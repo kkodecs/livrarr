@@ -3,7 +3,7 @@ services:
     image: ghcr.io/kkodecs/librarr:0.1.0-alpha1   # pin to a specific release; avoid :latest for alpha
     container_name: librarr
     ports:
-      - 8788:8787
+      - 8789:8789
     volumes:
       - ./config:/config           # database, covers, config.toml
       - /path/to/books:/books      # your ebook/audiobook library root

@@ -35,7 +35,7 @@ services:
     image: ghcr.io/kkodecs/librarr:latest
     container_name: librarr
     ports:
-      - 8788:8787
+      - 8789:8789
     volumes:
       - ./config:/config
       - /path/to/books:/books
@@ -53,7 +53,7 @@ docker compose up -d
 
 **3. Open the UI**
 
-Navigate to `http://your-server:8788`. You'll be prompted to create your admin account on first launch — no pre-seeding required.
+Navigate to `http://your-server:8789`. You'll be prompted to create your admin account on first launch — no pre-seeding required.
 
 **4. Configure**
 
@@ -70,7 +70,7 @@ All settings live in the UI. Optionally create `/config/config.toml` for advance
 
 ```toml
 [server]
-port = 8787          # internal port (map externally in compose)
+port = 8789          # internal port (map externally in compose)
 bind_address = "0.0.0.0"
 
 [log]

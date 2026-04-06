@@ -62,6 +62,6 @@ USER librarr
 # Config and data live in a volume — not baked in
 VOLUME ["/config"]
 
-EXPOSE 8787
+EXPOSE 8789
 
 ENTRYPOINT ["/app/librarr", "--data", "/config", "--ui-dir", "/app/ui"]

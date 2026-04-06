@@ -13,7 +13,7 @@ frontend/testdata/
 CLAUDE.md
 scripts/
 tools/
-src/
+/src/
 *.swp
 *.swo
 *~
