@@ -1,0 +1,471 @@
+#![allow(dead_code, unused_variables, async_fn_in_trait)]
+
+pub use librarr_domain::*;
+
+use serde::{Deserialize, Serialize};
+
+// Re-export ProwlarrConfig from librarr-db for use in trait signatures.
+pub use librarr_db::ProwlarrConfig;
+
+// =============================================================================
+// CRATE: librarr-download
+// =============================================================================
+// Prowlarr search + qBit client.
+
+// ---------------------------------------------------------------------------
+// Prowlarr Client
+// ---------------------------------------------------------------------------
+
+/// Prowlarr Torznab search.
+#[async_trait::async_trait]
+pub trait ProwlarrClient: Send + Sync {
+    /// Search Prowlarr for releases. Categories 7020 (ebooks) + 3030 (audiobooks).
+    async fn search_releases(
+        &self,
+        query: &str,
+        config: &ProwlarrConfig,
+    ) -> Result<Vec<ProwlarrRelease>, DownloadError>;
+
+    /// Test Prowlarr connection.
+    async fn test_connection(&self, config: &ProwlarrConfig) -> Result<(), DownloadError>;
+}
+
+/// Release from Prowlarr (pass-through, not persisted).
+#[derive(Debug, Clone)]
+pub struct ProwlarrRelease {
+    pub title: String,
+    pub indexer: String,
+    pub size: i64,
+    pub guid: String,
+    pub download_url: String,
+    pub seeders: Option<i32>,
+    pub leechers: Option<i32>,
+    pub publish_date: Option<String>,
+    pub categories: Vec<i32>,
+}
+
+// ---------------------------------------------------------------------------
+// qBittorrent Client
+// ---------------------------------------------------------------------------
+
+/// qBittorrent API v2 client.
+#[async_trait::async_trait]
+pub trait QBitClient: Send + Sync {
+    /// Authenticate to qBit. Caches session cookie.
+    async fn authenticate(&self, config: &DownloadClient) -> Result<(), DownloadError>;
+
+    /// Add torrent via magnet URL.
+    async fn add_torrent_magnet(
+        &self,
+        config: &DownloadClient,
+        magnet: &str,
+        category: &str,
+    ) -> Result<(), DownloadError>;
+
+    /// Add torrent via .torrent file upload (multipart).
+    async fn add_torrent_file(
+        &self,
+        config: &DownloadClient,
+        filename: &str,
+        data: &[u8],
+        category: &str,
+    ) -> Result<(), DownloadError>;
+
+    /// List torrents in a category.
+    async fn list_torrents(
+        &self,
+        config: &DownloadClient,
+        category: &str,
+    ) -> Result<Vec<QBitTorrent>, DownloadError>;
+
+    /// Get a specific torrent by hash.
+    async fn get_torrent(
+        &self,
+        config: &DownloadClient,
+        hash: &str,
+    ) -> Result<Option<QBitTorrent>, DownloadError>;
+
+    /// Test connection: auth + API version + category check + torrent list access.
+    async fn test_connection(&self, config: &DownloadClient) -> Result<(), DownloadError>;
+}
+
+/// Torrent info from qBit API.
+#[derive(Debug, Clone, Default)]
+pub struct QBitTorrent {
+    pub hash: String,
+    pub name: String,
+    pub state: String,
+    pub size: i64,
+    pub downloaded: i64,
+    pub progress: f64,
+    pub eta: Option<i64>,
+    pub content_path: String,
+    pub category: String,
+}
+
+// ---------------------------------------------------------------------------
+// Download Service (orchestrator)
+// ---------------------------------------------------------------------------
+
+/// Download operations -- grab, queue, release search.
+#[async_trait::async_trait]
+pub trait DownloadService: Send + Sync {
+    /// Search for releases via Prowlarr.
+    async fn search_releases(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<ReleaseSearchResult>, DownloadError>;
+
+    /// Grab a release. Validates, selects client, adds torrent, polls for confirmation.
+    async fn grab(&self, user_id: UserId, req: GrabRequest) -> Result<GrabResult, DownloadError>;
+
+    /// Get live queue from all enabled qBit clients.
+    async fn get_queue(&self, user_id: UserId) -> Result<QueueResponse, DownloadError>;
+
+    /// Remove grab from Librarr tracking. Torrent stays in qBit.
+    async fn remove_from_queue(
+        &self,
+        user_id: UserId,
+        grab_id: GrabId,
+    ) -> Result<(), DownloadError>;
+}
+
+#[derive(Debug)]
+pub struct GrabRequest {
+    pub work_id: WorkId,
+    pub download_url: String,
+    pub title: String,
+    pub indexer: String,
+    pub guid: String,
+    pub size: Option<i64>,
+    pub download_client_id: Option<DownloadClientId>,
+    pub source: TorrentSource,
+}
+
+impl Default for GrabRequest {
+    fn default() -> Self {
+        Self {
+            work_id: WorkId::default(),
+            download_url: String::new(),
+            title: String::new(),
+            indexer: String::new(),
+            guid: String::new(),
+            size: None,
+            download_client_id: None,
+            source: TorrentSource::Magnet(String::new()),
+        }
+    }
+}
+
+pub struct GrabResult {
+    pub grab: Grab,
+    pub status: GrabStatus,
+    pub warning: Option<String>,
+}
+
+impl Default for GrabResult {
+    fn default() -> Self {
+        Self {
+            grab: Grab {
+                id: 0,
+                user_id: 0,
+                work_id: 0,
+                download_client_id: 0,
+                title: String::new(),
+                indexer: String::new(),
+                guid: String::new(),
+                size: None,
+                download_url: String::new(),
+                download_id: None,
+                status: GrabStatus::Sent,
+                import_error: None,
+                media_type: None,
+                grabbed_at: chrono::Utc::now(),
+            },
+            status: GrabStatus::Sent,
+            warning: None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct ReleaseSearchResult {
+    pub title: String,
+    pub indexer: String,
+    pub size: i64,
+    pub guid: String,
+    pub download_url: String,
+    pub seeders: Option<i32>,
+    pub leechers: Option<i32>,
+    pub publish_date: Option<String>,
+    pub categories: Vec<i32>,
+}
+
+pub struct QueueResponse {
+    pub items: Vec<QBitTorrent>,
+    pub warnings: Vec<String>,
+}
+
+/// Queue item -- joined from qBit torrent + Librarr grab.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueItem {
+    pub id: GrabId,
+    pub download_id: String,
+    pub title: String,
+    pub status: QueueStatus,
+    pub size: i64,
+    pub sizeleft: i64,
+    pub eta: Option<i64>,
+    pub indexer: String,
+    pub download_client: String,
+    pub work_id: WorkId,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueItemResponse {
+    pub id: GrabId,
+    pub download_id: String,
+    pub title: String,
+    pub status: QueueStatus,
+    pub size: i64,
+    pub sizeleft: i64,
+    pub eta: Option<i64>,
+    pub indexer: String,
+    pub download_client: String,
+    pub work_id: WorkId,
+}
+
+// ---------------------------------------------------------------------------
+// Torrent Source / Hash Extraction
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum TorrentSource {
+    /// Magnet URI.
+    Magnet(String),
+    /// Download URL for .torrent file.
+    Url(String),
+    /// .torrent file with filename and raw bytes.
+    TorrentFile { filename: String, data: Vec<u8> },
+}
+
+/// Extract torrent hash from magnet link or .torrent file.
+///
+/// Satisfies: DLC-007
+pub fn extract_torrent_hash(source: &TorrentSource) -> Result<String, DownloadError> {
+    match source {
+        TorrentSource::Magnet(uri) => extract_hash_from_magnet(uri),
+        TorrentSource::Url(_) => {
+            // URL sources need to be fetched first, then parsed as .torrent
+            // For hash extraction, we need the data — this shouldn't be called directly on URLs
+            // without first fetching. Return a placeholder that the service layer handles.
+            Err(DownloadError::InvalidMagnet {
+                reason: "cannot extract hash from URL without fetching".to_string(),
+            })
+        }
+        TorrentSource::TorrentFile { data, .. } => extract_hash_from_torrent_file(data),
+    }
+}
+
+fn extract_hash_from_magnet(uri: &str) -> Result<String, DownloadError> {
+    // Parse xt= parameters
+    let xt = uri
+        .split('&')
+        .chain(uri.split('?').skip(1).take(1))
+        .flat_map(|s| s.split('&'))
+        .find(|p| p.starts_with("xt="))
+        .ok_or_else(|| DownloadError::InvalidMagnet {
+            reason: "no xt= parameter found".to_string(),
+        })?;
+
+    let xt_value = &xt[3..]; // skip "xt="
+
+    if let Some(hash) = xt_value.strip_prefix("urn:btih:") {
+        // BitTorrent v1: SHA-1
+        let trimmed = hash.trim_end_matches('=');
+        if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            Ok(trimmed.to_lowercase())
+        } else {
+            // Base32 encoded — decode to bytes then hex
+            let upper = hash.trim_end_matches('=').to_uppercase();
+            let mut decoded = data_encoding::BASE32_NOPAD
+                .decode(upper.as_bytes())
+                .map_err(|e| DownloadError::InvalidMagnet {
+                    reason: format!("invalid base32: {e}"),
+                })?;
+            // SHA-1 is always 20 bytes; zero-pad if input was short
+            while decoded.len() < 20 {
+                decoded.push(0);
+            }
+            decoded.truncate(20);
+            Ok(data_encoding::HEXLOWER.encode(&decoded))
+        }
+    } else if let Some(hash) = xt_value.strip_prefix("urn:btmh:") {
+        // BitTorrent v2: SHA-256 with multihash prefix
+        // Strip only the varint function code (12), keep the digest length + hash
+        let stripped = hash.strip_prefix("12").unwrap_or(hash);
+        Ok(stripped.to_lowercase())
+    } else {
+        Err(DownloadError::InvalidMagnet {
+            reason: "no btih or btmh hash in xt parameter".to_string(),
+        })
+    }
+}
+
+fn extract_hash_from_torrent_file(data: &[u8]) -> Result<String, DownloadError> {
+    // Locate the raw "info" dictionary bytes via pattern match, then use bendy to
+    // find the dict boundary. SHA-1 hashing requires the raw bencode bytes.
+    let info_start =
+        find_info_dict_start(data).ok_or_else(|| DownloadError::InvalidTorrentFile {
+            reason: "no info dictionary found".to_string(),
+        })?;
+
+    // Use bendy to decode just the info dict portion and measure its span.
+    let info_slice = &data[info_start..];
+    let mut decoder = bendy::decoding::Decoder::new(info_slice);
+    let obj = decoder
+        .next_object()
+        .map_err(|e| DownloadError::InvalidTorrentFile {
+            reason: format!("malformed info dictionary: {e}"),
+        })?;
+    let dict = obj
+        .ok_or_else(|| DownloadError::InvalidTorrentFile {
+            reason: "empty info dictionary".to_string(),
+        })?
+        .try_into_dictionary()
+        .map_err(|e| DownloadError::InvalidTorrentFile {
+            reason: format!("info is not a dictionary: {e}"),
+        })?;
+    let info_bytes = dict
+        .into_raw()
+        .map_err(|e| DownloadError::InvalidTorrentFile {
+            reason: format!("failed to read raw info bytes: {e}"),
+        })?;
+
+    use sha1::Digest;
+    let hash = sha1::Sha1::digest(info_bytes);
+    Ok(data_encoding::HEXLOWER.encode(&hash))
+}
+
+/// Find the byte offset where the info dictionary value starts (the 'd' after "4:info").
+fn find_info_dict_start(data: &[u8]) -> Option<usize> {
+    let needle = b"4:infod";
+    data.windows(needle.len())
+        .position(|w| w == needle)
+        .map(|pos| pos + 6) // skip "4:info", point at 'd'
+}
+
+/// Resolve download client paths to local paths.
+///
+/// Satisfies: DLC-013
+pub fn resolve_remote_path(
+    path: &str,
+    client_host: &str,
+    mappings: &[RemotePathMapping],
+) -> String {
+    let host_lower = client_host.to_lowercase();
+    let mut best_match: Option<&RemotePathMapping> = None;
+    let mut best_len = 0;
+
+    for m in mappings {
+        if m.host.to_lowercase() != host_lower {
+            continue;
+        }
+        if path.starts_with(&m.remote_path) && m.remote_path.len() > best_len {
+            best_match = Some(m);
+            best_len = m.remote_path.len();
+        }
+    }
+
+    match best_match {
+        Some(m) => {
+            let suffix = &path[m.remote_path.len()..];
+            format!("{}{}", m.local_path, suffix)
+        }
+        None => path.to_string(),
+    }
+}
+
+/// Map qBit state string to QueueStatus.
+///
+/// Satisfies: DLC-011
+pub fn map_qbit_state(state: &str) -> QueueStatus {
+    match state {
+        "downloading" | "stalledDL" | "forcedDL" => QueueStatus::Downloading,
+        "metaDL" | "allocating" | "queuedDL" | "checkingDL" | "checkingResumeData" => {
+            QueueStatus::Queued
+        }
+        "pausedDL" => QueueStatus::Paused,
+        "pausedUP" | "uploading" | "stalledUP" | "forcedUP" | "queuedUP" | "checkingUP" => {
+            QueueStatus::Completed
+        }
+        "missingFiles" | "moving" | "unknown" => QueueStatus::Warning,
+        "error" => QueueStatus::Error,
+        _ => QueueStatus::Warning,
+    }
+}
+
+/// Normalize eta value from qBit (handle sentinel values).
+///
+/// Satisfies: DLC-011
+pub fn normalize_eta(eta: Option<i64>) -> Option<i64> {
+    match eta {
+        Some(v) if v < 0 => None,
+        Some(v) if v >= 8640000 => None,
+        Some(v) if v > 365 * 86400 => None,
+        other => other,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DownloadError
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum DownloadError {
+    #[error("no download client configured")]
+    NoClient,
+    #[error("no enabled download client")]
+    NoEnabledClient,
+    #[error("download client connection failed: {0}")]
+    ConnectionFailed(String),
+    #[error("download client auth failed")]
+    AuthFailed,
+    #[error("download client rejected torrent: {reason}")]
+    Rejected { reason: String },
+    #[error("SSL certificate validation failed")]
+    SslValidationFailed,
+    #[error("qBittorrent API version unsupported")]
+    ApiVersionUnsupported,
+    #[error("category access/creation failed: {0}")]
+    CategoryFailed(String),
+    #[error("prowlarr not configured")]
+    ProwlarrNotConfigured,
+    #[error("prowlarr unreachable: {0}")]
+    ProwlarrUnreachable(String),
+    #[error("duplicate grab")]
+    Duplicate,
+    #[error("invalid download URL")]
+    InvalidUrl,
+    #[error("invalid magnet link: {reason}")]
+    InvalidMagnet { reason: String },
+    #[error("invalid .torrent file: {reason}")]
+    InvalidTorrentFile { reason: String },
+    #[error(".torrent fetch failed: {0}")]
+    TorrentFetchFailed(String),
+    #[error("torrent not found in client after initial polling")]
+    Unconfirmed,
+    #[error("torrent missing from client after prior confirmation")]
+    MissingAfterConfirmation,
+    #[error("work not found")]
+    WorkNotFound,
+    #[error("grab not found")]
+    GrabNotFound,
+    #[error("database error: {0}")]
+    Db(#[from] DbError),
+    #[error("HTTP error: {0}")]
+    Http(String),
+}

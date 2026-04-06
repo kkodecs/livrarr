@@ -1,0 +1,33 @@
+# Git
+.git/
+.gitignore
+
+# Dev tooling
+.claude/
+.serena/
+.mcp.json
+scripts/
+build/
+
+# Frontend build artifacts and deps (rebuilt in Docker)
+frontend/node_modules/
+frontend/dist/
+.pnpm-store/
+node_modules/
+
+# Rust build artifacts (rebuilt in Docker)
+target/
+
+# Test data — not needed in image
+testdata/
+testdat/
+test_list.txt
+
+# Docs
+*.md
+!README.md
+
+# Editor
+.vscode/
+.idea/
+*.swp

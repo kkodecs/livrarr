@@ -1,0 +1,8 @@
+[package]
+name = "librarr-http"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+thiserror = { workspace = true }

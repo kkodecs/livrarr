@@ -1,0 +1,9 @@
+[package]
+name = "librarr-metadata"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+librarr-domain = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "librarr-download"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+librarr-domain = { workspace = true }
+librarr-db = { workspace = true }
+sha1 = "0.10"
+data-encoding = "2"
+bendy = { version = "0.6", features = ["std"] }
