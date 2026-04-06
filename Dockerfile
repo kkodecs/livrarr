@@ -19,7 +19,7 @@ RUN pnpm build
 # ─────────────────────────────────────────────
 # Stage 2: Build backend
 # ─────────────────────────────────────────────
-FROM rust:1.85-slim-bookworm AS backend
+FROM rust:1.88-slim-bookworm AS backend
 
 WORKDIR /app
 
