@@ -3,7 +3,6 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { toast } from "sonner";
 import {
-  Download,
   Plus,
   Trash2,
   Pencil,
@@ -16,7 +15,6 @@ import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
-import { EmptyState } from "@/components/Page/EmptyState";
 import { ConfirmModal } from "@/components/Page/ConfirmModal";
 import { FormModal } from "@/components/Page/FormModal";
 import type {
@@ -265,17 +263,9 @@ export default function DownloadClientsPage() {
         <h1 className="text-lg font-semibold text-zinc-100">
           Download Clients
         </h1>
-        {isAdmin && (
-          <button
-            onClick={() => setModal({ open: true, editing: null })}
-            className="inline-flex items-center gap-1.5 rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-hover"
-          >
-            <Plus size={14} /> Add Client
-          </button>
-        )}
       </PageToolbar>
 
-      <PageContent className="space-y-8">
+      <PageContent className="space-y-4">
         {/* ── Torrent Clients ── */}
         <section>
           <h2 className="text-base font-semibold text-zinc-100 mb-4">
@@ -291,21 +281,7 @@ export default function DownloadClientsPage() {
               onSetDefault={(c) => setDefault.mutate(c)}
             />
           ) : (
-            <EmptyState
-              icon={<Download size={28} />}
-              title="No torrent clients"
-              description="Add a qBittorrent client to enable torrent downloading."
-              action={
-                isAdmin ? (
-                  <button
-                    onClick={() => setModal({ open: true, editing: null })}
-                    className="inline-flex items-center gap-1.5 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover"
-                  >
-                    <Plus size={14} /> Add Client
-                  </button>
-                ) : undefined
-              }
-            />
+            <p className="text-sm text-muted">No torrent clients configured.</p>
           )}
         </section>
 
@@ -324,23 +300,26 @@ export default function DownloadClientsPage() {
               onSetDefault={(c) => setDefault.mutate(c)}
             />
           ) : (
-            <EmptyState
-              icon={<Download size={28} />}
-              title="No Usenet clients"
-              description="Add a SABnzbd client to enable Usenet downloading."
-              action={
-                isAdmin ? (
-                  <button
-                    onClick={() => setModal({ open: true, editing: null })}
-                    className="inline-flex items-center gap-1.5 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover"
-                  >
-                    <Plus size={14} /> Add Client
-                  </button>
-                ) : undefined
-              }
-            />
+            <p className="text-sm text-muted">No Usenet clients configured.</p>
           )}
         </section>
+
+        {/* ── Inline Add Form ── */}
+        {isAdmin && (
+          <section data-tour="add-client-form" className="rounded-lg border border-border bg-zinc-900/50">
+            <div className="flex items-center gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
+              <Plus size={18} className="text-muted" />
+              <h2 className="text-base font-semibold text-zinc-100">Add Download Client</h2>
+            </div>
+            <div className="p-5">
+              <InlineClientForm
+                onSubmit={async (data) => {
+                  await createClient.mutateAsync(toRequest(data));
+                }}
+              />
+            </div>
+          </section>
+        )}
       </PageContent>
 
       {/* ── Delete Confirm ── */}
@@ -634,5 +613,166 @@ function ClientFormModal({
         </div>
       </form>
     </FormModal>
+  );
+}
+
+// ── Inline Add Client Form ──
+
+function InlineClientForm({
+  onSubmit,
+}: {
+  onSubmit: (data: ClientFormData) => Promise<void>;
+}) {
+  const {
+    register,
+    handleSubmit,
+    watch,
+    getValues,
+    control,
+    reset,
+    formState: { isSubmitting },
+  } = useForm<ClientFormData>({ defaultValues });
+
+  const [testResult, setTestResult] = useState<"success" | "fail" | null>(null);
+
+  const testClient = useMutation({
+    mutationFn: api.testDownloadClient,
+    onSuccess: () => { setTestResult("success"); toast.success("Connection successful"); },
+    onError: (e: Error) => { setTestResult("fail"); toast.error(e.message); },
+  });
+
+  const useSsl = watch("useSsl");
+  const impl = watch("implementation");
+  const isSabnzbd = impl === "sabnzbd";
+
+  return (
+    <form
+      onSubmit={handleSubmit(async (data) => {
+        await onSubmit(data);
+        reset(defaultValues);
+        setTestResult(null);
+      })}
+      className="space-y-4 max-w-xl"
+    >
+      <div>
+        <label className="block text-xs text-muted mb-1">Type</label>
+        <select
+          {...register("implementation")}
+          className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+        >
+          <option value="qBittorrent">qBittorrent</option>
+          <option value="sabnzbd">SABnzbd</option>
+        </select>
+      </div>
+
+      <div>
+        <label className="block text-xs text-muted mb-1">Name</label>
+        <input
+          {...register("name", { required: true })}
+          className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+        />
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        <div className="col-span-2">
+          <label className="block text-xs text-muted mb-1">Host</label>
+          <input
+            {...register("host", { required: true })}
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-muted mb-1">Port</label>
+          <input
+            type="number"
+            {...register("port", { required: true, valueAsNumber: true })}
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          />
+        </div>
+      </div>
+
+      <div className="flex gap-6">
+        <Controller name="useSsl" control={control} render={({ field }) => (
+          <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
+            <input type="checkbox" checked={field.value} onChange={field.onChange} className="rounded border-border" />
+            Use SSL
+          </label>
+        )} />
+        {useSsl && (
+          <Controller name="skipSslValidation" control={control} render={({ field }) => (
+            <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
+              <input type="checkbox" checked={field.value} onChange={field.onChange} className="rounded border-border" />
+              Skip SSL Validation
+            </label>
+          )} />
+        )}
+      </div>
+
+      <div>
+        <label className="block text-xs text-muted mb-1">URL Base</label>
+        <input
+          {...register("urlBase")}
+          placeholder={isSabnzbd ? "/sabnzbd" : "/qbittorrent"}
+          className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+        />
+      </div>
+
+      {isSabnzbd ? (
+        <div>
+          <label className="block text-xs text-muted mb-1">API Key</label>
+          <input
+            {...register("apiKey")}
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-xs text-zinc-100 focus:border-brand focus:outline-none"
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-muted mb-1">Username</label>
+            <input
+              {...register("username")}
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-muted mb-1">Password</label>
+            <input
+              type="password"
+              {...register("password")}
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            />
+          </div>
+        </div>
+      )}
+
+      <div>
+        <label className="block text-xs text-muted mb-1">Category</label>
+        <input
+          {...register("category", { required: true })}
+          className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+        />
+      </div>
+
+      <div className="flex items-center gap-3 pt-2">
+        <button
+          type="button"
+          onClick={() => { setTestResult(null); testClient.mutate(toRequest(getValues())); }}
+          disabled={testClient.isPending}
+          className="rounded border border-border px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
+        >
+          {testClient.isPending ? "Testing..." : "Test Connection"}
+        </button>
+        {testResult === "success" && <CheckCircle2 size={18} className="text-green-400" />}
+        {testResult === "fail" && <XCircle size={18} className="text-red-400" />}
+        <div className="flex-1" />
+        <button
+          type="submit"
+          disabled={isSubmitting}
+          className="rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+        >
+          {isSubmitting ? "Adding..." : "Add Client"}
+        </button>
+      </div>
+    </form>
   );
 }

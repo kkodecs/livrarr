@@ -4,7 +4,6 @@ import { useForm, Controller } from "react-hook-form";
 import { HelpTip } from "@/components/HelpTip";
 import { toast } from "sonner";
 import {
-  Radio,
   Plus,
   Trash2,
   Pencil,
@@ -17,7 +16,6 @@ import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
-import { EmptyState } from "@/components/Page/EmptyState";
 import { ConfirmModal } from "@/components/Page/ConfirmModal";
 import { FormModal } from "@/components/Page/FormModal";
 import type {
@@ -180,22 +178,18 @@ export default function IndexersPage() {
     <>
       <PageToolbar>
         <h1 className="text-lg font-semibold text-zinc-100">Indexers</h1>
-        {isAdmin && (
-          <button
-            onClick={() => setModal({ open: true, editing: null })}
-            className="inline-flex items-center gap-1.5 rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-hover"
-          >
-            <Plus size={14} /> Add Indexer
-          </button>
-        )}
+        <HelpTip text="Indexers are search engines that Livrarr queries to find ebook and audiobook releases. You need at least one indexer configured to search. Each indexer requires a URL and API key from your account on that indexer." />
       </PageToolbar>
 
-      <PageContent className="space-y-8">
+      <PageContent className="space-y-4">
         {/* ── Torrent Indexers ── */}
         <section>
-          <h2 className="text-base font-semibold text-zinc-100 mb-4">
-            Torrent Indexers
-          </h2>
+          <div className="flex items-center gap-2 mb-4">
+            <h2 className="text-base font-semibold text-zinc-100">
+              Torrent Indexers
+            </h2>
+            <HelpTip text="Torznab indexers serve torrent files. Popular options for books include MyAnonamouse (MAM), TorrentLeech, and IPTorrents. You'll need an account on the indexer and a Torznab-compatible API URL." />
+          </div>
 
           {torrentIndexers.length > 0 ? (
             <div className="overflow-x-auto rounded border border-border">
@@ -204,7 +198,7 @@ export default function IndexersPage() {
                   <tr>
                     <SortHeader field="name" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Name</SortHeader>
                     <SortHeader field="url" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>URL</SortHeader>
-                    <SortHeader field="priority" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Priority</SortHeader>
+                    <SortHeader field="priority" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Priority <HelpTip text="Lower number = higher priority. When multiple indexers return the same release, Livrarr prefers the one from the higher-priority indexer." /></SortHeader>
                     <th className="px-4 py-2">Capabilities</th>
                     <SortHeader field="enabled" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Status</SortHeader>
                     {isAdmin && <th className="px-4 py-2 w-24" />}
@@ -268,29 +262,18 @@ export default function IndexersPage() {
               </table>
             </div>
           ) : (
-            <EmptyState
-              icon={<Radio size={28} />}
-              title="No indexers"
-              description="Add a Torznab indexer to search for releases."
-              action={
-                isAdmin ? (
-                  <button
-                    onClick={() => setModal({ open: true, editing: null })}
-                    className="inline-flex items-center gap-1.5 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover"
-                  >
-                    <Plus size={14} /> Add Indexer
-                  </button>
-                ) : undefined
-              }
-            />
+            <p className="text-sm text-muted">No torrent indexers configured.</p>
           )}
         </section>
 
         {/* ── Usenet Indexers ── */}
         <section>
-          <h2 className="text-base font-semibold text-zinc-100 mb-4">
-            Usenet Indexers
-          </h2>
+          <div className="flex items-center gap-2 mb-4">
+            <h2 className="text-base font-semibold text-zinc-100">
+              Usenet Indexers
+            </h2>
+            <HelpTip text="Newznab indexers serve NZB files for Usenet downloads. Popular options include DrunkenSlug, NZBGeek, and NZBFinder. Requires a Usenet provider (separate from the indexer) and a download client like SABnzbd." />
+          </div>
 
           {usenetIndexers.length > 0 ? (
             <div className="overflow-x-auto rounded border border-border">
@@ -299,7 +282,7 @@ export default function IndexersPage() {
                   <tr>
                     <SortHeader field="name" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Name</SortHeader>
                     <SortHeader field="url" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>URL</SortHeader>
-                    <SortHeader field="priority" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Priority</SortHeader>
+                    <SortHeader field="priority" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Priority <HelpTip text="Lower number = higher priority. When multiple indexers return the same release, Livrarr prefers the one from the higher-priority indexer." /></SortHeader>
                     <th className="px-4 py-2">Capabilities</th>
                     <SortHeader field="enabled" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Status</SortHeader>
                     {isAdmin && <th className="px-4 py-2 w-24" />}
@@ -342,23 +325,26 @@ export default function IndexersPage() {
               </table>
             </div>
           ) : (
-            <EmptyState
-              icon={<Radio size={28} />}
-              title="No Usenet indexers"
-              description="Add a Newznab indexer to search for Usenet releases."
-              action={
-                isAdmin ? (
-                  <button
-                    onClick={() => setModal({ open: true, editing: null })}
-                    className="inline-flex items-center gap-1.5 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover"
-                  >
-                    <Plus size={14} /> Add Indexer
-                  </button>
-                ) : undefined
-              }
-            />
+            <p className="text-sm text-muted">No Usenet indexers configured.</p>
           )}
         </section>
+
+        {/* ── Inline Add Form ── */}
+        {isAdmin && (
+          <section data-tour="add-indexer-form" className="rounded-lg border border-border bg-zinc-900/50">
+            <div className="flex items-center gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
+              <Plus size={18} className="text-muted" />
+              <h2 className="text-base font-semibold text-zinc-100">Add Indexer</h2>
+            </div>
+            <div className="p-5">
+              <InlineIndexerForm
+                onSubmit={async (data) => {
+                  await createIndexer.mutateAsync(toCreateRequest(data));
+                }}
+              />
+            </div>
+          </section>
+        )}
       </PageContent>
 
       {/* ── Delete Confirm ── */}
@@ -461,23 +447,24 @@ function IndexerFormModal({
       : defaultValues,
   });
 
+  const handleClose = () => {
+    onClose();
+    setTestResult(null);
+    reset(defaultValues);
+  };
+
   return (
     <FormModal
       open={open}
       onOpenChange={(o) => {
-        if (!o) {
-          onClose();
-          setTestResult(null);
-          reset(defaultValues);
-        }
+        if (!o) handleClose();
       }}
       title={editing ? "Edit Indexer" : "Add Indexer"}
     >
       <form
         onSubmit={handleSubmit(async (data) => {
           await onSubmit(data);
-          onClose();
-          setTestResult(null);
+          handleClose();
         })}
         className="space-y-4"
       >
@@ -511,11 +498,6 @@ function IndexerFormModal({
             Protocol: <span className="font-medium text-zinc-300">{editing.protocol === "usenet" ? "Newznab (Usenet)" : "Torznab (Torrent)"}</span>
           </div>
         )}
-
-        <div className="text-xs text-muted mb-1">
-          Protocol:{" "}
-          <span className="font-medium text-zinc-300">Torznab</span>
-        </div>
 
         <div className="grid grid-cols-3 gap-3">
           <div className="col-span-2">
@@ -566,7 +548,7 @@ function IndexerFormModal({
             </p>
           </div>
           <div>
-            <label className="block text-xs text-muted mb-1">Priority</label>
+            <div className="flex items-center gap-2 mb-1"><label className="block text-xs text-muted">Priority</label><HelpTip text="Lower number = higher priority. When multiple indexers return the same release, Livrarr prefers the one from the higher-priority indexer." /></div>
             <input
               type="number"
               {...register("priority", {
@@ -701,7 +683,7 @@ function IndexerFormModal({
           <div className="flex-1" />
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             className="rounded px-4 py-2 text-sm text-muted hover:text-zinc-100"
           >
             Cancel
@@ -716,5 +698,174 @@ function IndexerFormModal({
         </div>
       </form>
     </FormModal>
+  );
+}
+
+// ── Inline Add Indexer Form ──
+
+function InlineIndexerForm({
+  onSubmit,
+}: {
+  onSubmit: (data: IndexerFormData) => Promise<void>;
+}) {
+  const {
+    register,
+    handleSubmit,
+    control,
+    reset,
+    getValues,
+    formState: { isSubmitting },
+  } = useForm<IndexerFormData>({ defaultValues });
+
+  const [testResult, setTestResult] = useState<TestIndexerResponse | null>(null);
+
+  const handleTestResult = (result: TestIndexerResponse) => {
+    setTestResult(result);
+    if (result.ok) toast.success("Connection successful");
+    else toast.error(result.error ?? "Test failed");
+  };
+
+  const testIndexer = useMutation({
+    mutationFn: api.testIndexer,
+    onSuccess: handleTestResult,
+    onError: (e: Error) => {
+      setTestResult({ ok: false, supportsBookSearch: false, error: e.message });
+      toast.error(e.message);
+    },
+  });
+
+  return (
+    <form
+      onSubmit={handleSubmit(async (data) => {
+        await onSubmit(data);
+        reset(defaultValues);
+        setTestResult(null);
+      })}
+      className="space-y-4 max-w-xl"
+    >
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-muted mb-1">Name</label>
+          <input
+            {...register("name", { required: true })}
+            placeholder="My Indexer"
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          />
+        </div>
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <label className="block text-xs text-muted">Protocol</label>
+            <HelpTip text="Torznab indexers serve torrent files (e.g., MyAnonamouse, TorrentLeech). Newznab indexers serve NZB/Usenet files (e.g., DrunkenSlug, NZBGeek)." />
+          </div>
+          <select
+            {...register("protocol")}
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          >
+            <option value="torrent">Torznab (Torrent)</option>
+            <option value="usenet">Newznab (Usenet)</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        <div className="col-span-2">
+          <label className="block text-xs text-muted mb-1">URL</label>
+          <input
+            {...register("url", { required: true })}
+            placeholder="https://indexer.example.com"
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-muted mb-1">API Path</label>
+          <input
+            {...register("apiPath")}
+            placeholder="/"
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          />
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-xs text-muted mb-1">API Key</label>
+        <input
+          type="password"
+          {...register("apiKey")}
+          className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-muted mb-1">Categories</label>
+          <input
+            {...register("categories")}
+            placeholder="7020, 3030"
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          />
+          <p className="mt-0.5 text-xs text-zinc-500">7020 = Ebooks, 3030 = Audiobooks</p>
+        </div>
+        <div>
+          <div className="flex items-center gap-2 mb-1"><label className="block text-xs text-muted">Priority</label><HelpTip text="Lower number = higher priority. When multiple indexers return the same release, Livrarr prefers the one from the higher-priority indexer." /></div>
+          <input
+            type="number"
+            {...register("priority", { required: true, valueAsNumber: true, min: 1 })}
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          />
+        </div>
+      </div>
+
+      <div className="flex gap-6">
+        <Controller name="enableInteractiveSearch" control={control} render={({ field }) => (
+          <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
+            <input type="checkbox" checked={field.value} onChange={field.onChange} className="rounded border-border" />
+            Interactive Search
+          </label>
+        )} />
+        <Controller name="enableAutomaticSearch" control={control} render={({ field }) => (
+          <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
+            <input type="checkbox" checked={field.value} onChange={field.onChange} className="rounded border-border" />
+            Automatic Search
+          </label>
+        )} />
+      </div>
+
+      {testResult && (
+        <div className={`rounded border p-3 text-sm ${testResult.ok ? "border-green-500/30 bg-green-500/10" : "border-red-500/30 bg-red-500/10"}`}>
+          <div className="flex items-center gap-2">
+            {testResult.ok ? <CheckCircle2 size={16} className="text-green-400" /> : <XCircle size={16} className="text-red-400" />}
+            <span className="font-medium text-zinc-200">{testResult.ok ? "Connection successful" : "Connection failed"}</span>
+          </div>
+          {testResult.ok && (
+            <p className="text-zinc-400 mt-1">Book search: <span className={testResult.supportsBookSearch ? "text-green-400" : "text-zinc-500"}>{testResult.supportsBookSearch ? "Supported" : "Not supported"}</span></p>
+          )}
+          {testResult.error && <p className="text-red-400 mt-1">{testResult.error}</p>}
+        </div>
+      )}
+
+      <div className="flex items-center gap-3 pt-2">
+        <button
+          type="button"
+          onClick={() => {
+            const vals = getValues();
+            setTestResult(null);
+            if (!vals.url) { toast.error("URL is required to test"); return; }
+            testIndexer.mutate({ url: vals.url, apiPath: vals.apiPath || "/", apiKey: vals.apiKey || null });
+          }}
+          disabled={testIndexer.isPending}
+          className="rounded border border-border px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
+        >
+          {testIndexer.isPending ? "Testing..." : "Test"}
+        </button>
+        <div className="flex-1" />
+        <button
+          type="submit"
+          disabled={isSubmitting}
+          className="rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+        >
+          {isSubmitting ? "Adding..." : "Add Indexer"}
+        </button>
+      </div>
+    </form>
   );
 }

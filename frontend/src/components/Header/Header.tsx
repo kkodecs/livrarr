@@ -1,12 +1,12 @@
 import { Link, useNavigate } from "react-router";
-import { Menu, Search, User, LogOut } from "lucide-react";
+import { Menu, Search, User, LogOut, HelpCircle } from "lucide-react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useUIStore } from "@/stores/ui";
 import { useAuthStore } from "@/stores/auth";
 import { NotificationBell } from "@/components/Header/NotificationBell";
 import { useState } from "react";
 
-export function Header() {
+export function Header({ onStartTour }: { onStartTour?: () => void }) {
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const user = useAuthStore((s) => s.user);
   const logoutAction = useAuthStore((s) => s.logoutAction);
@@ -53,6 +53,18 @@ export function Header() {
       </form>
 
       <div className="flex items-center gap-2">
+        {onStartTour && (
+          <button
+            onClick={() => {
+              navigate("/");
+              setTimeout(onStartTour, 100);
+            }}
+            className="rounded p-1.5 text-zinc-400 hover:bg-surface-hover hover:text-zinc-100"
+            title="Setup Guide"
+          >
+            <HelpCircle size={18} />
+          </button>
+        )}
         <NotificationBell />
         <DropdownMenu.Root>
           <DropdownMenu.Trigger className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-zinc-400 hover:bg-surface-hover hover:text-zinc-100">

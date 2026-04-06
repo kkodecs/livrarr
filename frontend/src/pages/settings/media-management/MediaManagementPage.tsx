@@ -283,7 +283,7 @@ export default function MediaManagementPage() {
 
       <PageContent className="space-y-6">
         {/* ── Root Folders ── */}
-        <section className="rounded-lg border border-border bg-zinc-900/50">
+        <section data-tour="root-folders-section" className="rounded-lg border border-border bg-zinc-900/50">
           <div className="flex items-center gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
             <FolderOpen size={18} className="text-muted" />
             <h2 className="text-base font-semibold text-zinc-100">
@@ -358,7 +358,7 @@ export default function MediaManagementPage() {
         </section>
 
         {/* ── Remote Path Mappings ── */}
-        <section className="rounded-lg border border-border bg-zinc-900/50">
+        <section data-tour="remote-path-section" className="rounded-lg border border-border bg-zinc-900/50">
           <div className="flex items-center justify-between border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
             <div className="flex items-center gap-2">
               <ArrowRightLeft size={18} className="text-muted" />
@@ -479,7 +479,7 @@ export default function MediaManagementPage() {
 
         {/* ── CWA Integration (admin only) ── */}
         {isAdmin && (
-          <section className="rounded-lg border border-border bg-zinc-900/50">
+          <section data-tour="cwa-section" className="rounded-lg border border-border bg-zinc-900/50">
             <div className="flex items-center gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
               <Settings2 size={18} className="text-muted" />
               <h2 className="text-base font-semibold text-zinc-100">

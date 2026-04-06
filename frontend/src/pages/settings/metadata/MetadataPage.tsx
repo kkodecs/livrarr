@@ -2,7 +2,7 @@ import { HelpTip } from "@/components/HelpTip";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { toast } from "sonner";
-import { BookOpen, Cpu, Globe, Languages, X } from "lucide-react";
+import { BookOpen, Cpu, Globe, Languages, X, ExternalLink } from "lucide-react";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
@@ -10,6 +10,64 @@ import { ErrorState } from "@/components/Page/ErrorState";
 import type { LlmProvider, UpdateMetadataConfigRequest } from "@/types/api";
 import * as api from "@/api";
 import { useState } from "react";
+
+// ── LLM Provider Configs ──
+
+interface ProviderConfig {
+  label: string;
+  endpoint: string;
+  models: { value: string; label: string }[];
+  free: boolean;
+  apiKeyUrl: string;
+  apiKeyHelp: string;
+}
+
+const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
+  groq: {
+    label: "Groq (Free)",
+    endpoint: "https://api.groq.com/openai/v1",
+    models: [
+      { value: "llama-3.3-70b-versatile", label: "Llama 3.3 70B Versatile (recommended)" },
+      { value: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant (faster, higher limits)" },
+    ],
+    free: true,
+    apiKeyUrl: "https://console.groq.com/keys",
+    apiKeyHelp: "Create a free account at groq.com, then go to console.groq.com/keys to generate an API key.",
+  },
+  gemini: {
+    label: "Gemini (Free)",
+    endpoint: "https://generativelanguage.googleapis.com/v1beta/openai",
+    models: [
+      { value: "gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash-Lite Preview (recommended)" },
+      { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" },
+      { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    ],
+    free: true,
+    apiKeyUrl: "https://aistudio.google.com/apikey",
+    apiKeyHelp: "Go to aistudio.google.com/apikey to create a free API key with your Google account.",
+  },
+  openai: {
+    label: "OpenAI (Paid)",
+    endpoint: "https://api.openai.com/v1",
+    models: [
+      { value: "gpt-4o-mini", label: "GPT-4o Mini (recommended)" },
+      { value: "gpt-4o", label: "GPT-4o" },
+    ],
+    free: false,
+    apiKeyUrl: "https://platform.openai.com/api-keys",
+    apiKeyHelp: "Go to platform.openai.com/api-keys. Requires a paid account with billing enabled.",
+  },
+  custom: {
+    label: "Custom (OpenAI-compatible)",
+    endpoint: "",
+    models: [],
+    free: false,
+    apiKeyUrl: "",
+    apiKeyHelp: "Enter the endpoint URL, API key, and model name for any OpenAI-compatible API.",
+  },
+};
+
+// ── Form Types ──
 
 interface MetadataForm {
   hardcoverEnabled: boolean;
@@ -43,6 +101,8 @@ export default function MetadataPage() {
     register,
     handleSubmit,
     control,
+    watch,
+    setValue,
     formState: { isSubmitting },
   } = useForm<MetadataForm>({
     values: {
@@ -56,6 +116,19 @@ export default function MetadataPage() {
       llmModel: configQ.data?.llmModel ?? "",
     },
   });
+
+  const selectedProvider = watch("llmProvider");
+  const providerConfig = selectedProvider ? PROVIDER_CONFIGS[selectedProvider] : null;
+
+  // Custom model toggle — show text input when "other" is selected
+  const [customModel, setCustomModel] = useState(false);
+  const currentModel = watch("llmModel");
+
+  // Check if current model matches any preset for the selected provider
+  const isPresetModel =
+    providerConfig?.models.some((m) => m.value === currentModel) ?? false;
+  const showCustomModel =
+    selectedProvider === "custom" || customModel || (!isPresetModel && currentModel !== "");
 
   // Languages editing
   const [languages, setLanguages] = useState<string[]>([]);
@@ -106,6 +179,21 @@ export default function MetadataPage() {
     updateConfig.mutate(req);
   };
 
+  const handleProviderChange = (newProvider: string) => {
+    setValue("llmProvider", newProvider as LlmProvider | "");
+    const cfg = PROVIDER_CONFIGS[newProvider];
+    if (cfg) {
+      if (cfg.endpoint) setValue("llmEndpoint", cfg.endpoint);
+      if (cfg.models.length > 0) {
+        setValue("llmModel", cfg.models[0]!.value);
+        setCustomModel(false);
+      } else {
+        setValue("llmModel", "");
+        setCustomModel(true);
+      }
+    }
+  };
+
   const addLanguage = () => {
     const val = langInput.trim().toLowerCase();
     if (val && !languages.includes(val)) {
@@ -129,7 +217,7 @@ export default function MetadataPage() {
       <PageContent>
         <form onSubmit={handleSubmit(onSubmit)} className="max-w-xl space-y-8">
           {/* ── Hardcover ── */}
-          <section>
+          <section data-tour="hardcover-section">
             <div className="flex items-center gap-2 mb-4">
               <BookOpen size={18} className="text-muted" />
               <h2 className="text-base font-semibold text-zinc-100">
@@ -177,13 +265,13 @@ export default function MetadataPage() {
           </section>
 
           {/* ── LLM ── */}
-          <section>
+          <section data-tour="llm-section">
             <div className="flex items-center gap-2 mb-4">
               <Cpu size={18} className="text-muted" />
               <h2 className="text-base font-semibold text-zinc-100">
                 LLM Enrichment
               </h2>
-              <HelpTip text="Optional. Uses an LLM to disambiguate search results and clean bibliographies. Only sends book titles and author names — no file names, no personal data." />
+              <HelpTip text="Optional. Uses an LLM to disambiguate search results and clean up author bibliographies. Livrarr only sends publicly available information (book titles, author names, publication years) — never file names, paths, or personal data. Both Groq and Gemini offer free tiers that are more than sufficient for typical use. Note: model names and pricing change frequently. If a model listed here stops working, check the provider's documentation for the latest available models." />
             </div>
             <label className="flex items-center gap-3 mb-4">
               <input
@@ -194,6 +282,8 @@ export default function MetadataPage() {
               <span className="text-sm text-zinc-200">Enabled</span>
             </label>
             <div className="space-y-4">
+
+              {/* Provider */}
               <div>
                 <label className="block text-xs text-muted mb-1">
                   Provider
@@ -204,49 +294,140 @@ export default function MetadataPage() {
                   render={({ field }) => (
                     <select
                       value={field.value}
-                      onChange={field.onChange}
+                      onChange={(e) => handleProviderChange(e.target.value)}
                       className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
                     >
                       <option value="">None</option>
-                      <option value="groq">Groq</option>
-                      <option value="gemini">Gemini</option>
-                      <option value="openai">OpenAI</option>
-                      <option value="custom">Custom</option>
+                      {Object.entries(PROVIDER_CONFIGS).map(([key, cfg]) => (
+                        <option key={key} value={key}>
+                          {cfg.label}
+                        </option>
+                      ))}
                     </select>
                   )}
                 />
               </div>
-              <div>
-                <label className="block text-xs text-muted mb-1">
-                  Endpoint URL
-                </label>
-                <input
-                  {...register("llmEndpoint")}
-                  placeholder="https://api.groq.com/openai/v1"
-                  className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-muted mb-1">
-                  API Key
-                </label>
-                <input
-                  {...register("llmApiKey")}
-                  type="text"
-                  placeholder="LLM API key"
-                  className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-muted mb-1">
-                  Model Name
-                </label>
-                <input
-                  {...register("llmModel")}
-                  placeholder="llama-3.3-70b-versatile"
-                  className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
-                />
-              </div>
+
+              {/* Provider-specific help */}
+              {providerConfig && selectedProvider !== "custom" && (
+                <div className="rounded border border-border/50 bg-zinc-800/30 p-3 text-xs text-zinc-400 space-y-1.5">
+                  <p>{providerConfig.apiKeyHelp}</p>
+                  {providerConfig.apiKeyUrl && (
+                    <a
+                      href={providerConfig.apiKeyUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-brand hover:text-brand-hover"
+                    >
+                      Get API key <ExternalLink size={10} />
+                    </a>
+                  )}
+                  <p className="text-zinc-500">
+                    Livrarr uses the OpenAI-compatible chat completions API. The pre-filled endpoint and model below should work, but providers update their offerings frequently. If something stops working, check the provider's documentation for current model names and endpoints.
+                  </p>
+                </div>
+              )}
+
+              {/* Endpoint */}
+              {selectedProvider && (
+                <div>
+                  <label className="block text-xs text-muted mb-1">
+                    Endpoint URL
+                  </label>
+                  <input
+                    {...register("llmEndpoint")}
+                    placeholder="https://api.example.com/v1"
+                    className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+                  />
+                  {selectedProvider !== "custom" && (
+                    <p className="mt-0.5 text-xs text-zinc-500">
+                      Auto-filled for {providerConfig?.label}. Edit if your setup differs.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Model */}
+              {selectedProvider && (
+                <div>
+                  <label className="block text-xs text-muted mb-1">
+                    Model
+                  </label>
+                  {providerConfig && providerConfig.models.length > 0 && !showCustomModel ? (
+                    <div className="space-y-2">
+                      <Controller
+                        name="llmModel"
+                        control={control}
+                        render={({ field }) => (
+                          <select
+                            value={field.value}
+                            onChange={field.onChange}
+                            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+                          >
+                            {providerConfig.models.map((m) => (
+                              <option key={m.value} value={m.value}>
+                                {m.label}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setCustomModel(true)}
+                        className="text-xs text-zinc-500 hover:text-zinc-300"
+                      >
+                        Use a different model...
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <input
+                        {...register("llmModel")}
+                        placeholder="model-name"
+                        className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+                      />
+                      {providerConfig && providerConfig.models.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCustomModel(false);
+                            setValue("llmModel", providerConfig.models[0]!.value);
+                          }}
+                          className="text-xs text-zinc-500 hover:text-zinc-300"
+                        >
+                          Back to preset models...
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* API Key */}
+              {selectedProvider && (
+                <div>
+                  <label className="block text-xs text-muted mb-1">
+                    API Key
+                  </label>
+                  <input
+                    {...register("llmApiKey")}
+                    type="text"
+                    placeholder="Paste your API key"
+                    className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
+                  />
+                </div>
+              )}
+
+              {/* Privacy note */}
+              {selectedProvider && (
+                <div className="rounded border border-zinc-700/50 bg-zinc-800/20 p-3 text-xs text-zinc-500">
+                  <p className="font-medium text-zinc-400 mb-1">Privacy</p>
+                  <p>
+                    Livrarr only sends publicly available book metadata to the LLM provider: book titles, author names, and publication years. No file names, file paths, library structure, personal information, or usage data is ever transmitted. The same information is freely available on any bookstore or library website.
+                  </p>
+                </div>
+              )}
             </div>
           </section>
 
