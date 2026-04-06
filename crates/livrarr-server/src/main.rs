@@ -51,23 +51,60 @@ async fn main() {
 
     info!("Livrarr starting — data directory: {}", data_dir.display());
 
-    // Step 4: Connect to SQLite.
+    // Step 4: Permission check — verify data dir is writable.
+    if let Err(e) = livrarr_db::pool::check_data_dir_permissions(&data_dir) {
+        error!("{e}");
+        std::process::exit(1);
+    }
+
+    // Step 5: PID lock — ensure single instance.
+    if let Err(e) = livrarr_db::pool::acquire_pid_lock(&data_dir) {
+        error!("{e}");
+        std::process::exit(1);
+    }
+
+    // Step 6: Connect to SQLite.
     let pool = match livrarr_db::pool::create_sqlite_pool(&data_dir).await {
         Ok(p) => p,
         Err(e) => {
             error!("Failed to connect to SQLite: {e}");
+            livrarr_db::pool::release_pid_lock(&data_dir);
             std::process::exit(1);
         }
     };
 
-    // Step 5: Run migrations.
+    // Step 7: Pre-migration backup (only if DB file already exists).
+    let db_path = data_dir.join("livrarr.db");
+    if db_path.exists() {
+        match livrarr_db::pool::create_backup(&pool, &data_dir).await {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Pre-migration backup failed: {e}");
+                livrarr_db::pool::release_pid_lock(&data_dir);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Step 8: Run migrations.
     if let Err(e) = livrarr_db::pool::run_migrations(&pool).await {
         error!("Migration failed: {e}");
+        livrarr_db::pool::release_pid_lock(&data_dir);
         std::process::exit(1);
     }
     info!("Database migrations complete");
 
-    // Step 6: Construct AppState.
+    // Step 9: Version gate — verify DB compatibility.
+    if let Err(e) = livrarr_db::pool::check_version_gate(&pool).await {
+        error!("{e}");
+        livrarr_db::pool::release_pid_lock(&data_dir);
+        std::process::exit(1);
+    }
+
+    // Step 10: Clean up old backups (keep 3).
+    livrarr_db::pool::cleanup_old_backups(&data_dir, 3);
+
+    // Construct AppState.
     let db = livrarr_db::sqlite::SqliteDb::new(pool);
     let auth_service = Arc::new(livrarr_server::auth_service::ServerAuthService::new(
         db.clone(),
@@ -83,7 +120,7 @@ async fn main() {
         auth_service,
         http_client,
         config: Arc::new(config.clone()),
-        data_dir: Arc::new(data_dir),
+        data_dir: Arc::new(data_dir.clone()),
         startup_time: chrono::Utc::now(),
         job_runner: Some(job_runner.clone()),
     };
@@ -127,6 +164,7 @@ async fn main() {
     // Await job completion (cancel already signalled above).
     job_runner.shutdown().await;
 
+    livrarr_db::pool::release_pid_lock(&data_dir);
     info!("Livrarr stopped");
 }
 

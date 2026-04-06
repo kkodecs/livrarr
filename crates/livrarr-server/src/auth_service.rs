@@ -94,7 +94,6 @@ impl ServerAuthService {
     }
 }
 
-#[async_trait::async_trait]
 impl AuthService for ServerAuthService {
     async fn login(&self, req: LoginRequest) -> Result<LoginResponse, AuthError> {
         let username_lower = req.username.to_lowercase();
@@ -116,7 +115,7 @@ impl AuthService for ServerAuthService {
         // Look up user
         let user = match self.db.get_user_by_username(&req.username).await {
             Ok(u) => u,
-            Err(DbError::NotFound) => {
+            Err(DbError::NotFound { .. }) => {
                 // Dummy hash to mask timing
                 let _ = self.crypto.hash_password("dummy").await;
                 self.record_failure(&username_lower).await;
@@ -130,7 +129,7 @@ impl AuthService for ServerAuthService {
             .crypto
             .verify_password(&req.password, &user.password_hash)
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
 
         if !valid {
             self.record_failure(&username_lower).await;
@@ -148,12 +147,12 @@ impl AuthService for ServerAuthService {
             .crypto
             .generate_token()
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
         let token_hash = self
             .crypto
             .hash_token(&token)
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
 
         let expires_at = if req.remember_me {
             Utc::now() + Duration::days(30)
@@ -192,18 +191,18 @@ impl AuthService for ServerAuthService {
             .crypto
             .hash_password(&req.password)
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
 
         let api_key = self
             .crypto
             .generate_token()
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
         let api_key_hash = self
             .crypto
             .hash_token(&api_key)
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
 
         let user = self
             .db
@@ -223,12 +222,12 @@ impl AuthService for ServerAuthService {
             .crypto
             .generate_token()
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
         let token_hash = self
             .crypto
             .hash_token(&token)
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
 
         let session = Session {
             token_hash,
@@ -271,7 +270,7 @@ impl AuthService for ServerAuthService {
                 .crypto
                 .hash_password(password)
                 .await
-                .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+                .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
             db_req.password_hash = Some(hash);
         }
         let user = self
@@ -279,7 +278,7 @@ impl AuthService for ServerAuthService {
             .update_user(user_id, db_req)
             .await
             .map_err(|e| match e {
-                DbError::NotFound => AuthError::UserNotFound,
+                DbError::NotFound { .. } => AuthError::UserNotFound,
                 other => AuthError::Db(other),
             })?;
         Ok(Self::user_to_response(&user))
@@ -290,17 +289,17 @@ impl AuthService for ServerAuthService {
             .crypto
             .generate_token()
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
         let hash = self
             .crypto
             .hash_token(&key)
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
         self.db
             .update_api_key_hash(user_id, &hash)
             .await
             .map_err(|e| match e {
-                DbError::NotFound => AuthError::UserNotFound,
+                DbError::NotFound { .. } => AuthError::UserNotFound,
                 other => AuthError::Db(other),
             })?;
         Ok(ApiKeyResponse { api_key: key })
@@ -313,17 +312,17 @@ impl AuthService for ServerAuthService {
             .crypto
             .hash_password(&req.password)
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
         let api_key = self
             .crypto
             .generate_token()
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
         let api_key_hash = self
             .crypto
             .hash_token(&api_key)
             .await
-            .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
         let user = self
             .db
             .create_user(CreateUserDbRequest {
@@ -347,7 +346,7 @@ impl AuthService for ServerAuthService {
 
     async fn get_user(&self, id: UserId) -> Result<UserResponse, AuthError> {
         let user = self.db.get_user(id).await.map_err(|e| match e {
-            DbError::NotFound => AuthError::UserNotFound,
+            DbError::NotFound { .. } => AuthError::UserNotFound,
             other => AuthError::Db(other),
         })?;
         Ok(Self::user_to_response(&user))
@@ -372,11 +371,11 @@ impl AuthService for ServerAuthService {
                 .crypto
                 .hash_password(password)
                 .await
-                .map_err(|e| AuthError::Db(DbError::Io(e.to_string())))?;
+                .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
             db_req.password_hash = Some(hash);
         }
         let user = self.db.update_user(id, db_req).await.map_err(|e| match e {
-            DbError::NotFound => AuthError::UserNotFound,
+            DbError::NotFound { .. } => AuthError::UserNotFound,
             other => AuthError::Db(other),
         })?;
         Ok(Self::user_to_response(&user))
@@ -395,7 +394,7 @@ impl AuthService for ServerAuthService {
             .get_user(target_user_id)
             .await
             .map_err(|e| match e {
-                DbError::NotFound => AuthError::UserNotFound,
+                DbError::NotFound { .. } => AuthError::UserNotFound,
                 other => AuthError::Db(other),
             })?;
         if target.role == UserRole::Admin {
@@ -408,7 +407,7 @@ impl AuthService for ServerAuthService {
             .delete_user(target_user_id)
             .await
             .map_err(|e| match e {
-                DbError::NotFound => AuthError::UserNotFound,
+                DbError::NotFound { .. } => AuthError::UserNotFound,
                 other => AuthError::Db(other),
             })?;
         Ok(())

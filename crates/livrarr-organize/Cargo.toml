@@ -6,5 +6,5 @@ license = "GPL-3.0-only"
 
 [dependencies]
 thiserror = { workspace = true }
-async-trait = { workspace = true }
+trait-variant = { workspace = true }
 livrarr-domain = { workspace = true }

@@ -1,6 +1,7 @@
 use axum::extract::State;
 use axum::Json;
 
+use crate::middleware::RequireAdmin;
 use crate::state::AppState;
 use crate::{ApiError, AuthContext, HealthCheckResult, HealthCheckType, SystemStatus};
 
@@ -21,7 +22,7 @@ pub async fn health(
 /// GET /api/v1/system/status
 pub async fn status(
     State(state): State<AppState>,
-    _ctx: AuthContext,
+    RequireAdmin(_auth): RequireAdmin,
 ) -> Result<Json<SystemStatus>, ApiError> {
     let os_info = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
 

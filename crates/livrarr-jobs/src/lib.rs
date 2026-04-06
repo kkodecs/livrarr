@@ -1,6 +1,4 @@
-#![allow(dead_code, unused_variables, async_fn_in_trait)]
-
-pub use livrarr_domain::*;
+use livrarr_domain::{AuthorId, GrabId, NotificationId, RootFolderId, UserId, WorkId};
 
 // =============================================================================
 // CRATE: livrarr-jobs
@@ -12,7 +10,7 @@ pub use livrarr_domain::*;
 // ---------------------------------------------------------------------------
 
 /// Background job trigger and status.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait JobService: Send + Sync {
     /// Trigger bulk re-enrichment for all user's works. Returns immediately (202).
     async fn trigger_bulk_enrichment(&self, user_id: UserId) -> Result<(), JobError>;
@@ -41,7 +39,7 @@ pub enum JobError {
 // ---------------------------------------------------------------------------
 
 /// Background task: polls qBit clients for completed downloads, triggers import.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait DownloadPoller: Send + Sync {
     /// Run one poll cycle.
     async fn poll(&self) -> Result<Vec<PollResult>, JobError>;
@@ -63,7 +61,7 @@ pub enum PollAction {
 // ---------------------------------------------------------------------------
 
 /// Background task: checks monitored authors for new works.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait AuthorMonitor: Send + Sync {
     /// Run one monitoring cycle for all monitored authors.
     async fn check_all(&self) -> Result<Vec<AuthorMonitorResult>, JobError>;

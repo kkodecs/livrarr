@@ -5,18 +5,21 @@ use std::str::FromStr;
 
 /// Create and configure a SQLite connection pool.
 ///
-/// Satisfies: RUNTIME-SQLITE-001, RUNTIME-SQLITE-002
-///
-/// - Max 4 connections, WAL journal mode, busy timeout 30s, foreign_keys ON.
-/// - Database file created automatically on first boot.
+/// Per-connection PRAGMAs per error-handling-policy.md:
+/// - WAL journal mode, synchronous=NORMAL (tradeoff for SD card perf)
+/// - busy_timeout=5s, foreign_keys=ON
+/// - journal_size_limit=64MB, wal_autocheckpoint=1000 pages (~4MB)
 pub async fn create_sqlite_pool(data_dir: &Path) -> Result<SqlitePool, sqlx::Error> {
     let db_path = data_dir.join("livrarr.db");
     let url = format!("sqlite://{}?mode=rwc", db_path.display());
 
     let options = SqliteConnectOptions::from_str(&url)?
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        .busy_timeout(std::time::Duration::from_secs(30))
-        .pragma("foreign_keys", "ON");
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .pragma("foreign_keys", "ON")
+        .pragma("synchronous", "NORMAL")
+        .pragma("journal_size_limit", "67108864")
+        .pragma("wal_autocheckpoint", "1000");
 
     let pool = SqlitePoolOptions::new()
         .max_connections(4)
@@ -32,4 +35,139 @@ pub async fn create_sqlite_pool(data_dir: &Path) -> Result<SqlitePool, sqlx::Err
 /// Satisfies: RUNTIME-SQLITE-003
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
+}
+
+// ── Startup checks ──────────────────────────────────────────────────────────
+
+/// Maximum schema_version this binary understands.
+const MAX_SCHEMA_VERSION: i64 = 10;
+/// Maximum data_version this binary understands.
+const MAX_DATA_VERSION: i64 = 1;
+
+/// Check that the database version is compatible with this binary.
+/// Fatal if either version exceeds the binary's supported max.
+pub async fn check_version_gate(pool: &SqlitePool) -> Result<(), String> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM _livrarr_meta WHERE key = 'schema_version'")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("failed to read schema_version: {e}"))?;
+
+    if let Some((val,)) = row {
+        let ver: i64 = val
+            .parse()
+            .map_err(|_| format!("invalid schema_version: {val}"))?;
+        if ver > MAX_SCHEMA_VERSION {
+            return Err(format!(
+                "database schema_version {ver} is newer than this binary supports (max {MAX_SCHEMA_VERSION}). Upgrade Livrarr."
+            ));
+        }
+    }
+
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM _livrarr_meta WHERE key = 'data_version'")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("failed to read data_version: {e}"))?;
+
+    if let Some((val,)) = row {
+        let ver: i64 = val
+            .parse()
+            .map_err(|_| format!("invalid data_version: {val}"))?;
+        if ver > MAX_DATA_VERSION {
+            return Err(format!(
+                "database data_version {ver} is newer than this binary supports (max {MAX_DATA_VERSION}). Upgrade Livrarr."
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify the data directory is writable (write+delete a healthcheck file).
+pub fn check_data_dir_permissions(data_dir: &Path) -> Result<(), String> {
+    let probe = data_dir.join(".healthcheck");
+    std::fs::write(&probe, b"ok")
+        .map_err(|e| format!("cannot write to data directory {}: {e}", data_dir.display()))?;
+    std::fs::remove_file(&probe).map_err(|e| format!("cannot delete healthcheck file: {e}"))?;
+    Ok(())
+}
+
+/// Write a PID lock file. Returns Err if a live instance is detected.
+pub fn acquire_pid_lock(data_dir: &Path) -> Result<(), String> {
+    let lock_path = data_dir.join("livrarr.pid");
+
+    if lock_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&lock_path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                // Check if process is still running
+                let proc_path = format!("/proc/{pid}");
+                if Path::new(&proc_path).exists() {
+                    return Err(format!(
+                        "another Livrarr instance (PID {pid}) is running. Remove {lock_path:?} if this is stale."
+                    ));
+                }
+            }
+        }
+        tracing::warn!("stale PID lock file detected, overwriting");
+    }
+
+    std::fs::write(&lock_path, std::process::id().to_string())
+        .map_err(|e| format!("failed to write PID lock: {e}"))?;
+    Ok(())
+}
+
+/// Remove the PID lock file on shutdown.
+pub fn release_pid_lock(data_dir: &Path) {
+    let lock_path = data_dir.join("livrarr.pid");
+    let _ = std::fs::remove_file(lock_path);
+}
+
+/// Create a pre-migration backup using VACUUM INTO.
+/// Returns the backup path on success.
+pub async fn create_backup(
+    pool: &SqlitePool,
+    data_dir: &Path,
+) -> Result<std::path::PathBuf, String> {
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let backup_name = format!("livrarr.db.pre-migrate-{timestamp}");
+    let backup_path = data_dir.join(&backup_name);
+    let backup_str = backup_path.display().to_string();
+
+    sqlx::query(&format!("VACUUM INTO '{backup_str}'"))
+        .execute(pool)
+        .await
+        .map_err(|e| format!("VACUUM INTO backup failed: {e}"))?;
+
+    tracing::info!("pre-migration backup: {backup_name}");
+    Ok(backup_path)
+}
+
+/// Delete old backups, keeping the most recent `keep` versions.
+pub fn cleanup_old_backups(data_dir: &Path, keep: usize) {
+    let mut backups: Vec<_> = std::fs::read_dir(data_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("livrarr.db.pre-migrate-")
+        })
+        .collect();
+
+    if backups.len() <= keep {
+        return;
+    }
+
+    // Sort by name (timestamp-based, so lexicographic = chronological)
+    backups.sort_by_key(|e| e.file_name());
+    let to_delete = backups.len() - keep;
+    for entry in backups.into_iter().take(to_delete) {
+        if let Err(e) = std::fs::remove_file(entry.path()) {
+            tracing::warn!("failed to delete old backup {:?}: {e}", entry.file_name());
+        } else {
+            tracing::info!("deleted old backup: {:?}", entry.file_name());
+        }
+    }
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::*;
-use livrarr_db::{mem::InMemoryDb, CreateUserDbRequest, SessionDb, UpdateUserDbRequest, UserDb};
+use livrarr_db::{sqlite::SqliteDb, CreateUserDbRequest, SessionDb, UpdateUserDbRequest, UserDb};
 
 // =============================================================================
 // TestRequest types (for middleware testing from test files)
@@ -34,6 +34,7 @@ enum MiddlewareMode {
     Normal,
     SetupPending,
     ExternalAuth {
+        #[allow(dead_code)] // used in test infrastructure
         header: String,
         trusted_cidrs: Vec<String>,
     },
@@ -193,7 +194,7 @@ fn ip_to_u32(ip: [u8; 4]) -> u32 {
 // =============================================================================
 
 pub struct AuthServiceImpl {
-    db: InMemoryDb,
+    db: SqliteDb,
     lockouts: Arc<RwLock<HashMap<String, LockoutState>>>,
 }
 
@@ -203,7 +204,7 @@ struct LockoutState {
 }
 
 impl AuthServiceImpl {
-    pub fn new(db: InMemoryDb) -> Self {
+    pub fn new(db: SqliteDb) -> Self {
         Self {
             db,
             lockouts: Arc::new(RwLock::new(HashMap::new())),
@@ -292,7 +293,6 @@ impl AuthServiceImpl {
     }
 }
 
-#[async_trait::async_trait]
 impl AuthService for AuthServiceImpl {
     async fn login(&self, req: LoginRequest) -> Result<LoginResponse, AuthError> {
         let username_lower = req.username.to_lowercase();
@@ -314,7 +314,7 @@ impl AuthService for AuthServiceImpl {
         // Look up user
         let user = match self.db.get_user_by_username(&req.username).await {
             Ok(u) => u,
-            Err(DbError::NotFound) => {
+            Err(DbError::NotFound { .. }) => {
                 // Dummy hash to mask timing
                 let _ = Self::hash_password("dummy");
                 self.record_failure(&username_lower).await;
@@ -434,7 +434,7 @@ impl AuthService for AuthServiceImpl {
             .update_user(user_id, db_req)
             .await
             .map_err(|e| match e {
-                DbError::NotFound => AuthError::UserNotFound,
+                DbError::NotFound { .. } => AuthError::UserNotFound,
                 other => AuthError::Db(other),
             })?;
         Ok(Self::user_to_response(&user))
@@ -447,7 +447,7 @@ impl AuthService for AuthServiceImpl {
             .update_api_key_hash(user_id, &hash)
             .await
             .map_err(|e| match e {
-                DbError::NotFound => AuthError::UserNotFound,
+                DbError::NotFound { .. } => AuthError::UserNotFound,
                 other => AuthError::Db(other),
             })?;
         Ok(ApiKeyResponse { api_key: key })
@@ -482,7 +482,7 @@ impl AuthService for AuthServiceImpl {
 
     async fn get_user(&self, id: UserId) -> Result<UserResponse, AuthError> {
         let user = self.db.get_user(id).await.map_err(|e| match e {
-            DbError::NotFound => AuthError::UserNotFound,
+            DbError::NotFound { .. } => AuthError::UserNotFound,
             other => AuthError::Db(other),
         })?;
         Ok(Self::user_to_response(&user))
@@ -506,7 +506,7 @@ impl AuthService for AuthServiceImpl {
             db_req.password_hash = Some(Self::hash_password(password));
         }
         let user = self.db.update_user(id, db_req).await.map_err(|e| match e {
-            DbError::NotFound => AuthError::UserNotFound,
+            DbError::NotFound { .. } => AuthError::UserNotFound,
             other => AuthError::Db(other),
         })?;
         Ok(Self::user_to_response(&user))
@@ -526,7 +526,7 @@ impl AuthService for AuthServiceImpl {
             .get_user(target_user_id)
             .await
             .map_err(|e| match e {
-                DbError::NotFound => AuthError::UserNotFound,
+                DbError::NotFound { .. } => AuthError::UserNotFound,
                 other => AuthError::Db(other),
             })?;
         if target.role == UserRole::Admin {
@@ -539,7 +539,7 @@ impl AuthService for AuthServiceImpl {
             .delete_user(target_user_id)
             .await
             .map_err(|e| match e {
-                DbError::NotFound => AuthError::UserNotFound,
+                DbError::NotFound { .. } => AuthError::UserNotFound,
                 other => AuthError::Db(other),
             })?;
         Ok(())
@@ -566,8 +566,17 @@ impl AuthServiceImpl {
     }
 }
 
-/// Create a fresh AuthService backed by an in-memory DB with a placeholder admin.
+/// Create a fresh AuthService backed by a SQLite :memory: DB with a placeholder admin.
 pub async fn new_test_auth_service() -> AuthServiceImpl {
-    let db = InMemoryDb::with_placeholder_admin();
+    let db = livrarr_db::test_helpers::create_test_db().await;
+    // Create the placeholder admin user
+    db.create_user(CreateUserDbRequest {
+        username: "admin".into(),
+        password_hash: "hash:admin".into(),
+        role: livrarr_db::UserRole::Admin,
+        api_key_hash: "apikey".into(),
+    })
+    .await
+    .unwrap();
     AuthServiceImpl::new(db)
 }

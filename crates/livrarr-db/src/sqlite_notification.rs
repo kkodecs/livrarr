@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
@@ -10,37 +9,33 @@ use crate::{
 };
 
 fn row_to_notification(row: sqlx::sqlite::SqliteRow) -> Result<Notification, DbError> {
-    let type_str: String = row
-        .try_get("type")
-        .map_err(|e| DbError::Io(e.to_string()))?;
-    let data_str: String = row
-        .try_get("data")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+    let type_str: String = row.try_get("type").map_err(|e| DbError::Io(Box::new(e)))?;
+    let data_str: String = row.try_get("data").map_err(|e| DbError::Io(Box::new(e)))?;
     let created_at_str: String = row
         .try_get("created_at")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
 
     Ok(Notification {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         user_id: row
             .try_get::<i64, _>("user_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         notification_type: parse_notification_type(&type_str),
         ref_key: row
             .try_get("ref_key")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         message: row
             .try_get("message")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        data: serde_json::from_str(&data_str).unwrap_or_default(),
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        data: serde_json::from_str(&data_str).map_err(|e| DbError::Io(Box::new(e)))?,
         read: row
             .try_get::<bool, _>("read")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         dismissed: row
             .try_get::<bool, _>("dismissed")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         created_at: parse_dt(&created_at_str)?,
     })
 }
@@ -67,7 +62,6 @@ fn notification_type_str(t: NotificationType) -> &'static str {
     }
 }
 
-#[async_trait]
 impl NotificationDb for SqliteDb {
     async fn list_notifications(
         &self,
@@ -93,7 +87,7 @@ impl NotificationDb for SqliteDb {
     ) -> Result<Notification, DbError> {
         let now = Utc::now().to_rfc3339();
         let type_str = notification_type_str(req.notification_type);
-        let data_str = serde_json::to_string(&req.data).map_err(|e| DbError::Io(e.to_string()))?;
+        let data_str = serde_json::to_string(&req.data).map_err(|e| DbError::Io(Box::new(e)))?;
 
         // Dedup: check if notification already exists for (user_id, type, ref_key).
         let existing = sqlx::query(
@@ -107,7 +101,7 @@ impl NotificationDb for SqliteDb {
         .map_err(map_db_err)?;
 
         if let Some(row) = existing {
-            let id: i64 = row.try_get("id").map_err(|e| DbError::Io(e.to_string()))?;
+            let id: i64 = row.try_get("id").map_err(|e| DbError::Io(Box::new(e)))?;
             // Return existing without creating.
             let all = self.list_notifications(req.user_id, false).await?;
             if let Some(n) = all.into_iter().find(|n| n.id == id) {
@@ -157,7 +151,9 @@ impl NotificationDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound {
+                entity: "notification",
+            });
         }
         Ok(())
     }
@@ -175,7 +171,9 @@ impl NotificationDb for SqliteDb {
                 .await
                 .map_err(map_db_err)?;
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound {
+                entity: "notification",
+            });
         }
         Ok(())
     }

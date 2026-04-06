@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_variables, async_fn_in_trait)]
-
 pub use livrarr_domain::*;
 
 use chrono::{DateTime, Utc};
@@ -96,7 +94,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AuthContext {
 // ---------------------------------------------------------------------------
 
 /// Auth operations (login, logout, setup, user management).
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait AuthService: Send + Sync {
     /// Login with username + password. Returns session token (plaintext, shown once).
     async fn login(&self, req: LoginRequest) -> Result<LoginResponse, AuthError>;
@@ -287,7 +285,7 @@ pub struct WorkSearchResult {
 }
 
 /// Work management operations.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait WorkApi: Send + Sync {
     /// Search OL for works.
     async fn lookup(&self, user_id: UserId, term: &str) -> Result<Vec<WorkSearchResult>, ApiError>;
@@ -433,7 +431,7 @@ pub struct AuthorSearchResult {
 }
 
 /// Author management operations.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait AuthorApi: Send + Sync {
     /// Search OL for authors.
     async fn lookup(
@@ -515,7 +513,7 @@ pub struct NotificationResponse {
 }
 
 /// Notification management.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait NotificationApi: Send + Sync {
     /// List notifications for a user.
     async fn list(
@@ -549,7 +547,7 @@ pub struct RootFolderResponse {
 }
 
 /// Root folder management (admin write, all read).
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait RootFolderApi: Send + Sync {
     /// List root folders with free/total space.
     async fn list(&self) -> Result<Vec<RootFolderResponse>, ApiError>;
@@ -627,7 +625,7 @@ pub struct UpdateDownloadClientApiRequest {
 }
 
 /// Download client configuration management (admin write, all read).
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait DownloadClientApi: Send + Sync {
     /// List download clients. Passwords omitted from response.
     async fn list(&self) -> Result<Vec<DownloadClientResponse>, ApiError>;
@@ -774,7 +772,7 @@ pub struct UpdateRemotePathMappingRequest {
 }
 
 /// Remote path mapping management (admin only).
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait RemotePathMappingApi: Send + Sync {
     async fn list(&self) -> Result<Vec<RemotePathMappingResponse>, ApiError>;
 
@@ -831,11 +829,11 @@ pub struct ProwlarrConfigResponse {
 #[serde(rename_all = "camelCase")]
 pub struct MetadataConfigResponse {
     pub hardcover_enabled: bool,
-    pub hardcover_api_token: Option<String>,
+    pub hardcover_api_token_set: bool,
     pub llm_enabled: bool,
     pub llm_provider: Option<LlmProvider>,
     pub llm_endpoint: Option<String>,
-    pub llm_api_key: Option<String>,
+    pub llm_api_key_set: bool,
     pub llm_model: Option<String>,
     pub audnexus_url: String,
     pub languages: Vec<String>,
@@ -953,7 +951,7 @@ pub struct UpdateMetadataApiRequest {
 }
 
 /// Configuration management (admin only).
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait ConfigApi: Send + Sync {
     /// Get naming config (read-only).
     async fn get_naming(&self) -> Result<NamingConfigResponse, ApiError>;
@@ -1011,7 +1009,7 @@ pub struct SystemStatus {
 }
 
 /// System and health endpoints.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait SystemApi: Send + Sync {
     /// Health check -- returns list of checks against all configured external dependencies.
     async fn health(&self) -> Result<Vec<HealthCheckResult>, ApiError>;
@@ -1025,7 +1023,7 @@ pub trait SystemApi: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Library file (workfile) management.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait LibraryFileApi: Send + Sync {
     /// List user's library files.
     async fn list(&self, user_id: UserId) -> Result<Vec<LibraryItemResponse>, ApiError>;
@@ -1056,7 +1054,7 @@ pub struct HistoryResponse {
 }
 
 /// History event log.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait HistoryApi: Send + Sync {
     /// List history events with optional filters.
     async fn list(
@@ -1259,29 +1257,60 @@ impl axum::response::IntoResponse for ApiError {
                 None,
             ),
             ApiError::Auth(e) => auth_error_to_http(e),
-            ApiError::Download(e) => (StatusCode::BAD_GATEWAY, "bad_gateway", e.to_string(), None),
-            ApiError::Import(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                e.to_string(),
-                None,
-            ),
-            ApiError::Metadata(e) => (StatusCode::BAD_GATEWAY, "bad_gateway", e.to_string(), None),
-            ApiError::Enrichment(e) => {
-                (StatusCode::BAD_GATEWAY, "bad_gateway", e.to_string(), None)
+            ApiError::Download(e) => {
+                tracing::warn!("download error: {e}");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "bad_gateway",
+                    "Download client error — check server logs".into(),
+                    None,
+                )
             }
-            ApiError::TagWrite(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                e.to_string(),
-                None,
-            ),
-            ApiError::Scan(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                e.to_string(),
-                None,
-            ),
+            ApiError::Import(e) => {
+                tracing::error!("import error: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "Import failed — check server logs".into(),
+                    None,
+                )
+            }
+            ApiError::Metadata(e) => {
+                tracing::warn!("metadata error: {e}");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "bad_gateway",
+                    "Metadata provider error — check server logs".into(),
+                    None,
+                )
+            }
+            ApiError::Enrichment(e) => {
+                tracing::warn!("enrichment error: {e}");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "bad_gateway",
+                    "Enrichment error — check server logs".into(),
+                    None,
+                )
+            }
+            ApiError::TagWrite(e) => {
+                tracing::error!("tag write error: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "Tag write failed — check server logs".into(),
+                    None,
+                )
+            }
+            ApiError::Scan(e) => {
+                tracing::error!("scan error: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "Scan failed — check server logs".into(),
+                    None,
+                )
+            }
             ApiError::Db(e) => db_error_to_http(e),
         };
 
@@ -1341,8 +1370,21 @@ fn db_error_to_http(
     use axum::http::StatusCode;
     let msg = e.to_string();
     match e {
-        DbError::NotFound => (StatusCode::NOT_FOUND, "not_found", msg, None),
+        DbError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", msg, None),
         DbError::Constraint { .. } => (StatusCode::CONFLICT, "conflict", msg, None),
+        DbError::Conflict { .. } => (StatusCode::CONFLICT, "conflict", msg, None),
+        DbError::DataCorruption { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "data_corruption",
+            "Internal data inconsistency detected — check server logs".into(),
+            None,
+        ),
+        DbError::IncompatibleData { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "incompatible_data",
+            "Database contains data from a newer version — upgrade Livrarr".into(),
+            None,
+        ),
         DbError::Io(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",

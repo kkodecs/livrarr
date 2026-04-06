@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
@@ -12,31 +11,29 @@ use crate::{
 fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbError> {
     let media_type_str: String = row
         .try_get("media_type")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
     let imported_at_str: String = row
         .try_get("imported_at")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
 
     Ok(LibraryItem {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         user_id: row
             .try_get::<i64, _>("user_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         work_id: row
             .try_get::<i64, _>("work_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         root_folder_id: row
             .try_get::<i64, _>("root_folder_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        path: row
-            .try_get("path")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        path: row.try_get("path").map_err(|e| DbError::Io(Box::new(e)))?,
         media_type: parse_media_type(&media_type_str),
         file_size: row
             .try_get::<i64, _>("file_size")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         imported_at: parse_dt(&imported_at_str)?,
     })
 }
@@ -55,7 +52,6 @@ fn media_type_str(mt: MediaType) -> &'static str {
     }
 }
 
-#[async_trait]
 impl LibraryItemDb for SqliteDb {
     async fn get_library_item(
         &self,
@@ -146,7 +142,7 @@ impl LibraryItemDb for SqliteDb {
             .fetch_one(self.pool())
             .await
             .map_err(map_db_err)?;
-        let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(e.to_string()))?;
+        let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(Box::new(e)))?;
         Ok(cnt > 0)
     }
 
@@ -175,7 +171,9 @@ impl LibraryItemDb for SqliteDb {
                 .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound {
+                entity: "library_item",
+            });
         }
         Ok(())
     }

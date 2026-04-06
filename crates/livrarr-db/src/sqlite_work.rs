@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
@@ -12,116 +11,110 @@ use crate::{
 fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
     let genres_str: Option<String> = row
         .try_get("genres")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
     let narrator_str: Option<String> = row
         .try_get("narrator")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
     let narration_type_str: Option<String> = row
         .try_get("narration_type")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
     let enrichment_status_str: String = row
         .try_get("enrichment_status")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
     let enriched_at_str: Option<String> = row
         .try_get("enriched_at")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
     let added_at_str: String = row
         .try_get("added_at")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
 
     Ok(Work {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         user_id: row
             .try_get::<i64, _>("user_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        title: row
-            .try_get("title")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        title: row.try_get("title").map_err(|e| DbError::Io(Box::new(e)))?,
         sort_title: row
             .try_get("sort_title")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         subtitle: row
             .try_get("subtitle")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         original_title: row
             .try_get("original_title")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         author_name: row
             .try_get("author_name")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         author_id: row
             .try_get::<Option<i64>, _>("author_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         description: row
             .try_get("description")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        year: row
-            .try_get("year")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        year: row.try_get("year").map_err(|e| DbError::Io(Box::new(e)))?,
         series_name: row
             .try_get("series_name")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         series_position: row
             .try_get("series_position")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         genres: genres_str.and_then(|s| serde_json::from_str(&s).ok()),
         language: row
             .try_get("language")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         page_count: row
             .try_get("page_count")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         duration_seconds: row
             .try_get("duration_seconds")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         publisher: row
             .try_get("publisher")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         publish_date: row
             .try_get("publish_date")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         ol_key: row
             .try_get("ol_key")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         hardcover_id: row
             .try_get("hardcover_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         isbn_13: row
             .try_get("isbn_13")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        asin: row
-            .try_get("asin")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        asin: row.try_get("asin").map_err(|e| DbError::Io(Box::new(e)))?,
         narrator: narrator_str.and_then(|s| serde_json::from_str(&s).ok()),
         narration_type: narration_type_str.and_then(|s| parse_narration_type(&s)),
         abridged: row
             .try_get::<bool, _>("abridged")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         rating: row
             .try_get("rating")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         rating_count: row
             .try_get("rating_count")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         enrichment_status: parse_enrichment_status(&enrichment_status_str),
         enrichment_retry_count: row
             .try_get::<i32, _>("enrichment_retry_count")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         enriched_at: enriched_at_str.map(|s| parse_dt(&s)).transpose()?,
         enrichment_source: row
             .try_get("enrichment_source")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         cover_url: row
             .try_get("cover_url")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         cover_manual: row
             .try_get::<bool, _>("cover_manual")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         monitored: row
             .try_get::<bool, _>("monitored")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         added_at: parse_dt(&added_at_str)?,
     })
 }
@@ -169,7 +162,6 @@ fn normalize(s: &str) -> String {
 
 type UserId = i64;
 
-#[async_trait]
 impl WorkDb for SqliteDb {
     async fn get_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError> {
         let row = sqlx::query("SELECT * FROM works WHERE id = ? AND user_id = ?")
@@ -361,7 +353,7 @@ impl WorkDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound { entity: "work" });
         }
         Ok(())
     }
@@ -384,7 +376,7 @@ impl WorkDb for SqliteDb {
             .fetch_one(self.pool())
             .await
             .map_err(map_db_err)?;
-        let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(e.to_string()))?;
+        let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(Box::new(e)))?;
         Ok(cnt > 0)
     }
 
@@ -418,7 +410,7 @@ impl WorkDb for SqliteDb {
         rows.into_iter()
             .map(|r| {
                 r.try_get::<String, _>("ol_key")
-                    .map_err(|e| DbError::Io(e.to_string()))
+                    .map_err(|e| DbError::Io(Box::new(e)))
             })
             .collect()
     }
@@ -454,7 +446,6 @@ impl WorkDb for SqliteDb {
     }
 }
 
-#[async_trait]
 impl crate::EnrichmentRetryDb for SqliteDb {
     async fn list_works_for_retry(&self) -> Result<Vec<Work>, crate::DbError> {
         let rows = sqlx::query(
@@ -482,7 +473,7 @@ impl crate::EnrichmentRetryDb for SqliteDb {
         .await
         .map_err(map_db_err)?;
         if result.rows_affected() == 0 {
-            return Err(crate::DbError::NotFound);
+            return Err(crate::DbError::NotFound { entity: "work" });
         }
         Ok(())
     }

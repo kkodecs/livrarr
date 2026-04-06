@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use axum::extract::{Path, State};
 use axum::Json;
 
+use crate::middleware::RequireAdmin;
 use crate::state::AppState;
 use crate::{
-    ApiError, AuthContext, CreateRootFolderRequest, MediaType, RootFolderResponse, ScanErrorEntry,
-    ScanResult, ScanUnmatchedFile,
+    ApiError, CreateRootFolderRequest, MediaType, RootFolderResponse, ScanErrorEntry, ScanResult,
+    ScanUnmatchedFile,
 };
 use livrarr_db::{CreateLibraryItemDbRequest, LibraryItemDb, RootFolderDb, WorkDb};
 use livrarr_domain::{classify_file, normalize_for_matching};
@@ -77,11 +78,11 @@ pub async fn delete(State(state): State<AppState>, Path(id): Path<i64>) -> Resul
 /// Satisfies: SCAN-001, SCAN-002, SCAN-003, SCAN-004, SCAN-005
 pub async fn scan(
     State(state): State<AppState>,
-    ctx: AuthContext,
+    RequireAdmin(auth): RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<Json<ScanResult>, ApiError> {
     let rf = state.db.get_root_folder(id).await?;
-    let user_id = ctx.user.id;
+    let user_id = auth.user.id;
 
     // Check root folder path exists (P0 from review: path gone at scan time).
     let root_path = PathBuf::from(&rf.path);
@@ -238,7 +239,7 @@ pub async fn scan(
 /// POST /api/v1/unmapped/scan — scan arbitrary path for unmapped files
 pub async fn scan_path(
     State(state): State<AppState>,
-    ctx: AuthContext,
+    RequireAdmin(auth): RequireAdmin,
     Json(req): Json<ScanPathRequest>,
 ) -> Result<Json<ScanResult>, ApiError> {
     let path = PathBuf::from(&req.path);
@@ -253,7 +254,7 @@ pub async fn scan_path(
         ));
     }
 
-    let user_id = ctx.user.id;
+    let user_id = auth.user.id;
 
     // Walk directory for all media types.
     let scan_files = tokio::task::spawn_blocking({

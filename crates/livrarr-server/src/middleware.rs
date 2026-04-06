@@ -71,3 +71,28 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
         .ok()?
         .strip_prefix("Bearer ")
 }
+
+/// Axum extractor: requires the authenticated user to be an admin.
+/// Must be used after auth middleware (AuthContext must be in extensions).
+pub struct RequireAdmin(pub AuthContext);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for RequireAdmin {
+    type Rejection = crate::ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let ctx = parts
+            .extensions
+            .get::<AuthContext>()
+            .cloned()
+            .ok_or(crate::ApiError::Unauthorized)?;
+
+        if ctx.user.role != livrarr_db::UserRole::Admin {
+            return Err(crate::ApiError::Forbidden);
+        }
+
+        Ok(RequireAdmin(ctx))
+    }
+}

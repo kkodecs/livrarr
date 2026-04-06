@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
@@ -14,49 +13,46 @@ fn parse_categories(s: &str) -> Vec<i32> {
 fn row_to_indexer(row: sqlx::sqlite::SqliteRow) -> Result<Indexer, DbError> {
     let categories_str: String = row
         .try_get("categories")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
     let added_at_str: String = row
         .try_get("added_at")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
 
     Ok(Indexer {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        name: row
-            .try_get("name")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        name: row.try_get("name").map_err(|e| DbError::Io(Box::new(e)))?,
         protocol: row
             .try_get("protocol")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        url: row.try_get("url").map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        url: row.try_get("url").map_err(|e| DbError::Io(Box::new(e)))?,
         api_path: row
             .try_get("api_path")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         api_key: row
             .try_get("api_key")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         categories: parse_categories(&categories_str),
         priority: row
             .try_get::<i32, _>("priority")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         enable_automatic_search: row
             .try_get::<bool, _>("enable_automatic_search")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         enable_interactive_search: row
             .try_get::<bool, _>("enable_interactive_search")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         supports_book_search: row
             .try_get::<bool, _>("supports_book_search")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         enabled: row
             .try_get::<bool, _>("enabled")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         added_at: parse_dt(&added_at_str)?,
     })
 }
 
-#[async_trait]
 impl IndexerDb for SqliteDb {
     async fn get_indexer(&self, id: IndexerId) -> Result<Indexer, DbError> {
         let row = sqlx::query("SELECT * FROM indexers WHERE id = ?")
@@ -88,7 +84,7 @@ impl IndexerDb for SqliteDb {
 
     async fn create_indexer(&self, req: CreateIndexerDbRequest) -> Result<Indexer, DbError> {
         let categories_json =
-            serde_json::to_string(&req.categories).map_err(|e| DbError::Io(e.to_string()))?;
+            serde_json::to_string(&req.categories).map_err(|e| DbError::Io(Box::new(e)))?;
 
         let id = sqlx::query(
             "INSERT INTO indexers \
@@ -161,7 +157,7 @@ impl IndexerDb for SqliteDb {
         };
 
         let categories_json =
-            serde_json::to_string(&categories).map_err(|e| DbError::Io(e.to_string()))?;
+            serde_json::to_string(&categories).map_err(|e| DbError::Io(Box::new(e)))?;
 
         sqlx::query(
             "UPDATE indexers SET name = ?, url = ?, api_path = ?, api_key = ?, \
@@ -195,7 +191,7 @@ impl IndexerDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound { entity: "indexer" });
         }
         Ok(())
     }
@@ -209,7 +205,7 @@ impl IndexerDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound { entity: "indexer" });
         }
         Ok(())
     }

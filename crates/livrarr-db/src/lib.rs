@@ -1,8 +1,5 @@
-#![allow(dead_code, unused_variables, async_fn_in_trait)]
-
 pub use livrarr_domain::*;
 
-pub mod mem;
 pub mod pool;
 pub mod sqlite;
 mod sqlite_author;
@@ -34,7 +31,7 @@ mod sqlite_work;
 /// User data access.
 ///
 /// Satisfies: AUTH-010, AUTH-011, AUTH-012, AUTH-013
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait UserDb: Send + Sync {
     /// Get user by ID.
     async fn get_user(&self, id: UserId) -> Result<User, DbError>;
@@ -100,7 +97,7 @@ pub struct CompleteSetupDbRequest {
 /// Session data access.
 ///
 /// Satisfies: AUTH-005, AUTH-006, AUTH-014
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait SessionDb: Send + Sync {
     /// Get session by token hash. Returns None if not found or expired.
     async fn get_session(&self, token_hash: &str) -> Result<Option<Session>, DbError>;
@@ -133,7 +130,7 @@ pub trait SessionDb: Send + Sync {
 /// Work data access. All queries scoped to user_id.
 ///
 /// Satisfies: AUTH-003
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait WorkDb: Send + Sync {
     /// Get work by ID for a specific user.
     async fn get_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError>;
@@ -262,7 +259,7 @@ pub struct UpdateWorkUserFieldsDbRequest {
 /// Author data access.
 ///
 /// Satisfies: AUTHOR-001, SEARCH-005
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait AuthorDb: Send + Sync {
     /// Get author by ID for a user.
     async fn get_author(&self, user_id: UserId, id: AuthorId) -> Result<Author, DbError>;
@@ -322,7 +319,7 @@ pub struct UpdateAuthorDbRequest {
 /// Library item data access.
 ///
 /// Satisfies: IMPORT-015
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait LibraryItemDb: Send + Sync {
     /// Get library item by ID for a user.
     async fn get_library_item(
@@ -404,7 +401,7 @@ pub struct CreateLibraryItemDbRequest {
 /// Shared infrastructure: admin-managed, visible to all users.
 ///
 /// Satisfies: IMPORT-001, IMPORT-002, IMPORT-004, AUTH-004
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait RootFolderDb: Send + Sync {
     async fn get_root_folder(&self, id: RootFolderId) -> Result<RootFolder, DbError>;
     async fn list_root_folders(&self) -> Result<Vec<RootFolder>, DbError>;
@@ -429,7 +426,7 @@ pub trait RootFolderDb: Send + Sync {
 /// Grab data access.
 ///
 /// Satisfies: DLC-006, DLC-009, DLC-012, DLC-015
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait GrabDb: Send + Sync {
     async fn get_grab(&self, user_id: UserId, id: GrabId) -> Result<Grab, DbError>;
 
@@ -515,7 +512,7 @@ pub struct CreateGrabDbRequest {
 /// Shared infrastructure: admin-managed, visible to all users.
 ///
 /// Satisfies: DLC-001, DLC-003, DLC-005, AUTH-004, USE-DLC-001, USE-DLC-004
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait DownloadClientDb: Send + Sync {
     async fn get_download_client(&self, id: DownloadClientId) -> Result<DownloadClient, DbError>;
     async fn list_download_clients(&self) -> Result<Vec<DownloadClient>, DbError>;
@@ -578,7 +575,7 @@ pub struct UpdateDownloadClientDbRequest {
 /// Shared infrastructure: admin-managed, visible to all users.
 ///
 /// Satisfies: DLC-013, AUTH-004
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait RemotePathMappingDb: Send + Sync {
     async fn get_remote_path_mapping(
         &self,
@@ -606,7 +603,7 @@ pub trait RemotePathMappingDb: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// History data access.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait HistoryDb: Send + Sync {
     /// List history events for a user, with optional filters.
     async fn list_history(
@@ -640,7 +637,7 @@ pub struct CreateHistoryEventDbRequest {
 /// Notification data access.
 ///
 /// Satisfies: AUTHOR-003, AUTHOR-005
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait NotificationDb: Send + Sync {
     /// List notifications for a user. Optional filter for unread only.
     async fn list_notifications(
@@ -697,7 +694,7 @@ pub struct CreateNotificationDbRequest {
 /// Shared infrastructure: admin-managed, visible to all users.
 ///
 /// Satisfies: CONFIG-001, CONFIG-002, CONFIG-003, CONFIG-004, CONFIG-005, AUTH-004
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait ConfigDb: Send + Sync {
     /// Get naming config (read-only singleton).
     async fn get_naming_config(&self) -> Result<NamingConfig, DbError>;
@@ -793,7 +790,7 @@ pub struct UpdateMetadataConfigRequest {
 /// Enrichment retry operations. Extends v2 WorkDb contract.
 ///
 /// Satisfies: IMPL-JOBS-005
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait EnrichmentRetryDb: Send + Sync {
     /// List works eligible for retry: status in (failed, partial), retry_count < 3.
     async fn list_works_for_retry(&self) -> Result<Vec<Work>, DbError>;
@@ -816,7 +813,7 @@ pub trait EnrichmentRetryDb: Send + Sync {
 /// Indexer data access. Not user-scoped — indexers are global.
 ///
 /// Satisfies: IDX-001, IDX-002, IDX-004, IDX-009, IDX-010
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait IndexerDb: Send + Sync {
     async fn get_indexer(&self, id: IndexerId) -> Result<Indexer, DbError>;
     async fn list_indexers(&self) -> Result<Vec<Indexer>, DbError>;
@@ -880,7 +877,7 @@ pub struct AuthorBibliography {
     pub fetched_at: String,
 }
 
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait AuthorBibliographyDb: Send + Sync {
     async fn get_bibliography(&self, author_id: i64)
         -> Result<Option<AuthorBibliography>, DbError>;
@@ -908,9 +905,9 @@ pub fn create_pool(
     let display = data_dir.display().to_string();
     Box::pin(async move {
         if !exists {
-            return Err(DbError::Io(format!(
-                "data directory does not exist: {display}"
-            )));
+            return Err(DbError::Io(
+                format!("data directory does not exist: {display}").into(),
+            ));
         }
         Ok(())
     })
@@ -921,32 +918,31 @@ pub fn create_pool(
 // ---------------------------------------------------------------------------
 
 pub mod test_helpers {
-    use super::mem::InMemoryDb;
-    use super::*;
+    use super::sqlite::SqliteDb;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
 
-    pub type StubDb = InMemoryDb;
+    /// Create a test database backed by SQLite `:memory:`.
+    ///
+    /// Single connection (`:memory:` is per-connection), migrated, FK-on,
+    /// busy_timeout matching production config.
+    pub async fn create_test_db() -> SqliteDb {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .pragma("foreign_keys", "ON")
+            .pragma("busy_timeout", "5000");
 
-    pub async fn new_test_db() -> InMemoryDb {
-        InMemoryDb::new()
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        SqliteDb::new(pool)
     }
 
-    pub async fn new_test_db_with_placeholder() -> InMemoryDb {
-        InMemoryDb::with_placeholder_admin()
-    }
-
-    pub fn new_notification_test_db() -> InMemoryDb {
-        InMemoryDb::new()
-    }
-
-    pub fn new_history_test_db() -> InMemoryDb {
-        InMemoryDb::new()
-    }
-
-    pub fn new_config_test_db() -> InMemoryDb {
-        InMemoryDb::new()
-    }
-
-    pub fn test_user_id() -> UserId {
+    pub fn test_user_id() -> super::UserId {
         1
     }
 }

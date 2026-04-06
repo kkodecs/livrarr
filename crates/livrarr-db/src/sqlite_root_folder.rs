@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
@@ -9,13 +8,11 @@ fn row_to_root_folder(row: sqlx::sqlite::SqliteRow) -> Result<RootFolder, DbErro
     Ok(RootFolder {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        path: row
-            .try_get("path")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        path: row.try_get("path").map_err(|e| DbError::Io(Box::new(e)))?,
         media_type: parse_media_type(
             &row.try_get::<String, _>("media_type")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         ),
     })
 }
@@ -34,7 +31,6 @@ fn media_type_str(mt: MediaType) -> &'static str {
     }
 }
 
-#[async_trait]
 impl RootFolderDb for SqliteDb {
     async fn get_root_folder(&self, id: RootFolderId) -> Result<RootFolder, DbError> {
         let row = sqlx::query("SELECT * FROM root_folders WHERE id = ?")
@@ -78,7 +74,9 @@ impl RootFolderDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound {
+                entity: "root_folder",
+            });
         }
         Ok(())
     }

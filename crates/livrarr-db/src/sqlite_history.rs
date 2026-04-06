@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
@@ -10,26 +9,22 @@ use crate::{
 fn row_to_history_event(row: sqlx::sqlite::SqliteRow) -> Result<HistoryEvent, DbError> {
     let event_type_str: String = row
         .try_get("event_type")
-        .map_err(|e| DbError::Io(e.to_string()))?;
-    let data_str: String = row
-        .try_get("data")
-        .map_err(|e| DbError::Io(e.to_string()))?;
-    let date_str: String = row
-        .try_get("date")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
+    let data_str: String = row.try_get("data").map_err(|e| DbError::Io(Box::new(e)))?;
+    let date_str: String = row.try_get("date").map_err(|e| DbError::Io(Box::new(e)))?;
 
     Ok(HistoryEvent {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         user_id: row
             .try_get::<i64, _>("user_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         work_id: row
             .try_get::<Option<i64>, _>("work_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         event_type: parse_event_type(&event_type_str),
-        data: serde_json::from_str(&data_str).unwrap_or_default(),
+        data: serde_json::from_str(&data_str).map_err(|e| DbError::Io(Box::new(e)))?,
         date: parse_dt(&date_str)?,
     })
 }
@@ -64,7 +59,6 @@ fn event_type_str(t: EventType) -> &'static str {
     }
 }
 
-#[async_trait]
 impl HistoryDb for SqliteDb {
     async fn list_history(
         &self,
@@ -104,7 +98,7 @@ impl HistoryDb for SqliteDb {
     async fn create_history_event(&self, req: CreateHistoryEventDbRequest) -> Result<(), DbError> {
         let now = chrono::Utc::now().to_rfc3339();
         let event_type_s = event_type_str(req.event_type);
-        let data_str = serde_json::to_string(&req.data).map_err(|e| DbError::Io(e.to_string()))?;
+        let data_str = serde_json::to_string(&req.data).map_err(|e| DbError::Io(Box::new(e)))?;
 
         sqlx::query(
             "INSERT INTO history (user_id, work_id, event_type, data, date) VALUES (?, ?, ?, ?, ?)",

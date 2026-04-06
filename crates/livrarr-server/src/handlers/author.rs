@@ -359,10 +359,13 @@ pub async fn refresh_bibliography(
     Path(id): Path<i64>,
 ) -> Result<Json<livrarr_db::AuthorBibliography>, ApiError> {
     // Clear cache so bibliography() re-fetches.
-    let _ = sqlx::query("DELETE FROM author_bibliography WHERE author_id = ?")
+    if let Err(e) = sqlx::query("DELETE FROM author_bibliography WHERE author_id = ?")
         .bind(id)
         .execute(state.db.pool())
-        .await;
+        .await
+    {
+        tracing::warn!("DELETE author_bibliography failed: {e}");
+    }
     bibliography(State(state), ctx, Path(id)).await
 }
 
@@ -424,7 +427,9 @@ pub fn spawn_bibliography_fetch(state: AppState, author_id: i64, user_id: i64) {
 
         let cleaned = llm_clean_bibliography(&state, &author.name, &entries_raw).await;
         let final_entries = cleaned.as_deref().unwrap_or(&entries_raw);
-        let _ = state.db.save_bibliography(author_id, final_entries).await;
+        if let Err(e) = state.db.save_bibliography(author_id, final_entries).await {
+            tracing::warn!("save_bibliography failed: {e}");
+        }
 
         tracing::info!(
             author = %author.name,

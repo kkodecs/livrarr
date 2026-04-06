@@ -1,7 +1,7 @@
-#![allow(dead_code, unused_variables, async_fn_in_trait)]
-
-pub use livrarr_domain::*;
-
+use livrarr_domain::{
+    sanitize_path_component, DbError, Grab, GrabId, GrabStatus, LibraryItemId, MediaType,
+    RootFolderId, UserId, WorkId,
+};
 // Re-export classify_file from domain.
 pub use livrarr_domain::classify_file;
 
@@ -15,7 +15,7 @@ pub use livrarr_domain::classify_file;
 // ---------------------------------------------------------------------------
 
 /// Import pipeline -- processes completed downloads.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait ImportService: Send + Sync {
     /// Run import for a completed grab.
     async fn import_grab(&self, grab: &Grab) -> Result<ImportResult, ImportError>;
@@ -91,7 +91,7 @@ pub enum ImportError {
 // ---------------------------------------------------------------------------
 
 /// Build target paths for imported files.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait PathBuilder: Send + Sync {
     /// Build ebook target path.
     /// Layout: {root}/{user_id}/{sanitized_author}/{sanitized_title}.{ext}
@@ -121,7 +121,7 @@ pub trait PathBuilder: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Manual library scan.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait ScanService: Send + Sync {
     /// Scan a root folder for the requesting user's files.
     async fn scan_root_folder(

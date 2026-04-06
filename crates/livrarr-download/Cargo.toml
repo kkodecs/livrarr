@@ -8,7 +8,7 @@ license = "GPL-3.0-only"
 chrono = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-async-trait = { workspace = true }
+trait-variant = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true }
 sha1 = "0.10"

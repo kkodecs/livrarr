@@ -75,11 +75,11 @@ pub async fn get_metadata(
 fn metadata_to_response(cfg: livrarr_db::MetadataConfig) -> MetadataConfigResponse {
     MetadataConfigResponse {
         hardcover_enabled: cfg.hardcover_enabled,
-        hardcover_api_token: cfg.hardcover_api_token,
+        hardcover_api_token_set: cfg.hardcover_api_token.is_some(),
         llm_enabled: cfg.llm_enabled,
         llm_provider: cfg.llm_provider,
         llm_endpoint: cfg.llm_endpoint,
-        llm_api_key: cfg.llm_api_key,
+        llm_api_key_set: cfg.llm_api_key.is_some(),
         llm_model: cfg.llm_model,
         audnexus_url: cfg.audnexus_url,
         languages: cfg.languages,

@@ -345,7 +345,7 @@ pub async fn import_grab(
     } else {
         EventType::ImportFailed
     };
-    let _ = state
+    if let Err(e) = state
         .db
         .create_history_event(CreateHistoryEventDbRequest {
             user_id,
@@ -358,7 +358,10 @@ pub async fn import_grab(
                 "error": error_msg,
             }),
         })
-        .await;
+        .await
+    {
+        tracing::warn!("create_history_event failed: {e}");
+    }
 
     Ok(ImportGrabResult {
         final_status,
@@ -545,7 +548,7 @@ async fn import_mp3_batch(
     work_id: i64,
     tag_metadata: Option<&livrarr_tagwrite::TagMetadata>,
     cover: Option<&[u8]>,
-    media_mgmt: &livrarr_db::MediaManagementConfig,
+    _media_mgmt: &livrarr_db::MediaManagementConfig,
     _author_name: &str,
     _title: &str,
 ) -> Result<(usize, Vec<String>), String> {
@@ -1122,10 +1125,13 @@ pub async fn retag_library_items(
                         .metadata()
                         .map(|m| m.len() as i64)
                         .unwrap_or(0);
-                    let _ = state
+                    if let Err(e) = state
                         .db
                         .update_library_item_size(item.user_id, item.id, new_size)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!("update_library_item_size failed: {e}");
+                    }
                 }
             }
             Ok(_) => {
@@ -1197,14 +1203,17 @@ pub async fn retag_library_items(
                                 .metadata()
                                 .map(|m| m.len() as i64)
                                 .unwrap_or(0);
-                            let _ = state
+                            if let Err(e) = state
                                 .db
                                 .update_library_item_size(
                                     mp3_items[i].user_id,
                                     mp3_items[i].id,
                                     new_size,
                                 )
-                                .await;
+                                .await
+                            {
+                                tracing::warn!("update_library_item_size failed: {e}");
+                            }
                         }
                     }
                 }

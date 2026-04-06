@@ -6,7 +6,7 @@ use chrono::Utc;
 
 use crate::*;
 use livrarr_db::{
-    mem::InMemoryDb, AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateDownloadClientDbRequest,
+    sqlite::SqliteDb, AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateDownloadClientDbRequest,
     CreateLibraryItemDbRequest, CreateNotificationDbRequest, CreateUserDbRequest,
     CreateWorkDbRequest, DownloadClientDb, HistoryDb, HistoryFilter, LibraryItemDb, NotificationDb,
     RemotePathMappingDb, RootFolderDb, UpdateAuthorDbRequest, UpdateDownloadClientDbRequest,
@@ -17,20 +17,24 @@ use livrarr_db::{
 /// Map DbError to the semantically correct ApiError.
 fn db_err(e: DbError) -> ApiError {
     match e {
-        DbError::NotFound => ApiError::NotFound,
-        DbError::Constraint { message } => ApiError::Conflict { reason: message },
-        DbError::Io(msg) => ApiError::Internal(msg),
+        DbError::NotFound { .. } => ApiError::NotFound,
+        DbError::Constraint { message } | DbError::Conflict { message } => {
+            ApiError::Conflict { reason: message }
+        }
+        DbError::DataCorruption { detail, .. } => ApiError::Internal(detail),
+        DbError::IncompatibleData { detail } => ApiError::Internal(detail),
+        DbError::Io(e) => ApiError::Internal(e.to_string()),
     }
 }
 
-/// Combined API implementation backed by InMemoryDb.
+/// Combined API implementation backed by SqliteDb.
 pub struct SecondaryApiImpl {
-    db: InMemoryDb,
+    db: SqliteDb,
     data_dir: String,
 }
 
 impl SecondaryApiImpl {
-    pub fn new(db: InMemoryDb) -> Self {
+    pub fn new(db: SqliteDb) -> Self {
         Self {
             db,
             data_dir: "/tmp/livrarr-test".into(),
@@ -39,7 +43,6 @@ impl SecondaryApiImpl {
 }
 
 // AuthorApi
-#[async_trait::async_trait]
 impl AuthorApi for SecondaryApiImpl {
     async fn lookup(&self, _uid: UserId, _term: &str) -> Result<Vec<AuthorSearchResult>, ApiError> {
         Ok(vec![])
@@ -157,7 +160,6 @@ impl AuthorApi for SecondaryApiImpl {
 }
 
 // NotificationApi
-#[async_trait::async_trait]
 impl NotificationApi for SecondaryApiImpl {
     async fn list(
         &self,
@@ -200,7 +202,6 @@ impl NotificationApi for SecondaryApiImpl {
 }
 
 // RootFolderApi
-#[async_trait::async_trait]
 impl RootFolderApi for SecondaryApiImpl {
     async fn list(&self) -> Result<Vec<RootFolderResponse>, ApiError> {
         let folders = self.db.list_root_folders().await.map_err(db_err)?;
@@ -290,7 +291,6 @@ impl RootFolderApi for SecondaryApiImpl {
 }
 
 // DownloadClientApi
-#[async_trait::async_trait]
 impl DownloadClientApi for SecondaryApiImpl {
     async fn list(&self) -> Result<Vec<DownloadClientResponse>, ApiError> {
         let clients = self.db.list_download_clients().await.map_err(db_err)?;
@@ -302,14 +302,16 @@ impl DownloadClientApi for SecondaryApiImpl {
         req: CreateDownloadClientApiRequest,
     ) -> Result<DownloadClientResponse, ApiError> {
         validate_download_client(&req)?;
+        let (host, ssl_override) = crate::handlers::download_client::normalize_host(&req.host);
+        let use_ssl = ssl_override.unwrap_or(req.use_ssl);
         let dc = self
             .db
             .create_download_client(CreateDownloadClientDbRequest {
                 name: req.name,
                 implementation: req.implementation,
-                host: req.host,
+                host,
                 port: req.port,
-                use_ssl: req.use_ssl,
+                use_ssl,
                 skip_ssl_validation: req.skip_ssl_validation,
                 url_base: req.url_base,
                 username: req.username,
@@ -333,15 +335,23 @@ impl DownloadClientApi for SecondaryApiImpl {
         id: DownloadClientId,
         req: UpdateDownloadClientApiRequest,
     ) -> Result<DownloadClientResponse, ApiError> {
+        let (host, ssl_override) = match &req.host {
+            Some(h) => {
+                let (clean, ssl) = crate::handlers::download_client::normalize_host(h);
+                (Some(clean), ssl)
+            }
+            None => (None, None),
+        };
+        let use_ssl = ssl_override.or(req.use_ssl);
         let dc = self
             .db
             .update_download_client(
                 id,
                 UpdateDownloadClientDbRequest {
                     name: req.name,
-                    host: req.host,
+                    host,
                     port: req.port,
-                    use_ssl: req.use_ssl,
+                    use_ssl,
                     skip_ssl_validation: req.skip_ssl_validation,
                     url_base: req.url_base,
                     username: req.username,
@@ -367,7 +377,6 @@ impl DownloadClientApi for SecondaryApiImpl {
 }
 
 // RemotePathMappingApi
-#[async_trait::async_trait]
 impl RemotePathMappingApi for SecondaryApiImpl {
     async fn list(&self) -> Result<Vec<RemotePathMappingResponse>, ApiError> {
         let mappings = self.db.list_remote_path_mappings().await.map_err(db_err)?;
@@ -432,7 +441,6 @@ impl RemotePathMappingApi for SecondaryApiImpl {
 }
 
 // ConfigApi
-#[async_trait::async_trait]
 impl ConfigApi for SecondaryApiImpl {
     async fn get_naming(&self) -> Result<NamingConfigResponse, ApiError> {
         let c = self.db.get_naming_config().await.map_err(db_err)?;
@@ -514,11 +522,11 @@ impl ConfigApi for SecondaryApiImpl {
         let c = self.db.get_metadata_config().await.map_err(db_err)?;
         Ok(MetadataConfigResponse {
             hardcover_enabled: c.hardcover_enabled,
-            hardcover_api_token: c.hardcover_api_token,
+            hardcover_api_token_set: c.hardcover_api_token.is_some(),
             llm_enabled: c.llm_enabled,
             llm_provider: c.llm_provider,
             llm_endpoint: c.llm_endpoint,
-            llm_api_key: c.llm_api_key,
+            llm_api_key_set: c.llm_api_key.is_some(),
             llm_model: c.llm_model,
             audnexus_url: c.audnexus_url,
             languages: c.languages,
@@ -546,11 +554,11 @@ impl ConfigApi for SecondaryApiImpl {
             .map_err(db_err)?;
         Ok(MetadataConfigResponse {
             hardcover_enabled: c.hardcover_enabled,
-            hardcover_api_token: c.hardcover_api_token,
+            hardcover_api_token_set: c.hardcover_api_token.is_some(),
             llm_enabled: c.llm_enabled,
             llm_provider: c.llm_provider,
             llm_endpoint: c.llm_endpoint,
-            llm_api_key: c.llm_api_key,
+            llm_api_key_set: c.llm_api_key.is_some(),
             llm_model: c.llm_model,
             audnexus_url: c.audnexus_url,
             languages: c.languages,
@@ -559,7 +567,6 @@ impl ConfigApi for SecondaryApiImpl {
 }
 
 // SystemApi
-#[async_trait::async_trait]
 impl SystemApi for SecondaryApiImpl {
     async fn health(&self) -> Result<Vec<HealthCheckResult>, ApiError> {
         Ok(vec![HealthCheckResult {
@@ -580,7 +587,6 @@ impl SystemApi for SecondaryApiImpl {
 }
 
 // LibraryFileApi
-#[async_trait::async_trait]
 impl LibraryFileApi for SecondaryApiImpl {
     async fn list(&self, uid: UserId) -> Result<Vec<LibraryItemResponse>, ApiError> {
         let items = self.db.list_library_items(uid).await.map_err(db_err)?;
@@ -601,7 +607,6 @@ impl LibraryFileApi for SecondaryApiImpl {
 }
 
 // HistoryApi
-#[async_trait::async_trait]
 impl HistoryApi for SecondaryApiImpl {
     async fn list(
         &self,
@@ -884,9 +889,9 @@ impl SecondaryApiImpl {
     }
 }
 
-/// Create a secondary API backed by an in-memory DB with a test user.
+/// Create a secondary API backed by a SQLite :memory: DB with a test user.
 pub async fn new_test_secondary_api() -> (SecondaryApiImpl, UserId) {
-    let db = InMemoryDb::new();
+    let db = livrarr_db::test_helpers::create_test_db().await;
     let user = db
         .create_user(CreateUserDbRequest {
             username: "testuser".into(),

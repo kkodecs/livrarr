@@ -1,7 +1,8 @@
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::handlers;
 use crate::middleware::auth_middleware;
@@ -218,5 +219,26 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         app
     };
 
-    app.with_state(state)
+    // Security headers per security-model-policy.md
+    app.layer(SetResponseHeaderLayer::overriding(
+        axum::http::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY"),
+    ))
+    .layer(SetResponseHeaderLayer::overriding(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    ))
+    .layer(SetResponseHeaderLayer::overriding(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    ))
+    .layer(SetResponseHeaderLayer::overriding(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; \
+             base-uri 'self'; object-src 'none'; form-action 'self'",
+        ),
+    ))
+    .with_state(state)
 }

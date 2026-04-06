@@ -3,8 +3,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::middleware::RequireAdmin;
 use crate::state::AppState;
-use crate::{ApiError, AuthContext};
+use crate::ApiError;
 
 #[derive(Debug, Deserialize)]
 pub struct BrowseQuery {
@@ -28,7 +29,7 @@ pub struct DirEntry {
 /// GET /api/v1/filesystem
 pub async fn browse(
     State(_state): State<AppState>,
-    _ctx: AuthContext,
+    RequireAdmin(_auth): RequireAdmin,
     Query(query): Query<BrowseQuery>,
 ) -> Result<Json<BrowseResponse>, ApiError> {
     let path = query

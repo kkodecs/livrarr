@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
@@ -12,50 +11,46 @@ fn row_to_download_client(row: sqlx::sqlite::SqliteRow) -> Result<DownloadClient
     Ok(DownloadClient {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        name: row
-            .try_get("name")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        name: row.try_get("name").map_err(|e| DbError::Io(Box::new(e)))?,
         implementation: parse_implementation(
             &row.try_get::<String, _>("implementation")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         ),
-        host: row
-            .try_get("host")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+        host: row.try_get("host").map_err(|e| DbError::Io(Box::new(e)))?,
         port: row
             .try_get::<i32, _>("port")
-            .map_err(|e| DbError::Io(e.to_string()))? as u16,
+            .map_err(|e| DbError::Io(Box::new(e)))? as u16,
         use_ssl: row
             .try_get::<bool, _>("use_ssl")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         skip_ssl_validation: row
             .try_get::<bool, _>("skip_ssl_validation")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         url_base: row
             .try_get("url_base")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         username: row
             .try_get("username")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         password: row
             .try_get("password")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         category: row
             .try_get("category")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         enabled: row
             .try_get::<bool, _>("enabled")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         client_type: row
             .try_get("client_type")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         api_key: row
             .try_get("api_key")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         is_default_for_protocol: row
             .try_get::<bool, _>("is_default_for_protocol")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
     })
 }
 
@@ -66,7 +61,6 @@ fn parse_implementation(s: &str) -> DownloadClientImplementation {
     }
 }
 
-#[async_trait]
 impl DownloadClientDb for SqliteDb {
     async fn get_download_client(&self, id: DownloadClientId) -> Result<DownloadClient, DbError> {
         let row = sqlx::query("SELECT * FROM download_clients WHERE id = ?")
@@ -268,7 +262,9 @@ impl DownloadClientDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound {
+                entity: "download_client",
+            });
         }
         Ok(())
     }

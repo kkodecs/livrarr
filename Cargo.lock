@@ -104,17 +104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-trait"
-version = "0.1.89"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1130,7 +1119,6 @@ version = "0.1.0"
 name = "livrarr-db"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "chrono",
  "livrarr-domain",
  "serde",
@@ -1138,6 +1126,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+ "trait-variant",
 ]
 
 [[package]]
@@ -1154,7 +1143,6 @@ dependencies = [
 name = "livrarr-download"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bendy",
  "chrono",
  "data-encoding",
@@ -1163,6 +1151,7 @@ dependencies = [
  "serde",
  "sha1",
  "thiserror",
+ "trait-variant",
 ]
 
 [[package]]
@@ -1177,27 +1166,27 @@ dependencies = [
 name = "livrarr-jobs"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "livrarr-domain",
  "thiserror",
+ "trait-variant",
 ]
 
 [[package]]
 name = "livrarr-metadata"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "livrarr-domain",
  "thiserror",
+ "trait-variant",
 ]
 
 [[package]]
 name = "livrarr-organize"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "livrarr-domain",
  "thiserror",
+ "trait-variant",
 ]
 
 [[package]]
@@ -1205,7 +1194,6 @@ name = "livrarr-server"
 version = "0.1.0"
 dependencies = [
  "argon2",
- "async-trait",
  "axum",
  "chrono",
  "clap",
@@ -1233,6 +1221,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "trait-variant",
  "urlencoding",
 ]
 
@@ -2580,6 +2569,17 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
+]
+
+[[package]]
+name = "trait-variant"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70977707304198400eb4835a78f6a9f928bf41bba420deb8fdb175cd965d77a7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

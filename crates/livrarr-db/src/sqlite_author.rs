@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
@@ -11,39 +10,36 @@ use crate::{
 fn row_to_author(row: sqlx::sqlite::SqliteRow) -> Result<Author, DbError> {
     let monitor_since_str: Option<String> = row
         .try_get("monitor_since")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
     let added_at_str: String = row
         .try_get("added_at")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
 
     Ok(Author {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         user_id: row
             .try_get::<i64, _>("user_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        name: row
-            .try_get("name")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        name: row.try_get("name").map_err(|e| DbError::Io(Box::new(e)))?,
         sort_name: row
             .try_get("sort_name")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         ol_key: row
             .try_get("ol_key")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         monitored: row
             .try_get::<bool, _>("monitored")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         monitor_new_items: row
             .try_get::<bool, _>("monitor_new_items")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         monitor_since: monitor_since_str.map(|s| parse_dt(&s)).transpose()?,
         added_at: parse_dt(&added_at_str)?,
     })
 }
 
-#[async_trait]
 impl AuthorDb for SqliteDb {
     async fn get_author(&self, user_id: UserId, id: AuthorId) -> Result<Author, DbError> {
         let row = sqlx::query("SELECT * FROM authors WHERE id = ? AND user_id = ?")
@@ -158,7 +154,7 @@ impl AuthorDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound { entity: "author" });
         }
         Ok(())
     }

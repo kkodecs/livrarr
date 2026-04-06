@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
@@ -13,31 +12,31 @@ fn row_to_user(row: sqlx::sqlite::SqliteRow) -> Result<User, DbError> {
     Ok(User {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         username: row
             .try_get("username")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         password_hash: row
             .try_get("password_hash")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         role: parse_role(
             row.try_get::<String, _>("role")
-                .map_err(|e| DbError::Io(e.to_string()))?
+                .map_err(|e| DbError::Io(Box::new(e)))?
                 .as_str(),
         ),
         api_key_hash: row
             .try_get("api_key_hash")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         setup_pending: row
             .try_get::<bool, _>("setup_pending")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         created_at: parse_dt(
             &row.try_get::<String, _>("created_at")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         )?,
         updated_at: parse_dt(
             &row.try_get::<String, _>("updated_at")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         )?,
     })
 }
@@ -49,7 +48,6 @@ fn parse_role(s: &str) -> UserRole {
     }
 }
 
-#[async_trait]
 impl UserDb for SqliteDb {
     async fn get_user(&self, id: UserId) -> Result<User, DbError> {
         let row = sqlx::query("SELECT * FROM users WHERE id = ?")
@@ -160,7 +158,7 @@ impl UserDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound { entity: "user" });
         }
         Ok(())
     }
@@ -171,31 +169,41 @@ impl UserDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
         row.try_get::<i64, _>("cnt")
-            .map_err(|e| DbError::Io(e.to_string()))
+            .map_err(|e| DbError::Io(Box::new(e)))
     }
 
     async fn complete_setup(&self, req: CompleteSetupDbRequest) -> Result<User, DbError> {
         let now = Utc::now().to_rfc3339();
 
-        let result = sqlx::query(
+        // Find the pending setup user (not hardcoded to id=1).
+        let row = sqlx::query("SELECT id FROM users WHERE setup_pending = 1 LIMIT 1")
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        let user_id: i64 = match row {
+            Some(r) => r.try_get("id").map_err(|e| DbError::Io(Box::new(e)))?,
+            None => {
+                return Err(DbError::Constraint {
+                    message: "setup already completed".to_string(),
+                });
+            }
+        };
+
+        sqlx::query(
             "UPDATE users SET username = ?, password_hash = ?, api_key_hash = ?, \
-             setup_pending = 0, updated_at = ? WHERE id = 1 AND setup_pending = 1",
+             setup_pending = 0, updated_at = ? WHERE id = ? AND setup_pending = 1",
         )
         .bind(&req.username)
         .bind(&req.password_hash)
         .bind(&req.api_key_hash)
         .bind(&now)
+        .bind(user_id)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?;
 
-        if result.rows_affected() == 0 {
-            return Err(DbError::Constraint {
-                message: "setup already completed".to_string(),
-            });
-        }
-
-        self.get_user(1).await
+        self.get_user(user_id).await
     }
 
     async fn update_api_key_hash(&self, user_id: UserId, hash: &str) -> Result<(), DbError> {
@@ -210,7 +218,7 @@ impl UserDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound { entity: "user" });
         }
         Ok(())
     }

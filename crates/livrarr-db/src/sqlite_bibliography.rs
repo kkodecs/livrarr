@@ -4,12 +4,13 @@ use sqlx::Row;
 
 fn map_db_err(e: sqlx::Error) -> DbError {
     match e {
-        sqlx::Error::RowNotFound => DbError::NotFound,
-        _ => DbError::Io(e.to_string()),
+        sqlx::Error::RowNotFound => DbError::NotFound {
+            entity: "bibliography",
+        },
+        _ => DbError::Io(Box::new(e)),
     }
 }
 
-#[async_trait::async_trait]
 impl AuthorBibliographyDb for SqliteDb {
     async fn get_bibliography(
         &self,
@@ -26,7 +27,7 @@ impl AuthorBibliographyDb for SqliteDb {
             Some(row) => {
                 let entries_json: String = row.get("entries");
                 let entries: Vec<BibliographyEntry> =
-                    serde_json::from_str(&entries_json).unwrap_or_default();
+                    serde_json::from_str(&entries_json).map_err(|e| DbError::Io(Box::new(e)))?;
                 let fetched_at: String = row.get("fetched_at");
                 Ok(Some(AuthorBibliography {
                     author_id,
@@ -43,8 +44,7 @@ impl AuthorBibliographyDb for SqliteDb {
         author_id: i64,
         entries: &[BibliographyEntry],
     ) -> Result<AuthorBibliography, DbError> {
-        let entries_json =
-            serde_json::to_string(entries).map_err(|e| DbError::Io(e.to_string()))?;
+        let entries_json = serde_json::to_string(entries).map_err(|e| DbError::Io(Box::new(e)))?;
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(

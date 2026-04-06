@@ -1,5 +1,3 @@
-#![allow(async_fn_in_trait)]
-
 use std::time::Duration;
 
 /// Composable HTTP client with configurable middleware.

@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
@@ -32,7 +31,6 @@ fn parse_languages(s: &str) -> Vec<String> {
     serde_json::from_str(s).unwrap_or_else(|_| vec!["en".to_string()])
 }
 
-#[async_trait]
 impl ConfigDb for SqliteDb {
     async fn get_naming_config(&self) -> Result<NamingConfig, DbError> {
         let row = sqlx::query("SELECT * FROM naming_config WHERE id = 1")
@@ -43,16 +41,16 @@ impl ConfigDb for SqliteDb {
         Ok(NamingConfig {
             author_folder_format: row
                 .try_get("author_folder_format")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
             book_folder_format: row
                 .try_get("book_folder_format")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
             rename_files: row
                 .try_get::<bool, _>("rename_files")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
             replace_illegal_chars: row
                 .try_get::<bool, _>("replace_illegal_chars")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         })
     }
 
@@ -64,17 +62,19 @@ impl ConfigDb for SqliteDb {
 
         let ebook_json: String = row
             .try_get("preferred_ebook_formats")
-            .map_err(|e| DbError::Io(e.to_string()))?;
+            .map_err(|e| DbError::Io(Box::new(e)))?;
         let audiobook_json: String = row
             .try_get("preferred_audiobook_formats")
-            .map_err(|e| DbError::Io(e.to_string()))?;
+            .map_err(|e| DbError::Io(Box::new(e)))?;
 
         Ok(MediaManagementConfig {
             cwa_ingest_path: row
                 .try_get("cwa_ingest_path")
-                .map_err(|e| DbError::Io(e.to_string()))?,
-            preferred_ebook_formats: serde_json::from_str(&ebook_json).unwrap_or_default(),
-            preferred_audiobook_formats: serde_json::from_str(&audiobook_json).unwrap_or_default(),
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            preferred_ebook_formats: serde_json::from_str(&ebook_json)
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            preferred_audiobook_formats: serde_json::from_str(&audiobook_json)
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         })
     }
 
@@ -82,9 +82,10 @@ impl ConfigDb for SqliteDb {
         &self,
         req: UpdateMediaManagementConfigRequest,
     ) -> Result<MediaManagementConfig, DbError> {
-        let ebook_json = serde_json::to_string(&req.preferred_ebook_formats).unwrap_or_default();
-        let audiobook_json =
-            serde_json::to_string(&req.preferred_audiobook_formats).unwrap_or_default();
+        let ebook_json = serde_json::to_string(&req.preferred_ebook_formats)
+            .map_err(|e| DbError::Io(Box::new(e)))?;
+        let audiobook_json = serde_json::to_string(&req.preferred_audiobook_formats)
+            .map_err(|e| DbError::Io(Box::new(e)))?;
         sqlx::query(
             "UPDATE media_management_config SET cwa_ingest_path = ?, \
              preferred_ebook_formats = ?, preferred_audiobook_formats = ? WHERE id = 1",
@@ -106,13 +107,13 @@ impl ConfigDb for SqliteDb {
             .map_err(map_db_err)?;
 
         Ok(ProwlarrConfig {
-            url: row.try_get("url").map_err(|e| DbError::Io(e.to_string()))?,
+            url: row.try_get("url").map_err(|e| DbError::Io(Box::new(e)))?,
             api_key: row
                 .try_get("api_key")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
             enabled: row
                 .try_get::<bool, _>("enabled")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         })
     }
 
@@ -153,30 +154,30 @@ impl ConfigDb for SqliteDb {
 
         let llm_provider_str: Option<String> = row
             .try_get("llm_provider")
-            .map_err(|e| DbError::Io(e.to_string()))?;
+            .map_err(|e| DbError::Io(Box::new(e)))?;
         let languages_str: String = row
             .try_get("languages")
-            .map_err(|e| DbError::Io(e.to_string()))?;
+            .map_err(|e| DbError::Io(Box::new(e)))?;
 
         Ok(MetadataConfig {
             hardcover_enabled: row.try_get::<bool, _>("hardcover_enabled").unwrap_or(true),
             hardcover_api_token: row
                 .try_get("hardcover_api_token")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
             llm_enabled: row.try_get::<bool, _>("llm_enabled").unwrap_or(true),
             llm_provider: llm_provider_str.and_then(|s| parse_llm_provider(&s)),
             llm_endpoint: row
                 .try_get("llm_endpoint")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
             llm_api_key: row
                 .try_get("llm_api_key")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
             llm_model: row
                 .try_get("llm_model")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
             audnexus_url: row
                 .try_get("audnexus_url")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
             languages: parse_languages(&languages_str),
         })
     }
@@ -242,7 +243,7 @@ impl ConfigDb for SqliteDb {
                 .map_err(map_db_err)?;
         }
         if let Some(languages) = &req.languages {
-            let json = serde_json::to_string(languages).map_err(|e| DbError::Io(e.to_string()))?;
+            let json = serde_json::to_string(languages).map_err(|e| DbError::Io(Box::new(e)))?;
             sqlx::query("UPDATE metadata_config SET languages = ? WHERE id = 1")
                 .bind(&json)
                 .execute(self.pool())

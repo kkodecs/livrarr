@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
@@ -9,49 +8,43 @@ use crate::{CreateGrabDbRequest, DbError, Grab, GrabDb, GrabId, GrabStatus, User
 fn row_to_grab(row: sqlx::sqlite::SqliteRow) -> Result<Grab, DbError> {
     let status_str: String = row
         .try_get("status")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
     let grabbed_at_str: String = row
         .try_get("grabbed_at")
-        .map_err(|e| DbError::Io(e.to_string()))?;
+        .map_err(|e| DbError::Io(Box::new(e)))?;
 
     Ok(Grab {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         user_id: row
             .try_get::<i64, _>("user_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         work_id: row
             .try_get::<i64, _>("work_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         download_client_id: row
             .try_get::<i64, _>("download_client_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        title: row
-            .try_get("title")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        title: row.try_get("title").map_err(|e| DbError::Io(Box::new(e)))?,
         indexer: row
             .try_get("indexer")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        guid: row
-            .try_get("guid")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        size: row
-            .try_get("size")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        guid: row.try_get("guid").map_err(|e| DbError::Io(Box::new(e)))?,
+        size: row.try_get("size").map_err(|e| DbError::Io(Box::new(e)))?,
         download_url: row
             .try_get("download_url")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         download_id: row
             .try_get("download_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         status: parse_grab_status(&status_str),
         import_error: row
             .try_get("import_error")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         media_type: row
             .try_get::<Option<String>, _>("media_type")
-            .map_err(|e| DbError::Io(e.to_string()))?
+            .map_err(|e| DbError::Io(Box::new(e)))?
             .and_then(|s| match s.as_str() {
                 "ebook" => Some(livrarr_domain::MediaType::Ebook),
                 "audiobook" => Some(livrarr_domain::MediaType::Audiobook),
@@ -85,7 +78,6 @@ fn grab_status_str(s: GrabStatus) -> &'static str {
     }
 }
 
-#[async_trait]
 impl GrabDb for SqliteDb {
     async fn get_grab(&self, user_id: UserId, id: GrabId) -> Result<Grab, DbError> {
         let row = sqlx::query("SELECT * FROM grabs WHERE id = ? AND user_id = ?")
@@ -217,7 +209,7 @@ impl GrabDb for SqliteDb {
         .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound { entity: "grab" });
         }
         Ok(())
     }
@@ -237,7 +229,7 @@ impl GrabDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound { entity: "grab" });
         }
         Ok(())
     }
@@ -270,13 +262,17 @@ impl GrabDb for SqliteDb {
         id: GrabId,
         download_id: &str,
     ) -> Result<(), DbError> {
-        sqlx::query("UPDATE grabs SET download_id = ? WHERE id = ? AND user_id = ?")
+        let result = sqlx::query("UPDATE grabs SET download_id = ? WHERE id = ? AND user_id = ?")
             .bind(download_id)
             .bind(id)
             .bind(user_id)
             .execute(self.pool())
             .await
             .map_err(map_db_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound { entity: "grab" });
+        }
         Ok(())
     }
 

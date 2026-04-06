@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_variables, async_fn_in_trait)]
-
 pub use livrarr_domain::*;
 
 use std::path::PathBuf;
@@ -9,7 +7,7 @@ use std::time::Duration;
 // Metadata Provider Trait
 // =============================================================================
 
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait MetadataProvider: Send + Sync {
     fn name(&self) -> &str;
     async fn search_works(&self, query: &str) -> Result<Vec<ProviderSearchResult>, MetadataError>;
@@ -86,7 +84,7 @@ pub enum MetadataError {
 // Enrichment Service
 // =============================================================================
 
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait EnrichmentService: Send + Sync {
     async fn enrich_work(&self, work: &Work) -> Result<EnrichmentResult, EnrichmentError>;
     async fn refresh_work(
@@ -117,7 +115,7 @@ pub enum EnrichmentError {
 // Hardcover Matching
 // =============================================================================
 
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait HardcoverMatcher: Send + Sync {
     async fn match_deterministic(
         &self,
@@ -148,7 +146,7 @@ pub struct HardcoverCandidate {
 // LLM Client
 // =============================================================================
 
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait LlmClient: Send + Sync {
     async fn chat_completion(&self, messages: Vec<LlmMessage>) -> Result<String, LlmError>;
 }
@@ -177,7 +175,7 @@ pub enum LlmError {
 // Cover Cache
 // =============================================================================
 
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait CoverCache: Send + Sync {
     async fn cache_cover(&self, work_id: WorkId, cover_url: &str) -> Result<(), CoverError>;
     async fn save_manual_cover(
@@ -206,7 +204,7 @@ pub enum CoverError {
 // Search Service
 // =============================================================================
 
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait SearchService: Send + Sync {
     async fn search_works(&self, query: &str) -> Result<Vec<WorkSearchResult>, MetadataError>;
     async fn search_authors(&self, query: &str) -> Result<Vec<AuthorSearchResult>, MetadataError>;
@@ -299,7 +297,6 @@ impl OpenLibraryProvider {
     }
 }
 
-#[async_trait::async_trait]
 impl MetadataProvider for OpenLibraryProvider {
     fn name(&self) -> &str {
         "openlibrary"
@@ -363,7 +360,6 @@ impl OlSearchService {
     }
 }
 
-#[async_trait::async_trait]
 impl SearchService for OlSearchService {
     async fn search_works(&self, _query: &str) -> Result<Vec<WorkSearchResult>, MetadataError> {
         match &self.mode {
@@ -384,6 +380,7 @@ impl SearchService for OlSearchService {
 // Test doubles module
 // =============================================================================
 
+#[cfg(test)]
 pub mod tests {
     use super::*;
 
@@ -402,7 +399,6 @@ pub mod tests {
         LlmFallback,
     }
 
-    #[async_trait::async_trait]
     impl EnrichmentService for StubEnrichment {
         async fn enrich_work(&self, work: &Work) -> Result<EnrichmentResult, EnrichmentError> {
             match self.mode {
@@ -510,7 +506,6 @@ pub mod tests {
         LlmSuccess,
     }
 
-    #[async_trait::async_trait]
     impl HardcoverMatcher for StubMatcher {
         async fn match_deterministic(
             &self,
@@ -588,7 +583,6 @@ pub mod tests {
         UnsupportedFormat,
     }
 
-    #[async_trait::async_trait]
     impl CoverCache for StubCoverCache {
         async fn cache_cover(&self, _work_id: WorkId, _cover_url: &str) -> Result<(), CoverError> {
             match &self.mode {
@@ -667,7 +661,6 @@ pub mod tests {
         RequestFailed(String),
     }
 
-    #[async_trait::async_trait]
     impl LlmClient for StubLlmClient {
         async fn chat_completion(&self, _messages: Vec<LlmMessage>) -> Result<String, LlmError> {
             match &self.mode {

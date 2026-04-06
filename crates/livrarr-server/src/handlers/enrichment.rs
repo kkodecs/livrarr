@@ -248,12 +248,16 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
     // --- Download cover if we got a new URL ---
     if let Some(ref url) = req.cover_url {
         let covers_dir = state.data_dir.join("covers");
-        let _ = tokio::fs::create_dir_all(&covers_dir).await;
+        if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
+            tracing::warn!("create_dir_all for covers failed: {e}");
+        }
         if let Ok(resp) = state.http_client.get(url).send().await {
             if resp.status().is_success() {
                 if let Ok(bytes) = resp.bytes().await {
                     let path = covers_dir.join(format!("{}.jpg", work.id));
-                    let _ = tokio::fs::write(&path, &bytes).await;
+                    if let Err(e) = tokio::fs::write(&path, &bytes).await {
+                        tracing::warn!("write cover file failed: {e}");
+                    }
                 }
             }
         }
@@ -304,6 +308,7 @@ fn empty_outcome(msg: &str) -> EnrichmentOutcome {
 
 struct HardcoverResult {
     title: Option<String>,
+    #[allow(dead_code)] // used in test infrastructure
     subtitle: Option<String>,
     original_title: Option<String>,
     description: Option<String>,

@@ -168,7 +168,7 @@ impl JobRunner {
                             s.running = false;
                             if !s.panic_notified {
                                 s.panic_notified = true;
-                                let _ = state
+                                if let Err(e) = state
                                     .db
                                     .create_notification(CreateNotificationDbRequest {
                                         user_id: 1,
@@ -177,7 +177,10 @@ impl JobRunner {
                                         message: format!("Job '{}' panicked: {}", job_name, msg),
                                         data: serde_json::Value::Null,
                                     })
-                                    .await;
+                                    .await
+                                {
+                                    tracing::warn!("create_notification failed: {e}");
+                                }
                             }
                         }
                     }
@@ -627,7 +630,7 @@ async fn poll_sabnzbd(
                     {
                         warn!("poller: failed to update grab {} status: {e}", grab.id);
                     }
-                    let _ = state
+                    if let Err(e) = state
                         .db
                         .create_history_event(CreateHistoryEventDbRequest {
                             user_id: grab.user_id,
@@ -638,7 +641,10 @@ async fn poll_sabnzbd(
                                 "error": fail_msg,
                             }),
                         })
-                        .await;
+                        .await
+                    {
+                        tracing::warn!("create_history_event failed: {e}");
+                    }
                 }
                 _ => {
                     // Still processing (e.g., Extracting, Verifying).
@@ -759,7 +765,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                 "author monitor: OL 429 for {} — backing off 60s (attempt {}/3)",
                 author.name, retries
             );
-            let _ = state
+            if let Err(e) = state
                 .db
                 .create_notification(CreateNotificationDbRequest {
                     user_id: 1,
@@ -768,7 +774,10 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                     message: "Open Library rate limit hit during author monitoring".into(),
                     data: serde_json::Value::Null,
                 })
-                .await;
+                .await
+            {
+                tracing::warn!("create_notification failed: {e}");
+            }
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {},
                 _ = cancel.cancelled() => { return Ok(()); },
@@ -887,7 +896,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                                         work_title
                                     );
                                     // Still create notification — work was added, just not enriched.
-                                    let _ = state
+                                    if let Err(e) = state
                                         .db
                                         .create_notification(CreateNotificationDbRequest {
                                             user_id: author.user_id,
@@ -905,20 +914,26 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                                                 "work_id": new_work.id,
                                             }),
                                         })
-                                        .await;
+                                        .await
+                                    {
+                                        tracing::warn!("create_notification failed: {e}");
+                                    }
                                     continue;
                                 }
                             };
-                            let _ = state
+                            if let Err(e) = state
                                 .db
                                 .update_work_enrichment(
                                     author.user_id,
                                     new_work.id,
                                     outcome.request,
                                 )
-                                .await;
+                                .await
+                            {
+                                tracing::warn!("update_work_enrichment failed: {e}");
+                            }
 
-                            let _ = state
+                            if let Err(e) = state
                                 .db
                                 .create_notification(CreateNotificationDbRequest {
                                     user_id: author.user_id,
@@ -936,14 +951,17 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                                         "work_id": new_work.id,
                                     }),
                                 })
-                                .await;
+                                .await
+                            {
+                                tracing::warn!("create_notification failed: {e}");
+                            }
                         }
                         Err(e) => {
                             warn!("author monitor: failed to auto-add '{}': {e}", work_title);
                         }
                     }
                 } else {
-                    let _ = state
+                    if let Err(e) = state
                         .db
                         .create_notification(CreateNotificationDbRequest {
                             user_id: author.user_id,
@@ -960,7 +978,10 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                                 "ol_key": work_ol_key,
                             }),
                         })
-                        .await;
+                        .await
+                    {
+                        tracing::warn!("create_notification failed: {e}");
+                    }
                 }
             }
         }
@@ -1006,7 +1027,9 @@ async fn enrichment_retry_tick(state: AppState, _cancel: CancellationToken) -> R
             Ok(outcome) => outcome,
             Err(_) => {
                 warn!("enrichment retry: timeout for work {}", work.id);
-                let _ = state.db.increment_retry_count(work.user_id, work.id).await;
+                if let Err(e) = state.db.increment_retry_count(work.user_id, work.id).await {
+                    tracing::warn!("increment_retry_count failed: {e}");
+                }
                 continue;
             }
         };
@@ -1022,7 +1045,9 @@ async fn enrichment_retry_tick(state: AppState, _cancel: CancellationToken) -> R
                 {
                     debug!("enrichment retry: work {} enriched successfully", work.id);
                 } else {
-                    let _ = state.db.increment_retry_count(work.user_id, work.id).await;
+                    if let Err(e) = state.db.increment_retry_count(work.user_id, work.id).await {
+                        tracing::warn!("increment_retry_count failed: {e}");
+                    }
                     debug!(
                         "enrichment retry: work {} still failed, count incremented",
                         work.id
@@ -1034,7 +1059,9 @@ async fn enrichment_retry_tick(state: AppState, _cancel: CancellationToken) -> R
                     "enrichment retry: DB update failed for work {}: {e}",
                     work.id
                 );
-                let _ = state.db.increment_retry_count(work.user_id, work.id).await;
+                if let Err(e) = state.db.increment_retry_count(work.user_id, work.id).await {
+                    tracing::warn!("increment_retry_count failed: {e}");
+                }
             }
         }
     }

@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
+use crate::middleware::RequireAdmin;
 use crate::state::AppState;
-use crate::{AddWorkRequest, ApiError, AuthContext, WorkSearchResult};
+use crate::{AddWorkRequest, ApiError, WorkSearchResult};
 use livrarr_db::{ConfigDb, LibraryItemDb, RootFolderDb, WorkDb};
 use livrarr_domain::{classify_file, normalize_for_matching, MediaType};
 
@@ -69,7 +70,7 @@ const LLM_BATCH_SIZE: usize = 50;
 /// POST /api/v1/manualimport/scan
 pub async fn scan(
     State(state): State<AppState>,
-    ctx: AuthContext,
+    RequireAdmin(auth): RequireAdmin,
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
     let path = PathBuf::from(&req.path);
@@ -121,7 +122,7 @@ pub async fn scan(
     let (parsed_files, sort_order) = llm_parse_filenames(&state, &filenames).await;
 
     // Get user's existing works for duplicate detection.
-    let user_id = ctx.user.id;
+    let user_id = auth.user.id;
     let existing_works = state.db.list_works(user_id).await?;
     let root_folders = state.db.list_root_folders().await?;
 
@@ -243,7 +244,7 @@ pub struct SearchResponse {
 /// POST /api/v1/manualimport/search
 pub async fn search(
     State(state): State<AppState>,
-    ctx: AuthContext,
+    RequireAdmin(auth): RequireAdmin,
     Json(req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let term = if let Some(ref author) = req.author {
@@ -255,7 +256,7 @@ pub async fn search(
     let results = search_ol_batch(&state, &term).await?;
 
     // Check duplicates against user's library.
-    let user_id = ctx.user.id;
+    let user_id = auth.user.id;
     let existing_works = state.db.list_works(user_id).await?;
 
     let results: Vec<OlMatch> = results
@@ -326,10 +327,10 @@ pub enum ImportStatus {
 /// POST /api/v1/manualimport/import
 pub async fn import(
     State(state): State<AppState>,
-    ctx: AuthContext,
+    RequireAdmin(auth): RequireAdmin,
     Json(req): Json<ImportRequest>,
 ) -> Result<Json<ImportResponse>, ApiError> {
-    let user_id = ctx.user.id;
+    let user_id = auth.user.id;
 
     // Validate all items have ol_key.
     for item in &req.items {
@@ -467,7 +468,9 @@ async fn import_single_item(
                 let full_path = PathBuf::from(rf_path).join(li_path);
                 match std::fs::remove_file(&full_path) {
                     Ok(()) => {
-                        let _ = state.db.delete_library_item(user_id, *li_id).await;
+                        if let Err(e) = state.db.delete_library_item(user_id, *li_id).await {
+                            tracing::warn!("delete_library_item failed: {e}");
+                        }
                         info!(
                             "manual import: deleted existing {} for work {}",
                             full_path.display(),
@@ -476,7 +479,9 @@ async fn import_single_item(
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         // Already deleted (by another file in the batch) — success.
-                        let _ = state.db.delete_library_item(user_id, *li_id).await;
+                        if let Err(e) = state.db.delete_library_item(user_id, *li_id).await {
+                            tracing::warn!("delete_library_item failed: {e}");
+                        }
                     }
                     Err(e) => {
                         warn!(

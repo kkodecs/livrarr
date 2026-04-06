@@ -46,6 +46,17 @@ pub async fn get(
     Ok(Json(to_response(dc)))
 }
 
+/// Strip scheme prefix from host if present; return (clean_host, use_ssl_override).
+pub fn normalize_host(host: &str) -> (String, Option<bool>) {
+    if let Some(h) = host.strip_prefix("https://") {
+        (h.trim_end_matches('/').to_string(), Some(true))
+    } else if let Some(h) = host.strip_prefix("http://") {
+        (h.trim_end_matches('/').to_string(), Some(false))
+    } else {
+        (host.to_string(), None)
+    }
+}
+
 /// POST /api/v1/downloadclient
 pub async fn create(
     State(state): State<AppState>,
@@ -58,14 +69,17 @@ pub async fn create(
         return Err(ApiError::BadRequest("host is required".into()));
     }
 
+    let (host, ssl_override) = normalize_host(&req.host);
+    let use_ssl = ssl_override.unwrap_or(req.use_ssl);
+
     let dc = state
         .db
         .create_download_client(CreateDownloadClientDbRequest {
             name: req.name,
             implementation: req.implementation,
-            host: req.host,
+            host,
             port: req.port,
-            use_ssl: req.use_ssl,
+            use_ssl,
             skip_ssl_validation: req.skip_ssl_validation,
             url_base: req.url_base,
             username: req.username,
@@ -110,15 +124,24 @@ pub async fn update(
         }
     }
 
+    let (host, ssl_override) = match &req.host {
+        Some(h) => {
+            let (clean, ssl) = normalize_host(h);
+            (Some(clean), ssl)
+        }
+        None => (None, None),
+    };
+    let use_ssl = ssl_override.or(req.use_ssl);
+
     let dc = state
         .db
         .update_download_client(
             id,
             UpdateDownloadClientDbRequest {
                 name: req.name,
-                host: req.host,
+                host,
                 port: req.port,
-                use_ssl: req.use_ssl,
+                use_ssl,
                 skip_ssl_validation: req.skip_ssl_validation,
                 url_base: req.url_base,
                 username: req.username,
@@ -159,7 +182,7 @@ async fn auto_promote_default(state: &AppState, client_type: &str, exclude_id: i
             .iter()
             .find(|c| c.client_type == client_type && c.enabled && c.id != exclude_id)
         {
-            let _ = state
+            if let Err(e) = state
                 .db
                 .update_download_client(
                     candidate.id,
@@ -168,7 +191,10 @@ async fn auto_promote_default(state: &AppState, client_type: &str, exclude_id: i
                         ..Default::default()
                     },
                 )
-                .await;
+                .await
+            {
+                tracing::warn!("update_download_client failed: {e}");
+            }
         }
     }
 }

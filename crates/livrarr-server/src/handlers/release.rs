@@ -105,7 +105,7 @@ pub async fn search(
 
     while let Some(join_result) = join_set.join_next().await {
         match join_result {
-            Ok((name, priority, Ok(items))) => {
+            Ok((_name, priority, Ok(items))) => {
                 for item in items {
                     all_results.push((priority, item));
                 }
@@ -658,7 +658,7 @@ pub async fn grab(
         .await?;
 
     // Record history event.
-    let _ = state
+    if let Err(e) = state
         .db
         .create_history_event(CreateHistoryEventDbRequest {
             user_id,
@@ -671,7 +671,10 @@ pub async fn grab(
                 "protocol": protocol,
             }),
         })
-        .await;
+        .await
+    {
+        tracing::warn!("create_history_event failed: {e}");
+    }
 
     Ok(())
 }

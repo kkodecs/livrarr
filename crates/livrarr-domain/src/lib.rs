@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -236,12 +233,28 @@ pub enum HealthCheckType {
 /// Database operation errors — canonical in livrarr-domain.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
-    #[error("not found")]
-    NotFound,
+    #[error("not found: {entity}")]
+    NotFound { entity: &'static str },
+
     #[error("constraint violation: {message}")]
     Constraint { message: String },
+
+    #[error("conflict: {message}")]
+    Conflict { message: String },
+
+    #[error("data corruption in {table}.{column} (row {row_id}): {detail}")]
+    DataCorruption {
+        table: &'static str,
+        column: &'static str,
+        row_id: i64,
+        detail: String,
+    },
+
+    #[error("incompatible data version: {detail}")]
+    IncompatibleData { detail: String },
+
     #[error("database I/O error: {0}")]
-    Io(String),
+    Io(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ---------------------------------------------------------------------------
@@ -251,16 +264,31 @@ pub enum DbError {
 /// User entity.
 ///
 /// Satisfies: AUTH-002, AUTH-011, AUTH-013
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
     pub username: String,
+    #[serde(skip_serializing)]
     pub password_hash: String,
     pub role: UserRole,
+    #[serde(skip_serializing)]
     pub api_key_hash: String,
     pub setup_pending: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("id", &self.id)
+            .field("username", &self.username)
+            .field("password_hash", &"[REDACTED]")
+            .field("role", &self.role)
+            .field("api_key_hash", &"[REDACTED]")
+            .field("setup_pending", &self.setup_pending)
+            .finish()
+    }
 }
 
 /// Session entity.
@@ -364,7 +392,7 @@ pub struct RootFolder {
 /// Download client configuration.
 ///
 /// Satisfies: DLC-001, DLC-002, USE-DLC-001, USE-DLC-004
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DownloadClient {
     pub id: DownloadClientId,
     pub name: String,
@@ -375,12 +403,28 @@ pub struct DownloadClient {
     pub skip_ssl_validation: bool,
     pub url_base: Option<String>,
     pub username: Option<String>,
+    #[serde(skip_serializing)]
     pub password: Option<String>,
     pub category: String,
     pub enabled: bool,
     pub client_type: String,
+    #[serde(skip_serializing)]
     pub api_key: Option<String>,
     pub is_default_for_protocol: bool,
+}
+
+impl std::fmt::Debug for DownloadClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownloadClient")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("implementation", &self.implementation)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Grab record — tracks a torrent download.
@@ -454,13 +498,14 @@ pub struct ExternalId {
 /// Torznab/Newznab indexer configuration.
 ///
 /// Satisfies: IDX-001, IDX-002, IDX-004, IDX-005, IDX-006, IDX-007
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Indexer {
     pub id: IndexerId,
     pub name: String,
     pub protocol: String,
     pub url: String,
     pub api_path: String,
+    #[serde(skip_serializing)]
     pub api_key: Option<String>,
     pub categories: Vec<i32>,
     pub priority: i32,
@@ -469,6 +514,18 @@ pub struct Indexer {
     pub supports_book_search: bool,
     pub enabled: bool,
     pub added_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for Indexer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Indexer")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("protocol", &self.protocol)
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------

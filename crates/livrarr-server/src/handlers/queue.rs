@@ -220,7 +220,7 @@ pub async fn retry_import(
     let result = match import::import_grab(&state, ctx.user.id, id).await {
         Ok(r) => r,
         Err(e) => {
-            let _ = state
+            if let Err(e2) = state
                 .db
                 .update_grab_status(
                     ctx.user.id,
@@ -228,7 +228,10 @@ pub async fn retry_import(
                     GrabStatus::ImportFailed,
                     Some(&e.to_string()),
                 )
-                .await;
+                .await
+            {
+                tracing::warn!("update_grab_status failed: {e2}");
+            }
             return Err(e);
         }
     };

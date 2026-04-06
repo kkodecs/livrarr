@@ -1,7 +1,7 @@
-#![allow(dead_code, unused_variables, async_fn_in_trait)]
-
-pub use livrarr_domain::*;
-
+use livrarr_domain::{
+    DbError, DownloadClient, DownloadClientId, Grab, GrabId, GrabStatus, QueueStatus,
+    RemotePathMapping, UserId, WorkId,
+};
 use serde::{Deserialize, Serialize};
 
 // Re-export ProwlarrConfig from livrarr-db for use in trait signatures.
@@ -17,7 +17,7 @@ pub use livrarr_db::ProwlarrConfig;
 // ---------------------------------------------------------------------------
 
 /// Prowlarr Torznab search.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait ProwlarrClient: Send + Sync {
     /// Search Prowlarr for releases. Categories 7020 (ebooks) + 3030 (audiobooks).
     async fn search_releases(
@@ -49,7 +49,7 @@ pub struct ProwlarrRelease {
 // ---------------------------------------------------------------------------
 
 /// qBittorrent API v2 client.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait QBitClient: Send + Sync {
     /// Authenticate to qBit. Caches session cookie.
     async fn authenticate(&self, config: &DownloadClient) -> Result<(), DownloadError>;
@@ -108,7 +108,7 @@ pub struct QBitTorrent {
 // ---------------------------------------------------------------------------
 
 /// Download operations -- grab, queue, release search.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait DownloadService: Send + Sync {
     /// Search for releases via Prowlarr.
     async fn search_releases(

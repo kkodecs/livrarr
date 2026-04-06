@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 
@@ -10,25 +9,24 @@ fn row_to_session(row: sqlx::sqlite::SqliteRow) -> Result<Session, DbError> {
     Ok(Session {
         token_hash: row
             .try_get("token_hash")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         user_id: row
             .try_get::<i64, _>("user_id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         persistent: row
             .try_get::<bool, _>("persistent")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         created_at: parse_dt(
             &row.try_get::<String, _>("created_at")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         )?,
         expires_at: parse_dt(
             &row.try_get::<String, _>("expires_at")
-                .map_err(|e| DbError::Io(e.to_string()))?,
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         )?,
     })
 }
 
-#[async_trait]
 impl SessionDb for SqliteDb {
     async fn get_session(&self, token_hash: &str) -> Result<Option<Session>, DbError> {
         let now = Utc::now().to_rfc3339();

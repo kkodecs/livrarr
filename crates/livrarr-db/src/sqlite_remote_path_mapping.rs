@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
@@ -9,20 +8,17 @@ fn row_to_mapping(row: sqlx::sqlite::SqliteRow) -> Result<RemotePathMapping, DbE
     Ok(RemotePathMapping {
         id: row
             .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(e.to_string()))?,
-        host: row
-            .try_get("host")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        host: row.try_get("host").map_err(|e| DbError::Io(Box::new(e)))?,
         remote_path: row
             .try_get("remote_path")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         local_path: row
             .try_get("local_path")
-            .map_err(|e| DbError::Io(e.to_string()))?,
+            .map_err(|e| DbError::Io(Box::new(e)))?,
     })
 }
 
-#[async_trait]
 impl RemotePathMappingDb for SqliteDb {
     async fn get_remote_path_mapping(
         &self,
@@ -83,7 +79,9 @@ impl RemotePathMappingDb for SqliteDb {
         .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound {
+                entity: "remote_path_mapping",
+            });
         }
 
         self.get_remote_path_mapping(id).await
@@ -97,7 +95,9 @@ impl RemotePathMappingDb for SqliteDb {
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
+            return Err(DbError::NotFound {
+                entity: "remote_path_mapping",
+            });
         }
         Ok(())
     }

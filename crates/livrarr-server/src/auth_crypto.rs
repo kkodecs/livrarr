@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 /// Auth crypto service contract.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait AuthCryptoService: Send + Sync {
     /// Hash a password using argon2id. Returns PHC-format string.
     async fn hash_password(&self, password: &str) -> Result<String, AuthCryptoError>;
@@ -38,7 +38,6 @@ pub enum AuthCryptoError {
 /// Real auth crypto implementation using argon2id, OsRng, SHA-256, subtle.
 pub struct RealAuthCrypto;
 
-#[async_trait::async_trait]
 impl AuthCryptoService for RealAuthCrypto {
     async fn hash_password(&self, password: &str) -> Result<String, AuthCryptoError> {
         let password = password.to_string();

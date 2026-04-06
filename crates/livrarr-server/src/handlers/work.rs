@@ -89,6 +89,7 @@ pub async fn lookup(
     Ok(Json(results))
 }
 
+#[allow(dead_code)] // TODO: wire up
 async fn lookup_hardcover(
     http: &livrarr_http::HttpClient,
     term: &str,
@@ -115,6 +116,7 @@ async fn lookup_hardcover(
 }
 
 /// Search Hardcover for books matching term.
+#[allow(dead_code)] // TODO: wire up
 async fn search_hardcover_books(
     http: &livrarr_http::HttpClient,
     term: &str,
@@ -209,6 +211,7 @@ async fn search_hardcover_books(
 }
 
 /// Extract an author ID from book search results, then fetch their top books.
+#[allow(dead_code)] // TODO: wire up
 async fn search_hardcover_author_books(
     http: &livrarr_http::HttpClient,
     term: &str,
@@ -216,7 +219,7 @@ async fn search_hardcover_author_books(
 ) -> Result<Vec<WorkSearchResult>, String> {
     // Step 1: Search books to find an author matching the term in contributions.
     let probe = search_hardcover_books(http, term, token).await;
-    let probe_hits = match &probe {
+    let _probe_hits = match &probe {
         Ok(results) if !results.is_empty() => results,
         _ => return Ok(vec![]),
     };
@@ -785,8 +788,11 @@ pub async fn refresh(
     let work = state.db.get_work(user_id, id).await?;
 
     // Reset enrichment status.
-    let _ =
-        livrarr_db::EnrichmentRetryDb::reset_enrichment_for_refresh(&state.db, user_id, id).await;
+    if let Err(e) =
+        livrarr_db::EnrichmentRetryDb::reset_enrichment_for_refresh(&state.db, user_id, id).await
+    {
+        tracing::warn!("reset_enrichment_for_refresh failed: {e}");
+    }
 
     // Re-enrich.
     let outcome = super::enrichment::enrich_work(&state, &work).await;
@@ -859,7 +865,7 @@ pub async fn refresh_all(
             }
         }
 
-        let _ = state
+        if let Err(e) = state
             .db
             .create_notification(livrarr_db::CreateNotificationDbRequest {
                 user_id,
@@ -874,7 +880,10 @@ pub async fn refresh_all(
                     "failed": failed,
                 }),
             })
-            .await;
+            .await
+        {
+            tracing::warn!("create_notification failed: {e}");
+        }
     });
 
     Ok(axum::http::StatusCode::ACCEPTED)
