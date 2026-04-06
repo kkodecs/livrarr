@@ -1,6 +1,6 @@
 # Librarr
 
-**Self-hosted ebook and audiobook library manager.** Built for the \*arr ecosystem — finds, grabs, and organizes your books the way Radarr does for movies.
+**Self-hosted ebook and audiobook library manager.** Built for the \*arr ecosystem — finds, grabs, and organizes your books the way Sonarr does for tv.
 
 > ⚠️ **Alpha software.** Core workflows work. Rough edges exist. Feedback welcome.
 
@@ -8,11 +8,20 @@
 
 ## What it does
 
-- **Search** any Torznab (MAM, TorrentLeech) or Newznab (DrunkenSlug, NZBGeek) indexer for ebooks and audiobooks
-- **Grab** via qBittorrent or SABnzbd
+- **Search** any Torznab or Newznab indexer for ebooks and audiobooks
+- **Grab** via qBittorrent or SABnzbd (forthcoming: support for other clients)
 - **Import** to your library with automatic file organization
 - **Enrich** metadata from Hardcover, OpenLibrary, and Audnexus
-- **Push** imported files downstream to Calibre-Web Automated (CWA) or AudioBookShelf (ABS)
+- **Push** to Calibre-Web Automated (CWA) or AudioBookShelf (ABS)
+
+---
+
+## Design Philosophy
+
+- Ebooks and audiobooks unified in a single instance — no separate installations
+- No closed-source metadata proxy — all providers are open, pluggable, and federated
+- Single container, single SQLite database — nothing else to manage
+- AI-assisted metadata disambiguation when exact matches fail
 
 ---
 
@@ -76,8 +85,9 @@ level = "info"       # trace | debug | info | warn | error
 |---|---|---|
 | Docker | Yes | linux/amd64 only (ARM coming later) |
 | qBittorrent or SABnzbd | Yes | Download client |
-| Torznab or Newznab indexer | Yes | MAM Torznab feed, DrunkenSlug, Prowlarr, etc. |
+| Torznab or Newznab indexer | Yes | Torznab / Newznab feed |
 | Hardcover API key | No | Better metadata — free at hardcover.app |
+| LLM integration | No | Better search and metadata |
 | Calibre-Web Automated | No | Downstream ebook delivery |
 | AudioBookShelf | No | Downstream audiobook delivery |
 
@@ -104,11 +114,10 @@ Librarr and your download client must see completed downloads at the **same host
 
 ## Alpha Limitations
 
-- Single user only (multi-user planned for beta)
+- Single user only (multi-user partially implemented)
 - PUID/PGID not configurable — runs as UID/GID 1000 (fix in beta)
 - No mobile-optimized UI
 - Readarr import not yet supported
-- Anna's Archive not yet supported
 
 ---
 
@@ -120,4 +129,4 @@ Built in Rust (backend) + React (frontend). Ships as a single Docker image — n
 
 ## License
 
-MIT
+GPLv3
