@@ -1,0 +1,129 @@
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+
+use crate::state::AppState;
+
+/// GET /api/v1/mediacover/:id/cover.jpg
+///
+/// Serves the locally cached cover image for a work.
+/// Uses ETag for cache validation so cover updates are reflected after refresh.
+pub async fn get_cover(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    req_headers: HeaderMap,
+) -> Response {
+    let cover_path = state.data_dir.join("covers").join(format!("{id}.jpg"));
+    serve_image(&cover_path, id, &req_headers).await
+}
+
+/// GET /api/v1/mediacover/:id/thumb.jpg
+///
+/// Serves a 300px-wide thumbnail of the cover image.
+/// Generated on first request from the full cover and cached to disk.
+pub async fn get_thumb(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    req_headers: HeaderMap,
+) -> Response {
+    let covers_dir = state.data_dir.join("covers");
+    let thumb_path = covers_dir.join(format!("{id}_thumb.jpg"));
+    let full_path = covers_dir.join(format!("{id}.jpg"));
+
+    // Generate thumbnail on-demand if it doesn't exist yet.
+    if !thumb_path.exists() {
+        if !full_path.exists() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        match tokio::fs::read(&full_path).await {
+            Ok(bytes) => {
+                let thumb_path_clone = thumb_path.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    match generate_thumbnail_jpeg(&bytes, 300) {
+                        Ok(thumb_bytes) => {
+                            if let Err(e) = std::fs::write(&thumb_path_clone, &thumb_bytes) {
+                                tracing::warn!(id, error = %e, "failed to write thumbnail");
+                            }
+                        }
+                        Err(e) => tracing::warn!(id, error = %e, "thumbnail generation failed"),
+                    }
+                })
+                .await;
+            }
+            Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    if !thumb_path.exists() {
+        // Generation failed; fall back to full cover.
+        return serve_image(&full_path, id, &req_headers).await;
+    }
+
+    serve_image(&thumb_path, id, &req_headers).await
+}
+
+/// Generate a JPEG thumbnail with max width `max_width`, preserving aspect ratio.
+fn generate_thumbnail_jpeg(bytes: &[u8], max_width: u32) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    // thumbnail() preserves aspect ratio. Use an unconstrained height so only width limits scale.
+    let thumb = img.thumbnail(max_width, u32::MAX / 2);
+    let mut out = Vec::new();
+    thumb
+        .write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Jpeg,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// Shared file-serving logic: ETag + Cache-Control + 304 support.
+async fn serve_image(path: &std::path::Path, id: i64, req_headers: &HeaderMap) -> Response {
+    if !path.exists() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let etag = tokio::fs::metadata(path)
+        .await
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(|mtime| {
+            let secs = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            format!("\"{id}-{secs}\"")
+        });
+
+    if let (Some(ref etag_val), Some(inm)) = (&etag, req_headers.get(header::IF_NONE_MATCH)) {
+        if inm.as_bytes() == etag_val.as_bytes() {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=300, must-revalidate"),
+            );
+            if let Ok(val) = HeaderValue::from_str(etag_val) {
+                headers.insert(header::ETAG, val);
+            }
+            return (StatusCode::NOT_MODIFIED, headers).into_response();
+        }
+    }
+
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=300, must-revalidate"),
+            );
+            if let Some(etag_val) = etag {
+                if let Ok(val) = HeaderValue::from_str(&etag_val) {
+                    headers.insert(header::ETAG, val);
+                }
+            }
+            (StatusCode::OK, headers, bytes).into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}

@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/livrarr-domain",
+    "crates/livrarr-http",
+    "crates/livrarr-db",
+    "crates/livrarr-metadata",
+    "crates/livrarr-download",
+    "crates/livrarr-organize",
+    "crates/livrarr-tagwrite",
+    "crates/livrarr-jobs",
+    "crates/livrarr-server",
+    "crates/livrarr-cli",
+]
+
+[workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full", "test-util"] }
+trait-variant = "0.1"
+async-trait = "0.1"
+
+# Internal crates
+livrarr-domain = { path = "crates/livrarr-domain" }
+livrarr-http = { path = "crates/livrarr-http" }
+livrarr-db = { path = "crates/livrarr-db" }
+livrarr-metadata = { path = "crates/livrarr-metadata" }
+livrarr-download = { path = "crates/livrarr-download" }
+livrarr-organize = { path = "crates/livrarr-organize" }
+livrarr-tagwrite = { path = "crates/livrarr-tagwrite" }
+livrarr-jobs = { path = "crates/livrarr-jobs" }
+livrarr-server = { path = "crates/livrarr-server" }
+
+[profile.release]
+strip = true

@@ -1,0 +1,16 @@
+[package]
+name = "livrarr-download"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+livrarr-domain = { workspace = true }
+livrarr-db = { workspace = true }
+sha1 = "0.10"
+data-encoding = "2"
+bendy = { version = "0.6", features = ["std"] }

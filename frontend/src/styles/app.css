@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand: #3b82f6;
+  --color-brand-hover: #2563eb;
+  --color-sidebar: #18181b;
+  --color-header: #18181b;
+  --color-surface: #27272a;
+  --color-surface-hover: #3f3f46;
+  --color-surface-active: #52525b;
+  --color-border: #3f3f46;
+  --color-muted: #a1a1aa;
+  --color-enrichment-enriched: #22c55e;
+  --color-enrichment-partial: #eab308;
+  --color-enrichment-pending: #3b82f6;
+  --color-enrichment-failed: #ef4444;
+  --color-enrichment-exhausted: #71717a;
+  --color-narration-human: #22c55e;
+  --color-narration-ai: #ef4444;
+  --color-narration-ai-authorized: #f97316;
+  --color-status-downloading: #3b82f6;
+  --color-status-queued: #71717a;
+  --color-status-paused: #eab308;
+  --color-status-completed: #22c55e;
+  --color-status-warning: #f97316;
+  --color-status-error: #ef4444;
+}
+
+body {
+  font-family:
+    system-ui,
+    -apple-system,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styling for dark theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-sidebar);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-active);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+/* Shared form utilities */
+.input-field {
+  @apply w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:border-brand focus:outline-none;
+}
+
+.btn-primary {
+  @apply rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50;
+}
+
+.btn-secondary {
+  @apply rounded border border-border bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-surface-hover disabled:opacity-50;
+}
+
+.btn-danger {
+  @apply rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50;
+}

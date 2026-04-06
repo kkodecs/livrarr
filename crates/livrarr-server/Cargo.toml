@@ -1,0 +1,41 @@
+[package]
+name = "livrarr-server"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "livrarr"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+livrarr-domain = { workspace = true }
+livrarr-db = { workspace = true }
+livrarr-http = { workspace = true }
+livrarr-download = { workspace = true }
+livrarr-tagwrite = { workspace = true }
+libc = "0.2"
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+argon2 = { version = "0.5", features = ["std"] }
+getrandom = { version = "0.2", features = ["std"] }
+sha2 = "0.10"
+subtle = "2"
+hex = "0.4"
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "limit", "trace"] }
+clap = { version = "4", features = ["derive"] }
+tokio-util = "0.7"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+quick-xml = "0.37"
+urlencoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }

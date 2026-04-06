@@ -1,0 +1,11 @@
+services:
+  livrarr:
+    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha1   # pin to a specific release; avoid :latest for alpha
+    container_name: livrarr
+    ports:
+      - 8789:8789
+    volumes:
+      - ./config:/config           # database, covers, config.toml
+      - /path/to/books:/books      # your ebook/audiobook library root
+      - /path/to/downloads:/downloads  # download client complete dir
+    restart: unless-stopped
