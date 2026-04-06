@@ -1,6 +1,6 @@
 # Librarr
 
-**Self-hosted ebook and audiobook library manager.** Built for the \*arr ecosystem — finds, grabs, and organizes your books the way Sonarr does for tv.
+**Self-hosted ebook and audiobook library manager.** Built for the \*arr ecosystem — finds, grabs, and organizes your books the way Sonarr does for TV.
 
 > ⚠️ **Alpha software.** Core workflows work. Rough edges exist. Feedback welcome.
 
@@ -114,7 +114,7 @@ Librarr and your download client must see completed downloads at the **same host
 
 ## Alpha Limitations
 
-- Single user only (multi-user partially implemented)
+- Multi-user partially implemented — additional users can log in but share admin indexers/clients; Settings not visible to non-admin users. Treat as single-user for alpha.
 - PUID/PGID not configurable — runs as UID/GID 1000 (fix in beta)
 - No mobile-optimized UI
 - Readarr import not yet supported
