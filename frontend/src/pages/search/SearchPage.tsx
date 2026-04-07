@@ -19,11 +19,9 @@ import { ApiError } from "@/api/client";
 export default function SearchPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialQuery = searchParams.get("q") ?? "";
-  const [term, setTerm] = useState(initialQuery);
-  const [olResults, setOlResults] = useState<WorkSearchResult[] | null>(null);
+  const query = searchParams.get("q")?.trim() ?? "";
+  const [term, setTerm] = useState(query);
   const [selectedOlKey, setSelectedOlKey] = useState<string | null>(null);
-  const [lastSearched, setLastSearched] = useState("");
 
   // Local library data
   const { data: allWorks } = useQuery({
@@ -32,24 +30,28 @@ export default function SearchPage() {
   });
 
   // Filter local works by search term
-  const query = searchParams.get("q")?.trim().toLowerCase() ?? "";
+  const lowerQuery = query.toLowerCase();
   const libraryMatches = query
     ? (allWorks ?? []).filter(
         (w) =>
-          w.title.toLowerCase().includes(query) ||
-          w.authorName.toLowerCase().includes(query),
+          w.title.toLowerCase().includes(lowerQuery) ||
+          w.authorName.toLowerCase().includes(lowerQuery),
       )
     : [];
 
-  // OL search
-  const searchMutation = useMutation({
-    mutationFn: (q: string) => lookupWorks(q),
-    onSuccess: (data) => {
-      setOlResults(data);
-      setSelectedOlKey(null);
-    },
-    onError: () => toast.error("Search failed"),
+  // OL search — useQuery handles deduplication & cancellation automatically
+  const searchQuery = useQuery({
+    queryKey: ["ol-search", query],
+    queryFn: () => lookupWorks(query),
+    enabled: !!query,
   });
+
+  // Reset selection when results change
+  useEffect(() => {
+    setSelectedOlKey(null);
+  }, [searchQuery.data]);
+
+  const olResults = searchQuery.data ?? null;
 
   const addMutation = useMutation({
     mutationFn: (work: WorkSearchResult) =>
@@ -74,29 +76,15 @@ export default function SearchPage() {
     },
   });
 
-  // Sync input with URL params — auto-search when q changes, clear when q removed
+  // Keep term input in sync when URL changes externally (e.g. back/forward)
   useEffect(() => {
-    const q = searchParams.get("q")?.trim() ?? "";
-    if (!q) {
-      // q param removed — clear input and results
-      setTerm("");
-      setOlResults(null);
-      setLastSearched("");
-      return;
-    }
-    if (q !== lastSearched && !searchMutation.isPending) {
-      setTerm(q);
-      setLastSearched(q);
-      searchMutation.mutate(q);
-    }
-  }, [searchParams]); // intentional: only re-run when URL params change
+    setTerm(query);
+  }, [query]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     const q = term.trim();
     if (!q) return;
-    // Only update URL params — the useEffect watching searchParams will
-    // trigger the actual search, keeping a single source of truth.
     setSearchParams({ q });
   };
 
@@ -126,9 +114,10 @@ export default function SearchPage() {
   const hasQuery = !!query;
   const hasLibraryResults = libraryMatches.length > 0;
   const hasOlResults = filteredOlResults !== null && filteredOlResults.length > 0;
+  const isSearching = searchQuery.isFetching;
   const showNoResults =
     hasQuery &&
-    !searchMutation.isPending &&
+    !isSearching &&
     !hasLibraryResults &&
     filteredOlResults !== null &&
     filteredOlResults.length === 0;
@@ -157,10 +146,10 @@ export default function SearchPage() {
           </div>
           <button
             type="submit"
-            disabled={searchMutation.isPending || !term.trim()}
+            disabled={isSearching || !term.trim()}
             className="inline-flex items-center gap-1.5 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
           >
-            {searchMutation.isPending ? (
+            {isSearching ? (
               <Loader2 size={14} className="animate-spin" />
             ) : (
               <Search size={14} />
@@ -185,14 +174,14 @@ export default function SearchPage() {
           )}
 
           {/* ── Loading ── */}
-          {searchMutation.isPending && (
+          {isSearching && (
             <div className="flex items-center justify-center py-12">
               <Loader2 size={24} className="animate-spin text-muted" />
             </div>
           )}
 
           {/* ── Add to Your Library ── */}
-          {!searchMutation.isPending && hasOlResults && (
+          {!isSearching && hasOlResults && (
             <section>
               <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted">
                 Add to Your Library

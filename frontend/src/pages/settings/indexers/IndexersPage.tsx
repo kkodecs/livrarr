@@ -69,21 +69,17 @@ function toCreateRequest(data: IndexerFormData): CreateIndexerRequest {
 }
 
 function toUpdateRequest(data: IndexerFormData): UpdateIndexerRequest {
-  const req: UpdateIndexerRequest = {
+  return {
     name: data.name,
     url: data.url,
     apiPath: data.apiPath || "/",
+    apiKey: data.apiKey,
     categories: parseCategories(data.categories),
     priority: data.priority,
     enableAutomaticSearch: data.enableAutomaticSearch,
     enableInteractiveSearch: data.enableInteractiveSearch,
     enabled: data.enabled,
   };
-  // Only send apiKey if user typed a new value; omit to keep existing
-  if (data.apiKey) {
-    req.apiKey = data.apiKey;
-  }
-  return req;
 }
 
 const defaultValues: IndexerFormData = {

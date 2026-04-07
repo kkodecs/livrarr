@@ -92,20 +92,32 @@ impl NotificationDb for SqliteDb {
         let type_str = notification_type_str(req.notification_type);
         let data_str = serde_json::to_string(&req.data).map_err(|e| DbError::Io(Box::new(e)))?;
 
-        // Dedup: check if notification already exists for (user_id, type, ref_key).
-        let existing = sqlx::query(
-            "SELECT id FROM notifications WHERE user_id = ? AND type = ? AND ref_key IS ?",
-        )
-        .bind(req.user_id)
-        .bind(type_str)
-        .bind(&req.ref_key)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_db_err)?;
+        // Dedup: use explicit `= ?` for non-NULL ref_key and `IS NULL` for NULL.
+        // `ref_key IS ?` is wrong for non-NULL because SQLite's IS operator is
+        // meant for NULL-safe comparison and behaves unexpectedly with bound params.
+        let existing = if req.ref_key.is_some() {
+            sqlx::query(
+                "SELECT id FROM notifications WHERE user_id = ? AND type = ? AND ref_key = ?",
+            )
+            .bind(req.user_id)
+            .bind(type_str)
+            .bind(&req.ref_key)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_db_err)?
+        } else {
+            sqlx::query(
+                "SELECT id FROM notifications WHERE user_id = ? AND type = ? AND ref_key IS NULL",
+            )
+            .bind(req.user_id)
+            .bind(type_str)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_db_err)?
+        };
 
         if let Some(row) = existing {
             let id: i64 = row.try_get("id").map_err(|e| DbError::Io(Box::new(e)))?;
-            // Return existing without creating — direct lookup by ID.
             let row = sqlx::query("SELECT * FROM notifications WHERE id = ?")
                 .bind(id)
                 .fetch_one(self.pool())
@@ -114,8 +126,13 @@ impl NotificationDb for SqliteDb {
             return row_to_notification(row);
         }
 
-        let id = sqlx::query(
-            "INSERT INTO notifications (user_id, type, ref_key, message, data, created_at) \
+        // For non-NULL ref_key, INSERT OR IGNORE leverages the unique index
+        // (user_id, type, ref_key) to atomically prevent duplicates from a
+        // concurrent INSERT that slipped past the SELECT above.
+        // For NULL ref_key, SQLite unique indexes treat NULLs as distinct,
+        // so duplicates are allowed — the SELECT dedup above is best-effort.
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO notifications (user_id, type, ref_key, message, data, created_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(req.user_id)
@@ -126,8 +143,38 @@ impl NotificationDb for SqliteDb {
         .bind(&now)
         .execute(self.pool())
         .await
-        .map_err(map_db_err)?
-        .last_insert_rowid();
+        .map_err(map_db_err)?;
+
+        // If INSERT OR IGNORE found a conflict (concurrent insert won the race),
+        // fetch the existing row instead.
+        let id = if result.rows_affected() == 0 {
+            let row = if req.ref_key.is_some() {
+                sqlx::query(
+                    "SELECT id FROM notifications WHERE user_id = ? AND type = ? AND ref_key = ?",
+                )
+                .bind(req.user_id)
+                .bind(type_str)
+                .bind(&req.ref_key)
+                .fetch_one(self.pool())
+                .await
+                .map_err(map_db_err)?
+            } else {
+                // NULL ref_key: shouldn't reach here since unique index doesn't
+                // conflict on NULLs, but handle gracefully.
+                sqlx::query(
+                    "SELECT id FROM notifications WHERE user_id = ? AND type = ? AND ref_key IS NULL ORDER BY id DESC LIMIT 1",
+                )
+                .bind(req.user_id)
+                .bind(type_str)
+                .fetch_one(self.pool())
+                .await
+                .map_err(map_db_err)?
+            };
+            row.try_get::<i64, _>("id")
+                .map_err(|e| DbError::Io(Box::new(e)))?
+        } else {
+            result.last_insert_rowid()
+        };
 
         let row = sqlx::query("SELECT * FROM notifications WHERE id = ?")
             .bind(id)

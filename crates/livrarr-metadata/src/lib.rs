@@ -673,6 +673,7 @@ pub mod tests {
         Timeout,
         RateLimited,
         RequestFailed(String),
+        InvalidResponse(String),
     }
 
     impl LlmClient for StubLlmClient {
@@ -684,6 +685,7 @@ pub mod tests {
                     LlmErrorKind::Timeout => LlmError::Timeout(Duration::from_secs(30)),
                     LlmErrorKind::RateLimited => LlmError::RateLimited,
                     LlmErrorKind::RequestFailed(s) => LlmError::RequestFailed(s.clone()),
+                    LlmErrorKind::InvalidResponse(s) => LlmError::InvalidResponse(s.clone()),
                 }),
             }
         }
@@ -701,7 +703,7 @@ pub mod tests {
             LlmError::Timeout(_) => LlmErrorKind::Timeout,
             LlmError::RateLimited => LlmErrorKind::RateLimited,
             LlmError::RequestFailed(s) => LlmErrorKind::RequestFailed(s),
-            LlmError::InvalidResponse(s) => LlmErrorKind::RequestFailed(s),
+            LlmError::InvalidResponse(s) => LlmErrorKind::InvalidResponse(s),
         };
         StubLlmClient {
             mode: LlmMode::Err(kind),

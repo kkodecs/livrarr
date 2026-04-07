@@ -60,11 +60,11 @@ impl HttpClientBuilder {
     }
 
     pub fn build(self) -> Result<HttpClient, HttpClientError> {
+        const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
         let mut builder = reqwest::Client::builder();
 
-        if let Some(timeout) = self.timeout {
-            builder = builder.timeout(timeout);
-        }
+        builder = builder.timeout(self.timeout.unwrap_or(DEFAULT_TIMEOUT));
 
         if let Some(ua) = self.user_agent {
             builder = builder.user_agent(ua);

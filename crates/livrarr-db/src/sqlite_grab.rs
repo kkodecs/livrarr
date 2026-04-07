@@ -139,81 +139,49 @@ impl GrabDb for SqliteDb {
             livrarr_domain::MediaType::Audiobook => "audiobook",
         });
 
-        // Check for existing grab with same (user_id, guid, indexer).
-        let existing =
-            sqlx::query("SELECT * FROM grabs WHERE user_id = ? AND guid = ? AND indexer = ?")
-                .bind(req.user_id)
-                .bind(&req.guid)
-                .bind(&req.indexer)
-                .fetch_optional(self.pool())
-                .await
-                .map_err(map_db_err)?;
-
-        if let Some(row) = existing {
-            let existing_grab = row_to_grab(row)?;
-            // Only replace grabs with status failed or removed.
-            // All other statuses (sent, confirmed, importing, imported, importFailed)
-            // are non-replaceable.
-            if !matches!(
-                existing_grab.status,
-                GrabStatus::Failed | GrabStatus::Removed
-            ) {
-                return Err(DbError::Constraint {
-                    message: format!(
-                        "grab already exists for this guid/indexer with status {:?}",
-                        existing_grab.status
-                    ),
-                });
-            }
-            // Update the existing row in place, preserving the original ID
-            // so foreign key references remain valid.
-            sqlx::query(
-                "UPDATE grabs SET \
-                 work_id = ?, download_client_id = ?, title = ?, size = ?, \
-                 download_url = ?, download_id = ?, status = ?, import_error = NULL, \
-                 media_type = ?, grabbed_at = ? \
-                 WHERE id = ?",
-            )
-            .bind(req.work_id)
-            .bind(req.download_client_id)
-            .bind(&req.title)
-            .bind(req.size)
-            .bind(&req.download_url)
-            .bind(&req.download_id)
-            .bind(status_str)
-            .bind(media_type_str)
-            .bind(&now)
-            .bind(existing_grab.id)
-            .execute(self.pool())
-            .await
-            .map_err(map_db_err)?;
-
-            return self.get_grab(req.user_id, existing_grab.id).await;
-        }
-
-        let id = sqlx::query(
+        // Atomic upsert using INSERT...ON CONFLICT against the
+        // UNIQUE(user_id, guid, indexer) constraint.
+        //
+        // The ON CONFLICT DO UPDATE only fires when the existing row has
+        // status 'failed' or 'removed' (the WHERE clause on the DO UPDATE).
+        // If the existing row has any other status, the WHERE fails and the
+        // INSERT is silently ignored — we detect that via changes() == 0.
+        let result = sqlx::query(
             "INSERT INTO grabs \
              (user_id, work_id, download_client_id, title, indexer, guid, size, \
               download_url, download_id, status, media_type, grabbed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+             ON CONFLICT(user_id, guid, indexer) DO UPDATE SET \
+               work_id = ?2, download_client_id = ?3, title = ?4, size = ?7, \
+               download_url = ?8, download_id = ?9, status = ?10, \
+               import_error = NULL, media_type = ?11, grabbed_at = ?12 \
+             WHERE grabs.status IN ('failed', 'removed')",
         )
-        .bind(req.user_id)
-        .bind(req.work_id)
-        .bind(req.download_client_id)
-        .bind(&req.title)
-        .bind(&req.indexer)
-        .bind(&req.guid)
-        .bind(req.size)
-        .bind(&req.download_url)
-        .bind(&req.download_id)
-        .bind(status_str)
-        .bind(media_type_str)
-        .bind(&now)
+        .bind(req.user_id) // ?1
+        .bind(req.work_id) // ?2
+        .bind(req.download_client_id) // ?3
+        .bind(&req.title) // ?4
+        .bind(&req.indexer) // ?5
+        .bind(&req.guid) // ?6
+        .bind(req.size) // ?7
+        .bind(&req.download_url) // ?8
+        .bind(&req.download_id) // ?9
+        .bind(status_str) // ?10
+        .bind(media_type_str) // ?11
+        .bind(&now) // ?12
         .execute(self.pool())
         .await
-        .map_err(map_db_err)?
-        .last_insert_rowid();
+        .map_err(map_db_err)?;
 
+        if result.rows_affected() == 0 {
+            // Conflict with a non-replaceable status — report it.
+            return Err(DbError::Constraint {
+                message: "grab already exists for this guid/indexer with a non-replaceable status"
+                    .to_string(),
+            });
+        }
+
+        let id = result.last_insert_rowid();
         self.get_grab(req.user_id, id).await
     }
 
@@ -304,9 +272,11 @@ impl GrabDb for SqliteDb {
     }
 
     async fn try_set_importing(&self, user_id: UserId, id: GrabId) -> Result<bool, DbError> {
+        // Only transition from sent/confirmed — excluding 'importing' prevents
+        // two workers from both acquiring the same grab concurrently.
         let result = sqlx::query(
             "UPDATE grabs SET status = 'importing', import_error = NULL \
-             WHERE id = ? AND user_id = ? AND status IN ('sent', 'confirmed', 'importing', 'importFailed')",
+             WHERE id = ? AND user_id = ? AND status IN ('sent', 'confirmed')",
         )
         .bind(id)
         .bind(user_id)

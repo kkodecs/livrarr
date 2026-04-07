@@ -548,11 +548,17 @@ async fn import_single_item(
             .unwrap_or(&target_path)
             .trim_start_matches('/');
         // Already tracked by this user = skipped.
-        let my_items = state
-            .db
-            .list_library_items_by_work(user_id, work_id)
-            .await
-            .unwrap_or_default();
+        let my_items = match state.db.list_library_items_by_work(user_id, work_id).await {
+            Ok(items) => items,
+            Err(e) => {
+                return ImportResult {
+                    path: item.path.clone(),
+                    status: ImportStatus::Failed,
+                    work_id: Some(work_id),
+                    error: Some(format!("failed to query library items: {e}")),
+                };
+            }
+        };
         if my_items.iter().any(|li| li.path == relative) {
             return ImportResult {
                 path: item.path.clone(),

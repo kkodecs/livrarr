@@ -184,6 +184,19 @@ export async function apiUpload<T>(path: string, file: Blob): Promise<T> {
     throw new ApiError(await normalizeError(res));
   }
 
-  if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  if (res.status === 204 || res.headers.get("content-length") === "0") {
+    return undefined as T;
+  }
+
+  // Mirror the safe JSON parsing from apiFetch — read as text first so we
+  // never throw on an empty/non-JSON 2xx body.
+  const text = await res.text();
+  if (!text) {
+    return undefined as T;
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return undefined as T;
+  }
 }

@@ -237,11 +237,13 @@ impl WorkDb for SqliteDb {
         let genres_json = req
             .genres
             .as_ref()
-            .and_then(|g| serde_json::to_string(g).ok());
+            .map(|g| serde_json::to_string(g).map_err(|e| DbError::Io(Box::new(e))))
+            .transpose()?;
         let narrator_json = req
             .narrator
             .as_ref()
-            .and_then(|n| serde_json::to_string(n).ok());
+            .map(|n| serde_json::to_string(n).map_err(|e| DbError::Io(Box::new(e))))
+            .transpose()?;
         let narration_type_val = req.narration_type.as_ref().map(narration_type_str);
 
         sqlx::query(

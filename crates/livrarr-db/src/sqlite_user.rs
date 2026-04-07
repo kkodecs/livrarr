@@ -180,7 +180,7 @@ impl UserDb for SqliteDb {
             }
         };
 
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE users SET username = ?, password_hash = ?, api_key_hash = ?, \
              setup_pending = 0, updated_at = ? WHERE id = ? AND setup_pending = 1",
         )
@@ -192,6 +192,12 @@ impl UserDb for SqliteDb {
         .execute(self.pool())
         .await
         .map_err(map_db_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::Constraint {
+                message: "setup already completed by another request".to_string(),
+            });
+        }
 
         self.get_user(user_id).await
     }

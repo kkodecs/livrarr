@@ -1056,14 +1056,10 @@ pub fn build_tag_metadata(work: &livrarr_domain::Work) -> livrarr_tagwrite::TagM
     }
 }
 
-/// Read cover image bytes from MediaCover/{work_id}/cover.jpg.
+/// Read cover image bytes from covers/{work_id}.jpg.
 /// Returns None if the file doesn't exist (not an error per TAG-V21-003).
 pub async fn read_cover_bytes(state: &AppState, work_id: i64) -> Option<Vec<u8>> {
-    let cover_path = state
-        .data_dir
-        .join("MediaCover")
-        .join(work_id.to_string())
-        .join("cover.jpg");
+    let cover_path = state.data_dir.join("covers").join(format!("{work_id}.jpg"));
     tokio::fs::read(&cover_path).await.ok()
 }
 

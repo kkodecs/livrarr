@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -646,6 +646,8 @@ function PosterView({
   selectedIds: Set<number>;
   onToggle: (id: number) => void;
 }) {
+  const navigate = useNavigate();
+
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
       {works.map((work) => {
@@ -661,10 +663,10 @@ function PosterView({
                 />
               </div>
             )}
-            <Link
-              to={`/work/${work.id}`}
+            <div
+              onClick={() => navigate(`/work/${work.id}`)}
               className={cn(
-                "group block overflow-hidden rounded-lg border bg-zinc-800",
+                "group block cursor-pointer overflow-hidden rounded-lg border bg-zinc-800",
                 editorMode && isSelected ? "border-brand" : "border-border",
               )}
             >
@@ -694,7 +696,7 @@ function PosterView({
                 </p>
                 <MediaStatusRow work={work} />
               </div>
-            </Link>
+            </div>
           </div>
         );
       })}
@@ -715,6 +717,8 @@ function OverviewView({
   selectedIds: Set<number>;
   onToggle: (id: number) => void;
 }) {
+  const navigate = useNavigate();
+
   return (
     <div className="space-y-4">
       {works.map((work) => {
@@ -723,8 +727,9 @@ function OverviewView({
         return (
           <div
             key={work.id}
+            onClick={() => navigate(`/work/${work.id}`)}
             className={cn(
-              "flex gap-4 rounded-lg border bg-zinc-800 p-4",
+              "flex cursor-pointer gap-4 rounded-lg border bg-zinc-800 p-4",
               editorMode && isSelected
                 ? "border-brand"
                 : "border-border hover:border-zinc-600",
@@ -738,7 +743,7 @@ function OverviewView({
                 />
               </div>
             )}
-            <Link to={`/work/${work.id}`} className="flex min-w-0 flex-1 gap-4">
+            <div className="flex min-w-0 flex-1 gap-4">
               <img
                 src={getCoverUrl(work.id)}
                 alt={work.title}
@@ -770,7 +775,7 @@ function OverviewView({
                   </p>
                 )}
               </div>
-            </Link>
+            </div>
           </div>
         );
       })}

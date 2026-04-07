@@ -620,7 +620,7 @@ pub fn derive_sort_name(display_name: &str) -> String {
     // Use rsplit_once to split at the last whitespace boundary.
     // This avoids collecting into an intermediate Vec.
     match trimmed.rsplit_once(char::is_whitespace) {
-        Some((given, surname)) => format!("{}, {}", surname, given),
+        Some((given, surname)) => format!("{}, {}", surname.trim(), given.trim()),
         None => trimmed.to_string(),
     }
 }

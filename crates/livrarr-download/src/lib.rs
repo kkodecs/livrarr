@@ -334,10 +334,10 @@ fn extract_hash_from_magnet(uri: &str) -> Result<String, DownloadError> {
             Ok(data_encoding::HEXLOWER.encode(&decoded))
         }
     } else if let Some(hash) = xt_value.strip_prefix("urn:btmh:") {
-        // BitTorrent v2: SHA-256 with multihash prefix
-        // Strip only the varint function code (12), keep the digest length + hash
+        // BitTorrent v2: SHA-256 with multihash prefix "1220"
+        // (varint function code 0x12 = SHA-256, varint digest length 0x20 = 32 bytes)
         let stripped = hash
-            .strip_prefix("12")
+            .strip_prefix("1220")
             .ok_or_else(|| DownloadError::InvalidMagnet {
                 reason: "unrecognized multihash prefix in btmh hash".to_string(),
             })?;

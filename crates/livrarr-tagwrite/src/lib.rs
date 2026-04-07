@@ -197,7 +197,19 @@ fn write_epub(
     };
 
     // Find existing cover path from OPF manifest (for dedup).
-    let existing_cover_path = find_cover_path_in_opf(&opf_content);
+    // The href is relative to the OPF's directory, so resolve it.
+    let opf_parent = Path::new(&opf_path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let existing_cover_path = find_cover_path_in_opf(&opf_content).map(|href| {
+        if opf_parent.is_empty() {
+            href
+        } else {
+            format!("{}/{}", opf_parent, href)
+        }
+    });
 
     // Determine actual cover entry path.
     let cover_entry_path = existing_cover_path
@@ -704,8 +716,8 @@ fn update_opf_metadata(
         }
     }
 
-    // Cover reference in metadata.
-    {
+    // Cover reference in metadata — only when a cover is actually being embedded.
+    if add_cover_manifest_item {
         new_meta_events.push(Event::Text(nl(indent).into_owned()));
         let mut elem = BytesStart::new("meta");
         elem.push_attribute(("name", "cover"));
@@ -880,16 +892,8 @@ fn write_mp3(
         tag.set_year(year);
     }
     if let Some(ref desc) = metadata.description {
-        // Only remove COMM frames with empty description (ours), preserve others.
-        let dominated: Vec<_> = tag
-            .comments()
-            .filter(|c| c.description.is_empty() && c.lang == "eng")
-            .map(|c| c.description.clone())
-            .collect();
-        for _ in dominated {
-            // id3 doesn't support targeted COMM removal easily, so remove all
-            // then re-add non-ours. Simpler: just set ours and accept one frame.
-        }
+        // Remove only our COMM frame (identified by description "livrarr"), preserve others.
+        tag.remove_comment(Some("livrarr"), Some("eng"));
         tag.add_frame(id3::frame::Comment {
             lang: "eng".to_string(),
             description: "livrarr".to_string(),
