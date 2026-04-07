@@ -5,15 +5,6 @@ use livrarr_domain::{
 // Re-export classify_file from domain.
 pub use livrarr_domain::classify_file;
 
-// =============================================================================
-// CRATE: livrarr-organize
-// =============================================================================
-// Naming, path building, file copy, import pipeline, CWA copy, manual scan.
-
-// ---------------------------------------------------------------------------
-// Import Service
-// ---------------------------------------------------------------------------
-
 /// Import pipeline -- processes completed downloads.
 #[trait_variant::make(Send)]
 pub trait ImportService: Send + Sync {

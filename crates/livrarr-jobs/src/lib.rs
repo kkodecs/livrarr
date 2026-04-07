@@ -1,24 +1,15 @@
 use livrarr_domain::{AuthorId, GrabId, NotificationId, RootFolderId, UserId, WorkId};
 
-// =============================================================================
-// CRATE: livrarr-jobs
-// =============================================================================
-// Background tasks.
-
-// ---------------------------------------------------------------------------
-// Job Service (trigger interface for server)
-// ---------------------------------------------------------------------------
-
 /// Background job trigger and status.
 #[trait_variant::make(Send)]
 pub trait JobService: Send + Sync {
-    /// Trigger bulk re-enrichment for all user's works. Returns immediately (202).
+    /// Trigger bulk re-enrichment for all user's works. Returns immediately.
     async fn trigger_bulk_enrichment(&self, user_id: UserId) -> Result<(), JobError>;
 
-    /// Trigger author monitoring check for all monitored authors. Returns immediately (202).
+    /// Trigger author monitoring check for all monitored authors. Returns immediately.
     async fn trigger_author_search(&self) -> Result<(), JobError>;
 
-    /// Trigger manual scan of a root folder. Returns immediately (202).
+    /// Trigger manual scan of a root folder. Returns immediately.
     async fn trigger_scan(
         &self,
         user_id: UserId,
@@ -80,7 +71,7 @@ pub struct AuthorMonitorResult {
 }
 
 pub struct DetectedWork {
-    pub ol_key: String,
+    pub provider_key: String,
     pub title: String,
     pub publish_year: Option<i32>,
 }

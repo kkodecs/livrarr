@@ -77,18 +77,6 @@ pub enum EnrichmentStatus {
     Exhausted,
 }
 
-impl EnrichmentStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Partial => "partial",
-            Self::Enriched => "enriched",
-            Self::Failed => "failed",
-            Self::Exhausted => "exhausted",
-        }
-    }
-}
-
 /// History event types. Append-only.
 ///
 /// Satisfies: spec Section 7 (history table)
@@ -565,10 +553,6 @@ impl std::fmt::Debug for Indexer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Domain Functions
-// ---------------------------------------------------------------------------
-
 /// Sanitizes a path component for filesystem use.
 ///
 /// Satisfies: IMPORT-011
@@ -633,14 +617,12 @@ pub fn derive_sort_name(display_name: &str) -> String {
         return String::new();
     }
 
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-    if parts.len() <= 1 {
-        return trimmed.to_string();
+    // Use rsplit_once to split at the last whitespace boundary.
+    // This avoids collecting into an intermediate Vec.
+    match trimmed.rsplit_once(char::is_whitespace) {
+        Some((given, surname)) => format!("{}, {}", surname, given),
+        None => trimmed.to_string(),
     }
-
-    let surname = parts[parts.len() - 1];
-    let given = parts[..parts.len() - 1].join(" ");
-    format!("{}, {}", surname, given)
 }
 
 /// Normalizes a string for scan matching. Applies the same character rules

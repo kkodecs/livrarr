@@ -35,8 +35,9 @@ export function parseCategories(s: string): number[] {
   if (!s.trim()) return [];
   return s
     .split(",")
-    .map((c) => parseInt(c.trim(), 10))
-    .filter((n) => !isNaN(n));
+    .map((c) => c.trim())
+    .filter((c) => c.length > 0 && /^\d+$/.test(c))
+    .map((c) => Number(c));
 }
 
 export function useIndexerForm(editing: IndexerResponse | null) {

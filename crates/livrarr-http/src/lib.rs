@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-/// Composable HTTP client with configurable middleware.
+/// Composable HTTP client.
 #[derive(Clone)]
 pub struct HttpClient {
     inner: reqwest::Client,
@@ -66,8 +66,8 @@ impl HttpClientBuilder {
             builder = builder.timeout(timeout);
         }
 
-        if let Some(ref ua) = self.user_agent {
-            builder = builder.user_agent(ua.clone());
+        if let Some(ua) = self.user_agent {
+            builder = builder.user_agent(ua);
         }
 
         if self.danger_accept_invalid_certs {
