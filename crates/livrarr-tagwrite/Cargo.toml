@@ -10,5 +10,6 @@ tokio = { workspace = true }
 livrarr-domain = { workspace = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 regex-lite = "0.1"
+quick-xml = "0.37"
 mp4ameta = "0.13"
 id3 = "1.16"

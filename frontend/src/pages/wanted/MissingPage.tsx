@@ -8,6 +8,8 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { listWorks } from "@/api";
+import { sortWorks } from "@/utils/works";
+import type { WorkSortField } from "@/utils/works";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
@@ -19,7 +21,6 @@ import { formatRelativeDate, getCoverUrl } from "@/utils/format";
 import type { WorkDetailResponse } from "@/types/api";
 
 type MissingFilter = "all" | "ebook" | "audiobook";
-type SortField = "title" | "authorName" | "year" | "addedAt";
 
 function isMissingEbook(work: WorkDetailResponse): boolean {
   return !work.libraryItems?.some((li) => li.mediaType === "ebook");
@@ -27,32 +28,6 @@ function isMissingEbook(work: WorkDetailResponse): boolean {
 
 function isMissingAudiobook(work: WorkDetailResponse): boolean {
   return !work.libraryItems?.some((li) => li.mediaType === "audiobook");
-}
-
-function sortWorks(
-  works: WorkDetailResponse[],
-  field: SortField,
-  dir: "asc" | "desc",
-): WorkDetailResponse[] {
-  const sorted = [...works].sort((a, b) => {
-    let cmp = 0;
-    switch (field) {
-      case "title":
-        cmp = (a.sortTitle ?? a.title).localeCompare(b.sortTitle ?? b.title);
-        break;
-      case "authorName":
-        cmp = a.authorName.localeCompare(b.authorName);
-        break;
-      case "year":
-        cmp = (a.year ?? 0) - (b.year ?? 0);
-        break;
-      case "addedAt":
-        cmp = a.addedAt.localeCompare(b.addedAt);
-        break;
-    }
-    return dir === "desc" ? -cmp : cmp;
-  });
-  return sorted;
 }
 
 export default function MissingPage() {
@@ -68,7 +43,7 @@ export default function MissingPage() {
 
   const [filter, setFilter] = useState<MissingFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortField, setSortField] = useState<SortField>("title");
+  const [sortField, setSortField] = useState<WorkSortField>("title");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const missing = useMemo(() => {
@@ -101,7 +76,7 @@ export default function MissingPage() {
     return sortWorks(result, sortField, sortDir);
   }, [works, filter, searchQuery, sortField, sortDir]);
 
-  const handleSort = (field: SortField) => {
+  const handleSort = (field: WorkSortField) => {
     if (sortField === field) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {

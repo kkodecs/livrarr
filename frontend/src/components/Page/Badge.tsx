@@ -76,11 +76,6 @@ export function QueueStatusBadge({ status }: { status: QueueStatus }) {
   );
 }
 
-/** Returns null — "Coming Soon" is now shown via title tooltip on the parent container. */
-export function ComingSoonBadge() {
-  return null;
-}
-
 export function MediaTypeBadge({ type }: { type: "ebook" | "audiobook" }) {
   return (
     <span className="inline-flex rounded bg-zinc-700 px-1.5 py-0.5 text-xs text-zinc-300">

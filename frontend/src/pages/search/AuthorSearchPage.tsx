@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Search, Plus, Loader2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { lookupAuthors, addAuthor } from "@/api";
@@ -13,16 +13,15 @@ import { ApiError } from "@/api/client";
 export default function AuthorSearchPage() {
   const navigate = useNavigate();
   const [term, setTerm] = useState("");
-  const [results, setResults] = useState<AuthorSearchResult[] | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
 
-  const searchMutation = useMutation({
-    mutationFn: (q: string) => lookupAuthors(q),
-    onSuccess: (data) => {
-      setResults(data);
-    },
-    onError: () => {
-      toast.error("Search failed");
-    },
+  const {
+    data: results,
+    isFetching: isSearching,
+  } = useQuery({
+    queryKey: ["authorSearch", searchTerm],
+    queryFn: () => lookupAuthors(searchTerm),
+    enabled: !!searchTerm,
   });
 
   const addMutation = useMutation({
@@ -49,8 +48,10 @@ export default function AuthorSearchPage() {
     e.preventDefault();
     const q = term.trim();
     if (!q) return;
-    searchMutation.mutate(q);
+    setSearchTerm(q);
   };
+
+  const hasSearched = !!searchTerm;
 
   return (
     <>
@@ -76,10 +77,10 @@ export default function AuthorSearchPage() {
           </div>
           <button
             type="submit"
-            disabled={searchMutation.isPending || !term.trim()}
+            disabled={isSearching || !term.trim()}
             className="inline-flex items-center gap-1.5 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
           >
-            {searchMutation.isPending ? (
+            {isSearching ? (
               <Loader2 size={14} className="animate-spin" />
             ) : (
               <Search size={14} />
@@ -89,14 +90,15 @@ export default function AuthorSearchPage() {
         </form>
 
         <div className="mt-6">
-          {searchMutation.isPending && (
+          {isSearching && (
             <div className="flex items-center justify-center py-12">
               <Loader2 size={24} className="animate-spin text-muted" />
             </div>
           )}
 
-          {!searchMutation.isPending &&
-            results !== null &&
+          {!isSearching &&
+            hasSearched &&
+            results !== undefined &&
             results.length === 0 && (
               <EmptyState
                 icon={<Search size={32} />}
@@ -105,7 +107,7 @@ export default function AuthorSearchPage() {
               />
             )}
 
-          {!searchMutation.isPending && results && results.length > 0 && (
+          {!isSearching && results && results.length > 0 && (
             <div className="space-y-2">
               {results.map((author) => (
                 <div
@@ -137,7 +139,7 @@ export default function AuthorSearchPage() {
             </div>
           )}
 
-          {results === null && !searchMutation.isPending && (
+          {!hasSearched && !isSearching && (
             <EmptyState
               icon={<UserPlus size={32} />}
               title="Search for an author"

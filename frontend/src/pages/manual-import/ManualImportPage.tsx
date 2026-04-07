@@ -34,11 +34,13 @@ export default function ManualImportPage() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState(false);
   const searchTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const searchAbort = useRef<AbortController | null>(null);
 
-  // Cleanup search timeout on unmount
+  // Cleanup search timeout and abort controller on unmount
   useEffect(() => {
     return () => {
       if (searchTimeout.current) clearTimeout(searchTimeout.current);
+      searchAbort.current?.abort();
     };
   }, []);
 
@@ -155,18 +157,27 @@ export default function ManualImportPage() {
     setSearchQuery(query);
     setSearchError(false);
     if (searchTimeout.current) clearTimeout(searchTimeout.current);
+    searchAbort.current?.abort();
     if (query.trim().length < 2) return;
     searchTimeout.current = setTimeout(async () => {
+      const controller = new AbortController();
+      searchAbort.current = controller;
       setSearchLoading(true);
       try {
         const resp = await searchManualImport(query);
-        setSearchResults(resp.results);
-        setSearchError(false);
+        if (!controller.signal.aborted) {
+          setSearchResults(resp.results);
+          setSearchError(false);
+        }
       } catch {
-        setSearchResults([]);
-        setSearchError(true);
+        if (!controller.signal.aborted) {
+          setSearchResults([]);
+          setSearchError(true);
+        }
       } finally {
-        setSearchLoading(false);
+        if (!controller.signal.aborted) {
+          setSearchLoading(false);
+        }
       }
     }, 400);
   };
@@ -174,6 +185,7 @@ export default function ManualImportPage() {
   const handleCloseSearch = () => {
     setSearchingIdx(null);
     if (searchTimeout.current) clearTimeout(searchTimeout.current);
+    searchAbort.current?.abort();
   };
 
   const handleSelectMatch = (idx: number, match: OlMatch) => {

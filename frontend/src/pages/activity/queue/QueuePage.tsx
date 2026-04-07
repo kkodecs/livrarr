@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { RefreshCw, RotateCcw, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
 import { getQueue, removeQueueItem, retryImport, listWorks } from "@/api";
+import { workName } from "@/utils/works";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { ConfirmModal } from "@/components/Page/ConfirmModal";
@@ -65,11 +66,6 @@ export default function QueuePage() {
     },
     onError: (e: Error) => toast.error(e.message ?? "Failed to retry"),
   });
-
-  const workName = (id: number): string => {
-    const w = works?.find((w) => w.id === id);
-    return w ? w.title : `Work #${id}`;
-  };
 
   if (isLoading) return <PageLoading />;
   if (error) return <ErrorState error={error} onRetry={() => refetch()} />;
@@ -138,7 +134,7 @@ export default function QueuePage() {
                       </td>
                       <td className="px-3 py-2">
                         <Link to={`/work/${item.workId}`} className="text-brand hover:underline">
-                          {workName(item.workId)}
+                          {workName(works, item.workId)}
                         </Link>
                       </td>
                       <td className="px-3 py-2 text-xs text-muted">

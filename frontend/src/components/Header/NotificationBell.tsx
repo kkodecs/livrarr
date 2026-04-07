@@ -107,7 +107,7 @@ export function NotificationBell() {
                 No notifications
               </div>
             ) : (
-              allNotifications.map((n: NotificationResponse) => (
+              allNotifications.slice(0, 50).map((n: NotificationResponse) => (
                 <div
                   key={n.id}
                   className={`flex items-start gap-3 border-b border-border/50 px-4 py-3 ${

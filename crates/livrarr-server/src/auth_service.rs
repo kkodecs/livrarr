@@ -13,6 +13,11 @@ use livrarr_db::{
     CompleteSetupDbRequest, CreateUserDbRequest, SessionDb, UpdateUserDbRequest, UserDb,
 };
 
+/// Maximum number of entries in the lockout map before eviction.
+const MAX_LOCKOUT_ENTRIES: usize = 10_000;
+/// Number of entries to evict when the map exceeds the maximum.
+const EVICT_COUNT: usize = 1_000;
+
 pub struct ServerAuthService {
     db: SqliteDb,
     crypto: RealAuthCrypto,
@@ -81,6 +86,13 @@ impl ServerAuthService {
 
     async fn record_failure(&self, username: &str) {
         let mut lockouts = self.lockouts.write().await;
+        // LRU-style eviction: if the map exceeds the max, remove the oldest entries.
+        if lockouts.len() >= MAX_LOCKOUT_ENTRIES {
+            let keys: Vec<String> = lockouts.keys().take(EVICT_COUNT).cloned().collect();
+            for key in keys {
+                lockouts.remove(&key);
+            }
+        }
         let state = lockouts
             .entry(username.to_string())
             .or_insert(LockoutState {

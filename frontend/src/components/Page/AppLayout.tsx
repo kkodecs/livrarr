@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect } from "react";
-import { Outlet, useLocation, useNavigate } from "react-router";
+import { Outlet, useNavigate } from "react-router";
 import { Header } from "@/components/Header/Header";
 import { Sidebar } from "@/components/Sidebar/Sidebar";
 import { useUIStore } from "@/stores/ui";
@@ -12,12 +12,11 @@ const GuidedTour = lazy(() => import("@/components/GuidedTour/GuidedTour"));
 export function AppLayout() {
   const collapsed = useUIStore((s) => s.sidebarCollapsed);
   const tour = useTourState();
-  const location = useLocation();
   const navigate = useNavigate();
 
-  // Auto-start tour on first visit (after setup, landing on home page)
+  // Auto-start tour on first visit (after setup, regardless of entry path)
   useEffect(() => {
-    if (!tour.hasCompleted && location.pathname === "/") {
+    if (!tour.hasCompleted) {
       tour.start();
       navigate("/settings/metadata");
     }

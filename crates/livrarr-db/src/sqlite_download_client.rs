@@ -16,7 +16,7 @@ fn row_to_download_client(row: sqlx::sqlite::SqliteRow) -> Result<DownloadClient
         implementation: parse_implementation(
             &row.try_get::<String, _>("implementation")
                 .map_err(|e| DbError::Io(Box::new(e)))?,
-        ),
+        )?,
         host: row.try_get("host").map_err(|e| DbError::Io(Box::new(e)))?,
         port: row
             .try_get::<i32, _>("port")
@@ -54,10 +54,13 @@ fn row_to_download_client(row: sqlx::sqlite::SqliteRow) -> Result<DownloadClient
     })
 }
 
-fn parse_implementation(s: &str) -> DownloadClientImplementation {
+fn parse_implementation(s: &str) -> Result<DownloadClientImplementation, DbError> {
     match s {
-        "sabnzbd" | "SABnzbd" => DownloadClientImplementation::SABnzbd,
-        _ => DownloadClientImplementation::QBittorrent,
+        "qbittorrent" | "qBittorrent" => Ok(DownloadClientImplementation::QBittorrent),
+        "sabnzbd" | "SABnzbd" => Ok(DownloadClientImplementation::SABnzbd),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown download client implementation: {s}"),
+        }),
     }
 }
 
@@ -142,114 +145,58 @@ impl DownloadClientDb for SqliteDb {
         id: DownloadClientId,
         req: UpdateDownloadClientDbRequest,
     ) -> Result<DownloadClient, DbError> {
-        // Verify exists.
-        let existing = self.get_download_client(id).await?;
+        // Fetch current record, merge changes, single atomic UPDATE.
+        let current = self.get_download_client(id).await?;
 
-        if let Some(name) = &req.name {
-            sqlx::query("UPDATE download_clients SET name = ? WHERE id = ?")
-                .bind(name)
+        let name = req.name.unwrap_or(current.name);
+        let host = req.host.unwrap_or(current.host);
+        let port = req.port.unwrap_or(current.port);
+        let use_ssl = req.use_ssl.unwrap_or(current.use_ssl);
+        let skip_ssl_validation = req
+            .skip_ssl_validation
+            .unwrap_or(current.skip_ssl_validation);
+        let url_base = req.url_base.or(current.url_base);
+        let username = req.username.or(current.username);
+        let password = req.password.or(current.password);
+        let category = req.category.unwrap_or(current.category);
+        let enabled = req.enabled.unwrap_or(current.enabled);
+        let api_key = req.api_key.or(current.api_key);
+        let is_default = req
+            .is_default_for_protocol
+            .unwrap_or(current.is_default_for_protocol);
+
+        // If promoting to default, clear other defaults for this client_type.
+        if is_default && !current.is_default_for_protocol {
+            sqlx::query("UPDATE download_clients SET is_default_for_protocol = false WHERE client_type = ? AND id != ?")
+                .bind(&current.client_type)
                 .bind(id)
                 .execute(self.pool())
                 .await
                 .map_err(map_db_err)?;
         }
-        if let Some(host) = &req.host {
-            sqlx::query("UPDATE download_clients SET host = ? WHERE id = ?")
-                .bind(host)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(port) = req.port {
-            sqlx::query("UPDATE download_clients SET port = ? WHERE id = ?")
-                .bind(port as i32)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(use_ssl) = req.use_ssl {
-            sqlx::query("UPDATE download_clients SET use_ssl = ? WHERE id = ?")
-                .bind(use_ssl)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(skip) = req.skip_ssl_validation {
-            sqlx::query("UPDATE download_clients SET skip_ssl_validation = ? WHERE id = ?")
-                .bind(skip)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(url_base) = &req.url_base {
-            sqlx::query("UPDATE download_clients SET url_base = ? WHERE id = ?")
-                .bind(url_base)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(username) = &req.username {
-            sqlx::query("UPDATE download_clients SET username = ? WHERE id = ?")
-                .bind(username)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(password) = &req.password {
-            sqlx::query("UPDATE download_clients SET password = ? WHERE id = ?")
-                .bind(password)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(category) = &req.category {
-            sqlx::query("UPDATE download_clients SET category = ? WHERE id = ?")
-                .bind(category)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(enabled) = req.enabled {
-            sqlx::query("UPDATE download_clients SET enabled = ? WHERE id = ?")
-                .bind(enabled)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(api_key) = &req.api_key {
-            sqlx::query("UPDATE download_clients SET api_key = ? WHERE id = ?")
-                .bind(api_key)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(is_default) = req.is_default_for_protocol {
-            if is_default {
-                // Clear other defaults for this client_type.
-                sqlx::query("UPDATE download_clients SET is_default_for_protocol = false WHERE client_type = ? AND id != ?")
-                    .bind(&existing.client_type)
-                    .bind(id)
-                    .execute(self.pool())
-                    .await
-                    .map_err(map_db_err)?;
-            }
-            sqlx::query("UPDATE download_clients SET is_default_for_protocol = ? WHERE id = ?")
-                .bind(is_default)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
+
+        sqlx::query(
+            "UPDATE download_clients SET name = ?, host = ?, port = ?, use_ssl = ?, \
+             skip_ssl_validation = ?, url_base = ?, username = ?, password = ?, \
+             category = ?, enabled = ?, api_key = ?, is_default_for_protocol = ? \
+             WHERE id = ?",
+        )
+        .bind(&name)
+        .bind(&host)
+        .bind(port as i32)
+        .bind(use_ssl)
+        .bind(skip_ssl_validation)
+        .bind(&url_base)
+        .bind(&username)
+        .bind(&password)
+        .bind(&category)
+        .bind(enabled)
+        .bind(&api_key)
+        .bind(is_default)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
 
         self.get_download_client(id).await
     }

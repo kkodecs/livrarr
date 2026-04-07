@@ -14,6 +14,7 @@ import {
   FileX,
 } from "lucide-react";
 import { getHistory, listWorks } from "@/api";
+import { workName } from "@/utils/works";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { EmptyState } from "@/components/Page/EmptyState";
@@ -87,12 +88,6 @@ export default function HistoryPage() {
     queryKey: ["works"],
     queryFn: listWorks,
   });
-
-  const workName = (id: number | null): string => {
-    if (!id) return "—";
-    const w = works?.find((w) => w.id === id);
-    return w ? w.title : `Work #${id}`;
-  };
 
   const sorting = useSort<HistorySortField>("date", "desc");
 
@@ -173,7 +168,7 @@ export default function HistoryPage() {
                               to={`/work/${row.workId}`}
                               className="text-brand hover:underline"
                             >
-                              {workName(row.workId)}
+                              {workName(works, row.workId)}
                             </Link>
                           ) : (
                             <span className="text-muted">—</span>

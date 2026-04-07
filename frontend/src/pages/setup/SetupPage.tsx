@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useForm } from "react-hook-form";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -74,21 +74,73 @@ interface MetadataForm {
   audnexusUrl: string;
 }
 
+const SETUP_STATE_KEY = "livrarr_setup_state";
+
+interface PersistedSetupState {
+  step: Step;
+  username?: string;
+  rootFolders: RootFolderForm[];
+}
+
+function loadSetupState(): PersistedSetupState | null {
+  try {
+    const raw = sessionStorage.getItem(SETUP_STATE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as PersistedSetupState;
+  } catch {
+    return null;
+  }
+}
+
+function saveSetupState(state: PersistedSetupState) {
+  try {
+    sessionStorage.setItem(SETUP_STATE_KEY, JSON.stringify(state));
+  } catch {
+    // sessionStorage full or unavailable — ignore
+  }
+}
+
+function clearSetupState() {
+  sessionStorage.removeItem(SETUP_STATE_KEY);
+}
+
 export function SetupPage() {
   const navigate = useNavigate();
   const setupAction = useAuthStore((s) => s.setupAction);
-  const [step, setStep] = useState<Step>("account");
+
+  // Restore non-sensitive state from sessionStorage
+  const persisted = loadSetupState();
+  const [step, setStep] = useState<Step>(persisted?.step ?? "account");
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Collected config for summary
+  // Collected config for summary — never persist secrets
   const [config, setConfig] = useState<{
     username?: string;
     rootFolders: RootFolderForm[];
     indexer?: IndexerForm;
     downloadClient?: DownloadClientForm;
     metadata?: MetadataForm;
-  }>({ rootFolders: [] });
+  }>({
+    rootFolders: persisted?.rootFolders ?? [],
+    username: persisted?.username,
+  });
+
+  // Persist non-sensitive state changes to sessionStorage
+  const persistState = useCallback(
+    (newStep: Step, newConfig: typeof config) => {
+      saveSetupState({
+        step: newStep,
+        username: newConfig.username,
+        rootFolders: newConfig.rootFolders,
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    persistState(step, config);
+  }, [step, config, persistState]);
 
   const stepIndex = STEPS.indexOf(step);
   const goNext = () => {
@@ -202,7 +254,10 @@ export function SetupPage() {
           <SummaryStep
             config={config}
             apiKey={apiKey}
-            onFinish={() => navigate("/")}
+            onFinish={() => {
+              clearSetupState();
+              navigate("/");
+            }}
           />
         )}
       </div>
@@ -303,8 +358,8 @@ function RootFolderStep({
       <p className="text-sm text-zinc-400">Where your media files live.</p>
       {folders.length > 0 && (
         <ul className="space-y-1 text-sm">
-          {folders.map((f, i) => (
-            <li key={i} className="rounded bg-zinc-800 px-3 py-2">
+          {folders.map((f) => (
+            <li key={f.path} className="rounded bg-zinc-800 px-3 py-2">
               {f.path} — <span className="text-zinc-400">{f.mediaType}</span>
             </li>
           ))}
@@ -418,7 +473,7 @@ function IndexerStep({
         </Field>
       </div>
       <Field label="API Key" error={errors.apiKey?.message}>
-        <input {...register("apiKey")} className="input-field" />
+        <input type="password" {...register("apiKey")} className="input-field" />
       </Field>
       <div className="flex gap-2">
         <button
@@ -548,7 +603,7 @@ function MetadataStep({
         label="Hardcover API Token"
         error={errors.hardcoverApiToken?.message}
       >
-        <input {...register("hardcoverApiToken")} className="input-field" />
+        <input type="password" {...register("hardcoverApiToken")} className="input-field" />
       </Field>
       <Field label="Audnexus URL" error={errors.audnexusUrl?.message}>
         <input {...register("audnexusUrl")} className="input-field" />

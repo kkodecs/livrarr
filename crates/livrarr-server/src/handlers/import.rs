@@ -606,27 +606,51 @@ async fn import_mp3_batch(
     }
 
     // Step 3: Finalize.
+    // Track which files were successfully placed on disk.
+    let mut file_placed = vec![false; files.len()];
+
     if tag_failed {
         // Delete all .tmps, re-copy all sources untagged.
         for (i, vf) in files.iter().enumerate() {
             let _ = std::fs::remove_file(&tmp_paths[i]);
             let src = vf.source.clone();
             let final_p = PathBuf::from(&target_paths[i]);
-            let _ = tokio::task::spawn_blocking(move || std::fs::copy(&src, &final_p)).await;
+            match tokio::task::spawn_blocking(move || std::fs::copy(&src, &final_p)).await {
+                Ok(Ok(_)) => {
+                    file_placed[i] = true;
+                }
+                Ok(Err(e)) => {
+                    warnings.push(format!(
+                        "MP3 batch re-copy failed for {}: {e}",
+                        vf.source.display()
+                    ));
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "MP3 batch re-copy spawn error for {}: {e}",
+                        vf.source.display()
+                    ));
+                }
+            }
         }
     } else {
         // Rename all .tmps → finals.
-        for (tmp, target) in tmp_paths.iter().zip(target_paths.iter()) {
+        for (i, (tmp, target)) in tmp_paths.iter().zip(target_paths.iter()).enumerate() {
             if let Err(e) = std::fs::rename(tmp, target) {
                 warnings.push(format!("MP3 batch rename failed for {target}: {e}"));
                 let _ = std::fs::remove_file(tmp);
+            } else {
+                file_placed[i] = true;
             }
         }
     }
 
-    // Step 4: Measure sizes and create library items.
+    // Step 4: Measure sizes and create library items — only for files successfully placed.
     let mut count = 0;
     for (i, vf) in files.iter().enumerate() {
+        if !file_placed[i] {
+            continue;
+        }
         let target = PathBuf::from(&target_paths[i]);
         let file_size = target.metadata().map(|m| m.len() as i64).unwrap_or(0);
         let relative = target_paths[i]

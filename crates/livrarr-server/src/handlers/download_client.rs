@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
+use crate::middleware::RequireAdmin;
 use crate::state::AppState;
 use crate::{
     ApiError, CreateDownloadClientApiRequest, DownloadClientResponse,
@@ -60,6 +61,7 @@ pub fn normalize_host(host: &str) -> (String, Option<bool>) {
 /// POST /api/v1/downloadclient
 pub async fn create(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Json(req): Json<CreateDownloadClientApiRequest>,
 ) -> Result<Json<DownloadClientResponse>, ApiError> {
     if req.name.is_empty() {
@@ -163,7 +165,11 @@ pub async fn update(
 }
 
 /// DELETE /api/v1/downloadclient/:id
-pub async fn delete(State(state): State<AppState>, Path(id): Path<i64>) -> Result<(), ApiError> {
+pub async fn delete(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+    Path(id): Path<i64>,
+) -> Result<(), ApiError> {
     let existing = state.db.get_download_client(id).await?;
     state.db.delete_download_client(id).await?;
 
@@ -249,11 +255,44 @@ fn request_base_url(req: &CreateDownloadClientApiRequest) -> String {
 /// POST /api/v1/downloadclient/test — test connection for qBit or SABnzbd
 pub async fn test(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Json(req): Json<CreateDownloadClientApiRequest>,
 ) -> Result<(), ApiError> {
+    run_connection_test(&state, &req).await
+}
+
+/// POST /api/v1/downloadclient/:id/test — test saved download client using DB creds
+pub async fn test_saved(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+    Path(id): Path<i64>,
+) -> Result<(), ApiError> {
+    let dc = state.db.get_download_client(id).await?;
+    let req = CreateDownloadClientApiRequest {
+        name: dc.name,
+        implementation: dc.implementation,
+        host: dc.host,
+        port: dc.port,
+        use_ssl: dc.use_ssl,
+        skip_ssl_validation: dc.skip_ssl_validation,
+        url_base: dc.url_base,
+        username: dc.username,
+        password: dc.password,
+        category: dc.category,
+        enabled: dc.enabled,
+        api_key: dc.api_key,
+    };
+    run_connection_test(&state, &req).await
+}
+
+/// Shared implementation for both test endpoints.
+async fn run_connection_test(
+    state: &AppState,
+    req: &CreateDownloadClientApiRequest,
+) -> Result<(), ApiError> {
     match req.implementation {
-        DownloadClientImplementation::SABnzbd => test_sabnzbd(&state, &req).await,
-        DownloadClientImplementation::QBittorrent => test_qbittorrent(&state, &req).await,
+        DownloadClientImplementation::SABnzbd => test_sabnzbd(state, req).await,
+        DownloadClientImplementation::QBittorrent => test_qbittorrent(state, req).await,
     }
 }
 

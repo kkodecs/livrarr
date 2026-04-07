@@ -639,11 +639,17 @@ pub async fn add_work_internal(
 
     // Run enrichment (synchronous, best-effort).
     let outcome = super::enrichment::enrich_work(state, &work).await;
-    let enriched_work = state
+    let enriched_work = match state
         .db
         .update_work_enrichment(user_id, work.id, outcome.request)
         .await
-        .unwrap_or(work);
+    {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(work_id = work.id, "update_work_enrichment failed: {e}");
+            work
+        }
+    };
 
     Ok(AddWorkResponse {
         work: work_to_detail(&enriched_work),
@@ -796,11 +802,20 @@ pub async fn refresh(
 
     // Re-enrich.
     let outcome = super::enrichment::enrich_work(&state, &work).await;
-    let enriched = state
+    let enriched = match state
         .db
         .update_work_enrichment(user_id, id, outcome.request)
         .await
-        .unwrap_or(work);
+    {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(
+                work_id = id,
+                "update_work_enrichment failed during refresh: {e}"
+            );
+            work
+        }
+    };
 
     // TAG-V21-004: rewrite tags on existing library items after re-enrichment.
     let mut messages = outcome.messages;

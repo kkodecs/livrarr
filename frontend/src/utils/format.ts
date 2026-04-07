@@ -10,7 +10,12 @@ export function formatRelativeDate(dateStr: string): string {
 }
 
 export function formatAbsoluteDate(iso: string): string {
-  return format(parseISO(iso), "MMM d, yyyy HH:mm");
+  let date = parseISO(iso);
+  // parseISO returns Invalid Date for non-ISO formats (e.g. RFC 2822 from Torznab).
+  // Fall back to native Date() which handles RFC 2822.
+  if (isNaN(date.getTime())) date = new Date(iso);
+  if (isNaN(date.getTime())) return iso;
+  return format(date, "MMM d, yyyy HH:mm");
 }
 
 export function formatMB(bytes: number): string {

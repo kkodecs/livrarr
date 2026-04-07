@@ -30,8 +30,12 @@ pub trait JobService: Send + Sync {
 pub enum JobError {
     #[error("job already running")]
     AlreadyRunning,
-    #[error("job failed: {0}")]
-    Failed(String),
+    #[error("job failed: {message}")]
+    Failed {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ interface ProfileForm {
 
 export default function ProfilePage() {
   const user = useAuthStore((s) => s.user);
+  const refreshUser = useAuthStore((s) => s.refreshUser);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [regenerating, setRegenerating] = useState(false);
 
@@ -32,6 +33,7 @@ export default function ProfilePage() {
         username: data.username,
         password: data.newPassword || null,
       });
+      await refreshUser();
       toast.success("Profile updated");
       reset({ ...data, newPassword: "", confirmPassword: "" });
     } catch (e: any) {

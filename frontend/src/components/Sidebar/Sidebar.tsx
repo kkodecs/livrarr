@@ -270,17 +270,16 @@ function SidebarItem({
 }) {
   if (item.greyed) {
     return (
-      <NavLink
-        to={item.path}
+      <span
         className={cn(
-          "flex items-center gap-3 rounded px-3 py-2 text-sm text-zinc-600 hover:text-zinc-500",
+          "flex items-center gap-3 rounded px-3 py-2 text-sm text-zinc-600 cursor-default",
           collapsed && "justify-center px-0",
         )}
         title="Coming Soon"
       >
         {item.icon}
         {!collapsed && <span>{item.label}</span>}
-      </NavLink>
+      </span>
     );
   }
 

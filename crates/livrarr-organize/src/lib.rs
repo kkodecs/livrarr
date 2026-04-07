@@ -91,7 +91,6 @@ pub enum ImportError {
 // ---------------------------------------------------------------------------
 
 /// Build target paths for imported files.
-#[trait_variant::make(Send)]
 pub trait PathBuilder: Send + Sync {
     /// Build ebook target path.
     /// Layout: {root}/{user_id}/{sanitized_author}/{sanitized_title}.{ext}

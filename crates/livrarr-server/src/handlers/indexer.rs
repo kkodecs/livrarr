@@ -5,6 +5,7 @@ use axum::Json;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+use crate::middleware::RequireAdmin;
 use crate::state::AppState;
 use crate::{
     ApiError, CreateIndexerApiRequest, IndexerResponse, TestIndexerApiRequest,
@@ -221,6 +222,7 @@ pub async fn get(
 /// POST /api/v1/indexer
 pub async fn create(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Json(req): Json<CreateIndexerApiRequest>,
 ) -> Result<Json<IndexerResponse>, ApiError> {
     // Validate.
@@ -310,6 +312,7 @@ pub async fn update(
 /// DELETE /api/v1/indexer/:id
 pub async fn delete(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
 ) -> Result<(), ApiError> {
     state.db.delete_indexer(id).await?;
@@ -319,6 +322,7 @@ pub async fn delete(
 /// POST /api/v1/indexer/test
 pub async fn test(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Json(req): Json<TestIndexerApiRequest>,
 ) -> Result<Json<TestIndexerApiResponse>, ApiError> {
     let result = test_indexer_caps(
@@ -334,6 +338,7 @@ pub async fn test(
 /// POST /api/v1/indexer/:id/test
 pub async fn test_saved(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
 ) -> Result<Json<TestIndexerApiResponse>, ApiError> {
     let indexer = state.db.get_indexer(id).await?;

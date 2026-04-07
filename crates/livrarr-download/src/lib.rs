@@ -270,6 +270,34 @@ pub fn extract_torrent_hash(source: &TorrentSource) -> Result<String, DownloadEr
     }
 }
 
+/// Simple percent-decode for magnet URI components.
+fn percent_decode(input: &str) -> String {
+    let mut result = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                result.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn extract_hash_from_magnet(uri: &str) -> Result<String, DownloadError> {
     // Parse xt= parameters
     let xt = uri
@@ -281,7 +309,9 @@ fn extract_hash_from_magnet(uri: &str) -> Result<String, DownloadError> {
             reason: "no xt= parameter found".to_string(),
         })?;
 
-    let xt_value = &xt[3..]; // skip "xt="
+    let xt_raw = &xt[3..]; // skip "xt="
+                           // URL-decode the xt value — magnet URIs may percent-encode colons and other chars.
+    let xt_value = percent_decode(xt_raw);
 
     if let Some(hash) = xt_value.strip_prefix("urn:btih:") {
         // BitTorrent v1: SHA-1
@@ -306,7 +336,11 @@ fn extract_hash_from_magnet(uri: &str) -> Result<String, DownloadError> {
     } else if let Some(hash) = xt_value.strip_prefix("urn:btmh:") {
         // BitTorrent v2: SHA-256 with multihash prefix
         // Strip only the varint function code (12), keep the digest length + hash
-        let stripped = hash.strip_prefix("12").unwrap_or(hash);
+        let stripped = hash
+            .strip_prefix("12")
+            .ok_or_else(|| DownloadError::InvalidMagnet {
+                reason: "unrecognized multihash prefix in btmh hash".to_string(),
+            })?;
         Ok(stripped.to_lowercase())
     } else {
         Err(DownloadError::InvalidMagnet {
@@ -316,6 +350,35 @@ fn extract_hash_from_magnet(uri: &str) -> Result<String, DownloadError> {
 }
 
 fn extract_hash_from_torrent_file(data: &[u8]) -> Result<String, DownloadError> {
+    // Verify the top-level bencode object is well-formed and there's no trailing data.
+    {
+        let mut top_decoder = bendy::decoding::Decoder::new(data);
+        let top_obj = top_decoder
+            .next_object()
+            .map_err(|e| DownloadError::InvalidTorrentFile {
+                reason: format!("malformed torrent file: {e}"),
+            })?
+            .ok_or_else(|| DownloadError::InvalidTorrentFile {
+                reason: "empty torrent file".to_string(),
+            })?;
+        // Consume the object fully so the decoder advances past it.
+        let _raw = top_obj
+            .try_into_dictionary()
+            .map_err(|e| DownloadError::InvalidTorrentFile {
+                reason: format!("torrent root is not a dictionary: {e}"),
+            })?
+            .into_raw()
+            .map_err(|e| DownloadError::InvalidTorrentFile {
+                reason: format!("failed to read torrent root: {e}"),
+            })?;
+        // After consuming the top-level object, the decoder should be at EOF.
+        if top_decoder.next_object().ok().flatten().is_some() {
+            return Err(DownloadError::InvalidTorrentFile {
+                reason: "trailing data after root bencode object".to_string(),
+            });
+        }
+    }
+
     // Locate the raw "info" dictionary bytes via pattern match, then use bendy to
     // find the dict boundary. SHA-1 hashing requires the raw bencode bytes.
     let info_start =
@@ -375,6 +438,13 @@ pub fn resolve_remote_path(
             continue;
         }
         if path.starts_with(&m.remote_path) && m.remote_path.len() > best_len {
+            // Verify the match is at a path boundary: the path must be exactly
+            // the remote_path, or the next character must be '/'.
+            // This prevents /data matching /database.
+            let remainder = &path[m.remote_path.len()..];
+            if !remainder.is_empty() && !remainder.starts_with('/') {
+                continue;
+            }
             best_match = Some(m);
             best_len = m.remote_path.len();
         }

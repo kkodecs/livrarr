@@ -260,6 +260,8 @@ export const testDownloadClient = (req: CreateDownloadClientRequest) =>
     method: "POST",
     body: JSON.stringify(req),
   });
+export const testSavedDownloadClient = (id: number) =>
+  apiFetch<void>(`/downloadclient/${id}/test`, { method: "POST" });
 
 // Remote Path Mappings
 export const listRemotePathMappings = () =>

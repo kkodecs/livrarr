@@ -12,6 +12,9 @@ use crate::{
     ApiError, AuthContext, GrabApiRequest, GrabStatus, ReleaseResponse, ReleaseSearchResponse,
     SearchWarning,
 };
+
+/// Maximum size for .torrent file downloads (10 MB).
+const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 use livrarr_db::{
     CreateGrabDbRequest, CreateHistoryEventDbRequest, DownloadClientDb, GrabDb, HistoryDb,
     IndexerDb, WorkDb,
@@ -842,7 +845,25 @@ async fn fetch_and_extract_hash(
         .ok();
     }
 
+    // Enforce size limit on .torrent downloads.
+    if let Some(content_length) = resp.content_length() {
+        if content_length as usize > MAX_DOWNLOAD_BYTES {
+            tracing::warn!(
+                content_length,
+                "download URL content-length exceeds MAX_DOWNLOAD_BYTES"
+            );
+            return None;
+        }
+    }
+
     let bytes = resp.bytes().await.ok()?;
+    if bytes.len() > MAX_DOWNLOAD_BYTES {
+        tracing::warn!(
+            size = bytes.len(),
+            "download URL response exceeds MAX_DOWNLOAD_BYTES"
+        );
+        return None;
+    }
 
     // Try as magnet text in body.
     if let Ok(text) = std::str::from_utf8(&bytes) {

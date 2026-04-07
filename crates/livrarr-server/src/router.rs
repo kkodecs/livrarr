@@ -64,6 +64,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
                 .put(handlers::download_client::update)
                 .delete(handlers::download_client::delete),
         )
+        .route(
+            "/downloadclient/{id}/test",
+            post(handlers::download_client::test_saved),
+        )
         // Remote path mappings
         .route(
             "/remotepathmapping",

@@ -61,7 +61,13 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
         series_position: row
             .try_get("series_position")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-        genres: genres_str.and_then(|s| serde_json::from_str(&s).ok()),
+        genres: genres_str
+            .map(|s| {
+                serde_json::from_str(&s).map_err(|e| DbError::IncompatibleData {
+                    detail: format!("invalid JSON in works.genres: {e}"),
+                })
+            })
+            .transpose()?,
         language: row
             .try_get("language")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -87,8 +93,16 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
             .try_get("isbn_13")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         asin: row.try_get("asin").map_err(|e| DbError::Io(Box::new(e)))?,
-        narrator: narrator_str.and_then(|s| serde_json::from_str(&s).ok()),
-        narration_type: narration_type_str.and_then(|s| parse_narration_type(&s)),
+        narrator: narrator_str
+            .map(|s| {
+                serde_json::from_str(&s).map_err(|e| DbError::IncompatibleData {
+                    detail: format!("invalid JSON in works.narrator: {e}"),
+                })
+            })
+            .transpose()?,
+        narration_type: narration_type_str
+            .map(|s| parse_narration_type(&s))
+            .transpose()?,
         abridged: row
             .try_get::<bool, _>("abridged")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -98,7 +112,7 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
         rating_count: row
             .try_get("rating_count")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-        enrichment_status: parse_enrichment_status(&enrichment_status_str),
+        enrichment_status: parse_enrichment_status(&enrichment_status_str)?,
         enrichment_retry_count: row
             .try_get::<i32, _>("enrichment_retry_count")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -119,13 +133,16 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
     })
 }
 
-fn parse_enrichment_status(s: &str) -> EnrichmentStatus {
+fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
     match s {
-        "partial" => EnrichmentStatus::Partial,
-        "enriched" => EnrichmentStatus::Enriched,
-        "failed" => EnrichmentStatus::Failed,
-        "exhausted" => EnrichmentStatus::Exhausted,
-        _ => EnrichmentStatus::Pending,
+        "pending" => Ok(EnrichmentStatus::Pending),
+        "partial" => Ok(EnrichmentStatus::Partial),
+        "enriched" => Ok(EnrichmentStatus::Enriched),
+        "failed" => Ok(EnrichmentStatus::Failed),
+        "exhausted" => Ok(EnrichmentStatus::Exhausted),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown enrichment status: {s}"),
+        }),
     }
 }
 
@@ -139,12 +156,14 @@ fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
     }
 }
 
-fn parse_narration_type(s: &str) -> Option<NarrationType> {
+fn parse_narration_type(s: &str) -> Result<NarrationType, DbError> {
     match s {
-        "human" => Some(NarrationType::Human),
-        "ai" => Some(NarrationType::Ai),
-        "ai_authorized_replica" => Some(NarrationType::AiAuthorizedReplica),
-        _ => None,
+        "human" => Ok(NarrationType::Human),
+        "ai" => Ok(NarrationType::Ai),
+        "ai_authorized_replica" => Ok(NarrationType::AiAuthorizedReplica),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown narration type: {s}"),
+        }),
     }
 }
 
@@ -296,44 +315,26 @@ impl WorkDb for SqliteDb {
         id: WorkId,
         req: UpdateWorkUserFieldsDbRequest,
     ) -> Result<Work, DbError> {
-        self.get_work(user_id, id).await?;
+        let current = self.get_work(user_id, id).await?;
 
-        if let Some(title) = &req.title {
-            sqlx::query("UPDATE works SET title = ? WHERE id = ? AND user_id = ?")
-                .bind(title)
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(author_name) = &req.author_name {
-            sqlx::query("UPDATE works SET author_name = ? WHERE id = ? AND user_id = ?")
-                .bind(author_name)
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(series_name) = &req.series_name {
-            sqlx::query("UPDATE works SET series_name = ? WHERE id = ? AND user_id = ?")
-                .bind(series_name)
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(series_position) = req.series_position {
-            sqlx::query("UPDATE works SET series_position = ? WHERE id = ? AND user_id = ?")
-                .bind(series_position)
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
+        let title = req.title.unwrap_or(current.title);
+        let author_name = req.author_name.unwrap_or(current.author_name);
+        let series_name = req.series_name.or(current.series_name);
+        let series_position = req.series_position.or(current.series_position);
+
+        sqlx::query(
+            "UPDATE works SET title = ?, author_name = ?, series_name = ?, series_position = ? \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(&title)
+        .bind(&author_name)
+        .bind(&series_name)
+        .bind(series_position)
+        .bind(id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
 
         self.get_work(user_id, id).await
     }

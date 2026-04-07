@@ -94,6 +94,7 @@ pub trait EnrichmentService: Send + Sync {
     ) -> Result<EnrichmentResult, EnrichmentError>;
 }
 
+#[derive(Debug, Clone)]
 pub struct EnrichmentResult {
     pub enrichment_status: EnrichmentStatus,
     pub enrichment_source: Option<String>,
@@ -157,14 +158,14 @@ pub struct LlmMessage {
     pub content: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum LlmError {
     #[error("LLM not configured")]
     NotConfigured,
     #[error("LLM request failed: {0}")]
     RequestFailed(String),
-    #[error("LLM timeout")]
-    Timeout,
+    #[error("LLM timeout after {0:?}")]
+    Timeout(Duration),
     #[error("LLM rate limited")]
     RateLimited,
     #[error("LLM returned invalid response: {0}")]
@@ -520,10 +521,7 @@ pub mod tests {
                     .max_by_key(|c| c.users_read_count)
                     .cloned(),
                 MatcherMode::Ambiguous | MatcherMode::LlmTimeout | MatcherMode::LlmSuccess => {
-                    if candidates.is_empty() {
-                        return None;
-                    }
-                    None // ambiguous
+                    None // ambiguous — defer to LLM
                 }
             }
         }
@@ -613,7 +611,8 @@ pub mod tests {
                     .join("MediaCover")
                     .join(work_id.to_string())
                     .join("cover.jpg"),
-                _ => PathBuf::from("/tmp/livrarr")
+                _ => std::env::temp_dir()
+                    .join("livrarr")
                     .join("MediaCover")
                     .join(work_id.to_string())
                     .join("cover.jpg"),
@@ -667,7 +666,7 @@ pub mod tests {
                 LlmMode::Ok(s) => Ok(s.clone()),
                 LlmMode::Err(k) => Err(match k {
                     LlmErrorKind::NotConfigured => LlmError::NotConfigured,
-                    LlmErrorKind::Timeout => LlmError::Timeout,
+                    LlmErrorKind::Timeout => LlmError::Timeout(Duration::from_secs(30)),
                     LlmErrorKind::RateLimited => LlmError::RateLimited,
                     LlmErrorKind::RequestFailed(s) => LlmError::RequestFailed(s.clone()),
                 }),
@@ -684,7 +683,7 @@ pub mod tests {
     pub fn llm_stub_err(err: LlmError) -> StubLlmClient {
         let kind = match err {
             LlmError::NotConfigured => LlmErrorKind::NotConfigured,
-            LlmError::Timeout => LlmErrorKind::Timeout,
+            LlmError::Timeout(_) => LlmErrorKind::Timeout,
             LlmError::RateLimited => LlmErrorKind::RateLimited,
             LlmError::RequestFailed(s) => LlmErrorKind::RequestFailed(s),
             LlmError::InvalidResponse(s) => LlmErrorKind::RequestFailed(s),

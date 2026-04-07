@@ -85,62 +85,31 @@ impl AuthorDb for SqliteDb {
         id: AuthorId,
         req: UpdateAuthorDbRequest,
     ) -> Result<Author, DbError> {
-        self.get_author(user_id, id).await?;
+        let current = self.get_author(user_id, id).await?;
 
-        if let Some(name) = &req.name {
-            sqlx::query("UPDATE authors SET name = ? WHERE id = ? AND user_id = ?")
-                .bind(name)
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(sort_name) = &req.sort_name {
-            sqlx::query("UPDATE authors SET sort_name = ? WHERE id = ? AND user_id = ?")
-                .bind(sort_name)
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(ol_key) = &req.ol_key {
-            sqlx::query("UPDATE authors SET ol_key = ? WHERE id = ? AND user_id = ?")
-                .bind(ol_key)
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(monitored) = req.monitored {
-            sqlx::query("UPDATE authors SET monitored = ? WHERE id = ? AND user_id = ?")
-                .bind(monitored)
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(monitor_new_items) = req.monitor_new_items {
-            sqlx::query("UPDATE authors SET monitor_new_items = ? WHERE id = ? AND user_id = ?")
-                .bind(monitor_new_items)
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(monitor_since) = &req.monitor_since {
-            sqlx::query("UPDATE authors SET monitor_since = ? WHERE id = ? AND user_id = ?")
-                .bind(monitor_since.to_rfc3339())
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
+        let name = req.name.unwrap_or(current.name);
+        let sort_name = req.sort_name.or(current.sort_name);
+        let ol_key = req.ol_key.or(current.ol_key);
+        let monitored = req.monitored.unwrap_or(current.monitored);
+        let monitor_new_items = req.monitor_new_items.unwrap_or(current.monitor_new_items);
+        let monitor_since = req.monitor_since.or(current.monitor_since);
+
+        sqlx::query(
+            "UPDATE authors SET name = ?, sort_name = ?, ol_key = ?, \
+             monitored = ?, monitor_new_items = ?, monitor_since = ? \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(&name)
+        .bind(&sort_name)
+        .bind(&ol_key)
+        .bind(monitored)
+        .bind(monitor_new_items)
+        .bind(monitor_since.map(|dt| dt.to_rfc3339()))
+        .bind(id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
 
         self.get_author(user_id, id).await
     }

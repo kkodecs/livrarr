@@ -76,7 +76,7 @@ impl HttpClientBuilder {
 
         let inner = builder
             .build()
-            .map_err(|e| HttpClientError::Request(e.to_string()))?;
+            .map_err(|e| HttpClientError::Build(e.to_string()))?;
 
         Ok(HttpClient { inner })
     }
@@ -84,8 +84,13 @@ impl HttpClientBuilder {
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpClientError {
-    #[error("request failed: {0}")]
-    Request(String),
+    #[error("request failed: {source}")]
+    Request {
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("request build failed: {0}")]
+    Build(String),
     #[error("timeout after {0:?}")]
     Timeout(Duration),
     #[error("TLS error: {0}")]

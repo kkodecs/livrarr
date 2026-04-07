@@ -20,6 +20,7 @@ livrarr-db = { workspace = true }
 livrarr-http = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-tagwrite = { workspace = true }
+futures = "0.3"
 libc = "0.2"
 toml = "1.1"
 tracing = "0.1"

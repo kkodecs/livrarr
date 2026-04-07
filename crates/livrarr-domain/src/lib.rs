@@ -13,8 +13,9 @@ pub type RootFolderId = i64;
 pub type GrabId = i64;
 pub type DownloadClientId = i64;
 pub type RemotePathMappingId = i64;
-pub type SessionTokenHash = String;
-pub type ApiKeyHash = String;
+// SessionTokenHash and ApiKeyHash were previously defined here as type aliases
+// for String. They were unused in struct fields (which use plain String) and
+// have been removed to avoid confusion.
 pub type HistoryId = i64;
 pub type NotificationId = i64;
 pub type ExternalIdRowId = i64;
@@ -529,7 +530,7 @@ impl std::fmt::Debug for Indexer {
 }
 
 // ---------------------------------------------------------------------------
-// Domain Functions (stubs)
+// Domain Functions
 // ---------------------------------------------------------------------------
 
 /// Sanitizes a path component for filesystem use.
@@ -571,7 +572,12 @@ pub fn sanitize_path_component(input: &str, fallback: &str) -> String {
     }
 }
 
-/// Derives sort name from display name.
+/// Derives sort name from display name using a surname-as-last-word heuristic.
+///
+/// Note: Assumes the last whitespace-delimited word is the surname. This is
+/// incorrect for some naming conventions (e.g., East Asian, Iberian, compound
+/// surnames like "van der Berg"), but matches the Readarr/Servarr convention.
+///
 /// "Frank Herbert" -> "Herbert, Frank"
 /// "J.R.R. Tolkien" -> "Tolkien, J.R.R."
 /// Single-word name -> returned as-is.

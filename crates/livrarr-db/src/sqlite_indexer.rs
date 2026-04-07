@@ -6,8 +6,10 @@ use crate::{
     CreateIndexerDbRequest, DbError, Indexer, IndexerDb, IndexerId, UpdateIndexerDbRequest,
 };
 
-fn parse_categories(s: &str) -> Vec<i32> {
-    serde_json::from_str(s).unwrap_or_else(|_| vec![7020, 3030])
+fn parse_categories(s: &str) -> Result<Vec<i32>, DbError> {
+    serde_json::from_str(s).map_err(|e| DbError::IncompatibleData {
+        detail: format!("invalid JSON in indexers.categories: {e}"),
+    })
 }
 
 fn row_to_indexer(row: sqlx::sqlite::SqliteRow) -> Result<Indexer, DbError> {
@@ -33,7 +35,7 @@ fn row_to_indexer(row: sqlx::sqlite::SqliteRow) -> Result<Indexer, DbError> {
         api_key: row
             .try_get("api_key")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-        categories: parse_categories(&categories_str),
+        categories: parse_categories(&categories_str)?,
         priority: row
             .try_get::<i32, _>("priority")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -124,14 +126,11 @@ impl IndexerDb for SqliteDb {
             .api_path
             .clone()
             .unwrap_or_else(|| current.api_path.clone());
-        let api_key = req
-            .api_key
-            .clone()
-            .unwrap_or_else(|| current.api_key.clone().unwrap_or_default());
-        let api_key_opt = if api_key.is_empty() {
-            current.api_key.clone()
-        } else {
-            Some(api_key)
+        // API key semantics: None = keep existing, Some("") = clear, Some(value) = set new.
+        let api_key_opt = match req.api_key.as_deref() {
+            None => current.api_key.clone(), // not provided, keep existing
+            Some("") => None,                // explicitly cleared
+            Some(value) => Some(value.to_string()), // set new value
         };
         let categories = req.categories.unwrap_or(current.categories);
         let priority = req.priority.unwrap_or(current.priority);

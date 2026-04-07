@@ -4,6 +4,7 @@ use axum::Json;
 use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 
+use crate::middleware::RequireAdmin;
 use crate::state::AppState;
 use crate::{
     AddAuthorRequest, ApiError, AuthContext, AuthorDetailResponse, AuthorResponse,
@@ -263,7 +264,7 @@ pub async fn delete(
 
 /// POST /api/v1/author/search — trigger author monitor check for all monitored authors.
 /// Returns 202 Accepted; work runs in the background.
-pub async fn search(State(state): State<AppState>) -> StatusCode {
+pub async fn search(State(state): State<AppState>, _admin: RequireAdmin) -> StatusCode {
     tokio::spawn(async move {
         let cancel = CancellationToken::new();
         if let Err(e) = crate::jobs::author_monitor_tick(state, cancel).await {

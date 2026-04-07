@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useSearchParams, useNavigate, Link } from "react-router";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Search, Plus, Loader2 } from "lucide-react";
@@ -23,7 +23,6 @@ export default function SearchPage() {
   const [term, setTerm] = useState(initialQuery);
   const [olResults, setOlResults] = useState<WorkSearchResult[] | null>(null);
   const [selectedOlKey, setSelectedOlKey] = useState<string | null>(null);
-  const [monitored, setMonitored] = useState(false);
   const [lastSearched, setLastSearched] = useState("");
 
   // Local library data
@@ -75,10 +74,17 @@ export default function SearchPage() {
     },
   });
 
-  // Auto-search when query param changes (from header search bar or direct nav)
+  // Sync input with URL params — auto-search when q changes, clear when q removed
   useEffect(() => {
     const q = searchParams.get("q")?.trim() ?? "";
-    if (q && q !== lastSearched && !searchMutation.isPending) {
+    if (!q) {
+      // q param removed — clear input and results
+      setTerm("");
+      setOlResults(null);
+      setLastSearched("");
+      return;
+    }
+    if (q !== lastSearched && !searchMutation.isPending) {
       setTerm(q);
       setLastSearched(q);
       searchMutation.mutate(q);
@@ -97,9 +103,18 @@ export default function SearchPage() {
   // Filter add-results to exclude works already in the library.
   // Match on olKey OR title+author (case-insensitive) since Hardcover results
   // use different keys than OL-sourced library items.
-  const libraryOlKeys = new Set((allWorks ?? []).map((w) => w.olKey).filter(Boolean));
-  const libraryTitleAuthor = new Set(
-    (allWorks ?? []).map((w) => `${w.title.toLowerCase()}|${w.authorName.toLowerCase()}`),
+  const libraryOlKeys = useMemo(
+    () => new Set((allWorks ?? []).map((w) => w.olKey).filter(Boolean)),
+    [allWorks],
+  );
+  const libraryTitleAuthor = useMemo(
+    () =>
+      new Set(
+        (allWorks ?? []).map(
+          (w) => `${w.title.toLowerCase()}|${w.authorName.toLowerCase()}`,
+        ),
+      ),
+    [allWorks],
   );
   const filteredOlResults =
     olResults?.filter(
@@ -195,8 +210,6 @@ export default function SearchPage() {
                     }
                     onAdd={() => addMutation.mutate(work)}
                     isAdding={addMutation.isPending}
-                    monitored={monitored}
-                    onMonitoredChange={setMonitored}
                   />
                 ))}
               </div>
@@ -250,16 +263,12 @@ function OlResult({
   onSelect,
   onAdd,
   isAdding,
-  monitored,
-  onMonitoredChange,
 }: {
   work: WorkSearchResult;
   isSelected: boolean;
   onSelect: () => void;
   onAdd: () => void;
   isAdding: boolean;
-  monitored: boolean;
-  onMonitoredChange: (v: boolean) => void;
 }) {
   return (
     <div
@@ -300,15 +309,6 @@ function OlResult({
 
       {isSelected && (
         <div className="flex items-center gap-4 px-2 pb-1.5 pt-0.5">
-          <label className="flex items-center gap-2 text-xs text-zinc-300">
-            <input
-              type="checkbox"
-              checked={monitored}
-              onChange={(e) => onMonitoredChange(e.target.checked)}
-              className="h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-900 text-brand"
-            />
-            Monitored
-          </label>
           <button
             onClick={onAdd}
             disabled={isAdding}

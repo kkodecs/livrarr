@@ -36,7 +36,7 @@ export function PathPicker({ initialPath = "/", onSelect, onClose }: PathPickerP
       <div className="max-h-64 overflow-y-auto space-y-0.5">
         {data?.parent && (
           <button
-            onClick={() => setCurrentPath(data.parent!)}
+            onClick={() => data.parent && setCurrentPath(data.parent)}
             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800"
           >
             <ChevronUp size={14} className="text-muted" />

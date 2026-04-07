@@ -3,6 +3,7 @@ pub use livrarr_domain::*;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 pub mod api_secondary_impl;
 pub mod auth_crypto;
 pub mod auth_impl;

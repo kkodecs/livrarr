@@ -1,15 +1,7 @@
 use crate::sqlite::SqliteDb;
+use crate::sqlite_common::map_db_err_with;
 use crate::{AuthorBibliography, AuthorBibliographyDb, BibliographyEntry, DbError};
 use sqlx::Row;
-
-fn map_db_err(e: sqlx::Error) -> DbError {
-    match e {
-        sqlx::Error::RowNotFound => DbError::NotFound {
-            entity: "bibliography",
-        },
-        _ => DbError::Io(Box::new(e)),
-    }
-}
 
 impl AuthorBibliographyDb for SqliteDb {
     async fn get_bibliography(
@@ -21,7 +13,7 @@ impl AuthorBibliographyDb for SqliteDb {
                 .bind(author_id)
                 .fetch_optional(self.pool())
                 .await
-                .map_err(map_db_err)?;
+                .map_err(map_db_err_with("bibliography"))?;
 
         match row {
             Some(row) => {
@@ -57,7 +49,7 @@ impl AuthorBibliographyDb for SqliteDb {
         .bind(&now)
         .execute(self.pool())
         .await
-        .map_err(map_db_err)?;
+        .map_err(map_db_err_with("bibliography"))?;
 
         Ok(AuthorBibliography {
             author_id,

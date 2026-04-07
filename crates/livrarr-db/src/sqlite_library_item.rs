@@ -30,7 +30,7 @@ fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbEr
             .try_get::<i64, _>("root_folder_id")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         path: row.try_get("path").map_err(|e| DbError::Io(Box::new(e)))?,
-        media_type: parse_media_type(&media_type_str),
+        media_type: parse_media_type(&media_type_str)?,
         file_size: row
             .try_get::<i64, _>("file_size")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -38,10 +38,13 @@ fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbEr
     })
 }
 
-fn parse_media_type(s: &str) -> MediaType {
+fn parse_media_type(s: &str) -> Result<MediaType, DbError> {
     match s {
-        "audiobook" => MediaType::Audiobook,
-        _ => MediaType::Ebook,
+        "ebook" => Ok(MediaType::Ebook),
+        "audiobook" => Ok(MediaType::Audiobook),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown media type: {s}"),
+        }),
     }
 }
 
@@ -101,7 +104,13 @@ impl LibraryItemDb for SqliteDb {
 
         let id = sqlx::query(
             "INSERT INTO library_items (user_id, work_id, root_folder_id, path, media_type, file_size, imported_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(user_id, path) DO UPDATE SET \
+               work_id = excluded.work_id, \
+               root_folder_id = excluded.root_folder_id, \
+               media_type = excluded.media_type, \
+               file_size = excluded.file_size, \
+               imported_at = excluded.imported_at",
         )
         .bind(req.user_id)
         .bind(req.work_id)

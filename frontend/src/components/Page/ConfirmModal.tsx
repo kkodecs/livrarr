@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
+import { toast } from "sonner";
 
 export function ConfirmModal({
   open,
@@ -35,6 +36,10 @@ export function ConfirmModal({
     try {
       await onConfirm();
       onOpenChange(false);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "An unexpected error occurred";
+      toast.error(message);
     } finally {
       setConfirming(false);
       setTypedValue("");

@@ -79,6 +79,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     });
   },
 
+  // Setup lives in the auth store because it creates the first user and
+  // returns an auth token in a single atomic operation.
   setupAction: async (username, password) => {
     const { token, apiKey } = await api.setup({ username, password });
     setToken(token);

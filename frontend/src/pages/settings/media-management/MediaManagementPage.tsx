@@ -562,7 +562,7 @@ export default function MediaManagementPage() {
           </div>
         </section>
 
-        {/* ── File Management (coming soon) ── */}
+        {/* ── File Management (coming soon) — intentional placeholder for post-alpha features ── */}
         <section className="rounded-lg border border-border bg-zinc-900/50 opacity-60" title="Coming Soon">
           <div className="flex items-center gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
             <HardDrive size={18} className="text-muted" />

@@ -1,7 +1,6 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::path::Path;
-use std::str::FromStr;
 
 /// Create and configure a SQLite connection pool.
 ///
@@ -11,9 +10,12 @@ use std::str::FromStr;
 /// - journal_size_limit=64MB, wal_autocheckpoint=1000 pages (~4MB)
 pub async fn create_sqlite_pool(data_dir: &Path) -> Result<SqlitePool, sqlx::Error> {
     let db_path = data_dir.join("livrarr.db");
-    let url = format!("sqlite://{}?mode=rwc", db_path.display());
 
-    let options = SqliteConnectOptions::from_str(&url)?
+    // Use filename() instead of URL parsing to safely handle paths containing
+    // special characters like '#' or '?' that would break URL parsing.
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .busy_timeout(std::time::Duration::from_secs(5))
         .pragma("foreign_keys", "ON")
@@ -40,7 +42,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::Migr
 // ── Startup checks ──────────────────────────────────────────────────────────
 
 /// Maximum schema_version this binary understands.
-const MAX_SCHEMA_VERSION: i64 = 10;
+const MAX_SCHEMA_VERSION: i64 = 11;
 /// Maximum data_version this binary understands.
 const MAX_DATA_VERSION: i64 = 1;
 
@@ -94,24 +96,45 @@ pub fn check_data_dir_permissions(data_dir: &Path) -> Result<(), String> {
 }
 
 /// Write a PID lock file. Returns Err if a live instance is detected.
+///
+/// Uses O_EXCL (create_new) to atomically detect an existing lock file,
+/// eliminating the TOCTOU race between checking and creating.
 pub fn acquire_pid_lock(data_dir: &Path) -> Result<(), String> {
+    use std::io::Write;
     let lock_path = data_dir.join("livrarr.pid");
 
-    if lock_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&lock_path) {
-            if let Ok(pid) = contents.trim().parse::<u32>() {
-                // Check if process is still running
-                let proc_path = format!("/proc/{pid}");
-                if Path::new(&proc_path).exists() {
-                    return Err(format!(
-                        "another Livrarr instance (PID {pid}) is running. Remove {lock_path:?} if this is stale."
-                    ));
-                }
-            }
+    // Try atomic creation first — fails if file already exists.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(mut f) => {
+            write!(f, "{}", std::process::id())
+                .map_err(|e| format!("failed to write PID lock: {e}"))?;
+            return Ok(());
         }
-        tracing::warn!("stale PID lock file detected, overwriting");
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // File exists — check if the owning process is still alive.
+        }
+        Err(e) => {
+            return Err(format!("failed to create PID lock: {e}"));
+        }
     }
 
+    // Lock file exists — check if stale.
+    if let Ok(contents) = std::fs::read_to_string(&lock_path) {
+        if let Ok(pid) = contents.trim().parse::<u32>() {
+            let proc_path = format!("/proc/{pid}");
+            if Path::new(&proc_path).exists() {
+                return Err(format!(
+                    "another Livrarr instance (PID {pid}) is running. Remove {lock_path:?} if this is stale."
+                ));
+            }
+        }
+    }
+
+    tracing::warn!("stale PID lock file detected, overwriting");
     std::fs::write(&lock_path, std::process::id().to_string())
         .map_err(|e| format!("failed to write PID lock: {e}"))?;
     Ok(())
@@ -134,7 +157,9 @@ pub async fn create_backup(
     let backup_path = data_dir.join(&backup_name);
     let backup_str = backup_path.display().to_string();
 
-    sqlx::query(&format!("VACUUM INTO '{backup_str}'"))
+    // Escape single quotes to prevent SQL injection via path.
+    let escaped = backup_str.replace('\'', "''");
+    sqlx::query(&format!("VACUUM INTO '{escaped}'"))
         .execute(pool)
         .await
         .map_err(|e| format!("VACUUM INTO backup failed: {e}"))?;
@@ -145,10 +170,22 @@ pub async fn create_backup(
 
 /// Delete old backups, keeping the most recent `keep` versions.
 pub fn cleanup_old_backups(data_dir: &Path, keep: usize) {
-    let mut backups: Vec<_> = std::fs::read_dir(data_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
+    let dir_entries = match std::fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("failed to read data directory for backup cleanup: {e}");
+            return;
+        }
+    };
+
+    let mut backups: Vec<_> = dir_entries
+        .filter_map(|entry| match entry {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::warn!("error reading directory entry during backup cleanup: {e}");
+                None
+            }
+        })
         .filter(|e| {
             e.file_name()
                 .to_string_lossy()

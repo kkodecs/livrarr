@@ -8,13 +8,15 @@ use crate::{
     UpdateProwlarrConfigRequest,
 };
 
-fn parse_llm_provider(s: &str) -> Option<LlmProvider> {
+fn parse_llm_provider(s: &str) -> Result<LlmProvider, DbError> {
     match s {
-        "groq" => Some(LlmProvider::Groq),
-        "gemini" => Some(LlmProvider::Gemini),
-        "openai" => Some(LlmProvider::Openai),
-        "custom" => Some(LlmProvider::Custom),
-        _ => None,
+        "groq" => Ok(LlmProvider::Groq),
+        "gemini" => Ok(LlmProvider::Gemini),
+        "openai" => Ok(LlmProvider::Openai),
+        "custom" => Ok(LlmProvider::Custom),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown LLM provider: {s}"),
+        }),
     }
 }
 
@@ -27,8 +29,10 @@ fn llm_provider_str(p: &LlmProvider) -> &'static str {
     }
 }
 
-fn parse_languages(s: &str) -> Vec<String> {
-    serde_json::from_str(s).unwrap_or_else(|_| vec!["en".to_string()])
+fn parse_languages(s: &str) -> Result<Vec<String>, DbError> {
+    serde_json::from_str(s).map_err(|e| DbError::IncompatibleData {
+        detail: format!("invalid JSON in metadata_config.languages: {e}"),
+    })
 }
 
 impl ConfigDb for SqliteDb {
@@ -121,27 +125,19 @@ impl ConfigDb for SqliteDb {
         &self,
         req: UpdateProwlarrConfigRequest,
     ) -> Result<ProwlarrConfig, DbError> {
-        if let Some(url) = &req.url {
-            sqlx::query("UPDATE prowlarr_config SET url = ? WHERE id = 1")
-                .bind(url)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(api_key) = &req.api_key {
-            sqlx::query("UPDATE prowlarr_config SET api_key = ? WHERE id = 1")
-                .bind(api_key)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(enabled) = req.enabled {
-            sqlx::query("UPDATE prowlarr_config SET enabled = ? WHERE id = 1")
-                .bind(enabled)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
+        let current = self.get_prowlarr_config().await?;
+
+        let url = req.url.or(current.url);
+        let api_key = req.api_key.or(current.api_key);
+        let enabled = req.enabled.unwrap_or(current.enabled);
+
+        sqlx::query("UPDATE prowlarr_config SET url = ?, api_key = ?, enabled = ? WHERE id = 1")
+            .bind(&url)
+            .bind(&api_key)
+            .bind(enabled)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         self.get_prowlarr_config().await
     }
@@ -165,7 +161,9 @@ impl ConfigDb for SqliteDb {
                 .try_get("hardcover_api_token")
                 .map_err(|e| DbError::Io(Box::new(e)))?,
             llm_enabled: row.try_get::<bool, _>("llm_enabled").unwrap_or(true),
-            llm_provider: llm_provider_str.and_then(|s| parse_llm_provider(&s)),
+            llm_provider: llm_provider_str
+                .map(|s| parse_llm_provider(&s))
+                .transpose()?,
             llm_endpoint: row
                 .try_get("llm_endpoint")
                 .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -178,7 +176,7 @@ impl ConfigDb for SqliteDb {
             audnexus_url: row
                 .try_get("audnexus_url")
                 .map_err(|e| DbError::Io(Box::new(e)))?,
-            languages: parse_languages(&languages_str),
+            languages: parse_languages(&languages_str)?,
         })
     }
 
@@ -186,70 +184,40 @@ impl ConfigDb for SqliteDb {
         &self,
         req: UpdateMetadataConfigRequest,
     ) -> Result<MetadataConfig, DbError> {
-        if let Some(enabled) = req.hardcover_enabled {
-            sqlx::query("UPDATE metadata_config SET hardcover_enabled = ? WHERE id = 1")
-                .bind(enabled)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(token) = &req.hardcover_api_token {
-            sqlx::query("UPDATE metadata_config SET hardcover_api_token = ? WHERE id = 1")
-                .bind(token)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(enabled) = req.llm_enabled {
-            sqlx::query("UPDATE metadata_config SET llm_enabled = ? WHERE id = 1")
-                .bind(enabled)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(provider) = &req.llm_provider {
-            sqlx::query("UPDATE metadata_config SET llm_provider = ? WHERE id = 1")
-                .bind(llm_provider_str(provider))
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(endpoint) = &req.llm_endpoint {
-            sqlx::query("UPDATE metadata_config SET llm_endpoint = ? WHERE id = 1")
-                .bind(endpoint)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(key) = &req.llm_api_key {
-            sqlx::query("UPDATE metadata_config SET llm_api_key = ? WHERE id = 1")
-                .bind(key)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(model) = &req.llm_model {
-            sqlx::query("UPDATE metadata_config SET llm_model = ? WHERE id = 1")
-                .bind(model)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(url) = &req.audnexus_url {
-            sqlx::query("UPDATE metadata_config SET audnexus_url = ? WHERE id = 1")
-                .bind(url)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(languages) = &req.languages {
-            let json = serde_json::to_string(languages).map_err(|e| DbError::Io(Box::new(e)))?;
-            sqlx::query("UPDATE metadata_config SET languages = ? WHERE id = 1")
-                .bind(&json)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
+        let current = self.get_metadata_config().await?;
+
+        let hardcover_enabled = req.hardcover_enabled.unwrap_or(current.hardcover_enabled);
+        let hardcover_api_token = req.hardcover_api_token.or(current.hardcover_api_token);
+        let llm_enabled = req.llm_enabled.unwrap_or(current.llm_enabled);
+        let llm_provider = req.llm_provider.or(current.llm_provider);
+        let llm_provider_val = llm_provider.as_ref().map(llm_provider_str);
+        let llm_endpoint = req.llm_endpoint.or(current.llm_endpoint);
+        let llm_api_key = req.llm_api_key.or(current.llm_api_key);
+        let llm_model = req.llm_model.or(current.llm_model);
+        let audnexus_url = req.audnexus_url.unwrap_or(current.audnexus_url);
+        let languages = req.languages.unwrap_or(current.languages);
+        let languages_json =
+            serde_json::to_string(&languages).map_err(|e| DbError::Io(Box::new(e)))?;
+
+        sqlx::query(
+            "UPDATE metadata_config SET \
+             hardcover_enabled = ?, hardcover_api_token = ?, \
+             llm_enabled = ?, llm_provider = ?, llm_endpoint = ?, \
+             llm_api_key = ?, llm_model = ?, audnexus_url = ?, languages = ? \
+             WHERE id = 1",
+        )
+        .bind(hardcover_enabled)
+        .bind(&hardcover_api_token)
+        .bind(llm_enabled)
+        .bind(llm_provider_val)
+        .bind(&llm_endpoint)
+        .bind(&llm_api_key)
+        .bind(&llm_model)
+        .bind(&audnexus_url)
+        .bind(&languages_json)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
 
         self.get_metadata_config().await
     }

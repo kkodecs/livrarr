@@ -16,6 +16,8 @@ import {
   CheckSquare,
 } from "lucide-react";
 import { listWorks, refreshAllWorks, deleteWork, refreshWork } from "@/api";
+import { sortWorks } from "@/utils/works";
+import type { WorkSortField } from "@/utils/works";
 import { useUIStore } from "@/stores/ui";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
@@ -32,35 +34,7 @@ import type {
   MediaType,
 } from "@/types/api";
 
-type SortField = "title" | "authorName" | "year" | "addedAt";
-
 const ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ#".split("");
-
-function sortWorks(
-  works: WorkDetailResponse[],
-  field: SortField,
-  dir: "asc" | "desc",
-): WorkDetailResponse[] {
-  const sorted = [...works].sort((a, b) => {
-    let cmp = 0;
-    switch (field) {
-      case "title":
-        cmp = (a.sortTitle ?? a.title).localeCompare(b.sortTitle ?? b.title);
-        break;
-      case "authorName":
-        cmp = a.authorName.localeCompare(b.authorName);
-        break;
-      case "year":
-        cmp = (a.year ?? 0) - (b.year ?? 0);
-        break;
-      case "addedAt":
-        cmp = a.addedAt.localeCompare(b.addedAt);
-        break;
-    }
-    return dir === "desc" ? -cmp : cmp;
-  });
-  return sorted;
-}
 
 export function WorksPage() {
   const queryClient = useQueryClient();
@@ -83,7 +57,7 @@ export function WorksPage() {
 
   const worksView = useUIStore((s) => s.worksView);
   const setWorksView = useUIStore((s) => s.setWorksView);
-  const worksSort = useUIStore((s) => s.worksSort) as SortField;
+  const worksSort = useUIStore((s) => s.worksSort) as WorkSortField;
   const worksSortDir = useUIStore((s) => s.worksSortDir);
   const setWorksSort = useUIStore((s) => s.setWorksSort);
 
@@ -202,7 +176,7 @@ export function WorksPage() {
     queryClient.invalidateQueries({ queryKey: ["works"] });
   };
 
-  const handleSort = (field: SortField) => {
+  const handleSort = (field: WorkSortField) => {
     if (worksSort === field) {
       setWorksSort(field, worksSortDir === "asc" ? "desc" : "asc");
     } else {
@@ -454,9 +428,9 @@ function SortDropdown({
 }: {
   active: string;
   dir: "asc" | "desc";
-  onChange: (field: SortField) => void;
+  onChange: (field: WorkSortField) => void;
 }) {
-  const fields: { key: SortField; label: string }[] = [
+  const fields: { key: WorkSortField; label: string }[] = [
     { key: "title", label: "Title" },
     { key: "authorName", label: "Author" },
     { key: "year", label: "Year" },
@@ -537,9 +511,9 @@ function TableView({
   onToggleAll,
 }: {
   works: WorkDetailResponse[];
-  sort: SortField;
+  sort: WorkSortField;
   dir: "asc" | "desc";
-  onSort: (field: SortField) => void;
+  onSort: (field: WorkSortField) => void;
   editorMode: boolean;
   selectedIds: Set<number>;
   onToggle: (id: number) => void;

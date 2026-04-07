@@ -1,4 +1,4 @@
-//! Rate limiting contracts.
+//! Rate limit policy lookup per metadata provider.
 //!
 //! Satisfies: IMPL-HTTP-004
 

@@ -38,7 +38,7 @@ fn row_to_grab(row: sqlx::sqlite::SqliteRow) -> Result<Grab, DbError> {
         download_id: row
             .try_get("download_id")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-        status: parse_grab_status(&status_str),
+        status: parse_grab_status(&status_str)?,
         import_error: row
             .try_get("import_error")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -54,15 +54,18 @@ fn row_to_grab(row: sqlx::sqlite::SqliteRow) -> Result<Grab, DbError> {
     })
 }
 
-fn parse_grab_status(s: &str) -> GrabStatus {
+fn parse_grab_status(s: &str) -> Result<GrabStatus, DbError> {
     match s {
-        "confirmed" => GrabStatus::Confirmed,
-        "importing" => GrabStatus::Importing,
-        "imported" => GrabStatus::Imported,
-        "importFailed" => GrabStatus::ImportFailed,
-        "removed" => GrabStatus::Removed,
-        "failed" => GrabStatus::Failed,
-        _ => GrabStatus::Sent,
+        "sent" => Ok(GrabStatus::Sent),
+        "confirmed" => Ok(GrabStatus::Confirmed),
+        "importing" => Ok(GrabStatus::Importing),
+        "imported" => Ok(GrabStatus::Imported),
+        "importFailed" => Ok(GrabStatus::ImportFailed),
+        "removed" => Ok(GrabStatus::Removed),
+        "failed" => Ok(GrabStatus::Failed),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown grab status: {s}"),
+        }),
     }
 }
 
@@ -144,13 +147,18 @@ impl GrabDb for SqliteDb {
 
         if let Some(row) = existing {
             let existing_grab = row_to_grab(row)?;
-            // If active (sent/confirmed), reject.
-            if matches!(
+            // Only replace grabs with status failed or removed.
+            // All other statuses (sent, confirmed, importing, imported, importFailed)
+            // are non-replaceable.
+            if !matches!(
                 existing_grab.status,
-                GrabStatus::Sent | GrabStatus::Confirmed
+                GrabStatus::Failed | GrabStatus::Removed
             ) {
                 return Err(DbError::Constraint {
-                    message: "active grab already exists for this guid/indexer".into(),
+                    message: format!(
+                        "grab already exists for this guid/indexer with status {:?}",
+                        existing_grab.status
+                    ),
                 });
             }
             // Replace failed/removed grab.

@@ -22,7 +22,7 @@ fn row_to_notification(row: sqlx::sqlite::SqliteRow) -> Result<Notification, DbE
         user_id: row
             .try_get::<i64, _>("user_id")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-        notification_type: parse_notification_type(&type_str),
+        notification_type: parse_notification_type(&type_str)?,
         ref_key: row
             .try_get("ref_key")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -40,14 +40,17 @@ fn row_to_notification(row: sqlx::sqlite::SqliteRow) -> Result<Notification, DbE
     })
 }
 
-fn parse_notification_type(s: &str) -> NotificationType {
+fn parse_notification_type(s: &str) -> Result<NotificationType, DbError> {
     match s {
-        "workAutoAdded" => NotificationType::WorkAutoAdded,
-        "metadataUpdated" => NotificationType::MetadataUpdated,
-        "bulkEnrichmentComplete" => NotificationType::BulkEnrichmentComplete,
-        "jobPanicked" => NotificationType::JobPanicked,
-        "rateLimitHit" => NotificationType::RateLimitHit,
-        _ => NotificationType::NewWorkDetected,
+        "newWorkDetected" => Ok(NotificationType::NewWorkDetected),
+        "workAutoAdded" => Ok(NotificationType::WorkAutoAdded),
+        "metadataUpdated" => Ok(NotificationType::MetadataUpdated),
+        "bulkEnrichmentComplete" => Ok(NotificationType::BulkEnrichmentComplete),
+        "jobPanicked" => Ok(NotificationType::JobPanicked),
+        "rateLimitHit" => Ok(NotificationType::RateLimitHit),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown notification type: {s}"),
+        }),
     }
 }
 

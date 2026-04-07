@@ -1,16 +1,21 @@
-import { useState, useCallback } from "react";
+import { useCallback, useMemo } from "react";
+import { useUIStore } from "@/stores/ui";
 
 const TOUR_COMPLETED_KEY = "livrarr-tour-completed";
 
 export function useTourState() {
-  const [running, setRunning] = useState(false);
+  const running = useUIStore((s) => s.tourRunning);
+  const setTourRunning = useUIStore((s) => s.setTourRunning);
 
-  const start = useCallback(() => setRunning(true), []);
+  const start = useCallback(() => setTourRunning(true), [setTourRunning]);
   const stop = useCallback(() => {
-    setRunning(false);
+    setTourRunning(false);
     localStorage.setItem(TOUR_COMPLETED_KEY, "true");
-  }, []);
+  }, [setTourRunning]);
   const hasCompleted = localStorage.getItem(TOUR_COMPLETED_KEY) === "true";
 
-  return { running, start, stop, hasCompleted };
+  return useMemo(
+    () => ({ running, start, stop, hasCompleted }),
+    [running, start, stop, hasCompleted],
+  );
 }

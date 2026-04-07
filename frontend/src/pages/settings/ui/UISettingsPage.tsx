@@ -3,8 +3,6 @@ import { useUIStore } from "@/stores/ui";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 
-const DATE_FORMAT_KEY = "livrarr_dateFormat";
-
 const dateFormats = [
   { value: "MMM d, yyyy", label: "Mar 31, 2026" },
   { value: "yyyy-MM-dd", label: "2026-03-31" },
@@ -12,19 +10,11 @@ const dateFormats = [
   { value: "MM/dd/yyyy", label: "03/31/2026" },
 ];
 
-function getDateFormat(): string {
-  return localStorage.getItem(DATE_FORMAT_KEY) ?? "MMM d, yyyy";
-}
-
-function setDateFormat(fmt: string) {
-  localStorage.setItem(DATE_FORMAT_KEY, fmt);
-}
-
 export default function UISettingsPage() {
   const relativeDates = useUIStore((s) => s.relativeDates);
   const setRelativeDates = useUIStore((s) => s.setRelativeDates);
-
-  const currentFormat = getDateFormat();
+  const dateFormat = useUIStore((s) => s.dateFormat);
+  const setDateFormat = useUIStore((s) => s.setDateFormat);
 
   return (
     <>
@@ -62,12 +52,8 @@ export default function UISettingsPage() {
             </h2>
           </div>
           <select
-            value={currentFormat}
-            onChange={(e) => {
-              setDateFormat(e.target.value);
-              // Force re-render by dispatching storage event
-              window.dispatchEvent(new Event("storage"));
-            }}
+            value={dateFormat}
+            onChange={(e) => setDateFormat(e.target.value)}
             className="rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
           >
             {dateFormats.map((f) => (

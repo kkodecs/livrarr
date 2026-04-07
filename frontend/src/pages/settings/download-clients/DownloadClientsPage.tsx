@@ -60,6 +60,7 @@ function toRequest(data: ClientFormData): CreateDownloadClientRequest {
     category: data.category,
     enabled: data.enabled,
     apiKey: data.implementation === "sabnzbd" ? data.apiKey || null : null,
+    isDefaultForProtocol: data.isDefaultForProtocol,
   };
 }
 
@@ -237,7 +238,7 @@ export default function DownloadClientsPage() {
 
   const allClients = clientsQ.data ?? [];
   const torrentClients = sorting.sort(
-    allClients.filter((c) => c.clientType !== "sabnzbd"),
+    allClients.filter((c) => c.implementation !== "sabnzbd"),
     (item, field) => {
       switch (field) {
         case "name": return item.name;
@@ -247,7 +248,7 @@ export default function DownloadClientsPage() {
     },
   );
   const usenetClients = sorting.sort(
-    allClients.filter((c) => c.clientType === "sabnzbd"),
+    allClients.filter((c) => c.implementation === "sabnzbd"),
     (item, field) => {
       switch (field) {
         case "name": return item.name;
@@ -527,6 +528,7 @@ function ClientFormModal({
           <div>
             <label className="block text-xs text-muted mb-1">API Key</label>
             <input
+              type="password"
               {...register("apiKey")}
               placeholder={editing?.apiKeySet ? "Leave blank to keep" : ""}
               className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none font-mono text-xs"
@@ -721,6 +723,7 @@ function InlineClientForm({
         <div>
           <label className="block text-xs text-muted mb-1">API Key</label>
           <input
+            type="password"
             {...register("apiKey")}
             className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-xs text-zinc-100 focus:border-brand focus:outline-none"
           />

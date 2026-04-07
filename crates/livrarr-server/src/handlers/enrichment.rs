@@ -13,6 +13,9 @@ use livrarr_db::MetadataConfig;
 
 use crate::state::AppState;
 
+/// Hardcover GraphQL API endpoint.
+const HARDCOVER_API_URL: &str = "https://api.hardcover.app/v1/graphql";
+
 /// Result of enrichment — data to write + messages for the user.
 pub struct EnrichmentOutcome {
     pub request: UpdateWorkEnrichmentDbRequest,
@@ -348,7 +351,7 @@ async fn query_hardcover(
     });
 
     let resp = http
-        .post("https://api.hardcover.app/v1/graphql")
+        .post(HARDCOVER_API_URL)
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/json")
         .json(&body)
@@ -541,7 +544,7 @@ async fn fetch_hardcover_editions(
     });
 
     let resp = http
-        .post("https://api.hardcover.app/v1/graphql")
+        .post(HARDCOVER_API_URL)
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/json")
         .json(&body)

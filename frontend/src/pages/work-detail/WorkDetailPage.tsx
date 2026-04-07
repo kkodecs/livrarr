@@ -57,6 +57,33 @@ import type {
   HistoryResponse,
 } from "@/types/api";
 
+// Module-level regex cache for format detection — avoids recompilation per render
+const FORMAT_REGEX_CACHE = new Map<string, RegExp>();
+
+function getFormatRegex(fmt: string): RegExp {
+  let re = FORMAT_REGEX_CACHE.get(fmt);
+  if (!re) {
+    re = new RegExp(`\\b${fmt}\\b`, "i");
+    FORMAT_REGEX_CACHE.set(fmt, re);
+  }
+  return re;
+}
+
+function detectFormat(title: string, allFormats: string[]): string | null {
+  const lower = title.toLowerCase();
+  for (const fmt of allFormats) {
+    if (
+      lower.includes(`.${fmt}`) ||
+      lower.includes(`[${fmt}]`) ||
+      lower.includes(`(${fmt})`) ||
+      getFormatRegex(fmt).test(lower)
+    ) {
+      return fmt;
+    }
+  }
+  return null;
+}
+
 interface EditForm {
   title: string;
   authorName: string;
@@ -457,20 +484,6 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
 
   // Filter by selected formats. Detect format from title, then check if it's selected.
   // Releases with no detectable format are always shown.
-  const detectFormat = (title: string, allFormats: string[]): string | null => {
-    const lower = title.toLowerCase();
-    for (const fmt of allFormats) {
-      if (
-        lower.includes(`.${fmt}`) ||
-        lower.includes(`[${fmt}]`) ||
-        lower.includes(`(${fmt})`) ||
-        new RegExp(`\\b${fmt}\\b`, "i").test(lower)
-      ) {
-        return fmt;
-      }
-    }
-    return null;
-  };
 
   const filterByFormat = (
     items: ReleaseResponse[],
@@ -565,10 +578,10 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {items.map((release, i) => {
+          {items.map((release) => {
             return (
               <tr
-                key={`${release.guid}-${i}`}
+                key={release.guid}
                 className="hover:bg-zinc-800/50"
               >
                 <td

@@ -941,8 +941,4 @@ pub mod test_helpers {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         SqliteDb::new(pool)
     }
-
-    pub fn test_user_id() -> super::UserId {
-        1
-    }
 }

@@ -41,10 +41,10 @@ export function useSort<F extends string>(
         if (av == null) return 1;
         if (bv == null) return -1;
         let cmp: number;
-        if (typeof av === "string" && typeof bv === "string") {
-          cmp = av.localeCompare(bv);
+        if (typeof av === "string" || typeof bv === "string") {
+          cmp = String(av).localeCompare(String(bv));
         } else {
-          cmp = (av as number) - (bv as number);
+          cmp = av - bv;
         }
         return dir === "desc" ? -cmp : cmp;
       });

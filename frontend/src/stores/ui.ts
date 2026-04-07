@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 type ViewMode = "table" | "poster" | "overview";
+type Theme = "dark" | "light";
 
 interface UIState {
   sidebarCollapsed: boolean;
@@ -13,6 +14,9 @@ interface UIState {
   authorsSortDir: "asc" | "desc";
   worksFilter: string;
   relativeDates: boolean;
+  dateFormat: string;
+  theme: Theme;
+  tourRunning: boolean;
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   setWorksView: (view: ViewMode) => void;
@@ -21,6 +25,9 @@ interface UIState {
   setAuthorsSort: (field: string, dir: "asc" | "desc") => void;
   setWorksFilter: (filter: string) => void;
   setRelativeDates: (value: boolean) => void;
+  setDateFormat: (fmt: string) => void;
+  setTheme: (theme: Theme) => void;
+  setTourRunning: (running: boolean) => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -35,6 +42,9 @@ export const useUIStore = create<UIState>()(
       authorsSortDir: "asc",
       worksFilter: "",
       relativeDates: true,
+      dateFormat: "MMM d, yyyy",
+      theme: "dark",
+      tourRunning: false,
       toggleSidebar: () =>
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
@@ -46,6 +56,9 @@ export const useUIStore = create<UIState>()(
         set({ authorsSort: field, authorsSortDir: dir }),
       setWorksFilter: (filter) => set({ worksFilter: filter }),
       setRelativeDates: (value) => set({ relativeDates: value }),
+      setDateFormat: (fmt) => set({ dateFormat: fmt }),
+      setTheme: (theme) => set({ theme }),
+      setTourRunning: (running) => set({ tourRunning: running }),
     }),
     {
       name: "livrarr_ui",

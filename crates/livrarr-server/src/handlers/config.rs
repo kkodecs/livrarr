@@ -12,6 +12,7 @@ fn clean_token(token: &str) -> String {
         .to_string()
 }
 
+use crate::middleware::RequireAdmin;
 use crate::state::AppState;
 use crate::{
     ApiError, MediaManagementConfigResponse, MetadataConfigResponse, NamingConfigResponse,
@@ -22,6 +23,7 @@ use livrarr_db::{ConfigDb, UpdateMediaManagementConfigRequest, UpdateMetadataCon
 /// GET /api/v1/config/naming
 pub async fn get_naming(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
 ) -> Result<Json<NamingConfigResponse>, ApiError> {
     let cfg = state.db.get_naming_config().await?;
     Ok(Json(NamingConfigResponse {
@@ -35,6 +37,7 @@ pub async fn get_naming(
 /// GET /api/v1/config/mediamanagement
 pub async fn get_media_management(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
 ) -> Result<Json<MediaManagementConfigResponse>, ApiError> {
     let cfg = state.db.get_media_management_config().await?;
     Ok(Json(MediaManagementConfigResponse {
@@ -47,6 +50,7 @@ pub async fn get_media_management(
 /// PUT /api/v1/config/mediamanagement
 pub async fn update_media_management(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Json(req): Json<UpdateMediaManagementApiRequest>,
 ) -> Result<Json<MediaManagementConfigResponse>, ApiError> {
     let cfg = state
@@ -67,6 +71,7 @@ pub async fn update_media_management(
 /// GET /api/v1/config/metadata
 pub async fn get_metadata(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
 ) -> Result<Json<MetadataConfigResponse>, ApiError> {
     let cfg = state.db.get_metadata_config().await?;
     Ok(Json(metadata_to_response(cfg)))
@@ -89,6 +94,7 @@ fn metadata_to_response(cfg: livrarr_db::MetadataConfig) -> MetadataConfigRespon
 /// PUT /api/v1/config/metadata
 pub async fn update_metadata(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Json(req): Json<UpdateMetadataApiRequest>,
 ) -> Result<Json<MetadataConfigResponse>, ApiError> {
     let cfg = state
@@ -109,7 +115,10 @@ pub async fn update_metadata(
 }
 
 /// POST /api/v1/config/metadata/test/hardcover
-pub async fn test_hardcover(State(state): State<AppState>) -> Result<(), ApiError> {
+pub async fn test_hardcover(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+) -> Result<(), ApiError> {
     let cfg = state.db.get_metadata_config().await?;
     let token = cfg
         .hardcover_api_token
@@ -136,7 +145,10 @@ pub async fn test_hardcover(State(state): State<AppState>) -> Result<(), ApiErro
 }
 
 /// POST /api/v1/config/metadata/test/audnexus
-pub async fn test_audnexus(State(state): State<AppState>) -> Result<(), ApiError> {
+pub async fn test_audnexus(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+) -> Result<(), ApiError> {
     let cfg = state.db.get_metadata_config().await?;
     let url = format!(
         "{}/authors/B000AQ0842",
@@ -160,7 +172,7 @@ pub async fn test_audnexus(State(state): State<AppState>) -> Result<(), ApiError
 }
 
 /// POST /api/v1/config/metadata/test/llm
-pub async fn test_llm(State(state): State<AppState>) -> Result<(), ApiError> {
+pub async fn test_llm(State(state): State<AppState>, _admin: RequireAdmin) -> Result<(), ApiError> {
     let cfg = state.db.get_metadata_config().await?;
     let endpoint = cfg
         .llm_endpoint

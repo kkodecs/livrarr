@@ -133,7 +133,10 @@ pub async fn scan(
         let sf = &source_files[i];
         let filename = filenames[i].clone();
         let parsed = parsed_files.get(i).cloned().flatten();
-        let size = std::fs::metadata(&sf.path).map(|m| m.len()).unwrap_or(0);
+        let size = tokio::fs::metadata(&sf.path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
 
         let routable = root_folders.iter().any(|rf| rf.media_type == sf.media_type);
 
@@ -185,13 +188,13 @@ pub async fn scan(
             (None, None)
         };
 
-        // OL throttle: 500ms delay between requests.
-        if parsed.is_some() && scanned_files.len() < sort_order.len() {
+        // OL throttle: 500ms delay between requests (skip after the last lookup).
+        if parsed.is_some() && scanned_files.len() + 1 < sort_order.len() {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
         // Check if file is readable.
-        let file_error = if std::fs::File::open(&sf.path).is_err() {
+        let file_error = if tokio::fs::File::open(&sf.path).await.is_err() {
             Some("file not readable".to_string())
         } else {
             None

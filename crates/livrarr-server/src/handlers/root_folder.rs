@@ -47,6 +47,7 @@ fn to_response(rf: livrarr_domain::RootFolder) -> RootFolderResponse {
 /// GET /api/v1/rootfolder
 pub async fn list(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
 ) -> Result<Json<Vec<RootFolderResponse>>, ApiError> {
     let folders = state.db.list_root_folders().await?;
     Ok(Json(folders.into_iter().map(to_response).collect()))
@@ -55,6 +56,7 @@ pub async fn list(
 /// POST /api/v1/rootfolder
 pub async fn create(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Json(req): Json<CreateRootFolderRequest>,
 ) -> Result<Json<RootFolderResponse>, ApiError> {
     if req.path.is_empty() {
@@ -68,7 +70,11 @@ pub async fn create(
 }
 
 /// DELETE /api/v1/rootfolder/:id
-pub async fn delete(State(state): State<AppState>, Path(id): Path<i64>) -> Result<(), ApiError> {
+pub async fn delete(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+    Path(id): Path<i64>,
+) -> Result<(), ApiError> {
     state.db.delete_root_folder(id).await?;
     Ok(())
 }
@@ -357,6 +363,11 @@ pub struct ScanPathRequest {
 // Scan Helpers
 // ---------------------------------------------------------------------------
 
+/// Maximum recursion depth for directory scans.
+const SCAN_MAX_DEPTH: usize = 20;
+/// Maximum entries traversed before stopping a scan.
+const SCAN_MAX_ENTRIES: usize = 100_000;
+
 struct ScanFile {
     path: PathBuf,
 }
@@ -370,12 +381,13 @@ struct ScanFileTyped {
 fn scan_walk_all_types(dir: &std::path::Path) -> (Vec<ScanFileTyped>, Vec<ScanErrorEntry>) {
     let mut files = Vec::new();
     let mut errors = Vec::new();
+    let mut entries_traversed = 0usize;
 
     if !dir.exists() {
         return (files, errors);
     }
 
-    scan_walk_all_recursive(dir, &mut files, &mut errors);
+    scan_walk_all_recursive(dir, &mut files, &mut errors, 0, &mut entries_traversed);
     (files, errors)
 }
 
@@ -383,7 +395,13 @@ fn scan_walk_all_recursive(
     dir: &std::path::Path,
     files: &mut Vec<ScanFileTyped>,
     errors: &mut Vec<ScanErrorEntry>,
+    depth: usize,
+    entries_traversed: &mut usize,
 ) {
+    if depth > SCAN_MAX_DEPTH {
+        return;
+    }
+
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -396,6 +414,11 @@ fn scan_walk_all_recursive(
     };
 
     for entry in entries {
+        *entries_traversed += 1;
+        if *entries_traversed > SCAN_MAX_ENTRIES {
+            return;
+        }
+
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -424,7 +447,7 @@ fn scan_walk_all_recursive(
         }
 
         if ft.is_dir() {
-            scan_walk_all_recursive(&path, files, errors);
+            scan_walk_all_recursive(&path, files, errors, depth + 1, entries_traversed);
         } else if ft.is_file() {
             if let Some(media_type) = classify_file(&path) {
                 files.push(ScanFileTyped { path, media_type });
@@ -441,12 +464,20 @@ fn scan_walk_user_dir(
 ) -> (Vec<ScanFile>, Vec<ScanErrorEntry>) {
     let mut files = Vec::new();
     let mut errors = Vec::new();
+    let mut entries_traversed = 0usize;
 
     if !user_dir.exists() {
         return (files, errors);
     }
 
-    scan_walk_recursive(user_dir, media_type, &mut files, &mut errors);
+    scan_walk_recursive(
+        user_dir,
+        media_type,
+        &mut files,
+        &mut errors,
+        0,
+        &mut entries_traversed,
+    );
     (files, errors)
 }
 
@@ -455,7 +486,13 @@ fn scan_walk_recursive(
     root_media_type: MediaType,
     files: &mut Vec<ScanFile>,
     errors: &mut Vec<ScanErrorEntry>,
+    depth: usize,
+    entries_traversed: &mut usize,
 ) {
+    if depth > SCAN_MAX_DEPTH {
+        return;
+    }
+
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -468,6 +505,11 @@ fn scan_walk_recursive(
     };
 
     for entry in entries {
+        *entries_traversed += 1;
+        if *entries_traversed > SCAN_MAX_ENTRIES {
+            return;
+        }
+
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -505,7 +547,14 @@ fn scan_walk_recursive(
         }
 
         if ft.is_dir() {
-            scan_walk_recursive(&path, root_media_type, files, errors);
+            scan_walk_recursive(
+                &path,
+                root_media_type,
+                files,
+                errors,
+                depth + 1,
+                entries_traversed,
+            );
         } else if ft.is_file() {
             // Only include files matching root folder's media type.
             if let Some(file_mt) = classify_file(&path) {

@@ -58,8 +58,10 @@ export default function AuthorsPage() {
   const toggleMonitored = useMutation({
     mutationFn: ({ id, monitored }: { id: number; monitored: boolean }) =>
       updateAuthor(id, { monitored }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["authors"] });
+    onSuccess: (_data, { id, monitored }) => {
+      queryClient.setQueryData<AuthorResponse[]>(["authors"], (old) =>
+        old?.map((a) => (a.id === id ? { ...a, monitored } : a)),
+      );
     },
     onError: () => {
       toast.error("Failed to update author");
@@ -74,8 +76,10 @@ export default function AuthorsPage() {
       id: number;
       monitorNewItems: boolean;
     }) => updateAuthor(id, { monitorNewItems }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["authors"] });
+    onSuccess: (_data, { id, monitorNewItems }) => {
+      queryClient.setQueryData<AuthorResponse[]>(["authors"], (old) =>
+        old?.map((a) => (a.id === id ? { ...a, monitorNewItems } : a)),
+      );
     },
     onError: () => {
       toast.error("Failed to update author");

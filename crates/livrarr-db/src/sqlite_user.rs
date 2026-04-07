@@ -23,7 +23,7 @@ fn row_to_user(row: sqlx::sqlite::SqliteRow) -> Result<User, DbError> {
             row.try_get::<String, _>("role")
                 .map_err(|e| DbError::Io(Box::new(e)))?
                 .as_str(),
-        ),
+        )?,
         api_key_hash: row
             .try_get("api_key_hash")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -41,10 +41,13 @@ fn row_to_user(row: sqlx::sqlite::SqliteRow) -> Result<User, DbError> {
     })
 }
 
-fn parse_role(s: &str) -> UserRole {
+fn parse_role(s: &str) -> Result<UserRole, DbError> {
     match s {
-        "admin" => UserRole::Admin,
-        _ => UserRole::User,
+        "admin" => Ok(UserRole::Admin),
+        "user" => Ok(UserRole::User),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown user role: {s}"),
+        }),
     }
 }
 
@@ -110,42 +113,28 @@ impl UserDb for SqliteDb {
     }
 
     async fn update_user(&self, id: UserId, req: UpdateUserDbRequest) -> Result<User, DbError> {
-        // Verify user exists first.
-        self.get_user(id).await?;
-
+        let current = self.get_user(id).await?;
         let now = Utc::now().to_rfc3339();
 
-        if let Some(username) = &req.username {
-            sqlx::query("UPDATE users SET username = ?, updated_at = ? WHERE id = ?")
-                .bind(username)
-                .bind(&now)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(password_hash) = &req.password_hash {
-            sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
-                .bind(password_hash)
-                .bind(&now)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
-        if let Some(role) = &req.role {
-            let role_str = match role {
-                UserRole::Admin => "admin",
-                UserRole::User => "user",
-            };
-            sqlx::query("UPDATE users SET role = ?, updated_at = ? WHERE id = ?")
-                .bind(role_str)
-                .bind(&now)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
-        }
+        let username = req.username.unwrap_or(current.username);
+        let password_hash = req.password_hash.unwrap_or(current.password_hash);
+        let role = req.role.unwrap_or(current.role);
+        let role_str = match role {
+            UserRole::Admin => "admin",
+            UserRole::User => "user",
+        };
+
+        sqlx::query(
+            "UPDATE users SET username = ?, password_hash = ?, role = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&username)
+        .bind(&password_hash)
+        .bind(role_str)
+        .bind(&now)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
 
         self.get_user(id).await
     }
@@ -176,10 +165,11 @@ impl UserDb for SqliteDb {
         let now = Utc::now().to_rfc3339();
 
         // Find the pending setup user (not hardcoded to id=1).
-        let row = sqlx::query("SELECT id FROM users WHERE setup_pending = 1 LIMIT 1")
-            .fetch_optional(self.pool())
-            .await
-            .map_err(map_db_err)?;
+        let row =
+            sqlx::query("SELECT id FROM users WHERE setup_pending = 1 ORDER BY id ASC LIMIT 1")
+                .fetch_optional(self.pool())
+                .await
+                .map_err(map_db_err)?;
 
         let user_id: i64 = match row {
             Some(r) => r.try_get("id").map_err(|e| DbError::Io(Box::new(e)))?,

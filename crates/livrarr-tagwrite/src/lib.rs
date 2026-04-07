@@ -67,7 +67,7 @@ pub async fn write_tags(
         })?
 }
 
-/// Write tags to multiple MP3 files in place. Shared metadata/cover for all files.
+/// Write tags to multiple media files in place. Shared metadata/cover for all files.
 /// If any file fails, returns BatchAborted with context. Caller handles cleanup.
 ///
 /// Satisfies: TAG-006

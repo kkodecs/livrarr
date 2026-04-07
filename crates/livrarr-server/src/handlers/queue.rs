@@ -1,6 +1,8 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 
+use futures::future::join_all;
+
 use crate::state::AppState;
 use crate::{
     ApiError, AuthContext, GrabStatus, QueueItemResponse, QueueListResponse, QueueProgress,
@@ -31,25 +33,32 @@ pub async fn list(
     // Pre-fetch download clients for enrichment.
     let clients = state.db.list_download_clients().await?;
 
-    // For active grabs (sent/confirmed), try to get live progress from the download client.
+    // For active grabs (sent/confirmed), fetch live progress concurrently.
+    let progress_futures: Vec<_> = grabs
+        .iter()
+        .map(|grab| {
+            let state = state.clone();
+            let client = clients.iter().find(|c| c.id == grab.download_client_id);
+            async move {
+                if matches!(grab.status, GrabStatus::Sent | GrabStatus::Confirmed) {
+                    if let (Some(client), Some(download_id)) = (client, &grab.download_id) {
+                        return fetch_progress(&state, client, download_id).await;
+                    }
+                }
+                None
+            }
+        })
+        .collect();
+
+    let progress_results = join_all(progress_futures).await;
+
     let mut items = Vec::with_capacity(grabs.len());
-    for grab in &grabs {
+    for (grab, progress) in grabs.iter().zip(progress_results) {
         let client = clients.iter().find(|c| c.id == grab.download_client_id);
         let client_name = client.map(|c| c.name.clone()).unwrap_or_default();
         let protocol = client
             .map(|c| c.implementation.protocol().to_string())
             .unwrap_or_else(|| "torrent".to_string());
-
-        // Only fetch live progress for active grabs.
-        let progress = if matches!(grab.status, GrabStatus::Sent | GrabStatus::Confirmed) {
-            if let (Some(client), Some(download_id)) = (client, &grab.download_id) {
-                fetch_progress(&state, client, download_id).await
-            } else {
-                None
-            }
-        } else {
-            None
-        };
 
         items.push(QueueItemResponse {
             id: grab.id,

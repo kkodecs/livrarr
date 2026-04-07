@@ -20,7 +20,6 @@ use livrarr_domain::{EventType, NotificationType};
 // JobRunner
 // ---------------------------------------------------------------------------
 
-/// Fix #1: Derive Clone so it can be added to AppState.
 #[derive(Clone)]
 pub struct JobRunner {
     status: Arc<RwLock<Vec<JobStatus>>>,
@@ -62,7 +61,6 @@ impl JobRunner {
     }
 
     /// Start all interval jobs. Call once after AppState is constructed.
-    /// Fix #5: start is now async so we can register status synchronously.
     pub async fn start(&self, state: AppState) {
         self.spawn_job(
             "download_poller",
@@ -94,7 +92,6 @@ impl JobRunner {
         .await;
     }
 
-    /// Fix #5: async fn — register status directly, no detached spawn.
     async fn spawn_job<F, Fut>(&self, name: &str, interval: Duration, state: AppState, tick_fn: F)
     where
         F: Fn(AppState, CancellationToken) -> Fut + Send + Sync + 'static,
@@ -154,7 +151,7 @@ impl JobRunner {
                         set_job_running(&status, &job_name, false).await;
                     }
                     Err(join_err) if join_err.is_panic() => {
-                        // Fix #6: Extract panic payload for logging.
+                        // Extract panic payload for logging.
                         let payload = join_err.into_panic();
                         let msg = payload
                             .downcast_ref::<&str>()
@@ -245,7 +242,6 @@ async fn set_job_running(status: &Arc<RwLock<Vec<JobStatus>>>, name: &str, runni
 
 // ---------------------------------------------------------------------------
 // Startup Recovery (JOBS-003)
-// Fix #7: Use DB trait methods instead of raw SQL.
 // ---------------------------------------------------------------------------
 
 /// Reset stale state from unclean shutdown. Run once before starting jobs.
@@ -724,7 +720,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
         .await
         .map_err(|e| format!("list authors: {e}"))?;
 
-    // Fix #3: index-based loop so we can retry on 429 without skipping.
+    // Index-based loop to retry on 429 without skipping.
     let mut i = 0;
     let mut retry_counts: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
     while i < authors.len() {
@@ -867,7 +863,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                 );
 
                 if author.monitor_new_items {
-                    // Fix #2: Actually create the work and enrich it (AUTHOR-004).
+                    // Create the work and trigger enrichment (AUTHOR-004).
                     match state
                         .db
                         .create_work(CreateWorkDbRequest {
@@ -999,7 +995,6 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
 
 // ---------------------------------------------------------------------------
 // Enrichment Retry Tick (JOBS-ENRICH-001)
-// Fix #8: Explicit 30s timeout on enrichment calls.
 // ---------------------------------------------------------------------------
 
 async fn enrichment_retry_tick(state: AppState, _cancel: CancellationToken) -> Result<(), String> {
@@ -1016,7 +1011,7 @@ async fn enrichment_retry_tick(state: AppState, _cancel: CancellationToken) -> R
     debug!("enrichment retry: {} works eligible", works.len());
 
     for work in &works {
-        // Fix #8: 30s timeout per spec.
+        // 30s timeout per spec.
         let enrich_result = tokio::time::timeout(
             Duration::from_secs(30),
             crate::handlers::enrichment::enrich_work(&state, work),

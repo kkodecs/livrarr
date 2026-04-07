@@ -371,6 +371,7 @@ export interface CreateDownloadClientRequest {
   category: string;
   enabled: boolean;
   apiKey?: string | null;
+  isDefaultForProtocol?: boolean;
 }
 
 export interface UpdateDownloadClientRequest {

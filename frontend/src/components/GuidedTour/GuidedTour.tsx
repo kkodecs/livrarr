@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Joyride, ACTIONS, EVENTS, STATUS } from "react-joyride";
 import type { EventData, Controls } from "react-joyride";
 import { useNavigate } from "react-router";
@@ -13,6 +13,14 @@ export default function GuidedTour({
 }) {
   const navigate = useNavigate();
   const [stepIndex, setStepIndex] = useState(0);
+
+  // Reset stepIndex on mount so tour always starts from the beginning
+  useEffect(() => {
+    setStepIndex(0);
+    return () => {
+      setStepIndex(0);
+    };
+  }, []);
 
   const handleEvent = useCallback(
     (data: EventData, controls: Controls) => {

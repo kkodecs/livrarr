@@ -23,24 +23,27 @@ fn row_to_history_event(row: sqlx::sqlite::SqliteRow) -> Result<HistoryEvent, Db
         work_id: row
             .try_get::<Option<i64>, _>("work_id")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-        event_type: parse_event_type(&event_type_str),
+        event_type: parse_event_type(&event_type_str)?,
         data: serde_json::from_str(&data_str).map_err(|e| DbError::Io(Box::new(e)))?,
         date: parse_dt(&date_str)?,
     })
 }
 
-fn parse_event_type(s: &str) -> EventType {
+fn parse_event_type(s: &str) -> Result<EventType, DbError> {
     match s {
-        "downloadCompleted" => EventType::DownloadCompleted,
-        "downloadFailed" => EventType::DownloadFailed,
-        "imported" => EventType::Imported,
-        "importFailed" => EventType::ImportFailed,
-        "enriched" => EventType::Enriched,
-        "enrichmentFailed" => EventType::EnrichmentFailed,
-        "tagWritten" => EventType::TagWritten,
-        "tagWriteFailed" => EventType::TagWriteFailed,
-        "fileDeleted" => EventType::FileDeleted,
-        _ => EventType::Grabbed,
+        "grabbed" => Ok(EventType::Grabbed),
+        "downloadCompleted" => Ok(EventType::DownloadCompleted),
+        "downloadFailed" => Ok(EventType::DownloadFailed),
+        "imported" => Ok(EventType::Imported),
+        "importFailed" => Ok(EventType::ImportFailed),
+        "enriched" => Ok(EventType::Enriched),
+        "enrichmentFailed" => Ok(EventType::EnrichmentFailed),
+        "tagWritten" => Ok(EventType::TagWritten),
+        "tagWriteFailed" => Ok(EventType::TagWriteFailed),
+        "fileDeleted" => Ok(EventType::FileDeleted),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown event type: {s}"),
+        }),
     }
 }
 

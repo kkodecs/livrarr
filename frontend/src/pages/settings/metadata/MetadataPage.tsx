@@ -9,7 +9,7 @@ import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
 import type { LlmProvider, UpdateMetadataConfigRequest } from "@/types/api";
 import * as api from "@/api";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 // ── LLM Provider Configs ──
 
@@ -136,14 +136,15 @@ export default function MetadataPage() {
   const [langDirty, setLangDirty] = useState(false);
 
   // Sync languages from query data on first load
-  if (
-    configQ.data &&
-    !langDirty &&
-    languages.length === 0 &&
-    configQ.data.languages.length > 0
-  ) {
-    setLanguages(configQ.data.languages);
-  }
+  useEffect(() => {
+    if (
+      configQ.data &&
+      !langDirty &&
+      configQ.data.languages.length > 0
+    ) {
+      setLanguages(configQ.data.languages);
+    }
+  }, [configQ.data, langDirty]);
 
   if (configQ.isLoading) return <PageLoading />;
   if (configQ.error)
@@ -239,7 +240,7 @@ export default function MetadataPage() {
               </label>
               <input
                 {...register("hardcoverApiToken")}
-                type="text"
+                type="password"
                 placeholder="Hardcover API token"
                 className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
               />
@@ -412,7 +413,7 @@ export default function MetadataPage() {
                   </label>
                   <input
                     {...register("llmApiKey")}
-                    type="text"
+                    type="password"
                     placeholder="Paste your API key"
                     className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
                   />
