@@ -20,6 +20,7 @@ import { FormModal } from "@/components/Page/FormModal";
 import type {
   DownloadClientResponse,
   CreateDownloadClientRequest,
+  UpdateDownloadClientRequest,
   DownloadClientImplementation,
 } from "@/types/api";
 import { useSort } from "@/hooks/useSort";
@@ -62,6 +63,35 @@ function toRequest(data: ClientFormData): CreateDownloadClientRequest {
     apiKey: data.implementation === "sabnzbd" ? data.apiKey || null : null,
     isDefaultForProtocol: data.isDefaultForProtocol,
   };
+}
+
+/** Build an update payload that omits empty credential fields so the backend
+ *  preserves existing saved credentials (undefined is stripped by JSON.stringify,
+ *  whereas null means "clear this field"). */
+function toUpdateRequest(data: ClientFormData): UpdateDownloadClientRequest {
+  const req: UpdateDownloadClientRequest = {
+    name: data.name,
+    host: data.host,
+    port: data.port,
+    useSsl: data.useSsl,
+    skipSslValidation: data.skipSslValidation,
+    urlBase: data.urlBase || null,
+    username: data.implementation === "qBittorrent" ? data.username || null : null,
+    category: data.category,
+    enabled: data.enabled,
+    isDefaultForProtocol: data.isDefaultForProtocol,
+  };
+
+  // Only include password when the user actually typed a new one.
+  if (data.implementation === "qBittorrent" && data.password) {
+    req.password = data.password;
+  }
+  // Only include apiKey when the user actually typed a new one.
+  if (data.implementation === "sabnzbd" && data.apiKey) {
+    req.apiKey = data.apiKey;
+  }
+
+  return req;
 }
 
 const defaultValues: ClientFormData = {
@@ -190,7 +220,7 @@ export default function DownloadClientsPage() {
       data,
     }: {
       id: number;
-      data: CreateDownloadClientRequest;
+      data: UpdateDownloadClientRequest;
     }) => api.updateDownloadClient(id, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["downloadClients"] });
@@ -343,11 +373,10 @@ export default function DownloadClientsPage() {
         editing={modal.editing}
         onClose={() => setModal({ open: false, editing: null })}
         onSubmit={async (data) => {
-          const req = toRequest(data);
           if (modal.editing) {
-            await updateClient.mutateAsync({ id: modal.editing.id, data: req });
+            await updateClient.mutateAsync({ id: modal.editing.id, data: toUpdateRequest(data) });
           } else {
-            await createClient.mutateAsync(req);
+            await createClient.mutateAsync(toRequest(data));
           }
         }}
       />

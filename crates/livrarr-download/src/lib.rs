@@ -466,23 +466,26 @@ pub fn resolve_remote_path(
         if m.host.to_lowercase() != host_lower {
             continue;
         }
-        if path.starts_with(&m.remote_path) && m.remote_path.len() > best_len {
+        let remote = m.remote_path.trim_end_matches('/');
+        if path.starts_with(remote) && remote.len() > best_len {
             // Verify the match is at a path boundary: the path must be exactly
             // the remote_path, or the next character must be '/'.
             // This prevents /data matching /database.
-            let remainder = &path[m.remote_path.len()..];
+            let remainder = &path[remote.len()..];
             if !remainder.is_empty() && !remainder.starts_with('/') {
                 continue;
             }
             best_match = Some(m);
-            best_len = m.remote_path.len();
+            best_len = remote.len();
         }
     }
 
     match best_match {
         Some(m) => {
-            let suffix = &path[m.remote_path.len()..];
-            format!("{}{}", m.local_path, suffix)
+            let remote = m.remote_path.trim_end_matches('/');
+            let suffix = &path[remote.len()..];
+            let local = m.local_path.trim_end_matches('/');
+            format!("{}{}", local, suffix)
         }
         None => path.to_string(),
     }

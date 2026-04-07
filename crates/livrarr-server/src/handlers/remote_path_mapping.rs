@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
+use crate::middleware::RequireAdmin;
 use crate::state::AppState;
 use crate::{
     ApiError, CreateRemotePathMappingApiRequest, RemotePathMappingResponse,
@@ -21,6 +22,7 @@ fn to_response(m: RemotePathMapping) -> RemotePathMappingResponse {
 /// GET /api/v1/remotepathmapping
 pub async fn list(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
 ) -> Result<Json<Vec<RemotePathMappingResponse>>, ApiError> {
     let mappings = state.db.list_remote_path_mappings().await?;
     Ok(Json(mappings.into_iter().map(to_response).collect()))
@@ -29,6 +31,7 @@ pub async fn list(
 /// GET /api/v1/remotepathmapping/:id
 pub async fn get(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<Json<RemotePathMappingResponse>, ApiError> {
     let m = state.db.get_remote_path_mapping(id).await?;
@@ -38,6 +41,7 @@ pub async fn get(
 /// POST /api/v1/remotepathmapping
 pub async fn create(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Json(req): Json<CreateRemotePathMappingApiRequest>,
 ) -> Result<Json<RemotePathMappingResponse>, ApiError> {
     if req.host.is_empty() {
@@ -58,6 +62,7 @@ pub async fn create(
 /// PUT /api/v1/remotepathmapping/:id
 pub async fn update(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Path(id): Path<i64>,
     Json(req): Json<UpdateRemotePathMappingRequest>,
 ) -> Result<Json<RemotePathMappingResponse>, ApiError> {
@@ -77,7 +82,11 @@ pub async fn update(
 }
 
 /// DELETE /api/v1/remotepathmapping/:id
-pub async fn delete(State(state): State<AppState>, Path(id): Path<i64>) -> Result<(), ApiError> {
+pub async fn delete(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+    Path(id): Path<i64>,
+) -> Result<(), ApiError> {
     state.db.delete_remote_path_mapping(id).await?;
     Ok(())
 }

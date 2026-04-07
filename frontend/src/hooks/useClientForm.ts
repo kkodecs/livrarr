@@ -109,15 +109,14 @@ export function useClientForm(editing: DownloadClientResponse | null) {
 
   const runTest = () => {
     setTestResult(null);
-    // When editing and no credentials have been changed, test the saved client
-    // directly so the server reads credentials from DB.
-    if (editing) {
-      const vals = form.getValues();
-      const hasNewCreds = !!(vals.password || vals.apiKey);
-      if (!hasNewCreds) {
-        testSaved.mutate(editing.id);
-        return;
-      }
+    // Only use the "test saved" path when editing and NO form fields have
+    // changed — i.e. the user just wants to verify the existing config still
+    // works.  Any change (host, port, urlBase, credentials, etc.) must send the
+    // full form values to the regular test endpoint so we test what the user
+    // actually typed, not the stale config in the DB.  (R5-N4)
+    if (editing && !form.formState.isDirty) {
+      testSaved.mutate(editing.id);
+      return;
     }
     testClient.mutate(toClientRequest(form.getValues()));
   };
