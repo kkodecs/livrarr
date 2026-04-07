@@ -45,7 +45,7 @@ pub async fn import_grab(
     // Resolve source path based on client type.
     let source_path = match &grab.download_id {
         Some(id) => {
-            let content_path = if client.client_type == "sabnzbd" {
+            let content_path = if client.client_type() == "sabnzbd" {
                 // For SABnzbd: query history for the storage path.
                 fetch_sabnzbd_storage_path(state, &client, id).await?
             } else {

@@ -134,6 +134,10 @@ impl GrabDb for SqliteDb {
     async fn upsert_grab(&self, req: CreateGrabDbRequest) -> Result<Grab, DbError> {
         let now = Utc::now().to_rfc3339();
         let status_str = grab_status_str(req.status);
+        let media_type_str = req.media_type.map(|mt| match mt {
+            livrarr_domain::MediaType::Ebook => "ebook",
+            livrarr_domain::MediaType::Audiobook => "audiobook",
+        });
 
         // Check for existing grab with same (user_id, guid, indexer).
         let existing =
@@ -161,12 +165,30 @@ impl GrabDb for SqliteDb {
                     ),
                 });
             }
-            // Replace failed/removed grab.
-            sqlx::query("DELETE FROM grabs WHERE id = ?")
-                .bind(existing_grab.id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
+            // Update the existing row in place, preserving the original ID
+            // so foreign key references remain valid.
+            sqlx::query(
+                "UPDATE grabs SET \
+                 work_id = ?, download_client_id = ?, title = ?, size = ?, \
+                 download_url = ?, download_id = ?, status = ?, import_error = NULL, \
+                 media_type = ?, grabbed_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(req.work_id)
+            .bind(req.download_client_id)
+            .bind(&req.title)
+            .bind(req.size)
+            .bind(&req.download_url)
+            .bind(&req.download_id)
+            .bind(status_str)
+            .bind(media_type_str)
+            .bind(&now)
+            .bind(existing_grab.id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+            return self.get_grab(req.user_id, existing_grab.id).await;
         }
 
         let id = sqlx::query(
@@ -185,10 +207,7 @@ impl GrabDb for SqliteDb {
         .bind(&req.download_url)
         .bind(&req.download_id)
         .bind(status_str)
-        .bind(req.media_type.map(|mt| match mt {
-            livrarr_domain::MediaType::Ebook => "ebook",
-            livrarr_domain::MediaType::Audiobook => "audiobook",
-        }))
+        .bind(media_type_str)
         .bind(&now)
         .execute(self.pool())
         .await

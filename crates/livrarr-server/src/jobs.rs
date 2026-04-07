@@ -277,7 +277,7 @@ async fn download_poller_tick(state: AppState, _cancel: CancellationToken) -> Re
         .map_err(|e| format!("list clients: {e}"))?;
 
     for client in clients.iter().filter(|c| c.enabled) {
-        match client.client_type.as_str() {
+        match client.client_type() {
             "sabnzbd" => {
                 if let Err(e) = poll_sabnzbd(&state, client).await {
                     warn!("poller: SABnzbd error for {}: {e}", client.name);

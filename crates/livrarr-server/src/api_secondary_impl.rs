@@ -693,7 +693,7 @@ fn dc_to_response(dc: &DownloadClient) -> DownloadClientResponse {
         username: dc.username.clone(),
         category: dc.category.clone(),
         enabled: dc.enabled,
-        client_type: dc.client_type.clone(),
+        client_type: dc.client_type().to_string(),
         api_key_set: dc.api_key.is_some(),
         is_default_for_protocol: dc.is_default_for_protocol,
     }
@@ -767,7 +767,7 @@ fn get_disk_space(path: &str) -> (Option<i64>, Option<i64>) {
     (None, None)
 }
 
-// Test helpers for the harness
+#[cfg(test)]
 impl SecondaryApiImpl {
     pub async fn create_author_without_ol_key(&self, user_id: UserId) -> AuthorId {
         let author = self
@@ -889,6 +889,7 @@ impl SecondaryApiImpl {
     }
 }
 
+#[cfg(test)]
 /// Create a secondary API backed by a SQLite :memory: DB with a test user.
 pub async fn new_test_secondary_api() -> (SecondaryApiImpl, UserId) {
     let db = livrarr_db::test_helpers::create_test_db().await;

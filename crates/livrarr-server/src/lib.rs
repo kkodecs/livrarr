@@ -1180,6 +1180,8 @@ pub enum ApiError {
     ServiceUnavailable,
     #[error("not implemented")]
     NotImplemented,
+    #[error("payload too large (max {max_bytes} bytes)")]
+    PayloadTooLarge { max_bytes: usize },
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -1239,6 +1241,12 @@ impl axum::response::IntoResponse for ApiError {
             ApiError::StructuredBadGateway { body } => {
                 return (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response();
             }
+            ApiError::PayloadTooLarge { max_bytes } => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                format!("request body exceeds maximum size ({max_bytes} bytes)"),
+                None,
+            ),
             ApiError::ServiceUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service_unavailable",

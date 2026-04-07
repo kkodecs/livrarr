@@ -382,6 +382,18 @@ function ClientFormModal({
     },
   });
 
+  const testSaved = useMutation({
+    mutationFn: api.testSavedDownloadClient,
+    onSuccess: () => {
+      setTestResult("success");
+      toast.success("Connection successful");
+    },
+    onError: (e: Error) => {
+      setTestResult("fail");
+      toast.error(e.message);
+    },
+  });
+
   const {
     register,
     handleSubmit,
@@ -584,12 +596,19 @@ function ClientFormModal({
             type="button"
             onClick={() => {
               setTestResult(null);
-              testClient.mutate(toRequest(getValues()));
+              const vals = getValues();
+              // When editing and no new credentials entered, test the saved
+              // client so the server reads credentials from DB.
+              if (editing && !vals.password && !vals.apiKey) {
+                testSaved.mutate(editing.id);
+              } else {
+                testClient.mutate(toRequest(vals));
+              }
             }}
-            disabled={testClient.isPending}
+            disabled={testClient.isPending || testSaved.isPending}
             className="rounded border border-border px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
           >
-            {testClient.isPending ? "Testing..." : "Test Connection"}
+            {testClient.isPending || testSaved.isPending ? "Testing..." : "Test Connection"}
           </button>
           {testResult === "success" && (
             <CheckCircle2 size={18} className="text-green-400" />

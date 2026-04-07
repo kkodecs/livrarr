@@ -11,6 +11,7 @@ use livrarr_db::{CreateDownloadClientDbRequest, DownloadClientDb, UpdateDownload
 use livrarr_domain::{DownloadClient, DownloadClientImplementation};
 
 fn to_response(dc: DownloadClient) -> DownloadClientResponse {
+    let client_type = dc.client_type().to_string();
     DownloadClientResponse {
         id: dc.id,
         name: dc.name,
@@ -24,7 +25,7 @@ fn to_response(dc: DownloadClient) -> DownloadClientResponse {
         // password intentionally omitted from response
         category: dc.category,
         enabled: dc.enabled,
-        client_type: dc.client_type.clone(),
+        client_type,
         api_key_set: dc.api_key.is_some(),
         is_default_for_protocol: dc.is_default_for_protocol,
     }
@@ -98,6 +99,7 @@ pub async fn create(
 /// PUT /api/v1/downloadclient/:id
 pub async fn update(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Path(id): Path<i64>,
     Json(req): Json<UpdateDownloadClientApiRequest>,
 ) -> Result<Json<DownloadClientResponse>, ApiError> {
@@ -114,7 +116,7 @@ pub async fn update(
             let clients = state.db.list_download_clients().await?;
             let other_defaults = clients.iter().any(|c| {
                 c.id != id
-                    && c.client_type == existing.client_type
+                    && c.client_type() == existing.client_type()
                     && c.enabled
                     && c.is_default_for_protocol
             });
@@ -158,7 +160,7 @@ pub async fn update(
 
     // Auto-promote: if disabling the default, promote another enabled client.
     if req.enabled == Some(false) && dc.is_default_for_protocol {
-        auto_promote_default(&state, &dc.client_type, dc.id).await;
+        auto_promote_default(&state, dc.client_type(), dc.id).await;
     }
 
     Ok(Json(to_response(dc)))
@@ -175,7 +177,7 @@ pub async fn delete(
 
     // Auto-promote: if deleting the default, promote another enabled client.
     if existing.is_default_for_protocol {
-        auto_promote_default(&state, &existing.client_type, existing.id).await;
+        auto_promote_default(&state, existing.client_type(), existing.id).await;
     }
 
     Ok(())
@@ -186,7 +188,7 @@ async fn auto_promote_default(state: &AppState, client_type: &str, exclude_id: i
     if let Ok(clients) = state.db.list_download_clients().await {
         if let Some(candidate) = clients
             .iter()
-            .find(|c| c.client_type == client_type && c.enabled && c.id != exclude_id)
+            .find(|c| c.client_type() == client_type && c.enabled && c.id != exclude_id)
         {
             if let Err(e) = state
                 .db

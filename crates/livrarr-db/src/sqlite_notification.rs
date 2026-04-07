@@ -105,12 +105,7 @@ impl NotificationDb for SqliteDb {
 
         if let Some(row) = existing {
             let id: i64 = row.try_get("id").map_err(|e| DbError::Io(Box::new(e)))?;
-            // Return existing without creating.
-            let all = self.list_notifications(req.user_id, false).await?;
-            if let Some(n) = all.into_iter().find(|n| n.id == id) {
-                return Ok(n);
-            }
-            // If dismissed, still return it by fetching directly.
+            // Return existing without creating — direct lookup by ID.
             let row = sqlx::query("SELECT * FROM notifications WHERE id = ?")
                 .bind(id)
                 .fetch_one(self.pool())

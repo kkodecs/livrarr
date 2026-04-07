@@ -193,9 +193,12 @@ export const searchReleases = async (
     }
   }
   if (!res.ok) {
-    const { ApiError, clearToken } = await import("./client");
+    const { ApiError } = await import("./client");
     if (res.status === 401) {
-      clearToken();
+      // Dynamically import to avoid circular dep; clearAuth handles both
+      // localStorage removal and Zustand state reset.
+      const { useAuthStore } = await import("@/stores/auth");
+      useAuthStore.getState().clearAuth();
       throw new ApiError({ status: 401, error: "unauthorized", message: "Session expired" });
     }
     throw new ApiError({ status: res.status, error: "error", message: "Search failed" });

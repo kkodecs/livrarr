@@ -558,7 +558,7 @@ impl AuthService for AuthServiceImpl {
 impl AuthServiceImpl {
     async fn record_failure(&self, username: &str) {
         let mut lockouts = self.lockouts.write().await;
-        // LRU-style eviction: if the map exceeds the max, remove the oldest entries.
+        // Bounded eviction: if the map exceeds the max, remove arbitrary entries.
         if lockouts.len() >= MAX_LOCKOUT_ENTRIES {
             let keys: Vec<String> = lockouts.keys().take(EVICT_COUNT).cloned().collect();
             for key in keys {
@@ -578,6 +578,7 @@ impl AuthServiceImpl {
     }
 }
 
+#[cfg(test)]
 /// Create a fresh AuthService backed by a SQLite :memory: DB with a placeholder admin.
 pub async fn new_test_auth_service() -> AuthServiceImpl {
     let db = livrarr_db::test_helpers::create_test_db().await;

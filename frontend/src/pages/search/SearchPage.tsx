@@ -95,9 +95,9 @@ export default function SearchPage() {
     e.preventDefault();
     const q = term.trim();
     if (!q) return;
-    setLastSearched(q);
+    // Only update URL params — the useEffect watching searchParams will
+    // trigger the actual search, keeping a single source of truth.
     setSearchParams({ q });
-    searchMutation.mutate(q);
   };
 
   // Filter add-results to exclude works already in the library.

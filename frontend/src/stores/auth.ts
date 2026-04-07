@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import type { UserResponse } from "@/types/api";
-import { getToken, setToken, clearToken } from "@/api/client";
+import {
+  ApiError,
+  getToken,
+  setToken,
+  clearToken,
+  registerAuthClearedListener,
+} from "@/api/client";
 import * as api from "@/api";
 
 export type AuthStatus =
@@ -44,8 +50,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           isAdmin: user.role === "admin",
         });
         return;
-      } catch {
-        clearToken();
+      } catch (err) {
+        // Only clear the stored token on an explicit 401 — the server has
+        // rejected the credential.  Network failures (TypeError from fetch,
+        // status 0, or any non-API error) should preserve the token so a
+        // page refresh can retry once connectivity is restored.
+        if (err instanceof ApiError && err.status === 401) {
+          clearToken();
+        } else {
+          // Network or unexpected error — keep token, let user retry on
+          // next page load.
+          set({
+            status: "unauthenticated",
+            user: null,
+            token,
+            isAdmin: false,
+          });
+          return;
+        }
       }
     }
     // No valid token — check setup status
@@ -113,3 +135,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ user, isAdmin: user.role === "admin" });
   },
 }));
+
+// When apiFetch/apiUpload receive a 401 and call clearAuth() in client.ts,
+// this listener keeps the Zustand state in sync (sets status, clears user).
+registerAuthClearedListener(() => {
+  const { status } = useAuthStore.getState();
+  // Avoid re-entrancy if clearAuth was called from the store itself.
+  if (status !== "unauthenticated") {
+    useAuthStore.setState({
+      status: "unauthenticated",
+      user: null,
+      token: null,
+      isAdmin: false,
+    });
+  }
+});

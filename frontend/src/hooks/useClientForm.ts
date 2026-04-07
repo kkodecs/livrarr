@@ -113,9 +113,7 @@ export function useClientForm(editing: DownloadClientResponse | null) {
     // directly so the server reads credentials from DB.
     if (editing) {
       const vals = form.getValues();
-      const hasNewCreds =
-        (editing.implementation === "sabnzbd" && vals.apiKey) ||
-        (editing.implementation === "qBittorrent" && vals.password);
+      const hasNewCreds = !!(vals.password || vals.apiKey);
       if (!hasNewCreds) {
         testSaved.mutate(editing.id);
         return;

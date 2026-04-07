@@ -288,6 +288,8 @@ impl std::fmt::Debug for User {
             .field("role", &self.role)
             .field("api_key_hash", &"[REDACTED]")
             .field("setup_pending", &self.setup_pending)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
             .finish()
     }
 }
@@ -295,13 +297,26 @@ impl std::fmt::Debug for User {
 /// Session entity.
 ///
 /// Satisfies: AUTH-005, AUTH-006
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(skip_serializing)]
     pub token_hash: String,
     pub user_id: UserId,
     pub persistent: bool,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("token_hash", &"[REDACTED]")
+            .field("user_id", &self.user_id)
+            .field("persistent", &self.persistent)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Work entity — the primary domain object.
@@ -408,10 +423,16 @@ pub struct DownloadClient {
     pub password: Option<String>,
     pub category: String,
     pub enabled: bool,
-    pub client_type: String,
     #[serde(skip_serializing)]
     pub api_key: Option<String>,
     pub is_default_for_protocol: bool,
+}
+
+impl DownloadClient {
+    /// Canonical client_type string derived from implementation — single source of truth.
+    pub fn client_type(&self) -> &'static str {
+        self.implementation.client_type()
+    }
 }
 
 impl std::fmt::Debug for DownloadClient {
@@ -422,8 +443,15 @@ impl std::fmt::Debug for DownloadClient {
             .field("implementation", &self.implementation)
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("use_ssl", &self.use_ssl)
+            .field("skip_ssl_validation", &self.skip_ssl_validation)
+            .field("url_base", &self.url_base)
+            .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("category", &self.category)
+            .field("enabled", &self.enabled)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("is_default_for_protocol", &self.is_default_for_protocol)
             .finish()
     }
 }
@@ -524,7 +552,15 @@ impl std::fmt::Debug for Indexer {
             .field("name", &self.name)
             .field("protocol", &self.protocol)
             .field("url", &self.url)
+            .field("api_path", &self.api_path)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("categories", &self.categories)
+            .field("priority", &self.priority)
+            .field("enable_automatic_search", &self.enable_automatic_search)
+            .field("enable_interactive_search", &self.enable_interactive_search)
+            .field("supports_book_search", &self.supports_book_search)
+            .field("enabled", &self.enabled)
+            .field("added_at", &self.added_at)
             .finish()
     }
 }
@@ -539,24 +575,34 @@ impl std::fmt::Debug for Indexer {
 pub fn sanitize_path_component(input: &str, fallback: &str) -> String {
     const MAX_BYTES: usize = 255;
     const ELLIPSIS: &str = "...";
-    const ILLEGAL: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 
-    // Strip control characters, replace illegal chars with underscore
-    let sanitized: String = input
-        .chars()
-        .filter(|c| !c.is_control())
-        .map(|c| if ILLEGAL.contains(&c) { '_' } else { c })
-        .collect();
+    fn sanitize_inner(s: &str) -> String {
+        const ILLEGAL: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 
-    // Trim trailing dots and spaces
-    let trimmed = sanitized.trim_end_matches(['.', ' ']);
+        // Strip control characters, replace illegal chars with underscore
+        let sanitized: String = s
+            .chars()
+            .filter(|c| !c.is_control())
+            .map(|c| if ILLEGAL.contains(&c) { '_' } else { c })
+            .collect();
 
-    // "." / ".." or empty after sanitization -> fallback
-    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
-        return fallback.to_string();
+        // Trim trailing dots and spaces
+        sanitized.trim_end_matches(['.', ' ']).to_string()
     }
 
-    let result = trimmed.to_string();
+    let trimmed = sanitize_inner(input);
+
+    // "." / ".." or empty after sanitization -> sanitize fallback too
+    let result = if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        let fb = sanitize_inner(fallback);
+        if fb.is_empty() || fb == "." || fb == ".." {
+            // Ultimate fallback if even the fallback is invalid
+            return "_".to_string();
+        }
+        fb
+    } else {
+        trimmed
+    };
 
     // Truncate to MAX_BYTES if needed
     if result.len() > MAX_BYTES {

@@ -740,6 +740,9 @@ pub async fn update(
     Ok(Json(work_to_detail(&work)))
 }
 
+/// Maximum upload size for cover images (1 MB).
+const MAX_COVER_BYTES: usize = 1_024 * 1_024;
+
 /// POST /api/v1/work/:id/cover
 pub async fn upload_cover(
     State(state): State<AppState>,
@@ -748,6 +751,13 @@ pub async fn upload_cover(
     body: Bytes,
 ) -> Result<(), ApiError> {
     let user_id = ctx.user.id;
+
+    // Reject oversized uploads (413 Payload Too Large).
+    if body.len() > MAX_COVER_BYTES {
+        return Err(ApiError::PayloadTooLarge {
+            max_bytes: MAX_COVER_BYTES,
+        });
+    }
 
     // Verify work exists.
     let _work = state.db.get_work(user_id, id).await?;

@@ -372,53 +372,82 @@ fn extract_hash_from_torrent_file(data: &[u8]) -> Result<String, DownloadError> 
                 reason: format!("failed to read torrent root: {e}"),
             })?;
         // After consuming the top-level object, the decoder should be at EOF.
-        if top_decoder.next_object().ok().flatten().is_some() {
-            return Err(DownloadError::InvalidTorrentFile {
-                reason: "trailing data after root bencode object".to_string(),
-            });
+        // Propagate decoder errors — malformed trailing bytes are invalid, not ignorable.
+        let trailing = top_decoder.next_object().map(|o| o.is_some());
+        match trailing {
+            Ok(false) => {} // EOF — correct
+            Ok(true) => {
+                return Err(DownloadError::InvalidTorrentFile {
+                    reason: "trailing data after root bencode object".to_string(),
+                });
+            }
+            Err(e) => {
+                return Err(DownloadError::InvalidTorrentFile {
+                    reason: format!("malformed trailing data: {e}"),
+                });
+            }
         }
     }
 
-    // Locate the raw "info" dictionary bytes via pattern match, then use bendy to
-    // find the dict boundary. SHA-1 hashing requires the raw bencode bytes.
-    let info_start =
-        find_info_dict_start(data).ok_or_else(|| DownloadError::InvalidTorrentFile {
-            reason: "no info dictionary found".to_string(),
-        })?;
-
-    // Use bendy to decode just the info dict portion and measure its span.
-    let info_slice = &data[info_start..];
-    let mut decoder = bendy::decoding::Decoder::new(info_slice);
-    let obj = decoder
-        .next_object()
-        .map_err(|e| DownloadError::InvalidTorrentFile {
-            reason: format!("malformed info dictionary: {e}"),
-        })?;
-    let dict = obj
-        .ok_or_else(|| DownloadError::InvalidTorrentFile {
-            reason: "empty info dictionary".to_string(),
-        })?
-        .try_into_dictionary()
-        .map_err(|e| DownloadError::InvalidTorrentFile {
-            reason: format!("info is not a dictionary: {e}"),
-        })?;
-    let info_bytes = dict
-        .into_raw()
-        .map_err(|e| DownloadError::InvalidTorrentFile {
-            reason: format!("failed to read raw info bytes: {e}"),
-        })?;
+    // Structurally parse the top-level dictionary to find the "info" key and extract
+    // its raw bencode bytes. This avoids the naive byte-pattern search for "4:infod"
+    // which can match inside nested values.
+    let info_bytes = find_info_dict_bytes(data)?;
 
     use sha1::Digest;
     let hash = sha1::Sha1::digest(info_bytes);
     Ok(data_encoding::HEXLOWER.encode(&hash))
 }
 
-/// Find the byte offset where the info dictionary value starts (the 'd' after "4:info").
-fn find_info_dict_start(data: &[u8]) -> Option<usize> {
-    let needle = b"4:infod";
-    data.windows(needle.len())
-        .position(|w| w == needle)
-        .map(|pos| pos + 6) // skip "4:info", point at 'd'
+/// Structurally walk the top-level bencode dictionary to extract the raw bytes of
+/// the `info` value. Uses `bendy` so we only match the actual top-level key, not
+/// a substring buried inside a nested value.
+fn find_info_dict_bytes(data: &[u8]) -> Result<&[u8], DownloadError> {
+    use bendy::decoding::{Decoder, Object};
+
+    let mut decoder = Decoder::new(data);
+    let top = decoder
+        .next_object()
+        .map_err(|e| DownloadError::InvalidTorrentFile {
+            reason: format!("malformed torrent file: {e}"),
+        })?
+        .ok_or_else(|| DownloadError::InvalidTorrentFile {
+            reason: "empty torrent file".to_string(),
+        })?;
+
+    let mut dict = top
+        .try_into_dictionary()
+        .map_err(|e| DownloadError::InvalidTorrentFile {
+            reason: format!("torrent root is not a dictionary: {e}"),
+        })?;
+
+    while let Some(pair) = dict
+        .next_pair()
+        .map_err(|e| DownloadError::InvalidTorrentFile {
+            reason: format!("error reading torrent dictionary: {e}"),
+        })?
+    {
+        let (key, value) = pair;
+        if key == b"info" {
+            // `value` is an Object — convert to raw bytes to get the exact bencode span.
+            match value {
+                Object::Dict(d) => {
+                    return d.into_raw().map_err(|e| DownloadError::InvalidTorrentFile {
+                        reason: format!("failed to read raw info bytes: {e}"),
+                    });
+                }
+                _ => {
+                    return Err(DownloadError::InvalidTorrentFile {
+                        reason: "info key is not a dictionary".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    Err(DownloadError::InvalidTorrentFile {
+        reason: "no info dictionary found".to_string(),
+    })
 }
 
 /// Resolve download client paths to local paths.

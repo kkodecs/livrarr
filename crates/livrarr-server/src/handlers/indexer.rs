@@ -261,6 +261,7 @@ pub async fn create(
 /// PUT /api/v1/indexer/:id
 pub async fn update(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
     Json(req): Json<UpdateIndexerApiRequest>,
 ) -> Result<Json<IndexerResponse>, ApiError> {

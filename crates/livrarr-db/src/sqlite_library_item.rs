@@ -102,15 +102,56 @@ impl LibraryItemDb for SqliteDb {
         let now = Utc::now().to_rfc3339();
         let mt = media_type_str(req.media_type);
 
+        // Check for an existing row at this (user_id, root_folder_id, path).
+        // If it exists but belongs to a different work, reject with a constraint error
+        // rather than silently reassigning the file.
+        let existing = sqlx::query(
+            "SELECT id, work_id FROM library_items \
+             WHERE user_id = ? AND root_folder_id = ? AND path = ?",
+        )
+        .bind(req.user_id)
+        .bind(req.root_folder_id)
+        .bind(&req.path)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        if let Some(row) = existing {
+            let existing_id: i64 = row.try_get("id").map_err(|e| DbError::Io(Box::new(e)))?;
+            let existing_work_id: i64 = row
+                .try_get("work_id")
+                .map_err(|e| DbError::Io(Box::new(e)))?;
+
+            if existing_work_id != req.work_id {
+                return Err(DbError::Constraint {
+                    message: format!(
+                        "library item at path '{}' already belongs to work {}, cannot reassign to work {}",
+                        req.path, existing_work_id, req.work_id
+                    ),
+                });
+            }
+
+            // Same work -- update in place (idempotent re-import).
+            sqlx::query(
+                "UPDATE library_items SET \
+                 media_type = ?, file_size = ?, imported_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(mt)
+            .bind(req.file_size)
+            .bind(&now)
+            .bind(existing_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+            return self.get_library_item(req.user_id, existing_id).await;
+        }
+
+        // No conflict -- insert new row.
         let id = sqlx::query(
             "INSERT INTO library_items (user_id, work_id, root_folder_id, path, media_type, file_size, imported_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(user_id, path) DO UPDATE SET \
-               work_id = excluded.work_id, \
-               root_folder_id = excluded.root_folder_id, \
-               media_type = excluded.media_type, \
-               file_size = excluded.file_size, \
-               imported_at = excluded.imported_at",
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(req.user_id)
         .bind(req.work_id)

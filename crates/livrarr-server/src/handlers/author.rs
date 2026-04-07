@@ -280,15 +280,15 @@ pub async fn bibliography(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<livrarr_db::AuthorBibliography>, ApiError> {
-    // Check cache first — skip empty caches (failed previous fetch).
+    // Verify ownership BEFORE any cache read — prevents cross-user data leak.
+    let author = state.db.get_author(ctx.user.id, id).await?;
+
+    // Check cache — skip empty caches (failed previous fetch).
     if let Ok(Some(cached)) = state.db.get_bibliography(id).await {
         if !cached.entries.is_empty() {
             return Ok(Json(cached));
         }
     }
-
-    // Fetch from OL.
-    let author = state.db.get_author(ctx.user.id, id).await?;
     let ol_key = author
         .ol_key
         .as_deref()
@@ -359,6 +359,9 @@ pub async fn refresh_bibliography(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<livrarr_db::AuthorBibliography>, ApiError> {
+    // Verify ownership BEFORE any cache mutation — prevents cross-user cache wipe.
+    let _author = state.db.get_author(ctx.user.id, id).await?;
+
     // Clear cache so bibliography() re-fetches.
     if let Err(e) = sqlx::query("DELETE FROM author_bibliography WHERE author_id = ?")
         .bind(id)

@@ -1,4 +1,10 @@
-pub use livrarr_domain::*;
+pub use livrarr_domain::{
+    Author, AuthorId, DbError, DownloadClient, DownloadClientId, DownloadClientImplementation,
+    EnrichmentStatus, EventType, Grab, GrabId, GrabStatus, HistoryEvent, HistoryId, Indexer,
+    IndexerId, LibraryItem, LibraryItemId, LlmProvider, MediaType, NarrationType, Notification,
+    NotificationId, NotificationType, RemotePathMapping, RemotePathMappingId, RootFolder,
+    RootFolderId, Session, User, UserId, UserRole, Work, WorkId,
+};
 
 pub mod pool;
 pub mod sqlite;
@@ -889,34 +895,10 @@ pub trait AuthorBibliographyDb: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// v2.1 — SQLite Pool Creation
-// ---------------------------------------------------------------------------
-
-/// Create and configure a SQLite connection pool.
-///
-/// Satisfies: RUNTIME-SQLITE-001, RUNTIME-SQLITE-002
-///
-/// This is a placeholder signature for Phase 3 behavioral tests.
-/// The real implementation uses sqlx::SqlitePool.
-pub fn create_pool(
-    data_dir: &std::path::Path,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DbError>> + Send>> {
-    let exists = data_dir.exists();
-    let display = data_dir.display().to_string();
-    Box::pin(async move {
-        if !exists {
-            return Err(DbError::Io(
-                format!("data directory does not exist: {display}").into(),
-            ));
-        }
-        Ok(())
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Test Helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers {
     use super::sqlite::SqliteDb;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};

@@ -1,4 +1,4 @@
-pub use livrarr_domain::*;
+pub use livrarr_domain::{DbError, EnrichmentStatus, LlmRole, NarrationType, UserId, Work, WorkId};
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -232,6 +232,7 @@ pub struct AuthorSearchResult {
 // OpenLibraryProvider — configurable test double
 // =============================================================================
 
+#[cfg(test)]
 enum OlProviderMode {
     Works(Vec<ProviderSearchResult>),
     Authors(Vec<ProviderAuthorResult>),
@@ -240,14 +241,18 @@ enum OlProviderMode {
 }
 
 // MetadataError isn't Clone, so store a reconstructible kind
+#[cfg(test)]
 enum MetadataErrorKind {
     NotConfigured,
     Timeout(Duration),
     RateLimited,
     AuthFailed,
     RequestFailed(String),
+    InvalidResponse(String),
+    NoMatch,
 }
 
+#[cfg(test)]
 impl MetadataErrorKind {
     fn to_error(&self) -> MetadataError {
         match self {
@@ -256,14 +261,18 @@ impl MetadataErrorKind {
             Self::RateLimited => MetadataError::RateLimited,
             Self::AuthFailed => MetadataError::AuthFailed,
             Self::RequestFailed(s) => MetadataError::RequestFailed(s.clone()),
+            Self::InvalidResponse(s) => MetadataError::InvalidResponse(s.clone()),
+            Self::NoMatch => MetadataError::NoMatch,
         }
     }
 }
 
+#[cfg(test)]
 pub struct OpenLibraryProvider {
     mode: OlProviderMode,
 }
 
+#[cfg(test)]
 impl OpenLibraryProvider {
     pub fn new_test(results: Vec<ProviderSearchResult>) -> Self {
         Self {
@@ -290,7 +299,8 @@ impl OpenLibraryProvider {
             MetadataError::RateLimited => MetadataErrorKind::RateLimited,
             MetadataError::AuthFailed => MetadataErrorKind::AuthFailed,
             MetadataError::RequestFailed(s) => MetadataErrorKind::RequestFailed(s),
-            _ => MetadataErrorKind::RequestFailed("unknown".to_string()),
+            MetadataError::InvalidResponse(s) => MetadataErrorKind::InvalidResponse(s),
+            MetadataError::NoMatch => MetadataErrorKind::NoMatch,
         };
         Self {
             mode: OlProviderMode::Error(kind),
@@ -298,6 +308,7 @@ impl OpenLibraryProvider {
     }
 }
 
+#[cfg(test)]
 impl MetadataProvider for OpenLibraryProvider {
     fn name(&self) -> &str {
         "openlibrary"
@@ -338,15 +349,18 @@ impl MetadataProvider for OpenLibraryProvider {
 // OlSearchService — configurable test double
 // =============================================================================
 
+#[cfg(test)]
 enum OlSearchMode {
     Works(Vec<WorkSearchResult>),
     Authors(Vec<AuthorSearchResult>),
 }
 
+#[cfg(test)]
 pub struct OlSearchService {
     mode: OlSearchMode,
 }
 
+#[cfg(test)]
 impl OlSearchService {
     pub fn new_test(results: Vec<WorkSearchResult>) -> Self {
         Self {
@@ -361,6 +375,7 @@ impl OlSearchService {
     }
 }
 
+#[cfg(test)]
 impl SearchService for OlSearchService {
     async fn search_works(&self, _query: &str) -> Result<Vec<WorkSearchResult>, MetadataError> {
         match &self.mode {

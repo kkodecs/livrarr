@@ -42,9 +42,6 @@ fn row_to_download_client(row: sqlx::sqlite::SqliteRow) -> Result<DownloadClient
         enabled: row
             .try_get::<bool, _>("enabled")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-        client_type: row
-            .try_get("client_type")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
         api_key: row
             .try_get("api_key")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -148,6 +145,9 @@ impl DownloadClientDb for SqliteDb {
         // Fetch current record, merge changes, single atomic UPDATE.
         let current = self.get_download_client(id).await?;
 
+        let client_type = current.client_type();
+        let was_default = current.is_default_for_protocol;
+
         let name = req.name.unwrap_or(current.name);
         let host = req.host.unwrap_or(current.host);
         let port = req.port.unwrap_or(current.port);
@@ -161,14 +161,12 @@ impl DownloadClientDb for SqliteDb {
         let category = req.category.unwrap_or(current.category);
         let enabled = req.enabled.unwrap_or(current.enabled);
         let api_key = req.api_key.or(current.api_key);
-        let is_default = req
-            .is_default_for_protocol
-            .unwrap_or(current.is_default_for_protocol);
+        let is_default = req.is_default_for_protocol.unwrap_or(was_default);
 
         // If promoting to default, clear other defaults for this client_type.
-        if is_default && !current.is_default_for_protocol {
+        if is_default && !was_default {
             sqlx::query("UPDATE download_clients SET is_default_for_protocol = false WHERE client_type = ? AND id != ?")
-                .bind(&current.client_type)
+                .bind(client_type)
                 .bind(id)
                 .execute(self.pool())
                 .await

@@ -90,7 +90,7 @@ async fn fetch_progress(
     client: &livrarr_domain::DownloadClient,
     download_id: &str,
 ) -> Option<QueueProgress> {
-    match client.client_type.as_str() {
+    match client.client_type() {
         "sabnzbd" => fetch_sab_progress(state, client, download_id).await,
         _ => fetch_qbit_progress(state, client, download_id).await,
     }

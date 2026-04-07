@@ -602,7 +602,7 @@ pub async fn grab(
     let client = if let Some(client_id) = req.download_client_id {
         let c = state.db.get_download_client(client_id).await?;
         // Validate client matches the release protocol.
-        if c.client_type != client_type {
+        if c.client_type() != client_type {
             return Err(ApiError::BadRequest(format!(
                 "Selected download client does not support {} protocol",
                 protocol
@@ -624,7 +624,7 @@ pub async fn grab(
             })?
     };
 
-    let download_id = match client.client_type.as_str() {
+    let download_id = match client.client_type() {
         "sabnzbd" => grab_sabnzbd(&state, &client, &req).await?,
         _ => grab_qbittorrent(&state, &client, &req).await?,
     };

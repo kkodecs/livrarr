@@ -14,6 +14,22 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+// Listener invoked whenever a 401 response forces token removal.
+// The auth store registers a callback so the Zustand state stays in sync
+// without a circular import (client.ts must not import from stores/).
+type AuthClearedListener = () => void;
+let onAuthCleared: AuthClearedListener | null = null;
+
+export function registerAuthClearedListener(cb: AuthClearedListener): void {
+  onAuthCleared = cb;
+}
+
+/** Clear token AND notify the auth store (if a listener is registered). */
+function clearAuth(): void {
+  clearToken();
+  onAuthCleared?.();
+}
+
 export class ApiError extends Error {
   status: number;
   error: string;
@@ -101,8 +117,7 @@ export async function apiFetch<T>(
   }
 
   if (res.status === 401) {
-    clearToken();
-    // Redirect handled by auth store listener
+    clearAuth();
     throw new ApiError({
       status: 401,
       error: "unauthorized",
@@ -118,7 +133,17 @@ export async function apiFetch<T>(
     return undefined as T;
   }
 
-  return res.json() as Promise<T>;
+  // HTTP/2 and some proxies omit content-length even on empty bodies.
+  // Read as text first so we never throw on an empty/non-JSON 2xx body.
+  const text = await res.text();
+  if (!text) {
+    return undefined as T;
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return undefined as T;
+  }
 }
 
 export async function apiUpload<T>(path: string, file: Blob): Promise<T> {
@@ -147,7 +172,7 @@ export async function apiUpload<T>(path: string, file: Blob): Promise<T> {
   }
 
   if (res.status === 401) {
-    clearToken();
+    clearAuth();
     throw new ApiError({
       status: 401,
       error: "unauthorized",
