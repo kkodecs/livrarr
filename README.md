@@ -32,7 +32,7 @@
 ```yaml
 services:
   livrarr:
-    image: ghcr.io/kkodecs/livrarr:latest
+    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha2
     container_name: livrarr
     ports:
       - 8789:8789
