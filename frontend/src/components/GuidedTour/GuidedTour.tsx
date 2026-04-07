@@ -14,27 +14,21 @@ export default function GuidedTour({
   const navigate = useNavigate();
   const [stepIndex, setStepIndex] = useState(0);
 
-  // Reset stepIndex on mount so tour always starts from the beginning
   useEffect(() => {
     setStepIndex(0);
-    return () => {
-      setStepIndex(0);
-    };
+    return () => setStepIndex(0);
   }, []);
 
   const handleEvent = useCallback(
     (data: EventData, controls: Controls) => {
       const { action, index, status, type } = data;
-      console.log("[tour]", { type, action, status, index });
 
-      // Tour finished or skipped
       if (status === STATUS.FINISHED || status === STATUS.SKIPPED) {
         onStop();
         setStepIndex(0);
         return;
       }
 
-      // Close button
       if (action === ACTIONS.CLOSE) {
         controls.skip();
         onStop();
@@ -42,11 +36,31 @@ export default function GuidedTour({
         return;
       }
 
+      // Target not found after timeout — skip to next step
+      if (type === EVENTS.TARGET_NOT_FOUND) {
+        const nextIndex = index + 1;
+        if (nextIndex >= TOUR_STEPS.length) {
+          onStop();
+          setStepIndex(0);
+        } else {
+          const nextStep = TOUR_STEPS[nextIndex];
+          const nextRoute = (nextStep?.data as { route?: string })?.route;
+          const currentRoute = (TOUR_STEPS[index]?.data as { route?: string })
+            ?.route;
+          if (nextRoute && nextRoute !== currentRoute) {
+            navigate(nextRoute);
+            setTimeout(() => setStepIndex(nextIndex), 300);
+          } else {
+            setStepIndex(nextIndex);
+          }
+        }
+        return;
+      }
+
       if (type === EVENTS.STEP_AFTER) {
         const nextIndex =
           action === ACTIONS.PREV ? index - 1 : index + 1;
 
-        // Past the last step — tour is done
         if (nextIndex >= TOUR_STEPS.length) {
           onStop();
           setStepIndex(0);
@@ -61,7 +75,6 @@ export default function GuidedTour({
 
           if (nextRoute && nextRoute !== currentRoute) {
             navigate(nextRoute);
-            // Small delay to let the page render before Joyride looks for targets
             setTimeout(() => setStepIndex(nextIndex), 300);
           } else {
             setStepIndex(nextIndex);
@@ -80,7 +93,6 @@ export default function GuidedTour({
       stepIndex={stepIndex}
       run={running}
       continuous
-      debug
       onEvent={handleEvent}
       locale={{
         back: "Back",
@@ -93,8 +105,11 @@ export default function GuidedTour({
         buttons: ["back", "skip", "primary"],
         showProgress: true,
         primaryColor: "#6366f1",
-        overlayColor: "rgba(0, 0, 0, 0.6)",
+        hideOverlay: true,
+        disableFocusTrap: true,
+        dismissKeyAction: false,
         overlayClickAction: false,
+        targetWaitTimeout: 3000,
       }}
       styles={{
         tooltip: {
@@ -102,6 +117,7 @@ export default function GuidedTour({
           padding: 16,
           backgroundColor: "#27272a",
           color: "#e4e4e7",
+          zIndex: 10000,
         },
         tooltipTitle: {
           color: "#e4e4e7",

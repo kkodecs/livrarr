@@ -28,7 +28,7 @@ import { EmptyState } from "@/components/Page/EmptyState";
 import { ConfirmModal } from "@/components/Page/ConfirmModal";
 import { cn } from "@/utils/cn";
 import { SortHeader } from "@/components/Page/SortHeader";
-import { formatMB, formatRelativeDate, getCoverUrl, getCoverThumbUrl } from "@/utils/format";
+import { formatMB, formatRelativeDate, getCoverUrl } from "@/utils/format";
 import type {
   WorkDetailResponse,
   MediaType,
@@ -566,7 +566,7 @@ function TableView({
                 )}
                 <td className="px-3 py-2">
                   <img
-                    src={getCoverThumbUrl(work.id)}
+                    src={getCoverUrl(work.id)}
                     alt=""
                     className="h-8 w-8 rounded object-cover"
                     loading="lazy"
@@ -672,7 +672,7 @@ function PosterView({
             >
               <div className="aspect-[2/3] overflow-hidden">
                 <img
-                  src={getCoverThumbUrl(work.id)}
+                  src={getCoverUrl(work.id)}
                   alt={work.title}
                   className="h-full w-full object-cover transition-transform group-hover:scale-105"
                   loading="lazy"

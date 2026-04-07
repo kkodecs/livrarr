@@ -6,6 +6,10 @@ export function AuthGuard({ children }: { children: ReactNode }) {
   const status = useAuthStore((s) => s.status);
   const location = useLocation();
 
+  if (status === "loading") {
+    return null;
+  }
+
   if (status === "setup_required") {
     return <Navigate to="/setup" replace />;
   }
@@ -29,6 +33,10 @@ export function AdminGuard({ children }: { children: ReactNode }) {
 
 export function GuestGuard({ children }: { children: ReactNode }) {
   const status = useAuthStore((s) => s.status);
+
+  if (status === "loading") {
+    return null;
+  }
 
   if (status === "authenticated") {
     return <Navigate to="/" replace />;

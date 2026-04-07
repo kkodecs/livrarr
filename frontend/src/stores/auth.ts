@@ -106,6 +106,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   setupAction: async (username, password) => {
     const { token, apiKey } = await api.setup({ username, password });
     setToken(token);
+    // Clear tour-completed flag so the guided tour starts for new setups.
+    localStorage.removeItem("livrarr-tour-completed");
     const { user } = await api.getMe();
     set({
       status: "authenticated",
