@@ -10,6 +10,8 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  Loader2,
+  Zap,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
 import { PageContent } from "@/components/Page/PageContent";
@@ -139,6 +141,28 @@ export default function IndexersPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const [testingId, setTestingId] = useState<number | null>(null);
+  const testSavedIndexer = useMutation({
+    mutationFn: api.testSavedIndexer,
+    onSuccess: (result) => {
+      setTestingId(null);
+      if (result.ok) {
+        toast.success("Connection successful");
+      } else {
+        toast.error(result.error ?? "Test failed");
+      }
+    },
+    onError: (e: Error) => {
+      setTestingId(null);
+      toast.error(e.message);
+    },
+  });
+
+  const handleTestRow = (id: number) => {
+    setTestingId(id);
+    testSavedIndexer.mutate(id);
+  };
+
   const [modal, setModal] = useState<{
     open: boolean;
     editing: IndexerResponse | null;
@@ -197,7 +221,7 @@ export default function IndexersPage() {
                     <SortHeader field="priority" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Priority <HelpTip text="Lower number = higher priority. When multiple indexers return the same release, Livrarr prefers the one from the higher-priority indexer." /></SortHeader>
                     <th className="px-4 py-2">Capabilities</th>
                     <SortHeader field="enabled" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Status</SortHeader>
-                    {isAdmin && <th className="px-4 py-2 w-24" />}
+                    {isAdmin && <th className="px-4 py-2 w-32" />}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -236,6 +260,18 @@ export default function IndexersPage() {
                       </td>
                       {isAdmin && (
                         <td className="px-4 py-2 flex gap-2">
+                          <button
+                            onClick={() => handleTestRow(idx.id)}
+                            disabled={testingId === idx.id}
+                            className="text-muted hover:text-blue-400 disabled:opacity-50"
+                            title="Test connection"
+                          >
+                            {testingId === idx.id ? (
+                              <Loader2 size={14} className="animate-spin" />
+                            ) : (
+                              <Zap size={14} />
+                            )}
+                          </button>
                           <button
                             onClick={() =>
                               setModal({ open: true, editing: idx })
@@ -281,7 +317,7 @@ export default function IndexersPage() {
                     <SortHeader field="priority" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Priority <HelpTip text="Lower number = higher priority. When multiple indexers return the same release, Livrarr prefers the one from the higher-priority indexer." /></SortHeader>
                     <th className="px-4 py-2">Capabilities</th>
                     <SortHeader field="enabled" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Status</SortHeader>
-                    {isAdmin && <th className="px-4 py-2 w-24" />}
+                    {isAdmin && <th className="px-4 py-2 w-32" />}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -307,6 +343,18 @@ export default function IndexersPage() {
                       </td>
                       {isAdmin && (
                         <td className="px-4 py-2 flex gap-2">
+                          <button
+                            onClick={() => handleTestRow(idx.id)}
+                            disabled={testingId === idx.id}
+                            className="text-muted hover:text-blue-400 disabled:opacity-50"
+                            title="Test connection"
+                          >
+                            {testingId === idx.id ? (
+                              <Loader2 size={14} className="animate-spin" />
+                            ) : (
+                              <Zap size={14} />
+                            )}
+                          </button>
                           <button onClick={() => setModal({ open: true, editing: idx })} className="text-muted hover:text-zinc-100">
                             <Pencil size={14} />
                           </button>

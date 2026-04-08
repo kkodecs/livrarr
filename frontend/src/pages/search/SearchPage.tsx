@@ -266,35 +266,53 @@ function OlResult({
         isSelected && "bg-brand/5",
       )}
     >
-      <button
-        type="button"
-        onClick={onSelect}
-        className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-zinc-800/50"
-      >
-        {work.coverUrl ? (
-          <img
-            src={work.coverUrl}
-            alt=""
-            className="h-8 w-6 shrink-0 rounded bg-zinc-700 object-cover"
-          />
-        ) : (
-          <div className="flex h-8 w-6 shrink-0 items-center justify-center rounded bg-zinc-700 text-[8px] text-zinc-500">
-            ?
-          </div>
-        )}
-        <span className="min-w-0 truncate font-medium text-sm text-zinc-100">{work.title}</span>
-        {work.seriesName && (
-          <span className="shrink-0 text-xs text-zinc-500">
-            {work.seriesName}
-            {work.seriesPosition != null && ` #${work.seriesPosition}`}
+      <div className="flex w-full items-center gap-2 px-2 py-1.5">
+        <button
+          type="button"
+          onClick={onSelect}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:bg-zinc-800/50 rounded -m-1 p-1"
+        >
+          {work.coverUrl ? (
+            <img
+              src={work.coverUrl}
+              alt=""
+              className="h-8 w-6 shrink-0 rounded bg-zinc-700 object-cover"
+            />
+          ) : (
+            <div className="flex h-8 w-6 shrink-0 items-center justify-center rounded bg-zinc-700 text-[8px] text-zinc-500">
+              ?
+            </div>
+          )}
+          <span className="min-w-0 truncate font-medium text-sm text-zinc-100">{work.title}</span>
+          {work.seriesName && (
+            <span className="shrink-0 text-xs text-zinc-500">
+              {work.seriesName}
+              {work.seriesPosition != null && ` #${work.seriesPosition}`}
+            </span>
+          )}
+          <span className="flex-1" />
+          <span className="shrink-0 text-xs text-muted">{work.authorName}</span>
+          <span className="shrink-0 w-10 text-right text-xs text-zinc-500">
+            {work.year ?? ""}
           </span>
-        )}
-        <span className="flex-1" />
-        <span className="shrink-0 text-xs text-muted">{work.authorName}</span>
-        <span className="shrink-0 w-10 text-right text-xs text-zinc-500">
-          {work.year ?? ""}
-        </span>
-      </button>
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onAdd();
+          }}
+          disabled={isAdding}
+          className="shrink-0 inline-flex items-center gap-1 rounded bg-brand px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+        >
+          {isAdding ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Plus size={12} />
+          )}
+          Add
+        </button>
+      </div>
 
       {isSelected && (
         <div className="flex items-center gap-4 px-2 pb-1.5 pt-0.5">
