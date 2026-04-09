@@ -323,7 +323,7 @@ export const testIndexer = (req: TestIndexerRequest) =>
     body: JSON.stringify(req),
   });
 export const testSavedIndexer = (id: number) =>
-  apiFetch<TestIndexerResponse>(`/indexer/test/${id}`, { method: "POST" });
+  apiFetch<TestIndexerResponse>(`/indexer/${id}/test`, { method: "POST" });
 export const getProwlarrConfig = () =>
   apiFetch<ProwlarrConfigResponse>("/config/prowlarr");
 export const importIndexersFromProwlarr = (req: ProwlarrImportRequest) =>

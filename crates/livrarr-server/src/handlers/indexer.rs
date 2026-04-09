@@ -371,6 +371,7 @@ pub async fn test_saved(
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProwlarrIndexer {
+    id: i64,
     name: String,
     #[serde(default = "default_torrent")]
     protocol: String,
@@ -378,8 +379,6 @@ struct ProwlarrIndexer {
     enable_automatic_search: bool,
     #[serde(default)]
     enable_interactive_search: bool,
-    #[serde(default)]
-    fields: Vec<ProwlarrField>,
     #[serde(default = "default_priority")]
     priority: i32,
 }
@@ -390,22 +389,6 @@ fn default_torrent() -> String {
 
 fn default_priority() -> i32 {
     25
-}
-
-#[derive(serde::Deserialize)]
-struct ProwlarrField {
-    name: String,
-    #[serde(default)]
-    value: serde_json::Value,
-}
-
-impl ProwlarrIndexer {
-    fn field_str(&self, name: &str) -> Option<String> {
-        self.fields
-            .iter()
-            .find(|f| f.name == name)
-            .and_then(|f| f.value.as_str().map(|s| s.to_string()))
-    }
 }
 
 /// POST /api/v1/indexer/import/prowlarr
@@ -475,19 +458,18 @@ pub async fn import_from_prowlarr(
     let mut errors = Vec::new();
 
     for pi in prowlarr_indexers {
-        let Some(base_url) = pi.field_str("baseUrl") else {
-            errors.push(format!("{}: missing baseUrl field", pi.name));
-            continue;
-        };
-
-        let url = normalize_url(&base_url);
+        // Use Prowlarr proxy URL instead of the direct indexer URL.
+        // This routes searches through Prowlarr, which handles Cloudflare
+        // and other connection issues that our HTTP client can't.
+        let url = format!("{base}/{}", pi.id);
         if existing_urls.contains(&url.to_lowercase()) {
             skipped += 1;
             continue;
         }
 
-        let api_key = pi.field_str("apiKey");
-        let api_path = pi.field_str("apiPath").unwrap_or_else(|| "/".to_string());
+        // Use Prowlarr's API key (not the individual indexer's key).
+        let api_key = Some(api_key.clone());
+        let api_path = "/api".to_string();
 
         let protocol = match pi.protocol.as_str() {
             "usenet" => "usenet".to_string(),
