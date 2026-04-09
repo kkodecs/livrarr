@@ -146,24 +146,34 @@ export default function IndexersPage() {
   });
 
   const [testingId, setTestingId] = useState<number | null>(null);
+  const [testResults, setTestResults] = useState<Record<number, "ok" | "fail">>({});
   const testSavedIndexer = useMutation({
     mutationFn: api.testSavedIndexer,
-    onSuccess: (result) => {
+    onSuccess: (result, id) => {
       setTestingId(null);
+      setTestResults((prev) => ({ ...prev, [id]: result.ok ? "ok" : "fail" }));
       if (result.ok) {
         toast.success("Connection successful");
+        // Optimistically update supportsBookSearch in the cache.
+        qc.setQueryData<IndexerResponse[]>(["indexers"], (old) =>
+          old?.map((idx) =>
+            idx.id === id ? { ...idx, supportsBookSearch: result.supportsBookSearch } : idx,
+          ),
+        );
       } else {
         toast.error(result.error ?? "Test failed");
       }
     },
-    onError: (e: Error) => {
+    onError: (e: Error, id) => {
       setTestingId(null);
+      setTestResults((prev) => ({ ...prev, [id]: "fail" }));
       toast.error(e.message);
     },
   });
 
   const handleTestRow = (id: number) => {
     setTestingId(id);
+    setTestResults((prev) => { const next = { ...prev }; delete next[id]; return next; });
     testSavedIndexer.mutate(id);
   };
 
@@ -267,7 +277,7 @@ export default function IndexersPage() {
                           <button
                             onClick={() => handleTestRow(idx.id)}
                             disabled={testingId === idx.id}
-                            className="text-muted hover:text-blue-400 disabled:opacity-50"
+                            className={`disabled:opacity-50 ${testResults[idx.id] === "ok" ? "text-green-400" : testResults[idx.id] === "fail" ? "text-red-400" : "text-muted hover:text-blue-400"}`}
                             title="Test connection"
                           >
                             {testingId === idx.id ? (
@@ -350,7 +360,7 @@ export default function IndexersPage() {
                           <button
                             onClick={() => handleTestRow(idx.id)}
                             disabled={testingId === idx.id}
-                            className="text-muted hover:text-blue-400 disabled:opacity-50"
+                            className={`disabled:opacity-50 ${testResults[idx.id] === "ok" ? "text-green-400" : testResults[idx.id] === "fail" ? "text-red-400" : "text-muted hover:text-blue-400"}`}
                             title="Test connection"
                           >
                             {testingId === idx.id ? (

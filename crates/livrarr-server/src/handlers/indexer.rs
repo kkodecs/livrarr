@@ -109,6 +109,17 @@ async fn test_indexer_caps(
         ))
     })?;
 
+    // Detect HTML responses (login pages, Cloudflare challenges, etc.)
+    let trimmed = body.trim_start();
+    if trimmed.starts_with("<!DOCTYPE")
+        || trimmed.starts_with("<html")
+        || trimmed.starts_with("<HTML")
+    {
+        return Err(ApiError::BadGateway(
+            "Indexer returned an HTML page instead of Torznab XML — check the URL and API key. If this site uses Cloudflare, route it through Prowlarr.".into(),
+        ));
+    }
+
     // Parse the XML.
     let mut reader = Reader::from_str(&body);
     reader.config_mut().trim_text(true);
@@ -185,9 +196,11 @@ async fn test_indexer_caps(
     }
 
     // Check for expected categories (7020 = ebook, 3030 = audiobook).
+    // Skip this warning if book search is already supported — Prowlarr proxies
+    // report book-search available but may not list individual categories.
     let has_ebook = found_categories.contains(&7020);
     let has_audiobook = found_categories.contains(&3030);
-    if !has_ebook && !has_audiobook {
+    if !supports_book_search && !has_ebook && !has_audiobook {
         warnings
             .push("No book-relevant categories (7020, 3030) found in indexer capabilities".into());
     }
