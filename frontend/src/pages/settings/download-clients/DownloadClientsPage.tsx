@@ -13,6 +13,8 @@ import {
   ChevronDown,
   ChevronRight,
   AlertTriangle,
+  Zap,
+  Loader2,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
 import { PageContent } from "@/components/Page/PageContent";
@@ -124,6 +126,9 @@ function ClientTable({
   onEdit,
   onDelete,
   onSetDefault,
+  onTest,
+  testingId,
+  testResults,
 }: {
   clients: DownloadClientResponse[];
   sorting: ReturnType<typeof useSort<ClientSortField>>;
@@ -131,6 +136,9 @@ function ClientTable({
   onEdit: (c: DownloadClientResponse) => void;
   onDelete: (c: DownloadClientResponse) => void;
   onSetDefault: (c: DownloadClientResponse) => void;
+  onTest: (id: number) => void;
+  testingId: number | null;
+  testResults: Record<number, "ok" | "fail">;
 }) {
   if (clients.length === 0) return null;
 
@@ -177,6 +185,18 @@ function ClientTable({
               </td>
               {isAdmin && (
                 <td className="px-4 py-2 flex gap-2">
+                  <button
+                    onClick={() => onTest(c.id)}
+                    disabled={testingId === c.id}
+                    className={`disabled:opacity-50 ${testResults[c.id] === "ok" ? "text-green-400" : testResults[c.id] === "fail" ? "text-red-400" : "text-muted hover:text-blue-400"}`}
+                    title="Test connection"
+                  >
+                    {testingId === c.id ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Zap size={14} />
+                    )}
+                  </button>
                   <button
                     onClick={() => onEdit(c)}
                     className="text-muted hover:text-zinc-100"
@@ -253,6 +273,28 @@ export default function DownloadClientsPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const [testingId, setTestingId] = useState<number | null>(null);
+  const [testResults, setTestResults] = useState<Record<number, "ok" | "fail">>({});
+  const testSavedClient = useMutation({
+    mutationFn: api.testSavedDownloadClient,
+    onSuccess: (_data, id) => {
+      setTestingId(null);
+      setTestResults((prev) => ({ ...prev, [id]: "ok" }));
+      toast.success("Connection successful");
+    },
+    onError: (e: Error, id) => {
+      setTestingId(null);
+      setTestResults((prev) => ({ ...prev, [id]: "fail" }));
+      toast.error(e.message);
+    },
+  });
+
+  const handleTestRow = (id: number) => {
+    setTestingId(id);
+    setTestResults((prev) => { const next = { ...prev }; delete next[id]; return next; });
+    testSavedClient.mutate(id);
+  };
+
   const [modal, setModal] = useState<{
     open: boolean;
     editing: DownloadClientResponse | null;
@@ -315,6 +357,9 @@ export default function DownloadClientsPage() {
               onEdit={(c) => setModal({ open: true, editing: c })}
               onDelete={(c) => setDeleteTarget(c)}
               onSetDefault={(c) => setDefault.mutate(c)}
+              onTest={handleTestRow}
+              testingId={testingId}
+              testResults={testResults}
             />
           ) : (
             <p className="text-sm text-muted">No torrent clients configured.</p>
@@ -334,6 +379,9 @@ export default function DownloadClientsPage() {
               onEdit={(c) => setModal({ open: true, editing: c })}
               onDelete={(c) => setDeleteTarget(c)}
               onSetDefault={(c) => setDefault.mutate(c)}
+              onTest={handleTestRow}
+              testingId={testingId}
+              testResults={testResults}
             />
           ) : (
             <p className="text-sm text-muted">No Usenet clients configured.</p>
@@ -868,6 +916,10 @@ function ProwlarrImportSection({ onImported }: { onImported: () => void }) {
       setResult(data);
       if (data.imported > 0) {
         toast.success(`Imported ${data.imported} download client${data.imported !== 1 ? "s" : ""}`);
+        toast.warning(
+          "Imported clients are disabled. Prowlarr does not expose passwords or API keys — edit each client to enter credentials, then enable it.",
+          { duration: 15000 },
+        );
         onImported();
       } else if (data.skipped > 0) {
         toast.info("All download clients already exist — nothing to import");
@@ -898,6 +950,10 @@ function ProwlarrImportSection({ onImported }: { onImported: () => void }) {
           <p className="text-sm text-muted">
             Import download clients from your Prowlarr instance. Only qBittorrent and SABnzbd are
             supported. Duplicates (matching host + port + type) will be skipped.
+          </p>
+          <p className="text-sm text-amber-400">
+            Note: Prowlarr does not expose passwords or API keys via its API. After import,
+            you will need to edit each client and enter the credentials manually.
           </p>
 
           <div>

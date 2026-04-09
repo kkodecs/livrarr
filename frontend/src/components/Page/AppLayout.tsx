@@ -39,6 +39,9 @@ export function AppLayout() {
       <Toaster
         theme="dark"
         position="bottom-right"
+        visibleToasts={5}
+        gap={8}
+        expand
         toastOptions={{
           className: "bg-zinc-800 border-border text-zinc-100",
         }}

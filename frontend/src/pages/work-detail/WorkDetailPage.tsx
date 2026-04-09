@@ -460,9 +460,9 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
       toast.success("Release grabbed");
       queryClient.invalidateQueries({ queryKey: ["releases", workId] });
     },
-    onError: () => {
+    onError: (e: Error) => {
       setGrabbingGuid(null);
-      toast.error("Failed to grab release");
+      toast.error(e.message || "Failed to grab release");
     },
   });
 

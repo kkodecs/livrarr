@@ -7,7 +7,6 @@ import { lookupWorks, addWork, listWorks } from "@/api";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { EmptyState } from "@/components/Page/EmptyState";
-import { cn } from "@/utils/cn";
 import { getCoverUrl } from "@/utils/format";
 import type {
   WorkSearchResult,
@@ -21,8 +20,6 @@ export default function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const query = searchParams.get("q")?.trim() ?? "";
   const [term, setTerm] = useState(query);
-  const [selectedOlKey, setSelectedOlKey] = useState<string | null>(null);
-
   // Local library data
   const { data: allWorks } = useQuery({
     queryKey: ["works"],
@@ -46,28 +43,28 @@ export default function SearchPage() {
     enabled: !!query,
   });
 
-  // Reset selection when results change
-  useEffect(() => {
-    setSelectedOlKey(null);
-  }, [searchQuery.data]);
-
   const olResults = searchQuery.data ?? null;
 
+  const [addingOlKey, setAddingOlKey] = useState<string | null>(null);
   const addMutation = useMutation({
-    mutationFn: (work: WorkSearchResult) =>
-      addWork({
+    mutationFn: (work: WorkSearchResult) => {
+      setAddingOlKey(work.olKey);
+      return addWork({
         olKey: work.olKey,
         title: work.title,
         authorName: work.authorName,
         authorOlKey: work.authorOlKey,
         year: work.year,
         coverUrl: work.coverUrl,
-      }),
+      });
+    },
     onSuccess: (data: AddWorkResponse) => {
+      setAddingOlKey(null);
       data.messages.forEach((msg) => toast.success(msg));
       navigate(`/work/${data.work.id}`);
     },
     onError: (err: Error) => {
+      setAddingOlKey(null);
       if (err instanceof ApiError && err.status === 409) {
         toast.error("Already in your library");
       } else {
@@ -191,14 +188,8 @@ export default function SearchPage() {
                   <OlResult
                     key={work.olKey}
                     work={work}
-                    isSelected={selectedOlKey === work.olKey}
-                    onSelect={() =>
-                      setSelectedOlKey(
-                        selectedOlKey === work.olKey ? null : work.olKey,
-                      )
-                    }
                     onAdd={() => addMutation.mutate(work)}
-                    isAdding={addMutation.isPending}
+                    isAdding={addingOlKey === work.olKey}
                   />
                 ))}
               </div>
@@ -248,88 +239,51 @@ function LibraryResult({ work }: { work: WorkDetailResponse }) {
 
 function OlResult({
   work,
-  isSelected,
-  onSelect,
   onAdd,
   isAdding,
 }: {
   work: WorkSearchResult;
-  isSelected: boolean;
-  onSelect: () => void;
   onAdd: () => void;
   isAdding: boolean;
 }) {
   return (
-    <div
-      className={cn(
-        "border-b border-border/50 transition-colors",
-        isSelected && "bg-brand/5",
-      )}
-    >
-      <div className="flex w-full items-center gap-2 px-2 py-1.5">
-        <button
-          type="button"
-          onClick={onSelect}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:bg-zinc-800/50 rounded -m-1 p-1"
-        >
-          {work.coverUrl ? (
-            <img
-              src={work.coverUrl}
-              alt=""
-              className="h-8 w-6 shrink-0 rounded bg-zinc-700 object-cover"
-            />
-          ) : (
-            <div className="flex h-8 w-6 shrink-0 items-center justify-center rounded bg-zinc-700 text-[8px] text-zinc-500">
-              ?
-            </div>
-          )}
-          <span className="min-w-0 truncate font-medium text-sm text-zinc-100">{work.title}</span>
-          {work.seriesName && (
-            <span className="shrink-0 text-xs text-zinc-500">
-              {work.seriesName}
-              {work.seriesPosition != null && ` #${work.seriesPosition}`}
-            </span>
-          )}
-          <span className="flex-1" />
-          <span className="shrink-0 text-xs text-muted">{work.authorName}</span>
-          <span className="shrink-0 w-10 text-right text-xs text-zinc-500">
-            {work.year ?? ""}
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onAdd();
-          }}
-          disabled={isAdding}
-          className="shrink-0 inline-flex items-center gap-1 rounded bg-brand px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-hover disabled:opacity-50"
-        >
-          {isAdding ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : (
-            <Plus size={12} />
-          )}
-          Add
-        </button>
-      </div>
-
-      {isSelected && (
-        <div className="flex items-center gap-4 px-2 pb-1.5 pt-0.5">
-          <button
-            onClick={onAdd}
-            disabled={isAdding}
-            className="inline-flex items-center gap-1 rounded bg-brand px-3 py-1 text-xs font-medium text-white hover:bg-brand-hover disabled:opacity-50"
-          >
-            {isAdding ? (
-              <Loader2 size={12} className="animate-spin" />
-            ) : (
-              <Plus size={12} />
-            )}
-            Add
-          </button>
+    <div className="flex items-center gap-2 border-b border-border/50 px-2 py-1.5">
+      {work.coverUrl ? (
+        <img
+          src={work.coverUrl}
+          alt=""
+          className="h-8 w-6 shrink-0 rounded bg-zinc-700 object-cover"
+        />
+      ) : (
+        <div className="flex h-8 w-6 shrink-0 items-center justify-center rounded bg-zinc-700 text-[8px] text-zinc-500">
+          ?
         </div>
       )}
+      <span className="min-w-0 truncate font-medium text-sm text-zinc-100">{work.title}</span>
+      {work.seriesName && (
+        <span className="shrink-0 text-xs text-zinc-500">
+          {work.seriesName}
+          {work.seriesPosition != null && ` #${work.seriesPosition}`}
+        </span>
+      )}
+      <span className="flex-1" />
+      <span className="shrink-0 text-xs text-muted">{work.authorName}</span>
+      <span className="shrink-0 w-10 text-right text-xs text-zinc-500">
+        {work.year ?? ""}
+      </span>
+      <button
+        type="button"
+        onClick={onAdd}
+        disabled={isAdding}
+        className="shrink-0 inline-flex items-center gap-1 rounded bg-brand px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+      >
+        {isAdding ? (
+          <Loader2 size={12} className="animate-spin" />
+        ) : (
+          <Plus size={12} />
+        )}
+        Add
+      </button>
     </div>
   );
 }

@@ -388,12 +388,16 @@ struct ProwlarrIndexer {
     name: String,
     #[serde(default = "default_torrent")]
     protocol: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     enable_automatic_search: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     enable_interactive_search: bool,
     #[serde(default = "default_priority")]
     priority: i32,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_torrent() -> String {

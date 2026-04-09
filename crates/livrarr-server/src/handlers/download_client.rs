@@ -640,17 +640,31 @@ pub async fn import_from_prowlarr(
 
         let url_base = pc.field_str("urlBase").filter(|s| !s.is_empty());
         let username = pc.field_str("username").filter(|s| !s.is_empty());
-        let password = pc.field_str("password").filter(|s| !s.is_empty());
-        let api_key = pc.field_str("apiKey").filter(|s| !s.is_empty());
+        // Prowlarr masks secrets as "********" — filter those out so we store None
+        // instead of the mask string. Users must enter credentials manually after import.
+        let is_masked = |s: &str| s.chars().all(|c| c == '*');
+        let password = pc
+            .field_str("password")
+            .filter(|s| !s.is_empty() && !is_masked(s));
+        let api_key = pc
+            .field_str("apiKey")
+            .filter(|s| !s.is_empty() && !is_masked(s));
         let category = pc
             .field_str("category")
             .unwrap_or_else(|| "livrarr".to_string());
+
+        // Disable if credentials are missing (Prowlarr masks them as "********").
+        let has_creds = match impl_enum {
+            DownloadClientImplementation::QBittorrent => password.is_some(),
+            DownloadClientImplementation::SABnzbd => api_key.is_some(),
+        };
 
         tracing::info!(
             name = %pc.name,
             host = %clean_host,
             port,
             use_ssl,
+            has_creds,
             impl_type = ?impl_enum,
             "Creating download client from Prowlarr"
         );
@@ -668,7 +682,7 @@ pub async fn import_from_prowlarr(
                 username,
                 password,
                 category,
-                enabled: pc.enable,
+                enabled: has_creds,
                 api_key,
             })
             .await
