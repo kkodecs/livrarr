@@ -72,7 +72,25 @@ export default function ManualImportPage() {
     onSuccess: (data) => {
       setFiles((prev) =>
         prev.map((f) => {
-          const result = data.results.find((r) => r.path === f.path);
+          // For grouped files, match if ANY grouped path has a result.
+          const paths = f.groupedPaths ?? [f.path];
+          const result = data.results.find((r) => paths.includes(r.path));
+          // Mark as imported if all files in the group succeeded.
+          if (f.groupedPaths) {
+            const allResults = data.results.filter((r) => paths.includes(r.path));
+            const allImported = allResults.length === paths.length && allResults.every((r) => r.status === "imported");
+            const anyFailed = allResults.some((r) => r.status === "failed");
+            const failedMsg = allResults.find((r) => r.status === "failed")?.error;
+            return {
+              ...f,
+              importResult: {
+                path: f.path,
+                status: anyFailed ? "failed" : allImported ? "imported" : "skipped",
+                workId: result?.workId ?? null,
+                error: failedMsg ?? null,
+              } as ManualImportResult,
+            };
+          }
           return result ? { ...f, importResult: result } : f;
         }),
       );
@@ -132,25 +150,31 @@ export default function ManualImportPage() {
 
   const handleImport = () => {
     const selected = files.filter((f) => f.selected && hasMatch(f));
-    const items: ManualImportItem[] = selected.map((f) => {
+    const items: ManualImportItem[] = [];
+    for (const f of selected) {
       const m = f.correctedMatch || f.match!;
-      return {
-        path: f.path,
-        olKey: m.olKey,
-        title: m.title,
-        author: m.author,
-        deleteExisting: f.deleteExisting,
-      };
-    });
+      // Expand grouped audiobook files into individual import items.
+      const paths = f.groupedPaths ?? [f.path];
+      for (const p of paths) {
+        items.push({
+          path: p,
+          olKey: m.olKey,
+          title: m.title,
+          author: m.author,
+          deleteExisting: f.deleteExisting,
+        });
+      }
+    }
     importMutation.mutate(items);
   };
 
   const handleInlineSearch = (idx: number) => {
     setSearchingIdx(idx);
     const f = files[idx]!;
-    setSearchQuery(f.parsed ? `${f.parsed.title} ${f.parsed.author}` : f.filename);
+    const query = f.parsed ? `${f.parsed.title} ${f.parsed.author}` : f.filename;
     setSearchResults([]);
     setSearchError(false);
+    handleSearchInput(query);
   };
 
   const handleSearchInput = (query: string) => {

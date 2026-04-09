@@ -11,7 +11,7 @@ use crate::{
     ApiError, CreateIndexerApiRequest, IndexerResponse, TestIndexerApiRequest,
     TestIndexerApiResponse, UpdateIndexerApiRequest,
 };
-use livrarr_db::{CreateIndexerDbRequest, IndexerDb, UpdateIndexerDbRequest};
+use livrarr_db::{ConfigDb, CreateIndexerDbRequest, IndexerDb, UpdateIndexerDbRequest};
 use livrarr_domain::{Indexer, IndexerId};
 use livrarr_http::HttpClient;
 
@@ -361,4 +361,178 @@ pub async fn test_saved(
     }
 
     Ok(Json(result))
+}
+
+// ---------------------------------------------------------------------------
+// Prowlarr Import
+// ---------------------------------------------------------------------------
+
+/// Prowlarr API indexer response shape.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProwlarrIndexer {
+    name: String,
+    #[serde(default = "default_torrent")]
+    protocol: String,
+    #[serde(default)]
+    enable_automatic_search: bool,
+    #[serde(default)]
+    enable_interactive_search: bool,
+    #[serde(default)]
+    fields: Vec<ProwlarrField>,
+    #[serde(default = "default_priority")]
+    priority: i32,
+}
+
+fn default_torrent() -> String {
+    "torrent".to_string()
+}
+
+fn default_priority() -> i32 {
+    25
+}
+
+#[derive(serde::Deserialize)]
+struct ProwlarrField {
+    name: String,
+    #[serde(default)]
+    value: serde_json::Value,
+}
+
+impl ProwlarrIndexer {
+    fn field_str(&self, name: &str) -> Option<String> {
+        self.fields
+            .iter()
+            .find(|f| f.name == name)
+            .and_then(|f| f.value.as_str().map(|s| s.to_string()))
+    }
+}
+
+/// POST /api/v1/indexer/import/prowlarr
+pub async fn import_from_prowlarr(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+    Json(req): Json<crate::ProwlarrImportRequest>,
+) -> Result<Json<crate::ProwlarrImportResponse>, ApiError> {
+    // Fall back to saved Prowlarr config for missing fields.
+    let saved = state.db.get_prowlarr_config().await.unwrap_or_default();
+    let url = if req.url.is_empty() {
+        saved
+            .url
+            .ok_or_else(|| ApiError::BadRequest("url is required".into()))?
+    } else {
+        req.url.clone()
+    };
+    let api_key = if req.api_key.is_empty() {
+        saved
+            .api_key
+            .ok_or_else(|| ApiError::BadRequest("apiKey is required".into()))?
+    } else {
+        req.api_key.clone()
+    };
+
+    let base = url.trim_end_matches('/');
+    let fetch_url = format!("{base}/api/v1/indexer");
+
+    let resp = state
+        .http_client
+        .inner()
+        .get(&fetch_url)
+        .header("X-Api-Key", &api_key)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| {
+            ApiError::BadGateway(format!(
+                "Failed to connect to Prowlarr: {}",
+                e.without_url()
+            ))
+        })?;
+
+    if !resp.status().is_success() {
+        return Err(ApiError::BadGateway(format!(
+            "Prowlarr returned HTTP {}",
+            resp.status()
+        )));
+    }
+
+    let prowlarr_indexers: Vec<ProwlarrIndexer> = resp.json().await.map_err(|e| {
+        ApiError::BadGateway(format!(
+            "Failed to parse Prowlarr response: {}",
+            e.without_url()
+        ))
+    })?;
+
+    // Load existing indexers for duplicate detection (by normalized URL).
+    let existing = state.db.list_indexers().await?;
+    let existing_urls: std::collections::HashSet<String> = existing
+        .iter()
+        .map(|i| i.url.trim_end_matches('/').to_lowercase())
+        .collect();
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = Vec::new();
+
+    for pi in prowlarr_indexers {
+        let Some(base_url) = pi.field_str("baseUrl") else {
+            errors.push(format!("{}: missing baseUrl field", pi.name));
+            continue;
+        };
+
+        let url = normalize_url(&base_url);
+        if existing_urls.contains(&url.to_lowercase()) {
+            skipped += 1;
+            continue;
+        }
+
+        let api_key = pi.field_str("apiKey");
+        let api_path = pi.field_str("apiPath").unwrap_or_else(|| "/".to_string());
+
+        let protocol = match pi.protocol.as_str() {
+            "usenet" => "usenet".to_string(),
+            _ => "torrent".to_string(),
+        };
+
+        // Map Prowlarr priority (1-50, default 25) to Livrarr priority (1+).
+        let priority = pi.priority.max(1);
+
+        match state
+            .db
+            .create_indexer(CreateIndexerDbRequest {
+                name: pi.name.clone(),
+                protocol,
+                url,
+                api_path: normalize_api_path(&api_path),
+                api_key,
+                categories: vec![7020, 3030],
+                priority,
+                enable_automatic_search: pi.enable_automatic_search,
+                enable_interactive_search: pi.enable_interactive_search,
+                enabled: true,
+            })
+            .await
+        {
+            Ok(_) => imported += 1,
+            Err(e) => errors.push(format!("{}: {e}", pi.name)),
+        }
+    }
+
+    // Persist Prowlarr creds on successful import so the form can be pre-filled.
+    if imported > 0 || skipped > 0 {
+        let _ = state
+            .db
+            .update_prowlarr_config(livrarr_db::UpdateProwlarrConfigRequest {
+                url: Some(url),
+                api_key: Some(api_key),
+                enabled: Some(true),
+            })
+            .await;
+    }
+
+    Ok(Json(crate::ProwlarrImportResponse {
+        imported,
+        skipped,
+        errors,
+    }))
 }

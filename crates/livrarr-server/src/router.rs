@@ -59,6 +59,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             post(handlers::download_client::test),
         )
         .route(
+            "/downloadclient/import/prowlarr",
+            post(handlers::download_client::import_from_prowlarr),
+        )
+        .route(
             "/downloadclient/{id}",
             get(handlers::download_client::get)
                 .put(handlers::download_client::update)
@@ -86,12 +90,20 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             get(handlers::config::get_media_management)
                 .put(handlers::config::update_media_management),
         )
+        .route(
+            "/config/prowlarr",
+            get(handlers::config::get_prowlarr).put(handlers::config::update_prowlarr),
+        )
         // Indexers (replaces /config/prowlarr — DEFERRED-001)
         .route(
             "/indexer",
             get(handlers::indexer::list).post(handlers::indexer::create),
         )
         .route("/indexer/test", post(handlers::indexer::test))
+        .route(
+            "/indexer/import/prowlarr",
+            post(handlers::indexer::import_from_prowlarr),
+        )
         .route(
             "/indexer/{id}",
             get(handlers::indexer::get)

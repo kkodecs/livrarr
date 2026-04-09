@@ -261,6 +261,9 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
                     if let Err(e) = tokio::fs::write(&path, &bytes).await {
                         tracing::warn!("write cover file failed: {e}");
                     }
+                    // Delete stale thumbnail so it gets regenerated from the new cover.
+                    let thumb_path = covers_dir.join(format!("{}_thumb.jpg", work.id));
+                    let _ = tokio::fs::remove_file(&thumb_path).await;
                 }
             }
         }
@@ -342,9 +345,17 @@ async fn query_hardcover(
         }
     }"#;
 
+    // Strip trailing parenthetical before searching — OL titles often include
+    // series info like "(The Wheel of Time Book 2)" which breaks Hardcover's
+    // exact-match search. The enrichment result will supply the canonical title.
+    let clean_title = title
+        .rfind('(')
+        .filter(|_| title.ends_with(')'))
+        .map(|i| title[..i].trim())
+        .unwrap_or(title);
     // Quote the title for exact matching — without quotes, Hardcover
     // returns partial matches (e.g., comic adaptations) that flood results.
-    let search_term = format!("\"{title}\"");
+    let search_term = format!("\"{clean_title}\"");
     let body = serde_json::json!({
         "query": query,
         "variables": {"query": search_term}

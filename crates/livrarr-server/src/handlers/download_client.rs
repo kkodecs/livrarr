@@ -7,7 +7,9 @@ use crate::{
     ApiError, CreateDownloadClientApiRequest, DownloadClientResponse,
     UpdateDownloadClientApiRequest,
 };
-use livrarr_db::{CreateDownloadClientDbRequest, DownloadClientDb, UpdateDownloadClientDbRequest};
+use livrarr_db::{
+    ConfigDb, CreateDownloadClientDbRequest, DownloadClientDb, UpdateDownloadClientDbRequest,
+};
 use livrarr_domain::{DownloadClient, DownloadClientImplementation};
 
 fn to_response(dc: DownloadClient) -> DownloadClientResponse {
@@ -445,4 +447,265 @@ async fn test_qbittorrent(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Prowlarr Import
+// ---------------------------------------------------------------------------
+
+/// Prowlarr API download client response shape.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProwlarrDownloadClient {
+    name: String,
+    #[serde(default)]
+    implementation: String,
+    #[serde(default)]
+    enable: bool,
+    #[serde(default)]
+    fields: Vec<ProwlarrField>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProwlarrField {
+    name: String,
+    #[serde(default)]
+    value: serde_json::Value,
+}
+
+impl ProwlarrDownloadClient {
+    fn field_str(&self, name: &str) -> Option<String> {
+        self.fields
+            .iter()
+            .find(|f| f.name == name)
+            .and_then(|f| match &f.value {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+    }
+
+    fn field_bool(&self, name: &str) -> Option<bool> {
+        self.fields
+            .iter()
+            .find(|f| f.name == name)
+            .and_then(|f| f.value.as_bool())
+    }
+
+    fn field_u16(&self, name: &str) -> Option<u16> {
+        self.fields
+            .iter()
+            .find(|f| f.name == name)
+            .and_then(|f| f.value.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+    }
+}
+
+/// POST /api/v1/downloadclient/import/prowlarr
+pub async fn import_from_prowlarr(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+    Json(req): Json<crate::ProwlarrImportRequest>,
+) -> Result<Json<crate::ProwlarrImportResponse>, ApiError> {
+    use std::time::Duration;
+
+    // Fall back to saved Prowlarr config for missing fields.
+    let saved = state.db.get_prowlarr_config().await.unwrap_or_default();
+    let url = if req.url.is_empty() {
+        saved
+            .url
+            .ok_or_else(|| ApiError::BadRequest("url is required".into()))?
+    } else {
+        req.url.clone()
+    };
+    let api_key = if req.api_key.is_empty() {
+        saved
+            .api_key
+            .ok_or_else(|| ApiError::BadRequest("apiKey is required".into()))?
+    } else {
+        req.api_key.clone()
+    };
+
+    let base = url.trim_end_matches('/');
+    let fetch_url = format!("{base}/api/v1/downloadclient");
+
+    let resp = state
+        .http_client
+        .inner()
+        .get(&fetch_url)
+        .header("X-Api-Key", &api_key)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| {
+            ApiError::BadGateway(format!(
+                "Failed to connect to Prowlarr: {}",
+                e.without_url()
+            ))
+        })?;
+
+    if !resp.status().is_success() {
+        return Err(ApiError::BadGateway(format!(
+            "Prowlarr returned HTTP {}",
+            resp.status()
+        )));
+    }
+
+    // Read raw body for debugging, then parse.
+    let body_text = resp.text().await.map_err(|e| {
+        ApiError::BadGateway(format!(
+            "Failed to read Prowlarr response: {}",
+            e.without_url()
+        ))
+    })?;
+
+    tracing::info!(
+        count = body_text.matches("\"name\"").count(),
+        "Prowlarr download client response received, raw length={}",
+        body_text.len()
+    );
+    tracing::debug!(body = %body_text, "Prowlarr raw download client response");
+
+    let prowlarr_clients: Vec<ProwlarrDownloadClient> = serde_json::from_str(&body_text)
+        .map_err(|e| ApiError::BadGateway(format!("Failed to parse Prowlarr response: {e}")))?;
+
+    tracing::info!(
+        parsed_count = prowlarr_clients.len(),
+        "Parsed Prowlarr download clients"
+    );
+
+    // Load existing clients for duplicate detection (by host + port + implementation).
+    let existing = state.db.list_download_clients().await?;
+    let existing_keys: std::collections::HashSet<(String, u16, String)> = existing
+        .iter()
+        .map(|c| (c.host.to_lowercase(), c.port, c.client_type().to_string()))
+        .collect();
+
+    tracing::info!(
+        existing_count = existing.len(),
+        "Existing download clients loaded for dedup"
+    );
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = Vec::new();
+
+    for pc in &prowlarr_clients {
+        tracing::info!(
+            name = %pc.name,
+            implementation = %pc.implementation,
+            enable = pc.enable,
+            field_count = pc.fields.len(),
+            host = ?pc.field_str("host"),
+            port = ?pc.field_u16("port"),
+            "Processing Prowlarr download client"
+        );
+    }
+
+    for pc in prowlarr_clients {
+        // Map implementation.
+        let impl_enum = match pc.implementation.as_str() {
+            "QBittorrent" => DownloadClientImplementation::QBittorrent,
+            "Sabnzbd" => DownloadClientImplementation::SABnzbd,
+            other => {
+                errors.push(format!("{}: unsupported implementation '{other}'", pc.name));
+                continue;
+            }
+        };
+
+        let host = match pc.field_str("host") {
+            Some(h) => h,
+            None => {
+                errors.push(format!("{}: missing host field", pc.name));
+                continue;
+            }
+        };
+
+        let port = pc.field_u16("port").unwrap_or(match impl_enum {
+            DownloadClientImplementation::QBittorrent => 8080,
+            DownloadClientImplementation::SABnzbd => 8080,
+        });
+
+        let (clean_host, ssl_override) = normalize_host(&host);
+        let use_ssl = ssl_override.unwrap_or_else(|| pc.field_bool("useSsl").unwrap_or(false));
+
+        if existing_keys.contains(&(
+            clean_host.to_lowercase(),
+            port,
+            impl_enum.client_type().to_string(),
+        )) {
+            skipped += 1;
+            continue;
+        }
+
+        let url_base = pc.field_str("urlBase").filter(|s| !s.is_empty());
+        let username = pc.field_str("username").filter(|s| !s.is_empty());
+        let password = pc.field_str("password").filter(|s| !s.is_empty());
+        let api_key = pc.field_str("apiKey").filter(|s| !s.is_empty());
+        let category = pc
+            .field_str("category")
+            .unwrap_or_else(|| "livrarr".to_string());
+
+        tracing::info!(
+            name = %pc.name,
+            host = %clean_host,
+            port,
+            use_ssl,
+            impl_type = ?impl_enum,
+            "Creating download client from Prowlarr"
+        );
+
+        match state
+            .db
+            .create_download_client(CreateDownloadClientDbRequest {
+                name: pc.name.clone(),
+                implementation: impl_enum,
+                host: clean_host,
+                port,
+                use_ssl,
+                skip_ssl_validation: false,
+                url_base,
+                username,
+                password,
+                category,
+                enabled: pc.enable,
+                api_key,
+            })
+            .await
+        {
+            Ok(dc) => {
+                tracing::info!(id = dc.id, name = %dc.name, "Download client imported successfully");
+                imported += 1;
+            }
+            Err(e) => {
+                tracing::warn!(name = %pc.name, error = %e, "Failed to import download client");
+                errors.push(format!("{}: {e}", pc.name));
+            }
+        }
+    }
+
+    tracing::info!(
+        imported,
+        skipped,
+        error_count = errors.len(),
+        "Prowlarr download client import complete"
+    );
+
+    // Persist Prowlarr creds on successful import so the form can be pre-filled.
+    if imported > 0 || skipped > 0 {
+        let _ = state
+            .db
+            .update_prowlarr_config(livrarr_db::UpdateProwlarrConfigRequest {
+                url: Some(url),
+                api_key: Some(api_key),
+                enabled: Some(true),
+            })
+            .await;
+    }
+
+    Ok(Json(crate::ProwlarrImportResponse {
+        imported,
+        skipped,
+        errors,
+    }))
 }

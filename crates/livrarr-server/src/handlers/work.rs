@@ -777,6 +777,10 @@ pub async fn upload_cover(
         .await
         .map_err(|e| ApiError::Internal(format!("failed to write cover: {e}")))?;
 
+    // Delete stale thumbnail so it gets regenerated from the new cover.
+    let thumb_path = covers_dir.join(format!("{id}_thumb.jpg"));
+    let _ = tokio::fs::remove_file(&thumb_path).await;
+
     // Set cover_manual flag.
     state.db.set_cover_manual(user_id, id, true).await?;
 
@@ -929,5 +933,8 @@ async fn download_cover(
     let bytes = resp.bytes().await?;
     let cover_path = covers_dir.join(format!("{work_id}.jpg"));
     tokio::fs::write(&cover_path, &bytes).await?;
+    // Delete stale thumbnail so it gets regenerated from the new cover.
+    let thumb_path = covers_dir.join(format!("{work_id}_thumb.jpg"));
+    let _ = tokio::fs::remove_file(&thumb_path).await;
     Ok(())
 }

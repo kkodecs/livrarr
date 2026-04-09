@@ -46,6 +46,9 @@ import type {
   UpdateIndexerRequest,
   TestIndexerRequest,
   TestIndexerResponse,
+  ProwlarrConfigResponse,
+  ProwlarrImportRequest,
+  ProwlarrImportResponse,
   MetadataConfigResponse,
   UpdateMetadataConfigRequest,
   HealthCheckResult,
@@ -321,6 +324,18 @@ export const testIndexer = (req: TestIndexerRequest) =>
   });
 export const testSavedIndexer = (id: number) =>
   apiFetch<TestIndexerResponse>(`/indexer/test/${id}`, { method: "POST" });
+export const getProwlarrConfig = () =>
+  apiFetch<ProwlarrConfigResponse>("/config/prowlarr");
+export const importIndexersFromProwlarr = (req: ProwlarrImportRequest) =>
+  apiFetch<ProwlarrImportResponse>("/indexer/import/prowlarr", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const importDownloadClientsFromProwlarr = (req: ProwlarrImportRequest) =>
+  apiFetch<ProwlarrImportResponse>("/downloadclient/import/prowlarr", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
 export const getMetadataConfig = () =>
   apiFetch<MetadataConfigResponse>("/config/metadata");
 export const updateMetadataConfig = (req: UpdateMetadataConfigRequest) =>

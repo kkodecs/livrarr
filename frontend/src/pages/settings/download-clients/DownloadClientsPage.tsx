@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { toast } from "sonner";
@@ -9,6 +9,10 @@ import {
   CheckCircle2,
   XCircle,
   Star,
+  Download,
+  ChevronDown,
+  ChevronRight,
+  AlertTriangle,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
 import { PageContent } from "@/components/Page/PageContent";
@@ -22,6 +26,7 @@ import type {
   CreateDownloadClientRequest,
   UpdateDownloadClientRequest,
   DownloadClientImplementation,
+  ProwlarrImportResponse,
 } from "@/types/api";
 import { useSort } from "@/hooks/useSort";
 import { SortHeader } from "@/components/Page/SortHeader";
@@ -334,6 +339,13 @@ export default function DownloadClientsPage() {
             <p className="text-sm text-muted">No Usenet clients configured.</p>
           )}
         </section>
+
+        {/* ── Import from Prowlarr ── */}
+        {isAdmin && (
+          <ProwlarrImportSection
+            onImported={() => qc.invalidateQueries({ queryKey: ["downloadClients"] })}
+          />
+        )}
 
         {/* ── Inline Add Form ── */}
         {isAdmin && (
@@ -825,5 +837,127 @@ function InlineClientForm({
         </button>
       </div>
     </form>
+  );
+}
+
+// ── Prowlarr Import Section ──
+
+function ProwlarrImportSection({ onImported }: { onImported: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [result, setResult] = useState<ProwlarrImportResponse | null>(null);
+
+  // Always fetch config so we can show status on the collapsed header.
+  const configQ = useQuery({
+    queryKey: ["prowlarrConfig"],
+    queryFn: api.getProwlarrConfig,
+  });
+  // Pre-fill URL when section is first opened and config is available.
+  useEffect(() => {
+    if (open && !loaded && configQ.data) {
+      if (configQ.data.url) setUrl(configQ.data.url);
+      setLoaded(true);
+    }
+  }, [open, loaded, configQ.data]);
+
+  const importMutation = useMutation({
+    mutationFn: api.importDownloadClientsFromProwlarr,
+    onSuccess: (data) => {
+      setResult(data);
+      if (data.imported > 0) {
+        toast.success(`Imported ${data.imported} download client${data.imported !== 1 ? "s" : ""}`);
+        onImported();
+      } else if (data.skipped > 0) {
+        toast.info("All download clients already exist — nothing to import");
+      }
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <section data-tour="prowlarr-import-dc" className="rounded-lg border border-border bg-zinc-900/50">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center gap-2 px-5 py-3 text-left rounded-t-lg bg-zinc-800/60 hover:bg-zinc-800/80"
+      >
+        {open ? (
+          <ChevronDown size={16} className="text-muted" />
+        ) : (
+          <ChevronRight size={16} className="text-muted" />
+        )}
+        <Download size={16} className="text-muted" />
+        <h2 className="text-base font-semibold text-zinc-100">
+          Import from Prowlarr
+        </h2>
+      </button>
+
+      {open && (
+        <div className="p-5 space-y-4 max-w-xl">
+          <p className="text-sm text-muted">
+            Import download clients from your Prowlarr instance. Only qBittorrent and SABnzbd are
+            supported. Duplicates (matching host + port + type) will be skipped.
+          </p>
+
+          <div>
+            <label className="block text-xs text-muted mb-1">Prowlarr URL</label>
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="http://localhost:9696"
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-muted mb-1">
+              API Key{" "}
+              {configQ.data?.apiKeySet && !apiKey && (
+                <span className="text-green-400 ml-1">(saved — leave blank to reuse)</span>
+              )}
+            </label>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={configQ.data?.apiKeySet ? "Leave blank to use saved key" : ""}
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-xs text-zinc-100 focus:border-brand focus:outline-none"
+            />
+          </div>
+
+          {result && (
+            <div
+              className={`rounded border p-3 text-sm ${
+                result.errors.length > 0
+                  ? "border-amber-500/30 bg-amber-500/10"
+                  : "border-green-500/30 bg-green-500/10"
+              }`}
+            >
+              <p className="text-zinc-200">
+                Imported: <span className="font-medium text-green-400">{result.imported}</span>
+                {" · "}Skipped: <span className="font-medium text-zinc-400">{result.skipped}</span>
+              </p>
+              {result.errors.map((err, i) => (
+                <p key={i} className="flex items-center gap-1 text-amber-400 mt-1">
+                  <AlertTriangle size={12} /> {err}
+                </p>
+              ))}
+            </div>
+          )}
+
+          <button
+            onClick={() => {
+              setResult(null);
+              importMutation.mutate({ url, apiKey });
+            }}
+            disabled={importMutation.isPending || !url || (!apiKey && !configQ.data?.apiKeySet)}
+            className="rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+          >
+            {importMutation.isPending ? "Importing..." : "Import Download Clients"}
+          </button>
+        </div>
+      )}
+    </section>
   );
 }

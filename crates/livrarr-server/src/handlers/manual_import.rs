@@ -42,6 +42,9 @@ pub struct ScannedFile {
     pub routable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// For multi-file audiobooks: all file paths in the group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grouped_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,38 +110,131 @@ pub async fn scan(
         }));
     }
 
-    // LLM batch parse filenames.
-    let filenames: Vec<String> = source_files
+    // ── Group multi-file audiobooks by parent directory ──
+    // When 2+ audio files share the same parent dir, collapse into a single entry
+    // using the folder path for identification instead of individual filenames.
+    let scan_root = &path;
+    let mut dir_audio_files: std::collections::HashMap<PathBuf, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, sf) in source_files.iter().enumerate() {
+        if sf.media_type == MediaType::Audiobook {
+            if let Some(parent) = sf.path.parent() {
+                dir_audio_files
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push(i);
+            }
+        }
+    }
+
+    // Build scan items: either individual files or folder groups.
+    struct ScanItem {
+        /// Display name for LLM parsing.
+        display_name: String,
+        /// Primary path (directory for groups, file for singles).
+        primary_path: PathBuf,
+        media_type: MediaType,
+        /// Individual file paths (None = single file, Some = group).
+        grouped_paths: Option<Vec<PathBuf>>,
+    }
+
+    let grouped_dirs: std::collections::HashSet<PathBuf> = dir_audio_files
         .iter()
-        .map(|f| {
-            f.path
-                .file_name()
+        .filter(|(_, indices)| indices.len() >= 2)
+        .map(|(dir, _)| dir.clone())
+        .collect();
+
+    let mut scan_items: Vec<ScanItem> = Vec::new();
+
+    // Add grouped audiobook directories first.
+    for (dir, indices) in &dir_audio_files {
+        if indices.len() < 2 {
+            continue;
+        }
+        // Use folder path relative to scan root for display.
+        let rel = dir
+            .strip_prefix(scan_root)
+            .unwrap_or(dir)
+            .to_string_lossy()
+            .to_string();
+        let display = if rel.is_empty() {
+            dir.file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string()
-        })
-        .collect();
+        } else {
+            rel
+        };
+        let file_paths: Vec<PathBuf> = indices
+            .iter()
+            .map(|&i| source_files[i].path.clone())
+            .collect();
+        scan_items.push(ScanItem {
+            display_name: display,
+            primary_path: dir.clone(),
+            media_type: MediaType::Audiobook,
+            grouped_paths: Some(file_paths),
+        });
+    }
 
-    let (parsed_files, sort_order) = llm_parse_filenames(&state, &filenames).await;
+    // Add individual files (skip those already in a group).
+    for sf in source_files.iter() {
+        if sf.media_type == MediaType::Audiobook {
+            if let Some(parent) = sf.path.parent() {
+                if grouped_dirs.contains(parent) {
+                    continue; // Part of a group.
+                }
+            }
+        }
+        let filename = sf
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        scan_items.push(ScanItem {
+            display_name: filename,
+            primary_path: sf.path.clone(),
+            media_type: sf.media_type,
+            grouped_paths: None,
+        });
+    }
+
+    // LLM batch parse display names.
+    let display_names: Vec<String> = scan_items
+        .iter()
+        .map(|si| si.display_name.clone())
+        .collect();
+    let (parsed_files, sort_order) = llm_parse_filenames(&state, &display_names).await;
 
     // Get user's existing works for duplicate detection.
     let user_id = auth.user.id;
     let existing_works = state.db.list_works(user_id).await?;
     let root_folders = state.db.list_root_folders().await?;
 
-    // Search OL for each parsed file (throttled), in LLM sort order.
+    // Search OL for each item (throttled), in LLM sort order.
     let mut scanned_files = Vec::new();
 
     for &i in &sort_order {
-        let sf = &source_files[i];
-        let filename = filenames[i].clone();
+        let si = &scan_items[i];
+        let filename = display_names[i].clone();
         let parsed = parsed_files.get(i).cloned().flatten();
-        let size = tokio::fs::metadata(&sf.path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
 
-        let routable = root_folders.iter().any(|rf| rf.media_type == sf.media_type);
+        // Compute total size.
+        let size = if let Some(ref paths) = si.grouped_paths {
+            let mut total = 0u64;
+            for p in paths {
+                total += tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0);
+            }
+            total
+        } else {
+            tokio::fs::metadata(&si.primary_path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
+
+        let routable = root_folders.iter().any(|rf| rf.media_type == si.media_type);
 
         let (ol_match, existing_work_id) = if let Some(ref p) = parsed {
             let search_term = format!("{} {}", p.title, p.author);
@@ -146,7 +242,6 @@ pub async fn scan(
 
             let (matched, dup_id) = match ol {
                 Some(result) => {
-                    // Check duplicate by ol_key first.
                     let dup = existing_works
                         .iter()
                         .find(|w| {
@@ -170,7 +265,6 @@ pub async fn scan(
                     )
                 }
                 None => {
-                    // No OL match — still check duplicate by parsed title/author.
                     let dup = existing_works
                         .iter()
                         .find(|w| {
@@ -188,30 +282,46 @@ pub async fn scan(
             (None, None)
         };
 
-        // OL throttle: 500ms delay between requests (skip after the last lookup).
+        // OL throttle.
         if parsed.is_some() && scanned_files.len() + 1 < sort_order.len() {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
-        // Check if file is readable.
-        let file_error = if tokio::fs::File::open(&sf.path).await.is_err() {
+        // Check readability (for groups, check first file).
+        let check_path = si
+            .grouped_paths
+            .as_ref()
+            .and_then(|p| p.first())
+            .unwrap_or(&si.primary_path);
+        let file_error = if tokio::fs::File::open(check_path).await.is_err() {
             Some("file not readable".to_string())
         } else {
             None
         };
 
-        // Check if a library item of the same media type already exists for this work.
         let has_existing_media_type = if let Some(wid) = existing_work_id {
             let items = state.db.list_library_items_by_work(user_id, wid).await?;
-            items.iter().any(|li| li.media_type == sf.media_type)
+            items.iter().any(|li| li.media_type == si.media_type)
         } else {
             false
         };
 
+        let grouped_path_strings = si
+            .grouped_paths
+            .as_ref()
+            .map(|paths| paths.iter().map(|p| p.display().to_string()).collect());
+
+        // For groups, show folder name with file count.
+        let display_filename = if let Some(ref paths) = si.grouped_paths {
+            format!("{}/ ({} files)", filename, paths.len())
+        } else {
+            filename
+        };
+
         scanned_files.push(ScannedFile {
-            path: sf.path.display().to_string(),
-            filename,
-            media_type: sf.media_type,
+            path: si.primary_path.display().to_string(),
+            filename: display_filename,
+            media_type: si.media_type,
             size,
             parsed,
             ol_match,
@@ -219,6 +329,7 @@ pub async fn scan(
             has_existing_media_type,
             routable,
             error: file_error,
+            grouped_paths: grouped_path_strings,
         });
     }
 
@@ -256,7 +367,11 @@ pub async fn search(
         req.query.clone()
     };
 
+    tracing::info!(query = %req.query, author = ?req.author, term = %term, "manual import search");
+
     let results = search_ol_batch(&state, &term).await?;
+
+    tracing::info!(ol_results = results.len(), "OL search returned");
 
     // Check duplicates against user's library.
     let user_id = auth.user.id;
@@ -280,6 +395,11 @@ pub async fn search(
             }
         })
         .collect();
+
+    tracing::info!(
+        final_results = results.len(),
+        "manual import search complete"
+    );
 
     Ok(Json(SearchResponse { results }))
 }
@@ -1021,7 +1141,7 @@ async fn search_ol_batch(state: &AppState, term: &str) -> Result<Vec<WorkSearchR
             let cover_url = doc
                 .get("cover_i")
                 .and_then(|c| c.as_i64())
-                .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-S.jpg"));
+                .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
 
             Some(WorkSearchResult {
                 ol_key,

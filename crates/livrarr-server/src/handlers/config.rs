@@ -210,3 +210,36 @@ pub async fn test_llm(State(state): State<AppState>, _admin: RequireAdmin) -> Re
     }
     Ok(())
 }
+
+/// GET /api/v1/config/prowlarr
+pub async fn get_prowlarr(
+    State(state): State<AppState>,
+) -> Result<Json<crate::ProwlarrConfigResponse>, ApiError> {
+    let c = state.db.get_prowlarr_config().await?;
+    Ok(Json(crate::ProwlarrConfigResponse {
+        url: c.url,
+        api_key_set: c.api_key.is_some(),
+        enabled: c.enabled,
+    }))
+}
+
+/// PUT /api/v1/config/prowlarr
+pub async fn update_prowlarr(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+    Json(req): Json<crate::UpdateProwlarrApiRequest>,
+) -> Result<Json<crate::ProwlarrConfigResponse>, ApiError> {
+    let c = state
+        .db
+        .update_prowlarr_config(livrarr_db::UpdateProwlarrConfigRequest {
+            url: req.url,
+            api_key: req.api_key,
+            enabled: req.enabled,
+        })
+        .await?;
+    Ok(Json(crate::ProwlarrConfigResponse {
+        url: c.url,
+        api_key_set: c.api_key.is_some(),
+        enabled: c.enabled,
+    }))
+}

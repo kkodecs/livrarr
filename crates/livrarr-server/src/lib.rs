@@ -847,6 +847,21 @@ pub struct TestProwlarrRequest {
     pub api_key: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProwlarrImportRequest {
+    pub url: String,
+    pub api_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProwlarrImportResponse {
+    pub imported: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Grab API Request
 // ---------------------------------------------------------------------------

@@ -484,6 +484,23 @@ export interface TestIndexerResponse {
   error?: string | null;
 }
 
+export interface ProwlarrConfigResponse {
+  url: string | null;
+  apiKeySet: boolean;
+  enabled: boolean;
+}
+
+export interface ProwlarrImportRequest {
+  url: string;
+  apiKey: string;
+}
+
+export interface ProwlarrImportResponse {
+  imported: number;
+  skipped: number;
+  errors: string[];
+}
+
 export interface MetadataConfigResponse {
   hardcoverEnabled: boolean;
   hardcoverApiToken: string | null;
@@ -577,6 +594,8 @@ export interface ScannedFile {
   existingWorkId: number | null;
   hasExistingMediaType: boolean;
   routable: boolean;
+  /** Multi-file audiobook: all file paths in the group. */
+  groupedPaths?: string[];
 }
 
 export interface ParsedFile {

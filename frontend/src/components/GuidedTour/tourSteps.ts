@@ -37,9 +37,17 @@ export const TOUR_STEPS: Step[] = [
     data: { route: "/settings/indexers" },
   },
   {
+    target: "[data-tour='prowlarr-import']",
+    content:
+      "If you use Prowlarr, you can import all your indexers in one click. Just enter your Prowlarr URL and API key. If you don't use Prowlarr, skip this and add indexers manually below.",
+    placement: "bottom",
+    skipBeacon: true,
+    data: { route: "/settings/indexers" },
+  },
+  {
     target: "[data-tour='add-indexer-form']",
     content:
-      "Add a Torznab indexer (e.g. MyAnonamouse, TorrentLeech) or a Newznab indexer (e.g. DrunkenSlug, NZBGeek). You'll need the indexer URL and API key. Fill out the form below and click Add Indexer.",
+      "Or add indexers manually — enter a Torznab URL (e.g. MyAnonamouse, TorrentLeech) or Newznab URL (e.g. DrunkenSlug, NZBGeek) with its API key.",
     placement: "top",
     skipBeacon: true,
     data: { route: "/settings/indexers" },
@@ -55,9 +63,17 @@ export const TOUR_STEPS: Step[] = [
     data: { route: "/settings/downloadclients" },
   },
   {
+    target: "[data-tour='prowlarr-import-dc']",
+    content:
+      "If you imported indexers from Prowlarr, you can also import your download clients here — your Prowlarr credentials are already saved. Only qBittorrent and SABnzbd are supported.",
+    placement: "bottom",
+    skipBeacon: true,
+    data: { route: "/settings/downloadclients" },
+  },
+  {
     target: "[data-tour='add-client-form']",
     content:
-      "Add qBittorrent for torrents or SABnzbd for Usenet. You'll need the host, port, and credentials for your client. Fill out the form below and click Add Client.",
+      "Or add download clients manually — qBittorrent for torrents or SABnzbd for Usenet. You'll need the host, port, and credentials.",
     placement: "top",
     skipBeacon: true,
     data: { route: "/settings/downloadclients" },
