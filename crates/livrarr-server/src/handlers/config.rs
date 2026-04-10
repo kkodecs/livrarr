@@ -243,3 +243,66 @@ pub async fn update_prowlarr(
         enabled: c.enabled,
     }))
 }
+
+/// GET /api/v1/config/email
+pub async fn get_email(
+    State(state): State<AppState>,
+) -> Result<Json<crate::EmailConfigResponse>, ApiError> {
+    let c = state.db.get_email_config().await?;
+    Ok(Json(crate::EmailConfigResponse {
+        enabled: c.enabled,
+        smtp_host: c.smtp_host,
+        smtp_port: c.smtp_port,
+        encryption: c.encryption,
+        username: c.username,
+        password_set: c.password.is_some(),
+        from_address: c.from_address,
+        recipient_email: c.recipient_email,
+        send_on_import: c.send_on_import,
+    }))
+}
+
+/// PUT /api/v1/config/email
+pub async fn update_email(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+    Json(req): Json<crate::UpdateEmailApiRequest>,
+) -> Result<Json<crate::EmailConfigResponse>, ApiError> {
+    let c = state
+        .db
+        .update_email_config(livrarr_db::UpdateEmailConfigRequest {
+            enabled: req.enabled,
+            smtp_host: req.smtp_host,
+            smtp_port: req.smtp_port,
+            encryption: req.encryption,
+            username: req.username,
+            password: req.password,
+            from_address: req.from_address,
+            recipient_email: req.recipient_email,
+            send_on_import: req.send_on_import,
+        })
+        .await?;
+    Ok(Json(crate::EmailConfigResponse {
+        enabled: c.enabled,
+        smtp_host: c.smtp_host,
+        smtp_port: c.smtp_port,
+        encryption: c.encryption,
+        username: c.username,
+        password_set: c.password.is_some(),
+        from_address: c.from_address,
+        recipient_email: c.recipient_email,
+        send_on_import: c.send_on_import,
+    }))
+}
+
+/// POST /api/v1/config/email/test
+pub async fn test_email(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let cfg = state.db.get_email_config().await?;
+    super::email::send_test(&cfg)
+        .await
+        .map_err(ApiError::BadRequest)?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}

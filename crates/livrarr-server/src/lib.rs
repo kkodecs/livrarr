@@ -954,6 +954,40 @@ pub struct UpdateProwlarrApiRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EmailConfigResponse {
+    pub enabled: bool,
+    pub smtp_host: String,
+    pub smtp_port: i32,
+    pub encryption: String,
+    pub username: Option<String>,
+    pub password_set: bool,
+    pub from_address: Option<String>,
+    pub recipient_email: Option<String>,
+    pub send_on_import: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateEmailApiRequest {
+    pub enabled: Option<bool>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i32>,
+    pub encryption: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub from_address: Option<String>,
+    pub recipient_email: Option<String>,
+    pub send_on_import: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendEmailRequest {
+    pub library_item_id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateMetadataApiRequest {
     pub hardcover_enabled: Option<bool>,
     pub hardcover_api_token: Option<String>,
@@ -1001,6 +1035,15 @@ pub trait ConfigApi: Send + Sync {
         &self,
         req: UpdateMetadataApiRequest,
     ) -> Result<MetadataConfigResponse, ApiError>;
+
+    /// Get email config. Password redacted in response.
+    async fn get_email(&self) -> Result<EmailConfigResponse, ApiError>;
+
+    /// Update email config.
+    async fn update_email(
+        &self,
+        req: UpdateEmailApiRequest,
+    ) -> Result<EmailConfigResponse, ApiError>;
 }
 
 // ---------------------------------------------------------------------------

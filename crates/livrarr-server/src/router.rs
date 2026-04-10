@@ -94,6 +94,11 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/config/prowlarr",
             get(handlers::config::get_prowlarr).put(handlers::config::update_prowlarr),
         )
+        .route(
+            "/config/email",
+            get(handlers::config::get_email).put(handlers::config::update_email),
+        )
+        .route("/config/email/test", post(handlers::config::test_email))
         // Indexers (replaces /config/prowlarr — DEFERRED-001)
         .route(
             "/indexer",
@@ -199,6 +204,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .route(
             "/workfile/{id}",
             get(handlers::workfile::get).delete(handlers::workfile::delete),
+        )
+        .route(
+            "/workfile/{id}/send-email",
+            post(handlers::workfile::send_email),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

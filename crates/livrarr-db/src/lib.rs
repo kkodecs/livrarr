@@ -731,6 +731,15 @@ pub trait ConfigDb: Send + Sync {
         &self,
         req: UpdateMetadataConfigRequest,
     ) -> Result<MetadataConfig, DbError>;
+
+    /// Get email config.
+    async fn get_email_config(&self) -> Result<EmailConfig, DbError>;
+
+    /// Update email config.
+    async fn update_email_config(
+        &self,
+        req: UpdateEmailConfigRequest,
+    ) -> Result<EmailConfig, DbError>;
 }
 
 pub struct NamingConfig {
@@ -775,6 +784,31 @@ pub struct UpdateProwlarrConfigRequest {
     pub url: Option<String>,
     pub api_key: Option<String>,
     pub enabled: Option<bool>,
+}
+
+#[derive(Default)]
+pub struct EmailConfig {
+    pub enabled: bool,
+    pub smtp_host: String,
+    pub smtp_port: i32,
+    pub encryption: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub from_address: Option<String>,
+    pub recipient_email: Option<String>,
+    pub send_on_import: bool,
+}
+
+pub struct UpdateEmailConfigRequest {
+    pub enabled: Option<bool>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i32>,
+    pub encryption: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub from_address: Option<String>,
+    pub recipient_email: Option<String>,
+    pub send_on_import: Option<bool>,
 }
 
 pub struct UpdateMetadataConfigRequest {

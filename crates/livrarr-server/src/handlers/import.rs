@@ -521,6 +521,42 @@ pub async fn import_single_file(
         }
     }
 
+    // Auto-send to email/Kindle on import (ebooks only, non-fatal).
+    if media_type == MediaType::Ebook {
+        if let Ok(email_cfg) = state.db.get_email_config().await {
+            if email_cfg.send_on_import && email_cfg.enabled {
+                let ext = source
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if super::email::ACCEPTED_EXTENSIONS.contains(&ext.as_str())
+                    && file_size <= super::email::MAX_EMAIL_SIZE
+                {
+                    let target_str = target_path.to_string();
+                    match tokio::fs::read(&target_str).await {
+                        Ok(bytes) => {
+                            let filename = std::path::Path::new(&target_str)
+                                .file_name()
+                                .and_then(|f| f.to_str())
+                                .unwrap_or("book");
+                            if let Err(e) =
+                                super::email::send_file(&email_cfg, bytes, filename, &ext).await
+                            {
+                                tracing::warn!(file = %target_str, "Auto-send email failed: {e}");
+                            } else {
+                                tracing::info!(file = %target_str, "Auto-sent to email on import");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(file = %target_str, "Auto-send: failed to read file: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     match tag_warning {
         Some(w) => Err(ImportFileError::Warning(w)),
         None => Ok(()),

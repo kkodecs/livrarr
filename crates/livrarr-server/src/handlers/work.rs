@@ -877,15 +877,30 @@ pub async fn refresh_all(
 
             match outcome {
                 Ok(o) => {
-                    if state
+                    match state
                         .db
                         .update_work_enrichment(user_id, work.id, o.request)
                         .await
-                        .is_ok()
                     {
-                        enriched += 1;
-                    } else {
-                        failed += 1;
+                        Ok(enriched_work) => {
+                            enriched += 1;
+                            // Retag library files with updated metadata.
+                            if let Ok(taggable) =
+                                state.db.list_taggable_items_by_work(user_id, work.id).await
+                            {
+                                if !taggable.is_empty() {
+                                    let _ = super::import::retag_library_items(
+                                        &state,
+                                        &enriched_work,
+                                        &taggable,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            failed += 1;
+                        }
                     }
                 }
                 Err(_) => {
