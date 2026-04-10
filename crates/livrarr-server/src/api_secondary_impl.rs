@@ -10,8 +10,8 @@ use livrarr_db::{
     CreateLibraryItemDbRequest, CreateNotificationDbRequest, CreateUserDbRequest,
     CreateWorkDbRequest, DownloadClientDb, HistoryDb, HistoryFilter, LibraryItemDb, NotificationDb,
     RemotePathMappingDb, RootFolderDb, UpdateAuthorDbRequest, UpdateDownloadClientDbRequest,
-    UpdateMediaManagementConfigRequest, UpdateMetadataConfigRequest, UpdateProwlarrConfigRequest,
-    UserDb, WorkDb,
+    UpdateEmailConfigRequest, UpdateMediaManagementConfigRequest, UpdateMetadataConfigRequest,
+    UpdateProwlarrConfigRequest, UserDb, WorkDb,
 };
 
 /// Map DbError to the semantically correct ApiError.
@@ -562,6 +562,53 @@ impl ConfigApi for SecondaryApiImpl {
             llm_model: c.llm_model,
             audnexus_url: c.audnexus_url,
             languages: c.languages,
+        })
+    }
+
+    async fn get_email(&self) -> Result<EmailConfigResponse, ApiError> {
+        let c = self.db.get_email_config().await.map_err(db_err)?;
+        Ok(EmailConfigResponse {
+            enabled: c.enabled,
+            smtp_host: c.smtp_host,
+            smtp_port: c.smtp_port,
+            encryption: c.encryption,
+            username: c.username,
+            password_set: c.password.is_some(),
+            from_address: c.from_address,
+            recipient_email: c.recipient_email,
+            send_on_import: c.send_on_import,
+        })
+    }
+
+    async fn update_email(
+        &self,
+        req: UpdateEmailApiRequest,
+    ) -> Result<EmailConfigResponse, ApiError> {
+        let c = self
+            .db
+            .update_email_config(UpdateEmailConfigRequest {
+                enabled: req.enabled,
+                smtp_host: req.smtp_host,
+                smtp_port: req.smtp_port,
+                encryption: req.encryption,
+                username: req.username,
+                password: req.password,
+                from_address: req.from_address,
+                recipient_email: req.recipient_email,
+                send_on_import: req.send_on_import,
+            })
+            .await
+            .map_err(db_err)?;
+        Ok(EmailConfigResponse {
+            enabled: c.enabled,
+            smtp_host: c.smtp_host,
+            smtp_port: c.smtp_port,
+            encryption: c.encryption,
+            username: c.username,
+            password_set: c.password.is_some(),
+            from_address: c.from_address,
+            recipient_email: c.recipient_email,
+            send_on_import: c.send_on_import,
         })
     }
 }

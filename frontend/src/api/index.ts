@@ -49,6 +49,8 @@ import type {
   ProwlarrConfigResponse,
   ProwlarrImportRequest,
   ProwlarrImportResponse,
+  EmailConfigResponse,
+  UpdateEmailConfigRequest,
   MetadataConfigResponse,
   UpdateMetadataConfigRequest,
   HealthCheckResult,
@@ -335,6 +337,19 @@ export const importDownloadClientsFromProwlarr = (req: ProwlarrImportRequest) =>
   apiFetch<ProwlarrImportResponse>("/downloadclient/import/prowlarr", {
     method: "POST",
     body: JSON.stringify(req),
+  });
+export const getEmailConfig = () =>
+  apiFetch<EmailConfigResponse>("/config/email");
+export const updateEmailConfig = (req: UpdateEmailConfigRequest) =>
+  apiFetch<EmailConfigResponse>("/config/email", {
+    method: "PUT",
+    body: JSON.stringify(req),
+  });
+export const testEmailConfig = () =>
+  apiFetch<{ success: boolean }>("/config/email/test", { method: "POST" });
+export const sendFileEmail = (fileId: number) =>
+  apiFetch<{ success: boolean }>(`/workfile/${fileId}/send-email`, {
+    method: "POST",
   });
 export const getMetadataConfig = () =>
   apiFetch<MetadataConfigResponse>("/config/metadata");

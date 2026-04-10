@@ -113,6 +113,14 @@ export const TOUR_STEPS: Step[] = [
     data: { route: "/settings/mediamanagement" },
   },
   {
+    target: "[data-tour='email-kindle-section']",
+    content:
+      "Send books directly to your Kindle or eReader via email. Pick a provider preset (Gmail, Outlook) or enter custom SMTP settings. You'll need your Kindle email address (find it at amazon.com/myk → Devices) and must add the From address to your Approved Personal Document Email List (amazon.com/myk → Preferences → Personal Document Settings). Enable 'Send on import' to automatically deliver new books.",
+    placement: "top",
+    skipBeacon: true,
+    data: { route: "/settings/mediamanagement" },
+  },
+  {
     target: "body",
     content:
       "You're all set! Configure each section at your own pace. You can always revisit these settings from the sidebar. Happy reading!",

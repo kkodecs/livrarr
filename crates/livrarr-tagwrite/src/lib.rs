@@ -292,6 +292,9 @@ fn write_epub(
             } else if name == cover_entry_path && should_replace_cover {
                 // Skip old cover — we write the new one below.
                 continue;
+            } else if is_stale_livrarr_cover(&name, &cover_entry_path) {
+                // Skip leftover Livrarr-injected cover duplicates from prior runs.
+                continue;
             } else {
                 // Copy entry with original compression method.
                 if entry.size() > MAX_EPUB_ENTRY_BYTES as u64 {
@@ -351,6 +354,22 @@ fn write_epub(
                     message: format!("EPUB rename failed: {e}"),
                 }
             })?;
+
+            // Run repub EPUB repair pass (XML declarations, mimetype, identifiers,
+            // proprietary metadata stripping). Non-fatal — if repub fails, the
+            // file is still valid from our own tag writing above.
+            let language = metadata.language.as_deref().unwrap_or("en");
+            match repub::Repub::new()
+                .default_language(language)
+                .fix(path, path)
+            {
+                Ok(_report) => {}
+                Err(e) => {
+                    // Log but don't fail — our tag writing already succeeded.
+                    eprintln!("repub repair warning: {e}");
+                }
+            }
+
             Ok(())
         }
         Err(e) => {
@@ -358,6 +377,21 @@ fn write_epub(
             Err(e)
         }
     }
+}
+
+/// Returns true if this ZIP entry is a stale Livrarr-injected cover that should be removed.
+/// A Livrarr cover is stale when the real cover lives at a different path.
+fn is_stale_livrarr_cover(entry_name: &str, active_cover_path: &str) -> bool {
+    // Only applies when the active cover is NOT the Livrarr default path
+    let livrarr_paths: &[&str] = &[
+        EPUB_COVER_PATH,
+        "images/cover.jpg",
+        "OEBPS/images/cover.jpg",
+    ];
+    let is_livrarr_path = livrarr_paths
+        .iter()
+        .any(|p| entry_name.eq_ignore_ascii_case(p));
+    is_livrarr_path && !entry_name.eq_ignore_ascii_case(active_cover_path)
 }
 
 /// Parse container.xml with quick-xml to find the OPF path.
@@ -417,10 +451,16 @@ fn find_opf_path(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<String,
 }
 
 /// Find the cover image path referenced in the OPF manifest.
+///
+/// Strategy:
+/// 1. Look for `<meta name="cover" content="item-id"/>` → find matching manifest `<item>` by id
+/// 2. Fallback: scan manifest for `<item>` with image media-type and id containing "cover"
+/// 3. Fallback: scan manifest for `<item>` with EPUB3 `properties="cover-image"`
 fn find_cover_path_in_opf(opf: &str) -> Option<String> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
+    // Pass 1: find <meta name="cover" content="..."/>
     let mut reader = Reader::from_str(opf);
     let mut buf = Vec::new();
     let mut cover_id: Option<String> = None;
@@ -454,11 +494,12 @@ fn find_cover_path_in_opf(opf: &str) -> Option<String> {
         buf.clear();
     }
 
-    let cover_id = cover_id?;
-
-    // Second pass: find <item id="cover_id" href="path"/>
+    // Pass 2: scan manifest items — match by meta cover_id, or fallback heuristics
     let mut reader = Reader::from_str(opf);
     buf.clear();
+    let mut fallback_by_id: Option<String> = None;
+    let mut fallback_by_props: Option<String> = None;
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e))
@@ -466,6 +507,8 @@ fn find_cover_path_in_opf(opf: &str) -> Option<String> {
             {
                 let mut item_id = None;
                 let mut href = None;
+                let mut is_image = false;
+                let mut has_cover_prop = false;
                 for attr in e.attributes().flatten() {
                     match attr.key.local_name().as_ref() {
                         b"id" => {
@@ -474,11 +517,40 @@ fn find_cover_path_in_opf(opf: &str) -> Option<String> {
                         b"href" => {
                             href = attr.unescape_value().ok().map(|v| v.to_string());
                         }
+                        b"media-type" => {
+                            if let Ok(v) = attr.unescape_value() {
+                                is_image = v.starts_with("image/");
+                            }
+                        }
+                        b"properties" => {
+                            if let Ok(v) = attr.unescape_value() {
+                                has_cover_prop = v.split_whitespace().any(|p| p == "cover-image");
+                            }
+                        }
                         _ => {}
                     }
                 }
-                if item_id.as_deref() == Some(&cover_id) {
-                    return href;
+
+                // Exact match via <meta name="cover" content="id">
+                if let Some(ref cid) = cover_id {
+                    if item_id.as_deref() == Some(cid) {
+                        return href;
+                    }
+                }
+
+                // Heuristic: image item with "cover" in id
+                if is_image
+                    && fallback_by_id.is_none()
+                    && item_id
+                        .as_deref()
+                        .is_some_and(|id| id.to_lowercase().contains("cover"))
+                {
+                    fallback_by_id = href.clone();
+                }
+
+                // EPUB3: properties="cover-image"
+                if has_cover_prop && fallback_by_props.is_none() {
+                    fallback_by_props = href.clone();
                 }
             }
             Ok(Event::Eof) => break,
@@ -488,6 +560,41 @@ fn find_cover_path_in_opf(opf: &str) -> Option<String> {
         buf.clear();
     }
 
+    // Return best fallback
+    fallback_by_props.or(fallback_by_id)
+}
+
+/// Scan OPF events for a manifest `<item>` that looks like a cover image.
+/// Looks for items with id containing "cover" and an image media-type.
+fn find_cover_item_id_in_events(events: &[quick_xml::events::Event<'_>]) -> Option<String> {
+    use quick_xml::events::Event;
+    for event in events {
+        if let Event::Empty(e) | Event::Start(e) = event {
+            if e.local_name().as_ref() != b"item" {
+                continue;
+            }
+            let mut item_id = None;
+            let mut is_image = false;
+            let mut id_has_cover = false;
+            for attr in e.attributes().flatten() {
+                match attr.key.local_name().as_ref() {
+                    b"id" => {
+                        let val = attr.unescape_value().ok()?;
+                        id_has_cover = val.to_lowercase().contains("cover");
+                        item_id = Some(val.to_string());
+                    }
+                    b"media-type" => {
+                        let val = attr.unescape_value().ok()?;
+                        is_image = val.starts_with("image/");
+                    }
+                    _ => {}
+                }
+            }
+            if is_image && id_has_cover {
+                return item_id;
+            }
+        }
+    }
     None
 }
 
@@ -559,6 +666,7 @@ fn update_opf_metadata(
     ];
 
     // Collect preserved elements from inside metadata (non-managed dc:, non-calibre-meta).
+    let mut original_cover_id: Option<String> = None;
     let mut preserved_events: Vec<Event<'static>> = Vec::new();
     let mut i = meta_start + 1;
     while i < meta_end {
@@ -590,6 +698,17 @@ fn update_opf_metadata(
                             && a.unescape_value().ok().as_deref() == Some("cover")
                     })
                 };
+
+                if is_cover_meta {
+                    // Capture the original cover ID before stripping.
+                    for a in e.attributes().flatten() {
+                        if a.key.local_name().as_ref() == b"content" {
+                            if let Ok(v) = a.unescape_value() {
+                                original_cover_id = Some(v.to_string());
+                            }
+                        }
+                    }
+                }
 
                 if is_managed_dc || is_isbn_identifier || is_calibre_meta || is_cover_meta {
                     // Skip this element (and its content if it's a Start, not Empty).
@@ -716,12 +835,20 @@ fn update_opf_metadata(
         }
     }
 
-    // Cover reference in metadata — only when a cover is actually being embedded.
-    if add_cover_manifest_item {
+    // Cover reference in metadata — always ensure one exists.
+    // Priority: new Livrarr cover > original meta > scan manifest for cover-like item.
+    let cover_content_id = if add_cover_manifest_item {
+        Some(LIVRARR_COVER_ID.to_string())
+    } else if original_cover_id.is_some() {
+        original_cover_id
+    } else {
+        find_cover_item_id_in_events(&events)
+    };
+    if let Some(ref cid) = cover_content_id {
         new_meta_events.push(Event::Text(nl(indent).into_owned()));
         let mut elem = BytesStart::new("meta");
         elem.push_attribute(("name", "cover"));
-        elem.push_attribute(("content", LIVRARR_COVER_ID));
+        elem.push_attribute(("content", cid.as_str()));
         new_meta_events.push(Event::Empty(elem.into_owned()));
     }
 
@@ -763,7 +890,34 @@ fn update_opf_metadata(
             result_events.extend(events[meta_end..].iter().cloned());
         }
     } else {
-        result_events.extend(events[meta_end..].iter().cloned());
+        // Copy remaining events, but strip any stale livrarr-cover-image manifest items.
+        let mut skip_depth: usize = 0;
+        for event in &events[meta_end..] {
+            if skip_depth > 0 {
+                if matches!(event, Event::Start(_)) {
+                    skip_depth += 1;
+                } else if matches!(event, Event::End(_)) {
+                    skip_depth -= 1;
+                }
+                continue;
+            }
+            let is_stale_item = match event {
+                Event::Empty(e) | Event::Start(e) if e.local_name().as_ref() == b"item" => {
+                    e.attributes().flatten().any(|a| {
+                        a.key.local_name().as_ref() == b"id"
+                            && a.unescape_value().ok().as_deref() == Some(LIVRARR_COVER_ID)
+                    })
+                }
+                _ => false,
+            };
+            if is_stale_item {
+                if matches!(event, Event::Start(_)) {
+                    skip_depth = 1;
+                }
+                continue;
+            }
+            result_events.push(event.clone());
+        }
     }
 
     // Serialize.
