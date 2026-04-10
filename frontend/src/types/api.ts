@@ -501,6 +501,30 @@ export interface ProwlarrImportResponse {
   errors: string[];
 }
 
+export interface EmailConfigResponse {
+  enabled: boolean;
+  smtpHost: string;
+  smtpPort: number;
+  encryption: string;
+  username: string | null;
+  passwordSet: boolean;
+  fromAddress: string | null;
+  recipientEmail: string | null;
+  sendOnImport: boolean;
+}
+
+export interface UpdateEmailConfigRequest {
+  enabled?: boolean;
+  smtpHost?: string;
+  smtpPort?: number;
+  encryption?: string;
+  username?: string | null;
+  password?: string | null;
+  fromAddress?: string | null;
+  recipientEmail?: string | null;
+  sendOnImport?: boolean;
+}
+
 export interface MetadataConfigResponse {
   hardcoverEnabled: boolean;
   hardcoverApiToken: string | null;

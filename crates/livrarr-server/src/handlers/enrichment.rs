@@ -248,6 +248,11 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
         }
     }
 
+    // Default language from metadata config if not set by any provider.
+    if req.language.is_none() {
+        req.language = cfg.languages.first().cloned();
+    }
+
     // --- Download cover if we got a new URL ---
     if let Some(ref url) = req.cover_url {
         let covers_dir = state.data_dir.join("covers");

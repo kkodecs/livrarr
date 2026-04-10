@@ -15,6 +15,10 @@ import {
   HardDrive,
   BookOpen,
   Headphones,
+  Mail,
+  CheckCircle2,
+  XCircle,
+  Loader2,
 } from "lucide-react";
 import {
   DndContext,
@@ -519,6 +523,9 @@ export default function MediaManagementPage() {
           </section>
         )}
 
+        {/* ── Email / Send to Kindle (admin only) ── */}
+        {isAdmin && <EmailConfigSection />}
+
         {/* ── Naming (read-only) ── */}
         <section className="rounded-lg border border-border bg-zinc-900/50 opacity-60" title="Coming Soon">
           <div className="flex items-center gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
@@ -856,5 +863,277 @@ function SortableFormatItem({
       <span className="flex-1 text-sm text-zinc-200 font-mono">.{id}</span>
       <span className="text-xs text-muted">#{rank}</span>
     </div>
+  );
+}
+
+// ── Email / Send to Kindle Config (MOCK) ──
+
+const SMTP_PRESETS: Record<string, { host: string; port: number; encryption: string }> = {
+  gmail: { host: "smtp.gmail.com", port: 587, encryption: "starttls" },
+  outlook: { host: "smtp-mail.outlook.com", port: 587, encryption: "starttls" },
+  custom: { host: "", port: 587, encryption: "starttls" },
+};
+
+function detectPreset(host: string): string {
+  if (host === "smtp.gmail.com") return "gmail";
+  if (host === "smtp-mail.outlook.com") return "outlook";
+  return "custom";
+}
+
+function EmailConfigSection() {
+  const qc = useQueryClient();
+  const emailConfigQ = useQuery({
+    queryKey: ["emailConfig"],
+    queryFn: api.getEmailConfig,
+  });
+
+  const [preset, setPreset] = useState<string | null>(null);
+  const [host, setHost] = useState<string | null>(null);
+  const [port, setPort] = useState<number | null>(null);
+  const [encryption, setEncryption] = useState<string | null>(null);
+  const [username, setUsername] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
+  const [fromAddress, setFromAddress] = useState<string | null>(null);
+  const [recipientEmail, setRecipientEmail] = useState<string | null>(null);
+  const [sendOnImport, setSendOnImport] = useState<boolean | null>(null);
+  const [testState, setTestState] = useState<"idle" | "loading" | "success" | "fail">("idle");
+
+  // Derive current values from local overrides or server data
+  const cfg = emailConfigQ.data;
+  const curHost = host ?? cfg?.smtpHost ?? "smtp.gmail.com";
+  const curPort = port ?? cfg?.smtpPort ?? 587;
+  const curEncryption = encryption ?? cfg?.encryption ?? "starttls";
+  const curUsername = username ?? cfg?.username ?? "";
+  const curFromAddress = fromAddress ?? cfg?.fromAddress ?? "";
+  const curRecipientEmail = recipientEmail ?? cfg?.recipientEmail ?? "";
+  const curSendOnImport = sendOnImport ?? cfg?.sendOnImport ?? false;
+  const curPreset = preset ?? detectPreset(curHost);
+
+  const updateEmail = useMutation({
+    mutationFn: api.updateEmailConfig,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["emailConfig"] });
+      // Reset local overrides so we read from server
+      setHost(null);
+      setPort(null);
+      setEncryption(null);
+      setUsername(null);
+      setPassword("");
+      setFromAddress(null);
+      setRecipientEmail(null);
+      setSendOnImport(null);
+      setPreset(null);
+      toast.success("Email configuration saved");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const applyPreset = (key: string) => {
+    setPreset(key);
+    const p = SMTP_PRESETS[key];
+    if (p) {
+      setHost(p.host || curHost);
+      setPort(p.port);
+      setEncryption(p.encryption);
+    }
+    if (key === "gmail" && !curUsername) {
+      setUsername("you@gmail.com");
+      if (!curFromAddress) setFromAddress("you@gmail.com");
+    } else if (key === "outlook" && !curUsername) {
+      setUsername("you@outlook.com");
+      if (!curFromAddress) setFromAddress("you@outlook.com");
+    }
+  };
+
+  const handleSave = () => {
+    updateEmail.mutate({
+      smtpHost: curHost,
+      smtpPort: curPort,
+      encryption: curEncryption,
+      username: curUsername || null,
+      ...(password ? { password } : {}),
+      fromAddress: curFromAddress || null,
+      recipientEmail: curRecipientEmail || null,
+      sendOnImport: curSendOnImport,
+      enabled: true,
+    });
+  };
+
+  const handleTest = async () => {
+    setTestState("loading");
+    try {
+      await api.testEmailConfig();
+      setTestState("success");
+      toast.success("Test email sent");
+    } catch (e) {
+      setTestState("fail");
+      toast.error(e instanceof Error ? e.message : "Test email failed");
+    }
+  };
+
+  if (emailConfigQ.isLoading) return null;
+
+  return (
+    <section data-tour="email-kindle-section" className="rounded-lg border border-border bg-zinc-900/50">
+      <div className="flex items-center gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
+        <Mail size={18} className="text-muted" />
+        <h2 className="text-base font-semibold text-zinc-100">
+          Email / Send to Kindle
+        </h2>
+        <HelpTip text="Send ebooks to your Kindle or eReader via email. Configure your SMTP server and recipient email address. You must add the 'From' address to your Amazon Approved Personal Document Email List." />
+      </div>
+      <div className="p-5">
+        <div className="max-w-xl space-y-4">
+          {/* Provider preset */}
+          <div>
+            <label className="block text-xs text-muted mb-1">Provider</label>
+            <select
+              value={curPreset}
+              onChange={(e) => applyPreset(e.target.value)}
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            >
+              <option value="custom">Custom SMTP</option>
+              <option value="gmail">Gmail</option>
+              <option value="outlook">Outlook</option>
+            </select>
+          </div>
+
+          {/* SMTP Host + Port */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="col-span-2">
+              <label className="block text-xs text-muted mb-1">SMTP Host</label>
+              <input
+                type="text"
+                value={curHost}
+                onChange={(e) => setHost(e.target.value)}
+                placeholder="smtp.example.com"
+                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1">Port</label>
+              <input
+                type="number"
+                value={curPort}
+                onChange={(e) => setPort(Number(e.target.value))}
+                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+              />
+            </div>
+          </div>
+
+          {/* Encryption */}
+          <div>
+            <label className="block text-xs text-muted mb-1">Encryption</label>
+            <select
+              value={curEncryption}
+              onChange={(e) => setEncryption(e.target.value)}
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            >
+              <option value="none">None</option>
+              <option value="starttls">STARTTLS</option>
+              <option value="ssl">SSL/TLS</option>
+            </select>
+          </div>
+
+          {/* Username + Password */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-muted mb-1">Username</label>
+              <input
+                type="text"
+                value={curUsername}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="user@example.com"
+                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="flex items-center gap-1 text-xs text-muted mb-1">
+                Password
+                {curPreset === "gmail" ? (
+                  <HelpTip text="Gmail requires an App Password, not your account password. Go to myaccount.google.com → Security → 2-Step Verification → App Passwords. Generate a new app password for 'Mail' and paste it here." />
+                ) : curPreset === "outlook" ? (
+                  <HelpTip text="If you have 2FA enabled, go to account.microsoft.com → Security → Advanced security options → App passwords. Generate a new app password and paste it here." />
+                ) : null}
+              </label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={cfg?.passwordSet ? "••••••••" : ""}
+                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+              />
+            </div>
+          </div>
+
+          {/* From Address */}
+          <div>
+            <label className="block text-xs text-muted mb-1">From Address</label>
+            <input
+              type="email"
+              value={curFromAddress}
+              onChange={(e) => setFromAddress(e.target.value)}
+              placeholder="livrarr@example.com"
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            />
+            <p className="mt-1 text-xs text-muted inline-flex items-center gap-1">
+              Must be on your Kindle Approved Email List
+              <HelpTip text="To add this address: 1) Go to amazon.com/myk → Preferences → Personal Document Settings. 2) Scroll to 'Approved Personal Document E-mail List'. 3) Click 'Add a new approved e-mail address'. 4) Enter the From Address above and click 'Add Address'. Without this, Amazon will silently reject emails from Livrarr." />
+            </p>
+          </div>
+
+          {/* Recipient Email */}
+          <div>
+            <label className="block text-xs text-muted mb-1">Kindle Email</label>
+            <input
+              type="email"
+              value={curRecipientEmail}
+              onChange={(e) => setRecipientEmail(e.target.value)}
+              placeholder="yourname@kindle.com"
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            />
+          </div>
+
+          {/* Auto-send on import */}
+          <label className="flex items-center gap-3 text-sm text-zinc-200 cursor-pointer group">
+            <input
+              type="checkbox"
+              checked={curSendOnImport}
+              onChange={(e) => setSendOnImport(e.target.checked)}
+              className="rounded border-border"
+            />
+            <span>Send to Kindle automatically on import</span>
+            <HelpTip text="Automatically emails EPUB and PDF files to your Kindle when imported. Other formats (MOBI, AZW3, M4B, etc.) are skipped. If the send fails, you'll see a notification — the import itself is not affected." />
+          </label>
+
+          {/* Actions */}
+          <div className="flex items-center gap-3 pt-2">
+            <button
+              onClick={handleSave}
+              disabled={updateEmail.isPending}
+              className="rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+            >
+              {updateEmail.isPending ? "Saving..." : "Save"}
+            </button>
+            <button
+              onClick={handleTest}
+              disabled={testState === "loading" || !curHost || !curRecipientEmail}
+              className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-2 text-sm text-zinc-300 hover:text-zinc-100 hover:border-zinc-500 disabled:opacity-50"
+            >
+              {testState === "loading" ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : testState === "success" ? (
+                <CheckCircle2 size={14} className="text-green-400" />
+              ) : testState === "fail" ? (
+                <XCircle size={14} className="text-red-400" />
+              ) : (
+                <Mail size={14} />
+              )}
+              Send Test Email
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }

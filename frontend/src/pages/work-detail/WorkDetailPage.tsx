@@ -19,6 +19,7 @@ import {
   Clock,
   ChevronDown,
   ChevronRight,
+  Mail,
 } from "lucide-react";
 import {
   getWork,
@@ -31,6 +32,7 @@ import {
   getHistory,
   deleteLibraryFile,
   getMediaManagementConfig,
+  sendFileEmail,
 } from "@/api";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
@@ -289,9 +291,23 @@ function TabTrigger({
 
 // --- Library Files Tab ---
 
+// Formats Amazon accepts via Send to Kindle email
+const KINDLE_ACCEPTED_FORMATS = new Set([
+  "epub", "pdf", "docx", "doc", "rtf", "htm", "html", "txt",
+]);
+
+const MAX_EMAIL_SIZE = 50 * 1024 * 1024; // 50 MB
+
+function getFileExtension(path: string): string {
+  const dot = path.lastIndexOf(".");
+  return dot >= 0 ? path.slice(dot + 1).toLowerCase() : "";
+}
+
 function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
   const queryClient = useQueryClient();
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
+  const [sendingId, setSendingId] = useState<number | null>(null);
+  const [sentIds, setSentIds] = useState<Set<number>>(new Set());
 
   const deleteFileMutation = useMutation({
     mutationFn: (fileId: number) => deleteLibraryFile(fileId),
@@ -302,6 +318,24 @@ function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
     },
     onError: () => toast.error("Failed to delete file"),
   });
+
+  const sendEmailMutation = useMutation({
+    mutationFn: sendFileEmail,
+    onSuccess: (_data, itemId) => {
+      setSendingId(null);
+      setSentIds((prev) => new Set(prev).add(itemId));
+      toast.success("Sent to Kindle");
+    },
+    onError: (e: Error) => {
+      setSendingId(null);
+      toast.error(e.message || "Failed to send email");
+    },
+  });
+
+  const handleSendEmail = (itemId: number) => {
+    setSendingId(itemId);
+    sendEmailMutation.mutate(itemId);
+  };
 
   if (work.libraryItems.length === 0) {
     return (
@@ -331,45 +365,73 @@ function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
               <th className="px-3 py-2 text-left text-xs font-medium uppercase text-muted">
                 Imported
               </th>
-              <th className="w-10 px-3 py-2" />
+              <th className="w-20 px-3 py-2" />
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {work.libraryItems.map((item) => (
-              <tr key={item.id} className="hover:bg-zinc-800/50">
-                <td
-                  className="max-w-md truncate px-3 py-2 font-mono text-xs text-zinc-300"
-                  title={item.path}
-                >
-                  {item.path}
-                </td>
-                <td className="px-3 py-2">
-                  <div className="inline-flex items-center gap-1 text-zinc-400">
-                    {item.mediaType === "ebook" ? (
-                      <Book size={14} />
-                    ) : (
-                      <Headphones size={14} />
-                    )}
-                    <span className="text-xs capitalize">{item.mediaType}</span>
-                  </div>
-                </td>
-                <td className="px-3 py-2 text-right text-muted">
-                  {formatBytes(item.fileSize)}
-                </td>
-                <td className="px-3 py-2 text-muted">
-                  {formatRelativeDate(item.importedAt)}
-                </td>
-                <td className="px-3 py-2">
-                  <button
-                    onClick={() => setConfirmDelete(item.id)}
-                    className="rounded p-1 text-muted hover:text-red-400"
-                    title="Delete file"
+            {work.libraryItems.map((item) => {
+              const ext = getFileExtension(item.path);
+              const canSend = KINDLE_ACCEPTED_FORMATS.has(ext);
+              const tooLarge = item.fileSize > MAX_EMAIL_SIZE;
+              const isSending = sendingId === item.id;
+              const wasSent = sentIds.has(item.id);
+
+              return (
+                <tr key={item.id} className="hover:bg-zinc-800/50">
+                  <td
+                    className="max-w-md truncate px-3 py-2 font-mono text-xs text-zinc-300"
+                    title={item.path}
                   >
-                    <Trash2 size={14} />
-                  </button>
-                </td>
-              </tr>
-            ))}
+                    {item.path}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="inline-flex items-center gap-1 text-zinc-400">
+                      {item.mediaType === "ebook" ? (
+                        <Book size={14} />
+                      ) : (
+                        <Headphones size={14} />
+                      )}
+                      <span className="text-xs capitalize">{item.mediaType}</span>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-right text-muted">
+                    {formatBytes(item.fileSize)}
+                  </td>
+                  <td className="px-3 py-2 text-muted">
+                    {formatRelativeDate(item.importedAt)}
+                  </td>
+                  <td className="px-3 py-2 flex items-center justify-end gap-1">
+                    {canSend && (
+                      <button
+                        onClick={() => handleSendEmail(item.id)}
+                        disabled={isSending || tooLarge}
+                        className={`rounded p-1 hover:text-brand disabled:opacity-40 ${tooLarge ? "disabled:cursor-not-allowed text-muted" : isSending ? "cursor-wait text-brand" : wasSent ? "text-green-400" : "text-muted"}`}
+                        title={
+                          tooLarge
+                            ? `File too large (${formatBytes(item.fileSize)}). Amazon limit is 50 MB.`
+                            : wasSent
+                              ? "Sent to Kindle"
+                              : "Send to Kindle"
+                        }
+                      >
+                        {isSending ? (
+                          <Loader2 size={14} className="animate-spin text-brand" />
+                        ) : (
+                          <Mail size={14} className={wasSent ? "text-green-400" : ""} />
+                        )}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setConfirmDelete(item.id)}
+                      className="rounded p-1 text-muted hover:text-red-400"
+                      title="Delete file"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

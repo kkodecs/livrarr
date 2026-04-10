@@ -3,9 +3,9 @@ use sqlx::Row;
 use crate::sqlite::SqliteDb;
 use crate::sqlite_common::map_db_err;
 use crate::{
-    ConfigDb, DbError, LlmProvider, MediaManagementConfig, MetadataConfig, NamingConfig,
-    ProwlarrConfig, UpdateMediaManagementConfigRequest, UpdateMetadataConfigRequest,
-    UpdateProwlarrConfigRequest,
+    ConfigDb, DbError, EmailConfig, LlmProvider, MediaManagementConfig, MetadataConfig,
+    NamingConfig, ProwlarrConfig, UpdateEmailConfigRequest, UpdateMediaManagementConfigRequest,
+    UpdateMetadataConfigRequest, UpdateProwlarrConfigRequest,
 };
 
 fn parse_llm_provider(s: &str) -> Result<LlmProvider, DbError> {
@@ -220,5 +220,81 @@ impl ConfigDb for SqliteDb {
         .map_err(map_db_err)?;
 
         self.get_metadata_config().await
+    }
+
+    async fn get_email_config(&self) -> Result<EmailConfig, DbError> {
+        let row = sqlx::query("SELECT * FROM email_config WHERE id = 1")
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        Ok(EmailConfig {
+            enabled: row
+                .try_get::<bool, _>("enabled")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            smtp_host: row
+                .try_get("smtp_host")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            smtp_port: row
+                .try_get("smtp_port")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            encryption: row
+                .try_get("encryption")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            username: row
+                .try_get("username")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            password: row
+                .try_get("password")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            from_address: row
+                .try_get("from_address")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            recipient_email: row
+                .try_get("recipient_email")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            send_on_import: row
+                .try_get::<bool, _>("send_on_import")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+        })
+    }
+
+    async fn update_email_config(
+        &self,
+        req: UpdateEmailConfigRequest,
+    ) -> Result<EmailConfig, DbError> {
+        let current = self.get_email_config().await?;
+
+        let enabled = req.enabled.unwrap_or(current.enabled);
+        let smtp_host = req.smtp_host.unwrap_or(current.smtp_host);
+        let smtp_port = req.smtp_port.unwrap_or(current.smtp_port);
+        let encryption = req.encryption.unwrap_or(current.encryption);
+        let username = req.username.or(current.username);
+        let password = req.password.or(current.password);
+        let from_address = req.from_address.or(current.from_address);
+        let recipient_email = req.recipient_email.or(current.recipient_email);
+        let send_on_import = req.send_on_import.unwrap_or(current.send_on_import);
+
+        sqlx::query(
+            "UPDATE email_config SET \
+             enabled = ?, smtp_host = ?, smtp_port = ?, encryption = ?, \
+             username = ?, password = ?, from_address = ?, recipient_email = ?, \
+             send_on_import = ? \
+             WHERE id = 1",
+        )
+        .bind(enabled)
+        .bind(&smtp_host)
+        .bind(smtp_port)
+        .bind(&encryption)
+        .bind(&username)
+        .bind(&password)
+        .bind(&from_address)
+        .bind(&recipient_email)
+        .bind(send_on_import)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        self.get_email_config().await
     }
 }

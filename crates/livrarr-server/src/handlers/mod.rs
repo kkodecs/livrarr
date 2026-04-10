@@ -2,6 +2,7 @@ pub mod auth;
 pub mod author;
 pub mod config;
 pub mod download_client;
+pub mod email;
 pub mod enrichment;
 pub mod filesystem;
 pub mod history;
