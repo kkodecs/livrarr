@@ -2,12 +2,13 @@ import { HelpTip } from "@/components/HelpTip";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { toast } from "sonner";
-import { BookOpen, Cpu, Globe, Languages, X, ExternalLink } from "lucide-react";
+import { BookOpen, Cpu, Globe, Languages, ExternalLink } from "lucide-react";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
 import type { LlmProvider, UpdateMetadataConfigRequest } from "@/types/api";
+import { SUPPORTED_LANGUAGES } from "@/types/api";
 import * as api from "@/api";
 import { useState, useEffect } from "react";
 
@@ -107,12 +108,12 @@ export default function MetadataPage() {
   } = useForm<MetadataForm>({
     values: {
       hardcoverEnabled: configQ.data?.hardcoverEnabled ?? true,
-      hardcoverApiToken: configQ.data?.hardcoverApiToken ?? "",
+      hardcoverApiToken: "",
       audnexusUrl: configQ.data?.audnexusUrl ?? "",
       llmEnabled: configQ.data?.llmEnabled ?? true,
       llmProvider: configQ.data?.llmProvider ?? "",
       llmEndpoint: configQ.data?.llmEndpoint ?? "",
-      llmApiKey: configQ.data?.llmApiKey ?? "",
+      llmApiKey: "",
       llmModel: configQ.data?.llmModel ?? "",
     },
   });
@@ -163,16 +164,16 @@ export default function MetadataPage() {
       llmEnabled: data.llmEnabled,
     };
 
-    if (data.hardcoverApiToken !== (config.hardcoverApiToken ?? ""))
-      req.hardcoverApiToken = data.hardcoverApiToken || null;
+    if (data.hardcoverApiToken)
+      req.hardcoverApiToken = data.hardcoverApiToken;
     if (data.audnexusUrl !== config.audnexusUrl)
       req.audnexusUrl = data.audnexusUrl || null;
     if (data.llmProvider) req.llmProvider = data.llmProvider as LlmProvider;
     else if (config.llmProvider) req.llmProvider = null;
     if (data.llmEndpoint !== (config.llmEndpoint ?? ""))
       req.llmEndpoint = data.llmEndpoint || null;
-    if (data.llmApiKey !== (config.llmApiKey ?? ""))
-      req.llmApiKey = data.llmApiKey || null;
+    if (data.llmApiKey)
+      req.llmApiKey = data.llmApiKey;
     if (data.llmModel !== (config.llmModel ?? ""))
       req.llmModel = data.llmModel || null;
     if (langDirty) req.languages = languages;
@@ -195,8 +196,8 @@ export default function MetadataPage() {
     }
   };
 
-  const addLanguage = () => {
-    const val = langInput.trim().toLowerCase();
+  const addLanguage = (code?: string) => {
+    const val = code ?? langInput.trim().toLowerCase();
     if (val && !languages.includes(val)) {
       setLanguages([...languages, val]);
       setLangDirty(true);
@@ -440,49 +441,108 @@ export default function MetadataPage() {
                 Languages
               </h2>
             </div>
-            <div className="flex flex-wrap gap-2 mb-3">
-              {languages.map((lang) => (
-                <span
-                  key={lang}
-                  className="inline-flex items-center gap-1 rounded-full bg-zinc-700 px-2.5 py-1 text-xs text-zinc-200"
-                >
-                  {lang}
-                  <button
-                    type="button"
-                    onClick={() => removeLanguage(lang)}
-                    className="text-muted hover:text-red-400"
+            <p className="text-xs text-muted mb-4">
+              Select languages for book metadata. The first enabled language is
+              your primary &mdash; used by default when searching for new books.
+            </p>
+            <div className="rounded-lg border border-border overflow-hidden">
+              {SUPPORTED_LANGUAGES.map((lang) => {
+                const isEnabled = languages.includes(lang.code);
+                const isEnglish = lang.code === "en";
+                const isPrimary =
+                  isEnglish && languages[0] === "en"
+                    ? true
+                    : languages[0] === lang.code;
+                const llmConfigured =
+                  config.llmEnabled &&
+                  !!config.llmEndpoint &&
+                  config.llmApiKeySet &&
+                  !!config.llmModel;
+                const needsLlm = lang.requiresLlm && !llmConfigured;
+                const providerError =
+                  config.providerStatus?.[lang.providerName];
+
+                return (
+                  <div
+                    key={lang.code}
+                    className={`flex items-center gap-3 px-4 py-3 border-b border-border last:border-b-0 transition-colors ${
+                      isEnabled || isEnglish
+                        ? "bg-zinc-800/50"
+                        : "bg-zinc-800/20"
+                    } ${needsLlm ? "opacity-60" : ""}`}
                   >
-                    <X size={12} />
-                  </button>
-                </span>
-              ))}
-              {languages.length === 0 && (
-                <span className="text-xs text-muted">
-                  No languages configured
-                </span>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={langInput}
-                onChange={(e) => setLangInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    addLanguage();
-                  }
-                }}
-                placeholder="en"
-                className="w-24 rounded border border-border bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-brand focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={addLanguage}
-                className="rounded border border-border px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-700"
-              >
-                Add
-              </button>
+                    <span
+                      className={`text-lg ${!isEnabled && !isEnglish ? "opacity-40" : ""}`}
+                    >
+                      {lang.flag}
+                    </span>
+                    <div className="flex flex-col flex-1 min-w-0">
+                      <span
+                        className={`text-sm font-medium ${isEnabled || isEnglish ? "text-zinc-100" : "text-zinc-500"}`}
+                      >
+                        {lang.englishName}
+                        {isPrimary && (
+                          <span className="ml-2 inline-block rounded bg-brand px-1.5 py-0.5 text-[9px] font-semibold text-white uppercase">
+                            Primary
+                          </span>
+                        )}
+                      </span>
+                      <span
+                        className={`text-[11px] ${isEnabled || isEnglish ? "text-zinc-500" : "text-zinc-600"}`}
+                      >
+                        {lang.providerName}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span
+                        className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
+                          lang.providerType === "llm"
+                            ? "bg-blue-500/15 text-blue-300"
+                            : "bg-blue-500/15 text-blue-300"
+                        }`}
+                      >
+                        {lang.providerType.toUpperCase()}
+                      </span>
+                      {providerError && (
+                        <span className="text-[11px] text-red-400">
+                          &#9679; Not Responding
+                        </span>
+                      )}
+                      {needsLlm && (
+                        <a
+                          href="#llm-section"
+                          className="text-[11px] text-red-400 underline"
+                        >
+                          Needs LLM &rarr;
+                        </a>
+                      )}
+                      {!isEnglish && !needsLlm && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isEnabled) {
+                              removeLanguage(lang.code);
+                            } else {
+                              addLanguage(lang.code);
+                            }
+                          }}
+                          className={`w-9 h-5 rounded-full relative transition-colors ${
+                            isEnabled ? "bg-brand" : "bg-zinc-600"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
+                              isEnabled
+                                ? "left-[18px] bg-white"
+                                : "left-0.5 bg-zinc-400"
+                            }`}
+                          />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </section>
 

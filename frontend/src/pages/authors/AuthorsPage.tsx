@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Plus, LayoutGrid, List, Rows3 } from "lucide-react";
+import { BookOpen, Plus, LayoutGrid, List, Rows3, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { listAuthors, updateAuthor } from "@/api";
+import { listAuthors, updateAuthor, deleteAuthor } from "@/api";
 import { useUIStore } from "@/stores/ui";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
@@ -63,8 +63,12 @@ export default function AuthorsPage() {
         old?.map((a) => (a.id === id ? { ...a, monitored } : a)),
       );
     },
-    onError: () => {
-      toast.error("Failed to update author");
+    onError: (err: Error) => {
+      if (err.message?.includes("OL linkage")) {
+        toast.error("Cannot monitor — author not linked to OpenLibrary");
+      } else {
+        toast.error("Failed to update author");
+      }
     },
   });
 
@@ -84,6 +88,17 @@ export default function AuthorsPage() {
     onError: () => {
       toast.error("Failed to update author");
     },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => deleteAuthor(id),
+    onSuccess: (_data, id) => {
+      queryClient.setQueryData<AuthorResponse[]>(["authors"], (old) =>
+        old?.filter((a) => a.id !== id),
+      );
+      toast.success("Author deleted");
+    },
+    onError: () => toast.error("Failed to delete author"),
   });
 
   const filtered = useMemo(() => {
@@ -208,6 +223,7 @@ export default function AuthorsPage() {
             onToggleMonitorNew={(id, val) =>
               toggleMonitorNew.mutate({ id, monitorNewItems: val })
             }
+            onDelete={(id) => deleteMutation.mutate(id)}
           />
         ) : authorsView === "poster" ? (
           <PosterView authors={filtered} />
@@ -223,20 +239,23 @@ function TableView({
   authors,
   onToggleMonitored,
   onToggleMonitorNew,
+  onDelete,
 }: {
   authors: AuthorResponse[];
   onToggleMonitored: (id: number, val: boolean) => void;
   onToggleMonitorNew: (id: number, val: boolean) => void;
+  onDelete: (id: number) => void;
 }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-xs font-medium uppercase text-muted">
-            <th className="w-10 px-3 py-2" />
             <th className="px-3 py-2">Name</th>
-            <th className="px-3 py-2">Monitor New</th>
+            <th className="w-20 px-3 py-2">Monitored</th>
+            <th className="w-24 px-3 py-2">Monitor New</th>
             <th className="px-3 py-2">Added</th>
+            <th className="w-10 px-3 py-2" />
           </tr>
         </thead>
         <tbody>
@@ -245,6 +264,14 @@ function TableView({
               key={author.id}
               className="border-b border-border/50 hover:bg-surface-hover"
             >
+              <td className="px-3 py-2">
+                <Link
+                  to={`/author/${author.id}`}
+                  className="font-medium text-zinc-100 hover:text-brand"
+                >
+                  {author.name}
+                </Link>
+              </td>
               <td className="px-3 py-2">
                 <button
                   onClick={() =>
@@ -268,14 +295,6 @@ function TableView({
                     </svg>
                   )}
                 </button>
-              </td>
-              <td className="px-3 py-2">
-                <Link
-                  to={`/author/${author.id}`}
-                  className="font-medium text-zinc-100 hover:text-brand"
-                >
-                  {author.name}
-                </Link>
               </td>
               <td className="px-3 py-2">
                 <button
@@ -307,6 +326,17 @@ function TableView({
               </td>
               <td className="px-3 py-2 text-muted">
                 {formatRelativeDate(author.addedAt)}
+              </td>
+              <td className="px-3 py-2">
+                <button
+                  onClick={() => {
+                    if (confirm(`Delete ${author.name}?`)) onDelete(author.id);
+                  }}
+                  className="rounded p-1 text-muted hover:text-red-400"
+                  title="Delete author"
+                >
+                  <Trash2 size={14} />
+                </button>
               </td>
             </tr>
           ))}
