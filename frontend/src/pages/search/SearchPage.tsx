@@ -62,6 +62,7 @@ export default function SearchPage() {
   const { data: allWorks } = useQuery({
     queryKey: ["works"],
     queryFn: listWorks,
+    select: (res) => res.items,
   });
 
   // Filter local works by search term

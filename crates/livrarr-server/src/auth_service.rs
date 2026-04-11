@@ -284,6 +284,15 @@ impl AuthService for ServerAuthService {
                 .await
                 .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
             db_req.password_hash = Some(hash);
+
+            // Delete sessions BEFORE updating password. If deletion fails,
+            // password is untouched and user can safely retry. If deletion
+            // succeeds but password update fails, user is logged out but
+            // password unchanged — a safe failure mode.
+            self.db
+                .delete_user_sessions(user_id)
+                .await
+                .map_err(AuthError::Db)?;
         }
         let user = self
             .db
@@ -293,6 +302,7 @@ impl AuthService for ServerAuthService {
                 DbError::NotFound { .. } => AuthError::UserNotFound,
                 other => AuthError::Db(other),
             })?;
+
         Ok(Self::user_to_response(&user))
     }
 
@@ -385,11 +395,18 @@ impl AuthService for ServerAuthService {
                 .await
                 .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
             db_req.password_hash = Some(hash);
+
+            // Delete sessions BEFORE updating password (safe failure ordering).
+            self.db
+                .delete_user_sessions(id)
+                .await
+                .map_err(AuthError::Db)?;
         }
         let user = self.db.update_user(id, db_req).await.map_err(|e| match e {
             DbError::NotFound { .. } => AuthError::UserNotFound,
             other => AuthError::Db(other),
         })?;
+
         Ok(Self::user_to_response(&user))
     }
 

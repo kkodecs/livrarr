@@ -47,6 +47,7 @@ export default function QueuePage() {
   const { data: works } = useQuery({
     queryKey: ["works"],
     queryFn: listWorks,
+    select: (res) => res.items,
   });
 
   const removeMutation = useMutation({

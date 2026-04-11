@@ -955,6 +955,7 @@ function HistoryTab({ workId }: { workId: number }) {
   } = useQuery({
     queryKey: ["history", workId],
     queryFn: () => getHistory({ workId }),
+    select: (res) => res.items,
   });
 
   if (isLoading) return <PageLoading />;
