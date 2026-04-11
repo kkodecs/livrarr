@@ -48,12 +48,32 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         monitored: w.monitored,
         added_at: w.added_at.to_rfc3339(),
         library_items: vec![],
+        metadata_source: w.metadata_source.clone(),
+    }
+}
+
+/// Rewrite an external cover URL to go through the server-side proxy.
+/// This bypasses CDN browser-blocking (e.g., Casa del Libro's Akamai).
+fn proxy_cover_url(url: &str) -> String {
+    format!("/api/v1/coverproxy?url={}", urlencoding::encode(url))
+}
+
+/// Extract the original URL from a proxy cover URL.
+/// Returns the input unchanged if it's not a proxy URL.
+fn unproxy_cover_url(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("/api/v1/coverproxy?url=") {
+        urlencoding::decode(rest)
+            .map(|s| s.into_owned())
+            .unwrap_or_else(|_| url.to_string())
+    } else {
+        url.to_string()
     }
 }
 
 #[derive(serde::Deserialize)]
 pub struct LookupQuery {
     pub term: Option<String>,
+    pub lang: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -62,7 +82,7 @@ pub struct DeleteQuery {
     pub delete_files: Option<bool>,
 }
 
-/// GET /api/v1/work/lookup?term=...  — searches OpenLibrary, optionally cleans with LLM.
+/// GET /api/v1/work/lookup?term=...&lang=...  — searches metadata providers by language.
 pub async fn lookup(
     State(state): State<AppState>,
     _ctx: AuthContext,
@@ -73,6 +93,108 @@ pub async fn lookup(
         return Ok(Json(vec![]));
     }
 
+    // Determine target language (default to primary from registry).
+    let registry = state.provider_registry.read().await;
+    let lang = q
+        .lang
+        .as_deref()
+        .unwrap_or_else(|| registry.primary_language());
+
+    // Validate language code.
+    if lang != "en" && !livrarr_metadata::language::is_supported_language(lang) {
+        return Err(ApiError::BadRequest(format!(
+            "unsupported language: {lang}"
+        )));
+    }
+
+    // Non-English: route through provider registry.
+    if lang != "en" {
+        if !registry.has_provider(lang) {
+            return Err(ApiError::BadRequest(format!(
+                "language not enabled: {lang}"
+            )));
+        }
+        let provider_name = registry.provider_name(lang).unwrap_or(lang).to_string();
+        match registry.search(lang, &term).await {
+            Some(Ok(results)) => {
+                state.provider_health.clear_error(&provider_name).await;
+                // Cache detail URLs server-side before converting to API response.
+                // The frontend never sees Goodreads URLs — the cache bridges search → add.
+                for r in &results {
+                    if let Some(ref url) = r.detail_url {
+                        let author = r.author_name.as_deref().unwrap_or("");
+                        let key = crate::state::DetailUrlCache::cache_key(&r.title, author);
+                        state.detail_url_cache.put(key, url.clone()).await;
+                    }
+                }
+                let mut api_results: Vec<WorkSearchResult> = results
+                    .into_iter()
+                    .map(|r| WorkSearchResult {
+                        ol_key: None,
+                        title: r.title,
+                        author_name: r.author_name.unwrap_or_default(),
+                        author_ol_key: None,
+                        year: r.year,
+                        // Cover proxy disabled for search thumbnails — Goodreads and
+                        // lubimyczytac serve covers directly to browsers. Enrichment
+                        // covers use the proxy (high-res from Goodreads CDN).
+                        cover_url: r.cover_url,
+                        description: None,
+                        series_name: None,
+                        series_position: None,
+                        source: Some(r.source),
+                        source_type: Some(r.source_type),
+                        language: Some(r.language),
+                    })
+                    .collect();
+                // Clean with LLM if configured — dedup, remove academic papers,
+                // fix author strings, extract series info.
+                if api_results.len() > 1 {
+                    let cfg = state.db.get_metadata_config().await.ok();
+                    if let Some(cleaned) = llm_clean_search_results(
+                        &state.http_client,
+                        cfg.as_ref(),
+                        &term,
+                        &api_results,
+                        true,
+                    )
+                    .await
+                    {
+                        api_results = cleaned;
+                    }
+                }
+                return Ok(Json(api_results));
+            }
+            Some(Err(e)) => {
+                use livrarr_metadata::MetadataError;
+                // Only set "Not Responding" for HTTP/network failures and anti-bot.
+                // Malformed data, unsupported ops, and config issues don't indicate provider down.
+                match &e {
+                    MetadataError::RequestFailed(_)
+                    | MetadataError::Timeout(_)
+                    | MetadataError::RateLimited
+                    | MetadataError::AntiBotChallenge => {
+                        state
+                            .provider_health
+                            .set_error(&provider_name, e.to_string())
+                            .await;
+                    }
+                    _ => {
+                        tracing::warn!(provider = %provider_name, error = %e, "provider error (not marking as down)");
+                    }
+                }
+                return Ok(Json(vec![]));
+            }
+            None => {
+                return Err(ApiError::BadRequest(format!(
+                    "no provider for language: {lang}"
+                )));
+            }
+        }
+    }
+    drop(registry);
+
+    // English: existing OpenLibrary flow.
     let results = lookup_openlibrary(&state.http_client, &term).await?;
     let results = results.0; // unwrap Json
 
@@ -80,7 +202,7 @@ pub async fn lookup(
     if results.len() > 1 {
         let cfg = state.db.get_metadata_config().await.ok();
         if let Some(cleaned) =
-            llm_clean_search_results(&state.http_client, cfg.as_ref(), &term, &results).await
+            llm_clean_search_results(&state.http_client, cfg.as_ref(), &term, &results, false).await
         {
             return Ok(Json(cleaned));
         }
@@ -103,11 +225,11 @@ async fn lookup_hardcover(
 
     let mut results = author_books.unwrap_or_default();
     let author_ids: std::collections::HashSet<String> =
-        results.iter().map(|r| r.ol_key.clone()).collect();
+        results.iter().filter_map(|r| r.ol_key.clone()).collect();
 
     // Append book results that aren't already in author results.
     for r in book_results.unwrap_or_default() {
-        if !author_ids.contains(&r.ol_key) {
+        if r.ol_key.as_ref().is_none_or(|k| !author_ids.contains(k)) {
             results.push(r);
         }
     }
@@ -194,7 +316,7 @@ async fn search_hardcover_books(
             // Use hardcover:{id} as the olKey — the frontend uses olKey as a unique identifier.
             // When adding, the backend will need to handle this prefix.
             Some(WorkSearchResult {
-                ol_key: format!("hardcover:{id}"),
+                ol_key: Some(format!("hardcover:{id}")),
                 title: title.to_string(),
                 author_name,
                 author_ol_key: None,
@@ -203,6 +325,9 @@ async fn search_hardcover_books(
                 description,
                 series_name: None,
                 series_position: None,
+                source: None,
+                source_type: None,
+                language: None,
             })
         })
         .collect();
@@ -355,7 +480,7 @@ async fn search_hardcover_author_books(
                 .map(|s| s.to_string());
 
             Some(WorkSearchResult {
-                ol_key: format!("hardcover:{id}"),
+                ol_key: Some(format!("hardcover:{id}")),
                 title: title.to_string(),
                 author_name: author_name.clone(),
                 author_ol_key: None,
@@ -364,6 +489,9 @@ async fn search_hardcover_author_books(
                 description,
                 series_name: None,
                 series_position: None,
+                source: None,
+                source_type: None,
+                language: None,
             })
         })
         .collect();
@@ -378,6 +506,7 @@ async fn llm_clean_search_results(
     cfg: Option<&livrarr_db::MetadataConfig>,
     search_term: &str,
     results: &[WorkSearchResult],
+    foreign: bool,
 ) -> Option<Vec<WorkSearchResult>> {
     let cfg = cfg?;
     if !cfg.llm_enabled {
@@ -399,15 +528,28 @@ async fn llm_clean_search_results(
         ));
     }
 
-    let prompt = format!(
-        "I searched a book database for \"{search_term}\". Here are the raw results:\n\n\
-         {listing}\n\
-         Clean up this list:\n\
+    let instructions = if foreign {
+        "Clean up this list:\n\
+         1. Remove academic papers, theses, and literary criticism — keep only the actual books\n\
+         2. Remove exact duplicates (same title + same author), but KEEP different editions of the same work\n\
+         3. Fix capitalization of titles and author names (use proper title case for the language)\n\
+         4. Fix author names: remove translator/editor info, keep only the primary author (First Last format)\n\
+         5. Add series name and position if you know it\n\n\
+         Keep multiple editions — they may have different ISBNs needed for cover resolution.\n\
+         Order: most relevant/popular edition first."
+    } else {
+        "Clean up this list:\n\
          1. Remove duplicates, foreign editions, comic adaptations, and anthologies\n\
          2. Fix spelling and capitalization of titles and author names\n\
          3. Remove series info from titles (e.g. \"The Great Hunt (The Wheel of Time Book 2)\" → \"The Great Hunt\")\n\
          4. Add series name and position if you know it\n\n\
-         Order results in the most logical way for a reader.\n\n\
+         Order results in the most logical way for a reader."
+    };
+
+    let prompt = format!(
+        "I searched a book database for \"{search_term}\". Here are the raw results:\n\n\
+         {listing}\n\
+         {instructions}\n\n\
          Return a JSON array. Each entry: {{\"idx\": <original index>, \"title\": \"<cleaned title>\", \
          \"author\": \"<cleaned author>\", \"series\": \"<series name or null>\", \"position\": <number or null>}}\n\
          Return ONLY the JSON array, no other text."
@@ -559,7 +701,7 @@ async fn lookup_openlibrary(
                 .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-M.jpg"));
 
             Some(WorkSearchResult {
-                ol_key,
+                ol_key: Some(ol_key),
                 title: title.to_string(),
                 author_name,
                 author_ol_key,
@@ -568,6 +710,9 @@ async fn lookup_openlibrary(
                 description: None,
                 series_name: None,
                 series_position: None,
+                source: None,
+                source_type: None,
+                language: None,
             })
         })
         .collect();
@@ -581,11 +726,13 @@ pub async fn add_work_internal(
     user_id: i64,
     req: AddWorkRequest,
 ) -> Result<AddWorkResponse, ApiError> {
-    // Check duplicate by ol_key.
-    if state.db.work_exists_by_ol_key(user_id, &req.ol_key).await? {
-        return Err(ApiError::Conflict {
-            reason: "work already exists".into(),
-        });
+    // Check duplicate by ol_key (only when provided).
+    if let Some(ref ol_key) = req.ol_key {
+        if state.db.work_exists_by_ol_key(user_id, ol_key).await? {
+            return Err(ApiError::Conflict {
+                reason: "work already exists".into(),
+            });
+        }
     }
 
     // Find or create author.
@@ -614,6 +761,13 @@ pub async fn add_work_internal(
 
     let cover_url = req.cover_url.clone();
 
+    // Look up detail URL from server-side cache (populated during search).
+    // Foreign works get their detail URL for enrichment; English works don't need it.
+    let detail_url = {
+        let key = crate::state::DetailUrlCache::cache_key(&req.title, &req.author_name);
+        state.detail_url_cache.get(&key).await
+    };
+
     let work = state
         .db
         .create_work(CreateWorkDbRequest {
@@ -621,24 +775,55 @@ pub async fn add_work_internal(
             title: req.title,
             author_name: req.author_name,
             author_id,
-            ol_key: Some(req.ol_key),
+            ol_key: req.ol_key.clone(),
             year: req.year,
             cover_url: req.cover_url,
+            metadata_source: req.metadata_source,
+            detail_url,
+            language: req.language,
         })
         .await?;
 
     // Download cover image in background (best-effort, don't fail the add).
+    // Unwrap proxy URLs back to the original external URL before downloading.
+    let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
+    // Re-validate cover URL server-side to prevent SSRF via direct API requests.
     if let Some(url) = cover_url {
-        let http = state.http_client.clone();
-        let covers_dir = state.data_dir.join("covers");
-        let work_id = work.id;
-        tokio::spawn(async move {
-            let _ = download_cover(&http, &url, &covers_dir, work_id).await;
-        });
+        if livrarr_metadata::llm_scraper::validate_cover_url(&url, "").is_some() {
+            let http = state.http_client.clone();
+            let covers_dir = state.data_dir.join("covers");
+            let work_id = work.id;
+            tokio::spawn(async move {
+                let _ = download_cover(&http, &url, &covers_dir, work_id).await;
+            });
+        } else {
+            tracing::warn!(url = %url, "cover URL rejected by SSRF validation");
+        }
     }
 
-    // Run enrichment (synchronous, best-effort).
-    let outcome = super::enrichment::enrich_work(state, &work).await;
+    // Foreign-language works: enrich from detail page (Goodreads etc.) if available.
+    // English works: enrich from Hardcover + OL + Audnexus.
+    let outcome = if livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref())
+    {
+        if work.detail_url.is_some() {
+            super::enrichment::enrich_foreign_work(state, &work).await
+        } else {
+            // No detail URL — skip enrichment, mark as skipped.
+            let _ = sqlx::query("UPDATE works SET enrichment_status = 'skipped' WHERE id = ?")
+                .bind(work.id)
+                .execute(state.db.pool())
+                .await;
+            let mut skipped_work = work;
+            skipped_work.enrichment_status = livrarr_domain::EnrichmentStatus::Skipped;
+            return Ok(AddWorkResponse {
+                work: work_to_detail(&skipped_work),
+                author_created,
+                messages: vec![],
+            });
+        }
+    } else {
+        super::enrichment::enrich_work(state, &work).await
+    };
     let enriched_work = match state
         .db
         .update_work_enrichment(user_id, work.id, outcome.request)
@@ -814,8 +999,13 @@ pub async fn refresh(
         tracing::warn!("reset_enrichment_for_refresh failed: {e}");
     }
 
-    // Re-enrich.
-    let outcome = super::enrichment::enrich_work(&state, &work).await;
+    // Re-enrich — route to the correct enrichment function.
+    let is_foreign = livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
+    let outcome = if is_foreign && work.detail_url.is_some() {
+        super::enrichment::enrich_foreign_work(&state, &work).await
+    } else {
+        super::enrichment::enrich_work(&state, &work).await
+    };
     let enriched = match state
         .db
         .update_work_enrichment(user_id, id, outcome.request)

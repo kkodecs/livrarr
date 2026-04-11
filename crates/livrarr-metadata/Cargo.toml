@@ -7,4 +7,13 @@ license = "GPL-3.0-only"
 [dependencies]
 thiserror = { workspace = true }
 trait-variant = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 livrarr-domain = { workspace = true }
+livrarr-http = { workspace = true }
+quick-xml = "0.37"
+unicode-normalization = "0.1"
+tracing = "0.1"
+url = "2"
+regex = "1"

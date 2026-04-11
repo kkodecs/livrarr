@@ -1,10 +1,13 @@
 import { Link, useNavigate } from "react-router";
-import { Menu, Search, User, LogOut, HelpCircle } from "lucide-react";
+import { Menu, Search, User, LogOut, HelpCircle, ChevronDown } from "lucide-react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useUIStore } from "@/stores/ui";
 import { useAuthStore } from "@/stores/auth";
 import { NotificationBell } from "@/components/Header/NotificationBell";
-import { useState } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { getMetadataConfig } from "@/api";
+import { SUPPORTED_LANGUAGES } from "@/types/api";
 
 export function Header({ onStartTour }: { onStartTour?: () => void }) {
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
@@ -12,14 +15,51 @@ export function Header({ onStartTour }: { onStartTour?: () => void }) {
   const logoutAction = useAuthStore((s) => s.logoutAction);
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState("");
+  const [selectedLang, setSelectedLang] = useState("en");
+  const [langOpen, setLangOpen] = useState(false);
+  const langRef = useRef<HTMLDivElement>(null);
+
+  const { data: metaConfig } = useQuery({
+    queryKey: ["metadata-config"],
+    queryFn: getMetadataConfig,
+  });
+
+  const enabledLanguages = useMemo(() => {
+    const codes = metaConfig?.languages ?? ["en"];
+    return SUPPORTED_LANGUAGES.filter((l) => codes.includes(l.code));
+  }, [metaConfig]);
+
+  // Sync to primary language from config
+  useEffect(() => {
+    if (metaConfig) {
+      setSelectedLang(metaConfig.languages[0] ?? "en");
+    }
+  }, [metaConfig]);
+
+  // Click-outside
+  useEffect(() => {
+    if (!langOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (langRef.current && !langRef.current.contains(e.target as Node)) {
+        setLangOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [langOpen]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     if (searchTerm.trim()) {
-      navigate(`/search?q=${encodeURIComponent(searchTerm.trim())}`);
+      const params = new URLSearchParams({ q: searchTerm.trim() });
+      if (selectedLang !== "en") params.set("lang", selectedLang);
+      navigate(`/search?${params.toString()}`);
       setSearchTerm("");
     }
   };
+
+  const currentLang = SUPPORTED_LANGUAGES.find((l) => l.code === selectedLang);
+  const showLangSelector = enabledLanguages.length > 1;
 
   return (
     <header className="fixed top-0 left-0 right-0 z-40 flex h-12 items-center justify-between border-b border-border bg-header px-4">
@@ -36,7 +76,42 @@ export function Header({ onStartTour }: { onStartTour?: () => void }) {
         </Link>
       </div>
 
-      <form onSubmit={handleSearch} className="hidden md:flex items-center">
+      <form onSubmit={handleSearch} className="hidden md:flex items-center gap-1.5">
+        {showLangSelector && (
+          <div className="relative" ref={langRef}>
+            <button
+              type="button"
+              onClick={() => setLangOpen(!langOpen)}
+              className="flex items-center gap-1 rounded border border-border bg-zinc-900 px-2 py-1.5 text-xs text-zinc-400 hover:border-zinc-500"
+            >
+              <span>{currentLang?.flag}</span>
+              <ChevronDown size={10} className="text-zinc-500" />
+            </button>
+            {langOpen && (
+              <div className="absolute top-full left-0 mt-1 z-50 min-w-[180px] rounded-lg border border-border bg-zinc-800 py-1 shadow-xl">
+                {enabledLanguages.map((lang) => (
+                  <button
+                    key={lang.code}
+                    type="button"
+                    onClick={() => {
+                      setSelectedLang(lang.code);
+                      setLangOpen(false);
+                    }}
+                    className={`flex items-center gap-2 w-full px-3 py-1.5 text-xs text-left hover:bg-blue-500/10 ${
+                      selectedLang === lang.code ? "bg-blue-500/10" : ""
+                    }`}
+                  >
+                    <span>{lang.flag}</span>
+                    <span className="text-zinc-100">{lang.englishName}</span>
+                    {selectedLang === lang.code && (
+                      <span className="ml-auto text-brand">&#10003;</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <div className="relative">
           <Search
             size={16}

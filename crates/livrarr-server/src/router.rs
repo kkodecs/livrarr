@@ -223,7 +223,8 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .route(
             "/mediacover/{id}/thumb.jpg",
             get(handlers::mediacover::get_thumb),
-        );
+        )
+        .route("/coverproxy", get(handlers::coverproxy::proxy_cover));
 
     // Combine API routes. Unmatched API paths return 404.
     let api = Router::new()
@@ -261,7 +262,7 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         axum::http::header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-             img-src 'self' data: blob: https://covers.openlibrary.org https://archive.org https://*.archive.org; connect-src 'self'; frame-ancestors 'none'; \
+             img-src 'self' data: blob: https: http:; connect-src 'self'; frame-ancestors 'none'; \
              base-uri 'self'; object-src 'none'; form-action 'self'",
         ),
     ))

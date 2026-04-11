@@ -129,6 +129,7 @@ export default function WorkDetailPage() {
   const deleteMutation = useMutation({
     mutationFn: () => deleteWork(Number(id), deleteFiles),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["works"] });
       toast.success("Work deleted");
       navigate("/");
     },
@@ -487,15 +488,9 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
   const allEbookFormats = ["epub", "mobi", "azw3", "pdf", "cbz", "cbr"];
   const allAudiobookFormats = ["m4b", "m4a", "mp3", "flac", "ogg", "wma"];
 
-  // Order: preferred formats first (in preference order), then the rest alphabetically.
-  const orderedEbookFormats = [
-    ...ebookPrefs.filter((f) => allEbookFormats.includes(f)),
-    ...allEbookFormats.filter((f) => !ebookPrefs.includes(f)),
-  ];
-  const orderedAudiobookFormats = [
-    ...audiobookPrefs.filter((f) => allAudiobookFormats.includes(f)),
-    ...allAudiobookFormats.filter((f) => !audiobookPrefs.includes(f)),
-  ];
+  // Placeholder — orderedFormats computed after release splitting below.
+  let orderedEbookFormats: string[] = [];
+  let orderedAudiobookFormats: string[] = [];
 
   const [ebooksOpen, setEbooksOpen] = useState(true);
   const [audiobooksOpen, setAudiobooksOpen] = useState(true);
@@ -543,6 +538,18 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
       !r.categories.some((c) => c >= 7000 && c < 8000) &&
       !r.categories.some((c) => c >= 3000 && c < 4000),
   );
+
+  // Only show format chips for formats that have at least one release.
+  const detectFormatsInReleases = (items: ReleaseResponse[], formats: string[]) =>
+    formats.filter((fmt) => items.some((r) => detectFormat(r.title, formats) === fmt));
+  orderedEbookFormats = (() => {
+    const present = detectFormatsInReleases([...ebookReleases, ...uncategorized], allEbookFormats);
+    return [...ebookPrefs.filter((f) => present.includes(f)), ...present.filter((f) => !ebookPrefs.includes(f))];
+  })();
+  orderedAudiobookFormats = (() => {
+    const present = detectFormatsInReleases(audiobookReleases, allAudiobookFormats);
+    return [...audiobookPrefs.filter((f) => present.includes(f)), ...present.filter((f) => !audiobookPrefs.includes(f))];
+  })();
 
   // Filter by selected formats. Detect format from title, then check if it's selected.
   // Releases with no detectable format are always shown.
@@ -854,6 +861,7 @@ function MetadataTab({
     enriched: "Enriched",
     failed: "Failed",
     exhausted: "Exhausted",
+    skipped: "Skipped",
   }[work.enrichmentStatus] ?? work.enrichmentStatus;
 
   const statusColor = {
@@ -862,20 +870,27 @@ function MetadataTab({
     pending: "text-zinc-400",
     failed: "text-red-400",
     exhausted: "text-orange-400",
+    skipped: "text-zinc-400",
   }[work.enrichmentStatus] ?? "text-muted";
 
   return (
     <div className="max-w-2xl">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-zinc-100">Metadata</h3>
-        <button
-          onClick={onRefresh}
-          disabled={refreshing}
-          className="btn-secondary inline-flex items-center gap-1.5 text-xs"
-        >
-          <RefreshCw size={12} className={cn(refreshing && "animate-spin")} />
-          Refresh Metadata
-        </button>
+        {!work.metadataSource || work.metadataSource === "OpenLibrary" ? (
+          <button
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="btn-secondary inline-flex items-center gap-1.5 text-xs"
+          >
+            <RefreshCw size={12} className={cn(refreshing && "animate-spin")} />
+            Refresh Metadata
+          </button>
+        ) : (
+          <span className="text-xs text-muted">
+            Metadata from {work.metadataSource}
+          </span>
+        )}
       </div>
 
       <dl>

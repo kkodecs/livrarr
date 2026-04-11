@@ -3,11 +3,14 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
+use livrarr_db::ConfigDb;
+use livrarr_metadata::registry::ProviderRegistry;
 use livrarr_server::config::{AppConfig, LogLevel};
 use livrarr_server::router::build_router;
-use livrarr_server::state::AppState;
+use livrarr_server::state::{AppState, ProviderHealthState};
 
 /// Livrarr — self-hosted ebook and audiobook library manager.
 #[derive(Parser)]
@@ -115,6 +118,36 @@ async fn main() {
         .build()
         .expect("failed to build HTTP client");
     let job_runner = livrarr_server::jobs::JobRunner::new();
+    // Build provider registry from saved metadata config.
+    let provider_registry = {
+        let meta_cfg = match db.get_metadata_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!("failed to load metadata config for provider registry: {e}");
+                // Fallback: English only, no LLM
+                livrarr_db::MetadataConfig {
+                    hardcover_enabled: false,
+                    hardcover_api_token: None,
+                    llm_enabled: false,
+                    llm_provider: None,
+                    llm_endpoint: None,
+                    llm_api_key: None,
+                    llm_model: None,
+                    audnexus_url: String::new(),
+                    languages: vec!["en".to_string()],
+                }
+            }
+        };
+        let llm = livrarr_metadata::registry::build_llm_client(
+            &http_client,
+            meta_cfg.llm_enabled,
+            meta_cfg.llm_endpoint.as_deref(),
+            meta_cfg.llm_api_key.as_deref(),
+            meta_cfg.llm_model.as_deref(),
+        );
+        ProviderRegistry::build(&meta_cfg.languages, llm, http_client.clone())
+            .expect("failed to build provider registry")
+    };
     let state = AppState {
         db,
         auth_service,
@@ -123,6 +156,10 @@ async fn main() {
         data_dir: Arc::new(data_dir.clone()),
         startup_time: chrono::Utc::now(),
         job_runner: Some(job_runner.clone()),
+        provider_registry: Arc::new(RwLock::new(provider_registry)),
+        provider_health: Arc::new(ProviderHealthState::new()),
+        cover_proxy_cache: Arc::new(livrarr_server::handlers::coverproxy::CoverProxyCache::new()),
+        detail_url_cache: Arc::new(livrarr_server::state::DetailUrlCache::new()),
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).

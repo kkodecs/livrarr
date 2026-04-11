@@ -3,6 +3,14 @@ pub use livrarr_domain::{DbError, EnrichmentStatus, LlmRole, NarrationType, User
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub mod cover;
+pub mod http_llm;
+pub mod language;
+pub mod llm_scraper;
+pub mod normalize;
+pub mod registry;
+pub mod sru;
+
 // =============================================================================
 // Metadata Provider Trait
 // =============================================================================
@@ -26,6 +34,13 @@ pub struct ProviderSearchResult {
     pub author_name: Option<String>,
     pub year: Option<i32>,
     pub cover_url: Option<String>,
+    pub isbn: Option<String>,
+    pub publisher: Option<String>,
+    pub source: String,
+    pub source_type: String,
+    pub language: String,
+    /// Detail page URL for enrichment (e.g., Goodreads book page). Server-side only.
+    pub detail_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +93,10 @@ pub enum MetadataError {
     NoMatch,
     #[error("authentication failed (check token)")]
     AuthFailed,
+    #[error("operation not supported by this provider")]
+    UnsupportedOperation,
+    #[error("anti-bot challenge detected")]
+    AntiBotChallenge,
 }
 
 // =============================================================================
@@ -250,6 +269,8 @@ enum MetadataErrorKind {
     RequestFailed(String),
     InvalidResponse(String),
     NoMatch,
+    UnsupportedOperation,
+    AntiBotChallenge,
 }
 
 #[cfg(test)]
@@ -263,6 +284,8 @@ impl MetadataErrorKind {
             Self::RequestFailed(s) => MetadataError::RequestFailed(s.clone()),
             Self::InvalidResponse(s) => MetadataError::InvalidResponse(s.clone()),
             Self::NoMatch => MetadataError::NoMatch,
+            Self::UnsupportedOperation => MetadataError::UnsupportedOperation,
+            Self::AntiBotChallenge => MetadataError::AntiBotChallenge,
         }
     }
 }
@@ -301,6 +324,8 @@ impl OpenLibraryProvider {
             MetadataError::RequestFailed(s) => MetadataErrorKind::RequestFailed(s),
             MetadataError::InvalidResponse(s) => MetadataErrorKind::InvalidResponse(s),
             MetadataError::NoMatch => MetadataErrorKind::NoMatch,
+            MetadataError::UnsupportedOperation => MetadataErrorKind::UnsupportedOperation,
+            MetadataError::AntiBotChallenge => MetadataErrorKind::AntiBotChallenge,
         };
         Self {
             mode: OlProviderMode::Error(kind),

@@ -874,6 +874,9 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                             ol_key: Some(work_ol_key.clone()),
                             year: publish_year,
                             cover_url: None,
+                            metadata_source: None,
+                            detail_url: None,
+                            language: None,
                         })
                         .await
                     {
@@ -1011,11 +1014,23 @@ async fn enrichment_retry_tick(state: AppState, _cancel: CancellationToken) -> R
     debug!("enrichment retry: {} works eligible", works.len());
 
     for work in &works {
+        // Route to the correct enrichment function based on metadata source.
+        let is_foreign =
+            livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
+
+        // Skip foreign works without a detail URL — nothing to enrich from.
+        if is_foreign && work.detail_url.is_none() {
+            continue;
+        }
+
         // 30s timeout per spec.
-        let enrich_result = tokio::time::timeout(
-            Duration::from_secs(30),
-            crate::handlers::enrichment::enrich_work(&state, work),
-        )
+        let enrich_result = tokio::time::timeout(Duration::from_secs(30), async {
+            if is_foreign {
+                crate::handlers::enrichment::enrich_foreign_work(&state, work).await
+            } else {
+                crate::handlers::enrichment::enrich_work(&state, work).await
+            }
+        })
         .await;
 
         let outcome = match enrich_result {

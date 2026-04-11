@@ -74,10 +74,14 @@ pub async fn get_metadata(
     _admin: RequireAdmin,
 ) -> Result<Json<MetadataConfigResponse>, ApiError> {
     let cfg = state.db.get_metadata_config().await?;
-    Ok(Json(metadata_to_response(cfg)))
+    let provider_status = state.provider_health.statuses().await;
+    Ok(Json(metadata_to_response(cfg, provider_status)))
 }
 
-fn metadata_to_response(cfg: livrarr_db::MetadataConfig) -> MetadataConfigResponse {
+fn metadata_to_response(
+    cfg: livrarr_db::MetadataConfig,
+    provider_status: std::collections::HashMap<String, String>,
+) -> MetadataConfigResponse {
     MetadataConfigResponse {
         hardcover_enabled: cfg.hardcover_enabled,
         hardcover_api_token_set: cfg.hardcover_api_token.is_some(),
@@ -88,6 +92,7 @@ fn metadata_to_response(cfg: livrarr_db::MetadataConfig) -> MetadataConfigRespon
         llm_model: cfg.llm_model,
         audnexus_url: cfg.audnexus_url,
         languages: cfg.languages,
+        provider_status,
     }
 }
 
@@ -97,6 +102,29 @@ pub async fn update_metadata(
     _admin: RequireAdmin,
     Json(req): Json<UpdateMetadataApiRequest>,
 ) -> Result<Json<MetadataConfigResponse>, ApiError> {
+    // Validate and normalize languages before saving.
+    // Use merged config (existing + request overrides) to determine LLM status,
+    // so partial updates don't wrongly strip LLM languages.
+    let validated_languages = if let Some(langs) = req.languages {
+        let existing = state.db.get_metadata_config().await?;
+        let llm_configured = livrarr_metadata::registry::is_llm_configured(
+            req.llm_enabled.unwrap_or(existing.llm_enabled),
+            req.llm_endpoint
+                .as_deref()
+                .or(existing.llm_endpoint.as_deref()),
+            req.llm_api_key
+                .as_deref()
+                .or(existing.llm_api_key.as_deref()),
+            req.llm_model.as_deref().or(existing.llm_model.as_deref()),
+        );
+        match livrarr_metadata::language::validate_languages(&langs, llm_configured) {
+            Ok(validated) => Some(validated),
+            Err(e) => return Err(ApiError::BadRequest(e)),
+        }
+    } else {
+        None
+    };
+
     let cfg = state
         .db
         .update_metadata_config(UpdateMetadataConfigRequest {
@@ -108,10 +136,39 @@ pub async fn update_metadata(
             llm_api_key: req.llm_api_key.map(|t| clean_token(&t)),
             llm_model: req.llm_model,
             audnexus_url: req.audnexus_url,
-            languages: req.languages,
+            languages: validated_languages,
         })
         .await?;
-    Ok(Json(metadata_to_response(cfg)))
+
+    // Rebuild provider registry on config change.
+    let llm = livrarr_metadata::registry::build_llm_client(
+        &state.http_client,
+        cfg.llm_enabled,
+        cfg.llm_endpoint.as_deref(),
+        cfg.llm_api_key.as_deref(),
+        cfg.llm_model.as_deref(),
+    );
+    match livrarr_metadata::registry::ProviderRegistry::build(
+        &cfg.languages,
+        llm,
+        state.http_client.clone(),
+    ) {
+        Ok(new_registry) => {
+            let active: std::collections::HashSet<String> = new_registry
+                .languages()
+                .iter()
+                .filter_map(|l| new_registry.provider_name(l).map(String::from))
+                .collect();
+            state.provider_health.purge_stale(&active).await;
+            *state.provider_registry.write().await = new_registry;
+        }
+        Err(e) => {
+            tracing::warn!("failed to rebuild provider registry: {e}");
+        }
+    }
+
+    let provider_status = state.provider_health.statuses().await;
+    Ok(Json(metadata_to_response(cfg, provider_status)))
 }
 
 /// POST /api/v1/config/metadata/test/hardcover

@@ -1,9 +1,9 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useSearchParams, useNavigate, Link } from "react-router";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Search, Plus, Loader2 } from "lucide-react";
+import { Search, Plus, Loader2, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
-import { lookupWorks, addWork, listWorks } from "@/api";
+import { lookupWorks, addWork, listWorks, getMetadataConfig } from "@/api";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { EmptyState } from "@/components/Page/EmptyState";
@@ -13,13 +13,51 @@ import type {
   AddWorkResponse,
   WorkDetailResponse,
 } from "@/types/api";
+import { SUPPORTED_LANGUAGES } from "@/types/api";
 import { ApiError } from "@/api/client";
 
 export default function SearchPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const query = searchParams.get("q")?.trim() ?? "";
+  const urlLang = searchParams.get("lang") ?? "";
   const [term, setTerm] = useState(query);
+  const [selectedLang, setSelectedLang] = useState<string>(urlLang || "en");
+  const [langOpen, setLangOpen] = useState(false);
+  const langRef = useRef<HTMLDivElement>(null);
+
+  // Load metadata config to get enabled languages
+  const { data: metaConfig } = useQuery({
+    queryKey: ["metadata-config"],
+    queryFn: getMetadataConfig,
+  });
+
+  // Sync selectedLang from URL on every navigation (header search changes URL params)
+  useEffect(() => {
+    if (urlLang) {
+      setSelectedLang(urlLang);
+    } else if (metaConfig) {
+      setSelectedLang(metaConfig.languages[0] ?? "en");
+    }
+  }, [urlLang, metaConfig]);
+
+  // Click-outside handler for language dropdown
+  useEffect(() => {
+    if (!langOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (langRef.current && !langRef.current.contains(e.target as Node)) {
+        setLangOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [langOpen]);
+
+  const enabledLanguages = useMemo(() => {
+    const codes = metaConfig?.languages ?? ["en"];
+    return SUPPORTED_LANGUAGES.filter((l) => codes.includes(l.code));
+  }, [metaConfig]);
+
   // Local library data
   const { data: allWorks } = useQuery({
     queryKey: ["works"],
@@ -36,19 +74,19 @@ export default function SearchPage() {
       )
     : [];
 
-  // OL search — useQuery handles deduplication & cancellation automatically
+  // Work search — pass language
   const searchQuery = useQuery({
-    queryKey: ["ol-search", query],
-    queryFn: () => lookupWorks(query),
+    queryKey: ["work-search", query, selectedLang],
+    queryFn: () => lookupWorks(query, selectedLang),
     enabled: !!query,
   });
 
   const olResults = searchQuery.data ?? null;
 
-  const [addingOlKey, setAddingOlKey] = useState<string | null>(null);
+  const [addingKey, setAddingKey] = useState<string | null>(null);
   const addMutation = useMutation({
     mutationFn: (work: WorkSearchResult) => {
-      setAddingOlKey(work.olKey);
+      setAddingKey(work.olKey ?? `${work.title}-${work.year ?? ''}-${work.authorName}`);
       return addWork({
         olKey: work.olKey,
         title: work.title,
@@ -56,15 +94,17 @@ export default function SearchPage() {
         authorOlKey: work.authorOlKey,
         year: work.year,
         coverUrl: work.coverUrl,
+        metadataSource: work.source,
+        language: work.language,
       });
     },
     onSuccess: (data: AddWorkResponse) => {
-      setAddingOlKey(null);
+      setAddingKey(null);
       data.messages.forEach((msg) => toast.success(msg));
       navigate(`/work/${data.work.id}`);
     },
     onError: (err: Error) => {
-      setAddingOlKey(null);
+      setAddingKey(null);
       if (err instanceof ApiError && err.status === 409) {
         toast.error("Already in your library");
       } else {
@@ -73,7 +113,7 @@ export default function SearchPage() {
     },
   });
 
-  // Keep term input in sync when URL changes externally (e.g. back/forward)
+  // Keep term input in sync when URL changes externally
   useEffect(() => {
     setTerm(query);
   }, [query]);
@@ -82,12 +122,12 @@ export default function SearchPage() {
     e.preventDefault();
     const q = term.trim();
     if (!q) return;
-    setSearchParams({ q });
+    const params: Record<string, string> = { q };
+    if (selectedLang !== "en") params.lang = selectedLang;
+    setSearchParams(params);
   };
 
-  // Filter add-results to exclude works already in the library.
-  // Match on olKey OR title+author (case-insensitive) since Hardcover results
-  // use different keys than OL-sourced library items.
+  // Filter add-results to exclude works already in the library
   const libraryOlKeys = useMemo(
     () => new Set((allWorks ?? []).map((w) => w.olKey).filter(Boolean)),
     [allWorks],
@@ -104,13 +144,16 @@ export default function SearchPage() {
   const filteredOlResults =
     olResults?.filter(
       (r) =>
-        !libraryOlKeys.has(r.olKey) &&
-        !libraryTitleAuthor.has(`${r.title.toLowerCase()}|${r.authorName.toLowerCase()}`),
+        !(r.olKey && libraryOlKeys.has(r.olKey)) &&
+        !libraryTitleAuthor.has(
+          `${r.title.toLowerCase()}|${r.authorName.toLowerCase()}`,
+        ),
     ) ?? null;
 
   const hasQuery = !!query;
   const hasLibraryResults = libraryMatches.length > 0;
-  const hasOlResults = filteredOlResults !== null && filteredOlResults.length > 0;
+  const hasOlResults =
+    filteredOlResults !== null && filteredOlResults.length > 0;
   const isSearching = searchQuery.isFetching;
   const showNoResults =
     hasQuery &&
@@ -118,6 +161,10 @@ export default function SearchPage() {
     !hasLibraryResults &&
     filteredOlResults !== null &&
     filteredOlResults.length === 0;
+
+  const currentLangInfo = SUPPORTED_LANGUAGES.find(
+    (l) => l.code === selectedLang,
+  );
 
   return (
     <>
@@ -127,6 +174,48 @@ export default function SearchPage() {
 
       <PageContent>
         <form onSubmit={handleSearch} className="flex gap-2">
+          {/* Language selector */}
+          {enabledLanguages.length > 1 && (
+            <div className="relative" ref={langRef}>
+              <button
+                type="button"
+                onClick={() => setLangOpen(!langOpen)}
+                className="flex items-center gap-1.5 rounded border border-border bg-zinc-800 px-3 py-2 text-sm text-zinc-300 hover:border-zinc-500 whitespace-nowrap"
+              >
+                <span>{currentLangInfo?.flag}</span>
+                <span className="text-zinc-400">{currentLangInfo?.englishName}</span>
+                <ChevronDown size={12} className="text-zinc-500" />
+              </button>
+              {langOpen && (
+                <div className="absolute top-full left-0 mt-1 z-10 min-w-[200px] rounded-lg border border-border bg-zinc-800 py-1 shadow-xl">
+                  {enabledLanguages.map((lang) => (
+                    <button
+                      key={lang.code}
+                      type="button"
+                      onClick={() => {
+                        setSelectedLang(lang.code);
+                        setLangOpen(false);
+                      }}
+                      className={`flex items-center gap-2.5 w-full px-3 py-2 text-sm text-left hover:bg-blue-500/10 ${
+                        selectedLang === lang.code ? "bg-blue-500/10" : ""
+                      }`}
+                    >
+                      <span>{lang.flag}</span>
+                      <div className="flex-1">
+                        <div className="text-zinc-100">{lang.englishName}</div>
+                        <div className="text-[10px] text-zinc-500">
+                          {lang.providerName}
+                        </div>
+                      </div>
+                      {selectedLang === lang.code && (
+                        <span className="text-brand text-sm">&#10003;</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div className="relative flex-1">
             <Search
               size={16}
@@ -184,12 +273,12 @@ export default function SearchPage() {
                 Add to Your Library
               </h2>
               <div className="rounded border border-border">
-                {filteredOlResults!.map((work) => (
+                {filteredOlResults!.map((work, idx) => (
                   <OlResult
-                    key={work.olKey}
+                    key={work.olKey ?? `${work.title}-${idx}`}
                     work={work}
                     onAdd={() => addMutation.mutate(work)}
-                    isAdding={addingOlKey === work.olKey}
+                    isAdding={addingKey === (work.olKey ?? `${work.title}-${work.year ?? ''}-${work.authorName}`)}
                   />
                 ))}
               </div>
@@ -221,7 +310,9 @@ function LibraryResult({ work }: { work: WorkDetailResponse }) {
         alt=""
         className="h-8 w-6 shrink-0 rounded bg-zinc-700 object-cover"
       />
-      <span className="min-w-0 truncate font-medium text-sm text-zinc-100">{work.title}</span>
+      <span className="min-w-0 truncate font-medium text-sm text-zinc-100">
+        {work.title}
+      </span>
       {work.seriesName && (
         <span className="shrink-0 text-xs text-zinc-500">
           {work.seriesName}
@@ -259,11 +350,18 @@ function OlResult({
           ?
         </div>
       )}
-      <span className="min-w-0 truncate font-medium text-sm text-zinc-100">{work.title}</span>
+      <span className="min-w-0 truncate font-medium text-sm text-zinc-100">
+        {work.title}
+      </span>
       {work.seriesName && (
         <span className="shrink-0 text-xs text-zinc-500">
           {work.seriesName}
           {work.seriesPosition != null && ` #${work.seriesPosition}`}
+        </span>
+      )}
+      {work.source && (
+        <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/12 text-blue-300">
+          {work.source}
         </span>
       )}
       <span className="flex-1" />

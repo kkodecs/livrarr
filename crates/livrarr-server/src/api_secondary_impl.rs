@@ -530,6 +530,7 @@ impl ConfigApi for SecondaryApiImpl {
             llm_model: c.llm_model,
             audnexus_url: c.audnexus_url,
             languages: c.languages,
+            provider_status: std::collections::HashMap::new(),
         })
     }
 
@@ -562,6 +563,7 @@ impl ConfigApi for SecondaryApiImpl {
             llm_model: c.llm_model,
             audnexus_url: c.audnexus_url,
             languages: c.languages,
+            provider_status: std::collections::HashMap::new(),
         })
     }
 
@@ -724,6 +726,7 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         monitored: w.monitored,
         added_at: w.added_at.to_rfc3339(),
         library_items: vec![],
+        metadata_source: w.metadata_source.clone(),
     }
 }
 
@@ -864,6 +867,9 @@ impl SecondaryApiImpl {
                 ol_key: None,
                 year: None,
                 cover_url: None,
+                metadata_source: None,
+                detail_url: None,
+                language: None,
             })
             .await
             .unwrap();
@@ -917,6 +923,9 @@ impl SecondaryApiImpl {
                 ol_key: None,
                 year: None,
                 cover_url: None,
+                metadata_source: None,
+                detail_url: None,
+                language: None,
             })
             .await
             .unwrap();

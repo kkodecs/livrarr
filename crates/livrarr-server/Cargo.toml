@@ -18,6 +18,7 @@ trait-variant = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true }
 livrarr-http = { workspace = true }
+livrarr-metadata = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-tagwrite = { workspace = true }
 futures = "0.3"

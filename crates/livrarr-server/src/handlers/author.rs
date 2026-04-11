@@ -63,6 +63,7 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         monitored: w.monitored,
         added_at: w.added_at.to_rfc3339(),
         library_items: vec![],
+        metadata_source: w.metadata_source.clone(),
     }
 }
 

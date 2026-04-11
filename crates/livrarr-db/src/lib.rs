@@ -221,6 +221,9 @@ pub struct CreateWorkDbRequest {
     pub ol_key: Option<String>,
     pub year: Option<i32>,
     pub cover_url: Option<String>,
+    pub metadata_source: Option<String>,
+    pub detail_url: Option<String>,
+    pub language: Option<String>,
 }
 
 pub struct UpdateWorkEnrichmentDbRequest {
