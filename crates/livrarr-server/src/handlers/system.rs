@@ -1,5 +1,6 @@
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::Json;
+use serde::Deserialize;
 
 use crate::middleware::RequireAdmin;
 use crate::state::AppState;
@@ -32,4 +33,24 @@ pub async fn status(
         data_directory: state.data_dir.display().to_string(),
         startup_time: state.startup_time,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct LogTailQuery {
+    #[serde(default = "default_log_lines")]
+    pub lines: usize,
+}
+
+fn default_log_lines() -> usize {
+    30
+}
+
+/// GET /api/v1/system/logs/tail?lines=30
+pub async fn log_tail(
+    State(state): State<AppState>,
+    RequireAdmin(_auth): RequireAdmin,
+    Query(q): Query<LogTailQuery>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let n = q.lines.min(200);
+    Ok(Json(state.log_buffer.tail(n)))
 }

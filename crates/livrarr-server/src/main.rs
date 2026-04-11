@@ -50,7 +50,8 @@ async fn main() {
     };
 
     // Step 3: Initialize tracing.
-    init_tracing(&config.log);
+    let log_buffer = Arc::new(livrarr_server::state::LogBuffer::new());
+    init_tracing(&config.log, log_buffer.clone());
 
     info!("Livrarr starting — data directory: {}", data_dir.display());
 
@@ -160,6 +161,7 @@ async fn main() {
         provider_health: Arc::new(ProviderHealthState::new()),
         cover_proxy_cache: Arc::new(livrarr_server::handlers::coverproxy::CoverProxyCache::new()),
         detail_url_cache: Arc::new(livrarr_server::state::DetailUrlCache::new()),
+        log_buffer,
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
@@ -230,7 +232,12 @@ fn load_config(data_dir: &std::path::Path) -> Result<AppConfig, String> {
     Ok(config)
 }
 
-fn init_tracing(log: &livrarr_server::config::LogConfig) {
+fn init_tracing(
+    log: &livrarr_server::config::LogConfig,
+    log_buffer: Arc<livrarr_server::state::LogBuffer>,
+) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
 
     let level = match log.level {
@@ -244,10 +251,63 @@ fn init_tracing(log: &livrarr_server::config::LogConfig) {
     let filter = EnvFilter::try_new(format!("livrarr={level},tower_http={level}"))
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+    let buf_layer = LogBufferLayer(log_buffer);
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .with(buf_layer)
         .init();
+}
+
+/// Tracing layer that captures formatted log lines into a shared ring buffer.
+struct LogBufferLayer(Arc<livrarr_server::state::LogBuffer>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogBufferLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let meta = event.metadata();
+        let mut message = String::new();
+        let mut visitor = MessageVisitor(&mut message);
+        event.record(&mut visitor);
+        let line = format!(
+            "{} {:>5} {}",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            meta.level(),
+            message,
+        );
+        self.0.push(line);
+    }
+}
+
+struct MessageVisitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for MessageVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            let _ = write!(self.0, "{:?}", value);
+        } else if !self.0.is_empty() {
+            let _ = write!(self.0, " {}={:?}", field.name(), value);
+        } else {
+            let _ = write!(self.0, "{}={:?}", field.name(), value);
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            let _ = write!(self.0, "{}", value);
+        } else if !self.0.is_empty() {
+            let _ = write!(self.0, " {}={}", field.name(), value);
+        } else {
+            let _ = write!(self.0, "{}={}", field.name(), value);
+        }
+    }
 }
 
 async fn shutdown_signal() {
