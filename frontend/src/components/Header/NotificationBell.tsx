@@ -34,6 +34,7 @@ export function NotificationBell() {
   const { data: unreadNotifications } = useQuery({
     queryKey: ["notifications", "unread"],
     queryFn: () => api.listNotifications(true),
+    select: (res) => res.items,
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
     staleTime: 0,
@@ -42,6 +43,7 @@ export function NotificationBell() {
   const { data: allNotifications, isLoading } = useQuery({
     queryKey: ["notifications", "all"],
     queryFn: () => api.listNotifications(false),
+    select: (res) => res.items,
     enabled: open,
   });
 

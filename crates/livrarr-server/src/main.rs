@@ -118,6 +118,12 @@ async fn main() {
         .user_agent(&format!("Livrarr/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .expect("failed to build HTTP client");
+    let http_client_safe = livrarr_http::HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(&format!("Livrarr/{}", env!("CARGO_PKG_VERSION")))
+        .ssrf_safe(true)
+        .build()
+        .expect("failed to build SSRF-safe HTTP client");
     let job_runner = livrarr_server::jobs::JobRunner::new();
     // Build provider registry from saved metadata config.
     let provider_registry = {
@@ -153,6 +159,7 @@ async fn main() {
         db,
         auth_service,
         http_client,
+        http_client_safe,
         config: Arc::new(config.clone()),
         data_dir: Arc::new(data_dir.clone()),
         startup_time: chrono::Utc::now(),
@@ -163,6 +170,7 @@ async fn main() {
         detail_url_cache: Arc::new(livrarr_server::state::DetailUrlCache::new()),
         log_buffer,
         log_level_handle,
+        refresh_in_progress: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).

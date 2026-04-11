@@ -18,6 +18,32 @@ pub mod state;
 // Re-export DB types used in API trait signatures.
 pub use livrarr_db::HistoryFilter;
 
+/// Shared pagination query params — default page=1, page_size=50.
+#[derive(Debug, serde::Deserialize)]
+pub struct PaginationQuery {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+impl PaginationQuery {
+    pub fn page(&self) -> u32 {
+        self.page.unwrap_or(1).max(1)
+    }
+    pub fn page_size(&self) -> u32 {
+        self.page_size.unwrap_or(50).clamp(1, 500)
+    }
+}
+
+/// Generic paginated response wrapper.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaginatedResponse<T: Serialize> {
+    pub items: Vec<T>,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
 // Forward-declare error types from other crates that ApiError wraps.
 // These are defined here as local types so the server crate compiles
 // without depending on every service crate. The real composition root

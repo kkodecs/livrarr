@@ -857,14 +857,24 @@ pub async fn add(
 pub async fn list(
     State(state): State<AppState>,
     ctx: AuthContext,
-) -> Result<Json<Vec<WorkDetailResponse>>, ApiError> {
+    Query(pq): Query<crate::PaginationQuery>,
+) -> Result<Json<crate::PaginatedResponse<WorkDetailResponse>>, ApiError> {
     let user_id = ctx.user.id;
-    let works = state.db.list_works(user_id).await?;
-    let all_items = state.db.list_library_items(user_id).await?;
+    let page = pq.page();
+    let page_size = pq.page_size();
+    let (works, total) = state
+        .db
+        .list_works_paginated(user_id, page, page_size)
+        .await?;
+    let work_ids: Vec<i64> = works.iter().map(|w| w.id).collect();
+    let page_items = state
+        .db
+        .list_library_items_by_work_ids(user_id, &work_ids)
+        .await?;
 
     let mut results: Vec<WorkDetailResponse> = works.iter().map(work_to_detail).collect();
     for detail in &mut results {
-        detail.library_items = all_items
+        detail.library_items = page_items
             .iter()
             .filter(|li| li.work_id == detail.id)
             .map(|li| crate::LibraryItemResponse {
@@ -876,7 +886,12 @@ pub async fn list(
             })
             .collect();
     }
-    Ok(Json(results))
+    Ok(Json(crate::PaginatedResponse {
+        items: results,
+        total,
+        page,
+        page_size,
+    }))
 }
 
 /// GET /api/v1/work/:id
@@ -1040,6 +1055,21 @@ pub async fn refresh(
     }))
 }
 
+/// RAII guard that removes user_id from refresh_in_progress on drop.
+/// Panic-safe: uses `lock().ok()` to avoid double-panic during unwind.
+struct RefreshGuard {
+    user_id: i64,
+    set: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
+}
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.set.lock() {
+            set.remove(&self.user_id);
+        }
+    }
+}
+
 /// POST /api/v1/work/refresh — refresh metadata for all user works.
 /// Returns 202 immediately; enrichment runs in background.
 pub async fn refresh_all(
@@ -1047,14 +1077,33 @@ pub async fn refresh_all(
     ctx: AuthContext,
 ) -> Result<axum::http::StatusCode, ApiError> {
     let user_id = ctx.user.id;
+
+    // Deduplication: reject if a refresh is already running for this user.
+    {
+        let mut guard = state.refresh_in_progress.lock().unwrap();
+        if !guard.insert(user_id) {
+            return Err(ApiError::Conflict {
+                reason: "Refresh already in progress".to_string(),
+            });
+        }
+    }
+
+    // RAII guard — handles cleanup on all paths (empty, error, panic, completion).
+    let refresh_guard = RefreshGuard {
+        user_id,
+        set: state.refresh_in_progress.clone(),
+    };
+
     let works = state.db.list_works(user_id).await?;
 
     if works.is_empty() {
         return Ok(axum::http::StatusCode::ACCEPTED);
+        // refresh_guard dropped here
     }
 
     let total = works.len();
     tokio::spawn(async move {
+        let _guard = refresh_guard; // ensure guard lives for the task's lifetime
         let mut enriched = 0usize;
         let mut failed = 0usize;
 
@@ -1118,6 +1167,8 @@ pub async fn refresh_all(
         {
             tracing::warn!("create_notification failed: {e}");
         }
+
+        // _guard dropped here — RefreshGuard::drop removes user_id from set.
     });
 
     Ok(axum::http::StatusCode::ACCEPTED)

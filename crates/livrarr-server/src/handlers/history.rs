@@ -2,7 +2,7 @@ use axum::extract::{Query, State};
 use axum::Json;
 
 use crate::state::AppState;
-use crate::{ApiError, AuthContext, HistoryResponse};
+use crate::{ApiError, AuthContext, HistoryResponse, PaginatedResponse, PaginationQuery};
 use livrarr_db::{HistoryDb, HistoryFilter};
 use livrarr_domain::EventType;
 
@@ -16,6 +16,8 @@ pub struct HistoryQuery {
     pub start_date: Option<String>,
     #[serde(rename = "endDate")]
     pub end_date: Option<String>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
 }
 
 /// GET /api/v1/history
@@ -23,7 +25,7 @@ pub async fn list(
     State(state): State<AppState>,
     ctx: AuthContext,
     Query(q): Query<HistoryQuery>,
-) -> Result<Json<Vec<HistoryResponse>>, ApiError> {
+) -> Result<Json<PaginatedResponse<HistoryResponse>>, ApiError> {
     let start_date = q
         .start_date
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
@@ -40,9 +42,20 @@ pub async fn list(
         end_date,
     };
 
-    let events = state.db.list_history(ctx.user.id, filter).await?;
-    Ok(Json(
-        events
+    let pq = PaginationQuery {
+        page: q.page,
+        page_size: q.page_size,
+    };
+    let page = pq.page();
+    let page_size = pq.page_size();
+
+    let (events, total) = state
+        .db
+        .list_history_paginated(ctx.user.id, filter, page, page_size)
+        .await?;
+
+    Ok(Json(PaginatedResponse {
+        items: events
             .iter()
             .map(|e| HistoryResponse {
                 id: e.id,
@@ -52,5 +65,8 @@ pub async fn list(
                 date: e.date.to_rfc3339(),
             })
             .collect(),
-    ))
+        total,
+        page,
+        page_size,
+    }))
 }

@@ -51,6 +51,14 @@ export type EventType =
 export type DownloadClientImplementation = "qBittorrent" | "sabnzbd";
 export type LlmProvider = "groq" | "gemini" | "openai" | "custom";
 
+// Paginated response wrapper
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 // Auth & Setup
 export interface LoginRequest {
   username: string;

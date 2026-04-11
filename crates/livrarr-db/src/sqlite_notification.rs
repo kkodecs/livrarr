@@ -84,6 +84,45 @@ impl NotificationDb for SqliteDb {
         rows.into_iter().map(row_to_notification).collect()
     }
 
+    async fn list_notifications_paginated(
+        &self,
+        user_id: UserId,
+        unread_only: bool,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<Notification>, i64), DbError> {
+        let where_clause = if unread_only {
+            "WHERE user_id = ? AND dismissed = 0 AND read = 0"
+        } else {
+            "WHERE user_id = ? AND dismissed = 0"
+        };
+
+        let total: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM notifications {where_clause}"
+        ))
+        .bind(user_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        let offset = (page.saturating_sub(1) * per_page) as i64;
+        let query =
+            format!("SELECT * FROM notifications {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?");
+        let rows = sqlx::query(&query)
+            .bind(user_id)
+            .bind(per_page as i64)
+            .bind(offset)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        let items = rows
+            .into_iter()
+            .map(row_to_notification)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((items, total))
+    }
+
     async fn create_notification(
         &self,
         req: CreateNotificationDbRequest,

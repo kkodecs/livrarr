@@ -591,6 +591,12 @@ pub async fn grab(
     Json(req): Json<GrabApiRequest>,
 ) -> Result<(), ApiError> {
     let user_id = ctx.user.id;
+
+    // SSRF protection: validate user-supplied download URL before fetching.
+    livrarr_http::ssrf::validate_url(&req.download_url)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Invalid download URL: {e}")))?;
+
     let protocol = req.protocol.as_deref().unwrap_or("torrent");
 
     // Get download client: specified, or default for protocol.
@@ -691,9 +697,9 @@ async fn grab_sabnzbd(
     let base_url = super::download_client::client_base_url(client);
     let api_key = client.api_key.as_deref().unwrap_or("");
 
-    // Step 1: Download NZB from indexer into memory.
+    // Step 1: Download NZB from indexer into memory (SSRF-safe client).
     let nzb_resp = state
-        .http_client
+        .http_client_safe
         .get(&req.download_url)
         .send()
         .await
@@ -784,7 +790,7 @@ async fn grab_qbittorrent(
     let sid = qbit_login(state, &base_url, client).await?;
 
     // Extract torrent hash BEFORE sending to qBit (Servarr pattern).
-    let download_id = fetch_and_extract_hash(&state.http_client, &req.download_url).await;
+    let download_id = fetch_and_extract_hash(&state.http_client_safe, &req.download_url).await;
 
     if let Some(ref hash) = download_id {
         tracing::info!("grab: extracted hash {hash} from download URL");
@@ -822,6 +828,8 @@ async fn fetch_and_extract_hash(
     http: &livrarr_http::HttpClient,
     download_url: &str,
 ) -> Option<String> {
+    // SSRF protection handled by the safe client's DNS resolver.
+
     // If it's already a magnet link, extract hash directly.
     if download_url.starts_with("magnet:") {
         return livrarr_download::extract_torrent_hash(&livrarr_download::TorrentSource::Magnet(

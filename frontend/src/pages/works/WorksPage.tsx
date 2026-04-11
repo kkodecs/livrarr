@@ -47,6 +47,7 @@ export function WorksPage() {
   } = useQuery({
     queryKey: ["works"],
     queryFn: listWorks,
+    select: (res) => res.items,
   });
 
   const refreshMutation = useMutation({

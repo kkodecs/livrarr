@@ -62,6 +62,7 @@ import type {
   ManualSearchResponse,
   ManualImportItem,
   ManualImportResponse,
+  PaginatedResponse,
 } from "@/types/api";
 
 // Setup
@@ -114,7 +115,8 @@ export const addWork = (req: AddWorkRequest) =>
     method: "POST",
     body: JSON.stringify(req),
   });
-export const listWorks = () => apiFetch<WorkDetailResponse[]>("/work");
+export const listWorks = () =>
+  apiFetch<PaginatedResponse<WorkDetailResponse>>("/work?page_size=500");
 export const getWork = (id: number) =>
   apiFetch<WorkDetailResponse>(`/work/${id}`);
 export const updateWork = (id: number, req: UpdateWorkRequest) =>
@@ -164,8 +166,8 @@ export const refreshAuthorBibliography = (id: number) =>
 
 // Notifications
 export const listNotifications = (unreadOnly?: boolean) =>
-  apiFetch<NotificationResponse[]>(
-    `/notification${unreadOnly ? "?unreadOnly=true" : ""}`,
+  apiFetch<PaginatedResponse<NotificationResponse>>(
+    `/notification?page_size=200${unreadOnly ? "&unreadOnly=true" : ""}`,
   );
 export const markNotificationRead = (id: number) =>
   apiFetch<void>(`/notification/${id}`, { method: "PUT" });
@@ -230,8 +232,9 @@ export const getHistory = (params?: {
   if (params?.workId) searchParams.set("workId", String(params.workId));
   if (params?.startDate) searchParams.set("startDate", params.startDate);
   if (params?.endDate) searchParams.set("endDate", params.endDate);
+  searchParams.set("page_size", "200");
   const qs = searchParams.toString();
-  return apiFetch<HistoryResponse[]>(`/history${qs ? `?${qs}` : ""}`);
+  return apiFetch<PaginatedResponse<HistoryResponse>>(`/history?${qs}`);
 };
 
 // Root Folders
@@ -374,7 +377,7 @@ export const setLogLevel = (level: string) =>
 
 // Library Files
 export const listLibraryFiles = () =>
-  apiFetch<LibraryItemResponse[]>("/workfile");
+  apiFetch<PaginatedResponse<LibraryItemResponse>>("/workfile?page_size=500");
 export const getLibraryFile = (id: number) =>
   apiFetch<LibraryItemResponse>(`/workfile/${id}`);
 export const deleteLibraryFile = (id: number) =>

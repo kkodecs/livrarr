@@ -933,12 +933,12 @@ async fn fetch_sabnzbd_storage_path(
 
     // SABnzbd search param searches by name, not nzo_id. Fetch recent history and match client-side.
     let url = format!("{base_url}/api?mode=history&apikey={api_key}&output=json&limit=200");
-    let resp = state
-        .http_client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("SABnzbd history request failed: {e}")))?;
+    let resp = state.http_client.get(&url).send().await.map_err(|e| {
+        ApiError::BadGateway(format!(
+            "SABnzbd history request failed: {}",
+            e.without_url()
+        ))
+    })?;
 
     if !resp.status().is_success() {
         return Err(ApiError::BadGateway(format!(

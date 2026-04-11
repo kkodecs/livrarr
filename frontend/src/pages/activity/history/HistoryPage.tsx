@@ -82,11 +82,13 @@ export default function HistoryPage() {
         eventType: filterType || undefined,
         startDate: loadOlder ? undefined : defaultStart,
       }),
+    select: (res) => res.items,
   });
 
   const { data: works } = useQuery({
     queryKey: ["works"],
     queryFn: listWorks,
+    select: (res) => res.items,
   });
 
   const sorting = useSort<HistorySortField>("date", "desc");

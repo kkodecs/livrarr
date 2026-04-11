@@ -40,9 +40,9 @@ RUN cargo build --release -p livrarr-server
 # ─────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-# CA certs for HTTPS outbound (Hardcover, OpenLibrary, download clients)
+# CA certs for HTTPS outbound + wget for healthcheck
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates wget && \
     rm -rf /var/lib/apt/lists/*
 
 # Non-root user with fixed UID/GID 1000

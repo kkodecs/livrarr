@@ -18,6 +18,9 @@ pub struct AppState {
     pub db: SqliteDb,
     pub auth_service: Arc<ServerAuthService>,
     pub http_client: HttpClient,
+    /// SSRF-safe HTTP client — uses DNS resolver that rejects private IPs.
+    /// Use for all user-supplied URLs (grab, fetch_and_extract_hash).
+    pub http_client_safe: HttpClient,
     pub config: Arc<AppConfig>,
     pub data_dir: Arc<std::path::PathBuf>,
     pub startup_time: chrono::DateTime<chrono::Utc>,
@@ -28,6 +31,7 @@ pub struct AppState {
     pub detail_url_cache: Arc<DetailUrlCache>,
     pub log_buffer: Arc<LogBuffer>,
     pub log_level_handle: Arc<LogLevelHandle>,
+    pub refresh_in_progress: Arc<std::sync::Mutex<HashSet<livrarr_db::UserId>>>,
 }
 
 /// Handle for dynamically reloading the tracing EnvFilter at runtime.

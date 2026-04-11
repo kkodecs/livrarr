@@ -1,8 +1,8 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 
 use crate::state::AppState;
-use crate::{ApiError, AuthContext, LibraryItemResponse};
+use crate::{ApiError, AuthContext, LibraryItemResponse, PaginatedResponse, PaginationQuery};
 use livrarr_db::{ConfigDb, LibraryItemDb, RootFolderDb};
 
 fn to_response(li: &livrarr_domain::LibraryItem) -> LibraryItemResponse {
@@ -19,9 +19,20 @@ fn to_response(li: &livrarr_domain::LibraryItem) -> LibraryItemResponse {
 pub async fn list(
     State(state): State<AppState>,
     ctx: AuthContext,
-) -> Result<Json<Vec<LibraryItemResponse>>, ApiError> {
-    let items = state.db.list_library_items(ctx.user.id).await?;
-    Ok(Json(items.iter().map(to_response).collect()))
+    Query(pq): Query<PaginationQuery>,
+) -> Result<Json<PaginatedResponse<LibraryItemResponse>>, ApiError> {
+    let page = pq.page();
+    let page_size = pq.page_size();
+    let (items, total) = state
+        .db
+        .list_library_items_paginated(ctx.user.id, page, page_size)
+        .await?;
+    Ok(Json(PaginatedResponse {
+        items: items.iter().map(to_response).collect(),
+        total,
+        page,
+        page_size,
+    }))
 }
 
 /// GET /api/v1/workfile/:id

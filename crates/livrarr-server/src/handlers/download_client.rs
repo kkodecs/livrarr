@@ -316,7 +316,9 @@ async fn test_sabnzbd(
         .get(&version_url)
         .send()
         .await
-        .map_err(|e| ApiError::BadGateway(format!("SABnzbd connection failed: {e}")))?;
+        .map_err(|e| {
+            ApiError::BadGateway(format!("SABnzbd connection failed: {}", e.without_url()))
+        })?;
 
     if !resp.status().is_success() {
         return Err(ApiError::BadGateway(format!(
@@ -341,12 +343,12 @@ async fn test_sabnzbd(
     // Test 2: Check category exists.
     let cat_url =
         format!("{base_url}/api?mode=get_config&section=categories&apikey={api_key}&output=json");
-    let resp = state
-        .http_client
-        .get(&cat_url)
-        .send()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("SABnzbd categories request failed: {e}")))?;
+    let resp = state.http_client.get(&cat_url).send().await.map_err(|e| {
+        ApiError::BadGateway(format!(
+            "SABnzbd categories request failed: {}",
+            e.without_url()
+        ))
+    })?;
 
     if !resp.status().is_success() {
         return Err(ApiError::BadGateway(format!(
@@ -564,7 +566,7 @@ pub async fn import_from_prowlarr(
         "Prowlarr download client response received, raw length={}",
         body_text.len()
     );
-    tracing::debug!(body = %body_text, "Prowlarr raw download client response");
+    // NOTE: raw body intentionally not logged — may contain credential fields.
 
     let prowlarr_clients: Vec<ProwlarrDownloadClient> = serde_json::from_str(&body_text)
         .map_err(|e| ApiError::BadGateway(format!("Failed to parse Prowlarr response: {e}")))?;
