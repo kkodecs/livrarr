@@ -123,6 +123,9 @@ pub trait SessionDb: Send + Sync {
         new_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError>;
 
+    /// Delete all sessions for a user (e.g. after password change).
+    async fn delete_user_sessions(&self, user_id: UserId) -> Result<u64, DbError>;
+
     /// Delete all expired sessions.
     ///
     /// Satisfies: AUTH-014
@@ -141,8 +144,16 @@ pub trait WorkDb: Send + Sync {
     /// Get work by ID for a specific user.
     async fn get_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError>;
 
-    /// List works for a user.
+    /// List works for a user (unbounded — for internal use).
     async fn list_works(&self, user_id: UserId) -> Result<Vec<Work>, DbError>;
+
+    /// List works for a user, paginated.
+    async fn list_works_paginated(
+        &self,
+        user_id: UserId,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<Work>, i64), DbError>;
 
     /// Create work. Returns created work with generated ID.
     ///
@@ -337,8 +348,23 @@ pub trait LibraryItemDb: Send + Sync {
         id: LibraryItemId,
     ) -> Result<LibraryItem, DbError>;
 
-    /// List library items for a user.
+    /// List library items for a user (unbounded — for internal use).
     async fn list_library_items(&self, user_id: UserId) -> Result<Vec<LibraryItem>, DbError>;
+
+    /// List library items for a user, paginated.
+    async fn list_library_items_paginated(
+        &self,
+        user_id: UserId,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<LibraryItem>, i64), DbError>;
+
+    /// List library items for a set of work IDs (batch enrichment for paginated work lists).
+    async fn list_library_items_by_work_ids(
+        &self,
+        user_id: UserId,
+        work_ids: &[WorkId],
+    ) -> Result<Vec<LibraryItem>, DbError>;
 
     /// List library items for a specific work.
     async fn list_library_items_by_work(
@@ -614,12 +640,21 @@ pub trait RemotePathMappingDb: Send + Sync {
 /// History data access.
 #[trait_variant::make(Send)]
 pub trait HistoryDb: Send + Sync {
-    /// List history events for a user, with optional filters.
+    /// List history events for a user, with optional filters (unbounded).
     async fn list_history(
         &self,
         user_id: UserId,
         filter: HistoryFilter,
     ) -> Result<Vec<HistoryEvent>, DbError>;
+
+    /// List history events, paginated.
+    async fn list_history_paginated(
+        &self,
+        user_id: UserId,
+        filter: HistoryFilter,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<HistoryEvent>, i64), DbError>;
 
     /// Record a history event.
     async fn create_history_event(&self, req: CreateHistoryEventDbRequest) -> Result<(), DbError>;
@@ -648,12 +683,21 @@ pub struct CreateHistoryEventDbRequest {
 /// Satisfies: AUTHOR-003, AUTHOR-005
 #[trait_variant::make(Send)]
 pub trait NotificationDb: Send + Sync {
-    /// List notifications for a user. Optional filter for unread only.
+    /// List notifications for a user. Optional filter for unread only (unbounded).
     async fn list_notifications(
         &self,
         user_id: UserId,
         unread_only: bool,
     ) -> Result<Vec<Notification>, DbError>;
+
+    /// List notifications, paginated.
+    async fn list_notifications_paginated(
+        &self,
+        user_id: UserId,
+        unread_only: bool,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<Notification>, i64), DbError>;
 
     /// Create notification. Respects dedup: one per (user_id, type, ref_key) regardless
     /// of dismissed state. If any notification (active or dismissed) exists for that

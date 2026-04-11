@@ -1,6 +1,10 @@
+use std::time::Duration;
+
 use axum::http::{HeaderValue, StatusCode};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::GovernorLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -12,11 +16,30 @@ use crate::state::AppState;
 ///
 /// Satisfies: RUNTIME-SERVER-005, RUNTIME-COMPOSE-003, RUNTIME-COMPOSE-004
 pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
+    // Rate limiter for login: 5 requests per 60 seconds per IP.
+    let login_governor = GovernorConfigBuilder::default()
+        .period(Duration::from_secs(12)) // 1 token per 12s = 5 per 60s
+        .burst_size(5)
+        .finish()
+        .expect("login rate limiter config");
+
+    // Global rate limiter: 100 requests per second sustained per peer IP.
+    // PeerIpKeyExtractor is the default — safe for direct exposure.
+    // If behind a reverse proxy, configure trusted_proxies in the app config.
+    let global_governor = GovernorConfigBuilder::default()
+        .per_millisecond(10) // 1 token per 10ms = 100/sec sustained
+        .burst_size(50)
+        .finish()
+        .expect("global rate limiter config");
+
     // Public API routes (no auth required).
     let public = Router::new()
         .route("/setup/status", get(handlers::setup::setup_status))
         .route("/setup", post(handlers::setup::setup))
-        .route("/auth/login", post(handlers::auth::login));
+        .route(
+            "/auth/login",
+            post(handlers::auth::login).layer(GovernorLayer::new(login_governor)),
+        );
 
     // Protected API routes (auth middleware applied).
     let protected = Router::new()
@@ -233,7 +256,8 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .merge(public)
         .merge(protected)
         .merge(mediacover)
-        .fallback(|| async { StatusCode::NOT_FOUND });
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(GovernorLayer::new(global_governor));
 
     let app = Router::new().nest("/api/v1", api);
 

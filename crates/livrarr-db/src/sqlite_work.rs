@@ -209,6 +209,35 @@ impl WorkDb for SqliteDb {
         rows.into_iter().map(row_to_work).collect()
     }
 
+    async fn list_works_paginated(
+        &self,
+        user_id: UserId,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<Work>, i64), DbError> {
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        let offset = (page.saturating_sub(1) * per_page) as i64;
+        let rows =
+            sqlx::query("SELECT * FROM works WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?")
+                .bind(user_id)
+                .bind(per_page as i64)
+                .bind(offset)
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_db_err)?;
+
+        let works = rows
+            .into_iter()
+            .map(row_to_work)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((works, total))
+    }
+
     async fn create_work(&self, req: CreateWorkDbRequest) -> Result<Work, DbError> {
         let now = Utc::now().to_rfc3339();
         let id = sqlx::query(

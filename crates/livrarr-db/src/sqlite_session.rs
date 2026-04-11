@@ -3,7 +3,7 @@ use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{map_db_err, parse_dt};
-use crate::{DbError, Session, SessionDb};
+use crate::{DbError, Session, SessionDb, UserId};
 
 fn row_to_session(row: sqlx::sqlite::SqliteRow) -> Result<Session, DbError> {
     Ok(Session {
@@ -81,6 +81,15 @@ impl SessionDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
         Ok(())
+    }
+
+    async fn delete_user_sessions(&self, user_id: UserId) -> Result<u64, DbError> {
+        let result = sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        Ok(result.rows_affected())
     }
 
     async fn delete_expired_sessions(&self) -> Result<u64, DbError> {

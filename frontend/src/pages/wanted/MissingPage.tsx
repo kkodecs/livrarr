@@ -39,6 +39,7 @@ export default function MissingPage() {
   } = useQuery({
     queryKey: ["works"],
     queryFn: listWorks,
+    select: (res) => res.items,
   });
 
   const [filter, setFilter] = useState<MissingFilter>("all");

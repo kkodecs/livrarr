@@ -271,6 +271,7 @@ pub async fn test_llm(State(state): State<AppState>, _admin: RequireAdmin) -> Re
 /// GET /api/v1/config/prowlarr
 pub async fn get_prowlarr(
     State(state): State<AppState>,
+    _admin: RequireAdmin,
 ) -> Result<Json<crate::ProwlarrConfigResponse>, ApiError> {
     let c = state.db.get_prowlarr_config().await?;
     Ok(Json(crate::ProwlarrConfigResponse {

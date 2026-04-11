@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+pub mod ssrf;
+
 /// Composable HTTP client.
 #[derive(Clone)]
 pub struct HttpClient {
@@ -30,6 +32,7 @@ pub struct HttpClientBuilder {
     timeout: Option<Duration>,
     user_agent: Option<String>,
     danger_accept_invalid_certs: bool,
+    ssrf_safe: bool,
 }
 
 impl HttpClientBuilder {
@@ -59,6 +62,13 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Enable SSRF protection via a custom DNS resolver that rejects private IPs
+    /// at connection time. Prevents redirect-based and DNS-rebinding SSRF.
+    pub fn ssrf_safe(mut self, enable: bool) -> Self {
+        self.ssrf_safe = enable;
+        self
+    }
+
     pub fn build(self) -> Result<HttpClient, HttpClientError> {
         const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -72,6 +82,10 @@ impl HttpClientBuilder {
 
         if self.danger_accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
+        }
+
+        if self.ssrf_safe {
+            builder = builder.dns_resolver(ssrf::SsrfSafeResolver::new());
         }
 
         let inner = builder

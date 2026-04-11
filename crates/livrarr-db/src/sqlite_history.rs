@@ -98,6 +98,59 @@ impl HistoryDb for SqliteDb {
         rows.into_iter().map(row_to_history_event).collect()
     }
 
+    async fn list_history_paginated(
+        &self,
+        user_id: crate::UserId,
+        filter: HistoryFilter,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<HistoryEvent>, i64), DbError> {
+        let mut where_clause = "WHERE user_id = ?".to_string();
+        let mut binds: Vec<String> = vec![];
+
+        if let Some(event_type) = filter.event_type {
+            where_clause.push_str(" AND event_type = ?");
+            binds.push(event_type_str(event_type).to_string());
+        }
+        if let Some(work_id) = filter.work_id {
+            where_clause.push_str(" AND work_id = ?");
+            binds.push(work_id.to_string());
+        }
+        if let Some(start_date) = filter.start_date {
+            where_clause.push_str(" AND date >= ?");
+            binds.push(start_date.to_rfc3339());
+        }
+        if let Some(end_date) = filter.end_date {
+            where_clause.push_str(" AND date <= ?");
+            binds.push(end_date.to_rfc3339());
+        }
+
+        // Count total.
+        let count_query = format!("SELECT COUNT(*) FROM history {where_clause}");
+        let mut cq = sqlx::query_scalar::<_, i64>(&count_query).bind(user_id);
+        for b in &binds {
+            cq = cq.bind(b);
+        }
+        let total = cq.fetch_one(self.pool()).await.map_err(map_db_err)?;
+
+        // Fetch page.
+        let offset = (page.saturating_sub(1) * per_page) as i64;
+        let data_query =
+            format!("SELECT * FROM history {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?");
+        let mut dq = sqlx::query(&data_query).bind(user_id);
+        for b in &binds {
+            dq = dq.bind(b);
+        }
+        dq = dq.bind(per_page as i64).bind(offset);
+
+        let rows = dq.fetch_all(self.pool()).await.map_err(map_db_err)?;
+        let events = rows
+            .into_iter()
+            .map(row_to_history_event)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((events, total))
+    }
+
     async fn create_history_event(&self, req: CreateHistoryEventDbRequest) -> Result<(), DbError> {
         let now = chrono::Utc::now().to_rfc3339();
         let event_type_s = event_type_str(req.event_type);

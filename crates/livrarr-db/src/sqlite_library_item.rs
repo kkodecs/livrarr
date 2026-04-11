@@ -79,6 +79,57 @@ impl LibraryItemDb for SqliteDb {
         rows.into_iter().map(row_to_library_item).collect()
     }
 
+    async fn list_library_items_paginated(
+        &self,
+        user_id: UserId,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<LibraryItem>, i64), DbError> {
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM library_items WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        let offset = (page.saturating_sub(1) * per_page) as i64;
+        let rows = sqlx::query(
+            "SELECT * FROM library_items WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?",
+        )
+        .bind(user_id)
+        .bind(per_page as i64)
+        .bind(offset)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        let items = rows
+            .into_iter()
+            .map(row_to_library_item)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((items, total))
+    }
+
+    async fn list_library_items_by_work_ids(
+        &self,
+        user_id: UserId,
+        work_ids: &[WorkId],
+    ) -> Result<Vec<LibraryItem>, DbError> {
+        if work_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders: Vec<&str> = work_ids.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT * FROM library_items WHERE user_id = ? AND work_id IN ({}) ORDER BY id",
+            placeholders.join(",")
+        );
+        let mut q = sqlx::query(&sql).bind(user_id);
+        for id in work_ids {
+            q = q.bind(*id);
+        }
+        let rows = q.fetch_all(self.pool()).await.map_err(map_db_err)?;
+        rows.into_iter().map(row_to_library_item).collect()
+    }
+
     async fn list_library_items_by_work(
         &self,
         user_id: UserId,
