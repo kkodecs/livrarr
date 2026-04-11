@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-server"
-version = "0.1.0-alpha3"
+version = "0.1.0-alpha2"
 dependencies = [
  "argon2",
  "axum",
