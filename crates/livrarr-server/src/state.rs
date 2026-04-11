@@ -32,7 +32,15 @@ pub struct AppState {
     pub log_buffer: Arc<LogBuffer>,
     pub log_level_handle: Arc<LogLevelHandle>,
     pub refresh_in_progress: Arc<std::sync::Mutex<HashSet<livrarr_db::UserId>>>,
+    /// Limits concurrent imports to avoid blocking poller and exhausting I/O.
+    pub import_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Per-(user, work) import locks to prevent concurrent imports of the same work.
+    pub import_locks: Arc<ImportLockMap>,
 }
+
+/// Per-(user, work) mutex map for serializing concurrent imports of the same work.
+pub type ImportLockMap =
+    dashmap::DashMap<(livrarr_db::UserId, livrarr_db::WorkId), Arc<tokio::sync::Mutex<()>>>;
 
 /// Handle for dynamically reloading the tracing EnvFilter at runtime.
 pub struct LogLevelHandle {

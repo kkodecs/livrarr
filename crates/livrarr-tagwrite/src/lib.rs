@@ -348,12 +348,24 @@ fn write_epub(
 
     match write_result {
         Ok(()) => {
+            // Flush temp file to disk before rename for crash safety.
+            if let Ok(f) = std::fs::File::open(&tmp_path) {
+                let _ = f.sync_all();
+            }
+
             std::fs::rename(&tmp_path, path).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp_path);
                 TagWriteError::Io {
                     message: format!("EPUB rename failed: {e}"),
                 }
             })?;
+
+            // Sync parent directory to persist the rename entry.
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
 
             // Run repub EPUB repair pass (XML declarations, mimetype, identifiers,
             // proprietary metadata stripping). Non-fatal — if repub fails, the

@@ -32,6 +32,15 @@ pub async fn import_grab(
     let grab = state.db.get_grab(user_id, grab_id).await?;
     let work = state.db.get_work(user_id, grab.work_id).await?;
 
+    // Per-(user, work) import lock — prevents concurrent imports of the same
+    // work from racing on target paths. Second importer waits, then dedup-skips.
+    let import_lock = state
+        .import_locks
+        .entry((user_id, work.id))
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _import_guard = import_lock.lock().await;
+
     // Resolve source path: grab.download_url has the torrent name,
     // but we need content_path from the grab record. For Phase 3a,
     // the source path comes from the download client + remote path mapping.
@@ -1039,6 +1048,10 @@ pub async fn apply_remote_path_mapping(
     client_host: &str,
     content_path: &str,
 ) -> Result<String, ApiError> {
+    // Normalize Windows backslashes — download clients on Windows report paths
+    // like C:\Downloads\book.epub that need to match Linux forward-slash mappings.
+    let content_path = &content_path.replace('\\', "/");
+
     let mappings = state.db.list_remote_path_mappings().await?;
 
     // Extract hostname from client_host URL (strip scheme, port, path).
@@ -1062,11 +1075,12 @@ pub async fn apply_remote_path_mapping(
             ch == mh || ch.ends_with(&format!(".{mh}"))
         })
         .filter(|m| {
-            if content_path.starts_with(&m.remote_path) {
+            let rp = m.remote_path.replace('\\', "/");
+            if content_path.starts_with(&rp) {
                 // Exact match or next char is '/' (directory boundary).
-                content_path.len() == m.remote_path.len()
-                    || content_path.as_bytes().get(m.remote_path.len()) == Some(&b'/')
-                    || m.remote_path.ends_with('/')
+                content_path.len() == rp.len()
+                    || content_path.as_bytes().get(rp.len()) == Some(&b'/')
+                    || rp.ends_with('/')
             } else {
                 false
             }
@@ -1075,7 +1089,8 @@ pub async fn apply_remote_path_mapping(
 
     match best_match {
         Some(mapping) => {
-            let local = content_path.replacen(&mapping.remote_path, &mapping.local_path, 1);
+            let rp = mapping.remote_path.replace('\\', "/");
+            let local = content_path.replacen(&rp, &mapping.local_path, 1);
             // Normalize double slashes from trailing/leading slash mismatches.
             Ok(local.replace("//", "/"))
         }

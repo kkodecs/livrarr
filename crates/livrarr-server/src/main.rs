@@ -171,6 +171,8 @@ async fn main() {
         log_buffer,
         log_level_handle,
         refresh_in_progress: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        import_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+        import_locks: Arc::new(dashmap::DashMap::new()),
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
