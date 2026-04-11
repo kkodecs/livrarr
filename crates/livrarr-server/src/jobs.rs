@@ -408,6 +408,20 @@ async fn poll_qbittorrent(
                 continue;
             }
 
+            // Persist the raw remote path so import_grab doesn't need to re-query.
+            if grab.content_path.is_none() {
+                if let Err(e) = state
+                    .db
+                    .set_grab_content_path(grab.user_id, grab.id, &content_path)
+                    .await
+                {
+                    warn!(
+                        "poller: failed to persist content_path for grab {}: {e}",
+                        grab.id
+                    );
+                }
+            }
+
             let transitioned = match state.db.try_set_importing(grab.user_id, grab.id).await {
                 Ok(t) => t,
                 Err(e) => {
@@ -426,6 +440,22 @@ async fn poll_qbittorrent(
                     }
                     Err(e) => {
                         warn!("poller: import failed for grab {}: {e}", grab.id);
+                        let err_msg = e.to_string();
+                        if let Err(e2) = state
+                            .db
+                            .update_grab_status(
+                                grab.user_id,
+                                grab.id,
+                                livrarr_domain::GrabStatus::ImportFailed,
+                                Some(&err_msg),
+                            )
+                            .await
+                        {
+                            warn!(
+                                "poller: failed to set ImportFailed for grab {}: {e2}",
+                                grab.id
+                            );
+                        }
                     }
                 }
             }
@@ -583,6 +613,20 @@ async fn poll_sabnzbd(
                         grab.id
                     );
 
+                    // Persist the raw remote path so import_grab doesn't need to re-query.
+                    if grab.content_path.is_none() {
+                        if let Err(e) = state
+                            .db
+                            .set_grab_content_path(grab.user_id, grab.id, storage)
+                            .await
+                        {
+                            warn!(
+                                "poller: failed to persist content_path for grab {}: {e}",
+                                grab.id
+                            );
+                        }
+                    }
+
                     let transitioned = match state.db.try_set_importing(grab.user_id, grab.id).await
                     {
                         Ok(t) => t,
@@ -604,6 +648,22 @@ async fn poll_sabnzbd(
                             }
                             Err(e) => {
                                 warn!("poller: import failed for grab {}: {e}", grab.id);
+                                let err_msg = e.to_string();
+                                if let Err(e2) = state
+                                    .db
+                                    .update_grab_status(
+                                        grab.user_id,
+                                        grab.id,
+                                        livrarr_domain::GrabStatus::ImportFailed,
+                                        Some(&err_msg),
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        "poller: failed to set ImportFailed for grab {}: {e2}",
+                                        grab.id
+                                    );
+                                }
                             }
                         }
                     }
