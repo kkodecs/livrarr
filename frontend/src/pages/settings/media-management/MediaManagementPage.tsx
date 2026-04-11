@@ -656,6 +656,14 @@ function RPMFormModal({
   onClose: () => void;
   onSubmit: (data: RPMFormData) => Promise<unknown>;
 }) {
+  const { data: clients } = useQuery({
+    queryKey: ["downloadClients"],
+    queryFn: api.listDownloadClients,
+  });
+
+  // Unique hosts from download clients
+  const hosts = [...new Set((clients ?? []).map((c) => c.host))];
+
   const {
     register,
     handleSubmit,
@@ -667,7 +675,7 @@ function RPMFormModal({
           remotePath: editing.remotePath,
           localPath: editing.localPath,
         }
-      : { host: "", remotePath: "", localPath: "" },
+      : { host: hosts[0] ?? "", remotePath: "", localPath: "" },
   });
 
   return (
@@ -687,10 +695,14 @@ function RPMFormModal({
       >
         <div>
           <label className="block text-xs text-muted mb-1">Host</label>
-          <input
+          <select
             {...register("host", { required: true })}
             className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
-          />
+          >
+            {hosts.map((h) => (
+              <option key={h} value={h}>{h}</option>
+            ))}
+          </select>
         </div>
         <div>
           <label className="block text-xs text-muted mb-1">Remote Path</label>

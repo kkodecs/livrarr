@@ -135,7 +135,7 @@ export default function AuthorDetailPage() {
                 author.monitored ? "bg-green-500" : "bg-zinc-600",
               )}
             />
-            {author.monitored ? "Monitored" : "Unmonitored"}
+            {author.monitored ? "Monitor" : "Unmonitored"}
           </span>
           <span className="flex items-center gap-1.5">
             <span
@@ -145,8 +145,8 @@ export default function AuthorDetailPage() {
               )}
             />
             {author.monitorNewItems
-              ? "Monitoring new items"
-              : "Not monitoring new items"}
+              ? "Monitor new"
+              : "Not monitoring new"}
           </span>
         </div>
 
@@ -408,7 +408,7 @@ function EditAuthorModal({
             onChange={(e) => setMonitored(e.target.checked)}
             className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand"
           />
-          <span className="text-sm text-zinc-200">Monitored</span>
+          <span className="text-sm text-zinc-200" title="Download any missing works when they are announced by an indexer">Monitor</span>
         </label>
         <label className="flex items-center gap-3">
           <input
@@ -417,7 +417,7 @@ function EditAuthorModal({
             onChange={(e) => setMonitorNewItems(e.target.checked)}
             className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand"
           />
-          <span className="text-sm text-zinc-200">Monitor new items</span>
+          <span className="text-sm text-zinc-200" title="Download new works when they are announced by an indexer">Monitor new</span>
         </label>
         <div className="flex justify-end gap-3 pt-2">
           <button
