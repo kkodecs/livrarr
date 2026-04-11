@@ -7,6 +7,7 @@ const enrichmentColors: Record<EnrichmentStatus, string> = {
   pending: "bg-enrichment-pending/20 text-enrichment-pending",
   failed: "bg-enrichment-failed/20 text-enrichment-failed",
   exhausted: "bg-enrichment-exhausted/20 text-enrichment-exhausted",
+  skipped: "bg-zinc-700/30 text-zinc-400",
 };
 
 export function EnrichmentBadge({ status }: { status: EnrichmentStatus }) {

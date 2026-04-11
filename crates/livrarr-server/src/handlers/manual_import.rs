@@ -245,7 +245,8 @@ pub async fn scan(
                     let dup = existing_works
                         .iter()
                         .find(|w| {
-                            w.ol_key.as_deref() == Some(&result.ol_key)
+                            (result.ol_key.is_some()
+                                && w.ol_key.as_deref() == result.ol_key.as_deref())
                                 || (normalize_for_matching(&w.title)
                                     == normalize_for_matching(&result.title)
                                     && normalize_for_matching(&w.author_name)
@@ -255,7 +256,7 @@ pub async fn scan(
 
                     (
                         Some(OlMatch {
-                            ol_key: result.ol_key,
+                            ol_key: result.ol_key.unwrap_or_default(),
                             title: result.title,
                             author: result.author_name,
                             cover_url: result.cover_url,
@@ -381,13 +382,13 @@ pub async fn search(
         .into_iter()
         .map(|r| {
             let dup = existing_works.iter().find(|w| {
-                w.ol_key.as_deref() == Some(&r.ol_key)
+                (r.ol_key.is_some() && w.ol_key.as_deref() == r.ol_key.as_deref())
                     || (normalize_for_matching(&w.title) == normalize_for_matching(&r.title)
                         && normalize_for_matching(&w.author_name)
                             == normalize_for_matching(&r.author_name))
             });
             OlMatch {
-                ol_key: r.ol_key,
+                ol_key: r.ol_key.unwrap_or_default(),
                 title: r.title,
                 author: r.author_name,
                 cover_url: r.cover_url,
@@ -816,12 +817,14 @@ async fn find_or_create_work(
 
     // Create via the same flow as work::add.
     let add_req = AddWorkRequest {
-        ol_key: item.ol_key.clone(),
+        ol_key: Some(item.ol_key.clone()),
         title: item.title.clone(),
         author_name: item.author.clone(),
         author_ol_key: None, // We don't have this from the scan match; enrichment will fill it.
         year: None,
         cover_url: None,
+        metadata_source: None,
+        language: None,
     };
 
     let resp = super::work::add_work_internal(state, user_id, add_req).await?;
@@ -1144,7 +1147,7 @@ async fn search_ol_batch(state: &AppState, term: &str) -> Result<Vec<WorkSearchR
                 .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
 
             Some(WorkSearchResult {
-                ol_key,
+                ol_key: Some(ol_key),
                 title: title.to_string(),
                 author_name,
                 author_ol_key,
@@ -1153,6 +1156,9 @@ async fn search_ol_batch(state: &AppState, term: &str) -> Result<Vec<WorkSearchR
                 description: None,
                 series_name: None,
                 series_position: None,
+                source: None,
+                source_type: None,
+                language: None,
             })
         })
         .collect();

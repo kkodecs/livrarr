@@ -105,8 +105,10 @@ export const regenerateUserApiKey = (id: number) =>
   apiFetch<ApiKeyResponse>(`/user/${id}/apikey`, { method: "POST" });
 
 // Works
-export const lookupWorks = (term: string) =>
-  apiFetch<WorkSearchResult[]>(`/work/lookup?term=${encodeURIComponent(term)}`);
+export const lookupWorks = (term: string, lang?: string) =>
+  apiFetch<WorkSearchResult[]>(
+    `/work/lookup?term=${encodeURIComponent(term)}${lang ? `&lang=${encodeURIComponent(lang)}` : ""}`,
+  );
 export const addWork = (req: AddWorkRequest) =>
   apiFetch<AddWorkResponse>("/work", {
     method: "POST",

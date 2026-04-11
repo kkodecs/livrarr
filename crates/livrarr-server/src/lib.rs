@@ -272,7 +272,7 @@ pub enum AuthError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkSearchResult {
-    pub ol_key: String,
+    pub ol_key: Option<String>,
     pub title: String,
     pub author_name: String,
     pub author_ol_key: Option<String>,
@@ -283,6 +283,12 @@ pub struct WorkSearchResult {
     pub series_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_position: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 /// Work management operations.
@@ -332,12 +338,16 @@ pub trait WorkApi: Send + Sync {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddWorkRequest {
-    pub ol_key: String,
+    pub ol_key: Option<String>,
     pub title: String,
     pub author_name: String,
     pub author_ol_key: Option<String>,
     pub year: Option<i32>,
     pub cover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -400,6 +410,8 @@ pub struct WorkDetailResponse {
     pub monitored: bool,
     pub added_at: String,
     pub library_items: Vec<LibraryItemResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -838,6 +850,8 @@ pub struct MetadataConfigResponse {
     pub llm_model: Option<String>,
     pub audnexus_url: String,
     pub languages: Vec<String>,
+    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub provider_status: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

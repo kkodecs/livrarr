@@ -18,7 +18,8 @@ export type EnrichmentStatus =
   | "partial"
   | "enriched"
   | "failed"
-  | "exhausted";
+  | "exhausted"
+  | "skipped";
 export type QueueStatus =
   | "downloading"
   | "queued"
@@ -112,7 +113,7 @@ export interface AdminUpdateUserRequest {
 
 // Works
 export interface WorkSearchResult {
-  olKey: string;
+  olKey: string | null;
   title: string;
   authorName: string;
   authorOlKey: string | null;
@@ -121,15 +122,20 @@ export interface WorkSearchResult {
   description: string | null;
   seriesName?: string | null;
   seriesPosition?: number | null;
+  source?: string | null;
+  sourceType?: string | null;
+  language?: string | null;
 }
 
 export interface AddWorkRequest {
-  olKey: string;
+  olKey?: string | null;
   title: string;
   authorName: string;
-  authorOlKey: string | null;
-  year: number | null;
-  coverUrl: string | null;
+  authorOlKey?: string | null;
+  year?: number | null;
+  coverUrl?: string | null;
+  metadataSource?: string | null;
+  language?: string | null;
 }
 
 export interface AddWorkResponse {
@@ -184,6 +190,7 @@ export interface WorkDetailResponse {
   monitored: boolean;
   addedAt: string;
   libraryItems: LibraryItemResponse[];
+  metadataSource?: string | null;
 }
 
 export interface LibraryItemResponse {
@@ -527,15 +534,38 @@ export interface UpdateEmailConfigRequest {
 
 export interface MetadataConfigResponse {
   hardcoverEnabled: boolean;
-  hardcoverApiToken: string | null;
+  hardcoverApiTokenSet: boolean;
   llmEnabled: boolean;
   llmProvider: LlmProvider | null;
   llmEndpoint: string | null;
-  llmApiKey: string | null;
+  llmApiKeySet: boolean;
   llmModel: string | null;
   audnexusUrl: string;
   languages: string[];
+  providerStatus?: Record<string, string>;
 }
+
+export interface LanguageInfo {
+  code: string;
+  englishName: string;
+  providerName: string;
+  providerType: "api" | "llm";
+  requiresLlm: boolean;
+  flag: string;
+}
+
+/** All supported languages with their metadata providers. */
+export const SUPPORTED_LANGUAGES: LanguageInfo[] = [
+  { code: "en", englishName: "English", providerName: "OpenLibrary + Hardcover", providerType: "api", requiresLlm: false, flag: "\u{1F1EC}\u{1F1E7}" },
+  { code: "nl", englishName: "Dutch", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1F3}\u{1F1F1}" },
+  { code: "fr", englishName: "French", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1EB}\u{1F1F7}" },
+  { code: "de", englishName: "German", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1E9}\u{1F1EA}" },
+  { code: "it", englishName: "Italian", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1EE}\u{1F1F9}" },
+  { code: "ja", englishName: "Japanese", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1EF}\u{1F1F5}" },
+  { code: "ko", englishName: "Korean", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1F0}\u{1F1F7}" },
+  { code: "pl", englishName: "Polish", providerName: "lubimyczytac.pl", providerType: "llm", requiresLlm: true, flag: "\u{1F1F5}\u{1F1F1}" },
+  { code: "es", englishName: "Spanish", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1EA}\u{1F1F8}" },
+];
 
 export interface UpdateMetadataConfigRequest {
   hardcoverEnabled?: boolean;

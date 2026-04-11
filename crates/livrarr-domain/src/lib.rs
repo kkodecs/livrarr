@@ -75,6 +75,8 @@ pub enum EnrichmentStatus {
     /// v2.1 — terminal state after 3 retry failures.
     /// Satisfies: IMPL-JOBS-005
     Exhausted,
+    /// Foreign-language work — enrichment intentionally skipped.
+    Skipped,
 }
 
 /// History event types. Append-only.
@@ -350,6 +352,14 @@ pub struct Work {
     pub cover_manual: bool,
     pub monitored: bool,
     pub added_at: DateTime<Utc>,
+    /// Foreign language provider attribution (e.g., "BnF", "lubimyczytac.pl").
+    /// Null for existing English/OL works.
+    #[serde(default)]
+    pub metadata_source: Option<String>,
+    /// Detail page URL for foreign work enrichment (e.g., Goodreads book page).
+    /// Server-side only — never exposed in API responses.
+    #[serde(default)]
+    pub detail_url: Option<String>,
 }
 
 /// Author entity.

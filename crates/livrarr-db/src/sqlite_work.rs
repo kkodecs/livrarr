@@ -130,6 +130,12 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
             .try_get::<bool, _>("monitored")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         added_at: parse_dt(&added_at_str)?,
+        metadata_source: row
+            .try_get("metadata_source")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        detail_url: row
+            .try_get("detail_url")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
     })
 }
 
@@ -140,6 +146,7 @@ fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
         "enriched" => Ok(EnrichmentStatus::Enriched),
         "failed" => Ok(EnrichmentStatus::Failed),
         "exhausted" => Ok(EnrichmentStatus::Exhausted),
+        "skipped" => Ok(EnrichmentStatus::Skipped),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown enrichment status: {s}"),
         }),
@@ -153,6 +160,7 @@ fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
         EnrichmentStatus::Enriched => "enriched",
         EnrichmentStatus::Failed => "failed",
         EnrichmentStatus::Exhausted => "exhausted",
+        EnrichmentStatus::Skipped => "skipped",
     }
 }
 
@@ -205,8 +213,8 @@ impl WorkDb for SqliteDb {
         let now = Utc::now().to_rfc3339();
         let id = sqlx::query(
             "INSERT INTO works (user_id, title, author_name, author_id, ol_key, year, \
-             cover_url, enrichment_status, added_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+             cover_url, enrichment_status, added_at, metadata_source, detail_url, language) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
         )
         .bind(req.user_id)
         .bind(&req.title)
@@ -216,6 +224,9 @@ impl WorkDb for SqliteDb {
         .bind(req.year)
         .bind(&req.cover_url)
         .bind(&now)
+        .bind(&req.metadata_source)
+        .bind(&req.detail_url)
+        .bind(&req.language)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?
