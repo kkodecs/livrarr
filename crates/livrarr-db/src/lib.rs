@@ -509,6 +509,14 @@ pub trait GrabDb: Send + Sync {
         download_id: &str,
     ) -> Result<(), DbError>;
 
+    /// Persist the raw remote content path from the download client.
+    async fn set_grab_content_path(
+        &self,
+        user_id: UserId,
+        id: GrabId,
+        content_path: &str,
+    ) -> Result<(), DbError>;
+
     /// List grabs for a user, paginated, newest first.
     async fn list_grabs_paginated(
         &self,

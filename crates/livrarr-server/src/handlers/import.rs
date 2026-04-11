@@ -42,34 +42,32 @@ pub async fn import_grab(
         .get_download_client(grab.download_client_id)
         .await?;
 
-    // Resolve source path based on client type.
-    let source_path = match &grab.download_id {
-        Some(id) => {
-            let content_path = if client.client_type() == "sabnzbd" {
-                // For SABnzbd: query history for the storage path.
-                fetch_sabnzbd_storage_path(state, &client, id).await?
-            } else {
-                // For qBit: query for content_path by hash.
-                fetch_qbit_content_path(state, &client, id).await?
-            };
-            // Apply remote path mapping.
-            apply_remote_path_mapping(state, &client.host, &content_path).await?
-        }
-        None => {
-            let error = "no download_id — download not confirmed in client".to_string();
-            state
-                .db
-                .update_grab_status(user_id, grab_id, GrabStatus::ImportFailed, Some(&error))
-                .await?;
-            return Ok(ImportGrabResult {
-                final_status: GrabStatus::ImportFailed,
-                imported_count: 0,
-                failed_count: 0,
-                skipped_count: 0,
-                warnings: vec![],
-                error: Some(error),
-            });
-        }
+    // Resolve source path. Use persisted content_path if available (avoids
+    // re-querying the download client, which may have removed the torrent/NZB).
+    let source_path = if let Some(ref remote_path) = grab.content_path {
+        // Re-apply path mapping (user may have fixed mapping config since grab).
+        apply_remote_path_mapping(state, &client.host, remote_path).await?
+    } else if let Some(ref id) = grab.download_id {
+        let content_path = if client.client_type() == "sabnzbd" {
+            fetch_sabnzbd_storage_path(state, &client, id).await?
+        } else {
+            fetch_qbit_content_path(state, &client, id).await?
+        };
+        apply_remote_path_mapping(state, &client.host, &content_path).await?
+    } else {
+        let error = "no download_id or content_path — download not confirmed in client".to_string();
+        state
+            .db
+            .update_grab_status(user_id, grab_id, GrabStatus::ImportFailed, Some(&error))
+            .await?;
+        return Ok(ImportGrabResult {
+            final_status: GrabStatus::ImportFailed,
+            imported_count: 0,
+            failed_count: 0,
+            skipped_count: 0,
+            warnings: vec![],
+            error: Some(error),
+        });
     };
 
     let source = PathBuf::from(&source_path);
@@ -132,7 +130,7 @@ pub async fn import_grab(
 
     let mut imported_count = 0usize;
     let mut failed_count = 0usize;
-    let mut skipped_count = 0usize;
+    let mut skipped_dedup = 0usize; // file exists with matching library_item
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
 
@@ -150,7 +148,7 @@ pub async fn import_grab(
                     media_type,
                     sf.path.display()
                 ));
-                skipped_count += 1;
+                failed_count += 1;
                 continue;
             }
         };
@@ -217,17 +215,48 @@ pub async fn import_grab(
             let relative = target_path
                 .strip_prefix(&root_folder.path)
                 .unwrap_or(&target_path)
-                .trim_start_matches('/');
+                .trim_start_matches('/')
+                .to_string();
             let existing_items = state
                 .db
                 .list_library_items_by_work(user_id, work_id)
                 .await?;
             if existing_items.iter().any(|li| li.path == relative) {
-                skipped_count += 1;
+                skipped_dedup += 1;
                 continue;
             }
-            errors.push(format!("target path already exists: {target_path}"));
-            failed_count += 1;
+            // File exists but no library_item — recovery from prior DB failure.
+            // Validate the file before adopting it.
+            let meta = target.metadata();
+            if meta.as_ref().map_or(true, |m| !m.is_file() || m.len() == 0) {
+                errors.push(format!(
+                    "target exists but is invalid (not a regular file or zero-length): {target_path}"
+                ));
+                failed_count += 1;
+                continue;
+            }
+            let file_size = meta.unwrap().len() as i64;
+            match state
+                .db
+                .create_library_item(CreateLibraryItemDbRequest {
+                    user_id,
+                    work_id,
+                    root_folder_id: root_folder.id,
+                    path: relative,
+                    media_type,
+                    file_size,
+                })
+                .await
+            {
+                Ok(_) => {
+                    imported_count += 1;
+                    warnings.push(format!("recovered existing file: {target_path}"));
+                }
+                Err(e) => {
+                    errors.push(format!("DB recovery failed for {target_path}: {e}"));
+                    failed_count += 1;
+                }
+            }
             continue;
         }
 
@@ -321,11 +350,13 @@ pub async fn import_grab(
         }
     }
 
-    // Determine final status per IMPORT-014.
-    let final_status = if imported_count > 0 && failed_count == 0 {
+    // Determine final status. Dedup-skipped files count as success (crash recovery).
+    let final_status = if failed_count > 0 {
+        GrabStatus::ImportFailed
+    } else if imported_count > 0 || skipped_dedup > 0 {
         GrabStatus::Imported
     } else {
-        GrabStatus::ImportFailed
+        GrabStatus::ImportFailed // nothing importable
     };
 
     let error_msg = if errors.is_empty() {
@@ -367,7 +398,7 @@ pub async fn import_grab(
         final_status,
         imported_count,
         failed_count,
-        skipped_count,
+        skipped_count: skipped_dedup,
         warnings,
         error: error_msg,
     })
@@ -416,6 +447,7 @@ pub async fn import_single_file(
     .map_err(|e| ImportFileError::Failed(format!("spawn error: {e}")))?;
 
     if let Err(e) = copy_result {
+        let _ = std::fs::remove_file(&tmp_target); // clean partial .tmp
         return Err(ImportFileError::Failed(format!(
             "{}: {e}",
             source.display()
@@ -453,8 +485,17 @@ pub async fn import_single_file(
     let tw = tag_warning.is_some();
     let fin_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         if tw {
+            // Tag failed — re-copy source to a temp file, then rename atomically.
             let _ = std::fs::remove_file(&tmp_fin);
-            std::fs::copy(&src2, &final_t).map_err(|e| format!("re-copy failed: {e}"))?;
+            let fallback = tmp_fin.with_extension("fallback.tmp");
+            std::fs::copy(&src2, &fallback).map_err(|e| {
+                let _ = std::fs::remove_file(&fallback);
+                format!("fallback copy failed: {e}")
+            })?;
+            std::fs::rename(&fallback, &final_t).map_err(|e| {
+                let _ = std::fs::remove_file(&fallback);
+                format!("fallback rename failed: {e}")
+            })?;
         } else {
             std::fs::rename(&tmp_fin, &final_t).map_err(|e| format!("rename failed: {e}"))?;
         }
@@ -493,7 +534,7 @@ pub async fn import_single_file(
         })
         .await
         .map_err(|e| {
-            let _ = std::fs::remove_file(&target);
+            // Do NOT delete the file — leave on disk for retry recovery.
             ImportFileError::Failed(format!("DB error: {e}"))
         })?;
 
@@ -609,7 +650,8 @@ async fn import_mp3_batch(
         .map_err(|e| format!("spawn error: {e}"))?;
 
         if let Err(e) = copy_result {
-            // Clean up all .tmps created so far.
+            // Clean up THIS file's partial .tmp + all prior .tmps.
+            let _ = std::fs::remove_file(&tmp_path);
             for tmp in &tmp_paths {
                 let _ = std::fs::remove_file(tmp);
             }
@@ -646,12 +688,22 @@ async fn import_mp3_batch(
     let mut file_placed = vec![false; files.len()];
 
     if tag_failed {
-        // Delete all .tmps, re-copy all sources untagged.
+        // Delete all .tmps, re-copy all sources untagged via atomic fallback.
         for (i, vf) in files.iter().enumerate() {
             let _ = std::fs::remove_file(&tmp_paths[i]);
             let src = vf.source.clone();
             let final_p = PathBuf::from(&target_paths[i]);
-            match tokio::task::spawn_blocking(move || std::fs::copy(&src, &final_p)).await {
+            let fallback_p = PathBuf::from(format!("{}.fallback.tmp", target_paths[i]));
+            match tokio::task::spawn_blocking(move || -> Result<u64, std::io::Error> {
+                let n = std::fs::copy(&src, &fallback_p)?;
+                if let Err(e) = std::fs::rename(&fallback_p, &final_p) {
+                    let _ = std::fs::remove_file(&fallback_p);
+                    return Err(e);
+                }
+                Ok(n)
+            })
+            .await
+            {
                 Ok(Ok(_)) => {
                     file_placed[i] = true;
                 }
@@ -709,8 +761,11 @@ async fn import_mp3_batch(
         {
             Ok(_) => count += 1,
             Err(e) => {
-                warnings.push(format!("DB error for {}: {e}", target_paths[i]));
-                let _ = std::fs::remove_file(&target);
+                // Do NOT delete the file — leave on disk for retry recovery.
+                return Err(format!(
+                    "DB batch insert failed at {}: {e}",
+                    target_paths[i]
+                ));
             }
         }
     }

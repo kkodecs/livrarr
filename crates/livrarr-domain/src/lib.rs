@@ -472,6 +472,8 @@ pub struct Grab {
     pub status: GrabStatus,
     pub import_error: Option<String>,
     pub media_type: Option<MediaType>,
+    /// Raw remote path from download client (pre-path-mapping).
+    pub content_path: Option<String>,
     pub grabbed_at: DateTime<Utc>,
 }
 
