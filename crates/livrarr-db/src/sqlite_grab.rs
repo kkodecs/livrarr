@@ -50,6 +50,9 @@ fn row_to_grab(row: sqlx::sqlite::SqliteRow) -> Result<Grab, DbError> {
                 "audiobook" => Some(livrarr_domain::MediaType::Audiobook),
                 _ => None,
             }),
+        content_path: row
+            .try_get("content_path")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         grabbed_at: parse_dt(&grabbed_at_str)?,
     })
 }
@@ -271,12 +274,29 @@ impl GrabDb for SqliteDb {
         Ok(())
     }
 
+    async fn set_grab_content_path(
+        &self,
+        user_id: UserId,
+        id: GrabId,
+        content_path: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE grabs SET content_path = ? WHERE id = ? AND user_id = ?")
+            .bind(content_path)
+            .bind(id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        Ok(())
+    }
+
     async fn try_set_importing(&self, user_id: UserId, id: GrabId) -> Result<bool, DbError> {
-        // Only transition from sent/confirmed — excluding 'importing' prevents
-        // two workers from both acquiring the same grab concurrently.
+        // Transition from sent/confirmed/importFailed. Excluding 'importing'
+        // prevents two workers from both acquiring the same grab concurrently.
+        // Including 'importFailed' enables retry of previously failed imports.
         let result = sqlx::query(
             "UPDATE grabs SET status = 'importing', import_error = NULL \
-             WHERE id = ? AND user_id = ? AND status IN ('sent', 'confirmed')",
+             WHERE id = ? AND user_id = ? AND status IN ('sent', 'confirmed', 'importFailed')",
         )
         .bind(id)
         .bind(user_id)

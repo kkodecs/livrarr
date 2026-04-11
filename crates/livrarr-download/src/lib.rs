@@ -181,6 +181,7 @@ impl Default for GrabResult {
                 status: GrabStatus::Sent,
                 import_error: None,
                 media_type: None,
+                content_path: None,
                 grabbed_at: chrono::Utc::now(),
             },
             status: GrabStatus::Sent,
