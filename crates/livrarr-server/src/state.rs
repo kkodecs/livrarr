@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,7 @@ pub struct AppState {
     pub provider_health: Arc<ProviderHealthState>,
     pub cover_proxy_cache: Arc<crate::handlers::coverproxy::CoverProxyCache>,
     pub detail_url_cache: Arc<DetailUrlCache>,
+    pub log_buffer: Arc<LogBuffer>,
 }
 
 /// In-memory provider error tracking with 1-hour TTL.
@@ -140,5 +141,45 @@ impl DetailUrlCache {
                 None
             }
         })
+    }
+}
+
+// =============================================================================
+// Log Buffer — in-memory ring buffer for recent log lines
+// =============================================================================
+
+const MAX_LOG_LINES: usize = 200;
+
+/// Thread-safe ring buffer that stores recent log lines for the help page.
+pub struct LogBuffer {
+    lines: std::sync::Mutex<VecDeque<String>>,
+}
+
+impl Default for LogBuffer {
+    fn default() -> Self {
+        Self {
+            lines: std::sync::Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)),
+        }
+    }
+}
+
+impl LogBuffer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a log line. Drops oldest if at capacity.
+    pub fn push(&self, line: String) {
+        let mut buf = self.lines.lock().unwrap();
+        if buf.len() >= MAX_LOG_LINES {
+            buf.pop_front();
+        }
+        buf.push_back(line);
+    }
+
+    /// Get the last `n` log lines.
+    pub fn tail(&self, n: usize) -> Vec<String> {
+        let buf = self.lines.lock().unwrap();
+        buf.iter().rev().take(n).rev().cloned().collect()
     }
 }

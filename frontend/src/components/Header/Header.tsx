@@ -9,7 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getMetadataConfig } from "@/api";
 import { SUPPORTED_LANGUAGES } from "@/types/api";
 
-export function Header({ onStartTour }: { onStartTour?: () => void }) {
+export function Header() {
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const user = useAuthStore((s) => s.user);
   const logoutAction = useAuthStore((s) => s.logoutAction);
@@ -128,18 +128,13 @@ export function Header({ onStartTour }: { onStartTour?: () => void }) {
       </form>
 
       <div className="flex items-center gap-2">
-        {onStartTour && (
-          <button
-            onClick={() => {
-              navigate("/");
-              setTimeout(onStartTour, 100);
-            }}
-            className="rounded p-1.5 text-zinc-400 hover:bg-surface-hover hover:text-zinc-100"
-            title="Setup Guide"
-          >
-            <HelpCircle size={18} />
-          </button>
-        )}
+        <button
+          onClick={() => navigate("/help")}
+          className="rounded p-1.5 text-zinc-400 hover:bg-surface-hover hover:text-zinc-100"
+          title="Help"
+        >
+          <HelpCircle size={18} />
+        </button>
         <NotificationBell />
         <DropdownMenu.Root>
           <DropdownMenu.Trigger className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-zinc-400 hover:bg-surface-hover hover:text-zinc-100">

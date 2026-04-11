@@ -388,8 +388,8 @@ export function Sidebar() {
           target="_blank"
           rel="noopener noreferrer"
           className={cn(
-            "text-zinc-400 hover:text-zinc-200 transition-colors",
-            collapsed ? "text-[10px]" : "block px-2 py-1 text-xs",
+            "text-brand hover:text-brand/80 transition-colors text-center",
+            collapsed ? "text-[9px]" : "block py-1 text-[11px]",
           )}
           title={`livrarr:${currentVersion ?? "..."}`}
         >

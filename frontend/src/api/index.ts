@@ -364,6 +364,8 @@ export const updateMetadataConfig = (req: UpdateMetadataConfigRequest) =>
 // System
 export const getHealth = () => apiFetch<HealthCheckResult[]>("/health");
 export const getSystemStatus = () => apiFetch<SystemStatus>("/system/status");
+export const getLogTail = (lines = 30) =>
+  apiFetch<string[]>(`/system/logs/tail?lines=${lines}`);
 
 // Library Files
 export const listLibraryFiles = () =>

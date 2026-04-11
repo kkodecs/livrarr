@@ -48,6 +48,7 @@ const UsersPage = lazy(() => import("@/pages/settings/users/UsersPage"));
 // System (lazy)
 const StatusPage = lazy(() => import("@/pages/system/status/StatusPage"));
 const HealthPage = lazy(() => import("@/pages/system/health/HealthPage"));
+const HelpPage = lazy(() => import("@/pages/help/HelpPage"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -317,6 +318,16 @@ export function App() {
               <Route
                 path="system/logs"
                 element={<ComingSoonPage title="Logs" />}
+              />
+
+              {/* Help */}
+              <Route
+                path="help"
+                element={
+                  <LazyPage>
+                    <HelpPage />
+                  </LazyPage>
+                }
               />
 
               {/* Greyed-out placeholders */}
