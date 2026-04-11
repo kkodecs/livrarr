@@ -187,6 +187,7 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         // System
         .route("/health", get(handlers::system::health))
         .route("/system/status", get(handlers::system::status))
+        .route("/system/logs/tail", get(handlers::system::log_tail))
         // Filesystem browse
         .route("/filesystem", get(handlers::filesystem::browse))
         // Manual import
