@@ -19,6 +19,13 @@ export function AppLayout() {
     navigate("/settings/metadata");
   };
 
+  // Auto-start tour on first visit after setup
+  useEffect(() => {
+    if (!tour.hasCompleted && !tour.running) {
+      setTimeout(handleStartTour, 500);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Listen for tour start from help page
   useEffect(() => {
     const handler = () => {

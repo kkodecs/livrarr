@@ -8,9 +8,6 @@ import {
   Bot,
   ExternalLink,
   BookOpen,
-  Info,
-  ChevronDown,
-  ChevronRight,
 } from "lucide-react";
 import { getSystemStatus, getLogTail } from "@/api";
 import type { SystemStatus } from "@/types/api";
@@ -103,7 +100,6 @@ export default function HelpPage() {
   });
 
   const [promptText, setPromptText] = useState<string | null>(null);
-  const [aboutOpen, setAboutOpen] = useState(false);
 
   // Build prompt once data loads, but only if user hasn't edited yet
   const defaultPrompt = buildPrompt(status, logs ?? []);
@@ -231,69 +227,6 @@ export default function HelpPage() {
         </div>
       </section>
 
-      {/* About */}
-      <section className="rounded-lg border border-border bg-surface">
-        <button
-          onClick={() => setAboutOpen((o) => !o)}
-          className="flex w-full items-center gap-3 p-5 text-left"
-        >
-          <Info size={20} className="text-brand shrink-0" />
-          <h2 className="flex-1 text-lg font-semibold text-zinc-100">
-            About Livrarr
-          </h2>
-          {aboutOpen ? (
-            <ChevronDown size={16} className="text-zinc-500" />
-          ) : (
-            <ChevronRight size={16} className="text-zinc-500" />
-          )}
-        </button>
-        {aboutOpen && (
-          <div className="space-y-3 text-sm text-zinc-400 leading-relaxed px-5 pb-5 pl-12">
-            <p>
-              Livrarr (from <em>livre</em>, French for "book") is a self-hosted
-              ebook and audiobook library manager built for the Servarr
-              ecosystem. It automates the entire workflow from
-              searching for books to organizing tagged files in your library,
-              working alongside tools like Prowlarr, qBittorrent, SABnzbd,
-              Calibre-Web Automated, and Audiobookshelf.
-            </p>
-            <p>
-              The project manages both ebooks and audiobooks in a single
-              application — users search for works, not formats, and grab
-              releases in whichever media type they want. It was born from
-              studying why earlier efforts in this space struggled. A detailed
-              post-mortem of Readarr's architecture informed every design
-              decision — from the works-first data model (books, not authors,
-              are the primary entity) to the multi-user isolation that's built
-              in from day one rather than retrofitted.
-            </p>
-            <p>
-              Livrarr is built entirely with AI-assisted development. Not a
-              single line of code was written by hand. The backend is
-              approximately 25,000 lines of Rust across 10 crates; the frontend
-              is React/TypeScript. The entire codebase was generated through a
-              rigorous pipeline: detailed specification, cross-family adversarial
-              review (Claude, Gemini, and GPT each reviewing each other's blind
-              spots), intermediate representation (typed Rust signatures that
-              constrain the generation space), behavioral tests written before
-              implementation, and Rust's own type system as a final reviewer.
-            </p>
-            <p>
-              When code generation is cheap, the specification becomes the
-              critical input — not the hand-written code. Rust was chosen for the
-              same reason: runtime performance and compile-time safety matter
-              more when the cost of writing code approaches zero.
-            </p>
-            <p>
-              Our sincere thanks to the user community for your support and
-              feedback. You make this project better.
-            </p>
-            <p className="italic">
-              — The Livrarr Dev Team, April 11, 2026
-            </p>
-          </div>
-        )}
-      </section>
     </div>
   );
 }
