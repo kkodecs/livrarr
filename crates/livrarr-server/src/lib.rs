@@ -1078,6 +1078,7 @@ pub struct SystemStatus {
     pub version: String,
     pub os_info: String,
     pub data_directory: String,
+    pub log_file: String,
     pub startup_time: DateTime<Utc>,
 }
 

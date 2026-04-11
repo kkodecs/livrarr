@@ -27,6 +27,35 @@ pub struct AppState {
     pub cover_proxy_cache: Arc<crate::handlers::coverproxy::CoverProxyCache>,
     pub detail_url_cache: Arc<DetailUrlCache>,
     pub log_buffer: Arc<LogBuffer>,
+    pub log_level_handle: Arc<LogLevelHandle>,
+}
+
+/// Handle for dynamically reloading the tracing EnvFilter at runtime.
+pub struct LogLevelHandle {
+    inner: tracing_subscriber::reload::Handle<
+        tracing_subscriber::EnvFilter,
+        tracing_subscriber::Registry,
+    >,
+}
+
+impl LogLevelHandle {
+    pub fn new(
+        handle: tracing_subscriber::reload::Handle<
+            tracing_subscriber::EnvFilter,
+            tracing_subscriber::Registry,
+        >,
+    ) -> Self {
+        Self { inner: handle }
+    }
+
+    pub fn set_level(&self, level: &str) -> Result<(), String> {
+        let filter =
+            tracing_subscriber::EnvFilter::try_new(format!("livrarr={level},tower_http={level}"))
+                .map_err(|e| format!("invalid log level: {e}"))?;
+        self.inner
+            .reload(filter)
+            .map_err(|e| format!("reload failed: {e}"))
+    }
 }
 
 /// In-memory provider error tracking with 1-hour TTL.

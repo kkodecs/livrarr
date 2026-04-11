@@ -7,7 +7,10 @@ use tracing::{info, warn};
 use crate::middleware::RequireAdmin;
 use crate::state::AppState;
 use crate::{AddWorkRequest, ApiError, WorkSearchResult};
-use livrarr_db::{ConfigDb, LibraryItemDb, RootFolderDb, WorkDb};
+use livrarr_db::{
+    ConfigDb, CreateHistoryEventDbRequest, HistoryDb, LibraryItemDb, RootFolderDb, WorkDb,
+};
+use livrarr_domain::EventType;
 use livrarr_domain::{classify_file, normalize_for_matching, MediaType};
 
 // ---------------------------------------------------------------------------
@@ -710,6 +713,8 @@ async fn import_single_item(
                     "manual import: shared file {} for work {} ({})",
                     item.path, work_id, work.title
                 );
+                log_manual_import_history(state, user_id, work_id, &item.path, &work.title, None)
+                    .await;
                 return ImportResult {
                     path: item.path.clone(),
                     status: ImportStatus::Imported,
@@ -751,6 +756,7 @@ async fn import_single_item(
                 "manual import: imported {} for work {} ({})",
                 item.path, work_id, work.title
             );
+            log_manual_import_history(state, user_id, work_id, &item.path, &work.title, None).await;
             ImportResult {
                 path: item.path.clone(),
                 status: ImportStatus::Imported,
@@ -763,6 +769,7 @@ async fn import_single_item(
                 "manual import: imported {} for work {} with warning: {w}",
                 item.path, work_id
             );
+            log_manual_import_history(state, user_id, work_id, &item.path, &work.title, None).await;
             ImportResult {
                 path: item.path.clone(),
                 status: ImportStatus::Imported,
@@ -775,6 +782,8 @@ async fn import_single_item(
                 "manual import: failed {} for work {}: {e}",
                 item.path, work_id
             );
+            log_manual_import_history(state, user_id, work_id, &item.path, &work.title, Some(&e))
+                .await;
             ImportResult {
                 path: item.path.clone(),
                 status: ImportStatus::Failed,
@@ -801,6 +810,38 @@ fn find_existing_work<'a>(
                     && normalize_for_matching(&w.author_name) == normalize_for_matching(author)
             })
         })
+}
+
+async fn log_manual_import_history(
+    state: &AppState,
+    user_id: i64,
+    work_id: i64,
+    path: &str,
+    title: &str,
+    error: Option<&str>,
+) {
+    let event_type = if error.is_some() {
+        EventType::ImportFailed
+    } else {
+        EventType::Imported
+    };
+    if let Err(e) = state
+        .db
+        .create_history_event(CreateHistoryEventDbRequest {
+            user_id,
+            work_id: Some(work_id),
+            event_type,
+            data: serde_json::json!({
+                "source": "manual_import",
+                "path": path,
+                "title": title,
+                "error": error,
+            }),
+        })
+        .await
+    {
+        tracing::warn!("create_history_event failed: {e}");
+    }
 }
 
 /// Find an existing work by ol_key (with fallback), or create a new one via the same flow as work::add.

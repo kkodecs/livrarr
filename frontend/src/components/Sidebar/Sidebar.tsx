@@ -14,7 +14,6 @@ import {
   Palette,
   UserCog,
   Activity,
-  Heart,
   Calendar,
   AlertCircle,
   LayoutList,
@@ -27,6 +26,7 @@ import {
   ChevronRight,
   Bookmark,
   ArrowUpCircle,
+  Info,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useAuthStore } from "@/stores/auth";
@@ -194,12 +194,15 @@ const navGroups: NavGroup[] = [
     label: "System",
     children: [
       { label: "Status", path: "/system/status", icon: <Activity size={18} /> },
-      { label: "Health", path: "/system/health", icon: <Heart size={18} /> },
       {
         label: "Logs",
         path: "/system/logs",
         icon: <ScrollText size={18} />,
-        greyed: true,
+      },
+      {
+        label: "About Livrarr",
+        path: "/system/about",
+        icon: <Info size={18} />,
       },
     ],
   },

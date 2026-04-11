@@ -25,6 +25,7 @@ futures = "0.3"
 libc = "0.2"
 toml = "1.1"
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
 argon2 = { version = "0.5", features = ["std"] }
 getrandom = { version = "0.2", features = ["std"] }

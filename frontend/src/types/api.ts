@@ -590,6 +590,7 @@ export interface SystemStatus {
   version: string;
   osInfo: string;
   dataDirectory: string;
+  logFile: string;
   startupTime: string;
 }
 

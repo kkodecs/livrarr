@@ -27,10 +27,13 @@ pub async fn status(
 ) -> Result<Json<SystemStatus>, ApiError> {
     let os_info = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
 
+    let log_file = state.data_dir.join("logs").join("livrarr.txt");
+
     Ok(Json(SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         os_info,
         data_directory: state.data_dir.display().to_string(),
+        log_file: log_file.display().to_string(),
         startup_time: state.startup_time,
     }))
 }
@@ -53,4 +56,28 @@ pub async fn log_tail(
 ) -> Result<Json<Vec<String>>, ApiError> {
     let n = q.lines.min(200);
     Ok(Json(state.log_buffer.tail(n)))
+}
+
+#[derive(Deserialize)]
+pub struct SetLogLevelRequest {
+    pub level: String,
+}
+
+/// PUT /api/v1/system/logs/level
+pub async fn set_log_level(
+    State(state): State<AppState>,
+    RequireAdmin(_auth): RequireAdmin,
+    Json(req): Json<SetLogLevelRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let level = req.level.to_lowercase();
+    match level.as_str() {
+        "trace" | "debug" | "info" | "warn" | "error" => {}
+        _ => return Err(ApiError::BadRequest(format!("invalid log level: {level}"))),
+    }
+    tracing::warn!("log level changing to {level}");
+    state
+        .log_level_handle
+        .set_level(&level)
+        .map_err(|e| ApiError::BadRequest(e))?;
+    Ok(Json(serde_json::json!({ "level": level })))
 }

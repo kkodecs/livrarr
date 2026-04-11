@@ -51,7 +51,7 @@ async fn main() {
 
     // Step 3: Initialize tracing.
     let log_buffer = Arc::new(livrarr_server::state::LogBuffer::new());
-    init_tracing(&config.log, log_buffer.clone());
+    let log_level_handle = init_tracing(&config.log, log_buffer.clone(), &data_dir);
 
     info!("Livrarr starting — data directory: {}", data_dir.display());
 
@@ -162,6 +162,7 @@ async fn main() {
         cover_proxy_cache: Arc::new(livrarr_server::handlers::coverproxy::CoverProxyCache::new()),
         detail_url_cache: Arc::new(livrarr_server::state::DetailUrlCache::new()),
         log_buffer,
+        log_level_handle,
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
@@ -235,7 +236,8 @@ fn load_config(data_dir: &std::path::Path) -> Result<AppConfig, String> {
 fn init_tracing(
     log: &livrarr_server::config::LogConfig,
     log_buffer: Arc<livrarr_server::state::LogBuffer>,
-) {
+    data_dir: &std::path::Path,
+) -> Arc<livrarr_server::state::LogLevelHandle> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
@@ -251,14 +253,31 @@ fn init_tracing(
     let filter = EnvFilter::try_new(format!("livrarr={level},tower_http={level}"))
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
+    let (filter, reload_handle) = tracing_subscriber::reload::Layer::new(filter);
+
+    // Console output
     let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+
+    // In-memory ring buffer for UI
     let buf_layer = LogBufferLayer(log_buffer);
+
+    // File output: {data_dir}/logs/livrarr.txt (Servarr convention)
+    let log_dir = data_dir.join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+    let file_appender = tracing_appender::rolling::never(&log_dir, "livrarr.txt");
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(file_appender);
 
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt_layer)
+        .with(file_layer)
         .with(buf_layer)
         .init();
+
+    Arc::new(livrarr_server::state::LogLevelHandle::new(reload_handle))
 }
 
 /// Tracing layer that captures formatted log lines into a shared ring buffer.
