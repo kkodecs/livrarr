@@ -26,11 +26,13 @@ import {
   ChevronDown,
   ChevronRight,
   Bookmark,
+  ArrowUpCircle,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useAuthStore } from "@/stores/auth";
 import { useUIStore } from "@/stores/ui";
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
+import { getSystemStatus } from "@/api";
 
 interface NavItem {
   label: string;
@@ -303,8 +305,39 @@ function SidebarItem({
   );
 }
 
+const REPO_URL = "https://github.com/kkodecs/livrarr";
+const RELEASES_API = "https://api.github.com/repos/kkodecs/livrarr/releases/latest";
+
+function useVersionCheck() {
+  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [latestUrl, setLatestUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    getSystemStatus().then((s) => setCurrentVersion(s.version)).catch(() => {});
+
+    fetch(RELEASES_API)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.tag_name) {
+          // Strip leading "v" if present (e.g. "v0.1.0-alpha3" → "0.1.0-alpha3")
+          setLatestVersion(data.tag_name.replace(/^v/, ""));
+          setLatestUrl(data.html_url);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const hasUpdate =
+    currentVersion && latestVersion && latestVersion !== currentVersion;
+
+  return { currentVersion, latestVersion, latestUrl, hasUpdate };
+}
+
 export function Sidebar() {
   const collapsed = useUIStore((s) => s.sidebarCollapsed);
+  const { currentVersion, latestVersion, latestUrl, hasUpdate } =
+    useVersionCheck();
 
   return (
     <aside
@@ -318,6 +351,51 @@ export function Sidebar() {
           <SidebarGroup key={group.label} group={group} />
         ))}
       </nav>
+
+      {/* Version footer */}
+      <div
+        className={cn(
+          "border-t border-border p-2",
+          collapsed && "flex flex-col items-center",
+        )}
+      >
+        {hasUpdate && !collapsed && (
+          <a
+            href={latestUrl ?? `${REPO_URL}/releases`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 rounded px-2 py-1.5 mb-1 text-xs font-medium bg-brand/15 text-brand hover:bg-brand/25 transition-colors"
+          >
+            <ArrowUpCircle size={14} className="shrink-0" />
+            <span>
+              Update: livrarr:{latestVersion}
+            </span>
+          </a>
+        )}
+        {hasUpdate && collapsed && (
+          <a
+            href={latestUrl ?? `${REPO_URL}/releases`}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`Update available: livrarr:${latestVersion}`}
+            className="flex items-center justify-center rounded p-1.5 mb-1 text-brand hover:bg-brand/25 transition-colors"
+          >
+            <ArrowUpCircle size={16} />
+          </a>
+        )}
+        <a
+          href={REPO_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={cn(
+            "text-zinc-600 hover:text-zinc-400 transition-colors",
+            collapsed ? "text-[10px]" : "block px-2 py-1 text-xs",
+          )}
+          title={`livrarr:${currentVersion ?? "..."}`}
+        >
+          {collapsed ? "v" + (currentVersion ?? "…") : `livrarr:${currentVersion ?? "..."}`}
+        </a>
+      </div>
     </aside>
   );
 }
