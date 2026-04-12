@@ -107,90 +107,156 @@ pub async fn lookup(
         )));
     }
 
-    // Non-English: route through provider registry.
+    // Non-English: direct Goodreads search with regex parsing.
     if lang != "en" {
-        if !registry.has_provider(lang) {
-            return Err(ApiError::BadRequest(format!(
-                "language not enabled: {lang}"
-            )));
-        }
-        let provider_name = registry.provider_name(lang).unwrap_or(lang).to_string();
-        match registry.search(lang, &term).await {
-            Some(Ok(results)) => {
-                state.provider_health.clear_error(&provider_name).await;
-                // Cache detail URLs server-side before converting to API response.
-                // The frontend never sees Goodreads URLs — the cache bridges search → add.
-                for r in &results {
-                    if let Some(ref url) = r.detail_url {
-                        let author = r.author_name.as_deref().unwrap_or("");
-                        let key = crate::state::DetailUrlCache::cache_key(&r.title, author);
-                        state.detail_url_cache.put(key, url.clone()).await;
-                    }
-                }
-                let mut api_results: Vec<WorkSearchResult> = results
-                    .into_iter()
-                    .map(|r| WorkSearchResult {
-                        ol_key: None,
-                        title: r.title,
-                        author_name: r.author_name.unwrap_or_default(),
-                        author_ol_key: None,
-                        year: r.year,
-                        // Cover proxy disabled for search thumbnails — Goodreads and
-                        // lubimyczytac serve covers directly to browsers. Enrichment
-                        // covers use the proxy (high-res from Goodreads CDN).
-                        cover_url: r.cover_url,
-                        description: None,
-                        series_name: None,
-                        series_position: None,
-                        source: Some(r.source),
-                        source_type: Some(r.source_type),
-                        language: Some(r.language),
-                    })
-                    .collect();
-                // Clean with LLM if configured — dedup, remove academic papers,
-                // fix author strings, extract series info.
-                if api_results.len() > 1 {
-                    let cfg = state.db.get_metadata_config().await.ok();
-                    if let Some(cleaned) = llm_clean_search_results(
-                        &state.http_client,
-                        cfg.as_ref(),
-                        &term,
-                        &api_results,
-                        true,
-                    )
-                    .await
-                    {
-                        api_results = cleaned;
-                    }
-                }
-                return Ok(Json(api_results));
-            }
-            Some(Err(e)) => {
-                use livrarr_metadata::MetadataError;
-                // Only set "Not Responding" for HTTP/network failures and anti-bot.
-                // Malformed data, unsupported ops, and config issues don't indicate provider down.
-                match &e {
-                    MetadataError::RequestFailed(_)
-                    | MetadataError::Timeout(_)
-                    | MetadataError::RateLimited
-                    | MetadataError::AntiBotChallenge => {
-                        state
-                            .provider_health
-                            .set_error(&provider_name, e.to_string())
-                            .await;
-                    }
-                    _ => {
-                        tracing::warn!(provider = %provider_name, error = %e, "provider error (not marking as down)");
-                    }
-                }
+        let lang_owned = lang.to_string();
+        drop(registry);
+
+        // Rate limit outbound Goodreads requests.
+        state.goodreads_rate_limiter.acquire().await;
+
+        let search_url = format!(
+            "https://www.goodreads.com/search?q={}",
+            urlencoding::encode(&term)
+        );
+
+        let fetch_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            state
+                .http_client
+                .get(&search_url)
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                )
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .send(),
+        )
+        .await;
+
+        let response = match fetch_result {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                state
+                    .provider_health
+                    .set_error("goodreads", format!("HTTP error: {e}"))
+                    .await;
+                tracing::warn!("Goodreads search fetch failed: {e}");
                 return Ok(Json(vec![]));
             }
-            None => {
-                return Err(ApiError::BadRequest(format!(
-                    "no provider for language: {lang}"
-                )));
+            Err(_) => {
+                state
+                    .provider_health
+                    .set_error("goodreads", "timeout".into())
+                    .await;
+                tracing::warn!("Goodreads search fetch timed out");
+                return Ok(Json(vec![]));
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            state
+                .provider_health
+                .set_error("goodreads", format!("HTTP {status}"))
+                .await;
+            tracing::warn!(%status, "Goodreads search returned non-success status");
+            return Ok(Json(vec![]));
+        }
+
+        let raw_html = match response.text().await {
+            Ok(html) => html,
+            Err(e) => {
+                tracing::warn!("Goodreads search body read failed: {e}");
+                return Ok(Json(vec![]));
+            }
+        };
+
+        // Anti-bot detection — error, no fallback.
+        if livrarr_metadata::llm_scraper::is_anti_bot_page(&raw_html) {
+            state
+                .provider_health
+                .set_error("goodreads", "anti-bot challenge detected".into())
+                .await;
+            tracing::warn!("Goodreads search: anti-bot page detected");
+            return Ok(Json(vec![]));
+        }
+
+        state.provider_health.clear_error("goodreads").await;
+
+        // Direct regex parsing of search results.
+        let parsed = livrarr_metadata::goodreads::parse_search_html(&raw_html);
+        let raw_count = parsed.len();
+
+        // Cache detail URLs server-side and convert to API results.
+        for r in &parsed {
+            let author = r.author.as_deref().unwrap_or("");
+            let key = crate::state::DetailUrlCache::cache_key(&r.title, author);
+            // Prepend base URL for relative paths.
+            let full_url = if r.detail_url.starts_with('/') {
+                format!("https://www.goodreads.com{}", r.detail_url)
+            } else {
+                r.detail_url.clone()
+            };
+            if livrarr_metadata::goodreads::validate_detail_url(&full_url) {
+                state.detail_url_cache.put(key, full_url).await;
             }
         }
+
+        let mut api_results: Vec<WorkSearchResult> = parsed
+            .into_iter()
+            .map(|r| WorkSearchResult {
+                ol_key: None,
+                title: r.title,
+                author_name: r.author.unwrap_or_default(),
+                author_ol_key: None,
+                year: r.year,
+                cover_url: r.cover_url,
+                description: None,
+                series_name: None,
+                series_position: None,
+                source: Some("Goodreads".to_string()),
+                source_type: Some("goodreads".to_string()),
+                language: Some(lang_owned.clone()),
+            })
+            .collect();
+
+        // If regex returned 0 valid results but we got HTTP 200, try LLM fallback.
+        if api_results.is_empty() && raw_count == 0 {
+            tracing::info!("Goodreads regex returned 0 results, attempting LLM fallback");
+            let cfg = state.db.get_metadata_config().await.ok();
+            if let Some(cleaned) = llm_clean_search_results(
+                &state.http_client,
+                cfg.as_ref(),
+                &term,
+                &api_results,
+                true,
+            )
+            .await
+            {
+                api_results = cleaned;
+            }
+        }
+
+        // Clean with LLM if configured — dedup, remove academic papers,
+        // fix author strings, extract series info.
+        if api_results.len() > 1 {
+            let cfg = state.db.get_metadata_config().await.ok();
+            if let Some(cleaned) = llm_clean_search_results(
+                &state.http_client,
+                cfg.as_ref(),
+                &term,
+                &api_results,
+                true,
+            )
+            .await
+            {
+                api_results = cleaned;
+            }
+        }
+
+        return Ok(Json(api_results));
     }
     drop(registry);
 

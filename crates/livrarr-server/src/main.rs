@@ -168,6 +168,7 @@ async fn main() {
         provider_health: Arc::new(ProviderHealthState::new()),
         cover_proxy_cache: Arc::new(livrarr_server::handlers::coverproxy::CoverProxyCache::new()),
         detail_url_cache: Arc::new(livrarr_server::state::DetailUrlCache::new()),
+        goodreads_rate_limiter: Arc::new(livrarr_server::state::GoodreadsRateLimiter::new()),
         log_buffer,
         log_level_handle,
         refresh_in_progress: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),

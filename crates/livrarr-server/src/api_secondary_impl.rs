@@ -632,6 +632,7 @@ impl SystemApi for SecondaryApiImpl {
             data_directory: self.data_dir.clone(),
             log_file: format!("{}/logs/livrarr.txt", self.data_dir),
             startup_time: Utc::now(),
+            log_level: "info".into(),
         })
     }
 }

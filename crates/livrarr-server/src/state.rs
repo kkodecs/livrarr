@@ -29,6 +29,7 @@ pub struct AppState {
     pub provider_health: Arc<ProviderHealthState>,
     pub cover_proxy_cache: Arc<crate::handlers::coverproxy::CoverProxyCache>,
     pub detail_url_cache: Arc<DetailUrlCache>,
+    pub goodreads_rate_limiter: Arc<GoodreadsRateLimiter>,
     pub log_buffer: Arc<LogBuffer>,
     pub log_level_handle: Arc<LogLevelHandle>,
     pub refresh_in_progress: Arc<std::sync::Mutex<HashSet<livrarr_db::UserId>>>,
@@ -136,6 +137,62 @@ impl ProviderHealthState {
 }
 
 // =============================================================================
+// Goodreads Rate Limiter — async-safe token bucket for outbound requests
+// =============================================================================
+
+/// Outbound rate limiter for Goodreads requests.
+/// Token bucket: 1 token/second, burst of 5.
+pub struct GoodreadsRateLimiter {
+    state: tokio::sync::Mutex<RateLimiterInner>,
+}
+
+struct RateLimiterInner {
+    tokens: f64,
+    last_refill: std::time::Instant,
+}
+
+const GR_RATE: f64 = 1.0; // 1 token per second
+const GR_BURST: f64 = 5.0; // max burst of 5
+
+impl Default for GoodreadsRateLimiter {
+    fn default() -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(RateLimiterInner {
+                tokens: GR_BURST,
+                last_refill: std::time::Instant::now(),
+            }),
+        }
+    }
+}
+
+impl GoodreadsRateLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Acquire a token, waiting if necessary. Never blocks the tokio runtime.
+    pub async fn acquire(&self) {
+        loop {
+            let mut inner = self.state.lock().await;
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(inner.last_refill).as_secs_f64();
+            inner.tokens = (inner.tokens + elapsed * GR_RATE).min(GR_BURST);
+            inner.last_refill = now;
+
+            if inner.tokens >= 1.0 {
+                inner.tokens -= 1.0;
+                return;
+            }
+
+            let wait = (1.0 - inner.tokens) / GR_RATE;
+            drop(inner);
+            tracing::debug!(wait_secs = %format!("{wait:.2}"), "Goodreads rate limiter: waiting");
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+        }
+    }
+}
+
+// =============================================================================
 // Detail URL Cache — maps search results to their detail page URLs server-side.
 // Goodreads URLs never reach the frontend; this cache bridges search → add.
 // =============================================================================
@@ -233,5 +290,44 @@ impl LogBuffer {
     pub fn tail(&self, n: usize) -> Vec<String> {
         let buf = self.lines.lock().unwrap();
         buf.iter().rev().take(n).rev().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rate_limiter_allows_burst() {
+        let limiter = GoodreadsRateLimiter::new();
+
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            limiter.acquire().await;
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 100,
+            "Burst of 5 took {}ms, expected <100ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_throttles_after_burst() {
+        let limiter = GoodreadsRateLimiter::new();
+
+        for _ in 0..5 {
+            limiter.acquire().await;
+        }
+
+        let start = std::time::Instant::now();
+        limiter.acquire().await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() >= 800,
+            "6th acquire took only {}ms, expected >=800ms",
+            elapsed.as_millis()
+        );
     }
 }
