@@ -14,6 +14,8 @@ import {
   Pencil,
   Trash2,
   CheckSquare,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import { listWorks, refreshAllWorks, deleteWork, refreshWork } from "@/api";
 import { sortWorks } from "@/utils/works";
@@ -61,6 +63,8 @@ export function WorksPage() {
   const worksSort = useUIStore((s) => s.worksSort) as WorkSortField;
   const worksSortDir = useUIStore((s) => s.worksSortDir);
   const setWorksSort = useUIStore((s) => s.setWorksSort);
+  const posterZoom = useUIStore((s) => s.posterZoom);
+  const setPosterZoom = useUIStore((s) => s.setPosterZoom);
 
   const [mediaTypeFilter, setMediaTypeFilter] = useState<MediaType | "">("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -241,6 +245,20 @@ export function WorksPage() {
               className="h-8 rounded border border-border bg-zinc-800 pl-8 pr-3 text-sm text-zinc-100 placeholder:text-muted focus:border-brand focus:outline-none"
             />
           </div>
+          {worksView === "poster" && (
+            <div className="flex items-center gap-1.5">
+              <ZoomOut size={14} className="text-muted" />
+              <input
+                type="range"
+                min={2}
+                max={8}
+                value={posterZoom}
+                onChange={(e) => setPosterZoom(Number(e.target.value))}
+                className="h-1 w-20 cursor-pointer appearance-none rounded bg-zinc-700 accent-brand"
+              />
+              <ZoomIn size={14} className="text-muted" />
+            </div>
+          )}
           <ViewToggle active={worksView} onChange={setWorksView} />
         </div>
       </PageToolbar>
@@ -346,6 +364,7 @@ export function WorksPage() {
                 editorMode={editorMode}
                 selectedIds={selectedIds}
                 onToggle={toggleSelection}
+                columns={posterZoom}
               />
             )}
             {worksView === "overview" && (
@@ -641,16 +660,18 @@ function PosterView({
   editorMode,
   selectedIds,
   onToggle,
+  columns,
 }: {
   works: WorkDetailResponse[];
   editorMode: boolean;
   selectedIds: Set<number>;
   onToggle: (id: number) => void;
+  columns: number;
 }) {
   const navigate = useNavigate();
 
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+    <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
       {works.map((work) => {
         const isSelected = selectedIds.has(work.id);
 

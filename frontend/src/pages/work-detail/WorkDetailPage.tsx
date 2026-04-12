@@ -225,7 +225,10 @@ function WorkHeader({ work, coverVersion }: { work: WorkDetailResponse; coverVer
         className="h-[300px] w-[200px] flex-shrink-0 rounded-lg object-cover shadow-lg"
       />
       <div className="min-w-0 flex-1">
-        <h1 className="text-2xl font-bold text-zinc-100">{work.title}</h1>
+        <div className="flex items-baseline gap-2">
+          <h1 className="text-2xl font-bold text-zinc-100">{work.title}</h1>
+          <span className="text-xs text-zinc-600">#{work.id}</span>
+        </div>
 
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
           {work.authorId ? (
@@ -480,10 +483,11 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
   });
 
   // Initialize filters from preferences once loaded.
+  // If no preferred formats have results, default to all formats active.
   const ebookPrefs = mmConfig?.preferredEbookFormats ?? ["epub"];
   const audiobookPrefs = mmConfig?.preferredAudiobookFormats ?? ["m4b"];
-  const activeEbookFormats = ebookFormatFilter ?? new Set(ebookPrefs);
-  const activeAudiobookFormats = audiobookFormatFilter ?? new Set(audiobookPrefs);
+  const ebookPrefsSet = new Set(ebookPrefs);
+  const audiobookPrefsSet = new Set(audiobookPrefs);
 
   const allEbookFormats = ["epub", "mobi", "azw3", "pdf", "cbz", "cbr"];
   const allAudiobookFormats = ["m4b", "m4a", "mp3", "flac", "ogg", "wma"];
@@ -550,6 +554,16 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
     const present = detectFormatsInReleases(audiobookReleases, allAudiobookFormats);
     return [...audiobookPrefs.filter((f) => present.includes(f)), ...present.filter((f) => !audiobookPrefs.includes(f))];
   })();
+
+  // Default active formats: preferred if any have results, otherwise all present.
+  const ebookDefault = orderedEbookFormats.some((f) => ebookPrefsSet.has(f))
+    ? new Set(ebookPrefs)
+    : new Set(orderedEbookFormats);
+  const audiobookDefault = orderedAudiobookFormats.some((f) => audiobookPrefsSet.has(f))
+    ? new Set(audiobookPrefs)
+    : new Set(orderedAudiobookFormats);
+  const activeEbookFormats = ebookFormatFilter ?? ebookDefault;
+  const activeAudiobookFormats = audiobookFormatFilter ?? audiobookDefault;
 
   // Filter by selected formats. Detect format from title, then check if it's selected.
   // Releases with no detectable format are always shown.
@@ -714,7 +728,7 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
         </div>
       )}
 
-      {(ebookReleases.length > 0 || uncategorized.length > 0) && (
+      {releases.length > 0 && (
         <section>
           <div className="mb-2 flex items-center gap-3">
             <button
@@ -733,7 +747,9 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
                     className={cn(
                       "flex items-center gap-1 rounded px-1.5 py-0.5 text-xs cursor-pointer",
                       activeEbookFormats.has(fmt)
-                        ? "bg-brand/20 text-brand"
+                        ? ebookPrefsSet.has(fmt)
+                          ? "bg-brand/20 text-brand"
+                          : "bg-amber-500/20 text-amber-400"
                         : "bg-zinc-800 text-zinc-500 hover:text-zinc-400",
                     )}
                   >
@@ -751,13 +767,13 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
           </div>
           {ebooksOpen && (
             sortedEbooks.length > 0 ? renderTable(sortedEbooks) : (
-              <p className="text-sm text-muted py-2">No results match selected formats.</p>
+              <p className="text-sm text-muted py-2">{ebookReleases.length + uncategorized.length === 0 ? "No ebook releases found." : "No results match selected formats."}</p>
             )
           )}
         </section>
       )}
 
-      {audiobookReleases.length > 0 && (
+      {releases.length > 0 && (
         <section>
           <div className="mb-2 flex items-center gap-3">
             <button
@@ -776,7 +792,9 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
                     className={cn(
                       "flex items-center gap-1 rounded px-1.5 py-0.5 text-xs cursor-pointer",
                       activeAudiobookFormats.has(fmt)
-                        ? "bg-brand/20 text-brand"
+                        ? audiobookPrefsSet.has(fmt)
+                          ? "bg-brand/20 text-brand"
+                          : "bg-amber-500/20 text-amber-400"
                         : "bg-zinc-800 text-zinc-500 hover:text-zinc-400",
                     )}
                   >
@@ -794,7 +812,7 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
           </div>
           {audiobooksOpen && (
             sortedAudiobooks.length > 0 ? renderTable(sortedAudiobooks) : (
-              <p className="text-sm text-muted py-2">No results match selected formats.</p>
+              <p className="text-sm text-muted py-2">{audiobookReleases.length === 0 ? "No audiobook releases found." : "No results match selected formats."}</p>
             )
           )}
         </section>

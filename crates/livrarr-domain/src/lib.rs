@@ -117,6 +117,8 @@ pub enum NotificationType {
     /// v2.1 — author monitor received 429 from Open Library.
     /// Satisfies: IMPL-JOBS-004
     RateLimitHit,
+    /// Download complete but file not found locally — likely needs remote path mapping.
+    PathNotFound,
 }
 
 /// Narration type for audiobook metadata.

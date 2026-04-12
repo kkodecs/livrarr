@@ -21,7 +21,11 @@ export default function LogsPage() {
     queryFn: getSystemStatus,
   });
 
-  const [logLevel, setLogLevel] = useState("info");
+  const [logLevel, setLogLevel] = useState(statusData?.logLevel ?? "info");
+  // Sync with server when status loads.
+  useEffect(() => {
+    if (statusData?.logLevel) setLogLevel(statusData.logLevel);
+  }, [statusData?.logLevel]);
   const levelMut = useMutation({
     mutationFn: apiSetLogLevel,
     onSuccess: (data: { level: string }) => {

@@ -1,5 +1,8 @@
 import { HelpTip } from "@/components/HelpTip";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { Joyride, STATUS } from "react-joyride";
+import type { EventData, Controls } from "react-joyride";
+import { useUIStore } from "@/stores/ui";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -247,6 +250,26 @@ export default function MediaManagementPage() {
   const [ebookFormats, setEbookFormats] = useState<string[] | null>(null);
   const [audiobookFormats, setAudiobookFormats] = useState<string[] | null>(null);
 
+  // RPM joyride — triggered from PathNotFound notification link
+  const rpmHighlight = useUIStore((s) => s.rpmHighlight);
+  const setRpmHighlight = useUIStore((s) => s.setRpmHighlight);
+  const [rpmJoyrideRun, setRpmJoyrideRun] = useState(false);
+
+  useEffect(() => {
+    if (rpmHighlight) {
+      const t = setTimeout(() => setRpmJoyrideRun(true), 400);
+      return () => clearTimeout(t);
+    }
+  }, [rpmHighlight]);
+
+  const handleRpmJoyride = (_data: EventData, _controls: Controls) => {
+    const { status } = _data;
+    if (status === STATUS.FINISHED || status === STATUS.SKIPPED) {
+      setRpmJoyrideRun(false);
+      setRpmHighlight(false);
+    }
+  };
+
   const isLoading =
     rootFoldersQ.isLoading ||
     remoteMappingsQ.isLoading ||
@@ -279,6 +302,40 @@ export default function MediaManagementPage() {
 
   return (
     <>
+      {rpmJoyrideRun && (
+        <Joyride
+          steps={[
+            {
+              target: "[data-tour='remote-path-section']",
+              content:
+                "Your download client reported a file that Livrarr couldn't find locally. Add a remote path mapping below to tell Livrarr where to find the file.\n\nNote: Livrarr does not automatically transfer files from the remote server to the local machine. This needs to be set up by the user.",
+              placement: "top",
+              skipBeacon: true,
+            },
+          ]}
+          run={rpmJoyrideRun}
+          onEvent={handleRpmJoyride}
+          locale={{ close: "Got it", last: "Got it" }}
+          options={{
+            primaryColor: "#6366f1",
+            hideOverlay: true,
+            disableFocusTrap: true,
+          }}
+          styles={{
+            tooltip: {
+              borderRadius: 8,
+              padding: 16,
+              backgroundColor: "#27272a",
+              color: "#e4e4e7",
+              zIndex: 10000,
+              whiteSpace: "pre-line",
+            },
+            tooltipContent: {
+              color: "#a1a1aa",
+            },
+          }}
+        />
+      )}
       <PageToolbar>
         <h1 className="text-lg font-semibold text-zinc-100">
           Media Management

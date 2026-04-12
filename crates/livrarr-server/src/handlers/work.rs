@@ -532,7 +532,8 @@ async fn llm_clean_search_results(
         "Clean up this list:\n\
          1. Remove academic papers, theses, and literary criticism — keep only the actual books\n\
          2. Remove exact duplicates (same title + same author), but KEEP different editions of the same work\n\
-         3. Fix capitalization of titles and author names (use proper title case for the language)\n\
+         3. Do NOT change title capitalization — preserve the original casing exactly as shown. \
+            Many languages (Spanish, French, German, etc.) do NOT capitalize every word in titles like English does.\n\
          4. Fix author names: remove translator/editor info, keep only the primary author (First Last format)\n\
          5. Add series name and position if you know it\n\n\
          Keep multiple editions — they may have different ISBNs needed for cover resolution.\n\
@@ -786,18 +787,26 @@ pub async fn add_work_internal(
 
     // Download cover image in background (best-effort, don't fail the add).
     // Unwrap proxy URLs back to the original external URL before downloading.
-    let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
-    // Re-validate cover URL server-side to prevent SSRF via direct API requests.
-    if let Some(url) = cover_url {
-        if livrarr_metadata::llm_scraper::validate_cover_url(&url, "").is_some() {
-            let http = state.http_client.clone();
-            let covers_dir = state.data_dir.join("covers");
-            let work_id = work.id;
-            tokio::spawn(async move {
-                let _ = download_cover(&http, &url, &covers_dir, work_id).await;
-            });
-        } else {
-            tracing::warn!(url = %url, "cover URL rejected by SSRF validation");
+    // Download search thumbnail as initial cover — but only if enrichment won't
+    // provide a high-res one. For foreign works with detail_url, enrichment will
+    // download the high-res cover itself; spawning the thumbnail here would race
+    // and potentially overwrite it.
+    let is_foreign = livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
+    let has_detail_url = work.detail_url.is_some();
+
+    if !is_foreign || !has_detail_url {
+        let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
+        if let Some(url) = cover_url {
+            if livrarr_metadata::llm_scraper::validate_cover_url(&url, "").is_some() {
+                let http = state.http_client.clone();
+                let covers_dir = state.data_dir.join("covers");
+                let work_id = work.id;
+                tokio::spawn(async move {
+                    let _ = download_cover(&http, &url, &covers_dir, work_id).await;
+                });
+            } else {
+                tracing::warn!(url = %url, "cover URL rejected by SSRF validation");
+            }
         }
     }
 

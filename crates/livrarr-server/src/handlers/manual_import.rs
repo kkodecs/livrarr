@@ -710,8 +710,8 @@ async fn import_single_item(
         {
             Ok(_) => {
                 info!(
-                    "manual import: shared file {} for work {} ({})",
-                    item.path, work_id, work.title
+                    "manual import: shared file {} for work {}",
+                    item.path, work_id
                 );
                 log_manual_import_history(state, user_id, work_id, &item.path, &work.title, None)
                     .await;
@@ -752,10 +752,7 @@ async fn import_single_item(
     .await
     {
         Ok(()) => {
-            info!(
-                "manual import: imported {} for work {} ({})",
-                item.path, work_id, work.title
-            );
+            info!("manual import: imported {} for work {}", item.path, work_id);
             log_manual_import_history(state, user_id, work_id, &item.path, &work.title, None).await;
             ImportResult {
                 path: item.path.clone(),

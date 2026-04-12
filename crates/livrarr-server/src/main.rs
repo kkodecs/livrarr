@@ -199,17 +199,20 @@ async fn main() {
     // Step 9: Serve with graceful shutdown on SIGTERM/Ctrl+C.
     // Cancel background jobs immediately when signal fires (before HTTP drain).
     let job_cancel = job_runner.cancel_token();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            info!("Cancelling background jobs");
-            job_cancel.cancel();
-        })
-        .await
-        .unwrap_or_else(|e| {
-            error!("Server error: {e}");
-            std::process::exit(1);
-        });
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        info!("Cancelling background jobs");
+        job_cancel.cancel();
+    })
+    .await
+    .unwrap_or_else(|e| {
+        error!("Server error: {e}");
+        std::process::exit(1);
+    });
 
     // Await job completion (cancel already signalled above).
     job_runner.shutdown().await;
@@ -287,7 +290,10 @@ fn init_tracing(
         .with(buf_layer)
         .init();
 
-    Arc::new(livrarr_server::state::LogLevelHandle::new(reload_handle))
+    Arc::new(livrarr_server::state::LogLevelHandle::new(
+        reload_handle,
+        level,
+    ))
 }
 
 /// Tracing layer that captures formatted log lines into a shared ring buffer.

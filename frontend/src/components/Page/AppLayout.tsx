@@ -50,6 +50,7 @@ export function AppLayout() {
         visibleToasts={5}
         gap={8}
         expand
+        closeButton
         toastOptions={{
           className: "bg-zinc-800 border-border text-zinc-100",
         }}

@@ -460,24 +460,52 @@ async fn poll_qbittorrent(
                         continue;
                     }
                 };
-            let local_path = match crate::handlers::import::apply_remote_path_mapping(
+            let mapping_result = match crate::handlers::import::apply_remote_path_mapping(
                 state,
                 &client.host,
                 &content_path,
             )
             .await
             {
-                Ok(p) => p,
+                Ok(r) => r,
                 Err(e) => {
                     warn!("poller: path mapping failed for grab {}: {e}", grab.id);
                     continue;
                 }
             };
-            if !std::path::Path::new(&local_path).exists() {
+            if !std::path::Path::new(&mapping_result.local_path).exists() {
                 tracing::debug!(
-                    "poller: source not yet available for grab {}, will retry: {local_path}",
+                    "poller: source not yet available for <grab {}>, will retry",
                     grab.id
                 );
+                // Notify user once — file may need a remote path mapping.
+                let _ = state
+                    .db
+                    .create_notification(CreateNotificationDbRequest {
+                        user_id: grab.user_id,
+                        notification_type: NotificationType::PathNotFound,
+                        ref_key: Some(format!("path_not_found:{}", grab.id)),
+                        message: format!(
+                            "{} reports that {} (grab {}) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.",
+                            client.name, grab.title, grab.id
+                        ),
+                        data: {
+                            let content_dir = std::path::Path::new(&content_path)
+                                .parent()
+                                .map(|d| d.display().to_string())
+                                .unwrap_or_default();
+                            serde_json::json!({
+                                "grabId": grab.id,
+                                "title": grab.title,
+                                "clientName": client.name,
+                                "clientHost": client.host,
+                                "contentDir": content_dir,
+                                "configuredRemotePath": mapping_result.configured_remote_path,
+                                "configuredLocalPath": mapping_result.configured_local_path,
+                            })
+                        },
+                    })
+                    .await;
                 continue;
             }
 
@@ -634,24 +662,51 @@ async fn poll_sabnzbd(
                         .unwrap_or_default();
 
                     // Resolve local path and verify it exists before attempting import.
-                    let local_path = match crate::handlers::import::apply_remote_path_mapping(
+                    let mapping_result = match crate::handlers::import::apply_remote_path_mapping(
                         state,
                         &client.host,
                         storage,
                     )
                     .await
                     {
-                        Ok(p) => p,
+                        Ok(r) => r,
                         Err(e) => {
                             warn!("poller: path mapping failed for grab {}: {e}", grab.id);
                             continue;
                         }
                     };
-                    if !std::path::Path::new(&local_path).exists() {
+                    if !std::path::Path::new(&mapping_result.local_path).exists() {
                         tracing::debug!(
-                            "poller: source not yet available for grab {}, will retry: {local_path}",
+                            "poller: source not yet available for <grab {}>, will retry",
                             grab.id
                         );
+                        let _ = state
+                            .db
+                            .create_notification(CreateNotificationDbRequest {
+                                user_id: grab.user_id,
+                                notification_type: NotificationType::PathNotFound,
+                                ref_key: Some(format!("path_not_found:{}", grab.id)),
+                                message: format!(
+                                    "{} reports that {} (grab {}) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.",
+                                    client.name, grab.title, grab.id
+                                ),
+                                data: {
+                                    let content_dir = std::path::Path::new(storage)
+                                        .parent()
+                                        .map(|d| d.display().to_string())
+                                        .unwrap_or_default();
+                                    serde_json::json!({
+                                        "grabId": grab.id,
+                                        "title": grab.title,
+                                        "clientName": client.name,
+                                        "clientHost": client.host,
+                                        "contentDir": content_dir,
+                                        "configuredRemotePath": mapping_result.configured_remote_path,
+                                        "configuredLocalPath": mapping_result.configured_local_path,
+                                    })
+                                },
+                            })
+                            .await;
                         continue;
                     }
 
@@ -973,8 +1028,8 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                     .to_string();
 
                 info!(
-                    "author monitor: new work detected — '{}' by {} ({})",
-                    work_title, author.name, year
+                    "author monitor: new work detected for <author {}> ({})",
+                    author.id, year
                 );
 
                 if author.monitor_new_items {
@@ -1006,8 +1061,8 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                                 Ok(o) => o,
                                 Err(_) => {
                                     warn!(
-                                        "author monitor: enrichment timeout for '{}'",
-                                        work_title
+                                        "author monitor: enrichment timeout for <work {}>",
+                                        new_work.id
                                     );
                                     // Still create notification — work was added, just not enriched.
                                     if let Err(e) = state
@@ -1071,7 +1126,10 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                             }
                         }
                         Err(e) => {
-                            warn!("author monitor: failed to auto-add '{}': {e}", work_title);
+                            warn!(
+                                "author monitor: failed to auto-add work for <author {}>: {e}",
+                                author.id
+                            );
                         }
                     }
                 } else {
