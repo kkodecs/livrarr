@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Bell,
   BookPlus,
@@ -7,15 +7,19 @@ import {
   Layers,
   AlertOctagon,
   AlertTriangle,
+  FolderX,
   Trash2,
   Check,
 } from "lucide-react";
+import { Link } from "react-router";
 import * as Popover from "@radix-ui/react-popover";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import * as api from "@/api";
 import type { NotificationType, NotificationResponse } from "@/types/api";
 import { formatRelativeDate } from "@/utils/format";
 import { LoadingSpinner } from "@/components/Page/LoadingSpinner";
+import { useUIStore } from "@/stores/ui";
 import type { ReactNode } from "react";
 
 const notificationIcons: Record<NotificationType, ReactNode> = {
@@ -25,11 +29,14 @@ const notificationIcons: Record<NotificationType, ReactNode> = {
   bulkEnrichmentComplete: <Layers size={16} className="text-purple-400" />,
   jobPanicked: <AlertOctagon size={16} className="text-red-400" />,
   rateLimitHit: <AlertTriangle size={16} className="text-orange-400" />,
+  pathNotFound: <FolderX size={16} className="text-red-400" />,
 };
 
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
+  const toastedIds = useRef<Set<number>>(new Set());
+  const setRpmHighlight = useUIStore((s) => s.setRpmHighlight);
 
   const { data: unreadNotifications } = useQuery({
     queryKey: ["notifications", "unread"],
@@ -39,6 +46,46 @@ export function NotificationBell() {
     refetchOnWindowFocus: true,
     staleTime: 0,
   });
+
+  // Show persistent toast for pathNotFound notifications (once per notification).
+  useEffect(() => {
+    if (!unreadNotifications) return;
+    for (const n of unreadNotifications) {
+      if (n.notificationType === "pathNotFound" && !toastedIds.current.has(n.id)) {
+        toastedIds.current.add(n.id);
+        const d = (n.data ?? {}) as Record<string, unknown>;
+        const title = (d.title as string) || "";
+        const configuredRemote = (d.configuredRemotePath as string) || "NOT SET";
+        const configuredLocal = (d.configuredLocalPath as string) || "NOT SET";
+        const remoteHost = (d.clientHost as string) || "NOT SET";
+        const contentDir = (d.contentDir as string) || "unknown";
+        const redactedPath = `${contentDir}/[REDACTED grab ${d.grabId}]`;
+        const question = `My download client ${d.clientName} completed a download but Livrarr says the file is not available locally.\n\nDownload client path: ${redactedPath}\nConfigured Remote Path: ${configuredRemote}\nConfigured Local Path: ${configuredLocal}\nRemote Host: ${remoteHost}\n\nHow do I set up a remote path mapping to fix this?`;
+        toast.error(
+          <div>
+            {String(d.clientName)} reports that {title ? <strong className="font-semibold text-white">{title}</strong> : <strong className="font-semibold text-white">Grab {String(d.grabId)}</strong>} (grab {String(d.grabId)} in the <a href="/activity/queue" className="text-brand hover:underline">queue</a>) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.
+          </div>,
+          {
+            duration: Infinity,
+            description: (
+              <ul className="mt-1.5 space-y-0.5 text-xs list-disc pl-4">
+                <li>
+                  <a href="/settings/mediamanagement" onClick={() => setRpmHighlight(true)} className="text-brand hover:underline">
+                    Configure path mapping
+                  </a>
+                </li>
+                <li>
+                  <a href={`/help?question=${encodeURIComponent(question)}`} className="text-brand hover:underline">
+                    Get AI help
+                  </a>
+                </li>
+              </ul>
+            ),
+          },
+        );
+      }
+    }
+  }, [unreadNotifications]);
 
   const { data: allNotifications, isLoading } = useQuery({
     queryKey: ["notifications", "all"],
@@ -120,7 +167,37 @@ export function NotificationBell() {
                     {notificationIcons[n.notificationType]}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm text-zinc-200">{n.message}</p>
+                    {n.notificationType === "pathNotFound" && n.data ? (() => {
+                      const d = n.data as Record<string, unknown>;
+                      const title = (d.title as string) || "";
+                      const configuredRemote = (d.configuredRemotePath as string) || "NOT SET";
+                      const configuredLocal = (d.configuredLocalPath as string) || "NOT SET";
+                      const remoteHost = (d.clientHost as string) || "NOT SET";
+                      const contentDir = (d.contentDir as string) || "unknown";
+                      const redactedPath = `${contentDir}/[REDACTED grab ${d.grabId}]`;
+                      const question = `My download client ${d.clientName} completed a download but Livrarr says the file is not available locally.\n\nDownload client path: ${redactedPath}\nConfigured Remote Path: ${configuredRemote}\nConfigured Local Path: ${configuredLocal}\nRemote Host: ${remoteHost}\n\nHow do I set up a remote path mapping to fix this?`;
+                      return (
+                        <>
+                          <p className="text-sm text-zinc-200">
+                            {String(d.clientName)} reports that {title ? <strong className="font-semibold text-white">{title}</strong> : <strong className="font-semibold text-white">Grab {String(d.grabId)}</strong>} (grab {String(d.grabId)} in the <Link to="/activity/queue" onClick={() => setOpen(false)} className="text-brand hover:underline">queue</Link>) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.
+                          </p>
+                          <ul className="mt-1.5 space-y-0.5 text-xs list-disc pl-4">
+                            <li>
+                              <Link to="/settings/mediamanagement" onClick={() => { setOpen(false); setRpmHighlight(true); }} className="text-brand hover:underline">
+                                Configure path mapping
+                              </Link>
+                            </li>
+                            <li>
+                              <Link to={`/help?question=${encodeURIComponent(question)}`} onClick={() => setOpen(false)} className="text-brand hover:underline">
+                                Get AI help
+                              </Link>
+                            </li>
+                          </ul>
+                        </>
+                      );
+                    })() : (
+                      <p className="text-sm text-zinc-200">{n.message}</p>
+                    )}
                     <p className="mt-0.5 text-xs text-muted">
                       {formatRelativeDate(n.createdAt)}
                     </p>

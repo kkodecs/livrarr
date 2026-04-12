@@ -35,6 +35,7 @@ pub async fn status(
         data_directory: state.data_dir.display().to_string(),
         log_file: log_file.display().to_string(),
         startup_time: state.startup_time,
+        log_level: state.log_level_handle.current_level(),
     }))
 }
 

@@ -78,7 +78,10 @@ export default function AuthorDetailPage() {
     <>
       <PageToolbar>
         <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold text-zinc-100">{author.name}</h1>
+          <div className="flex items-baseline gap-2">
+            <h1 className="text-lg font-semibold text-zinc-100">{author.name}</h1>
+            <span className="text-xs text-zinc-600">#{author.id}</span>
+          </div>
           {author.olKey && (
             <a
               href={`https://openlibrary.org/authors/${author.olKey}`}

@@ -98,6 +98,7 @@ export default function QueuePage() {
                 <thead>
                   <tr className="border-b border-border text-left text-xs text-muted">
                     <th className="px-3 py-2">Status</th>
+                    <th className="px-3 py-2 text-zinc-600 w-16">Grab ID</th>
                     <th className="px-3 py-2">Work</th>
                     <th className="px-3 py-2">Format</th>
                     <th className="px-3 py-2">Release</th>
@@ -133,6 +134,7 @@ export default function QueuePage() {
                           </span>
                         )}
                       </td>
+                      <td className="px-3 py-2 text-[11px] text-zinc-600">{item.id}</td>
                       <td className="px-3 py-2">
                         <Link to={`/work/${item.workId}`} className="text-brand hover:underline">
                           {workName(works, item.workId)}

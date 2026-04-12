@@ -373,12 +373,24 @@ fn build_torznab_url(
 
 /// Redact apikey from URL for logging.
 fn redact_url(url: &str) -> String {
-    if let Some(pos) = url.find("apikey=") {
-        let end = url[pos..].find('&').map(|i| pos + i).unwrap_or(url.len());
-        format!("{}apikey=[REDACTED]{}", &url[..pos], &url[end..])
-    } else {
-        url.to_string()
+    let mut result = url.to_string();
+    // Redact API key.
+    if let Some(pos) = result.find("apikey=") {
+        let end = result[pos..]
+            .find('&')
+            .map(|i| pos + i)
+            .unwrap_or(result.len());
+        result = format!("{}apikey=[REDACTED]{}", &result[..pos], &result[end..]);
     }
+    // Redact search query (contains book title).
+    if let Some(pos) = result.find("q=") {
+        let end = result[pos..]
+            .find('&')
+            .map(|i| pos + i)
+            .unwrap_or(result.len());
+        result = format!("{}q=[REDACTED]{}", &result[..pos], &result[end..]);
+    }
+    result
 }
 
 async fn fetch_and_parse(

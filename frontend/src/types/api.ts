@@ -33,7 +33,8 @@ export type NotificationType =
   | "metadataUpdated"
   | "bulkEnrichmentComplete"
   | "jobPanicked"
-  | "rateLimitHit";
+  | "rateLimitHit"
+  | "pathNotFound";
 export type NarrationType = "human" | "ai" | "ai_authorized_replica";
 export type AuthType = "session" | "api_key" | "external_auth";
 export type HealthCheckType = "ok" | "warning" | "error";
@@ -600,6 +601,7 @@ export interface SystemStatus {
   dataDirectory: string;
   logFile: string;
   startupTime: string;
+  logLevel: string;
 }
 
 // Unmapped Files
