@@ -165,7 +165,7 @@ export default function WorkDetailPage() {
         <WorkHeader work={work} coverVersion={coverVersion} />
 
         <Tabs.Root defaultValue={initialTab} className="mt-6">
-          <Tabs.List className="flex border-b border-border">
+          <Tabs.List className="flex overflow-x-auto border-b border-border">
             <TabTrigger value="files">Library Files</TabTrigger>
             <TabTrigger value="releases">Search</TabTrigger>
             <TabTrigger value="history">History</TabTrigger>
@@ -218,13 +218,13 @@ export default function WorkDetailPage() {
 
 function WorkHeader({ work, coverVersion }: { work: WorkDetailResponse; coverVersion?: number }) {
   return (
-    <div className="flex gap-6">
+    <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start sm:gap-6">
       <img
         src={getCoverUrl(work.id, coverVersion)}
         alt={work.title}
-        className="h-[300px] w-[200px] flex-shrink-0 rounded-lg object-cover shadow-lg"
+        className="h-[200px] w-[133px] sm:h-[300px] sm:w-[200px] flex-shrink-0 rounded-lg object-cover shadow-lg"
       />
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 text-center sm:text-left">
         <div className="flex items-baseline gap-2">
           <h1 className="text-2xl font-bold text-zinc-100">{work.title}</h1>
           <span className="text-xs text-zinc-600">#{work.id}</span>
@@ -249,6 +249,18 @@ function WorkHeader({ work, coverVersion }: { work: WorkDetailResponse; coverVer
             </span>
           )}
         </div>
+
+        {work.detailUrl && (
+          <a
+            href={work.detailUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-2 inline-flex items-center gap-1 text-sm text-brand hover:underline"
+          >
+            <ExternalLink size={14} />
+            View on Goodreads
+          </a>
+        )}
 
         {work.genres && work.genres.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-1.5">
