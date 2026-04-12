@@ -29,6 +29,7 @@ import { FormModal } from "@/components/Page/FormModal";
 import { MediaTypeBadge } from "@/components/Page/Badge";
 import { getCoverUrl, formatRelativeDate } from "@/utils/format";
 import { cn } from "@/utils/cn";
+import { HelpTip } from "@/components/HelpTip";
 import type { AuthorDetailResponse } from "@/types/api";
 
 export default function AuthorDetailPage() {
@@ -139,6 +140,7 @@ export default function AuthorDetailPage() {
               )}
             />
             {author.monitored ? "Monitor" : "Unmonitored"}
+            <HelpTip text="Monitor indexers for new uploads of all content by author." />
           </span>
           <span className="flex items-center gap-1.5">
             <span
@@ -150,6 +152,7 @@ export default function AuthorDetailPage() {
             {author.monitorNewItems
               ? "Monitor new"
               : "Not monitoring new"}
+            <HelpTip text="Monitor indexers for new content by author." />
           </span>
         </div>
 
@@ -404,24 +407,30 @@ function EditAuthorModal({
   return (
     <FormModal open={open} onOpenChange={handleOpenChange} title="Edit Author">
       <div className="space-y-4">
-        <label className="flex items-center gap-3">
-          <input
-            type="checkbox"
-            checked={monitored}
-            onChange={(e) => setMonitored(e.target.checked)}
-            className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand"
-          />
-          <span className="text-sm text-zinc-200" title="Download any missing works when they are announced by an indexer">Monitor</span>
-        </label>
-        <label className="flex items-center gap-3">
-          <input
-            type="checkbox"
-            checked={monitorNewItems}
-            onChange={(e) => setMonitorNewItems(e.target.checked)}
-            className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand"
-          />
-          <span className="text-sm text-zinc-200" title="Download new works when they are announced by an indexer">Monitor new</span>
-        </label>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={monitored}
+              onChange={(e) => setMonitored(e.target.checked)}
+              className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand"
+            />
+            <span className="text-sm text-zinc-200">Monitor</span>
+          </label>
+          <HelpTip text="Monitor indexers for new uploads of all content by author." />
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={monitorNewItems}
+              onChange={(e) => setMonitorNewItems(e.target.checked)}
+              className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand"
+            />
+            <span className="text-sm text-zinc-200">Monitor new</span>
+          </label>
+          <HelpTip text="Monitor indexers for new content by author." />
+        </div>
         <div className="flex justify-end gap-3 pt-2">
           <button
             onClick={() => onOpenChange(false)}

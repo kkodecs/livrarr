@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { HelpTip } from "@/components/HelpTip";
 import { Link, useParams, useNavigate, useSearchParams } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -176,7 +176,7 @@ export default function WorkDetailPage() {
             <LibraryFilesTab work={work} />
           </Tabs.Content>
           <Tabs.Content value="releases" className="mt-4">
-            <ReleasesTab workId={work.id} autoSearch={initialTab === "releases"} />
+            <ReleasesTab workId={work.id} />
           </Tabs.Content>
           <Tabs.Content value="history" className="mt-4">
             <HistoryTab workId={work.id} />
@@ -472,22 +472,43 @@ function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
 
 // --- Releases Tab ---
 
-function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: boolean }) {
-  const queryClient = useQueryClient();
-  const [searched, setSearched] = useState(autoSearch ?? false);
+function ReleasesTab({ workId }: { workId: number }) {
   const [ebookFormatFilter, setEbookFormatFilter] = useState<Set<string> | null>(null);
   const [audiobookFormatFilter, setAudiobookFormatFilter] = useState<Set<string> | null>(null);
 
+  // Mode ref controls what the queryFn does:
+  // 'cacheCheck' = ask backend for cached results only (no indexer hits) — used on mount
+  // 'search'     = full search hitting all indexers
+  // 'refresh'    = full search bypassing backend cache
+  const modeRef = useRef<"cacheCheck" | "search" | "refresh">("cacheCheck");
   const {
     data: searchResponse,
-    isLoading,
+    fetchStatus,
+    dataUpdatedAt,
     refetch,
   } = useQuery({
     queryKey: ["releases", workId],
-    queryFn: () => searchReleases(workId),
-    enabled: searched,
+    queryFn: () => {
+      const mode = modeRef.current;
+      modeRef.current = "cacheCheck";
+      if (mode === "refresh") return searchReleases(workId, { refresh: true });
+      if (mode === "search") return searchReleases(workId);
+      return searchReleases(workId, { cacheOnly: true });
+    },
+    staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
     retry: false,
   });
+  const isLoading = fetchStatus === "fetching";
+  const hasResults = (searchResponse?.results?.length ?? 0) > 0;
+
+  // Live-updating cache age from React Query's own timestamp.
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!dataUpdatedAt) return;
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, [dataUpdatedAt]);
 
   const { data: mmConfig } = useQuery({
     queryKey: ["mediaManagementConfig"],
@@ -531,7 +552,6 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
       setGrabbedGuids((prev) => new Set(prev).add(release.guid));
       setGrabbingGuid(null);
       toast.success("Release grabbed");
-      queryClient.invalidateQueries({ queryKey: ["releases", workId] });
     },
     onError: (e: Error) => {
       setGrabbingGuid(null);
@@ -624,11 +644,11 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
     setter(next);
   };
 
-  if (!searched) {
+  if (!hasResults && !isLoading) {
     return (
       <div className="flex flex-col items-center py-12">
         <button
-          onClick={() => setSearched(true)}
+          onClick={() => { modeRef.current = "search"; refetch(); }}
           className="btn-primary inline-flex items-center gap-1.5"
         >
           <Search size={14} />
@@ -638,7 +658,7 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
     );
   }
 
-  if (isLoading) return <PageLoading />;
+  if (!hasResults && isLoading) return <PageLoading />;
 
   if (releases.length === 0 && warnings.length === 0) {
     return (
@@ -647,7 +667,7 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
         title="No releases found"
         action={
           <button
-            onClick={() => refetch()}
+            onClick={() => { modeRef.current = "search"; refetch(); }}
             className="btn-secondary inline-flex items-center gap-1.5"
           >
             <RefreshCw size={14} />
@@ -728,8 +748,34 @@ function ReleasesTab({ workId, autoSearch }: { workId: number; autoSearch?: bool
     </div>
   );
 
+  const handleRefresh = () => {
+    modeRef.current = "refresh";
+    refetch();
+  };
+  const cacheAgeSecs = dataUpdatedAt ? Math.floor((now - dataUpdatedAt) / 1000) : null;
+
+  const formatCacheAge = (secs: number) => {
+    if (secs < 60) return "just now";
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+    return `${Math.floor(secs / 86400)}d ago`;
+  };
+
   return (
     <div className="space-y-6">
+      <div className="flex items-center justify-end gap-3">
+        {cacheAgeSecs != null && (
+          <span className="text-xs text-muted">Cached {formatCacheAge(cacheAgeSecs)}</span>
+        )}
+        <button
+          onClick={handleRefresh}
+          disabled={isLoading}
+          className="btn-secondary inline-flex items-center gap-1.5 text-xs"
+        >
+          <RefreshCw size={12} className={isLoading ? "animate-spin" : ""} />
+          Refresh
+        </button>
+      </div>
       {warnings.length > 0 && (
         <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3">
           {warnings.map((w, i) => (

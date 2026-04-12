@@ -189,11 +189,15 @@ export const retryImport = (grabId: number) =>
 // indexers fail. We parse the body as warnings in that case instead of throwing.
 export const searchReleases = async (
   workId: number,
+  opts?: { refresh?: boolean; cacheOnly?: boolean },
 ): Promise<ReleaseSearchResponse> => {
   const token = (await import("./client")).getToken();
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(`/api/v1/release?workId=${workId}`, { headers });
+  const params = new URLSearchParams({ workId: String(workId) });
+  if (opts?.refresh) params.set("refresh", "true");
+  if (opts?.cacheOnly) params.set("cacheOnly", "true");
+  const res = await fetch(`/api/v1/release?${params}`, { headers });
   if (res.status === 502) {
     try {
       return (await res.json()) as ReleaseSearchResponse;
