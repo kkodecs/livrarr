@@ -107,7 +107,7 @@ pub async fn update_metadata(
     // so partial updates don't wrongly strip LLM languages.
     let validated_languages = if let Some(langs) = req.languages {
         let existing = state.db.get_metadata_config().await?;
-        let llm_configured = livrarr_metadata::registry::is_llm_configured(
+        let llm_configured = livrarr_metadata::language::is_llm_configured(
             req.llm_enabled.unwrap_or(existing.llm_enabled),
             req.llm_endpoint
                 .as_deref()
@@ -139,33 +139,6 @@ pub async fn update_metadata(
             languages: validated_languages,
         })
         .await?;
-
-    // Rebuild provider registry on config change.
-    let llm = livrarr_metadata::registry::build_llm_client(
-        &state.http_client,
-        cfg.llm_enabled,
-        cfg.llm_endpoint.as_deref(),
-        cfg.llm_api_key.as_deref(),
-        cfg.llm_model.as_deref(),
-    );
-    match livrarr_metadata::registry::ProviderRegistry::build(
-        &cfg.languages,
-        llm,
-        state.http_client.clone(),
-    ) {
-        Ok(new_registry) => {
-            let active: std::collections::HashSet<String> = new_registry
-                .languages()
-                .iter()
-                .filter_map(|l| new_registry.provider_name(l).map(String::from))
-                .collect();
-            state.provider_health.purge_stale(&active).await;
-            *state.provider_registry.write().await = new_registry;
-        }
-        Err(e) => {
-            tracing::warn!("failed to rebuild provider registry: {e}");
-        }
-    }
 
     let provider_status = state.provider_health.statuses().await;
     Ok(Json(metadata_to_response(cfg, provider_status)))

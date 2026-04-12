@@ -93,12 +93,13 @@ pub async fn lookup(
         return Ok(Json(vec![]));
     }
 
-    // Determine target language (default to primary from registry).
-    let registry = state.provider_registry.read().await;
-    let lang = q
-        .lang
-        .as_deref()
-        .unwrap_or_else(|| registry.primary_language());
+    // Determine target language (default to primary from metadata config).
+    let cfg = state.db.get_metadata_config().await.ok();
+    let default_lang = cfg
+        .as_ref()
+        .and_then(|c| c.languages.first().cloned())
+        .unwrap_or_else(|| "en".to_string());
+    let lang = q.lang.as_deref().unwrap_or(&default_lang);
 
     // Validate language code.
     if lang != "en" && !livrarr_metadata::language::is_supported_language(lang) {
@@ -110,7 +111,6 @@ pub async fn lookup(
     // Non-English: direct Goodreads search with regex parsing.
     if lang != "en" {
         let lang_owned = lang.to_string();
-        drop(registry);
 
         // Rate limit outbound Goodreads requests.
         state.goodreads_rate_limiter.acquire().await;
@@ -187,78 +187,52 @@ pub async fn lookup(
 
         // Direct regex parsing of search results.
         let parsed = livrarr_metadata::goodreads::parse_search_html(&raw_html);
-        let raw_count = parsed.len();
 
-        // Cache detail URLs server-side and convert to API results.
-        for r in &parsed {
-            let author = r.author.as_deref().unwrap_or("");
-            let key = crate::state::DetailUrlCache::cache_key(&r.title, author);
-            // Prepend base URL for relative paths.
-            let full_url = if r.detail_url.starts_with('/') {
-                format!("https://www.goodreads.com{}", r.detail_url)
-            } else {
-                r.detail_url.clone()
-            };
-            if livrarr_metadata::goodreads::validate_detail_url(&full_url) {
-                state.detail_url_cache.put(key, full_url).await;
-            }
+        // Parser drift detection: if the HTML had book rows but none passed
+        // validation, Goodreads likely changed their markup.
+        if parsed.is_empty() && raw_html.contains("itemtype=\"http") {
+            tracing::warn!(
+                "Goodreads parser drift: HTML contains schema.org Book rows but 0 passed \
+                 validation. HTML structure may have changed — please report this at \
+                 https://github.com/kkodecs/livrarr/issues"
+            );
         }
 
-        let mut api_results: Vec<WorkSearchResult> = parsed
+        // Include detail_url directly in each result for pass-through to add.
+        let api_results: Vec<WorkSearchResult> = parsed
             .into_iter()
-            .map(|r| WorkSearchResult {
-                ol_key: None,
-                title: r.title,
-                author_name: r.author.unwrap_or_default(),
-                author_ol_key: None,
-                year: r.year,
-                cover_url: r.cover_url,
-                description: None,
-                series_name: None,
-                series_position: None,
-                source: Some("Goodreads".to_string()),
-                source_type: Some("goodreads".to_string()),
-                language: Some(lang_owned.clone()),
+            .map(|r| {
+                let full_url = if r.detail_url.starts_with('/') {
+                    format!("https://www.goodreads.com{}", r.detail_url)
+                } else {
+                    r.detail_url.clone()
+                };
+                let validated_url = if livrarr_metadata::goodreads::validate_detail_url(&full_url) {
+                    Some(full_url)
+                } else {
+                    None
+                };
+                WorkSearchResult {
+                    ol_key: None,
+                    title: r.title,
+                    author_name: r.author.unwrap_or_default(),
+                    author_ol_key: None,
+                    year: r.year,
+                    cover_url: r.cover_url,
+                    description: None,
+                    series_name: r.series_name,
+                    series_position: r.series_position,
+                    source: Some("Goodreads".to_string()),
+                    source_type: Some("goodreads".to_string()),
+                    language: Some(lang_owned.clone()),
+                    detail_url: validated_url,
+                    rating: r.rating,
+                }
             })
             .collect();
 
-        // If regex returned 0 valid results but we got HTTP 200, try LLM fallback.
-        if api_results.is_empty() && raw_count == 0 {
-            tracing::info!("Goodreads regex returned 0 results, attempting LLM fallback");
-            let cfg = state.db.get_metadata_config().await.ok();
-            if let Some(cleaned) = llm_clean_search_results(
-                &state.http_client,
-                cfg.as_ref(),
-                &term,
-                &api_results,
-                true,
-            )
-            .await
-            {
-                api_results = cleaned;
-            }
-        }
-
-        // Clean with LLM if configured — dedup, remove academic papers,
-        // fix author strings, extract series info.
-        if api_results.len() > 1 {
-            let cfg = state.db.get_metadata_config().await.ok();
-            if let Some(cleaned) = llm_clean_search_results(
-                &state.http_client,
-                cfg.as_ref(),
-                &term,
-                &api_results,
-                true,
-            )
-            .await
-            {
-                api_results = cleaned;
-            }
-        }
-
         return Ok(Json(api_results));
     }
-    drop(registry);
 
     // English: existing OpenLibrary flow.
     let results = lookup_openlibrary(&state.http_client, &term).await?;
@@ -394,6 +368,8 @@ async fn search_hardcover_books(
                 source: None,
                 source_type: None,
                 language: None,
+                detail_url: None,
+                rating: None,
             })
         })
         .collect();
@@ -558,6 +534,8 @@ async fn search_hardcover_author_books(
                 source: None,
                 source_type: None,
                 language: None,
+                detail_url: None,
+                rating: None,
             })
         })
         .collect();
@@ -780,6 +758,8 @@ async fn lookup_openlibrary(
                 source: None,
                 source_type: None,
                 language: None,
+                detail_url: None,
+                rating: None,
             })
         })
         .collect();
@@ -828,12 +808,8 @@ pub async fn add_work_internal(
 
     let cover_url = req.cover_url.clone();
 
-    // Look up detail URL from server-side cache (populated during search).
-    // Foreign works get their detail URL for enrichment; English works don't need it.
-    let detail_url = {
-        let key = crate::state::DetailUrlCache::cache_key(&req.title, &req.author_name);
-        state.detail_url_cache.get(&key).await
-    };
+    // Detail URL comes from the frontend (passed through from search results).
+    let detail_url = req.detail_url.clone();
 
     let work = state
         .db
@@ -853,26 +829,25 @@ pub async fn add_work_internal(
 
     // Download cover image in background (best-effort, don't fail the add).
     // Unwrap proxy URLs back to the original external URL before downloading.
-    // Download search thumbnail as initial cover — but only if enrichment won't
-    // provide a high-res one. For foreign works with detail_url, enrichment will
-    // download the high-res cover itself; spawning the thumbnail here would race
-    // and potentially overwrite it.
+    // Foreign works: save as thumbnail ({id}_thumb.jpg) — enrichment saves hi-res later.
+    // English works: save as main cover ({id}.jpg).
     let is_foreign = livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
-    let has_detail_url = work.detail_url.is_some();
-
-    if !is_foreign || !has_detail_url {
-        let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
-        if let Some(url) = cover_url {
-            if livrarr_metadata::llm_scraper::validate_cover_url(&url, "").is_some() {
-                let http = state.http_client.clone();
-                let covers_dir = state.data_dir.join("covers");
-                let work_id = work.id;
-                tokio::spawn(async move {
+    let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
+    if let Some(url) = cover_url {
+        if livrarr_metadata::llm_scraper::validate_cover_url(&url, "").is_some() {
+            let http = state.http_client.clone();
+            let covers_dir = state.data_dir.join("covers");
+            let work_id = work.id;
+            let save_as_thumb = is_foreign;
+            tokio::spawn(async move {
+                if save_as_thumb {
+                    let _ = download_cover_as(&http, &url, &covers_dir, work_id, "_thumb").await;
+                } else {
                     let _ = download_cover(&http, &url, &covers_dir, work_id).await;
-                });
-            } else {
-                tracing::warn!(url = %url, "cover URL rejected by SSRF validation");
-            }
+                }
+            });
+        } else {
+            tracing::warn!(url = %url, "cover URL rejected by SSRF validation");
         }
     }
 
@@ -1256,16 +1231,23 @@ async fn download_cover(
     covers_dir: &std::path::Path,
     work_id: i64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    download_cover_as(http, url, covers_dir, work_id, "").await
+}
+
+async fn download_cover_as(
+    http: &livrarr_http::HttpClient,
+    url: &str,
+    covers_dir: &std::path::Path,
+    work_id: i64,
+    suffix: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::fs::create_dir_all(covers_dir).await?;
     let resp = http.get(url).send().await?;
     if !resp.status().is_success() {
         return Err(format!("cover download returned {}", resp.status()).into());
     }
     let bytes = resp.bytes().await?;
-    let cover_path = covers_dir.join(format!("{work_id}.jpg"));
+    let cover_path = covers_dir.join(format!("{work_id}{suffix}.jpg"));
     tokio::fs::write(&cover_path, &bytes).await?;
-    // Delete stale thumbnail so it gets regenerated from the new cover.
-    let thumb_path = covers_dir.join(format!("{work_id}_thumb.jpg"));
-    let _ = tokio::fs::remove_file(&thumb_path).await;
     Ok(())
 }
