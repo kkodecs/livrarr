@@ -72,36 +72,27 @@ pub struct LookupQuery {
     pub term: Option<String>,
 }
 
-/// GET /api/v1/author/lookup?term=...  — searches OpenLibrary
-pub async fn lookup(
-    State(state): State<AppState>,
-    _ctx: AuthContext,
-    Query(q): Query<LookupQuery>,
-) -> Result<Json<Vec<AuthorSearchResult>>, ApiError> {
-    let term = q.term.unwrap_or_default();
-    if term.is_empty() {
-        return Ok(Json(vec![]));
-    }
-
-    let resp = state
-        .http_client
+/// Search OpenLibrary for authors by name. Reusable by handlers and manual import.
+pub async fn lookup_ol_authors(
+    http: &livrarr_http::HttpClient,
+    term: &str,
+    limit: u32,
+) -> Result<Vec<AuthorSearchResult>, String> {
+    let resp = http
         .get("https://openlibrary.org/search/authors.json")
-        .query(&[("q", term.as_str()), ("limit", "20")])
+        .query(&[("q", term), ("limit", &limit.to_string())])
         .send()
         .await
-        .map_err(|e| ApiError::BadGateway(format!("OpenLibrary request failed: {e}")))?;
+        .map_err(|e| format!("OpenLibrary request failed: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(ApiError::BadGateway(format!(
-            "OpenLibrary returned {}",
-            resp.status()
-        )));
+        return Err(format!("OpenLibrary returned {}", resp.status()));
     }
 
     let data: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| ApiError::BadGateway(format!("OpenLibrary parse error: {e}")))?;
+        .map_err(|e| format!("OpenLibrary parse error: {e}"))?;
 
     let docs = data
         .get("docs")
@@ -109,7 +100,7 @@ pub async fn lookup(
         .cloned()
         .unwrap_or_default();
 
-    let results: Vec<AuthorSearchResult> = docs
+    Ok(docs
         .iter()
         .filter_map(|doc| {
             let key = doc.get("key")?.as_str()?;
@@ -122,7 +113,23 @@ pub async fn lookup(
                 sort_name: None,
             })
         })
-        .collect();
+        .collect())
+}
+
+/// GET /api/v1/author/lookup?term=...  — searches OpenLibrary
+pub async fn lookup(
+    State(state): State<AppState>,
+    _ctx: AuthContext,
+    Query(q): Query<LookupQuery>,
+) -> Result<Json<Vec<AuthorSearchResult>>, ApiError> {
+    let term = q.term.unwrap_or_default();
+    if term.is_empty() {
+        return Ok(Json(vec![]));
+    }
+
+    let results = lookup_ol_authors(&state.http_client, &term, 20)
+        .await
+        .map_err(|e| ApiError::BadGateway(e))?;
 
     Ok(Json(results))
 }

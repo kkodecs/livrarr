@@ -348,8 +348,8 @@ export default function ManualImportPage() {
                 <tbody>
                   {files.map((f, idx) => {
                     const match = effectiveMatch(f);
-                    const isDuplicate = f.hasExistingMediaType === true;
                     const dupWorkId = f.existingWorkId || match?.existingWorkId;
+                    const isDuplicate = !!dupWorkId;
                     const result = f.importResult;
                     const imported = isImported(f);
 
@@ -383,6 +383,11 @@ export default function ManualImportPage() {
                                 <span className="text-zinc-500">
                                   {" "}({f.parsed.series}
                                   {f.parsed.seriesPosition && ` #${f.parsed.seriesPosition}`})
+                                </span>
+                              )}
+                              {f.parsed.language && (
+                                <span className="ml-1 text-zinc-500 uppercase">
+                                  ({f.parsed.language.slice(0, 2).toUpperCase()})
                                 </span>
                               )}
                             </div>
