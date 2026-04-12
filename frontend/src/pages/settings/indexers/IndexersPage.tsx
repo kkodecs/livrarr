@@ -564,8 +564,8 @@ function IndexerFormModal({
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-3">
-          <div className="col-span-2">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="sm:col-span-2">
             <label className="block text-xs text-muted mb-1">URL</label>
             <input
               {...register("url", { required: true })}
@@ -598,7 +598,7 @@ function IndexerFormModal({
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-muted mb-1">
               Categories
@@ -626,7 +626,7 @@ function IndexerFormModal({
           </div>
         </div>
 
-        <div className="flex gap-6">
+        <div className="flex flex-wrap gap-4 sm:gap-6">
           <Controller
             name="enableInteractiveSearch"
             control={control}
@@ -808,7 +808,7 @@ function InlineIndexerForm({
       })}
       className="space-y-4 max-w-xl"
     >
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label className="block text-xs text-muted mb-1">Name</label>
           <input
@@ -832,8 +832,8 @@ function InlineIndexerForm({
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
-        <div className="col-span-2">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="sm:col-span-2">
           <label className="block text-xs text-muted mb-1">URL</label>
           <input
             {...register("url", { required: true })}
@@ -860,7 +860,7 @@ function InlineIndexerForm({
         />
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label className="block text-xs text-muted mb-1">Categories</label>
           <input
@@ -880,7 +880,7 @@ function InlineIndexerForm({
         </div>
       </div>
 
-      <div className="flex gap-6">
+      <div className="flex flex-wrap gap-4 sm:gap-6">
         <Controller name="enableInteractiveSearch" control={control} render={({ field }) => (
           <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
             <input type="checkbox" checked={field.value} onChange={field.onChange} className="rounded border-border" />

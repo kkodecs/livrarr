@@ -163,7 +163,7 @@ export default function HelpPage() {
   };
 
   return (
-    <div className="mx-auto max-w-2xl p-6 space-y-6">
+    <div className="mx-auto max-w-2xl px-3 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-zinc-100">Help</h1>
         <p className="mt-1 text-sm text-zinc-400">
@@ -172,9 +172,9 @@ export default function HelpPage() {
       </div>
 
       {/* Setup Guide */}
-      <section className="rounded-lg border border-border bg-surface p-5">
+      <section className="rounded-lg border border-border bg-surface p-3 sm:p-5">
         <div className="flex items-start gap-3">
-          <Compass size={20} className="mt-0.5 text-brand shrink-0" />
+          <Compass size={20} className="mt-0.5 text-brand shrink-0 hidden sm:block" />
           <div>
             <h2 className="text-lg font-semibold text-zinc-100">
               Setup Guide
@@ -198,9 +198,9 @@ export default function HelpPage() {
       </section>
 
       {/* AI Help */}
-      <section className="rounded-lg border border-border bg-surface p-5">
+      <section className="rounded-lg border border-border bg-surface p-3 sm:p-5">
         <div className="flex items-start gap-3">
-          <Bot size={20} className="mt-0.5 text-brand shrink-0" />
+          <Bot size={20} className="mt-0.5 text-brand shrink-0 hidden sm:block" />
           <div className="flex-1 min-w-0">
             <h2 className="text-lg font-semibold text-zinc-100">
               Get AI Help
@@ -213,7 +213,7 @@ export default function HelpPage() {
 
             {/* Editable prompt */}
             <div className="mt-4">
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1 mb-1">
                 <label className="text-xs font-medium text-zinc-400">
                   Prompt
                 </label>
@@ -246,9 +246,9 @@ export default function HelpPage() {
       </section>
 
       {/* Documentation */}
-      <section className="rounded-lg border border-border bg-surface p-5">
+      <section className="rounded-lg border border-border bg-surface p-3 sm:p-5">
         <div className="flex items-start gap-3">
-          <BookOpen size={20} className="mt-0.5 text-brand shrink-0" />
+          <BookOpen size={20} className="mt-0.5 text-brand shrink-0 hidden sm:block" />
           <div>
             <h2 className="text-lg font-semibold text-zinc-100">
               Documentation

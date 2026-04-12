@@ -112,7 +112,7 @@ export default function AuthorSearchPage() {
               {results.map((author) => (
                 <div
                   key={author.olKey}
-                  className="flex items-center justify-between gap-4 rounded-lg border border-border bg-surface p-4"
+                  className="flex items-center justify-between gap-3 sm:gap-4 rounded-lg border border-border bg-surface p-3 sm:p-4"
                 >
                   <div className="min-w-0">
                     <p className="font-medium text-zinc-100">{author.name}</p>
