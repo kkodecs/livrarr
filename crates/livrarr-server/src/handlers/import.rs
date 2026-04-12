@@ -55,14 +55,18 @@ pub async fn import_grab(
     // re-querying the download client, which may have removed the torrent/NZB).
     let source_path = if let Some(ref remote_path) = grab.content_path {
         // Re-apply path mapping (user may have fixed mapping config since grab).
-        apply_remote_path_mapping(state, &client.host, remote_path).await?.local_path
+        apply_remote_path_mapping(state, &client.host, remote_path)
+            .await?
+            .local_path
     } else if let Some(ref id) = grab.download_id {
         let content_path = if client.client_type() == "sabnzbd" {
             fetch_sabnzbd_storage_path(state, &client, id).await?
         } else {
             fetch_qbit_content_path(state, &client, id).await?
         };
-        apply_remote_path_mapping(state, &client.host, &content_path).await?.local_path
+        apply_remote_path_mapping(state, &client.host, &content_path)
+            .await?
+            .local_path
     } else {
         let error = "no download_id or content_path — download not confirmed in client".to_string();
         state

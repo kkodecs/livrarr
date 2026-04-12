@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub mod cover;
+pub mod goodreads;
 pub mod http_llm;
 pub mod language;
 pub mod llm_scraper;
