@@ -954,7 +954,7 @@ Rules:
 - For genres, use the most specific applicable tags"#;
 
 /// Enrich a foreign work from its detail page URL.
-/// Fetches the page, cleans HTML, sends to LLM for structured extraction.
+/// Primary: JSON-LD + regex parsing. Fallback: LLM extraction.
 pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
     let detail_url = match &work.detail_url {
         Some(url) if !url.is_empty() => url.clone(),
@@ -963,30 +963,11 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
         }
     };
 
-    let cfg = match state.db.get_metadata_config().await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Failed to read metadata config: {e}");
-            return empty_outcome("Enrichment skipped: config unavailable");
-        }
-    };
-
-    // Build LLM client from config.
-    if !cfg.llm_enabled {
-        return empty_outcome("Foreign enrichment skipped: LLM not configured");
+    // SSRF validation on the stored detail URL.
+    if !livrarr_metadata::goodreads::validate_detail_url(&detail_url) {
+        warn!(url = %detail_url, "Foreign enrichment: detail URL failed SSRF validation");
+        return empty_outcome("Foreign enrichment skipped: invalid detail URL");
     }
-    let endpoint = match cfg.llm_endpoint.as_deref().filter(|s| !s.is_empty()) {
-        Some(e) => e,
-        None => return empty_outcome("Foreign enrichment skipped: LLM endpoint not set"),
-    };
-    let api_key = match cfg.llm_api_key.as_deref().filter(|s| !s.is_empty()) {
-        Some(k) => k,
-        None => return empty_outcome("Foreign enrichment skipped: LLM API key not set"),
-    };
-    let model = match cfg.llm_model.as_deref().filter(|s| !s.is_empty()) {
-        Some(m) => m,
-        None => return empty_outcome("Foreign enrichment skipped: LLM model not set"),
-    };
 
     let mut messages = Vec::new();
     let mut req = UpdateWorkEnrichmentDbRequest {
@@ -1016,6 +997,9 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
         enrichment_source: None,
         cover_url: None,
     };
+
+    // Rate limit outbound Goodreads requests.
+    state.goodreads_rate_limiter.acquire().await;
 
     // --- Fetch detail page ---
     let page_result = tokio::time::timeout(Duration::from_secs(15), async {
@@ -1062,7 +1046,7 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
         }
     };
 
-    // Check for anti-bot page.
+    // Anti-bot detection — error, NO fallback.
     if livrarr_metadata::llm_scraper::is_anti_bot_page(&raw_html) {
         warn!("Anti-bot page detected for work {}", work.id);
         messages.push("Detail page blocked by anti-bot protection".into());
@@ -1072,187 +1056,305 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
         };
     }
 
-    // Clean HTML for LLM.
-    let cleaned = livrarr_metadata::llm_scraper::clean_html_for_llm(&raw_html);
-    if cleaned.is_empty() {
-        messages.push("Detail page was empty after cleaning".into());
-        return EnrichmentOutcome {
-            request: req,
-            messages,
-        };
-    }
-
-    // --- LLM extraction ---
-    let llm_url = format!(
-        "{}chat/completions",
-        endpoint.trim_end_matches('/').to_owned() + "/"
-    );
-
-    // Determine the expected language so the LLM can filter out wrong-language descriptions.
-    let lang_hint = work
-        .language
-        .as_deref()
-        .and_then(livrarr_metadata::language::get_language_info)
-        .map(|info| info.english_name)
-        .unwrap_or("the original");
-
-    let user_prompt = format!(
-        "This book is in {lang_hint}. Extract book details from this page. \
-         For the description, use ONLY text in {lang_hint} or English. \
-         If the description is in a different language, return null for description.\n\n{}",
-        cleaned
-    );
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": DETAIL_EXTRACTION_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_tokens": 4000,
-        "temperature": 0.0,
-    });
-
-    let llm_result = tokio::time::timeout(Duration::from_secs(30), async {
-        let resp = state
-            .http_client
-            .post(&llm_url)
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("LLM request failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            return Err(format!("LLM HTTP {}", resp.status()));
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("LLM parse error: {e}"))?;
-
-        data.pointer("/choices/0/message/content")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| "LLM response missing content".to_string())
-    })
-    .await;
-
-    let llm_response = match llm_result {
-        Ok(Ok(content)) => content,
-        Ok(Err(e)) => {
-            warn!("Foreign enrichment LLM failed for '{}': {e}", work.title);
-            messages.push(format!("LLM extraction failed: {e}"));
-            return EnrichmentOutcome {
-                request: req,
-                messages,
-            };
-        }
-        Err(_) => {
-            warn!("Foreign enrichment LLM timed out for work {}", work.id);
-            messages.push("LLM extraction timed out".into());
-            return EnrichmentOutcome {
-                request: req,
-                messages,
-            };
-        }
-    };
-
-    // --- Parse LLM response ---
-    let trimmed = llm_response.trim();
-    // Strip markdown code fences if present.
-    let json_str = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .unwrap_or(trimmed)
-        .strip_suffix("```")
-        .unwrap_or(trimmed)
-        .trim();
-    // Also try extracting outermost { ... } bounds.
-    let json_str = json_str
-        .find('{')
-        .and_then(|start| json_str.rfind('}').map(|end| &json_str[start..=end]))
-        .unwrap_or(json_str);
-
-    let detail: LlmDetailResult = match serde_json::from_str(json_str) {
-        Ok(d) => d,
-        Err(e) => {
-            let snippet: String = llm_response.chars().take(500).collect();
-            warn!(
-                error = %e,
-                response_snippet = %snippet,
-                "Foreign enrichment: LLM returned malformed JSON"
-            );
-            messages.push("LLM returned unparseable response".into());
-            return EnrichmentOutcome {
-                request: req,
-                messages,
-            };
-        }
-    };
-
-    // --- Populate enrichment fields ---
+    // --- Primary: Direct JSON-LD + regex parsing ---
     let nfc = livrarr_metadata::normalize::nfc;
+    let direct_result = livrarr_metadata::goodreads::parse_detail_html(&raw_html);
 
-    req.description = detail.description.map(|s| nfc(&s));
+    let mut direct_success = false;
 
-    if work.series_name.is_none() {
-        req.series_name = detail.series_name.map(|s| nfc(&s));
-    }
-    if work.series_position.is_none() {
-        req.series_position = detail.series_position;
-    }
+    if let Some(detail) = direct_result {
+        let has_title = detail.title.is_some();
+        let has_cover = detail.cover_url.is_some();
+        let has_description = detail.description.is_some();
 
-    req.genres = detail
-        .genres
-        .map(|g| g.into_iter().map(|s| nfc(&s)).collect());
-    req.page_count = detail.page_count.filter(|&p| p > 0);
-    req.publisher = detail.publisher.map(|s| nfc(&s));
-    req.publish_date = detail.publish_date;
+        if has_title || has_cover || has_description {
+            direct_success = true;
 
-    // Derive year from publish_date if not already set on the work.
-    if work.year.is_none() {
-        req.year = req
-            .publish_date
-            .as_deref()
-            .and_then(|d| d.get(..4))
-            .and_then(|y| y.parse::<i32>().ok());
-    }
+            req.description = detail.description.map(|s| nfc(&s));
 
-    req.rating = detail.rating;
-    req.rating_count = detail.rating_count;
-    req.isbn_13 = detail.isbn.filter(|s| s.len() >= 10);
-
-    // --- Cover handling ---
-    // Use the high-res cover from the detail page if available.
-    // Validate the URL and download it.
-    if let Some(ref cover_url_str) = detail.cover_url {
-        if let Some(validated) =
-            livrarr_metadata::llm_scraper::validate_cover_url(cover_url_str, "")
-        {
-            req.cover_url = Some(validated.clone());
-
-            // Download cover in-band (not background) so enrichment is complete.
-            let covers_dir = state.data_dir.join("covers");
-            if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
-                tracing::warn!("create_dir_all for covers failed: {e}");
+            if work.series_name.is_none() {
+                req.series_name = detail.series_name.map(|s| nfc(&s));
             }
-            if let Ok(resp) = state.http_client.get(&validated).send().await {
-                if resp.status().is_success() {
-                    if let Ok(bytes) = resp.bytes().await {
-                        let path = covers_dir.join(format!("{}.jpg", work.id));
-                        if let Err(e) = tokio::fs::write(&path, &bytes).await {
-                            tracing::warn!("write cover file failed: {e}");
+            if work.series_position.is_none() {
+                req.series_position = detail.series_position;
+            }
+
+            req.genres = if detail.genres.is_empty() {
+                None
+            } else {
+                Some(detail.genres.into_iter().map(|s| nfc(&s)).collect())
+            };
+            req.page_count = detail.page_count.filter(|&p| p > 0);
+            req.publish_date = detail.publish_date;
+            req.language = detail.language.map(|s| nfc(&s));
+            req.rating = detail.rating;
+            req.rating_count = detail.rating_count;
+            req.isbn_13 = detail.isbn.filter(|s| s.len() >= 10);
+
+            // Derive year from publish_date if not already set.
+            if work.year.is_none() {
+                req.year = req
+                    .publish_date
+                    .as_deref()
+                    .and_then(|d| d.get(..4))
+                    .and_then(|y| y.parse::<i32>().ok());
+            }
+
+            // --- Cover handling ---
+            if let Some(ref cover_url_str) = detail.cover_url {
+                if livrarr_metadata::goodreads::validate_cover_url(cover_url_str) {
+                    req.cover_url = Some(cover_url_str.clone());
+
+                    // Rate limit cover download.
+                    state.goodreads_rate_limiter.acquire().await;
+
+                    let covers_dir = state.data_dir.join("covers");
+                    if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
+                        tracing::warn!("create_dir_all for covers failed: {e}");
+                    }
+                    if let Ok(resp) = state.http_client.get(cover_url_str).send().await {
+                        if resp.status().is_success() {
+                            if let Ok(bytes) = resp.bytes().await {
+                                let path = covers_dir.join(format!("{}.jpg", work.id));
+                                if let Err(e) = tokio::fs::write(&path, &bytes).await {
+                                    tracing::warn!("write cover file failed: {e}");
+                                }
+                                // Delete stale thumbnail so it gets regenerated.
+                                let thumb_path = covers_dir.join(format!("{}_thumb.jpg", work.id));
+                                let _ = tokio::fs::remove_file(&thumb_path).await;
+                            }
                         }
-                        // Delete stale thumbnail so it gets regenerated.
-                        let thumb_path = covers_dir.join(format!("{}_thumb.jpg", work.id));
-                        let _ = tokio::fs::remove_file(&thumb_path).await;
                     }
                 }
             }
         }
+    }
+
+    // --- Fallback: LLM extraction (only if direct parsing failed) ---
+    if !direct_success {
+        tracing::info!(
+            work_id = work.id,
+            "Direct parsing returned no useful data, attempting LLM fallback"
+        );
+
+        let cfg = match state.db.get_metadata_config().await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read metadata config for LLM fallback: {e}");
+                messages.push("Direct parsing failed; LLM fallback unavailable".into());
+                return EnrichmentOutcome {
+                    request: req,
+                    messages,
+                };
+            }
+        };
+
+        if !cfg.llm_enabled {
+            messages.push("Direct parsing failed; LLM not configured for fallback".into());
+            return EnrichmentOutcome {
+                request: req,
+                messages,
+            };
+        }
+
+        let endpoint = match cfg.llm_endpoint.as_deref().filter(|s| !s.is_empty()) {
+            Some(e) => e,
+            None => {
+                messages.push("Direct parsing failed; LLM endpoint not set".into());
+                return EnrichmentOutcome {
+                    request: req,
+                    messages,
+                };
+            }
+        };
+        let api_key = match cfg.llm_api_key.as_deref().filter(|s| !s.is_empty()) {
+            Some(k) => k,
+            None => {
+                messages.push("Direct parsing failed; LLM API key not set".into());
+                return EnrichmentOutcome {
+                    request: req,
+                    messages,
+                };
+            }
+        };
+        let model = match cfg.llm_model.as_deref().filter(|s| !s.is_empty()) {
+            Some(m) => m,
+            None => {
+                messages.push("Direct parsing failed; LLM model not set".into());
+                return EnrichmentOutcome {
+                    request: req,
+                    messages,
+                };
+            }
+        };
+
+        let cleaned = livrarr_metadata::llm_scraper::clean_html_for_llm(&raw_html);
+        if cleaned.is_empty() {
+            messages.push("Detail page empty after cleaning (LLM fallback)".into());
+            return EnrichmentOutcome {
+                request: req,
+                messages,
+            };
+        }
+
+        let llm_url = format!(
+            "{}chat/completions",
+            endpoint.trim_end_matches('/').to_owned() + "/"
+        );
+
+        let lang_hint = work
+            .language
+            .as_deref()
+            .and_then(livrarr_metadata::language::get_language_info)
+            .map(|info| info.english_name)
+            .unwrap_or("the original");
+
+        let user_prompt = format!(
+            "This book is in {lang_hint}. Extract book details from this page. \
+             For the description, use ONLY text in {lang_hint} or English. \
+             If the description is in a different language, return null for description.\n\n{}",
+            cleaned
+        );
+
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": DETAIL_EXTRACTION_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": 4000,
+            "temperature": 0.0,
+        });
+
+        let llm_result = tokio::time::timeout(Duration::from_secs(30), async {
+            let resp = state
+                .http_client
+                .post(&llm_url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("LLM request failed: {e}"))?;
+
+            if !resp.status().is_success() {
+                return Err(format!("LLM HTTP {}", resp.status()));
+            }
+
+            let data: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("LLM parse error: {e}"))?;
+
+            data.pointer("/choices/0/message/content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| "LLM response missing content".to_string())
+        })
+        .await;
+
+        let llm_response = match llm_result {
+            Ok(Ok(content)) => content,
+            Ok(Err(e)) => {
+                warn!("Foreign enrichment LLM failed for '{}': {e}", work.title);
+                messages.push(format!("LLM fallback failed: {e}"));
+                return EnrichmentOutcome {
+                    request: req,
+                    messages,
+                };
+            }
+            Err(_) => {
+                warn!("Foreign enrichment LLM timed out for work {}", work.id);
+                messages.push("LLM fallback timed out".into());
+                return EnrichmentOutcome {
+                    request: req,
+                    messages,
+                };
+            }
+        };
+
+        // Parse LLM response.
+        let trimmed = llm_response.trim();
+        let json_str = trimmed
+            .strip_prefix("```json")
+            .or_else(|| trimmed.strip_prefix("```"))
+            .unwrap_or(trimmed)
+            .strip_suffix("```")
+            .unwrap_or(trimmed)
+            .trim();
+        let json_str = json_str
+            .find('{')
+            .and_then(|start| json_str.rfind('}').map(|end| &json_str[start..=end]))
+            .unwrap_or(json_str);
+
+        let detail: LlmDetailResult = match serde_json::from_str(json_str) {
+            Ok(d) => d,
+            Err(e) => {
+                let snippet: String = llm_response.chars().take(500).collect();
+                warn!(
+                    error = %e,
+                    response_snippet = %snippet,
+                    "Foreign enrichment: LLM returned malformed JSON"
+                );
+                messages.push("LLM returned unparseable response".into());
+                return EnrichmentOutcome {
+                    request: req,
+                    messages,
+                };
+            }
+        };
+
+        req.description = detail.description.map(|s| nfc(&s));
+        if work.series_name.is_none() {
+            req.series_name = detail.series_name.map(|s| nfc(&s));
+        }
+        if work.series_position.is_none() {
+            req.series_position = detail.series_position;
+        }
+        req.genres = detail
+            .genres
+            .map(|g| g.into_iter().map(|s| nfc(&s)).collect());
+        req.page_count = detail.page_count.filter(|&p| p > 0);
+        req.publisher = detail.publisher.map(|s| nfc(&s));
+        req.publish_date = detail.publish_date;
+        req.rating = detail.rating;
+        req.rating_count = detail.rating_count;
+        req.isbn_13 = detail.isbn.filter(|s| s.len() >= 10);
+
+        if work.year.is_none() {
+            req.year = req
+                .publish_date
+                .as_deref()
+                .and_then(|d| d.get(..4))
+                .and_then(|y| y.parse::<i32>().ok());
+        }
+
+        if let Some(ref cover_url_str) = detail.cover_url {
+            if let Some(validated) =
+                livrarr_metadata::llm_scraper::validate_cover_url(cover_url_str, "")
+            {
+                req.cover_url = Some(validated.clone());
+
+                let covers_dir = state.data_dir.join("covers");
+                if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
+                    tracing::warn!("create_dir_all for covers failed: {e}");
+                }
+                if let Ok(resp) = state.http_client.get(&validated).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes().await {
+                            let path = covers_dir.join(format!("{}.jpg", work.id));
+                            if let Err(e) = tokio::fs::write(&path, &bytes).await {
+                                tracing::warn!("write cover file failed: {e}");
+                            }
+                            let thumb_path = covers_dir.join(format!("{}_thumb.jpg", work.id));
+                            let _ = tokio::fs::remove_file(&thumb_path).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        messages.push("Enriched via LLM fallback (direct parsing failed)".into());
     }
 
     // --- Set status ---
@@ -1265,7 +1367,11 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
         } else {
             EnrichmentStatus::Partial
         };
-        req.enrichment_source = Some("web_search".to_string());
+        req.enrichment_source = Some(if direct_success {
+            "goodreads_direct".to_string()
+        } else {
+            "web_search".to_string()
+        });
         messages.insert(
             0,
             format!(
@@ -1280,7 +1386,6 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
             ),
         );
     } else {
-        // No useful data extracted — still mark as attempted.
         req.enrichment_status = EnrichmentStatus::Partial;
         req.enrichment_source = Some("web_search".to_string());
         messages.push("Detail page enrichment: no description or cover extracted".into());
