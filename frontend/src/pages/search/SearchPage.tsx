@@ -97,6 +97,7 @@ export default function SearchPage() {
         coverUrl: work.coverUrl,
         metadataSource: work.source,
         language: work.language,
+        detailUrl: work.detailUrl,
       });
     },
     onSuccess: (data: AddWorkResponse) => {
@@ -174,7 +175,7 @@ export default function SearchPage() {
       </PageToolbar>
 
       <PageContent>
-        <form onSubmit={handleSearch} className="flex gap-2">
+        <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-2">
           {/* Language selector */}
           {enabledLanguages.length > 1 && (
             <div className="relative" ref={langRef}>
@@ -267,6 +268,13 @@ export default function SearchPage() {
             </div>
           )}
 
+          {/* ── SRP tip for non-English searches ── */}
+          {selectedLang !== "en" && hasQuery && !isSearching && (
+            <div className="mb-4 rounded-lg border border-blue-500/20 bg-blue-500/5 px-4 py-3 text-sm text-blue-300">
+              <strong>Tip:</strong> Search by title for best results. Add author name if you get too many matches. For titles that are similar or identical in multiple languages, add the language to the search term.
+            </div>
+          )}
+
           {/* ── Add to Your Library ── */}
           {!isSearching && hasOlResults && (
             <section>
@@ -304,7 +312,7 @@ function LibraryResult({ work }: { work: WorkDetailResponse }) {
   return (
     <Link
       to={`/work/${work.id}`}
-      className="flex items-center gap-2 border-b border-border/50 px-2 py-1.5 hover:bg-zinc-800/50"
+      className="flex items-center gap-2 border-b border-border/50 px-2 py-2 sm:py-1.5 hover:bg-zinc-800/50"
     >
       <img
         src={getCoverUrl(work.id)}
@@ -315,14 +323,14 @@ function LibraryResult({ work }: { work: WorkDetailResponse }) {
         {work.title}
       </span>
       {work.seriesName && (
-        <span className="shrink-0 text-xs text-zinc-500">
+        <span className="hidden sm:inline shrink-0 text-xs text-zinc-500">
           {work.seriesName}
           {work.seriesPosition != null && ` #${work.seriesPosition}`}
         </span>
       )}
       <span className="flex-1" />
       <span className="shrink-0 text-xs text-muted">{work.authorName}</span>
-      <span className="shrink-0 w-10 text-right text-xs text-zinc-500">
+      <span className="hidden sm:inline shrink-0 w-10 text-right text-xs text-zinc-500">
         {work.year ?? ""}
       </span>
     </Link>
@@ -339,50 +347,54 @@ function OlResult({
   isAdding: boolean;
 }) {
   return (
-    <div className="flex items-center gap-2 border-b border-border/50 px-2 py-1.5">
-      {work.coverUrl ? (
-        <img
-          src={work.coverUrl}
-          alt=""
-          className="h-8 w-6 shrink-0 rounded bg-zinc-700 object-cover"
-        />
-      ) : (
-        <div className="flex h-8 w-6 shrink-0 items-center justify-center rounded bg-zinc-700 text-[8px] text-zinc-500">
-          ?
-        </div>
-      )}
-      <span className="min-w-0 truncate font-medium text-sm text-zinc-100">
-        {work.title}
-      </span>
-      {work.seriesName && (
-        <span className="shrink-0 text-xs text-zinc-500">
-          {work.seriesName}
-          {work.seriesPosition != null && ` #${work.seriesPosition}`}
-        </span>
-      )}
-      {work.source && (
-        <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/12 text-blue-300">
-          {work.source}
-        </span>
-      )}
-      <span className="flex-1" />
-      <span className="shrink-0 text-xs text-muted">{work.authorName}</span>
-      <span className="shrink-0 w-10 text-right text-xs text-zinc-500">
-        {work.year ?? ""}
-      </span>
-      <button
-        type="button"
-        onClick={onAdd}
-        disabled={isAdding}
-        className="shrink-0 inline-flex items-center gap-1 rounded bg-brand px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-hover disabled:opacity-50"
-      >
-        {isAdding ? (
-          <Loader2 size={12} className="animate-spin" />
+    <div className="flex flex-col sm:flex-row sm:items-center gap-2 border-b border-border/50 px-2 py-2 sm:py-1.5">
+      <div className="flex items-center gap-2 min-w-0 flex-1">
+        {work.coverUrl ? (
+          <img
+            src={work.coverUrl}
+            alt=""
+            className="h-8 w-6 shrink-0 rounded bg-zinc-700 object-cover"
+          />
         ) : (
-          <Plus size={12} />
+          <div className="flex h-8 w-6 shrink-0 items-center justify-center rounded bg-zinc-700 text-[8px] text-zinc-500">
+            ?
+          </div>
         )}
-        Add
-      </button>
+        <span className="min-w-0 truncate font-medium text-sm text-zinc-100">
+          {work.title}
+        </span>
+        {work.seriesName && (
+          <span className="hidden sm:inline shrink-0 text-xs text-zinc-500">
+            {work.seriesName}
+            {work.seriesPosition != null && ` #${work.seriesPosition}`}
+          </span>
+        )}
+        {work.source && (
+          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/12 text-blue-300">
+            {work.source}
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-2 pl-8 sm:pl-0">
+        <span className="shrink-0 text-xs text-muted">{work.authorName}</span>
+        {work.rating && <span className="text-xs text-yellow-400">{work.rating} ★</span>}
+        <span className="shrink-0 w-10 text-right text-xs text-zinc-500">
+          {work.year ?? ""}
+        </span>
+        <button
+          type="button"
+          onClick={onAdd}
+          disabled={isAdding}
+          className="shrink-0 inline-flex items-center gap-1 rounded bg-brand px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+        >
+          {isAdding ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Plus size={12} />
+          )}
+          Add
+        </button>
+      </div>
     </div>
   );
 }

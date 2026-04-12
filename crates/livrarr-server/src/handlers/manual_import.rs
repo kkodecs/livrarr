@@ -863,6 +863,7 @@ async fn find_or_create_work(
         cover_url: None,
         metadata_source: None,
         language: None,
+        detail_url: None,
     };
 
     let resp = super::work::add_work_internal(state, user_id, add_req).await?;
@@ -1197,6 +1198,8 @@ async fn search_ol_batch(state: &AppState, term: &str) -> Result<Vec<WorkSearchR
                 source: None,
                 source_type: None,
                 language: None,
+                detail_url: None,
+                rating: None,
             })
         })
         .collect();
