@@ -1119,9 +1119,7 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
                                 if let Err(e) = tokio::fs::write(&path, &bytes).await {
                                     tracing::warn!("write cover file failed: {e}");
                                 }
-                                // Delete stale thumbnail so it gets regenerated.
-                                let thumb_path = covers_dir.join(format!("{}_thumb.jpg", work.id));
-                                let _ = tokio::fs::remove_file(&thumb_path).await;
+                                // Keep thumbnail — useful for list views.
                             }
                         }
                     }
@@ -1346,8 +1344,6 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
                             if let Err(e) = tokio::fs::write(&path, &bytes).await {
                                 tracing::warn!("write cover file failed: {e}");
                             }
-                            let thumb_path = covers_dir.join(format!("{}_thumb.jpg", work.id));
-                            let _ = tokio::fs::remove_file(&thumb_path).await;
                         }
                     }
                 }

@@ -131,7 +131,7 @@ export default function ProfilePage() {
           <h2 className="text-lg font-semibold text-zinc-100">API Key</h2>
           {apiKey ? (
             <>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                 <input
                   readOnly
                   value={apiKey}
@@ -155,7 +155,7 @@ export default function ProfilePage() {
               </p>
             </>
           ) : (
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
               <p className="flex-1 text-sm text-zinc-400">
                 Your API key is stored securely and cannot be displayed. Regenerate to get a new one.
               </p>

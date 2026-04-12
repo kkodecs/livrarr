@@ -315,6 +315,10 @@ pub struct WorkSearchResult {
     pub source_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rating: Option<String>,
 }
 
 /// Work management operations.
@@ -374,6 +378,8 @@ pub struct AddWorkRequest {
     pub metadata_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

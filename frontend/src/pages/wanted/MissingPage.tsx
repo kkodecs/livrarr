@@ -105,7 +105,7 @@ export default function MissingPage() {
   return (
     <>
       <PageToolbar>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {(["all", "ebook", "audiobook"] as const).map((key) => {
             const labels = {
               all: "All Missing",
@@ -191,6 +191,7 @@ export default function MissingPage() {
                     activeField={sortField}
                     dir={sortDir}
                     onSort={handleSort}
+                    className="hidden sm:table-cell"
                   >
                     Author
                   </SortHeader>
@@ -199,6 +200,7 @@ export default function MissingPage() {
                     activeField={sortField}
                     dir={sortDir}
                     onSort={handleSort}
+                    className="hidden md:table-cell"
                   >
                     Year
                   </SortHeader>
@@ -210,6 +212,7 @@ export default function MissingPage() {
                     activeField={sortField}
                     dir={sortDir}
                     onSort={handleSort}
+                    className="hidden lg:table-cell"
                   >
                     Added
                   </SortHeader>
@@ -234,7 +237,7 @@ export default function MissingPage() {
                         {work.title}
                       </Link>
                     </td>
-                    <td className="px-3 py-2 text-muted">
+                    <td className="hidden sm:table-cell px-3 py-2 text-muted">
                       {work.authorId ? (
                         <Link
                           to={`/author/${work.authorId}`}
@@ -246,13 +249,13 @@ export default function MissingPage() {
                         work.authorName
                       )}
                     </td>
-                    <td className="px-3 py-2 text-muted">
+                    <td className="hidden md:table-cell px-3 py-2 text-muted">
                       {work.year ?? "\u2014"}
                     </td>
                     <td className="px-3 py-2">
                       <MissingBadges work={work} />
                     </td>
-                    <td className="px-3 py-2 text-muted">
+                    <td className="hidden lg:table-cell px-3 py-2 text-muted">
                       {formatRelativeDate(work.addedAt)}
                     </td>
                   </tr>

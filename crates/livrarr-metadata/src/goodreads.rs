@@ -18,6 +18,9 @@ pub struct GoodreadsSearchResult {
     pub detail_url: String,
     pub cover_url: Option<String>,
     pub year: Option<i32>,
+    pub rating: Option<String>,
+    pub series_name: Option<String>,
+    pub series_position: Option<f64>,
 }
 
 /// Detailed metadata extracted from a Goodreads book detail page.
@@ -68,6 +71,16 @@ static RE_COVER: LazyLock<Regex> = LazyLock::new(|| {
 
 static RE_YEAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"published\s+(\d{4})"#).unwrap());
 
+static RE_RATING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?s)class="minirating"[^>]*>(.*?)</span>"#).unwrap());
+
+static RE_RATING_VALUE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(\d+\.\d+)\s+avg"#).unwrap());
+
+/// Matches series info in parentheses at end of title: "(Series Name, #1)"
+static RE_TITLE_SERIES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\s*\(([^,]+),\s*#(\d+(?:\.\d+)?)\)\s*$"#).unwrap());
+
 // Detail page regex patterns
 static RE_JSONLD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?si)<script\s+type="application/ld\+json">(.*?)</script>"#).unwrap()
@@ -81,6 +94,9 @@ static RE_GENRES: LazyLock<Regex> =
 
 static RE_PUBLISHED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"First published\s+(.*?)(?:<|$)"#).unwrap());
+
+static RE_SERIES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"aria-label="Book (\d+) in the (.*?) series""#).unwrap());
 
 static RE_HTML_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"<[^>]+>"#).unwrap());
 
@@ -136,12 +152,31 @@ pub fn parse_search_html(html: &str) -> Vec<GoodreadsSearchResult> {
         // Year (optional)
         let year = RE_YEAR.captures(row).and_then(|c| c[1].parse::<i32>().ok());
 
+        // Rating (optional) — e.g. "3.92 avg rating"
+        let rating = RE_RATING
+            .captures(row)
+            .and_then(|c| RE_RATING_VALUE.captures(&c[1]).map(|m| m[1].to_string()));
+
+        // Extract series from title: "Book Title (Series Name, #1)" → strip from title
+        let (clean_title, series_name, series_position) =
+            if let Some(caps) = RE_TITLE_SERIES.captures(&title) {
+                let sname = caps[1].trim().to_string();
+                let spos = caps[2].parse::<f64>().ok();
+                let clean = RE_TITLE_SERIES.replace(&title, "").trim().to_string();
+                (clean, Some(sname), spos)
+            } else {
+                (title, None, None)
+            };
+
         results.push(GoodreadsSearchResult {
-            title,
+            title: clean_title,
             author,
             detail_url,
             cover_url,
             year,
+            rating,
+            series_name,
+            series_position,
         });
     }
 
@@ -164,6 +199,17 @@ pub fn parse_detail_html(html: &str) -> Option<GoodreadsDetailResult> {
     let description = extract_description(html);
     let genres = extract_genres(html);
     let publish_date = RE_PUBLISHED.captures(html).map(|c| c[1].trim().to_string());
+    let (series_name, series_position) = RE_SERIES
+        .captures(html)
+        .map(|c| {
+            let pos = c[1].parse::<f64>().ok();
+            let name = c[2]
+                .replace("&#x27;", "'")
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"");
+            (Some(name), pos)
+        })
+        .unwrap_or((None, None));
 
     // If we have JSON-LD, use it as primary
     if let Some(book) = book_json {
@@ -234,8 +280,8 @@ pub fn parse_detail_html(html: &str) -> Option<GoodreadsDetailResult> {
             book_format,
             description,
             genres,
-            series_name: None,     // TODO: parse from BookPageTitleSection
-            series_position: None, // TODO: parse from BookPageTitleSection
+            series_name,
+            series_position,
             publish_date,
         })
     } else if description.is_some() || !genres.is_empty() {
@@ -252,8 +298,8 @@ pub fn parse_detail_html(html: &str) -> Option<GoodreadsDetailResult> {
             book_format: None,
             description,
             genres,
-            series_name: None,
-            series_position: None,
+            series_name,
+            series_position,
             publish_date,
         })
     } else {
@@ -349,6 +395,7 @@ pub fn validate_detail_url(url: &str) -> bool {
 }
 
 /// Validate that a cover URL is from an allowed host (SSRF protection).
+/// HTTPS only — all Goodreads/Amazon CDNs serve HTTPS.
 pub fn validate_cover_url(url: &str) -> bool {
     const ALLOWED_HOSTS: &[&str] = &[
         "i.gr-assets.com",
@@ -360,7 +407,7 @@ pub fn validate_cover_url(url: &str) -> bool {
     ];
 
     if let Ok(parsed) = url::Url::parse(url) {
-        if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        if parsed.scheme() != "https" {
             return false;
         }
         if let Some(host) = parsed.host_str() {
@@ -462,7 +509,9 @@ mod tests {
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 1);
 
-        assert_eq!(results[0].title, "QualityLand (QualityLand, #1)");
+        assert_eq!(results[0].title, "QualityLand");
+        assert_eq!(results[0].series_name.as_deref(), Some("QualityLand"));
+        assert_eq!(results[0].series_position, Some(1.0));
         assert_eq!(results[0].author.as_deref(), Some("Marc-Uwe Kling"));
         assert!(results[0].detail_url.starts_with("/book/show/"));
         assert!(results[0].cover_url.is_some());
@@ -474,7 +523,9 @@ mod tests {
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 1);
 
-        assert_eq!(results[0].title, "QualityLand 2.0 (QualityLand, #2)");
+        assert_eq!(results[0].title, "QualityLand 2.0");
+        assert_eq!(results[0].series_name.as_deref(), Some("QualityLand"));
+        assert_eq!(results[0].series_position, Some(2.0));
         assert_eq!(results[0].author.as_deref(), Some("Marc-Uwe Kling"));
         assert!(results[0].cover_url.is_some());
     }
@@ -485,7 +536,9 @@ mod tests {
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 1);
 
-        assert_eq!(results[0].title, "Tintenherz (Tintenwelt, #1)");
+        assert_eq!(results[0].title, "Tintenherz");
+        assert_eq!(results[0].series_name.as_deref(), Some("Tintenwelt"));
+        assert_eq!(results[0].series_position, Some(1.0));
         assert_eq!(results[0].author.as_deref(), Some("Cornelia Funke"));
         assert!(results[0].cover_url.is_some());
     }

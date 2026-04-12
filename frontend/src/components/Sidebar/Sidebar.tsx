@@ -27,6 +27,7 @@ import {
   Bookmark,
   ArrowUpCircle,
   Info,
+  X,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useAuthStore } from "@/stores/auth";
@@ -208,7 +209,13 @@ const navGroups: NavGroup[] = [
   },
 ];
 
-function SidebarGroup({ group }: { group: NavGroup }) {
+function SidebarGroup({
+  group,
+  onNavigate,
+}: {
+  group: NavGroup;
+  onNavigate?: () => void;
+}) {
   const location = useLocation();
   const isAdmin = useAuthStore((s) => s.isAdmin);
   const collapsed = useUIStore((s) => s.sidebarCollapsed);
@@ -230,7 +237,12 @@ function SidebarGroup({ group }: { group: NavGroup }) {
     return (
       <div className="space-y-0.5">
         {visibleChildren.map((item) => (
-          <SidebarItem key={item.path} item={item} collapsed />
+          <SidebarItem
+            key={item.path}
+            item={item}
+            collapsed
+            onNavigate={onNavigate}
+          />
         ))}
       </div>
     );
@@ -243,7 +255,11 @@ function SidebarGroup({ group }: { group: NavGroup }) {
           {group.label}
         </div>
         {visibleChildren.map((item) => (
-          <SidebarItem key={item.path} item={item} />
+          <SidebarItem
+            key={item.path}
+            item={item}
+            onNavigate={onNavigate}
+          />
         ))}
       </div>
     );
@@ -260,7 +276,11 @@ function SidebarGroup({ group }: { group: NavGroup }) {
       </button>
       {open &&
         visibleChildren.map((item) => (
-          <SidebarItem key={item.path} item={item} />
+          <SidebarItem
+            key={item.path}
+            item={item}
+            onNavigate={onNavigate}
+          />
         ))}
     </div>
   );
@@ -269,9 +289,11 @@ function SidebarGroup({ group }: { group: NavGroup }) {
 function SidebarItem({
   item,
   collapsed,
+  onNavigate,
 }: {
   item: NavItem;
   collapsed?: boolean;
+  onNavigate?: () => void;
 }) {
   if (item.greyed) {
     return (
@@ -292,6 +314,7 @@ function SidebarItem({
     <NavLink
       to={item.path}
       end={item.path === "/"}
+      onClick={onNavigate}
       className={({ isActive }) =>
         cn(
           "flex items-center gap-3 rounded px-3 py-2 text-sm transition-colors",
@@ -337,68 +360,140 @@ function useVersionCheck() {
   return { currentVersion, latestVersion, latestUrl, hasUpdate };
 }
 
-export function Sidebar() {
-  const collapsed = useUIStore((s) => s.sidebarCollapsed);
+function VersionFooter({ collapsed }: { collapsed: boolean }) {
   const { currentVersion, latestVersion, latestUrl, hasUpdate } =
     useVersionCheck();
 
   return (
-    <aside
+    <div
       className={cn(
-        "fixed left-0 top-12 bottom-0 z-30 flex flex-col overflow-y-auto bg-sidebar border-r border-border transition-all",
-        collapsed ? "w-14" : "w-56",
+        "border-t border-border p-2",
+        collapsed && "flex flex-col items-center",
       )}
     >
-      <nav className="flex-1 space-y-2 p-2">
-        {navGroups.map((group) => (
-          <SidebarGroup key={group.label} group={group} />
-        ))}
-      </nav>
-
-      {/* Version footer */}
-      <div
-        className={cn(
-          "border-t border-border p-2",
-          collapsed && "flex flex-col items-center",
-        )}
-      >
-        {hasUpdate && !collapsed && (
-          <a
-            href={latestUrl ?? `${REPO_URL}/releases`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 rounded px-2 py-1.5 mb-1 text-xs font-medium bg-brand/15 text-brand hover:bg-brand/25 transition-colors"
-          >
-            <ArrowUpCircle size={14} className="shrink-0" />
-            <span>
-              Update: livrarr:{latestVersion}
-            </span>
-          </a>
-        )}
-        {hasUpdate && collapsed && (
-          <a
-            href={latestUrl ?? `${REPO_URL}/releases`}
-            target="_blank"
-            rel="noopener noreferrer"
-            title={`Update available: livrarr:${latestVersion}`}
-            className="flex items-center justify-center rounded p-1.5 mb-1 text-brand hover:bg-brand/25 transition-colors"
-          >
-            <ArrowUpCircle size={16} />
-          </a>
-        )}
+      {hasUpdate && !collapsed && (
         <a
-          href={REPO_URL}
+          href={latestUrl ?? `${REPO_URL}/releases`}
           target="_blank"
           rel="noopener noreferrer"
-          className={cn(
-            "text-brand hover:text-brand/80 transition-colors text-center",
-            collapsed ? "text-[9px]" : "block py-1 text-[11px]",
-          )}
-          title={`livrarr:${currentVersion ?? "..."}`}
+          className="flex items-center gap-2 rounded px-2 py-1.5 mb-1 text-xs font-medium bg-brand/15 text-brand hover:bg-brand/25 transition-colors"
         >
-          {collapsed ? "v" + (currentVersion ?? "…") : `livrarr:${currentVersion ?? "..."}`}
+          <ArrowUpCircle size={14} className="shrink-0" />
+          <span>Update: livrarr:{latestVersion}</span>
         </a>
-      </div>
-    </aside>
+      )}
+      {hasUpdate && collapsed && (
+        <a
+          href={latestUrl ?? `${REPO_URL}/releases`}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Update available: livrarr:${latestVersion}`}
+          className="flex items-center justify-center rounded p-1.5 mb-1 text-brand hover:bg-brand/25 transition-colors"
+        >
+          <ArrowUpCircle size={16} />
+        </a>
+      )}
+      <a
+        href={REPO_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={cn(
+          "text-brand hover:text-brand/80 transition-colors text-center",
+          collapsed ? "text-[9px]" : "block py-1 text-[11px]",
+        )}
+        title={`livrarr:${currentVersion ?? "..."}`}
+      >
+        {collapsed
+          ? "v" + (currentVersion ?? "…")
+          : `livrarr:${currentVersion ?? "..."}`}
+      </a>
+    </div>
+  );
+}
+
+export function Sidebar() {
+  const collapsed = useUIStore((s) => s.sidebarCollapsed);
+  const mobileSidebarOpen = useUIStore((s) => s.mobileSidebarOpen);
+  const setMobileSidebarOpen = useUIStore((s) => s.setMobileSidebarOpen);
+
+  // Close mobile sidebar on navigation (handled via onNavigate callback)
+  const closeMobile = () => setMobileSidebarOpen(false);
+
+  // Close mobile sidebar on escape key
+  useEffect(() => {
+    if (!mobileSidebarOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeMobile();
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [mobileSidebarOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Prevent body scroll when mobile sidebar is open
+  useEffect(() => {
+    if (mobileSidebarOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [mobileSidebarOpen]);
+
+  return (
+    <>
+      {/* Mobile backdrop */}
+      {mobileSidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
+          onClick={closeMobile}
+        />
+      )}
+
+      {/* Mobile sidebar drawer */}
+      <aside
+        className={cn(
+          "fixed top-0 left-0 bottom-0 z-50 flex w-64 flex-col overflow-y-auto bg-sidebar border-r border-border transition-transform duration-200 md:hidden",
+          mobileSidebarOpen ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+        {/* Mobile sidebar header */}
+        <div className="flex h-12 items-center justify-between border-b border-border px-4">
+          <span className="text-lg font-bold text-zinc-100">Livrarr</span>
+          <button
+            onClick={closeMobile}
+            className="rounded p-1.5 text-zinc-400 hover:bg-surface-hover hover:text-zinc-100"
+          >
+            <X size={20} />
+          </button>
+        </div>
+        <nav className="flex-1 space-y-2 p-2">
+          {navGroups.map((group) => (
+            <SidebarGroup
+              key={group.label}
+              group={group}
+              onNavigate={closeMobile}
+            />
+          ))}
+        </nav>
+        <VersionFooter collapsed={false} />
+      </aside>
+
+      {/* Desktop sidebar (hidden on mobile) */}
+      <aside
+        className={cn(
+          "fixed left-0 top-12 bottom-0 z-30 hidden md:flex flex-col overflow-y-auto bg-sidebar border-r border-border transition-all",
+          collapsed ? "w-14" : "w-56",
+        )}
+      >
+        <nav className="flex-1 space-y-2 p-2">
+          {navGroups.map((group) => (
+            <SidebarGroup key={group.label} group={group} />
+          ))}
+        </nav>
+        <VersionFooter collapsed={collapsed} />
+      </aside>
+    </>
   );
 }

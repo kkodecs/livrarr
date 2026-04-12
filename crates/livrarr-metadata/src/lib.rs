@@ -9,8 +9,6 @@ pub mod http_llm;
 pub mod language;
 pub mod llm_scraper;
 pub mod normalize;
-pub mod registry;
-pub mod sru;
 
 // =============================================================================
 // Metadata Provider Trait

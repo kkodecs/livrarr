@@ -245,7 +245,7 @@ export default function ManualImportPage() {
       <PageContent>
         {/* Path input */}
         <div className="mb-6 space-y-3">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
             <input
               type="text"
               value={path}
@@ -257,21 +257,23 @@ export default function ManualImportPage() {
                 pathError ? "border-red-500" : "border-border"
               }`}
             />
-            <button
-              onClick={() => setShowPicker(!showPicker)}
-              className="btn-secondary inline-flex items-center gap-1.5 text-sm"
-            >
-              <FolderSearch size={14} />
-              Browse
-            </button>
-            <button
-              onClick={handleScan}
-              disabled={!path.trim() || scanMutation.isPending}
-              className="btn-primary inline-flex items-center gap-1.5 text-sm"
-            >
-              {scanMutation.isPending ? <LoadingSpinner size={14} /> : <Search size={14} />}
-              Scan
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowPicker(!showPicker)}
+                className="btn-secondary inline-flex items-center gap-1.5 text-sm"
+              >
+                <FolderSearch size={14} />
+                Browse
+              </button>
+              <button
+                onClick={handleScan}
+                disabled={!path.trim() || scanMutation.isPending}
+                className="btn-primary inline-flex items-center gap-1.5 text-sm"
+              >
+                {scanMutation.isPending ? <LoadingSpinner size={14} /> : <Search size={14} />}
+                Scan
+              </button>
+            </div>
           </div>
 
           {pathError && (
@@ -306,7 +308,7 @@ export default function ManualImportPage() {
         {/* Results table */}
         {!scanMutation.isPending && files.length > 0 && (
           <>
-            <div className="mb-3 flex items-center justify-between">
+            <div className="mb-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
               <span className="text-sm text-muted">
                 {files.length} file{files.length !== 1 ? "s" : ""} found
                 {selectedCount > 0 && ` · ${selectedCount} selected`}
@@ -338,9 +340,9 @@ export default function ManualImportPage() {
                       />
                     </th>
                     <th className="px-3 py-2">File</th>
-                    <th className="px-3 py-2">Type</th>
+                    <th className="hidden md:table-cell px-3 py-2">Type</th>
                     <th className="px-3 py-2">Match</th>
-                    <th className="px-3 py-2">Status</th>
+                    <th className="hidden sm:table-cell px-3 py-2">Status</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -388,7 +390,7 @@ export default function ManualImportPage() {
                         </td>
 
                         {/* Media type */}
-                        <td className="px-3 py-2">
+                        <td className="hidden md:table-cell px-3 py-2">
                           <span className="rounded bg-zinc-700 px-1.5 py-0.5 text-xs text-zinc-300">
                             {f.mediaType}
                           </span>
@@ -497,7 +499,7 @@ export default function ManualImportPage() {
                         </td>
 
                         {/* Status */}
-                        <td className="px-3 py-2">
+                        <td className="hidden sm:table-cell px-3 py-2">
                           {result ? (
                             <div>
                               {result.status === "imported" && (

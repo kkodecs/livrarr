@@ -134,6 +134,8 @@ export interface WorkSearchResult {
   source?: string | null;
   sourceType?: string | null;
   language?: string | null;
+  detailUrl?: string | null;
+  rating?: string | null;
 }
 
 export interface AddWorkRequest {
@@ -145,6 +147,7 @@ export interface AddWorkRequest {
   coverUrl?: string | null;
   metadataSource?: string | null;
   language?: string | null;
+  detailUrl?: string | null;
 }
 
 export interface AddWorkResponse {
@@ -200,6 +203,7 @@ export interface WorkDetailResponse {
   addedAt: string;
   libraryItems: LibraryItemResponse[];
   metadataSource?: string | null;
+  detailUrl?: string | null;
 }
 
 export interface LibraryItemResponse {
