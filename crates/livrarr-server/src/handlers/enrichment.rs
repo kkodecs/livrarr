@@ -33,6 +33,7 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
         }
     };
 
+    let work_id = work.id;
     let title = &work.title;
     let author = &work.author_name;
     let mut messages = Vec::new();
@@ -141,11 +142,11 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
                 hc_succeeded = true;
             }
             Ok(Err(e)) => {
-                warn!("Hardcover enrichment failed for '{title}': {e}");
+                warn!("Hardcover enrichment failed for <work {work_id}>: {e}");
                 messages.push(format!("Hardcover: {e}"));
             }
             Err(_) => {
-                warn!("Hardcover enrichment timed out for '{title}'");
+                warn!("Hardcover enrichment timed out for <work {work_id}>");
                 messages.push("Hardcover: timed out".into());
             }
         }
@@ -170,10 +171,10 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
                     ol_succeeded = true;
                 }
                 Ok(Err(e)) => {
-                    warn!("OL detail failed for '{title}': {e}");
+                    warn!("OL detail failed for <work {work_id}>: {e}");
                 }
                 Err(_) => {
-                    warn!("OL detail timed out for '{title}'");
+                    warn!("OL detail timed out for <work {work_id}>");
                 }
             }
         }
@@ -209,10 +210,10 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
                 audnexus_succeeded = true;
             }
             Ok(Err(e)) => {
-                warn!("Audnexus failed for '{title}': {e}");
+                warn!("Audnexus failed for <work {work_id}>: {e}");
             }
             Err(_) => {
-                warn!("Audnexus timed out for '{title}'");
+                warn!("Audnexus timed out for <work {work_id}>");
             }
         }
     }
@@ -1052,7 +1053,7 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
             };
         }
         Err(_) => {
-            warn!("Foreign enrichment fetch timed out for '{}'", work.title);
+            warn!("Foreign enrichment fetch timed out for work {}", work.id);
             messages.push("Detail page fetch timed out".into());
             return EnrichmentOutcome {
                 request: req,
@@ -1063,7 +1064,7 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
 
     // Check for anti-bot page.
     if livrarr_metadata::llm_scraper::is_anti_bot_page(&raw_html) {
-        warn!("Anti-bot page detected for '{}'", work.title);
+        warn!("Anti-bot page detected for work {}", work.id);
         messages.push("Detail page blocked by anti-bot protection".into());
         return EnrichmentOutcome {
             request: req,
@@ -1150,7 +1151,7 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
             };
         }
         Err(_) => {
-            warn!("Foreign enrichment LLM timed out for '{}'", work.title);
+            warn!("Foreign enrichment LLM timed out for work {}", work.id);
             messages.push("LLM extraction timed out".into());
             return EnrichmentOutcome {
                 request: req,

@@ -1106,6 +1106,7 @@ pub struct SystemStatus {
     pub data_directory: String,
     pub log_file: String,
     pub startup_time: DateTime<Utc>,
+    pub log_level: String,
 }
 
 /// System and health endpoints.

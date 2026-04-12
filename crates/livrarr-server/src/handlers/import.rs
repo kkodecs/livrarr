@@ -55,14 +55,14 @@ pub async fn import_grab(
     // re-querying the download client, which may have removed the torrent/NZB).
     let source_path = if let Some(ref remote_path) = grab.content_path {
         // Re-apply path mapping (user may have fixed mapping config since grab).
-        apply_remote_path_mapping(state, &client.host, remote_path).await?
+        apply_remote_path_mapping(state, &client.host, remote_path).await?.local_path
     } else if let Some(ref id) = grab.download_id {
         let content_path = if client.client_type() == "sabnzbd" {
             fetch_sabnzbd_storage_path(state, &client, id).await?
         } else {
             fetch_qbit_content_path(state, &client, id).await?
         };
-        apply_remote_path_mapping(state, &client.host, &content_path).await?
+        apply_remote_path_mapping(state, &client.host, &content_path).await?.local_path
     } else {
         let error = "no download_id or content_path — download not confirmed in client".to_string();
         state
@@ -466,7 +466,7 @@ pub async fn import_single_file(
     // Tag the .tmp if enrichment data available.
     let mut tag_warning = None;
     if let Some(metadata) = tag_metadata {
-        tracing::debug!(path = %tmp_path, title = %metadata.title, "writing tags to epub");
+        tracing::debug!(path = %tmp_path, "writing tags");
         match livrarr_tagwrite::write_tags(
             tmp_path.clone(),
             metadata.clone(),
@@ -1042,12 +1042,18 @@ async fn fetch_sabnzbd_storage_path(
         })
 }
 
-/// Apply remote path mapping (longest prefix match on host).
+#[derive(Clone)]
+pub struct PathMappingResult {
+    pub local_path: String,
+    pub configured_remote_path: Option<String>,
+    pub configured_local_path: Option<String>,
+}
+
 pub async fn apply_remote_path_mapping(
     state: &AppState,
     client_host: &str,
     content_path: &str,
-) -> Result<String, ApiError> {
+) -> Result<PathMappingResult, ApiError> {
     // Normalize Windows backslashes — download clients on Windows report paths
     // like C:\Downloads\book.epub that need to match Linux forward-slash mappings.
     let content_path = &content_path.replace('\\', "/");
@@ -1062,18 +1068,21 @@ pub async fn apply_remote_path_mapping(
         .next()
         .unwrap_or(client_host);
 
-    // Find longest matching remote_path prefix for this host.
-    // Enforce directory boundary: remote_path must match at a `/` boundary
-    // to prevent partial matches (e.g., /data/downloads matching /data/downloads_new).
-    let best_match = mappings
+    // Filter to mappings that match this host.
+    let host_matches: Vec<_> = mappings
         .iter()
         .filter(|m| {
-            // Match if mapping host equals the hostname, or if hostname ends with the mapping host
-            // (e.g., "host.example.com" ends with "example.com").
             let mh = m.host.to_ascii_lowercase();
             let ch = client_hostname.to_ascii_lowercase();
             ch == mh || ch.ends_with(&format!(".{mh}"))
         })
+        .collect();
+
+    // Find longest matching remote_path prefix for this host.
+    // Enforce directory boundary: remote_path must match at a `/` boundary
+    // to prevent partial matches (e.g., /data/downloads matching /data/downloads_new).
+    let best_match = host_matches
+        .iter()
         .filter(|m| {
             let rp = m.remote_path.replace('\\', "/");
             if content_path.starts_with(&rp) {
@@ -1092,9 +1101,25 @@ pub async fn apply_remote_path_mapping(
             let rp = mapping.remote_path.replace('\\', "/");
             let local = content_path.replacen(&rp, &mapping.local_path, 1);
             // Normalize double slashes from trailing/leading slash mismatches.
-            Ok(local.replace("//", "/"))
+            Ok(PathMappingResult {
+                local_path: local.replace("//", "/"),
+                configured_remote_path: Some(mapping.remote_path.clone()),
+                configured_local_path: Some(mapping.local_path.clone()),
+            })
         }
-        None => Ok(content_path.to_string()),
+        None => {
+            // No path-prefix match, but include host-matched mapping config
+            // for diagnostics (so the user/AI can see what's configured).
+            let (cfg_remote, cfg_local) = host_matches
+                .first()
+                .map(|m| (Some(m.remote_path.clone()), Some(m.local_path.clone())))
+                .unwrap_or((None, None));
+            Ok(PathMappingResult {
+                local_path: content_path.to_string(),
+                configured_remote_path: cfg_remote,
+                configured_local_path: cfg_local,
+            })
+        }
     }
 }
 

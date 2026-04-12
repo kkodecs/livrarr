@@ -48,6 +48,7 @@ pub struct LogLevelHandle {
         tracing_subscriber::EnvFilter,
         tracing_subscriber::Registry,
     >,
+    current_level: std::sync::Mutex<String>,
 }
 
 impl LogLevelHandle {
@@ -56,8 +57,12 @@ impl LogLevelHandle {
             tracing_subscriber::EnvFilter,
             tracing_subscriber::Registry,
         >,
+        initial_level: &str,
     ) -> Self {
-        Self { inner: handle }
+        Self {
+            inner: handle,
+            current_level: std::sync::Mutex::new(initial_level.to_string()),
+        }
     }
 
     pub fn set_level(&self, level: &str) -> Result<(), String> {
@@ -66,7 +71,13 @@ impl LogLevelHandle {
                 .map_err(|e| format!("invalid log level: {e}"))?;
         self.inner
             .reload(filter)
-            .map_err(|e| format!("reload failed: {e}"))
+            .map_err(|e| format!("reload failed: {e}"))?;
+        *self.current_level.lock().unwrap() = level.to_string();
+        Ok(())
+    }
+
+    pub fn current_level(&self) -> String {
+        self.current_level.lock().unwrap().clone()
     }
 }
 

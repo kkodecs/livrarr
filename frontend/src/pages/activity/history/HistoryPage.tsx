@@ -93,7 +93,7 @@ export default function HistoryPage() {
 
   const sorting = useSort<HistorySortField>("date", "desc");
 
-  if (isLoading) return <PageLoading />;
+  if (isLoading || !works) return <PageLoading />;
   if (error) return <ErrorState error={error} onRetry={() => refetch()} />;
 
   const allRows = sorting.sort(data ?? [], (item, field) => {
@@ -145,6 +145,7 @@ export default function HistoryPage() {
                 <thead className="sticky top-0 z-10 bg-zinc-900">
                   <tr className="border-b border-border text-left text-xs text-muted">
                     <SortHeader field="eventType" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Event</SortHeader>
+                    <th className="px-3 py-2 text-zinc-600 w-12">Event ID</th>
                     <SortHeader field="workId" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Work</SortHeader>
                     <th className="px-3 py-2">Details</th>
                     <SortHeader field="date" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Date</SortHeader>
@@ -164,6 +165,7 @@ export default function HistoryPage() {
                             {EVENT_LABELS[row.eventType] ?? row.eventType}
                           </span>
                         </td>
+                        <td className="px-3 py-2 text-[11px] text-zinc-600">{row.id}</td>
                         <td className="px-3 py-2">
                           {row.workId ? (
                             <Link

@@ -1,5 +1,5 @@
-import { useState, useRef } from "react";
-import { useNavigate } from "react-router";
+import { useState, useRef, useEffect } from "react";
+import { useNavigate, useSearchParams } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import {
   Copy,
@@ -53,6 +53,8 @@ ${logs.join("\n")}
   prompt += `
 ## My Question
 ${QUESTION_PLACEHOLDER}
+
+Please include a Summary and then a more detailed answer.
 `;
 
   return prompt;
@@ -62,7 +64,33 @@ function CopyButton({ getText }: { getText: () => string }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(getText());
+    const text = getText();
+    // Clipboard API is unavailable in non-secure contexts (HTTP on LAN IP).
+    // Check explicitly before calling, then fall back to execCommand.
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+        return;
+      } catch {
+        // Permission denied or other error — fall through to fallback
+      }
+    }
+    // Fallback: temporary textarea + execCommand
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch {
+      // Silently fail — nothing more we can do
+    }
+    document.body.removeChild(ta);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -89,6 +117,7 @@ function CopyButton({ getText }: { getText: () => string }) {
 
 export default function HelpPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { data: status } = useQuery({
     queryKey: ["system-status"],
@@ -100,6 +129,18 @@ export default function HelpPage() {
   });
 
   const [promptText, setPromptText] = useState<string | null>(null);
+
+  // If ?question= is in the URL, pre-fill the prompt with that question.
+  const prefillQuestion = searchParams.get("question");
+  useEffect(() => {
+    if (prefillQuestion && status) {
+      const prompt = buildPrompt(status, logs ?? []).replace(
+        QUESTION_PLACEHOLDER,
+        prefillQuestion,
+      );
+      setPromptText(prompt);
+    }
+  }, [prefillQuestion, status, logs]);
 
   // Build prompt once data loads, but only if user hasn't edited yet
   const defaultPrompt = buildPrompt(status, logs ?? []);
@@ -184,7 +225,8 @@ export default function HelpPage() {
                 onChange={(e) => setPromptText(e.target.value)}
                 onFocus={handleFocus}
                 rows={16}
-                className="w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-300 font-mono focus:outline-none focus:border-brand resize-y"
+                wrap="off"
+                className="w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-300 font-mono focus:outline-none focus:border-brand resize-y overflow-x-auto"
               />
             </div>
 
