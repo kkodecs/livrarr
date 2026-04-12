@@ -57,6 +57,8 @@ pub struct ParsedFile {
     pub title: String,
     pub series: Option<String>,
     pub series_position: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +73,6 @@ pub struct OlMatch {
 
 const MAX_MEDIA_FILES: usize = 50;
 const MAX_ENTRIES_TRAVERSED: usize = 10_000;
-const LLM_BATCH_SIZE: usize = 50;
 
 /// POST /api/v1/manualimport/scan
 pub async fn scan(
@@ -203,24 +204,62 @@ pub async fn scan(
         });
     }
 
-    // LLM batch parse display names.
-    let display_names: Vec<String> = scan_items
-        .iter()
-        .map(|si| si.display_name.clone())
-        .collect();
-    let (parsed_files, sort_order) = llm_parse_filenames(&state, &display_names).await;
+    // Local extraction via matching engine (M1+M2+M3).
+    // M1 runs in spawn_blocking internally (file I/O safe).
+    let scan_root = path.clone();
+    let mut parsed_files: Vec<Option<ParsedFile>> = Vec::with_capacity(scan_items.len());
+    for si in &scan_items {
+        let input = crate::matching::types::MatchInput {
+            file_path: Some(si.primary_path.clone()),
+            grouped_paths: si.grouped_paths.clone(),
+            parse_string: Some(si.display_name.clone()),
+            media_type: Some(si.media_type),
+            scan_root: Some(scan_root.clone()),
+        };
+        let clusters = crate::matching::extract_and_reconcile(&input).await;
+        let parsed = clusters.into_iter().next().map(|cluster| {
+            let e = &cluster.primary;
+            ParsedFile {
+                author: e.author.clone().unwrap_or_default(),
+                title: e.title.clone().unwrap_or_default(),
+                series: e.series.clone(),
+                series_position: e.series_position,
+                language: e.language.clone(),
+            }
+        });
+        parsed_files.push(parsed);
+    }
+
+    // Sort indices by (author, series, series_position, title) for logical display order.
+    let mut sort_indices: Vec<usize> = (0..scan_items.len()).collect();
+    sort_indices.sort_by(|&a, &b| {
+        let pa = parsed_files[a].as_ref();
+        let pb = parsed_files[b].as_ref();
+        let author_a = pa.map(|p| p.author.as_str()).unwrap_or("");
+        let author_b = pb.map(|p| p.author.as_str()).unwrap_or("");
+        let series_a = pa.and_then(|p| p.series.as_deref()).unwrap_or("");
+        let series_b = pb.and_then(|p| p.series.as_deref()).unwrap_or("");
+        let pos_a = pa.and_then(|p| p.series_position).unwrap_or(f64::MAX);
+        let pos_b = pb.and_then(|p| p.series_position).unwrap_or(f64::MAX);
+        let title_a = pa.map(|p| p.title.as_str()).unwrap_or("");
+        let title_b = pb.map(|p| p.title.as_str()).unwrap_or("");
+        author_a.cmp(author_b)
+            .then(series_a.cmp(series_b))
+            .then(pos_a.partial_cmp(&pos_b).unwrap_or(std::cmp::Ordering::Equal))
+            .then(title_a.cmp(title_b))
+    });
 
     // Get user's existing works for duplicate detection.
     let user_id = auth.user.id;
     let existing_works = state.db.list_works(user_id).await?;
     let root_folders = state.db.list_root_folders().await?;
 
-    // Search OL for each item (throttled), in LLM sort order.
+    // Search OL for each item (throttled), in sorted display order.
     let mut scanned_files = Vec::new();
 
-    for &i in &sort_order {
+    for &i in &sort_indices {
         let si = &scan_items[i];
-        let filename = display_names[i].clone();
+        let filename = si.display_name.clone();
         let parsed = parsed_files.get(i).cloned().flatten();
 
         // Compute total size.
@@ -240,54 +279,86 @@ pub async fn scan(
         let routable = root_folders.iter().any(|rf| rf.media_type == si.media_type);
 
         let (ol_match, existing_work_id) = if let Some(ref p) = parsed {
-            let search_term = format!("{} {}", p.title, p.author);
-            let ol = search_ol_single(&state, &search_term).await;
+            // Clean title for OL search:
+            // 1. Strip parenthetical content (series info, edition, etc.)
+            //    e.g., "El ojo del mundo (La rueda del tiempo, #1)" → "El ojo del mundo"
+            // 2. Strip subtitle after colon for long titles
+            //    e.g., "The Let Them Theory: A Life-Changing Tool..." → "The Let Them Theory"
+            let mut clean_title = if let Some(paren) = p.title.find('(') {
+                p.title[..paren].trim().to_string()
+            } else {
+                p.title.trim().to_string()
+            };
+            if clean_title.len() > 60 {
+                if let Some(colon) = clean_title.find(':') {
+                    if colon > 5 {
+                        clean_title = clean_title[..colon].trim().to_string();
+                    }
+                }
+            }
+            let search_term = format!("{} {}", clean_title, p.author);
+            let ol_results = search_ol_batch(&state, &search_term).await.unwrap_or_default();
 
-            let (matched, dup_id) = match ol {
-                Some(result) => {
-                    let dup = existing_works
-                        .iter()
-                        .find(|w| {
-                            (result.ol_key.is_some()
-                                && w.ol_key.as_deref() == result.ol_key.as_deref())
-                                || (normalize_for_matching(&w.title)
-                                    == normalize_for_matching(&result.title)
-                                    && normalize_for_matching(&w.author_name)
-                                        == normalize_for_matching(&result.author_name))
-                        })
-                        .map(|w| w.id);
+            if !ol_results.is_empty() {
+                // First: check if any OL result matches an existing work (prefer dup detection
+                // over top-ranked result). This handles cases where a translated title ranks
+                // above the original but the original matches our library.
+                let dup_match = ol_results.iter().find_map(|result| {
+                    let dup = existing_works.iter().find(|w| {
+                        (result.ol_key.is_some()
+                            && w.ol_key.as_deref() == result.ol_key.as_deref())
+                            || (normalize_for_matching(&w.title)
+                                == normalize_for_matching(&result.title)
+                                && normalize_for_matching(&w.author_name)
+                                    == normalize_for_matching(&result.author_name))
+                    });
+                    dup.map(|w| (result, w.id))
+                });
 
+                if let Some((result, dup_id)) = dup_match {
+                    // Found an OL result that matches an existing work — use it.
                     (
                         Some(OlMatch {
-                            ol_key: result.ol_key.unwrap_or_default(),
-                            title: result.title,
-                            author: result.author_name,
-                            cover_url: result.cover_url,
-                            existing_work_id: dup,
+                            ol_key: result.ol_key.clone().unwrap_or_default(),
+                            title: result.title.clone(),
+                            author: result.author_name.clone(),
+                            cover_url: result.cover_url.clone(),
+                            existing_work_id: Some(dup_id),
                         }),
-                        dup,
+                        Some(dup_id),
+                    )
+                } else {
+                    // No existing work match — use the top OL result.
+                    let result = &ol_results[0];
+                    (
+                        Some(OlMatch {
+                            ol_key: result.ol_key.clone().unwrap_or_default(),
+                            title: result.title.clone(),
+                            author: result.author_name.clone(),
+                            cover_url: result.cover_url.clone(),
+                            existing_work_id: None,
+                        }),
+                        None,
                     )
                 }
-                None => {
-                    let dup = existing_works
-                        .iter()
-                        .find(|w| {
-                            normalize_for_matching(&w.title) == normalize_for_matching(&p.title)
-                                && normalize_for_matching(&w.author_name)
-                                    == normalize_for_matching(&p.author)
-                        })
-                        .map(|w| w.id);
-                    (None, dup)
-                }
-            };
-
-            (matched, dup_id)
+            } else {
+                // No OL results — try local-only duplicate detection.
+                let dup = existing_works
+                    .iter()
+                    .find(|w| {
+                        normalize_for_matching(&w.title) == normalize_for_matching(&p.title)
+                            && normalize_for_matching(&w.author_name)
+                                == normalize_for_matching(&p.author)
+                    })
+                    .map(|w| w.id);
+                (None, dup)
+            }
         } else {
             (None, None)
         };
 
         // OL throttle.
-        if parsed.is_some() && scanned_files.len() + 1 < sort_order.len() {
+        if parsed.is_some() && scanned_files.len() + 1 < scan_items.len() {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
@@ -510,6 +581,8 @@ pub async fn import(
     };
     let media_mgmt = state.db.get_media_management_config().await?;
     let mut results = Vec::new();
+    // Cache author OL key lookups to avoid N+1 API calls for same author.
+    let mut author_ol_cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
 
     for item in &req.items {
         let result = import_single_item(
@@ -520,6 +593,7 @@ pub async fn import(
             &root_folders,
             &media_mgmt,
             &existing_items_snapshot,
+            &mut author_ol_cache,
         )
         .await;
         results.push(result);
@@ -539,6 +613,7 @@ async fn import_single_item(
     root_folders: &[livrarr_domain::RootFolder],
     media_mgmt: &livrarr_db::MediaManagementConfig,
     deletion_snapshot: &[DeletionTarget],
+    author_ol_cache: &mut std::collections::HashMap<String, Option<String>>,
 ) -> ImportResult {
     let source = PathBuf::from(&item.path);
 
@@ -569,7 +644,7 @@ async fn import_single_item(
     };
 
     // Find or create the work (reuses the same pattern as work::add).
-    let work_id = match find_or_create_work(state, user_id, item, existing_works).await {
+    let work_id = match find_or_create_work(state, user_id, item, existing_works, author_ol_cache).await {
         Ok(id) => id,
         Err(e) => {
             warn!("manual import: work creation failed for {}: {e}", item.path);
@@ -847,18 +922,35 @@ async fn find_or_create_work(
     user_id: i64,
     item: &ImportItem,
     existing_works: &[livrarr_domain::Work],
+    author_ol_cache: &mut std::collections::HashMap<String, Option<String>>,
 ) -> Result<i64, ApiError> {
     if let Some(work) = find_existing_work(existing_works, &item.ol_key, &item.title, &item.author)
     {
         return Ok(work.id);
     }
 
+    // Resolve author OL key with cache to avoid N+1 lookups for same author.
+    let cache_key = item.author.to_lowercase();
+    let author_ol_key = if let Some(cached) = author_ol_cache.get(&cache_key) {
+        cached.clone()
+    } else {
+        let result = match super::author::lookup_ol_authors(&state.http_client, &item.author, 1).await {
+            Ok(results) => results.into_iter().next().map(|r| r.ol_key),
+            Err(e) => {
+                tracing::warn!(author = %item.author, error = %e, "OL author lookup failed during import, proceeding without ol_key");
+                None
+            }
+        };
+        author_ol_cache.insert(cache_key, result.clone());
+        result
+    };
+
     // Create via the same flow as work::add.
     let add_req = AddWorkRequest {
         ol_key: Some(item.ol_key.clone()),
         title: item.title.clone(),
         author_name: item.author.clone(),
-        author_ol_key: None, // We don't have this from the scan match; enrichment will fill it.
+        author_ol_key,
         year: None,
         cover_url: None,
         metadata_source: None,
@@ -941,171 +1033,6 @@ fn enumerate_recursive(
             }
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// LLM filename parsing
-// ---------------------------------------------------------------------------
-
-/// Returns (parsed_files_by_index, sort_order).
-/// sort_order is the LLM's recommended display order as a vec of original indices.
-async fn llm_parse_filenames(
-    state: &AppState,
-    filenames: &[String],
-) -> (Vec<Option<ParsedFile>>, Vec<usize>) {
-    let default_order: Vec<usize> = (0..filenames.len()).collect();
-
-    let cfg: livrarr_db::MetadataConfig = match state.db.get_metadata_config().await {
-        Ok(c) => c,
-        Err(_) => return (vec![None; filenames.len()], default_order),
-    };
-
-    let endpoint = match cfg.llm_endpoint.as_deref().filter(|s| !s.is_empty()) {
-        Some(e) => e.to_string(),
-        None => return (vec![None; filenames.len()], (0..filenames.len()).collect()),
-    };
-    let api_key = match cfg.llm_api_key.as_deref().filter(|s| !s.is_empty()) {
-        Some(k) => k.to_string(),
-        None => return (vec![None; filenames.len()], (0..filenames.len()).collect()),
-    };
-    let model = match cfg.llm_model.as_deref().filter(|s| !s.is_empty()) {
-        Some(m) => m.to_string(),
-        None => return (vec![None; filenames.len()], (0..filenames.len()).collect()),
-    };
-
-    let mut all_parsed: Vec<Option<ParsedFile>> = vec![None; filenames.len()];
-    let mut sort_order: Vec<usize> = Vec::new();
-
-    // Process in batches.
-    for chunk_start in (0..filenames.len()).step_by(LLM_BATCH_SIZE) {
-        let chunk_end = (chunk_start + LLM_BATCH_SIZE).min(filenames.len());
-        let chunk = &filenames[chunk_start..chunk_end];
-
-        match llm_parse_batch(&state.http_client, &endpoint, &api_key, &model, chunk).await {
-            Some(parsed) => {
-                for (idx, p) in parsed {
-                    let abs_idx = chunk_start + idx;
-                    if abs_idx < all_parsed.len() {
-                        all_parsed[abs_idx] = Some(p);
-                        sort_order.push(abs_idx);
-                    }
-                }
-            }
-            None => {
-                warn!(
-                    "manual import: LLM batch failed for files {}-{}",
-                    chunk_start, chunk_end
-                );
-            }
-        }
-    }
-
-    // Add any files the LLM didn't return (failed parse) at the end.
-    for i in 0..filenames.len() {
-        if !sort_order.contains(&i) {
-            sort_order.push(i);
-        }
-    }
-
-    (all_parsed, sort_order)
-}
-
-async fn llm_parse_batch(
-    http: &livrarr_http::HttpClient,
-    endpoint: &str,
-    api_key: &str,
-    model: &str,
-    filenames: &[String],
-) -> Option<Vec<(usize, ParsedFile)>> {
-    let mut listing = String::new();
-    for (i, name) in filenames.iter().enumerate() {
-        listing.push_str(&format!("{i}: \"{name}\"\n"));
-    }
-
-    let prompt = format!(
-        "These are ebook/audiobook filenames:\n\n\
-         {listing}\n\
-         Extract the author name, title, and series info from each filename.\n\
-         Order the results in the most logical way for a reader — \
-         group by author, then by series order, then standalone works alphabetically.\n\n\
-         Return a JSON array. Each entry: {{\"idx\": <original index>, \"author\": \"<author name>\", \
-         \"title\": \"<book title>\", \"series\": \"<series name or null>\", \
-         \"position\": <number or null>}}\n\n\
-         Return ONLY the JSON array, no other text."
-    );
-
-    let url = format!(
-        "{}chat/completions",
-        endpoint.trim_end_matches('/').to_owned() + "/"
-    );
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000,
-        "temperature": 0.0,
-    });
-
-    let resp = http
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .ok()?;
-
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let data: serde_json::Value = resp.json().await.ok()?;
-    let answer = data
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-
-    // Robust JSON extraction: find first '[' and last ']' to handle preamble text.
-    let start = answer.find('[').unwrap_or(0);
-    let end = answer.rfind(']').map(|e| e + 1).unwrap_or(answer.len());
-    let json_str = if start < end {
-        &answer[start..end]
-    } else {
-        answer
-    };
-
-    let entries: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
-
-    let parsed: Vec<(usize, ParsedFile)> = entries
-        .iter()
-        .filter_map(|entry| {
-            let idx = entry.get("idx")?.as_u64()? as usize;
-            let author = entry.get("author")?.as_str()?.to_string();
-            let title = entry.get("title")?.as_str()?.to_string();
-            let series = entry
-                .get("series")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let position = entry.get("position").and_then(|v| v.as_f64());
-
-            Some((
-                idx,
-                ParsedFile {
-                    author,
-                    title,
-                    series,
-                    series_position: position,
-                },
-            ))
-        })
-        .collect();
-
-    if parsed.is_empty() {
-        return None;
-    }
-
-    Some(parsed)
 }
 
 // ---------------------------------------------------------------------------

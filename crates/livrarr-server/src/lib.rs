@@ -11,6 +11,7 @@ pub mod auth_service;
 pub mod config;
 pub mod handlers;
 pub mod jobs;
+pub mod matching;
 pub mod middleware;
 pub mod router;
 pub mod state;
