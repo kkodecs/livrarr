@@ -481,11 +481,14 @@ function ReleasesTab({ workId }: { workId: number }) {
   // 'search'     = full search hitting all indexers
   // 'refresh'    = full search bypassing backend cache
   const modeRef = useRef<"cacheCheck" | "search" | "refresh">("cacheCheck");
+  const [hasSearched, setHasSearched] = useState(false);
   const {
     data: searchResponse,
     fetchStatus,
     dataUpdatedAt,
     refetch,
+    isError,
+    error,
   } = useQuery({
     queryKey: ["releases", workId],
     queryFn: () => {
@@ -501,6 +504,11 @@ function ReleasesTab({ workId }: { workId: number }) {
   });
   const isLoading = fetchStatus === "fetching";
   const hasResults = (searchResponse?.results?.length ?? 0) > 0;
+
+  // Mark searched when cache returns results (so we skip the "Search" prompt).
+  useEffect(() => {
+    if (hasResults) setHasSearched(true);
+  }, [hasResults]);
 
   // Live-updating cache age from React Query's own timestamp.
   const [now, setNow] = useState(Date.now());
@@ -644,11 +652,41 @@ function ReleasesTab({ workId }: { workId: number }) {
     setter(next);
   };
 
-  if (!hasResults && !isLoading) {
+  const runQuery = (mode: "search" | "refresh") => {
+    modeRef.current = mode;
+    setHasSearched(true);
+    refetch();
+  };
+  const doSearch = () => runQuery("search");
+
+  // Error state — show if query failed and we have no prior results.
+  if (isError && !hasResults) {
+    return (
+      <EmptyState
+        icon={<Search size={24} />}
+        title="Failed to load releases"
+        description={(error as Error)?.message || "An error occurred"}
+        action={
+          <button
+            onClick={doSearch}
+            disabled={isLoading}
+            className="btn-secondary inline-flex items-center gap-1.5"
+          >
+            <RefreshCw size={14} />
+            Retry
+          </button>
+        }
+      />
+    );
+  }
+
+  // No results yet and haven't searched — show search prompt.
+  if (!hasResults && !isLoading && !hasSearched) {
     return (
       <div className="flex flex-col items-center py-12">
         <button
-          onClick={() => { modeRef.current = "search"; refetch(); }}
+          onClick={doSearch}
+          disabled={isLoading}
           className="btn-primary inline-flex items-center gap-1.5"
         >
           <Search size={14} />
@@ -660,6 +698,7 @@ function ReleasesTab({ workId }: { workId: number }) {
 
   if (!hasResults && isLoading) return <PageLoading />;
 
+  // Searched but got 0 results — show empty state with retry.
   if (releases.length === 0 && warnings.length === 0) {
     return (
       <EmptyState
@@ -667,7 +706,8 @@ function ReleasesTab({ workId }: { workId: number }) {
         title="No releases found"
         action={
           <button
-            onClick={() => { modeRef.current = "search"; refetch(); }}
+            onClick={doSearch}
+            disabled={isLoading}
             className="btn-secondary inline-flex items-center gap-1.5"
           >
             <RefreshCw size={14} />
@@ -748,11 +788,10 @@ function ReleasesTab({ workId }: { workId: number }) {
     </div>
   );
 
-  const handleRefresh = () => {
-    modeRef.current = "refresh";
-    refetch();
-  };
-  const cacheAgeSecs = dataUpdatedAt ? Math.floor((now - dataUpdatedAt) / 1000) : null;
+  const handleRefresh = () => runQuery("refresh");
+  const cacheAgeSecs = dataUpdatedAt
+    ? (searchResponse?.cacheAgeSeconds ?? 0) + Math.floor((now - dataUpdatedAt) / 1000)
+    : null;
 
   const formatCacheAge = (secs: number) => {
     if (secs < 60) return "just now";
@@ -776,6 +815,13 @@ function ReleasesTab({ workId }: { workId: number }) {
           Refresh
         </button>
       </div>
+      {isError && hasResults && (
+        <div className="rounded border border-red-500/30 bg-red-500/10 p-3">
+          <p className="text-sm text-red-400">
+            Failed to update results: {(error as Error)?.message || "An error occurred"}. Showing previously cached results.
+          </p>
+        </div>
+      )}
       {warnings.length > 0 && (
         <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3">
           {warnings.map((w, i) => (

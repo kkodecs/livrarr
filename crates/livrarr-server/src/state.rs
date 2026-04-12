@@ -236,17 +236,22 @@ impl LogBuffer {
 
 const GRAB_CACHE_TTL_SECS: u64 = 86400; // 24 hours
 
-type GrabCacheMap = HashMap<(String, i64), (Instant, Vec<crate::ReleaseResponse>)>;
+type GrabCacheMap = HashMap<(String, String, i64), (Instant, Vec<crate::ReleaseResponse>)>;
 
-/// In-memory cache for grab search results, keyed by (query, indexer_id).
+/// Evict expired entries at most once per this interval.
+const GRAB_CACHE_CLEANUP_INTERVAL_SECS: u64 = 300; // 5 minutes
+
+/// In-memory cache for grab search results, keyed by (title, author, indexer_id).
 pub struct GrabSearchCache {
     entries: RwLock<GrabCacheMap>,
+    last_cleanup: RwLock<Instant>,
 }
 
 impl Default for GrabSearchCache {
     fn default() -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
+            last_cleanup: RwLock::new(Instant::now()),
         }
     }
 }
@@ -258,9 +263,10 @@ impl GrabSearchCache {
 
     /// Look up cached results. Returns None if missing or expired.
     /// On hit, returns (results, age_in_seconds).
-    pub async fn get(&self, query: &str, indexer_id: i64) -> Option<(Vec<crate::ReleaseResponse>, u64)> {
+    pub async fn get(&self, title: &str, author: &str, indexer_id: i64) -> Option<(Vec<crate::ReleaseResponse>, u64)> {
         let entries = self.entries.read().await;
-        let (ts, results) = entries.get(&(query.to_string(), indexer_id))?;
+        let key = (title.to_string(), author.to_string(), indexer_id);
+        let (ts, results) = entries.get(&key)?;
         let age = ts.elapsed().as_secs();
         if age < GRAB_CACHE_TTL_SECS {
             Some((results.clone(), age))
@@ -269,12 +275,17 @@ impl GrabSearchCache {
         }
     }
 
-    /// Store results for a (query, indexer_id) pair.
-    pub async fn put(&self, query: &str, indexer_id: i64, results: Vec<crate::ReleaseResponse>) {
-        self.entries
-            .write()
-            .await
-            .insert((query.to_string(), indexer_id), (Instant::now(), results));
+    /// Store results for a (title, author, indexer_id) tuple.
+    /// Periodically evicts expired entries (at most once per 5 minutes).
+    pub async fn put(&self, title: &str, author: &str, indexer_id: i64, results: Vec<crate::ReleaseResponse>) {
+        let mut entries = self.entries.write().await;
+        // Throttled cleanup: only scan the full map every 5 minutes.
+        let should_cleanup = self.last_cleanup.read().await.elapsed().as_secs() >= GRAB_CACHE_CLEANUP_INTERVAL_SECS;
+        if should_cleanup {
+            entries.retain(|_, (ts, _)| ts.elapsed().as_secs() < GRAB_CACHE_TTL_SECS);
+            *self.last_cleanup.write().await = Instant::now();
+        }
+        entries.insert((title.to_string(), author.to_string(), indexer_id), (Instant::now(), results));
     }
 }
 
