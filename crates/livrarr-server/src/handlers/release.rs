@@ -25,6 +25,11 @@ use livrarr_domain::{EventType, Indexer};
 pub struct SearchQuery {
     #[serde(rename = "workId")]
     pub work_id: Option<i64>,
+    #[serde(default)]
+    pub refresh: bool,
+    /// If true, only return cached results — never hit indexers.
+    #[serde(default, rename = "cacheOnly")]
+    pub cache_only: bool,
 }
 
 /// GET /api/v1/release?workId=...  — searches all enabled Torznab indexers
@@ -41,6 +46,7 @@ pub async fn search(
             return Ok(Json(ReleaseSearchResponse {
                 results: vec![],
                 warnings: vec![],
+                cache_age_seconds: None,
             }))
         }
     };
@@ -76,44 +82,77 @@ pub async fn search(
     }
 
     let total_indexers = indexers.len();
+    let refresh = q.refresh;
+    let cache_only = q.cache_only;
+    let cache_key = format!("{}|{}", title.to_lowercase(), author.to_lowercase());
 
-    // Fan-out search to all indexers in parallel.
+    // Fan-out search to all indexers in parallel (with cache).
     let mut join_set = JoinSet::new();
 
     for indexer in indexers {
         let http = state.http_client.clone();
         let t = title.clone();
         let a = author.clone();
+        let cache = state.grab_search_cache.clone();
+        let ck = cache_key.clone();
 
+        // Return type: (name, priority, result, cache_age_secs)
         join_set.spawn(async move {
             let allowed_cats: std::collections::HashSet<i32> =
                 indexer.categories.iter().copied().collect();
-            let result = search_indexer(&http, &indexer, &t, &a).await.map(|items| {
+
+            // Check cache first (unless refresh requested).
+            if !refresh {
+                if let Some((cached, age_secs)) = cache.get(&ck, indexer.id).await {
+                    tracing::debug!(indexer = %indexer.name, age_secs, "grab search cache hit");
+                    let filtered: Vec<_> = cached
+                        .into_iter()
+                        .filter(|r| {
+                            r.categories.is_empty()
+                                || r.categories.iter().any(|c| allowed_cats.contains(c))
+                        })
+                        .collect();
+                    return (indexer.name.clone(), indexer.priority, Ok(filtered), Some(age_secs));
+                }
+            }
+
+            // cacheOnly mode: don't hit indexers if no cache.
+            if cache_only {
+                return (indexer.name.clone(), indexer.priority, Ok(vec![]), None);
+            }
+
+            let result = search_indexer(&http, &indexer, &t, &a).await;
+            if let Ok(ref items) = result {
+                cache.put(&ck, indexer.id, items.clone()).await;
+            }
+            let result = result.map(|items| {
                 items
                     .into_iter()
                     .filter(|r| {
-                        // Keep if result has no categories (indexer didn't report them)
-                        // or if any result category matches the indexer's configured categories.
                         r.categories.is_empty()
                             || r.categories.iter().any(|c| allowed_cats.contains(c))
                     })
                     .collect::<Vec<_>>()
             });
-            (indexer.name.clone(), indexer.priority, result)
+            (indexer.name.clone(), indexer.priority, result, Some(0u64))
         });
     }
 
     let mut all_results: Vec<(i32, ReleaseResponse)> = Vec::new(); // (priority, result)
     let mut warnings: Vec<SearchWarning> = Vec::new();
+    let mut max_cache_age: Option<u64> = None;
 
     while let Some(join_result) = join_set.join_next().await {
         match join_result {
-            Ok((_name, priority, Ok(items))) => {
+            Ok((_name, priority, Ok(items), age)) => {
+                if let Some(a) = age {
+                    max_cache_age = Some(max_cache_age.map_or(a, |cur: u64| cur.max(a)));
+                }
                 for item in items {
                     all_results.push((priority, item));
                 }
             }
-            Ok((name, _, Err(err))) => {
+            Ok((name, _, Err(err), _)) => {
                 warnings.push(SearchWarning {
                     indexer: name,
                     error: err,
@@ -133,6 +172,7 @@ pub async fn search(
         let body = ReleaseSearchResponse {
             results: vec![],
             warnings,
+            cache_age_seconds: None,
         };
         return Err(ApiError::StructuredBadGateway {
             body: serde_json::to_value(&body).unwrap_or_default(),
@@ -171,7 +211,10 @@ pub async fn search(
         "release search complete"
     );
 
-    Ok(Json(ReleaseSearchResponse { results, warnings }))
+    // For fresh searches (age=0), don't report as cached.
+    let cache_age_seconds = max_cache_age.filter(|&a| a > 0);
+
+    Ok(Json(ReleaseSearchResponse { results, warnings, cache_age_seconds }))
 }
 
 /// Clean a title for search: strip subtitle (after colon or parenthetical),
