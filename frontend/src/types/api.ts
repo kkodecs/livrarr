@@ -673,6 +673,7 @@ export interface ParsedFile {
   title: string;
   series: string | null;
   seriesPosition: number | null;
+  language?: string;
 }
 
 export interface OlMatch {
