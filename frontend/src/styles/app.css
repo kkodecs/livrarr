@@ -70,3 +70,59 @@ body {
 .btn-danger {
   @apply rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50;
 }
+
+/* Mobile-friendly table → card layout */
+@media (max-width: 767px) {
+  /* Make tables scroll horizontally or convert to cards */
+  .mobile-cards table {
+    display: block;
+  }
+
+  .mobile-cards thead {
+    display: none;
+  }
+
+  .mobile-cards tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .mobile-cards tr {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    padding: 0.75rem;
+    background: var(--color-surface);
+  }
+
+  .mobile-cards td {
+    display: flex;
+    padding: 0.25rem 0;
+    border: none;
+  }
+
+  .mobile-cards td::before {
+    content: attr(data-label);
+    font-weight: 500;
+    width: 7rem;
+    flex-shrink: 0;
+    color: var(--color-muted);
+    font-size: 0.75rem;
+  }
+
+  /* Touch-friendly tap targets */
+  button,
+  a,
+  [role="button"] {
+    min-height: 36px;
+  }
+}
+
+/* Safe area padding for notched devices */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}

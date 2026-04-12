@@ -6,6 +6,7 @@ type Theme = "dark" | "light";
 
 interface UIState {
   sidebarCollapsed: boolean;
+  mobileSidebarOpen: boolean;
   worksView: ViewMode;
   authorsView: ViewMode;
   worksSort: string;
@@ -21,6 +22,7 @@ interface UIState {
   rpmHighlight: boolean;
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
+  setMobileSidebarOpen: (open: boolean) => void;
   setWorksView: (view: ViewMode) => void;
   setAuthorsView: (view: ViewMode) => void;
   setWorksSort: (field: string, dir: "asc" | "desc") => void;
@@ -38,6 +40,7 @@ export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
       sidebarCollapsed: false,
+      mobileSidebarOpen: false,
       worksView: "table",
       authorsView: "table",
       worksSort: "title",
@@ -54,6 +57,7 @@ export const useUIStore = create<UIState>()(
       toggleSidebar: () =>
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
+      setMobileSidebarOpen: (open) => set({ mobileSidebarOpen: open }),
       setWorksView: (view) => set({ worksView: view }),
       setAuthorsView: (view) => set({ authorsView: view }),
       setWorksSort: (field, dir) =>

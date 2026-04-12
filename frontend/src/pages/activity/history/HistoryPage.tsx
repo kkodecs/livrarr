@@ -145,10 +145,10 @@ export default function HistoryPage() {
                 <thead className="sticky top-0 z-10 bg-zinc-900">
                   <tr className="border-b border-border text-left text-xs text-muted">
                     <SortHeader field="eventType" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Event</SortHeader>
-                    <th className="px-3 py-2 text-zinc-600 w-12">Event ID</th>
+                    <th className="hidden lg:table-cell px-3 py-2 text-zinc-600 w-12">Event ID</th>
                     <SortHeader field="workId" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Work</SortHeader>
-                    <th className="px-3 py-2">Details</th>
-                    <SortHeader field="date" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle}>Date</SortHeader>
+                    <th className="hidden sm:table-cell px-3 py-2">Details</th>
+                    <SortHeader field="date" activeField={sorting.field} dir={sorting.dir} onSort={sorting.toggle} className="hidden sm:table-cell">Date</SortHeader>
                   </tr>
                 </thead>
                 <tbody>
@@ -165,7 +165,7 @@ export default function HistoryPage() {
                             {EVENT_LABELS[row.eventType] ?? row.eventType}
                           </span>
                         </td>
-                        <td className="px-3 py-2 text-[11px] text-zinc-600">{row.id}</td>
+                        <td className="hidden lg:table-cell px-3 py-2 text-[11px] text-zinc-600">{row.id}</td>
                         <td className="px-3 py-2">
                           {row.workId ? (
                             <Link
@@ -179,13 +179,13 @@ export default function HistoryPage() {
                           )}
                         </td>
                         <td
-                          className="max-w-[300px] truncate px-3 py-2"
+                          className="hidden sm:table-cell max-w-[300px] truncate px-3 py-2"
                           title={eventDetails(row.data)}
                         >
                           {eventDetails(row.data)}
                         </td>
                         <td
-                          className="whitespace-nowrap px-3 py-2 text-muted"
+                          className="hidden sm:table-cell whitespace-nowrap px-3 py-2 text-muted"
                           title={formatAbsoluteDate(row.date)}
                         >
                           {formatRelativeDate(row.date)}
