@@ -456,8 +456,8 @@ function IndexerStep({
           placeholder="My Indexer"
         />
       </Field>
-      <div className="grid grid-cols-3 gap-3">
-        <Field label="URL" error={errors.url?.message} className="col-span-2">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="URL" error={errors.url?.message} className="sm:col-span-2">
           <input
             {...register("url", { required: "Required" })}
             className="input-field"
@@ -532,8 +532,8 @@ function DownloadClientStep({
           placeholder="qBittorrent"
         />
       </Field>
-      <div className="grid grid-cols-3 gap-3">
-        <Field label="Host" error={errors.host?.message} className="col-span-2">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="Host" error={errors.host?.message} className="sm:col-span-2">
           <input
             {...register("host", { required: "Required" })}
             className="input-field"
@@ -548,7 +548,7 @@ function DownloadClientStep({
           />
         </Field>
       </div>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Username" error={errors.username?.message}>
           <input {...register("username")} className="input-field" />
         </Field>

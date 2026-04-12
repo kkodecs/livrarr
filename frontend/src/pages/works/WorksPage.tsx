@@ -210,7 +210,7 @@ export function WorksPage() {
             title="Toggle editor mode"
           >
             <Pencil size={14} />
-            {editorMode ? "Editing" : "Edit"}
+            <span className="hidden sm:inline">{editorMode ? "Editing" : "Edit"}</span>
           </button>
           <button
             onClick={() => refreshMutation.mutate()}
@@ -221,18 +221,18 @@ export function WorksPage() {
               size={14}
               className={cn(refreshMutation.isPending && "animate-spin")}
             />
-            Refresh All
+            <span className="hidden sm:inline">Refresh All</span>
           </button>
           <Link
             to="/work/add"
             className="btn-primary inline-flex items-center gap-1.5"
           >
             <Plus size={14} />
-            Add New
+            <span className="hidden sm:inline">Add New</span>
           </Link>
         </div>
         <div className="flex items-center gap-2">
-          <div className="relative">
+          <div className="relative flex-1 sm:flex-none">
             <Search
               size={14}
               className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted"
@@ -242,12 +242,18 @@ export function WorksPage() {
               placeholder="Filter..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-8 rounded border border-border bg-zinc-800 pl-8 pr-3 text-sm text-zinc-100 placeholder:text-muted focus:border-brand focus:outline-none"
+              className="h-8 w-full sm:w-auto rounded border border-border bg-zinc-800 pl-8 pr-3 text-sm text-zinc-100 placeholder:text-muted focus:border-brand focus:outline-none"
             />
           </div>
           {worksView === "poster" && (
-            <div className="flex items-center gap-1.5">
-              <ZoomOut size={14} className="text-muted" />
+            <div className="hidden sm:flex items-center gap-1.5">
+              <button
+                onClick={() => setPosterZoom(Math.max(2, posterZoom - 1))}
+                className="rounded p-0.5 text-muted hover:text-zinc-100 disabled:opacity-30"
+                disabled={posterZoom <= 2}
+              >
+                <ZoomOut size={14} />
+              </button>
               <input
                 type="range"
                 min={2}
@@ -256,7 +262,13 @@ export function WorksPage() {
                 onChange={(e) => setPosterZoom(Number(e.target.value))}
                 className="h-1 w-20 cursor-pointer appearance-none rounded bg-zinc-700 accent-brand"
               />
-              <ZoomIn size={14} className="text-muted" />
+              <button
+                onClick={() => setPosterZoom(Math.min(8, posterZoom + 1))}
+                className="rounded p-0.5 text-muted hover:text-zinc-100 disabled:opacity-30"
+                disabled={posterZoom >= 8}
+              >
+                <ZoomIn size={14} />
+              </button>
             </div>
           )}
           <ViewToggle active={worksView} onChange={setWorksView} />
@@ -288,7 +300,7 @@ export function WorksPage() {
         )}
 
         {/* Filter bar */}
-        <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3 overflow-x-auto">
           <select
             value={mediaTypeFilter}
             onChange={(e) =>
@@ -554,12 +566,12 @@ function TableView({
             )}
             <th className="w-10 px-3 py-2" />
             <SortHeader field="title" activeField={sort} dir={dir} onSort={onSort}>Title</SortHeader>
-            <SortHeader field="authorName" activeField={sort} dir={dir} onSort={onSort}>Author</SortHeader>
-            <SortHeader field="year" activeField={sort} dir={dir} onSort={onSort}>Year</SortHeader>
-            <th className="px-3 py-2 text-left text-xs font-medium uppercase text-muted">
+            <SortHeader field="authorName" activeField={sort} dir={dir} onSort={onSort} className="hidden sm:table-cell">Author</SortHeader>
+            <SortHeader field="year" activeField={sort} dir={dir} onSort={onSort} className="hidden md:table-cell">Year</SortHeader>
+            <th className="hidden md:table-cell px-3 py-2 text-left text-xs font-medium uppercase text-muted">
               Library
             </th>
-            <SortHeader field="addedAt" activeField={sort} dir={dir} onSort={onSort}>Added</SortHeader>
+            <SortHeader field="addedAt" activeField={sort} dir={dir} onSort={onSort} className="hidden lg:table-cell">Added</SortHeader>
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
@@ -600,7 +612,7 @@ function TableView({
                     {work.title}
                   </Link>
                 </td>
-                <td className="px-3 py-2 text-muted">
+                <td className="hidden sm:table-cell px-3 py-2 text-muted">
                   {work.authorId ? (
                     <Link to={`/author/${work.authorId}`} className="hover:text-brand">
                       {work.authorName}
@@ -609,13 +621,13 @@ function TableView({
                     work.authorName
                   )}
                 </td>
-                <td className="px-3 py-2 text-muted">
+                <td className="hidden md:table-cell px-3 py-2 text-muted">
                   {work.year ?? "\u2014"}
                 </td>
-                <td className="px-3 py-2">
+                <td className="hidden md:table-cell px-3 py-2">
                   <MediaStatusRow work={work} />
                 </td>
-                <td className="px-3 py-2 text-muted">
+                <td className="hidden lg:table-cell px-3 py-2 text-muted">
                   {formatRelativeDate(work.addedAt)}
                 </td>
               </tr>
@@ -671,7 +683,7 @@ function PosterView({
   const navigate = useNavigate();
 
   return (
-    <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+    <div className="grid gap-3 sm:gap-4 grid-cols-2 sm:grid-cols-3 md:grid-cols-4" style={{ gridTemplateColumns: window.innerWidth >= 640 ? `repeat(${columns}, minmax(0, 1fr))` : undefined }}>
       {works.map((work) => {
         const isSelected = selectedIds.has(work.id);
 
@@ -765,11 +777,11 @@ function OverviewView({
                 />
               </div>
             )}
-            <div className="flex min-w-0 flex-1 gap-4">
+            <div className="flex min-w-0 flex-1 gap-3 sm:gap-4">
               <img
                 src={getCoverUrl(work.id)}
                 alt={work.title}
-                className="h-28 w-20 flex-shrink-0 rounded object-cover"
+                className="h-20 w-14 sm:h-28 sm:w-20 flex-shrink-0 rounded object-cover"
                 loading="lazy"
               />
               <div className="min-w-0 flex-1">

@@ -64,9 +64,9 @@ export default function StatusPage() {
       <h1 className="mb-6 text-lg font-semibold text-zinc-100">Status</h1>
       <dl className="max-w-lg space-y-3">
         {rows.map(([label, value]) => (
-          <div key={label} className="flex items-baseline gap-4">
+          <div key={label} className="flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-4">
             <dt className="w-36 shrink-0 text-sm text-muted">{label}</dt>
-            <dd className="text-sm text-zinc-200">{value}</dd>
+            <dd className="text-sm text-zinc-200 break-all">{value}</dd>
           </div>
         ))}
       </dl>
@@ -84,7 +84,7 @@ export default function StatusPage() {
             <li
               key={i}
               className={cn(
-                "flex items-start gap-4 rounded-lg border border-border px-4 py-3",
+                "flex flex-col sm:flex-row items-start gap-2 sm:gap-4 rounded-lg border border-border px-3 sm:px-4 py-2 sm:py-3",
                 typeBgColors[check.checkType],
               )}
             >

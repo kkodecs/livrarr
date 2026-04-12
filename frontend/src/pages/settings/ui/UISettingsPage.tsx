@@ -54,7 +54,7 @@ export default function UISettingsPage() {
           <select
             value={dateFormat}
             onChange={(e) => setDateFormat(e.target.value)}
-            className="rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            className="w-full sm:w-auto rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
           >
             {dateFormats.map((f) => (
               <option key={f.value} value={f.value}>

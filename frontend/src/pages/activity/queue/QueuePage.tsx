@@ -98,16 +98,16 @@ export default function QueuePage() {
                 <thead>
                   <tr className="border-b border-border text-left text-xs text-muted">
                     <th className="px-3 py-2">Status</th>
-                    <th className="px-3 py-2 text-zinc-600 w-16">Grab ID</th>
+                    <th className="hidden lg:table-cell px-3 py-2 text-zinc-600 w-16">Grab ID</th>
                     <th className="px-3 py-2">Work</th>
-                    <th className="px-3 py-2">Format</th>
-                    <th className="px-3 py-2">Release</th>
-                    <th className="px-3 py-2">Indexer</th>
-                    <th className="px-3 py-2">Protocol</th>
-                    <th className="px-3 py-2">Size</th>
+                    <th className="hidden sm:table-cell px-3 py-2">Format</th>
+                    <th className="hidden md:table-cell px-3 py-2">Release</th>
+                    <th className="hidden lg:table-cell px-3 py-2">Indexer</th>
+                    <th className="hidden lg:table-cell px-3 py-2">Protocol</th>
+                    <th className="hidden sm:table-cell px-3 py-2">Size</th>
                     <th className="px-3 py-2">Progress</th>
-                    <th className="px-3 py-2">Client</th>
-                    <th className="px-3 py-2">Grabbed</th>
+                    <th className="hidden lg:table-cell px-3 py-2">Client</th>
+                    <th className="hidden md:table-cell px-3 py-2">Grabbed</th>
                     <th className="px-3 py-2" />
                   </tr>
                 </thead>
@@ -134,27 +134,27 @@ export default function QueuePage() {
                           </span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-[11px] text-zinc-600">{item.id}</td>
+                      <td className="hidden lg:table-cell px-3 py-2 text-[11px] text-zinc-600">{item.id}</td>
                       <td className="px-3 py-2">
                         <Link to={`/work/${item.workId}`} className="text-brand hover:underline">
                           {workName(works, item.workId)}
                         </Link>
                       </td>
-                      <td className="px-3 py-2 text-xs text-muted">
+                      <td className="hidden sm:table-cell px-3 py-2 text-xs text-muted">
                         {item.mediaType === "ebook" ? "Ebook" : item.mediaType === "audiobook" ? "Audiobook" : "\u2014"}
                       </td>
-                      <td className="max-w-[200px] truncate px-3 py-2" title={item.title}>
+                      <td className="hidden md:table-cell max-w-[200px] truncate px-3 py-2" title={item.title}>
                         {item.title}
                       </td>
-                      <td className="px-3 py-2 text-xs text-muted">
+                      <td className="hidden lg:table-cell px-3 py-2 text-xs text-muted">
                         {item.indexer || "\u2014"}
                       </td>
-                      <td className="px-3 py-2">
+                      <td className="hidden lg:table-cell px-3 py-2">
                         <span className={`text-xs ${item.protocol === "usenet" ? "text-purple-400" : "text-cyan-400"}`}>
                           {item.protocol === "usenet" ? "NZB" : "Torrent"}
                         </span>
                       </td>
-                      <td className="whitespace-nowrap px-3 py-2 text-muted">
+                      <td className="hidden sm:table-cell whitespace-nowrap px-3 py-2 text-muted">
                         {item.size ? formatMB(item.size) : "\u2014"}
                       </td>
                       <td className="px-3 py-2">
@@ -179,10 +179,10 @@ export default function QueuePage() {
                           <span className="text-xs text-muted">{"\u2014"}</span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-muted text-xs">
+                      <td className="hidden lg:table-cell px-3 py-2 text-muted text-xs">
                         {item.downloadClient || "\u2014"}
                       </td>
-                      <td className="px-3 py-2 text-muted text-xs" title={item.grabbedAt}>
+                      <td className="hidden md:table-cell px-3 py-2 text-muted text-xs" title={item.grabbedAt}>
                         {formatRelativeDate(item.grabbedAt)}
                       </td>
                       <td className="px-3 py-2">

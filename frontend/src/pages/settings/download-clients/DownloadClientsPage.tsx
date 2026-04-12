@@ -562,8 +562,8 @@ function ClientFormModal({
           />
         </div>
 
-        <div className="grid grid-cols-3 gap-3">
-          <div className="col-span-2">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="sm:col-span-2">
             <label className="block text-xs text-muted mb-1">Host</label>
             <input
               {...register("host", { required: true })}
@@ -580,7 +580,7 @@ function ClientFormModal({
           </div>
         </div>
 
-        <div className="flex gap-6">
+        <div className="flex flex-wrap gap-4 sm:gap-6">
           <Controller
             name="useSsl"
             control={control}
@@ -636,7 +636,7 @@ function ClientFormModal({
             />
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs text-muted mb-1">Username</label>
               <input
@@ -783,8 +783,8 @@ function InlineClientForm({
         />
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
-        <div className="col-span-2">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="sm:col-span-2">
           <label className="block text-xs text-muted mb-1">Host</label>
           <input
             {...register("host", { required: true })}
@@ -801,7 +801,7 @@ function InlineClientForm({
         </div>
       </div>
 
-      <div className="flex gap-6">
+      <div className="flex flex-wrap gap-4 sm:gap-6">
         <Controller name="useSsl" control={control} render={({ field }) => (
           <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
             <input type="checkbox" checked={field.value} onChange={field.onChange} className="rounded border-border" />
@@ -837,7 +837,7 @@ function InlineClientForm({
           />
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-muted mb-1">Username</label>
             <input

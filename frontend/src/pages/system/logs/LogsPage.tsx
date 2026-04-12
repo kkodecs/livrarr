@@ -121,7 +121,7 @@ export default function LogsPage() {
       <PageToolbar>
         <h1 className="text-lg font-semibold text-zinc-100">Logs</h1>
         <div className="flex-1" />
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1.5 text-xs text-muted">
             Show:
             <HelpTip text="Filter which log lines are shown on this page" />
@@ -212,7 +212,7 @@ export default function LogsPage() {
         </div>
 
         {/* Search bar */}
-        <div className="mt-3 flex items-center gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
           <div className="relative flex items-center">
             <Search
               size={14}
@@ -224,7 +224,7 @@ export default function LogsPage() {
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Search logs..."
-              className="w-64 rounded border border-border bg-zinc-800 py-1.5 pl-8 pr-8 text-xs text-zinc-100 placeholder:text-muted focus:border-brand focus:outline-none"
+              className="w-full sm:w-64 rounded border border-border bg-zinc-800 py-1.5 pl-8 pr-8 text-xs text-zinc-100 placeholder:text-muted focus:border-brand focus:outline-none"
             />
             {search && (
               <button
@@ -258,7 +258,7 @@ export default function LogsPage() {
             <span className="text-xs text-red-400">No matches</span>
           )}
           <div className="flex-1" />
-          <span className="text-xs text-zinc-600">
+          <span className="hidden sm:inline text-xs text-zinc-600">
             Showing last 200 lines{statusData?.logFile ? ` — log file: ${statusData.logFile}` : ""}
           </span>
         </div>

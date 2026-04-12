@@ -217,7 +217,7 @@ export default function MetadataPage() {
       </PageToolbar>
 
       <PageContent>
-        <form onSubmit={handleSubmit(onSubmit)} className="max-w-xl space-y-8">
+        <form onSubmit={handleSubmit(onSubmit)} className="w-full max-w-xl space-y-8">
           {/* ── Hardcover ── */}
           <section data-tour="hardcover-section">
             <div className="flex items-center gap-2 mb-4">
@@ -465,7 +465,7 @@ export default function MetadataPage() {
                 return (
                   <div
                     key={lang.code}
-                    className={`flex items-center gap-3 px-4 py-3 border-b border-border last:border-b-0 transition-colors ${
+                    className={`flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-3 border-b border-border last:border-b-0 transition-colors ${
                       isEnabled || isEnglish
                         ? "bg-zinc-800/50"
                         : "bg-zinc-800/20"

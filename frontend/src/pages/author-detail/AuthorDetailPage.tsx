@@ -105,21 +105,21 @@ export default function AuthorDetailPage() {
               size={14}
               className={refreshMutation.isPending ? "animate-spin" : ""}
             />
-            Refresh
+            <span className="hidden sm:inline">Refresh</span>
           </button>
           <button
             onClick={() => setEditOpen(true)}
             className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-sm text-zinc-200 hover:bg-surface-hover"
           >
             <Pencil size={14} />
-            Edit
+            <span className="hidden sm:inline">Edit</span>
           </button>
           <button
             onClick={() => setDeleteOpen(true)}
             className="inline-flex items-center gap-1.5 rounded border border-red-800 px-3 py-1.5 text-sm text-red-400 hover:bg-red-900/30"
           >
             <Trash2 size={14} />
-            Delete
+            <span className="hidden sm:inline">Delete</span>
           </button>
         </div>
       </PageToolbar>
@@ -166,18 +166,18 @@ export default function AuthorDetailPage() {
               <Link
                 key={work.id}
                 to={`/work/${work.id}`}
-                className="flex items-center gap-4 rounded-lg border border-border bg-surface p-3 hover:border-brand"
+                className="flex items-center gap-3 sm:gap-4 rounded-lg border border-border bg-surface p-2 sm:p-3 hover:border-brand"
               >
                 <img
                   src={getCoverUrl(work.id)}
                   alt=""
-                  className="h-16 w-11 shrink-0 rounded bg-zinc-700 object-cover"
+                  className="h-12 w-8 sm:h-16 sm:w-11 shrink-0 rounded bg-zinc-700 object-cover"
                   onError={(e) => {
                     (e.target as HTMLImageElement).style.display = "none";
                   }}
                 />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-medium text-zinc-100">
+                  <p className="truncate font-medium text-sm sm:text-base text-zinc-100">
                     {work.title}
                   </p>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
@@ -187,7 +187,7 @@ export default function AuthorDetailPage() {
                     ))}
                   </div>
                 </div>
-                <span className="shrink-0 text-xs text-muted">
+                <span className="hidden sm:inline shrink-0 text-xs text-muted">
                   {work.libraryItems.length}{" "}
                   {work.libraryItems.length === 1 ? "file" : "files"}
                 </span>
@@ -333,7 +333,7 @@ function BibliographySection({
                       </span>
                     )}
                   </td>
-                  <td className="px-2 py-1.5 w-12 text-right text-xs text-zinc-500">
+                  <td className="hidden sm:table-cell px-2 py-1.5 w-12 text-right text-xs text-zinc-500">
                     {entry.year ?? ""}
                   </td>
                   <td className="px-2 py-1.5 w-10 text-right">
