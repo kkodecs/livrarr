@@ -14,7 +14,7 @@ export default function AboutPage() {
       <PageContent>
         <div className="max-w-2xl space-y-6">
           <div className="flex items-start gap-3">
-            <Info size={20} className="text-brand shrink-0 mt-0.5" />
+            <Info size={20} className="text-brand shrink-0 mt-0.5 hidden sm:block" />
             <div className="space-y-4 text-sm text-zinc-400 leading-relaxed">
               <p>
                 Livrarr (from <em>livre</em>, French for "book") is a self-hosted
