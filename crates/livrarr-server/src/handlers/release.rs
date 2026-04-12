@@ -84,7 +84,8 @@ pub async fn search(
     let total_indexers = indexers.len();
     let refresh = q.refresh;
     let cache_only = q.cache_only;
-    let cache_key = format!("{}|{}", title.to_lowercase(), author.to_lowercase());
+    let cache_title = title.to_lowercase();
+    let cache_author = author.to_lowercase();
 
     // Fan-out search to all indexers in parallel (with cache).
     let mut join_set = JoinSet::new();
@@ -94,7 +95,8 @@ pub async fn search(
         let t = title.clone();
         let a = author.clone();
         let cache = state.grab_search_cache.clone();
-        let ck = cache_key.clone();
+        let ct = cache_title.clone();
+        let ca = cache_author.clone();
 
         // Return type: (name, priority, result, cache_age_secs)
         join_set.spawn(async move {
@@ -103,7 +105,7 @@ pub async fn search(
 
             // Check cache first (unless refresh requested).
             if !refresh {
-                if let Some((cached, age_secs)) = cache.get(&ck, indexer.id).await {
+                if let Some((cached, age_secs)) = cache.get(&ct, &ca, indexer.id).await {
                     tracing::debug!(indexer = %indexer.name, age_secs, "grab search cache hit");
                     let filtered: Vec<_> = cached
                         .into_iter()
@@ -123,7 +125,7 @@ pub async fn search(
 
             let result = search_indexer(&http, &indexer, &t, &a).await;
             if let Ok(ref items) = result {
-                cache.put(&ck, indexer.id, items.clone()).await;
+                cache.put(&ct, &ca, indexer.id, items.clone()).await;
             }
             let result = result.map(|items| {
                 items
