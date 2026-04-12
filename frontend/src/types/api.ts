@@ -310,6 +310,7 @@ export interface QueueListResponse {
 export interface ReleaseSearchResponse {
   results: ReleaseResponse[];
   warnings?: SearchWarning[];
+  cacheAgeSeconds?: number;
 }
 
 export interface SearchWarning {

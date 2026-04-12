@@ -34,6 +34,7 @@ pub struct AppState {
     pub import_semaphore: Arc<tokio::sync::Semaphore>,
     /// Per-(user, work) import locks to prevent concurrent imports of the same work.
     pub import_locks: Arc<ImportLockMap>,
+    pub grab_search_cache: Arc<GrabSearchCache>,
 }
 
 /// Per-(user, work) mutex map for serializing concurrent imports of the same work.
@@ -226,6 +227,54 @@ impl LogBuffer {
     pub fn tail(&self, n: usize) -> Vec<String> {
         let buf = self.lines.lock().unwrap();
         buf.iter().rev().take(n).rev().cloned().collect()
+    }
+}
+
+// =============================================================================
+// Grab Search Cache — avoids hammering indexers for repeated searches
+// =============================================================================
+
+const GRAB_CACHE_TTL_SECS: u64 = 86400; // 24 hours
+
+type GrabCacheMap = HashMap<(String, i64), (Instant, Vec<crate::ReleaseResponse>)>;
+
+/// In-memory cache for grab search results, keyed by (query, indexer_id).
+pub struct GrabSearchCache {
+    entries: RwLock<GrabCacheMap>,
+}
+
+impl Default for GrabSearchCache {
+    fn default() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+impl GrabSearchCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Look up cached results. Returns None if missing or expired.
+    /// On hit, returns (results, age_in_seconds).
+    pub async fn get(&self, query: &str, indexer_id: i64) -> Option<(Vec<crate::ReleaseResponse>, u64)> {
+        let entries = self.entries.read().await;
+        let (ts, results) = entries.get(&(query.to_string(), indexer_id))?;
+        let age = ts.elapsed().as_secs();
+        if age < GRAB_CACHE_TTL_SECS {
+            Some((results.clone(), age))
+        } else {
+            None
+        }
+    }
+
+    /// Store results for a (query, indexer_id) pair.
+    pub async fn put(&self, query: &str, indexer_id: i64, results: Vec<crate::ReleaseResponse>) {
+        self.entries
+            .write()
+            .await
+            .insert((query.to_string(), indexer_id), (Instant::now(), results));
     }
 }
 

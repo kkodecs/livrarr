@@ -1215,7 +1215,7 @@ pub struct QueueListResponse {
 // Release API Responses
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReleaseResponse {
     pub title: String,
@@ -1239,6 +1239,8 @@ pub struct ReleaseSearchResponse {
     pub results: Vec<ReleaseResponse>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<SearchWarning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_age_seconds: Option<u64>,
 }
 
 /// Warning for a failed indexer during search.

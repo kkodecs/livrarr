@@ -12,6 +12,7 @@ import { ErrorState } from "@/components/Page/ErrorState";
 import { EmptyState } from "@/components/Page/EmptyState";
 import { formatRelativeDate } from "@/utils/format";
 import { cn } from "@/utils/cn";
+import { HelpTip } from "@/components/HelpTip";
 import type { AuthorResponse } from "@/types/api";
 
 type FilterStatus = "all" | "monitored" | "unmonitored";
@@ -252,8 +253,8 @@ function TableView({
         <thead>
           <tr className="border-b border-border text-left text-xs font-medium uppercase text-muted">
             <th className="px-3 py-2">Name</th>
-            <th className="w-20 px-3 py-2">Monitored</th>
-            <th className="hidden sm:table-cell w-24 px-3 py-2">Monitor New</th>
+            <th className="w-20 px-3 py-2"><span className="flex items-center gap-1">Monitor <HelpTip text="Monitor indexers for new uploads of all content by author." /></span></th>
+            <th className="hidden sm:table-cell w-24 px-3 py-2"><span className="flex items-center gap-1">Monitor New <HelpTip text="Monitor indexers for new content by author." /></span></th>
             <th className="hidden md:table-cell px-3 py-2">Added</th>
             <th className="w-10 px-3 py-2" />
           </tr>
