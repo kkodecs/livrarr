@@ -135,6 +135,19 @@ pub fn repair_languages_on_read(languages: &mut Vec<String>) {
     }
 }
 
+/// Returns true if LLM is fully configured (enabled + endpoint + key + model all non-empty).
+pub fn is_llm_configured(
+    llm_enabled: bool,
+    llm_endpoint: Option<&str>,
+    llm_api_key: Option<&str>,
+    llm_model: Option<&str>,
+) -> bool {
+    llm_enabled
+        && llm_endpoint.is_some_and(|s| !s.is_empty())
+        && llm_api_key.is_some_and(|s| !s.is_empty())
+        && llm_model.is_some_and(|s| !s.is_empty())
+}
+
 /// Returns true if the work's metadata_source indicates a foreign provider.
 /// Foreign works skip enrichment and metadata refresh.
 pub fn is_foreign_source(metadata_source: Option<&str>) -> bool {

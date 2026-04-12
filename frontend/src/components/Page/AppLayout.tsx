@@ -40,7 +40,13 @@ export function AppLayout() {
       <Header />
       <Sidebar />
       <main
-        className={cn("pt-12 transition-all", collapsed ? "ml-14" : "ml-56")}
+        className={cn(
+          "pt-12 transition-all",
+          // Desktop: margin for fixed sidebar
+          // Mobile: no margin (sidebar is overlay)
+          "ml-0 md:ml-14",
+          !collapsed && "md:ml-56",
+        )}
       >
         <Outlet />
       </main>

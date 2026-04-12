@@ -90,7 +90,7 @@ function AddRootFolderSection({
           onAdd(data.path, data.mediaType);
           reset();
         })}
-        className="flex items-end gap-3"
+        className="flex flex-col sm:flex-row items-stretch sm:items-end gap-3"
       >
         <div className="flex-1">
           <label className="block text-xs text-muted mb-1">Path</label>
@@ -420,7 +420,7 @@ export default function MediaManagementPage() {
 
         {/* ── Remote Path Mappings ── */}
         <section data-tour="remote-path-section" className="rounded-lg border border-border bg-zinc-900/50">
-          <div className="flex items-center justify-between border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
             <div className="flex items-center gap-2">
               <ArrowRightLeft size={18} className="text-muted" />
               <h2 className="text-base font-semibold text-zinc-100">
@@ -505,7 +505,7 @@ export default function MediaManagementPage() {
             Select and order preferred formats. Checked formats are accepted; order determines preference (top = highest).
           </p>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-2xl">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-2xl">
             <FormatPreferenceList
               label="Ebooks"
               icon={<BookOpen size={14} />}
@@ -553,7 +553,7 @@ export default function MediaManagementPage() {
               <label className="block text-xs text-muted mb-1">
                 CWA Ingest Path
               </label>
-              <div className="flex gap-3">
+              <div className="flex flex-col sm:flex-row gap-3">
                 <input
                   type="text"
                   value={cwaPath ?? mmConfig?.cwaIngestPath ?? ""}
@@ -614,7 +614,7 @@ export default function MediaManagementPage() {
                   className="w-full rounded border border-border bg-zinc-900/50 px-3 py-2 text-sm text-zinc-400 cursor-not-allowed"
                 />
               </div>
-              <div className="flex gap-6 text-sm text-zinc-400">
+              <div className="flex flex-col sm:flex-row gap-2 sm:gap-6 text-sm text-zinc-400">
                 <span>Rename Files: {naming.renameFiles ? "Yes" : "No"}</span>
                 <span>
                   Replace Illegal Chars:{" "}
@@ -1068,8 +1068,8 @@ function EmailConfigSection() {
           </div>
 
           {/* SMTP Host + Port */}
-          <div className="grid grid-cols-3 gap-3">
-            <div className="col-span-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="sm:col-span-2">
               <label className="block text-xs text-muted mb-1">SMTP Host</label>
               <input
                 type="text"
@@ -1105,7 +1105,7 @@ function EmailConfigSection() {
           </div>
 
           {/* Username + Password */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs text-muted mb-1">Username</label>
               <input

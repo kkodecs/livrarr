@@ -110,7 +110,7 @@ export default function UnmappedPage() {
         {/* Path mode */}
         {mode === "path" && (
           <div className="mb-6 space-y-3">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
               <input
                 type="text"
                 value={path}
@@ -122,21 +122,23 @@ export default function UnmappedPage() {
                   pathError ? "border-red-500" : "border-border"
                 }`}
               />
-              <button
-                onClick={() => setShowPicker(!showPicker)}
-                className="btn-secondary inline-flex items-center gap-1.5 text-sm"
-              >
-                <FolderSearch size={14} />
-                Browse
-              </button>
-              <button
-                onClick={handleScanPath}
-                disabled={!path.trim() || isPending}
-                className="btn-primary inline-flex items-center gap-1.5 text-sm"
-              >
-                {isPending ? <LoadingSpinner size={14} /> : <Search size={14} />}
-                Scan
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowPicker(!showPicker)}
+                  className="btn-secondary inline-flex items-center gap-1.5 text-sm"
+                >
+                  <FolderSearch size={14} />
+                  Browse
+                </button>
+                <button
+                  onClick={handleScanPath}
+                  disabled={!path.trim() || isPending}
+                  className="btn-primary inline-flex items-center gap-1.5 text-sm"
+                >
+                  {isPending ? <LoadingSpinner size={14} /> : <Search size={14} />}
+                  Scan
+                </button>
+              </div>
             </div>
             {pathError && <p className="text-sm text-red-400">{pathError}</p>}
             {showPicker && (
@@ -166,7 +168,7 @@ export default function UnmappedPage() {
                 }
               />
             ) : (
-              <div className="flex items-center gap-3">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                 <select
                   value={selectedId}
                   onChange={(e) =>

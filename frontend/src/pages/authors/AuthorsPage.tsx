@@ -125,7 +125,7 @@ export default function AuthorsPage() {
           </Link>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
           {/* Sort */}
           <select
             value={`${authorsSort}:${authorsSortDir}`}
@@ -253,8 +253,8 @@ function TableView({
           <tr className="border-b border-border text-left text-xs font-medium uppercase text-muted">
             <th className="px-3 py-2">Name</th>
             <th className="w-20 px-3 py-2">Monitored</th>
-            <th className="w-24 px-3 py-2">Monitor New</th>
-            <th className="px-3 py-2">Added</th>
+            <th className="hidden sm:table-cell w-24 px-3 py-2">Monitor New</th>
+            <th className="hidden md:table-cell px-3 py-2">Added</th>
             <th className="w-10 px-3 py-2" />
           </tr>
         </thead>
@@ -296,7 +296,7 @@ function TableView({
                   )}
                 </button>
               </td>
-              <td className="px-3 py-2">
+              <td className="hidden sm:table-cell px-3 py-2">
                 <button
                   onClick={() =>
                     onToggleMonitorNew(author.id, !author.monitorNewItems)
@@ -324,7 +324,7 @@ function TableView({
                   )}
                 </button>
               </td>
-              <td className="px-3 py-2 text-muted">
+              <td className="hidden md:table-cell px-3 py-2 text-muted">
                 {formatRelativeDate(author.addedAt)}
               </td>
               <td className="px-3 py-2">
