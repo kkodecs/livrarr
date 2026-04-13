@@ -2,9 +2,9 @@ use serde::Deserialize;
 
 pub use livrarr_domain::{
     Author, AuthorId, DbError, DownloadClient, DownloadClientId, DownloadClientImplementation,
-    EnrichmentStatus, EventType, Grab, GrabId, GrabStatus, HistoryEvent, HistoryId, Indexer,
-    IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider, MediaType,
-    NarrationType, Notification, NotificationId, NotificationType, PlaybackProgress,
+    EnrichmentStatus, EventType, Grab, GrabId, GrabStatus, HistoryEvent, HistoryId, Import,
+    Indexer, IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider,
+    MediaType, NarrationType, Notification, NotificationId, NotificationType, PlaybackProgress,
     RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Session, User, UserId,
     UserRole, Work, WorkId,
 };
@@ -18,6 +18,7 @@ mod sqlite_config;
 mod sqlite_download_client;
 mod sqlite_grab;
 mod sqlite_history;
+mod sqlite_import;
 mod sqlite_indexer;
 mod sqlite_library_item;
 mod sqlite_notification;
@@ -245,6 +246,7 @@ pub struct CreateWorkDbRequest {
     pub metadata_source: Option<String>,
     pub detail_url: Option<String>,
     pub language: Option<String>,
+    pub import_id: Option<String>,
 }
 
 pub struct UpdateWorkEnrichmentDbRequest {
@@ -335,6 +337,7 @@ pub struct CreateAuthorDbRequest {
     pub ol_key: Option<String>,
     pub gr_key: Option<String>,
     pub hc_key: Option<String>,
+    pub import_id: Option<String>,
 }
 
 pub struct UpdateAuthorDbRequest {
@@ -450,6 +453,7 @@ pub struct CreateLibraryItemDbRequest {
     pub path: String,
     pub media_type: MediaType,
     pub file_size: i64,
+    pub import_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,6 +1066,54 @@ pub trait AuthorBibliographyDb: Send + Sync {
     ) -> Result<AuthorBibliography, DbError>;
 }
 
+// ---------------------------------------------------------------------------
+// Import DB (Readarr Library Import)
+// ---------------------------------------------------------------------------
+
+/// Import tracking data access.
+#[trait_variant::make(Send)]
+pub trait ImportDb: Send + Sync {
+    /// Create an import record.
+    async fn create_import(&self, req: CreateImportDbRequest) -> Result<(), DbError>;
+
+    /// Get an import by ID.
+    async fn get_import(&self, id: &str) -> Result<Option<Import>, DbError>;
+
+    /// List imports for a user (most recent first).
+    async fn list_imports(&self, user_id: UserId) -> Result<Vec<Import>, DbError>;
+
+    /// Update import status.
+    async fn update_import_status(&self, id: &str, status: &str) -> Result<(), DbError>;
+
+    /// Update import counters.
+    async fn update_import_counts(
+        &self,
+        id: &str,
+        authors: i64,
+        works: i64,
+        files: i64,
+        skipped: i64,
+    ) -> Result<(), DbError>;
+
+    /// Mark import as completed (set status + completed_at timestamp).
+    async fn set_import_completed(&self, id: &str) -> Result<(), DbError>;
+
+    /// List library items by import_id (for undo).
+    async fn list_library_items_by_import(
+        &self,
+        import_id: &str,
+    ) -> Result<Vec<LibraryItem>, DbError>;
+
+    /// Delete a library item by ID (no user scope — for undo).
+    async fn delete_library_item_by_id(&self, id: LibraryItemId) -> Result<(), DbError>;
+
+    /// Delete works by import_id that have zero library items.
+    async fn delete_orphan_works_by_import(&self, import_id: &str) -> Result<i64, DbError>;
+
+    /// Delete authors by import_id that have zero works.
+    async fn delete_orphan_authors_by_import(&self, import_id: &str) -> Result<i64, DbError>;
+}
+
 /// Playback progress data access.
 #[trait_variant::make(Send)]
 pub trait PlaybackProgressDb: Send + Sync {
@@ -1080,6 +1132,14 @@ pub trait PlaybackProgressDb: Send + Sync {
         position: &str,
         progress_pct: f64,
     ) -> Result<(), DbError>;
+}
+
+pub struct CreateImportDbRequest {
+    pub id: String,
+    pub user_id: UserId,
+    pub source: String,
+    pub source_url: Option<String>,
+    pub target_root_folder_id: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------

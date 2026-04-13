@@ -803,6 +803,7 @@ pub async fn add_work_internal(
                     ol_key: req.author_ol_key.clone(),
                     gr_key: None,
                     hc_key: None,
+                    import_id: None,
                 })
                 .await?;
             crate::handlers::author::spawn_bibliography_fetch((*state).clone(), author.id, user_id);
@@ -829,6 +830,7 @@ pub async fn add_work_internal(
             metadata_source: req.metadata_source,
             detail_url,
             language: req.language,
+            import_id: None,
         })
         .await?;
 
