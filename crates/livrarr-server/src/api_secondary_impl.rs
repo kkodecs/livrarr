@@ -82,6 +82,8 @@ impl AuthorApi for SecondaryApiImpl {
                 name: req.name,
                 sort_name: req.sort_name,
                 ol_key: Some(req.ol_key),
+                gr_key: None,
+                hc_key: None,
             })
             .await
             .map_err(db_err)?;
@@ -713,7 +715,8 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         publisher: w.publisher.clone(),
         publish_date: w.publish_date.clone(),
         ol_key: w.ol_key.clone(),
-        hardcover_id: w.hardcover_id.clone(),
+        hc_key: w.hc_key.clone(),
+        gr_key: w.gr_key.clone(),
         isbn_13: w.isbn_13.clone(),
         asin: w.asin.clone(),
         narrator: w.narrator.clone(),
@@ -833,6 +836,8 @@ impl SecondaryApiImpl {
                 ),
                 sort_name: None,
                 ol_key: None,
+                gr_key: None,
+                hc_key: None,
             })
             .await
             .unwrap();
@@ -868,6 +873,7 @@ impl SecondaryApiImpl {
                 author_name: "Test Author".into(),
                 author_id: None,
                 ol_key: None,
+                gr_key: None,
                 year: None,
                 cover_url: None,
                 metadata_source: None,
@@ -924,6 +930,7 @@ impl SecondaryApiImpl {
                 author_name: "File Author".into(),
                 author_id: None,
                 ol_key: None,
+                gr_key: None,
                 year: None,
                 cover_url: None,
                 metadata_source: None,
