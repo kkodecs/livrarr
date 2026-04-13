@@ -1044,6 +1044,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                             author_name: author.name.clone(),
                             author_id: Some(author.id),
                             ol_key: Some(work_ol_key.clone()),
+                            gr_key: None,
                             year: publish_year,
                             cover_url: None,
                             metadata_source: None,
@@ -1458,7 +1459,11 @@ pub(crate) async fn rss_sync_core(
             }
             match result {
                 Ok((idx, Ok(Ok(releases)))) => {
-                    debug!("RSS sync: fetched {} releases from {}", releases.len(), idx.name);
+                    debug!(
+                        "RSS sync: fetched {} releases from {}",
+                        releases.len(),
+                        idx.name
+                    );
                     fetch_results.push((idx, releases));
                 }
                 Ok((idx, Ok(Err(e)))) => {
@@ -1538,13 +1543,18 @@ pub(crate) async fn rss_sync_core(
             }
         }
 
-        debug!("RSS sync: gap detection complete for {}, {} gaps found", indexer.name, n_gaps);
+        debug!(
+            "RSS sync: gap detection complete for {}, {} gaps found",
+            indexer.name, n_gaps
+        );
 
         // Update state to newest dated item.
         if let Some(newest) = dated_items.first() {
             trace!(
                 "RSS sync: state update for {} — newest guid={}, date={:?}",
-                indexer.name, newest.guid, newest.publish_date
+                indexer.name,
+                newest.guid,
+                newest.publish_date
             );
             state
                 .db
@@ -1555,7 +1565,8 @@ pub(crate) async fn rss_sync_core(
             // No dated items but have guidful releases — store guid only (RSS-JOB-001).
             trace!(
                 "RSS sync: state update for {} — guid only={}, no dated items",
-                indexer.name, guidful[0].guid
+                indexer.name,
+                guidful[0].guid
             );
             state
                 .db
@@ -1571,7 +1582,8 @@ pub(crate) async fn rss_sync_core(
             );
             trace!(
                 "RSS sync: first sync for {} — storing {} GUIDs, skipping grabs",
-                indexer.name, guidful.len()
+                indexer.name,
+                guidful.len()
             );
         }
     }
@@ -1678,11 +1690,16 @@ pub(crate) async fn rss_sync_core(
             if media_types.is_empty() {
                 trace!(
                     "RSS sync: skip '{}' — no ebook/audiobook category (categories: {:?})",
-                    release.title, release.categories
+                    release.title,
+                    release.categories
                 );
                 continue;
             }
-            trace!("RSS sync: '{}' media types: {:?}", release.title, media_types);
+            trace!(
+                "RSS sync: '{}' media types: {:?}",
+                release.title,
+                media_types
+            );
 
             // RSS-GRAB-003: filter ineligible protocols before ranking.
             let protocol_eligible = match release.protocol.as_str() {
@@ -1692,7 +1709,8 @@ pub(crate) async fn rss_sync_core(
             if !protocol_eligible {
                 trace!(
                     "RSS sync: skip '{}' — no {} client configured",
-                    release.title, release.protocol
+                    release.title,
+                    release.protocol
                 );
                 continue;
             }
@@ -1707,7 +1725,8 @@ pub(crate) async fn rss_sync_core(
             n_parsed += 1;
             trace!(
                 "RSS sync: '{}' parsed — {} extractions",
-                release.title, extractions.len()
+                release.title,
+                extractions.len()
             );
 
             // RSS-FILTER-005: format preference check.
@@ -1723,7 +1742,10 @@ pub(crate) async fn rss_sync_core(
                     if !prefs.is_empty() && !prefs.iter().any(|p| p.eq_ignore_ascii_case(fmt)) {
                         trace!(
                             "RSS sync: skip '{}' for {:?} — format {} not in preferences {:?}",
-                            release.title, mt, fmt, prefs
+                            release.title,
+                            mt,
+                            fmt,
+                            prefs
                         );
                         continue;
                     }
@@ -1748,7 +1770,9 @@ pub(crate) async fn rss_sync_core(
                     if !monitored_for_type {
                         trace!(
                             "RSS sync: '{}' vs work {} — not monitored for {:?}, skipping",
-                            release.title, work.id, mt
+                            release.title,
+                            work.id,
+                            mt
                         );
                         continue;
                     }
@@ -1775,13 +1799,20 @@ pub(crate) async fn rss_sync_core(
 
                     trace!(
                         "RSS sync: '{}' vs work {} '{}' — score {:.3} (threshold {})",
-                        release.title, work.id, work.title, best_score, threshold
+                        release.title,
+                        work.id,
+                        work.title,
+                        best_score,
+                        threshold
                     );
 
                     if best_score < threshold {
                         trace!(
                             "RSS sync: '{}' below threshold for work {} — score {:.3} < {}",
-                            release.title, work.id, best_score, threshold
+                            release.title,
+                            work.id,
+                            best_score,
+                            threshold
                         );
                         continue;
                     }
@@ -1809,7 +1840,11 @@ pub(crate) async fn rss_sync_core(
                     };
                     trace!(
                         "RSS sync: match '{}' → work {} (user {}, {}, score {:.3})",
-                        release.title, wid, uid, mt_label, score
+                        release.title,
+                        wid,
+                        uid,
+                        mt_label,
+                        score
                     );
                     release_matches.push(ReleaseMatch {
                         user_id: *uid,
@@ -1836,7 +1871,10 @@ pub(crate) async fn rss_sync_core(
         }
     }
 
-    debug!("RSS sync: phase 1 complete — {} release-work matches", n_matched);
+    debug!(
+        "RSS sync: phase 1 complete — {} release-work matches",
+        n_matched
+    );
 
     // Phase 2: Best release per (user, work, media_type) (RSS-MATCH-002).
     let mut best_map: HashMap<(i64, i64, String), GrabCandidate> = HashMap::new();
@@ -1894,10 +1932,16 @@ pub(crate) async fn rss_sync_core(
         }
     }
 
-    debug!("RSS sync: phase 2 complete — {} grab candidates after dedup", best_map.len());
+    debug!(
+        "RSS sync: phase 2 complete — {} grab candidates after dedup",
+        best_map.len()
+    );
 
     // Step 7: Filter and grab.
-    debug!("RSS sync: filtering and grabbing {} candidates", best_map.len());
+    debug!(
+        "RSS sync: filtering and grabbing {} candidates",
+        best_map.len()
+    );
     for gc in best_map.values() {
         if cancel.is_cancelled() {
             break;
@@ -1912,7 +1956,8 @@ pub(crate) async fn rss_sync_core(
             Ok(true) => {
                 trace!(
                     "RSS sync: skip '{}' — active grab exists for work {}",
-                    gc.release.title, gc.work_id
+                    gc.release.title,
+                    gc.work_id
                 );
                 n_skipped += 1;
                 continue;
@@ -1934,7 +1979,8 @@ pub(crate) async fn rss_sync_core(
             Ok(true) => {
                 trace!(
                     "RSS sync: skip '{}' — already in library for work {}",
-                    gc.release.title, gc.work_id
+                    gc.release.title,
+                    gc.work_id
                 );
                 n_skipped += 1;
                 continue;

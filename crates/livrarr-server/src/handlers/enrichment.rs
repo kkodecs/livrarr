@@ -52,7 +52,7 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
         duration_seconds: None,
         publisher: None,
         publish_date: None,
-        hardcover_id: None,
+        hc_key: None,
         isbn_13: None,
         asin: None,
         narrator: None,
@@ -120,7 +120,7 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
                         .and_then(|d| d.get(..4))
                         .and_then(|y| y.parse::<i32>().ok());
                 }
-                req.hardcover_id = hc.hardcover_id.clone();
+                req.hc_key = hc.hc_key.clone();
                 req.isbn_13 = hc.isbn_13;
                 req.rating = hc.rating;
                 req.rating_count = hc.rating_count;
@@ -128,7 +128,7 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
                     req.cover_url = hc.cover_url;
                 }
                 // F7: Fetch edition detail with language filtering for better ISBN.
-                if let Some(ref hc_id) = hc.hardcover_id {
+                if let Some(ref hc_id) = hc.hc_key {
                     if let Ok(Ok(Some(isbn))) = tokio::time::timeout(
                         per_provider,
                         fetch_hardcover_editions(&state.http_client, hc_id, clean_token, "en"),
@@ -298,7 +298,7 @@ fn empty_outcome(msg: &str) -> EnrichmentOutcome {
             duration_seconds: None,
             publisher: None,
             publish_date: None,
-            hardcover_id: None,
+            hc_key: None,
             isbn_13: None,
             asin: None,
             narrator: None,
@@ -330,7 +330,7 @@ struct HardcoverResult {
     page_count: Option<i32>,
     publisher: Option<String>,
     publish_date: Option<String>,
-    hardcover_id: Option<String>,
+    hc_key: Option<String>,
     isbn_13: Option<String>,
     cover_url: Option<String>,
     rating: Option<f64>,
@@ -463,7 +463,7 @@ async fn query_hardcover(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
-    let hardcover_id = doc
+    let hc_key = doc
         .get("id")
         .map(|v| v.to_string().trim_matches('"').to_string());
 
@@ -528,7 +528,7 @@ async fn query_hardcover(
         page_count,
         publisher: None,
         publish_date,
-        hardcover_id,
+        hc_key,
         isbn_13,
         cover_url,
         rating,
@@ -985,7 +985,7 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
         duration_seconds: None,
         publisher: None,
         publish_date: None,
-        hardcover_id: None,
+        hc_key: None,
         isbn_13: None,
         asin: None,
         narrator: None,

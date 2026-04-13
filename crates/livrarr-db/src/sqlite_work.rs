@@ -86,8 +86,11 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
         ol_key: row
             .try_get("ol_key")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-        hardcover_id: row
-            .try_get("hardcover_id")
+        hc_key: row
+            .try_get("hc_key")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        gr_key: row
+            .try_get("gr_key")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         isbn_13: row
             .try_get("isbn_13")
@@ -244,15 +247,16 @@ impl WorkDb for SqliteDb {
     async fn create_work(&self, req: CreateWorkDbRequest) -> Result<Work, DbError> {
         let now = Utc::now().to_rfc3339();
         let id = sqlx::query(
-            "INSERT INTO works (user_id, title, author_name, author_id, ol_key, year, \
+            "INSERT INTO works (user_id, title, author_name, author_id, ol_key, gr_key, year, \
              cover_url, enrichment_status, added_at, metadata_source, detail_url, language) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
         )
         .bind(req.user_id)
         .bind(&req.title)
         .bind(&req.author_name)
         .bind(req.author_id)
         .bind(&req.ol_key)
+        .bind(&req.gr_key)
         .bind(req.year)
         .bind(&req.cover_url)
         .bind(&now)
@@ -305,7 +309,7 @@ impl WorkDb for SqliteDb {
              duration_seconds = COALESCE(?, duration_seconds), \
              publisher = COALESCE(?, publisher), \
              publish_date = COALESCE(?, publish_date), \
-             hardcover_id = COALESCE(?, hardcover_id), \
+             hc_key = COALESCE(?, hc_key), \
              isbn_13 = COALESCE(?, isbn_13), \
              asin = COALESCE(?, asin), \
              narrator = COALESCE(?, narrator), \
@@ -333,7 +337,7 @@ impl WorkDb for SqliteDb {
         .bind(req.duration_seconds)
         .bind(req.publisher.as_deref())
         .bind(req.publish_date.as_deref())
-        .bind(req.hardcover_id.as_deref())
+        .bind(req.hc_key.as_deref())
         .bind(req.isbn_13.as_deref())
         .bind(req.asin.as_deref())
         .bind(narrator_json.as_deref())

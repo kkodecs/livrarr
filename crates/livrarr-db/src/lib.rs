@@ -237,6 +237,7 @@ pub struct CreateWorkDbRequest {
     pub author_name: String,
     pub author_id: Option<AuthorId>,
     pub ol_key: Option<String>,
+    pub gr_key: Option<String>,
     pub year: Option<i32>,
     pub cover_url: Option<String>,
     pub metadata_source: Option<String>,
@@ -259,7 +260,7 @@ pub struct UpdateWorkEnrichmentDbRequest {
     pub duration_seconds: Option<i32>,
     pub publisher: Option<String>,
     pub publish_date: Option<String>,
-    pub hardcover_id: Option<String>,
+    pub hc_key: Option<String>,
     pub isbn_13: Option<String>,
     pub asin: Option<String>,
     pub narrator: Option<Vec<String>>,
@@ -330,6 +331,8 @@ pub struct CreateAuthorDbRequest {
     pub name: String,
     pub sort_name: Option<String>,
     pub ol_key: Option<String>,
+    pub gr_key: Option<String>,
+    pub hc_key: Option<String>,
 }
 
 pub struct UpdateAuthorDbRequest {

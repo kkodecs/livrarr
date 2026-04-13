@@ -1149,7 +1149,7 @@ function MetadataTab({
 
         <div className="mt-4 mb-2 text-xs font-medium text-muted uppercase tracking-wide">Identifiers</div>
         <MetadataRow label="Open Library" value={work.olKey} />
-        <MetadataRow label="Hardcover" value={work.hardcoverId} />
+        <MetadataRow label="Hardcover" value={work.hcKey} />
         <MetadataRow label="ISBN-13" value={work.isbn13} />
         <MetadataRow label="ASIN" value={work.asin} />
       </dl>
