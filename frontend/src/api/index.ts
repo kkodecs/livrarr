@@ -69,6 +69,13 @@ import type {
   ImportPreviewResponse,
   ImportProgressResponse,
   ImportHistoryItem,
+  SeriesListResponse,
+  SeriesResponse,
+  SeriesWithAuthorResponse,
+  SeriesDetailResponse,
+  MonitorSeriesRequest,
+  UpdateSeriesRequest,
+  ResolveGrResponse,
 } from "@/types/api";
 
 // Setup
@@ -168,6 +175,32 @@ export const getAuthorBibliography = (id: number) =>
 export const refreshAuthorBibliography = (id: number) =>
   apiFetch<AuthorBibliography>(`/author/${id}/bibliography/refresh`, {
     method: "POST",
+  });
+
+// Series
+export const listAllSeries = () =>
+  apiFetch<SeriesWithAuthorResponse[]>("/series");
+export const getSeriesDetail = (id: number) =>
+  apiFetch<SeriesDetailResponse>(`/series/${id}`);
+export const resolveGr = (authorId: number) =>
+  apiFetch<ResolveGrResponse>(`/author/${authorId}/resolve-gr`, {
+    method: "POST",
+  });
+export const getAuthorSeries = (authorId: number) =>
+  apiFetch<SeriesListResponse>(`/author/${authorId}/series`);
+export const refreshAuthorSeries = (authorId: number) =>
+  apiFetch<SeriesListResponse>(`/author/${authorId}/series/refresh`, {
+    method: "POST",
+  });
+export const monitorSeries = (authorId: number, req: MonitorSeriesRequest) =>
+  apiFetch<SeriesResponse>(`/author/${authorId}/series/monitor`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const updateSeries = (seriesId: number, req: UpdateSeriesRequest) =>
+  apiFetch<SeriesResponse>(`/series/${seriesId}`, {
+    method: "PUT",
+    body: JSON.stringify(req),
   });
 
 // Notifications

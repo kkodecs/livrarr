@@ -5,8 +5,8 @@ pub use livrarr_domain::{
     EnrichmentStatus, EventType, Grab, GrabId, GrabStatus, HistoryEvent, HistoryId, Import,
     Indexer, IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider,
     MediaType, NarrationType, Notification, NotificationId, NotificationType, PlaybackProgress,
-    RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Session, User, UserId,
-    UserRole, Work, WorkId,
+    RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Series, Session, User,
+    UserId, UserRole, Work, WorkId,
 };
 
 pub mod pool;
@@ -25,6 +25,8 @@ mod sqlite_notification;
 mod sqlite_playback_progress;
 mod sqlite_remote_path_mapping;
 mod sqlite_root_folder;
+mod sqlite_series;
+mod sqlite_series_cache;
 mod sqlite_session;
 mod sqlite_user;
 mod sqlite_work;
@@ -152,6 +154,13 @@ pub trait WorkDb: Send + Sync {
     /// List works for a user (unbounded — for internal use).
     async fn list_works(&self, user_id: UserId) -> Result<Vec<Work>, DbError>;
 
+    /// List works for a specific author.
+    async fn list_works_by_author(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<Vec<Work>, DbError>;
+
     /// List works for a user, paginated.
     async fn list_works_paginated(
         &self,
@@ -247,6 +256,11 @@ pub struct CreateWorkDbRequest {
     pub detail_url: Option<String>,
     pub language: Option<String>,
     pub import_id: Option<String>,
+    pub series_id: Option<i64>,
+    pub series_name: Option<String>,
+    pub series_position: Option<f64>,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
 }
 
 pub struct UpdateWorkEnrichmentDbRequest {
@@ -344,6 +358,7 @@ pub struct UpdateAuthorDbRequest {
     pub name: Option<String>,
     pub sort_name: Option<String>,
     pub ol_key: Option<String>,
+    pub gr_key: Option<String>,
     pub monitored: Option<bool>,
     pub monitor_new_items: Option<bool>,
     pub monitor_since: Option<chrono::DateTime<chrono::Utc>>,
@@ -1064,6 +1079,101 @@ pub trait AuthorBibliographyDb: Send + Sync {
         author_id: i64,
         entries: &[BibliographyEntry],
     ) -> Result<AuthorBibliography, DbError>;
+}
+
+// ---------------------------------------------------------------------------
+// Series DB
+// ---------------------------------------------------------------------------
+
+/// Cached series list entry for an author (from GR scraping).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesCacheEntry {
+    pub name: String,
+    pub gr_key: String,
+    pub book_count: i32,
+}
+
+/// Cached series list for an author.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorSeriesCache {
+    pub author_id: i64,
+    pub entries: Vec<SeriesCacheEntry>,
+    pub fetched_at: String,
+}
+
+pub struct LinkWorkToSeriesRequest {
+    pub work_id: WorkId,
+    pub series_id: i64,
+    pub series_work_count: i32,
+    pub series_name: String,
+    pub series_position: Option<f64>,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+}
+
+pub struct CreateSeriesDbRequest {
+    pub user_id: UserId,
+    pub author_id: AuthorId,
+    pub name: String,
+    pub gr_key: String,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+    pub work_count: i32,
+}
+
+#[trait_variant::make(Send)]
+pub trait SeriesDb: Send + Sync {
+    /// Get a series by ID (user-scoped through author ownership check at handler level).
+    async fn get_series(&self, id: i64) -> Result<Option<Series>, DbError>;
+
+    /// List all series for a user.
+    async fn list_all_series(&self, user_id: UserId) -> Result<Vec<Series>, DbError>;
+
+    /// List all series for an author.
+    async fn list_series_for_author(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<Vec<Series>, DbError>;
+
+    /// Create or update a series (upsert on user_id + author_id + gr_key).
+    async fn upsert_series(&self, req: CreateSeriesDbRequest) -> Result<Series, DbError>;
+
+    /// Update monitoring flags on a series and propagate to linked works.
+    async fn update_series_flags(
+        &self,
+        id: i64,
+        monitor_ebook: bool,
+        monitor_audiobook: bool,
+    ) -> Result<Series, DbError>;
+
+    /// Update work_count for a series.
+    async fn update_series_work_count(&self, id: i64, work_count: i32) -> Result<(), DbError>;
+
+    /// Link a work to a series (with assignment guard: only if current series_id is NULL
+    /// or new series has smaller work_count).
+    async fn link_work_to_series(&self, req: LinkWorkToSeriesRequest) -> Result<(), DbError>;
+
+    /// List monitored series (either flag true) for a list of author IDs.
+    async fn list_monitored_series_for_authors(
+        &self,
+        author_ids: &[AuthorId],
+    ) -> Result<Vec<Series>, DbError>;
+}
+
+#[trait_variant::make(Send)]
+pub trait SeriesCacheDb: Send + Sync {
+    async fn get_series_cache(&self, author_id: i64) -> Result<Option<AuthorSeriesCache>, DbError>;
+
+    async fn save_series_cache(
+        &self,
+        author_id: i64,
+        entries: &[SeriesCacheEntry],
+    ) -> Result<AuthorSeriesCache, DbError>;
+
+    async fn delete_series_cache(&self, author_id: i64) -> Result<(), DbError>;
 }
 
 // ---------------------------------------------------------------------------
