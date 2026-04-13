@@ -33,7 +33,8 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         publisher: w.publisher.clone(),
         publish_date: w.publish_date.clone(),
         ol_key: w.ol_key.clone(),
-        hardcover_id: w.hardcover_id.clone(),
+        hc_key: w.hc_key.clone(),
+        gr_key: w.gr_key.clone(),
         isbn_13: w.isbn_13.clone(),
         asin: w.asin.clone(),
         narrator: w.narrator.clone(),
@@ -800,6 +801,8 @@ pub async fn add_work_internal(
                     name: req.author_name.clone(),
                     sort_name: None,
                     ol_key: req.author_ol_key.clone(),
+                    gr_key: None,
+                    hc_key: None,
                 })
                 .await?;
             crate::handlers::author::spawn_bibliography_fetch((*state).clone(), author.id, user_id);
@@ -820,6 +823,7 @@ pub async fn add_work_internal(
             author_name: req.author_name,
             author_id,
             ol_key: req.ol_key.clone(),
+            gr_key: None,
             year: req.year,
             cover_url: req.cover_url,
             metadata_source: req.metadata_source,

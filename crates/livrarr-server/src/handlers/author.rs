@@ -48,7 +48,8 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         publisher: w.publisher.clone(),
         publish_date: w.publish_date.clone(),
         ol_key: w.ol_key.clone(),
-        hardcover_id: w.hardcover_id.clone(),
+        hc_key: w.hc_key.clone(),
+        gr_key: w.gr_key.clone(),
         isbn_13: w.isbn_13.clone(),
         asin: w.asin.clone(),
         narrator: w.narrator.clone(),
@@ -171,6 +172,8 @@ pub async fn add(
             name: req.name,
             sort_name: req.sort_name,
             ol_key: Some(req.ol_key),
+            gr_key: None,
+            hc_key: None,
         })
         .await?;
 
