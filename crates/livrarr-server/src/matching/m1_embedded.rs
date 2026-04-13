@@ -9,7 +9,10 @@ use super::types::{Confidence, Extraction, ExtractionSource};
 
 /// Extract metadata from a file's embedded tags.
 /// Returns None only if no usable title can be extracted.
-pub fn extract_embedded(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Option<Extraction> {
+pub fn extract_embedded(
+    path: &Path,
+    grouped_paths: Option<&[std::path::PathBuf]>,
+) -> Option<Extraction> {
     let ext = path.extension()?.to_str()?.to_lowercase();
     match ext.as_str() {
         "epub" => extract_epub(path),
@@ -24,7 +27,10 @@ fn extract_epub(path: &Path) -> Option<Extraction> {
     let metadata = book.metadata();
 
     let raw_title = metadata.title().map(|t| decode_xml_entities(t.value()));
-    let raw_author = metadata.creators().first().map(|c| decode_xml_entities(c.value()));
+    let raw_author = metadata
+        .creators()
+        .first()
+        .map(|c| decode_xml_entities(c.value()));
     let raw_language = metadata.language().map(|l| l.value().to_string());
 
     let title = raw_title.and_then(|t| sanitize_title(&t, path));
@@ -105,10 +111,18 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
 
     for p in &paths_to_read {
         if let Ok(tag) = id3::Tag::read_from_path(p) {
-            if let Some(t) = tag.title() { titles.push(t.to_string()); }
-            if let Some(a) = tag.artist() { artists.push(a.to_string()); }
-            if let Some(al) = tag.album() { albums.push(al.to_string()); }
-            if let Some(y) = tag.year() { years.push(y); }
+            if let Some(t) = tag.title() {
+                titles.push(t.to_string());
+            }
+            if let Some(a) = tag.artist() {
+                artists.push(a.to_string());
+            }
+            if let Some(al) = tag.album() {
+                albums.push(al.to_string());
+            }
+            if let Some(y) = tag.year() {
+                years.push(y);
+            }
         }
     }
 
@@ -118,8 +132,8 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
         let most_common_album = most_common_non_garbage_title(&albums, path);
         let most_common_title = most_common_non_garbage_title(&titles, path);
         match (most_common_album, most_common_title) {
-            (Some(a), _) => Some(a),       // Album is valid — use it (book title).
-            (None, Some(t)) => Some(t),     // Album garbage, fall back to TIT2.
+            (Some(a), _) => Some(a),    // Album is valid — use it (book title).
+            (None, Some(t)) => Some(t), // Album garbage, fall back to TIT2.
             _ => None,
         }
     };
@@ -175,26 +189,33 @@ fn decode_xml_entities(s: &str) -> String {
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-static GARBAGE_TITLE: Lazy<Vec<Regex>> = Lazy::new(|| vec![
-    Regex::new(r"(?i)^track\s*\d+$").unwrap(),
-    Regex::new(r"(?i)^chapter\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|[ivxlc]+)$").unwrap(),
-    Regex::new(r"(?i)^ch\.\s*\d+$").unwrap(),
-    Regex::new(r"(?i)^(disc|cd|part)\s*\d+$").unwrap(),
-    Regex::new(r"(?i)^side\s*[ab]$").unwrap(),
-    Regex::new(r"^\d{1,3}$").unwrap(),
-    Regex::new(r"(?i)^(unknown|untitled|audiobook|full book)$").unwrap(),
-    Regex::new(r"(?i)^https?://").unwrap(),
-    Regex::new(r"(?i)\.(com|net|org)").unwrap(),
-]);
+static GARBAGE_TITLE: Lazy<Vec<Regex>> = Lazy::new(|| {
+    vec![
+        Regex::new(r"(?i)^track\s*\d+$").unwrap(),
+        Regex::new(
+            r"(?i)^chapter\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|[ivxlc]+)$",
+        )
+        .unwrap(),
+        Regex::new(r"(?i)^ch\.\s*\d+$").unwrap(),
+        Regex::new(r"(?i)^(disc|cd|part)\s*\d+$").unwrap(),
+        Regex::new(r"(?i)^side\s*[ab]$").unwrap(),
+        Regex::new(r"^\d{1,3}$").unwrap(),
+        Regex::new(r"(?i)^(unknown|untitled|audiobook|full book)$").unwrap(),
+        Regex::new(r"(?i)^https?://").unwrap(),
+        Regex::new(r"(?i)\.(com|net|org)").unwrap(),
+    ]
+});
 
-static GARBAGE_AUTHOR: Lazy<Vec<Regex>> = Lazy::new(|| vec![
-    Regex::new(r"(?i)^(unknown|unknown author|various|various authors|va)$").unwrap(),
-    Regex::new(r"(?i)^(author|calibre|administrator|admin)$").unwrap(),
-    Regex::new(r"(?i)^(read by|narrated by)").unwrap(),
-    Regex::new(r"(?i)^(microsoft|amazon|google)").unwrap(),
-    Regex::new(r"(?i)^https?://").unwrap(),
-    Regex::new(r"(?i)\.(com|net)").unwrap(),
-]);
+static GARBAGE_AUTHOR: Lazy<Vec<Regex>> = Lazy::new(|| {
+    vec![
+        Regex::new(r"(?i)^(unknown|unknown author|various|various authors|va)$").unwrap(),
+        Regex::new(r"(?i)^(author|calibre|administrator|admin)$").unwrap(),
+        Regex::new(r"(?i)^(read by|narrated by)").unwrap(),
+        Regex::new(r"(?i)^(microsoft|amazon|google)").unwrap(),
+        Regex::new(r"(?i)^https?://").unwrap(),
+        Regex::new(r"(?i)\.(com|net)").unwrap(),
+    ]
+});
 
 fn sanitize_title(title: &str, path: &Path) -> Option<String> {
     let trimmed = title.trim();
@@ -229,7 +250,10 @@ fn sanitize_author(author: &str) -> Option<String> {
 }
 
 fn is_isbn(s: &str) -> bool {
-    let digits: String = s.chars().filter(|c| c.is_ascii_digit() || *c == 'X').collect();
+    let digits: String = s
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == 'X')
+        .collect();
     digits.len() == 10 || digits.len() == 13
 }
 
@@ -244,10 +268,7 @@ fn most_common_non_garbage_title(values: &[String], path: &Path) -> Option<Strin
 
 /// Return the most common non-garbage author from a list of tag values.
 fn most_common_non_garbage_author(values: &[String]) -> Option<String> {
-    let clean: Vec<String> = values
-        .iter()
-        .filter_map(|v| sanitize_author(v))
-        .collect();
+    let clean: Vec<String> = values.iter().filter_map(|v| sanitize_author(v)).collect();
     most_common(&clean).cloned()
 }
 

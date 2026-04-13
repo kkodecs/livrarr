@@ -3,7 +3,9 @@ use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{map_db_err, parse_dt};
-use crate::{CreateGrabDbRequest, DbError, Grab, GrabDb, GrabId, GrabStatus, UserId};
+use crate::{
+    CreateGrabDbRequest, DbError, Grab, GrabDb, GrabId, GrabStatus, MediaType, UserId, WorkId,
+};
 
 fn row_to_grab(row: sqlx::sqlite::SqliteRow) -> Result<Grab, DbError> {
     let status_str: String = row
@@ -305,5 +307,30 @@ impl GrabDb for SqliteDb {
         .map_err(map_db_err)?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn active_grab_exists(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        media_type: MediaType,
+    ) -> Result<bool, DbError> {
+        let mt = match media_type {
+            MediaType::Ebook => "ebook",
+            MediaType::Audiobook => "audiobook",
+        };
+        let row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM grabs \
+             WHERE user_id = ? AND work_id = ? AND media_type = ? \
+             AND status IN ('sent', 'confirmed', 'importing')",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(mt)
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(Box::new(e)))?;
+        Ok(cnt > 0)
     }
 }

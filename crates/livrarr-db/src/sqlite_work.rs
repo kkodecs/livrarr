@@ -126,8 +126,11 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
         cover_manual: row
             .try_get::<bool, _>("cover_manual")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-        monitored: row
-            .try_get::<bool, _>("monitored")
+        monitor_ebook: row
+            .try_get::<bool, _>("monitor_ebook")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        monitor_audiobook: row
+            .try_get::<bool, _>("monitor_audiobook")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         added_at: parse_dt(&added_at_str)?,
         metadata_source: row
@@ -363,15 +366,20 @@ impl WorkDb for SqliteDb {
         let author_name = req.author_name.unwrap_or(current.author_name);
         let series_name = req.series_name.or(current.series_name);
         let series_position = req.series_position.or(current.series_position);
+        let monitor_ebook = req.monitor_ebook.unwrap_or(current.monitor_ebook);
+        let monitor_audiobook = req.monitor_audiobook.unwrap_or(current.monitor_audiobook);
 
         sqlx::query(
-            "UPDATE works SET title = ?, author_name = ?, series_name = ?, series_position = ? \
+            "UPDATE works SET title = ?, author_name = ?, series_name = ?, series_position = ?, \
+             monitor_ebook = ?, monitor_audiobook = ? \
              WHERE id = ? AND user_id = ?",
         )
         .bind(&title)
         .bind(&author_name)
         .bind(&series_name)
         .bind(series_position)
+        .bind(monitor_ebook)
+        .bind(monitor_audiobook)
         .bind(id)
         .bind(user_id)
         .execute(self.pool())
@@ -486,6 +494,17 @@ impl WorkDb for SqliteDb {
         .await
         .map_err(map_db_err)?;
         Ok(result.rows_affected())
+    }
+
+    async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError> {
+        let rows = sqlx::query(
+            "SELECT * FROM works WHERE monitor_ebook = 1 OR monitor_audiobook = 1 \
+             ORDER BY id",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_work).collect()
     }
 }
 

@@ -9,19 +9,34 @@ use super::types::{Confidence, Extraction, ExtractionSource};
 
 /// Directories to skip during path parsing (case-insensitive).
 const IGNORE_DIRS: &[&str] = &[
-    "books", "ebooks", "audiobooks", "fiction", "non-fiction", "nonfiction",
-    "sci-fi", "fantasy", "to import", "downloads", "complete", "unsorted",
-    "new", "incoming", "media", "library", "audio", "text",
+    "books",
+    "ebooks",
+    "audiobooks",
+    "fiction",
+    "non-fiction",
+    "nonfiction",
+    "sci-fi",
+    "fantasy",
+    "to import",
+    "downloads",
+    "complete",
+    "unsorted",
+    "new",
+    "incoming",
+    "media",
+    "library",
+    "audio",
+    "text",
 ];
 
 /// Patterns for noise directories to collapse (multi-disc, parts).
-static NOISE_DIR: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^(disc|cd|part|disk)\s*\d+$").unwrap()
-});
+static NOISE_DIR: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^(disc|cd|part|disk)\s*\d+$").unwrap());
 
 /// Series vocabulary that strongly signals a directory is a series name.
 static SERIES_VOCAB: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(series|saga|chronicles|cycle|trilogy|duology|quartet|collection)\b").unwrap()
+    Regex::new(r"(?i)\b(series|saga|chronicles|cycle|trilogy|duology|quartet|collection)\b")
+        .unwrap()
 });
 
 /// Sequence indicators in a child title that signal the parent is a series.
@@ -32,9 +47,11 @@ static CHILD_SEQUENCE: Lazy<Regex> = Lazy::new(|| {
 // Supplementary metadata patterns for title component.
 static ASIN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([A-Z0-9]{10})\]").unwrap());
 static NARRATOR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{([^}]+)\}").unwrap());
-static YEAR_PREFIX_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\(?(\d{4})\)?\s*-\s*(.+)").unwrap());
+static YEAR_PREFIX_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\(?(\d{4})\)?\s*-\s*(.+)").unwrap());
 static SEQUENCE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^(?:vol\.?\s*|volume\s*|book\s*|#)?(\d{1,3}(?:\.\d{1,2})?)\s*[\.\-]\s*(.+)").unwrap()
+    Regex::new(r"(?i)^(?:vol\.?\s*|volume\s*|book\s*|#)?(\d{1,3}(?:\.\d{1,2})?)\s*[\.\-]\s*(.+)")
+        .unwrap()
 });
 
 /// Extract metadata from filesystem path structure.
@@ -82,15 +99,29 @@ pub fn extract_from_path(path: &Path, scan_root: &Path) -> Vec<Extraction> {
         return vec![];
     }
 
-    let parent = if cleaned.len() >= 2 { Some(cleaned[cleaned.len() - 2]) } else { None };
-    let grandparent = if cleaned.len() >= 3 { Some(cleaned[cleaned.len() - 3]) } else { None };
+    let parent = if cleaned.len() >= 2 {
+        Some(cleaned[cleaned.len() - 2])
+    } else {
+        None
+    };
+    let grandparent = if cleaned.len() >= 3 {
+        Some(cleaned[cleaned.len() - 3])
+    } else {
+        None
+    };
 
     match parent {
         None => {
             // Flat file, title only.
             vec![make_extraction(
-                &title, None, sup.series.as_deref(), sup.sequence, sup.year,
-                sup.narrator.as_deref(), sup.asin.as_deref(), Confidence::MediumLow,
+                &title,
+                None,
+                sup.series.as_deref(),
+                sup.sequence,
+                sup.year,
+                sup.narrator.as_deref(),
+                sup.asin.as_deref(),
+                Confidence::MediumLow,
             )]
         }
         Some(parent_dir) => {
@@ -100,28 +131,53 @@ pub fn extract_from_path(path: &Path, scan_root: &Path) -> Vec<Extraction> {
                 // Parent is series. Grandparent is author (if available).
                 let author = grandparent.map(|s| s.to_string());
                 let series = Some(parent_dir.to_string());
-                let conf = if author.is_some() { Confidence::MediumHigh } else { Confidence::Medium };
+                let conf = if author.is_some() {
+                    Confidence::MediumHigh
+                } else {
+                    Confidence::Medium
+                };
                 vec![make_extraction(
-                    &title, author.as_deref(), series.as_deref(),
-                    sup.sequence, sup.year, sup.narrator.as_deref(), sup.asin.as_deref(), conf,
+                    &title,
+                    author.as_deref(),
+                    series.as_deref(),
+                    sup.sequence,
+                    sup.year,
+                    sup.narrator.as_deref(),
+                    sup.asin.as_deref(),
+                    conf,
                 )]
             } else if author_score >= 3 || (author_score > series_score) {
                 // Parent is author.
                 vec![make_extraction(
-                    &title, Some(parent_dir), sup.series.as_deref(),
-                    sup.sequence, sup.year, sup.narrator.as_deref(), sup.asin.as_deref(),
+                    &title,
+                    Some(parent_dir),
+                    sup.series.as_deref(),
+                    sup.sequence,
+                    sup.year,
+                    sup.narrator.as_deref(),
+                    sup.asin.as_deref(),
                     Confidence::MediumHigh,
                 )]
             } else {
                 // Ambiguous — produce two hypotheses.
                 let as_author = make_extraction(
-                    &title, Some(parent_dir), sup.series.as_deref(),
-                    sup.sequence, sup.year, sup.narrator.as_deref(), sup.asin.as_deref(),
+                    &title,
+                    Some(parent_dir),
+                    sup.series.as_deref(),
+                    sup.sequence,
+                    sup.year,
+                    sup.narrator.as_deref(),
+                    sup.asin.as_deref(),
                     Confidence::Medium,
                 );
                 let as_series = make_extraction(
-                    &title, grandparent, Some(parent_dir),
-                    sup.sequence, sup.year, sup.narrator.as_deref(), sup.asin.as_deref(),
+                    &title,
+                    grandparent,
+                    Some(parent_dir),
+                    sup.sequence,
+                    sup.year,
+                    sup.narrator.as_deref(),
+                    sup.asin.as_deref(),
                     Confidence::Medium,
                 );
                 vec![as_author, as_series]
@@ -139,7 +195,8 @@ fn classify_parent(parent: &str, child_title: &str) -> (i32, i32) {
     // Strong author: comma-separated name form ("Last, First").
     if parent.contains(',') && parent.split(',').count() == 2 {
         let parts: Vec<&str> = parent.split(',').map(|s| s.trim()).collect();
-        if !parts[0].is_empty() && !parts[1].is_empty()
+        if !parts[0].is_empty()
+            && !parts[1].is_empty()
             && !parts[0].chars().any(|c| c.is_ascii_digit())
         {
             author_score += 3;
@@ -187,7 +244,11 @@ struct Supplementary {
 fn extract_supplementary(title: &str) -> (String, Supplementary) {
     let mut t = title.to_string();
     let mut sup = Supplementary {
-        series: None, sequence: None, year: None, narrator: None, asin: None,
+        series: None,
+        sequence: None,
+        year: None,
+        narrator: None,
+        asin: None,
     };
 
     // ASIN: [B0015T963C]

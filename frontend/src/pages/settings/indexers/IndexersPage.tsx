@@ -48,6 +48,7 @@ interface IndexerFormData {
   priority: number;
   enableAutomaticSearch: boolean;
   enableInteractiveSearch: boolean;
+  enableRss: boolean;
   enabled: boolean;
 }
 
@@ -70,6 +71,7 @@ function toCreateRequest(data: IndexerFormData): CreateIndexerRequest {
     priority: data.priority,
     enableAutomaticSearch: data.enableAutomaticSearch,
     enableInteractiveSearch: data.enableInteractiveSearch,
+    enableRss: data.enableRss,
     enabled: data.enabled,
   };
 }
@@ -84,6 +86,7 @@ function toUpdateRequest(data: IndexerFormData): UpdateIndexerRequest {
     priority: data.priority,
     enableAutomaticSearch: data.enableAutomaticSearch,
     enableInteractiveSearch: data.enableInteractiveSearch,
+    enableRss: data.enableRss,
     enabled: data.enabled,
   };
 }
@@ -98,8 +101,100 @@ const defaultValues: IndexerFormData = {
   priority: 1,
   enableAutomaticSearch: true,
   enableInteractiveSearch: true,
+  enableRss: true,
   enabled: true,
 };
+
+// ── RSS Sync Config ──
+
+function RssSyncConfig() {
+  const configQ = useQuery({
+    queryKey: ["indexerConfig"],
+    queryFn: api.getIndexerConfig,
+  });
+  const qc = useQueryClient();
+  const [interval, setInterval_] = useState<string>("");
+  const [threshold, setThreshold] = useState<string>("");
+  const [initialized, setInitialized] = useState(false);
+
+  useEffect(() => {
+    if (configQ.data && !initialized) {
+      setInterval_(String(configQ.data.rssSyncIntervalMinutes));
+      setThreshold(String(configQ.data.rssMatchThreshold));
+      setInitialized(true);
+    }
+  }, [configQ.data, initialized]);
+
+  const updateConfig = useMutation({
+    mutationFn: api.updateIndexerConfig,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["indexerConfig"] });
+      toast.success("RSS config saved");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const handleSave = () => {
+    const intVal = parseInt(interval, 10);
+    const thrVal = parseFloat(threshold);
+    if (isNaN(intVal) || isNaN(thrVal)) {
+      toast.error("Invalid values");
+      return;
+    }
+    updateConfig.mutate({
+      rssSyncIntervalMinutes: intVal,
+      rssMatchThreshold: thrVal,
+    });
+  };
+
+  if (!configQ.data) return null;
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <h2 className="mb-3 text-sm font-semibold text-zinc-100">RSS Sync</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <label className="block text-xs text-muted">Sync Interval (minutes)</label>
+            <HelpTip text="How often to poll indexers for new releases. 0 = disabled. Minimum 10 minutes." />
+          </div>
+          <input
+            type="number"
+            value={interval}
+            onChange={(e) => setInterval_(e.target.value)}
+            min={0}
+            max={1440}
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          />
+        </div>
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <label className="block text-xs text-muted">Match Threshold</label>
+            <HelpTip text="Minimum match score (0.50–0.95) for RSS auto-grab. Higher = fewer false positives." />
+          </div>
+          <input
+            type="number"
+            value={threshold}
+            onChange={(e) => setThreshold(e.target.value)}
+            min={0.5}
+            max={0.95}
+            step={0.05}
+            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          />
+        </div>
+        <div>
+          <button
+            onClick={handleSave}
+            disabled={updateConfig.isPending}
+            className="rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+          >
+            {updateConfig.isPending ? "Saving..." : "Save"}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 // ── Main Page ──
 
@@ -216,6 +311,9 @@ export default function IndexersPage() {
       </PageToolbar>
 
       <PageContent className="space-y-4">
+        {/* ── RSS Sync Config ── */}
+        <RssSyncConfig />
+
         {/* ── Torrent Indexers ── */}
         <section>
           <div className="flex items-center gap-2 mb-4">
@@ -261,6 +359,11 @@ export default function IndexersPage() {
                           {idx.enableAutomaticSearch && (
                             <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-xs text-zinc-400">
                               Auto
+                            </span>
+                          )}
+                          {idx.enableRss && (
+                            <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-xs text-zinc-400">
+                              RSS
                             </span>
                           )}
                         </div>
@@ -347,6 +450,9 @@ export default function IndexersPage() {
                           )}
                           {idx.enableAutomaticSearch && (
                             <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-xs text-zinc-400">Auto</span>
+                          )}
+                          {idx.enableRss && (
+                            <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-xs text-zinc-400">RSS</span>
                           )}
                         </div>
                       </td>
@@ -507,6 +613,7 @@ function IndexerFormModal({
           priority: editing.priority,
           enableAutomaticSearch: editing.enableAutomaticSearch,
           enableInteractiveSearch: editing.enableInteractiveSearch,
+          enableRss: editing.enableRss,
           enabled: editing.enabled,
         }
       : defaultValues,
@@ -631,11 +738,12 @@ function IndexerFormModal({
             name="enableInteractiveSearch"
             control={control}
             render={({ field }) => (
-              <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
+              <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-not-allowed opacity-50">
                 <input
                   type="checkbox"
                   checked={field.value}
                   onChange={field.onChange}
+                  disabled
                   className="rounded border-border"
                 />
                 Interactive Search
@@ -646,6 +754,22 @@ function IndexerFormModal({
             name="enableAutomaticSearch"
             control={control}
             render={({ field }) => (
+              <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-not-allowed opacity-50">
+                <input
+                  type="checkbox"
+                  checked={field.value}
+                  onChange={field.onChange}
+                  disabled
+                  className="rounded border-border"
+                />
+                Automatic Search
+              </label>
+            )}
+          />
+          <Controller
+            name="enableRss"
+            control={control}
+            render={({ field }) => (
               <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
                 <input
                   type="checkbox"
@@ -653,7 +777,7 @@ function IndexerFormModal({
                   onChange={field.onChange}
                   className="rounded border-border"
                 />
-                Automatic Search
+                RSS Sync
               </label>
             )}
           />
@@ -882,15 +1006,21 @@ function InlineIndexerForm({
 
       <div className="flex flex-wrap gap-4 sm:gap-6">
         <Controller name="enableInteractiveSearch" control={control} render={({ field }) => (
-          <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
-            <input type="checkbox" checked={field.value} onChange={field.onChange} className="rounded border-border" />
+          <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-not-allowed opacity-50">
+            <input type="checkbox" checked={field.value} onChange={field.onChange} disabled className="rounded border-border" />
             Interactive Search
           </label>
         )} />
         <Controller name="enableAutomaticSearch" control={control} render={({ field }) => (
+          <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-not-allowed opacity-50">
+            <input type="checkbox" checked={field.value} onChange={field.onChange} disabled className="rounded border-border" />
+            Automatic Search
+          </label>
+        )} />
+        <Controller name="enableRss" control={control} render={({ field }) => (
           <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
             <input type="checkbox" checked={field.value} onChange={field.onChange} className="rounded border-border" />
-            Automatic Search
+            RSS Sync
           </label>
         )} />
       </div>

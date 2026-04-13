@@ -405,6 +405,8 @@ pub struct UpdateWorkRequest {
     pub author_name: Option<String>,
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
+    pub monitor_ebook: Option<bool>,
+    pub monitor_audiobook: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,7 +442,8 @@ pub struct WorkDetailResponse {
     pub enriched_at: Option<String>,
     pub enrichment_source: Option<String>,
     pub cover_manual: bool,
-    pub monitored: bool,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
     pub added_at: String,
     pub library_items: Vec<LibraryItemResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -742,6 +745,8 @@ pub struct CreateIndexerApiRequest {
     #[serde(default = "default_true")]
     pub enable_interactive_search: bool,
     #[serde(default = "default_true")]
+    pub enable_rss: bool,
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
@@ -756,6 +761,7 @@ pub struct UpdateIndexerApiRequest {
     pub priority: Option<i32>,
     pub enable_automatic_search: Option<bool>,
     pub enable_interactive_search: Option<bool>,
+    pub enable_rss: Option<bool>,
     pub enabled: Option<bool>,
 }
 
@@ -773,6 +779,7 @@ pub struct IndexerResponse {
     pub enable_automatic_search: bool,
     pub enable_interactive_search: bool,
     pub supports_book_search: bool,
+    pub enable_rss: bool,
     pub enabled: bool,
     pub added_at: chrono::DateTime<chrono::Utc>,
 }
