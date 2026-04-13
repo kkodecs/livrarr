@@ -788,6 +788,7 @@ async fn import_single_item(
                 path: relative.to_string(),
                 media_type,
                 file_size,
+                import_id: None,
             })
             .await
         {

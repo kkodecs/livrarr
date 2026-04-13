@@ -258,6 +258,7 @@ pub async fn import_grab(
                     path: relative,
                     media_type,
                     file_size,
+                    import_id: None,
                 })
                 .await
             {
@@ -544,6 +545,7 @@ pub async fn import_single_file(
             path: relative,
             media_type,
             file_size,
+            import_id: None,
         })
         .await
         .map_err(|e| {
@@ -769,6 +771,7 @@ async fn import_mp3_batch(
                 path: relative,
                 media_type: vf.media_type,
                 file_size,
+                import_id: None,
             })
             .await
         {

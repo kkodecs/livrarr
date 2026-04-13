@@ -15,6 +15,7 @@ pub mod notification;
 pub mod opds;
 pub mod profile;
 pub mod queue;
+pub mod readarr_import;
 pub mod release;
 pub mod remote_path_mapping;
 pub mod root_folder;
