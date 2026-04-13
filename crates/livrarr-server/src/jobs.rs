@@ -1051,6 +1051,11 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                             detail_url: None,
                             language: None,
                             import_id: None,
+                            series_id: None,
+                            series_name: None,
+                            series_position: None,
+                            monitor_ebook: false,
+                            monitor_audiobook: false,
                         })
                         .await
                     {

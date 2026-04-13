@@ -1,6 +1,7 @@
 import { NavLink, useLocation } from "react-router";
 import {
   BookOpen,
+  Library,
   Users,
   PlusCircle,
   BookMarked,
@@ -56,6 +57,7 @@ const navGroups: NavGroup[] = [
     pinned: true,
     children: [
       { label: "Works", path: "/", icon: <BookOpen size={18} /> },
+      { label: "Series", path: "/series", icon: <Library size={18} /> },
       { label: "Authors", path: "/author", icon: <Users size={18} /> },
       { label: "Add New", path: "/search", icon: <PlusCircle size={18} /> },
       {
