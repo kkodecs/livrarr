@@ -122,6 +122,15 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             get(handlers::config::get_email).put(handlers::config::update_email),
         )
         .route("/config/email/test", post(handlers::config::test_email))
+        .route(
+            "/config/indexer",
+            get(handlers::config::get_indexer).put(handlers::config::update_indexer),
+        )
+        // RSS sync trigger
+        .route(
+            "/command/rss-sync",
+            post(handlers::config::trigger_rss_sync),
+        )
         // Indexers (replaces /config/prowlarr — DEFERRED-001)
         .route(
             "/indexer",

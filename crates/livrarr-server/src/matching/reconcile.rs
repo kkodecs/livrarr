@@ -58,7 +58,8 @@ pub fn reconcile(mut extractions: Vec<Extraction>) -> Vec<Cluster> {
     }
 
     // Collect connected components.
-    let mut cluster_map: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    let mut cluster_map: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
     for i in 0..n {
         let root = find(&mut parent, i);
         cluster_map.entry(root).or_default().push(i);
@@ -69,14 +70,16 @@ pub fn reconcile(mut extractions: Vec<Extraction>) -> Vec<Cluster> {
     let mut result: Vec<Cluster> = clusters
         .into_iter()
         .filter_map(|indices| {
-            let members: Vec<Extraction> = indices.iter().map(|&i| extractions[i].clone()).collect();
+            let members: Vec<Extraction> =
+                indices.iter().map(|&i| extractions[i].clone()).collect();
             build_cluster(members)
         })
         .collect();
 
     // Step 3: Sort by confidence then completeness.
     result.sort_by(|a, b| {
-        b.confidence.cmp(&a.confidence)
+        b.confidence
+            .cmp(&a.confidence)
             .then_with(|| b.primary.completeness().cmp(&a.primary.completeness()))
     });
 
@@ -177,7 +180,8 @@ fn build_cluster(members: Vec<Extraction>) -> Option<Cluster> {
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| {
-            a.completeness().cmp(&b.completeness())
+            a.completeness()
+                .cmp(&b.completeness())
                 .then_with(|| source_trust(a.source).cmp(&source_trust(b.source)))
         })
         .map(|(i, _)| i)

@@ -27,7 +27,8 @@ pub fn parse_string(input: &str) -> (Vec<Extraction>, SideChannel) {
         if let Some(cap) = pattern.regex.captures(&cleaned) {
             let author = cap.name("author").map(|m| m.as_str().trim().to_string());
             let book = cap.name("book").map(|m| m.as_str().trim().to_string());
-            let year = cap.name("releaseyear")
+            let year = cap
+                .name("releaseyear")
                 .and_then(|m| m.as_str().parse::<i32>().ok())
                 .or(side.year);
 
@@ -41,38 +42,44 @@ pub fn parse_string(input: &str) -> (Vec<Extraction>, SideChannel) {
 
             if let Some(title) = book {
                 if !title.is_empty() {
-                    return (vec![Extraction {
-                        title: Some(title),
-                        author,
-                        year,
-                        isbn: None,
-                        language: side.language.clone(),
-                        series: None,
-                        series_position: None,
-                        narrator: side.narrator.clone(),
-                        asin: None,
-                        confidence: Confidence::Medium,
-                        source: ExtractionSource::String,
-                    }], side);
+                    return (
+                        vec![Extraction {
+                            title: Some(title),
+                            author,
+                            year,
+                            isbn: None,
+                            language: side.language.clone(),
+                            series: None,
+                            series_position: None,
+                            narrator: side.narrator.clone(),
+                            asin: None,
+                            confidence: Confidence::Medium,
+                            source: ExtractionSource::String,
+                        }],
+                        side,
+                    );
                 }
             }
         }
     }
 
     // No regex matched — return cleaned string as title-only.
-    (vec![Extraction {
-        title: Some(cleaned.trim().to_string()),
-        author: None,
-        year: side.year,
-        isbn: None,
-        language: side.language.clone(),
-        series: None,
-        series_position: None,
-        narrator: side.narrator.clone(),
-        asin: None,
-        confidence: Confidence::MediumLow,
-        source: ExtractionSource::String,
-    }], side)
+    (
+        vec![Extraction {
+            title: Some(cleaned.trim().to_string()),
+            author: None,
+            year: side.year,
+            isbn: None,
+            language: side.language.clone(),
+            series: None,
+            series_position: None,
+            narrator: side.narrator.clone(),
+            asin: None,
+            confidence: Confidence::MediumLow,
+            source: ExtractionSource::String,
+        }],
+        side,
+    )
 }
 
 fn make_extraction(title: Option<&str>, author: Option<&str>, year: Option<i32>) -> Extraction {
@@ -96,7 +103,10 @@ fn make_extraction(title: Option<&str>, author: Option<&str>, year: Option<i32>)
 // ---------------------------------------------------------------------------
 
 static FILE_EXT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\.(epub|m4b|m4a|mp3|flac|ogg|wma|pdf|azw3?|mobi|cbz|cbr|nzb|torrent|zip|rar|7z)$").unwrap()
+    Regex::new(
+        r"(?i)\.(epub|m4b|m4a|mp3|flac|ogg|wma|pdf|azw3?|mobi|cbz|cbr|nzb|torrent|zip|rar|7z)$",
+    )
+    .unwrap()
 });
 static WEBSITE_PREFIX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)^(?:\[\s*)?(?:www\.)?[-a-z0-9]{1,256}\.(?:[a-z]{2,6}\.[a-z]{2,6}|[a-z]{2,})\b(?:\s*\]|[ \-]{2,})[ \-]*").unwrap()
@@ -104,21 +114,15 @@ static WEBSITE_PREFIX: Lazy<Regex> = Lazy::new(|| {
 static WEBSITE_POSTFIX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\s*[-\s]*(?:www\.)?[-a-z0-9]{1,256}\.(?:com|net|org|info|me)\s*$").unwrap()
 });
-static GROUP_SUFFIX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"-[A-Za-z0-9]{2,15}$").unwrap()
-});
+static GROUP_SUFFIX: Lazy<Regex> = Lazy::new(|| Regex::new(r"-[A-Za-z0-9]{2,15}$").unwrap());
 static QUALITY_TAG: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)[\[\(]\s*(epub|mobi|azw3?|pdf|flac|mp3|m4[ab]|ogg|wma|320kbps|192kbps|vbr|cbr|cbz)\s*[\]\)]").unwrap()
 });
-static YEAR_EXTRACT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[\(\[]?(\d{4})[\)\]]?").unwrap()
-});
-static NARRATOR_EXTRACT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?:\((?:narrated|read) by ([^)]+)\)|\{([^}]+)\})").unwrap()
-});
-static ABRIDGED_EXTRACT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(unabridged|abridged)\b").unwrap()
-});
+static YEAR_EXTRACT: Lazy<Regex> = Lazy::new(|| Regex::new(r"[\(\[]?(\d{4})[\)\]]?").unwrap());
+static NARRATOR_EXTRACT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)(?:\((?:narrated|read) by ([^)]+)\)|\{([^}]+)\})").unwrap());
+static ABRIDGED_EXTRACT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\b(unabridged|abridged)\b").unwrap());
 static LANG_TAG: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\[(english|french|german|spanish|italian|portuguese|russian|chinese|japanese|korean|polish|dutch|swedish|czech|arabic|hebrew|hindi|turkish)\]").unwrap()
 });
@@ -129,7 +133,10 @@ fn clean_input(input: &str) -> (String, SideChannel) {
 
     // Extract side-channel metadata before stripping.
     if let Some(cap) = NARRATOR_EXTRACT.captures(&s) {
-        side.narrator = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str().to_string());
+        side.narrator = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .map(|m| m.as_str().to_string());
     }
     if let Some(cap) = ABRIDGED_EXTRACT.captures(&s) {
         side.unabridged = Some(cap[1].eq_ignore_ascii_case("unabridged"));

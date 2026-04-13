@@ -45,7 +45,8 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
         enrichment_source: w.enrichment_source.clone(),
         cover_manual: w.cover_manual,
-        monitored: w.monitored,
+        monitor_ebook: w.monitor_ebook,
+        monitor_audiobook: w.monitor_audiobook,
         added_at: w.added_at.to_rfc3339(),
         library_items: vec![],
         metadata_source: w.metadata_source.clone(),
@@ -984,6 +985,8 @@ pub async fn update(
                 author_name: req.author_name,
                 series_name: req.series_name,
                 series_position: req.series_position,
+                monitor_ebook: req.monitor_ebook,
+                monitor_audiobook: req.monitor_audiobook,
             },
         )
         .await?;

@@ -278,4 +278,24 @@ impl LibraryItemDb for SqliteDb {
         }
         Ok(())
     }
+
+    async fn work_has_library_item(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        media_type: MediaType,
+    ) -> Result<bool, DbError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM library_items \
+             WHERE user_id = ? AND work_id = ? AND media_type = ?",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(media_type_str(media_type))
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(Box::new(e)))?;
+        Ok(cnt > 0)
+    }
 }

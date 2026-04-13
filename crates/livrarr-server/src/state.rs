@@ -35,6 +35,10 @@ pub struct AppState {
     /// Per-(user, work) import locks to prevent concurrent imports of the same work.
     pub import_locks: Arc<ImportLockMap>,
     pub grab_search_cache: Arc<GrabSearchCache>,
+    /// Last RSS sync completion timestamp (unix seconds, 0 = never).
+    pub rss_last_run: Arc<std::sync::atomic::AtomicI64>,
+    /// Guard against concurrent RSS sync runs.
+    pub rss_sync_running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Per-(user, work) mutex map for serializing concurrent imports of the same work.
@@ -263,7 +267,12 @@ impl GrabSearchCache {
 
     /// Look up cached results. Returns None if missing or expired.
     /// On hit, returns (results, age_in_seconds).
-    pub async fn get(&self, title: &str, author: &str, indexer_id: i64) -> Option<(Vec<crate::ReleaseResponse>, u64)> {
+    pub async fn get(
+        &self,
+        title: &str,
+        author: &str,
+        indexer_id: i64,
+    ) -> Option<(Vec<crate::ReleaseResponse>, u64)> {
         let entries = self.entries.read().await;
         let key = (title.to_string(), author.to_string(), indexer_id);
         let (ts, results) = entries.get(&key)?;
@@ -277,15 +286,25 @@ impl GrabSearchCache {
 
     /// Store results for a (title, author, indexer_id) tuple.
     /// Periodically evicts expired entries (at most once per 5 minutes).
-    pub async fn put(&self, title: &str, author: &str, indexer_id: i64, results: Vec<crate::ReleaseResponse>) {
+    pub async fn put(
+        &self,
+        title: &str,
+        author: &str,
+        indexer_id: i64,
+        results: Vec<crate::ReleaseResponse>,
+    ) {
         let mut entries = self.entries.write().await;
         // Throttled cleanup: only scan the full map every 5 minutes.
-        let should_cleanup = self.last_cleanup.read().await.elapsed().as_secs() >= GRAB_CACHE_CLEANUP_INTERVAL_SECS;
+        let should_cleanup =
+            self.last_cleanup.read().await.elapsed().as_secs() >= GRAB_CACHE_CLEANUP_INTERVAL_SECS;
         if should_cleanup {
             entries.retain(|_, (ts, _)| ts.elapsed().as_secs() < GRAB_CACHE_TTL_SECS);
             *self.last_cleanup.write().await = Instant::now();
         }
-        entries.insert((title.to_string(), author.to_string(), indexer_id), (Instant::now(), results));
+        entries.insert(
+            (title.to_string(), author.to_string(), indexer_id),
+            (Instant::now(), results),
+        );
     }
 }
 

@@ -34,7 +34,9 @@ export type NotificationType =
   | "bulkEnrichmentComplete"
   | "jobPanicked"
   | "rateLimitHit"
-  | "pathNotFound";
+  | "pathNotFound"
+  | "rssGrabbed"
+  | "rssGrabFailed";
 export type NarrationType = "human" | "ai" | "ai_authorized_replica";
 export type AuthType = "session" | "api_key" | "external_auth";
 export type HealthCheckType = "ok" | "warning" | "error";
@@ -166,6 +168,8 @@ export interface UpdateWorkRequest {
   authorName?: string | null;
   seriesName?: string | null;
   seriesPosition?: number | null;
+  monitorEbook?: boolean | null;
+  monitorAudiobook?: boolean | null;
 }
 
 export interface WorkDetailResponse {
@@ -199,7 +203,8 @@ export interface WorkDetailResponse {
   enrichedAt: string | null;
   enrichmentSource: string | null;
   coverManual: boolean;
-  monitored: boolean;
+  monitorEbook: boolean;
+  monitorAudiobook: boolean;
   addedAt: string;
   libraryItems: LibraryItemResponse[];
   metadataSource?: string | null;
@@ -463,6 +468,7 @@ export interface IndexerResponse {
   enableAutomaticSearch: boolean;
   enableInteractiveSearch: boolean;
   supportsBookSearch: boolean;
+  enableRss: boolean;
   enabled: boolean;
   addedAt: string;
 }
@@ -477,6 +483,7 @@ export interface CreateIndexerRequest {
   priority?: number;
   enableAutomaticSearch?: boolean;
   enableInteractiveSearch?: boolean;
+  enableRss?: boolean;
   enabled?: boolean;
 }
 
@@ -489,6 +496,7 @@ export interface UpdateIndexerRequest {
   priority?: number | null;
   enableAutomaticSearch?: boolean | null;
   enableInteractiveSearch?: boolean | null;
+  enableRss?: boolean | null;
   enabled?: boolean | null;
 }
 
@@ -503,6 +511,16 @@ export interface TestIndexerResponse {
   supportsBookSearch: boolean;
   warnings?: string[];
   error?: string | null;
+}
+
+export interface IndexerConfigResponse {
+  rssSyncIntervalMinutes: number;
+  rssMatchThreshold: number;
+}
+
+export interface UpdateIndexerConfigRequest {
+  rssSyncIntervalMinutes?: number;
+  rssMatchThreshold?: number;
 }
 
 export interface ProwlarrConfigResponse {

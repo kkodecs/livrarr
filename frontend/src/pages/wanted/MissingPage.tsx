@@ -49,18 +49,18 @@ export default function MissingPage() {
 
   const missing = useMemo(() => {
     if (!works) return [];
-    let result = works.filter((w) => w.monitored);
+    let result = works.filter((w) => w.monitorEbook || w.monitorAudiobook);
 
     switch (filter) {
       case "ebook":
-        result = result.filter(isMissingEbook);
+        result = result.filter((w) => w.monitorEbook && isMissingEbook(w));
         break;
       case "audiobook":
-        result = result.filter(isMissingAudiobook);
+        result = result.filter((w) => w.monitorAudiobook && isMissingAudiobook(w));
         break;
       case "all":
         result = result.filter(
-          (w) => isMissingEbook(w) || isMissingAudiobook(w),
+          (w) => (w.monitorEbook && isMissingEbook(w)) || (w.monitorAudiobook && isMissingAudiobook(w)),
         );
         break;
     }
@@ -89,13 +89,13 @@ export default function MissingPage() {
   // Counts for tab badges
   const counts = useMemo(() => {
     if (!works) return { all: 0, ebook: 0, audiobook: 0 };
-    const monitored = works.filter((w) => w.monitored);
+    const monitored = works.filter((w) => w.monitorEbook || w.monitorAudiobook);
     return {
       all: monitored.filter(
-        (w) => isMissingEbook(w) || isMissingAudiobook(w),
+        (w) => (w.monitorEbook && isMissingEbook(w)) || (w.monitorAudiobook && isMissingAudiobook(w)),
       ).length,
-      ebook: monitored.filter(isMissingEbook).length,
-      audiobook: monitored.filter(isMissingAudiobook).length,
+      ebook: monitored.filter((w) => w.monitorEbook && isMissingEbook(w)).length,
+      audiobook: monitored.filter((w) => w.monitorAudiobook && isMissingAudiobook(w)).length,
     };
   }, [works]);
 

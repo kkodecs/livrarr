@@ -49,6 +49,8 @@ fn parse_notification_type(s: &str) -> Result<NotificationType, DbError> {
         "jobPanicked" => Ok(NotificationType::JobPanicked),
         "rateLimitHit" => Ok(NotificationType::RateLimitHit),
         "pathNotFound" => Ok(NotificationType::PathNotFound),
+        "rssGrabbed" => Ok(NotificationType::RssGrabbed),
+        "rssGrabFailed" => Ok(NotificationType::RssGrabFailed),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown notification type: {s}"),
         }),
@@ -64,6 +66,8 @@ fn notification_type_str(t: NotificationType) -> &'static str {
         NotificationType::JobPanicked => "jobPanicked",
         NotificationType::RateLimitHit => "rateLimitHit",
         NotificationType::PathNotFound => "pathNotFound",
+        NotificationType::RssGrabbed => "rssGrabbed",
+        NotificationType::RssGrabFailed => "rssGrabFailed",
     }
 }
 

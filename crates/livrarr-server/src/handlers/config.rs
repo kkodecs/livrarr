@@ -337,3 +337,79 @@ pub async fn test_email(
         .map_err(ApiError::BadRequest)?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
+
+/// GET /api/v1/config/indexer
+pub async fn get_indexer(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+) -> Result<Json<livrarr_domain::IndexerConfig>, ApiError> {
+    let c = state.db.get_indexer_config().await?;
+    Ok(Json(c))
+}
+
+/// PUT /api/v1/config/indexer
+pub async fn update_indexer(
+    State(state): State<AppState>,
+    _admin: RequireAdmin,
+    Json(req): Json<livrarr_db::UpdateIndexerConfigRequest>,
+) -> Result<Json<livrarr_domain::IndexerConfig>, ApiError> {
+    // Validate interval: 0 (disabled) or 10..=1440
+    if let Some(interval) = req.rss_sync_interval_minutes {
+        if interval != 0 && !(10..=1440).contains(&interval) {
+            return Err(ApiError::BadRequest(
+                "rss_sync_interval_minutes must be 0 (disabled) or between 10 and 1440".into(),
+            ));
+        }
+    }
+    // Validate threshold: 0.50..=0.95
+    if let Some(threshold) = req.rss_match_threshold {
+        if !(0.50..=0.95).contains(&threshold) {
+            return Err(ApiError::BadRequest(
+                "rss_match_threshold must be between 0.50 and 0.95".into(),
+            ));
+        }
+    }
+    let c = state.db.update_indexer_config(req).await?;
+    Ok(Json(c))
+}
+
+/// POST /api/v1/command/rss-sync — trigger immediate RSS sync.
+///
+/// Satisfies: RSS-TRIGGER-001
+pub async fn trigger_rss_sync(
+    State(state): State<AppState>,
+    _auth: crate::AuthContext,
+) -> Result<axum::http::StatusCode, ApiError> {
+    use std::sync::atomic::Ordering;
+
+    // Atomically acquire the running guard in the request path.
+    // This guarantees 200 = will run, 409 = already running.
+    if state
+        .rss_sync_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(ApiError::Conflict {
+            reason: "RSS sync already running".into(),
+        });
+    }
+
+    let s = state.clone();
+    let running = state.rss_sync_running.clone();
+    let cancel = state
+        .job_runner
+        .as_ref()
+        .map(|jr| jr.cancel_token())
+        .unwrap_or_default();
+
+    // Spawn task that owns the guard and calls core logic directly.
+    // The guard is released via drop when the task completes.
+    tokio::spawn(async move {
+        if let Err(e) = crate::jobs::rss_sync_core(s, cancel).await {
+            tracing::warn!("trigger rss_sync_core failed: {e}");
+        }
+        running.store(false, Ordering::SeqCst);
+    });
+
+    Ok(axum::http::StatusCode::OK)
+}

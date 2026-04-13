@@ -15,6 +15,7 @@ export interface IndexerFormData {
   priority: number;
   enableAutomaticSearch: boolean;
   enableInteractiveSearch: boolean;
+  enableRss: boolean;
   enabled: boolean;
 }
 
@@ -28,6 +29,7 @@ export const indexerFormDefaults: IndexerFormData = {
   priority: 1,
   enableAutomaticSearch: true,
   enableInteractiveSearch: true,
+  enableRss: true,
   enabled: true,
 };
 
@@ -55,6 +57,7 @@ export function useIndexerForm(editing: IndexerResponse | null) {
           priority: editing.priority,
           enableAutomaticSearch: editing.enableAutomaticSearch,
           enableInteractiveSearch: editing.enableInteractiveSearch,
+          enableRss: editing.enableRss,
           enabled: editing.enabled,
         }
       : undefined,

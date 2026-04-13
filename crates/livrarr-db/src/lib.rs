@@ -1,9 +1,11 @@
+use serde::Deserialize;
+
 pub use livrarr_domain::{
     Author, AuthorId, DbError, DownloadClient, DownloadClientId, DownloadClientImplementation,
     EnrichmentStatus, EventType, Grab, GrabId, GrabStatus, HistoryEvent, HistoryId, Indexer,
-    IndexerId, LibraryItem, LibraryItemId, LlmProvider, MediaType, NarrationType, Notification,
-    NotificationId, NotificationType, RemotePathMapping, RemotePathMappingId, RootFolder,
-    RootFolderId, Session, User, UserId, UserRole, Work, WorkId,
+    IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider, MediaType,
+    NarrationType, Notification, NotificationId, NotificationType, RemotePathMapping,
+    RemotePathMappingId, RootFolder, RootFolderId, Session, User, UserId, UserRole, Work, WorkId,
 };
 
 pub mod pool;
@@ -222,6 +224,11 @@ pub trait WorkDb: Send + Sync {
 
     /// Reset all pending enrichments to failed (startup recovery — JOBS-003).
     async fn reset_pending_enrichments(&self) -> Result<u64, DbError>;
+
+    /// List all works where monitor_ebook=1 OR monitor_audiobook=1, across all users.
+    ///
+    /// Satisfies: RSS-MATCH-001, RSS-FILTER-002
+    async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError>;
 }
 
 pub struct CreateWorkDbRequest {
@@ -270,6 +277,8 @@ pub struct UpdateWorkUserFieldsDbRequest {
     pub author_name: Option<String>,
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
+    pub monitor_ebook: Option<bool>,
+    pub monitor_audiobook: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +426,16 @@ pub trait LibraryItemDb: Send + Sync {
         id: LibraryItemId,
         file_size: i64,
     ) -> Result<(), DbError>;
+
+    /// Check if user has a library item for this work with the given media type.
+    ///
+    /// Satisfies: RSS-FILTER-002
+    async fn work_has_library_item(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        media_type: MediaType,
+    ) -> Result<bool, DbError>;
 }
 
 pub struct CreateLibraryItemDbRequest {
@@ -531,6 +550,16 @@ pub trait GrabDb: Send + Sync {
     ///
     /// Satisfies: IMPORT-V21-001 (atomic transition prevents concurrent imports)
     async fn try_set_importing(&self, user_id: UserId, id: GrabId) -> Result<bool, DbError>;
+
+    /// Check if user has an active grab (sent/confirmed/importing) for this work+media type.
+    ///
+    /// Satisfies: RSS-FILTER-002
+    async fn active_grab_exists(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        media_type: MediaType,
+    ) -> Result<bool, DbError>;
 }
 
 pub struct CreateGrabDbRequest {
@@ -754,7 +783,7 @@ pub struct CreateNotificationDbRequest {
 /// Configuration data access (DB singletons).
 /// Shared infrastructure: admin-managed, visible to all users.
 ///
-/// Satisfies: CONFIG-001, CONFIG-002, CONFIG-003, CONFIG-004, CONFIG-005, AUTH-004
+/// Satisfies: CONFIG-001, CONFIG-002, CONFIG-003, CONFIG-004, CONFIG-005, AUTH-004, RSS-CONFIG-001
 #[trait_variant::make(Send)]
 pub trait ConfigDb: Send + Sync {
     /// Get naming config (read-only singleton).
@@ -795,6 +824,19 @@ pub trait ConfigDb: Send + Sync {
         &self,
         req: UpdateEmailConfigRequest,
     ) -> Result<EmailConfig, DbError>;
+
+    /// Get indexer config singleton (RSS sync settings).
+    ///
+    /// Satisfies: RSS-CONFIG-001
+    async fn get_indexer_config(&self) -> Result<IndexerConfig, DbError>;
+
+    /// Update indexer config singleton.
+    ///
+    /// Satisfies: RSS-CONFIG-001
+    async fn update_indexer_config(
+        &self,
+        req: UpdateIndexerConfigRequest,
+    ) -> Result<IndexerConfig, DbError>;
 }
 
 pub struct NamingConfig {
@@ -866,6 +908,13 @@ pub struct UpdateEmailConfigRequest {
     pub send_on_import: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateIndexerConfigRequest {
+    pub rss_sync_interval_minutes: Option<i32>,
+    pub rss_match_threshold: Option<f64>,
+}
+
 pub struct UpdateMetadataConfigRequest {
     pub hardcover_enabled: Option<bool>,
     pub hardcover_api_token: Option<String>,
@@ -907,7 +956,7 @@ pub trait EnrichmentRetryDb: Send + Sync {
 
 /// Indexer data access. Not user-scoped — indexers are global.
 ///
-/// Satisfies: IDX-001, IDX-002, IDX-004, IDX-009, IDX-010
+/// Satisfies: IDX-001, IDX-002, IDX-004, IDX-009, IDX-010, RSS-FETCH-002, RSS-GAP-001
 #[trait_variant::make(Send)]
 pub trait IndexerDb: Send + Sync {
     async fn get_indexer(&self, id: IndexerId) -> Result<Indexer, DbError>;
@@ -921,6 +970,29 @@ pub trait IndexerDb: Send + Sync {
     ) -> Result<Indexer, DbError>;
     async fn delete_indexer(&self, id: IndexerId) -> Result<(), DbError>;
     async fn set_supports_book_search(&self, id: IndexerId, supports: bool) -> Result<(), DbError>;
+
+    /// List indexers with enabled=1 AND enable_rss=1.
+    ///
+    /// Satisfies: RSS-FETCH-002
+    async fn list_enabled_rss_indexers(&self) -> Result<Vec<Indexer>, DbError>;
+
+    /// Get RSS state for an indexer. Returns None if no state row exists (first sync).
+    ///
+    /// Satisfies: RSS-GAP-001, RSS-JOB-001
+    async fn get_rss_state(
+        &self,
+        indexer_id: IndexerId,
+    ) -> Result<Option<IndexerRssState>, DbError>;
+
+    /// Insert or update RSS state for an indexer.
+    ///
+    /// Satisfies: RSS-GAP-001
+    async fn upsert_rss_state(
+        &self,
+        indexer_id: IndexerId,
+        last_publish_date: Option<&str>,
+        last_guid: &str,
+    ) -> Result<(), DbError>;
 }
 
 pub struct CreateIndexerDbRequest {
@@ -933,6 +1005,7 @@ pub struct CreateIndexerDbRequest {
     pub priority: i32,
     pub enable_automatic_search: bool,
     pub enable_interactive_search: bool,
+    pub enable_rss: bool,
     pub enabled: bool,
 }
 
@@ -945,6 +1018,7 @@ pub struct UpdateIndexerDbRequest {
     pub priority: Option<i32>,
     pub enable_automatic_search: Option<bool>,
     pub enable_interactive_search: Option<bool>,
+    pub enable_rss: Option<bool>,
     pub enabled: Option<bool>,
 }
 

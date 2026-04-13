@@ -53,6 +53,8 @@ import type {
   UpdateEmailConfigRequest,
   MetadataConfigResponse,
   UpdateMetadataConfigRequest,
+  IndexerConfigResponse,
+  UpdateIndexerConfigRequest,
   HealthCheckResult,
   SystemStatus,
   LibraryItemResponse,
@@ -367,6 +369,17 @@ export const updateMetadataConfig = (req: UpdateMetadataConfigRequest) =>
     method: "PUT",
     body: JSON.stringify(req),
   });
+// Indexer Config (RSS sync settings)
+export const getIndexerConfig = () =>
+  apiFetch<IndexerConfigResponse>("/config/indexer");
+export const updateIndexerConfig = (req: UpdateIndexerConfigRequest) =>
+  apiFetch<IndexerConfigResponse>("/config/indexer", {
+    method: "PUT",
+    body: JSON.stringify(req),
+  });
+// RSS Sync
+export const triggerRssSync = () =>
+  apiFetch<void>("/command/rss-sync", { method: "POST" });
 
 // System
 export const getHealth = () => apiFetch<HealthCheckResult[]>("/health");

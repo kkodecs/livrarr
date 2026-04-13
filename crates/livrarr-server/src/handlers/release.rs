@@ -114,7 +114,12 @@ pub async fn search(
                                 || r.categories.iter().any(|c| allowed_cats.contains(c))
                         })
                         .collect();
-                    return (indexer.name.clone(), indexer.priority, Ok(filtered), Some(age_secs));
+                    return (
+                        indexer.name.clone(),
+                        indexer.priority,
+                        Ok(filtered),
+                        Some(age_secs),
+                    );
                 }
             }
 
@@ -216,7 +221,11 @@ pub async fn search(
     // For fresh searches (age=0), don't report as cached.
     let cache_age_seconds = max_cache_age.filter(|&a| a > 0);
 
-    Ok(Json(ReleaseSearchResponse { results, warnings, cache_age_seconds }))
+    Ok(Json(ReleaseSearchResponse {
+        results,
+        warnings,
+        cache_age_seconds,
+    }))
 }
 
 /// Clean a title for search: strip subtitle (after colon or parenthetical),
@@ -386,7 +395,7 @@ async fn search_indexer(
     fetch_and_parse(http, &url, &indexer.name).await
 }
 
-fn build_torznab_url(
+pub(crate) fn build_torznab_url(
     base: &str,
     api_path: &str,
     api_key: Option<&str>,
@@ -438,7 +447,7 @@ fn redact_url(url: &str) -> String {
     result
 }
 
-async fn fetch_and_parse(
+pub(crate) async fn fetch_and_parse(
     http: &livrarr_http::HttpClient,
     url: &str,
     indexer_name: &str,
@@ -647,14 +656,83 @@ pub async fn grab(
     ctx: AuthContext,
     Json(req): Json<GrabApiRequest>,
 ) -> Result<(), ApiError> {
-    let user_id = ctx.user.id;
+    let internal = InternalGrabRequest {
+        user_id: ctx.user.id,
+        work_id: req.work_id,
+        download_url: req.download_url,
+        title: req.title,
+        indexer: req.indexer,
+        guid: req.guid,
+        size: req.size,
+        protocol: req.protocol.unwrap_or_else(|| "torrent".to_string()),
+        categories: req.categories,
+        download_client_id: req.download_client_id,
+        source: "manual".to_string(),
+    };
 
-    // SSRF protection: validate user-supplied download URL before fetching.
+    do_grab_internal(&state, internal)
+        .await
+        .map_err(|e| match e {
+            GrabError::NoClient { protocol } => {
+                let label = if protocol == "usenet" {
+                    "Usenet"
+                } else {
+                    "torrent"
+                };
+                ApiError::BadRequest(format!("No {label} download client configured"))
+            }
+            GrabError::ClientProtocolMismatch { protocol } => ApiError::BadRequest(format!(
+                "Selected download client does not support {protocol} protocol"
+            )),
+            GrabError::ClientUnreachable { message } => ApiError::BadGateway(message),
+            GrabError::Ssrf(msg) => ApiError::BadRequest(format!("Invalid download URL: {msg}")),
+            GrabError::Db(db_err) => ApiError::from(db_err),
+        })?;
+
+    Ok(())
+}
+
+/// Request for internal grab (used by both API handler and RSS job).
+pub struct InternalGrabRequest {
+    pub user_id: livrarr_domain::UserId,
+    pub work_id: livrarr_domain::WorkId,
+    pub download_url: String,
+    pub title: String,
+    pub indexer: String,
+    pub guid: String,
+    pub size: i64,
+    pub protocol: String,
+    pub categories: Vec<i32>,
+    pub download_client_id: Option<livrarr_domain::DownloadClientId>,
+    pub source: String,
+}
+
+#[derive(Debug)]
+pub enum GrabError {
+    NoClient { protocol: String },
+    ClientProtocolMismatch { protocol: String },
+    ClientUnreachable { message: String },
+    Ssrf(String),
+    Db(livrarr_domain::DbError),
+}
+
+impl From<livrarr_domain::DbError> for GrabError {
+    fn from(e: livrarr_domain::DbError) -> Self {
+        GrabError::Db(e)
+    }
+}
+
+/// Core grab logic shared between HTTP handler and RSS job.
+pub async fn do_grab_internal(
+    state: &AppState,
+    req: InternalGrabRequest,
+) -> Result<livrarr_domain::Grab, GrabError> {
+    // SSRF protection
     livrarr_http::ssrf::validate_url(&req.download_url)
         .await
-        .map_err(|e| ApiError::BadRequest(format!("Invalid download URL: {e}")))?;
+        .map_err(|e| GrabError::Ssrf(e.to_string()))?;
 
-    let protocol = req.protocol.as_deref().unwrap_or("torrent");
+    let protocol = req.protocol.as_str();
 
     // Get download client: specified, or default for protocol.
     let client_type = match protocol {
@@ -664,12 +742,10 @@ pub async fn grab(
 
     let client = if let Some(client_id) = req.download_client_id {
         let c = state.db.get_download_client(client_id).await?;
-        // Validate client matches the release protocol.
         if c.client_type() != client_type {
-            return Err(ApiError::BadRequest(format!(
-                "Selected download client does not support {} protocol",
-                protocol
-            )));
+            return Err(GrabError::ClientProtocolMismatch {
+                protocol: protocol.to_string(),
+            });
         }
         c
     } else {
@@ -677,23 +753,43 @@ pub async fn grab(
             .db
             .get_default_download_client(client_type)
             .await?
-            .ok_or_else(|| {
-                let label = if protocol == "usenet" {
-                    "Usenet"
-                } else {
-                    "torrent"
-                };
-                ApiError::BadRequest(format!("No {label} download client configured"))
+            .ok_or_else(|| GrabError::NoClient {
+                protocol: protocol.to_string(),
             })?
     };
 
-    let download_id = match client.client_type() {
-        "sabnzbd" => grab_sabnzbd(&state, &client, &req).await?,
-        _ => grab_qbittorrent(&state, &client, &req).await?,
+    // Build a temporary GrabApiRequest for the existing helpers.
+    let api_req = GrabApiRequest {
+        work_id: req.work_id,
+        download_url: req.download_url.clone(),
+        title: req.title.clone(),
+        indexer: req.indexer.clone(),
+        guid: req.guid.clone(),
+        size: req.size,
+        download_client_id: req.download_client_id,
+        protocol: Some(req.protocol.clone()),
+        categories: req.categories.clone(),
     };
 
-    // Derive media type from categories: 7000s = ebook, 3000s = audiobook.
-    let media_type = if req.categories.iter().any(|&c| (7000..8000).contains(&c)) {
+    let download_id = match client.client_type() {
+        "sabnzbd" => grab_sabnzbd(state, &client, &api_req).await.map_err(|e| {
+            GrabError::ClientUnreachable {
+                message: e.to_string(),
+            }
+        })?,
+        _ => grab_qbittorrent(state, &client, &api_req)
+            .await
+            .map_err(|e| GrabError::ClientUnreachable {
+                message: e.to_string(),
+            })?,
+    };
+
+    // Derive media type from categories: 7020 = ebook, 3030 = audiobook.
+    let media_type = if req.categories.contains(&7020) {
+        Some(crate::MediaType::Ebook)
+    } else if req.categories.contains(&3030) {
+        Some(crate::MediaType::Audiobook)
+    } else if req.categories.iter().any(|&c| (7000..8000).contains(&c)) {
         Some(crate::MediaType::Ebook)
     } else if req.categories.iter().any(|&c| (3000..4000).contains(&c)) {
         Some(crate::MediaType::Audiobook)
@@ -701,19 +797,15 @@ pub async fn grab(
         None
     };
 
-    // Capture for history before move.
-    let history_title = req.title.clone();
-    let history_indexer = req.indexer.clone();
-
     // Record grab in DB.
-    state
+    let grab_record = state
         .db
         .upsert_grab(CreateGrabDbRequest {
-            user_id,
+            user_id: req.user_id,
             work_id: req.work_id,
             download_client_id: client.id,
-            title: req.title,
-            indexer: req.indexer,
+            title: req.title.clone(),
+            indexer: req.indexer.clone(),
             guid: req.guid,
             size: Some(req.size),
             download_url: req.download_url,
@@ -727,14 +819,15 @@ pub async fn grab(
     if let Err(e) = state
         .db
         .create_history_event(CreateHistoryEventDbRequest {
-            user_id,
+            user_id: req.user_id,
             work_id: Some(req.work_id),
             event_type: EventType::Grabbed,
             data: serde_json::json!({
-                "title": history_title,
-                "indexer": history_indexer,
+                "title": req.title,
+                "indexer": req.indexer,
                 "downloadClient": client.name,
                 "protocol": protocol,
+                "source": req.source,
             }),
         })
         .await
@@ -742,7 +835,7 @@ pub async fn grab(
         tracing::warn!("create_history_event failed: {e}");
     }
 
-    Ok(())
+    Ok(grab_record)
 }
 
 /// USE-GRAB-002: Grab via SABnzbd — download NZB, push via addfile multipart.

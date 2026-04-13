@@ -3,9 +3,10 @@ use sqlx::Row;
 use crate::sqlite::SqliteDb;
 use crate::sqlite_common::map_db_err;
 use crate::{
-    ConfigDb, DbError, EmailConfig, LlmProvider, MediaManagementConfig, MetadataConfig,
-    NamingConfig, ProwlarrConfig, UpdateEmailConfigRequest, UpdateMediaManagementConfigRequest,
-    UpdateMetadataConfigRequest, UpdateProwlarrConfigRequest,
+    ConfigDb, DbError, EmailConfig, IndexerConfig, LlmProvider, MediaManagementConfig,
+    MetadataConfig, NamingConfig, ProwlarrConfig, UpdateEmailConfigRequest,
+    UpdateIndexerConfigRequest, UpdateMediaManagementConfigRequest, UpdateMetadataConfigRequest,
+    UpdateProwlarrConfigRequest,
 };
 
 fn parse_llm_provider(s: &str) -> Result<LlmProvider, DbError> {
@@ -296,5 +297,48 @@ impl ConfigDb for SqliteDb {
         .map_err(map_db_err)?;
 
         self.get_email_config().await
+    }
+
+    async fn get_indexer_config(&self) -> Result<IndexerConfig, DbError> {
+        let row = sqlx::query("SELECT * FROM indexer_config WHERE id = 1")
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        Ok(IndexerConfig {
+            rss_sync_interval_minutes: row
+                .try_get::<i32, _>("rss_sync_interval_minutes")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+            rss_match_threshold: row
+                .try_get::<f64, _>("rss_match_threshold")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
+        })
+    }
+
+    async fn update_indexer_config(
+        &self,
+        req: UpdateIndexerConfigRequest,
+    ) -> Result<IndexerConfig, DbError> {
+        let current = self.get_indexer_config().await?;
+
+        let interval = req
+            .rss_sync_interval_minutes
+            .unwrap_or(current.rss_sync_interval_minutes);
+        let threshold = req
+            .rss_match_threshold
+            .unwrap_or(current.rss_match_threshold);
+
+        sqlx::query(
+            "UPDATE indexer_config SET \
+             rss_sync_interval_minutes = ?, rss_match_threshold = ? \
+             WHERE id = 1",
+        )
+        .bind(interval)
+        .bind(threshold)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        self.get_indexer_config().await
     }
 }

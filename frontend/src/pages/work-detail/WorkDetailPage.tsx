@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import { HelpTip } from "@/components/HelpTip";
 import { Link, useParams, useNavigate, useSearchParams } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -33,6 +33,7 @@ import {
   deleteLibraryFile,
   getMediaManagementConfig,
   sendFileEmail,
+  getQueue,
 } from "@/api";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
@@ -91,6 +92,8 @@ interface EditForm {
   authorName: string;
   seriesName: string;
   seriesPosition: string;
+  monitorEbook: boolean;
+  monitorAudiobook: boolean;
 }
 
 export default function WorkDetailPage() {
@@ -136,6 +139,32 @@ export default function WorkDetailPage() {
     onError: () => toast.error("Failed to delete work"),
   });
 
+  const { data: queueItems } = useQuery({
+    queryKey: ["queue"],
+    queryFn: () => getQueue(),
+    select: (res) => res.items,
+    refetchInterval: 30_000,
+  });
+
+  const activeGrabs = useMemo(() => {
+    const set = new Set<string>();
+    queueItems?.forEach((item) => {
+      if (["sent", "confirmed", "importing"].includes(item.status) && item.mediaType) {
+        set.add(`${item.workId}-${item.mediaType}`);
+      }
+    });
+    return set;
+  }, [queueItems]);
+
+  const toggleMonitorMutation = useMutation({
+    mutationFn: (req: UpdateWorkRequest) => updateWork(Number(id), req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["work", id] });
+      queryClient.invalidateQueries({ queryKey: ["works"] });
+    },
+    onError: () => toast.error("Failed to update monitoring"),
+  });
+
   if (isLoading) return <PageLoading />;
   if (error) return <ErrorState error={error} onRetry={() => refetch()} />;
   if (!work) return <ErrorState error={new Error("Work not found")} />;
@@ -162,7 +191,16 @@ export default function WorkDetailPage() {
       </PageToolbar>
 
       <PageContent>
-        <WorkHeader work={work} coverVersion={coverVersion} />
+        <WorkHeader
+          work={work}
+          coverVersion={coverVersion}
+          activeGrabs={activeGrabs}
+          onToggleMonitor={(field) =>
+            toggleMonitorMutation.mutate({
+              [field]: !work[field],
+            } as UpdateWorkRequest)
+          }
+        />
 
         <Tabs.Root defaultValue={initialTab} className="mt-6">
           <Tabs.List className="flex overflow-x-auto border-b border-border">
@@ -216,7 +254,39 @@ export default function WorkDetailPage() {
 
 // --- Header ---
 
-function WorkHeader({ work, coverVersion }: { work: WorkDetailResponse; coverVersion?: number }) {
+function WorkHeader({
+  work,
+  coverVersion,
+  activeGrabs,
+  onToggleMonitor,
+}: {
+  work: WorkDetailResponse;
+  coverVersion?: number;
+  activeGrabs: Set<string>;
+  onToggleMonitor: (field: "monitorEbook" | "monitorAudiobook") => void;
+}) {
+  const ebookItems = work.libraryItems?.filter((li) => li.mediaType === "ebook") ?? [];
+  const audioItems = work.libraryItems?.filter((li) => li.mediaType === "audiobook") ?? [];
+  const ebookSize = ebookItems.reduce((acc, li) => acc + li.fileSize, 0);
+  const audioSize = audioItems.reduce((acc, li) => acc + li.fileSize, 0);
+  const ebookDownloading = activeGrabs.has(`${work.id}-ebook`);
+  const audioDownloading = activeGrabs.has(`${work.id}-audiobook`);
+
+  function monitorStatus(
+    monitored: boolean,
+    hasFile: boolean,
+    fileSize: number,
+    downloading: boolean,
+  ): { color: string; label: string } {
+    if (!monitored) return { color: "text-zinc-600", label: "Not Monitored" };
+    if (hasFile) return { color: "text-green-400", label: formatBytes(fileSize) };
+    if (downloading) return { color: "text-purple-400", label: "Downloading" };
+    return { color: "text-amber-500", label: "Missing" };
+  }
+
+  const ebook = monitorStatus(work.monitorEbook, ebookItems.length > 0, ebookSize, ebookDownloading);
+  const audio = monitorStatus(work.monitorAudiobook, audioItems.length > 0, audioSize, audioDownloading);
+
   return (
     <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start sm:gap-6">
       <img
@@ -248,6 +318,25 @@ function WorkHeader({ work, coverVersion }: { work: WorkDetailResponse; coverVer
               {work.seriesPosition != null && ` #${work.seriesPosition}`}
             </span>
           )}
+        </div>
+
+        <div className="mt-3 flex items-center gap-4">
+          <button
+            onClick={() => onToggleMonitor("monitorEbook")}
+            className={cn("inline-flex items-center gap-1.5 text-sm transition-colors hover:opacity-80", ebook.color)}
+            title={`Ebook: ${ebook.label}. Click to ${work.monitorEbook ? "stop" : "start"} monitoring.`}
+          >
+            <Book size={16} />
+            <span>{ebook.label}</span>
+          </button>
+          <button
+            onClick={() => onToggleMonitor("monitorAudiobook")}
+            className={cn("inline-flex items-center gap-1.5 text-sm transition-colors hover:opacity-80", audio.color)}
+            title={`Audiobook: ${audio.label}. Click to ${work.monitorAudiobook ? "stop" : "start"} monitoring.`}
+          >
+            <Headphones size={16} />
+            <span>{audio.label}</span>
+          </button>
         </div>
 
         {work.detailUrl && (
@@ -1163,6 +1252,8 @@ function EditModal({
       seriesName: work.seriesName ?? "",
       seriesPosition:
         work.seriesPosition != null ? String(work.seriesPosition) : "",
+      monitorEbook: work.monitorEbook,
+      monitorAudiobook: work.monitorAudiobook,
     },
   });
 
@@ -1191,6 +1282,8 @@ function EditModal({
       authorName: data.authorName || null,
       seriesName: data.seriesName || null,
       seriesPosition: data.seriesPosition ? Number(data.seriesPosition) : null,
+      monitorEbook: data.monitorEbook,
+      monitorAudiobook: data.monitorAudiobook,
     };
     updateMutation.mutate(req);
   };
@@ -1232,6 +1325,25 @@ function EditModal({
               step="any"
               className="input-field"
             />
+          </label>
+        </div>
+
+        <div className="flex gap-6">
+          <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
+            <input
+              type="checkbox"
+              {...register("monitorEbook")}
+              className="rounded border-border"
+            />
+            Monitor Ebook
+          </label>
+          <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
+            <input
+              type="checkbox"
+              {...register("monitorAudiobook")}
+              className="rounded border-border"
+            />
+            Monitor Audiobook
           </label>
         </div>
 

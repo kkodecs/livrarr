@@ -43,10 +43,7 @@ pub async fn extract_and_reconcile(input: &MatchInput) -> Vec<reconcile::Cluster
     // (set by the scan grouping code), so we use it directly.
     if let Some(ref path) = input.file_path {
         let m2_path = path.to_path_buf();
-        let scan_root = input
-            .scan_root
-            .as_deref()
-            .unwrap_or(Path::new("/"));
+        let scan_root = input.scan_root.as_deref().unwrap_or(Path::new("/"));
         let path_extractions = m2_path::extract_from_path(&m2_path, scan_root);
         all_extractions.extend(path_extractions);
     }
@@ -54,7 +51,9 @@ pub async fn extract_and_reconcile(input: &MatchInput) -> Vec<reconcile::Cluster
     // M3: String parsing (on filename, folder name, or explicit parse string).
     let parse_str = input.parse_string.clone().or_else(|| {
         input.file_path.as_ref().and_then(|p| {
-            p.file_name().and_then(|f| f.to_str()).map(|s| s.to_string())
+            p.file_name()
+                .and_then(|f| f.to_str())
+                .map(|s| s.to_string())
         })
     });
     if let Some(ref s) = parse_str {

@@ -17,8 +17,7 @@ pub fn score_candidate(extraction: &Extraction, candidate: &MatchCandidate) -> f
     let has_title = !title_ext.is_empty();
     let has_author = author_ext.is_some_and(|a| !a.is_empty());
     let has_year = year_ext.is_some() && candidate.year.is_some();
-    let has_series = series_ext.is_some_and(|s| !s.is_empty())
-        && candidate.series.is_some();
+    let has_series = series_ext.is_some_and(|s| !s.is_empty()) && candidate.series.is_some();
 
     // Base weights.
     let mut w_title = if has_title { 0.45 } else { 0.0 };
@@ -61,7 +60,11 @@ pub fn score_candidate(extraction: &Extraction, candidate: &MatchCandidate) -> f
             (Some(a), Some(b)) => (a - b).abs() < 0.01,
             _ => false,
         };
-        if s_sim > 0.80 && seq_match { 1.0 } else { 0.0 }
+        if s_sim > 0.80 && seq_match {
+            1.0
+        } else {
+            0.0
+        }
     } else {
         0.0
     };
