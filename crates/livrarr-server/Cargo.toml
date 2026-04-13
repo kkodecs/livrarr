@@ -32,7 +32,8 @@ getrandom = { version = "0.2", features = ["std"] }
 sha2 = "0.10"
 subtle = "2"
 hex = "0.4"
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
+csv = "1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors", "limit", "trace", "set-header"] }
 clap = { version = "4", features = ["derive"] }

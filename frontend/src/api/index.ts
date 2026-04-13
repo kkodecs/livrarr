@@ -76,6 +76,11 @@ import type {
   MonitorSeriesRequest,
   UpdateSeriesRequest,
   ResolveGrResponse,
+  ListImportPreviewResponse,
+  ListImportConfirmRequest,
+  ListImportConfirmResponse,
+  ListImportSummary,
+  ListImportUndoResponse,
 } from "@/types/api";
 
 // Setup
@@ -437,6 +442,34 @@ export const getLibraryFile = (id: number) =>
 export const deleteLibraryFile = (id: number) =>
   apiFetch<void>(`/workfile/${id}`, { method: "DELETE" });
 
+// Playback progress
+export const getPlaybackProgress = (id: number) =>
+  apiFetch<{
+    library_item_id: number;
+    position: string;
+    progress_pct: number;
+    updated_at: string;
+  }>(`/workfile/${id}/progress`);
+export const updatePlaybackProgress = (
+  id: number,
+  position: string,
+  progress_pct: number,
+) =>
+  apiFetch<{ success: boolean }>(`/workfile/${id}/progress`, {
+    method: "PUT",
+    body: JSON.stringify({ position, progress_pct }),
+  });
+
+// File download URL (for reader/player — returns the API path, not a fetch)
+export const getDownloadUrl = (id: number) =>
+  `/api/v1/workfile/${id}/download`;
+
+// Stream URL with token auth (for HTML5 audio/video elements that can't send headers)
+export const getStreamUrl = (id: number) => {
+  const token = localStorage.getItem("livrarr_token") ?? "";
+  return `/api/v1/stream/${id}?token=${encodeURIComponent(token)}`;
+};
+
 // Unmapped Files
 export const scanRootFolder = (id: number) =>
   apiFetch<ScanResult>(`/rootfolder/${id}/scan`, { method: "POST" });
@@ -501,3 +534,31 @@ export const readarrHistory = () =>
   apiFetch<ImportHistoryItem[]>("/import/readarr/history");
 export const readarrUndo = (importId: string) =>
   apiFetch<void>(`/import/readarr/${importId}`, { method: "DELETE" });
+
+// List imports (CSV: Goodreads, Hardcover)
+export const listImportPreview = async (file: File): Promise<ListImportPreviewResponse> => {
+  const token = (await import("./client")).getToken();
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch("/api/v1/listimport/preview", {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || res.statusText);
+  }
+  return res.json();
+};
+export const listImportConfirm = (req: ListImportConfirmRequest) =>
+  apiFetch<ListImportConfirmResponse>("/listimport/confirm", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const listImportComplete = (importId: string) =>
+  apiFetch<{ status: string }>(`/listimport/${importId}/complete`, { method: "POST" });
+export const listImportUndo = (importId: string) =>
+  apiFetch<ListImportUndoResponse>(`/listimport/${importId}`, { method: "DELETE" });
+export const listImportHistory = () =>
+  apiFetch<ListImportSummary[]>("/listimport");

@@ -277,6 +277,18 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/import/readarr/{import_id}",
             delete(handlers::readarr_import::undo),
         )
+        // List imports (CSV: Goodreads, Hardcover)
+        .route("/listimport", get(handlers::list_import::list))
+        .route("/listimport/preview", post(handlers::list_import::preview))
+        .route("/listimport/confirm", post(handlers::list_import::confirm))
+        .route(
+            "/listimport/{import_id}/complete",
+            post(handlers::list_import::complete),
+        )
+        .route(
+            "/listimport/{import_id}",
+            delete(handlers::list_import::undo),
+        )
         // Library files
         .route("/workfile", get(handlers::workfile::list))
         .route(
@@ -297,6 +309,9 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             auth_middleware,
         ));
 
+    // Stream endpoint — token auth via query param for HTML5 audio/video.
+    let stream = Router::new().route("/stream/{id}", get(handlers::workfile::stream));
+
     // Media cover serving (no auth — images loaded by browser directly).
     let mediacover = Router::new()
         .route(
@@ -313,6 +328,7 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
     let api = Router::new()
         .merge(public)
         .merge(protected)
+        .merge(stream)
         .merge(mediacover)
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(GovernorLayer::new(global_governor));

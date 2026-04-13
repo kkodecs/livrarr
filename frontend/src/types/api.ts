@@ -849,3 +849,53 @@ export interface ImportHistoryItem {
   filesSkipped: number;
   sourceUrl: string | null;
 }
+
+// List Imports (CSV: Goodreads, Hardcover)
+export interface ListImportPreviewRow {
+  rowIndex: number;
+  title: string;
+  author: string;
+  isbn13: string | null;
+  isbn10: string | null;
+  year: number | null;
+  sourceStatus: string | null;
+  sourceRating: number | null;
+  previewStatus: "new" | "already_exists" | "parse_error";
+}
+
+export interface ListImportPreviewResponse {
+  previewId: string;
+  source: string;
+  totalRows: number;
+  rows: ListImportPreviewRow[];
+}
+
+export interface ListImportConfirmRequest {
+  previewId: string;
+  rowIndices: number[];
+  importId?: string;
+}
+
+export interface ListImportConfirmRowResult {
+  rowIndex: number;
+  status: "added" | "already_exists" | "add_failed" | "lookup_error";
+  message: string | null;
+}
+
+export interface ListImportConfirmResponse {
+  importId: string;
+  results: ListImportConfirmRowResult[];
+}
+
+export interface ListImportSummary {
+  id: string;
+  source: string;
+  status: string;
+  startedAt: string;
+  completedAt: string | null;
+  worksCreated: number;
+}
+
+export interface ListImportUndoResponse {
+  worksRemoved: number;
+}
