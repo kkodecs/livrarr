@@ -1686,6 +1686,7 @@ dependencies = [
  "chrono",
  "clap",
  "dashmap",
+ "data-encoding",
  "futures",
  "getrandom 0.2.17",
  "hex",

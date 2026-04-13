@@ -400,6 +400,19 @@ pub struct LibraryItem {
     pub imported_at: DateTime<Utc>,
 }
 
+/// Playback progress — reading/listening position for a library item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackProgress {
+    pub id: i64,
+    pub user_id: UserId,
+    pub library_item_id: LibraryItemId,
+    /// CFI string (EPUB), page number (PDF), or seconds as float (audio).
+    pub position: String,
+    /// 0.0 to 1.0.
+    pub progress_pct: f64,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Root folder.
 ///
 /// Satisfies: IMPORT-001, IMPORT-002, IMPORT-003

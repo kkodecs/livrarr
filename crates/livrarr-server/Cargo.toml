@@ -53,6 +53,7 @@ regex = "1"
 rbook = "0.4"
 mp4ameta = "0.13"
 id3 = "1.16"
+data-encoding = "2.10.0"
 
 [dev-dependencies]
 livrarr-db = { workspace = true, features = ["test-helpers"] }

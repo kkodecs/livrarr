@@ -243,6 +243,11 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/workfile/{id}/send-email",
             post(handlers::workfile::send_email),
         )
+        .route("/workfile/{id}/download", get(handlers::workfile::download))
+        .route(
+            "/workfile/{id}/progress",
+            get(handlers::workfile::get_progress).put(handlers::workfile::update_progress),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -268,7 +273,18 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(GovernorLayer::new(global_governor));
 
-    let app = Router::new().nest("/api/v1", api);
+    // OPDS routes — top level, before SPA fallback. Basic Auth handled per-handler.
+    let opds = Router::new()
+        .route("/", get(handlers::opds::root))
+        .route("/recent", get(handlers::opds::recent))
+        .route("/author", get(handlers::opds::author_list))
+        .route("/author/{id}", get(handlers::opds::author_works))
+        .route("/search", get(handlers::opds::search))
+        .route("/osd", get(handlers::opds::opensearch))
+        .route("/cover/{work_id}", get(handlers::opds::cover))
+        .route("/download/{library_item_id}", get(handlers::opds::download));
+
+    let app = Router::new().nest("/api/v1", api).nest("/opds", opds);
 
     // Static file serving with SPA fallback.
     let app = if ui_dir.is_dir() {
@@ -296,9 +312,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
     .layer(SetResponseHeaderLayer::overriding(
         axum::http::header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-             img-src 'self' data: blob: https: http:; connect-src 'self'; frame-ancestors 'none'; \
-             base-uri 'self'; object-src 'none'; form-action 'self'",
+            "default-src 'self'; script-src 'self' blob:; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: blob: https: http:; connect-src 'self'; \
+             worker-src 'self' blob:; frame-src 'self' blob:; \
+             frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'",
         ),
     ))
     .with_state(state)
