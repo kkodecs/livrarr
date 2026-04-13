@@ -1462,12 +1462,15 @@ impl axum::response::IntoResponse for ApiError {
                 "not implemented".into(),
                 None,
             ),
-            ApiError::Internal(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                "Something went wrong".into(),
-                None,
-            ),
+            ApiError::Internal(ref e) => {
+                tracing::error!("internal error: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "Something went wrong".into(),
+                    None,
+                )
+            }
             ApiError::Auth(e) => auth_error_to_http(e),
             ApiError::Download(e) => {
                 tracing::warn!("download error: {e}");
