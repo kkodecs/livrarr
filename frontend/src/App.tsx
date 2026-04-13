@@ -31,6 +31,9 @@ const MissingPage = lazy(() => import("@/pages/wanted/MissingPage"));
 const ReadarrImportPage = lazy(
   () => import("@/pages/import/ReadarrImportPage"),
 );
+const ListImportPage = lazy(
+  () => import("@/pages/lists/ListImportPage"),
+);
 
 // Readers (lazy, full-page — no AppLayout)
 const ReaderPage = lazy(() => import("@/pages/reader/ReaderPage"));
@@ -208,6 +211,14 @@ export function App() {
                 }
               />
               <Route
+                path="lists"
+                element={
+                  <LazyPage>
+                    <ListImportPage />
+                  </LazyPage>
+                }
+              />
+              <Route
                 path="unmapped"
                 element={
                   <LazyPage>
@@ -319,10 +330,7 @@ export function App() {
                 path="settings/customformats"
                 element={<ComingSoonPage title="Custom Formats" />}
               />
-              <Route
-                path="settings/importlists"
-                element={<ComingSoonPage title="Import Lists" />}
-              />
+              {/* Import Lists moved to /lists (main nav) */}
               <Route
                 path="settings/notifications"
                 element={<ComingSoonPage title="Notifications" />}
