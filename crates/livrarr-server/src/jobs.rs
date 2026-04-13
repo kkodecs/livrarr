@@ -876,6 +876,19 @@ async fn session_cleanup_tick(state: AppState, _cancel: CancellationToken) -> Re
     if count > 0 {
         debug!("session cleanup: deleted {count} expired sessions");
     }
+
+    // Clean up stale list import preview rows (older than 1 hour).
+    let cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let preview_count = sqlx::query("DELETE FROM list_import_previews WHERE created_at < ?")
+        .bind(&cutoff)
+        .execute(state.db.pool())
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+    if preview_count > 0 {
+        debug!("session cleanup: deleted {preview_count} stale list import previews");
+    }
+
     Ok(())
 }
 

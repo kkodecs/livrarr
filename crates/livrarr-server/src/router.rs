@@ -258,6 +258,18 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/import/readarr/{import_id}",
             delete(handlers::readarr_import::undo),
         )
+        // List imports (CSV: Goodreads, Hardcover)
+        .route("/listimport", get(handlers::list_import::list))
+        .route("/listimport/preview", post(handlers::list_import::preview))
+        .route("/listimport/confirm", post(handlers::list_import::confirm))
+        .route(
+            "/listimport/{import_id}/complete",
+            post(handlers::list_import::complete),
+        )
+        .route(
+            "/listimport/{import_id}",
+            delete(handlers::list_import::undo),
+        )
         // Library files
         .route("/workfile", get(handlers::workfile::list))
         .route(
