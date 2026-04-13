@@ -12,6 +12,7 @@ pub mod indexer;
 pub mod manual_import;
 pub mod mediacover;
 pub mod notification;
+pub mod opds;
 pub mod profile;
 pub mod queue;
 pub mod release;
