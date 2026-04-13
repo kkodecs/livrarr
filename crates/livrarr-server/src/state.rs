@@ -39,6 +39,9 @@ pub struct AppState {
     pub rss_last_run: Arc<std::sync::atomic::AtomicI64>,
     /// Guard against concurrent RSS sync runs.
     pub rss_sync_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Readarr import progress — polled by frontend.
+    pub readarr_import_progress:
+        Arc<tokio::sync::Mutex<crate::handlers::readarr_import::ImportProgress>>,
 }
 
 /// Per-(user, work) mutex map for serializing concurrent imports of the same work.

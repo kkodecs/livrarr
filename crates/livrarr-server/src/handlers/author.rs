@@ -174,6 +174,7 @@ pub async fn add(
             ol_key: Some(req.ol_key),
             gr_key: None,
             hc_key: None,
+            import_id: None,
         })
         .await?;
 

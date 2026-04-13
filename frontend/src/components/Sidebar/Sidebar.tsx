@@ -90,6 +90,11 @@ const navGroups: NavGroup[] = [
         path: "/import",
         icon: <Import size={18} />,
       },
+      {
+        label: "Readarr Import",
+        path: "/import/readarr",
+        icon: <Download size={18} />,
+      },
     ],
   },
   {
