@@ -135,6 +135,9 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
         monitor_audiobook: row
             .try_get::<bool, _>("monitor_audiobook")
             .map_err(|e| DbError::Io(Box::new(e)))?,
+        import_id: row
+            .try_get("import_id")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         added_at: parse_dt(&added_at_str)?,
         metadata_source: row
             .try_get("metadata_source")
@@ -248,8 +251,8 @@ impl WorkDb for SqliteDb {
         let now = Utc::now().to_rfc3339();
         let id = sqlx::query(
             "INSERT INTO works (user_id, title, author_name, author_id, ol_key, gr_key, year, \
-             cover_url, enrichment_status, added_at, metadata_source, detail_url, language) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+             cover_url, enrichment_status, added_at, metadata_source, detail_url, language, import_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
         )
         .bind(req.user_id)
         .bind(&req.title)
@@ -263,6 +266,7 @@ impl WorkDb for SqliteDb {
         .bind(&req.metadata_source)
         .bind(&req.detail_url)
         .bind(&req.language)
+        .bind(&req.import_id)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?

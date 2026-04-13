@@ -35,6 +35,9 @@ fn row_to_author(row: sqlx::sqlite::SqliteRow) -> Result<Author, DbError> {
         hc_key: row
             .try_get("hc_key")
             .map_err(|e| DbError::Io(Box::new(e)))?,
+        import_id: row
+            .try_get("import_id")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         monitored: row
             .try_get::<bool, _>("monitored")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -69,8 +72,8 @@ impl AuthorDb for SqliteDb {
     async fn create_author(&self, req: CreateAuthorDbRequest) -> Result<Author, DbError> {
         let now = Utc::now().to_rfc3339();
         let id = sqlx::query(
-            "INSERT INTO authors (user_id, name, sort_name, ol_key, gr_key, hc_key, added_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO authors (user_id, name, sort_name, ol_key, gr_key, hc_key, import_id, added_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(req.user_id)
         .bind(&req.name)
@@ -78,6 +81,7 @@ impl AuthorDb for SqliteDb {
         .bind(&req.ol_key)
         .bind(&req.gr_key)
         .bind(&req.hc_key)
+        .bind(&req.import_id)
         .bind(&now)
         .execute(self.pool())
         .await

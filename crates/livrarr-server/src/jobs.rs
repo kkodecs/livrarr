@@ -1050,6 +1050,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                             metadata_source: None,
                             detail_url: None,
                             language: None,
+                            import_id: None,
                         })
                         .await
                     {

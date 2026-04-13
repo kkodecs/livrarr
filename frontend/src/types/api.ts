@@ -730,3 +730,57 @@ export interface ManualSearchRequest {
 export interface ManualSearchResponse {
   results: OlMatch[];
 }
+
+// Readarr Import types
+export interface ReadarrRootFolder {
+  id: number;
+  name: string | null;
+  path: string;
+  accessible: boolean | null;
+  freeSpace: number | null;
+  totalSpace: number | null;
+}
+
+export interface ImportPreviewResponse {
+  authors: ImportPreviewItem[];
+  works: ImportPreviewItem[];
+  files: ImportPreviewItem[];
+  skipped: ImportSkippedItem[];
+}
+
+export interface ImportPreviewItem {
+  name: string;
+  action: string;
+  details: string | null;
+}
+
+export interface ImportSkippedItem {
+  name: string;
+  reason: string;
+}
+
+export interface ImportProgressResponse {
+  importId: string | null;
+  status: string;
+  authorsProcessed: number;
+  authorsTotal: number;
+  worksProcessed: number;
+  worksTotal: number;
+  filesProcessed: number;
+  filesTotal: number;
+  filesSkipped: number;
+  error: string | null;
+}
+
+export interface ImportHistoryItem {
+  id: string;
+  source: string;
+  status: string;
+  startedAt: string;
+  completedAt: string | null;
+  authorsCreated: number;
+  worksCreated: number;
+  filesImported: number;
+  filesSkipped: number;
+  sourceUrl: string | null;
+}

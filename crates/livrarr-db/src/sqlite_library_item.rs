@@ -34,6 +34,9 @@ fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbEr
         file_size: row
             .try_get::<i64, _>("file_size")
             .map_err(|e| DbError::Io(Box::new(e)))?,
+        import_id: row
+            .try_get("import_id")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         imported_at: parse_dt(&imported_at_str)?,
     })
 }
@@ -201,8 +204,8 @@ impl LibraryItemDb for SqliteDb {
 
         // No conflict -- insert new row.
         let id = sqlx::query(
-            "INSERT INTO library_items (user_id, work_id, root_folder_id, path, media_type, file_size, imported_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO library_items (user_id, work_id, root_folder_id, path, media_type, file_size, import_id, imported_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(req.user_id)
         .bind(req.work_id)
@@ -210,6 +213,7 @@ impl LibraryItemDb for SqliteDb {
         .bind(&req.path)
         .bind(mt)
         .bind(req.file_size)
+        .bind(&req.import_id)
         .bind(&now)
         .execute(self.pool())
         .await

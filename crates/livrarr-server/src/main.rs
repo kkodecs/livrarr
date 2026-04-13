@@ -142,6 +142,9 @@ async fn main() {
         grab_search_cache: Arc::new(livrarr_server::state::GrabSearchCache::new()),
         rss_last_run: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         rss_sync_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        readarr_import_progress: Arc::new(tokio::sync::Mutex::new(
+            livrarr_server::handlers::readarr_import::ImportProgress::default(),
+        )),
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
