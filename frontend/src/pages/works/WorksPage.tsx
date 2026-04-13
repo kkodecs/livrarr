@@ -7,6 +7,7 @@ import {
   Headphones,
   Plus,
   RefreshCw,
+  Rss,
   TableProperties,
   LayoutGrid,
   LayoutList,
@@ -17,7 +18,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { listWorks, refreshAllWorks, deleteWork, refreshWork } from "@/api";
+import { listWorks, refreshAllWorks, deleteWork, refreshWork, triggerRssSync, getQueue } from "@/api";
 import { sortWorks } from "@/utils/works";
 import type { WorkSortField } from "@/utils/works";
 import { useUIStore } from "@/stores/ui";
@@ -57,6 +58,29 @@ export function WorksPage() {
     onSuccess: () => toast.success("Refreshing all works"),
     onError: () => toast.error("Failed to refresh works"),
   });
+
+  const rssSyncMutation = useMutation({
+    mutationFn: triggerRssSync,
+    onSuccess: () => toast.success("RSS sync started"),
+    onError: () => toast.error("RSS sync already running"),
+  });
+
+  const { data: queueItems } = useQuery({
+    queryKey: ["queue"],
+    queryFn: () => getQueue(),
+    select: (res) => res.items,
+    refetchInterval: 30_000,
+  });
+
+  const activeGrabs = useMemo(() => {
+    const set = new Set<string>();
+    queueItems?.forEach((item) => {
+      if (["sent", "confirmed", "importing"].includes(item.status) && item.mediaType) {
+        set.add(`${item.workId}-${item.mediaType}`);
+      }
+    });
+    return set;
+  }, [queueItems]);
 
   const worksView = useUIStore((s) => s.worksView);
   const setWorksView = useUIStore((s) => s.setWorksView);
@@ -211,6 +235,18 @@ export function WorksPage() {
           >
             <Pencil size={14} />
             <span className="hidden sm:inline">{editorMode ? "Editing" : "Edit"}</span>
+          </button>
+          <button
+            onClick={() => rssSyncMutation.mutate()}
+            disabled={rssSyncMutation.isPending}
+            className="btn-secondary inline-flex items-center gap-1.5"
+            title="Trigger RSS sync"
+          >
+            <Rss
+              size={14}
+              className={cn(rssSyncMutation.isPending && "animate-spin")}
+            />
+            <span className="hidden sm:inline">RSS Sync</span>
           </button>
           <button
             onClick={() => refreshMutation.mutate()}
@@ -368,6 +404,7 @@ export function WorksPage() {
                 onToggle={toggleSelection}
                 allSelected={allSelected}
                 onToggleAll={toggleSelectAll}
+                activeGrabs={activeGrabs}
               />
             )}
             {worksView === "poster" && (
@@ -377,6 +414,7 @@ export function WorksPage() {
                 selectedIds={selectedIds}
                 onToggle={toggleSelection}
                 columns={posterZoom}
+                activeGrabs={activeGrabs}
               />
             )}
             {worksView === "overview" && (
@@ -385,6 +423,7 @@ export function WorksPage() {
                 editorMode={editorMode}
                 selectedIds={selectedIds}
                 onToggle={toggleSelection}
+                activeGrabs={activeGrabs}
               />
             )}
           </>
@@ -541,6 +580,7 @@ function TableView({
   onToggle,
   allSelected,
   onToggleAll,
+  activeGrabs,
 }: {
   works: WorkDetailResponse[];
   sort: WorkSortField;
@@ -551,6 +591,7 @@ function TableView({
   onToggle: (id: number) => void;
   allSelected: boolean;
   onToggleAll: () => void;
+  activeGrabs: Set<string>;
 }) {
   let lastLetter = "";
 
@@ -625,7 +666,7 @@ function TableView({
                   {work.year ?? "\u2014"}
                 </td>
                 <td className="hidden md:table-cell px-3 py-2">
-                  <MediaStatusRow work={work} />
+                  <MediaStatusRow work={work} activeGrabs={activeGrabs} />
                 </td>
                 <td className="hidden lg:table-cell px-3 py-2 text-muted">
                   {formatRelativeDate(work.addedAt)}
@@ -641,25 +682,38 @@ function TableView({
 
 // --- Shared media status row ---
 
-function MediaStatusRow({ work }: { work: WorkDetailResponse }) {
+function MediaStatusRow({ work, activeGrabs }: { work: WorkDetailResponse; activeGrabs: Set<string> }) {
   const ebookItems = work.libraryItems?.filter((li) => li.mediaType === "ebook") ?? [];
   const audioItems = work.libraryItems?.filter((li) => li.mediaType === "audiobook") ?? [];
   const ebookSize = ebookItems.reduce((acc, li) => acc + li.fileSize, 0);
   const audioSize = audioItems.reduce((acc, li) => acc + li.fileSize, 0);
+  const ebookDownloading = activeGrabs.has(`${work.id}-ebook`);
+  const audioDownloading = activeGrabs.has(`${work.id}-audiobook`);
+
+  function typeStatus(
+    monitored: boolean,
+    hasFile: boolean,
+    fileSize: number,
+    downloading: boolean,
+  ): { color: string; label: string } {
+    if (!monitored) return { color: "text-zinc-600", label: "unmonitored" };
+    if (hasFile) return { color: "text-green-400", label: formatMB(fileSize) };
+    if (downloading) return { color: "text-purple-400", label: "downloading" };
+    return { color: "text-amber-500", label: "missing" };
+  }
+
+  const ebook = typeStatus(work.monitorEbook, ebookItems.length > 0, ebookSize, ebookDownloading);
+  const audio = typeStatus(work.monitorAudiobook, audioItems.length > 0, audioSize, audioDownloading);
 
   return (
     <div className="flex items-center gap-3 text-xs">
       <span className="inline-flex items-center gap-1">
-        <Book size={12} className={ebookItems.length > 0 ? "text-green-400" : "text-zinc-600"} />
-        <span className={ebookItems.length > 0 ? "text-zinc-300" : "text-zinc-600"}>
-          {ebookItems.length > 0 ? formatMB(ebookSize) : "missing"}
-        </span>
+        <Book size={12} className={ebook.color} />
+        <span className={ebook.color}>{ebook.label}</span>
       </span>
       <span className="inline-flex items-center gap-1">
-        <Headphones size={12} className={audioItems.length > 0 ? "text-green-400" : "text-zinc-600"} />
-        <span className={audioItems.length > 0 ? "text-zinc-300" : "text-zinc-600"}>
-          {audioItems.length > 0 ? formatMB(audioSize) : "missing"}
-        </span>
+        <Headphones size={12} className={audio.color} />
+        <span className={audio.color}>{audio.label}</span>
       </span>
     </div>
   );
@@ -673,12 +727,14 @@ function PosterView({
   selectedIds,
   onToggle,
   columns,
+  activeGrabs,
 }: {
   works: WorkDetailResponse[];
   editorMode: boolean;
   selectedIds: Set<number>;
   onToggle: (id: number) => void;
   columns: number;
+  activeGrabs: Set<string>;
 }) {
   const navigate = useNavigate();
 
@@ -728,7 +784,7 @@ function PosterView({
                     </Link>
                   ) : work.authorName}
                 </p>
-                <MediaStatusRow work={work} />
+                <MediaStatusRow work={work} activeGrabs={activeGrabs} />
               </div>
             </div>
           </div>
@@ -745,11 +801,13 @@ function OverviewView({
   editorMode,
   selectedIds,
   onToggle,
+  activeGrabs,
 }: {
   works: WorkDetailResponse[];
   editorMode: boolean;
   selectedIds: Set<number>;
   onToggle: (id: number) => void;
+  activeGrabs: Set<string>;
 }) {
   const navigate = useNavigate();
 
@@ -801,7 +859,7 @@ function OverviewView({
                   ) : work.authorName}
                 </p>
                 <div className="mt-1.5">
-                  <MediaStatusRow work={work} />
+                  <MediaStatusRow work={work} activeGrabs={activeGrabs} />
                 </div>
                 {work.description && (
                   <p className="mt-2 line-clamp-2 text-sm text-zinc-400">

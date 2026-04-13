@@ -10,6 +10,7 @@ import {
   FolderX,
   Trash2,
   Check,
+  Rss,
 } from "lucide-react";
 import { Link } from "react-router";
 import * as Popover from "@radix-ui/react-popover";
@@ -30,6 +31,8 @@ const notificationIcons: Record<NotificationType, ReactNode> = {
   jobPanicked: <AlertOctagon size={16} className="text-red-400" />,
   rateLimitHit: <AlertTriangle size={16} className="text-orange-400" />,
   pathNotFound: <FolderX size={16} className="text-red-400" />,
+  rssGrabbed: <Rss size={16} className="text-green-400" />,
+  rssGrabFailed: <Rss size={16} className="text-red-400" />,
 };
 
 export function NotificationBell() {

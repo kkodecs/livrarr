@@ -119,6 +119,10 @@ pub enum NotificationType {
     RateLimitHit,
     /// Download complete but file not found locally — likely needs remote path mapping.
     PathNotFound,
+    /// RSS sync auto-grabbed a release.
+    RssGrabbed,
+    /// RSS sync grab failed (download client unreachable or rejected).
+    RssGrabFailed,
 }
 
 /// Narration type for audiobook metadata.
@@ -352,7 +356,8 @@ pub struct Work {
     pub enrichment_source: Option<String>,
     pub cover_url: Option<String>,
     pub cover_manual: bool,
-    pub monitored: bool,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
     pub added_at: DateTime<Utc>,
     /// Foreign language provider attribution (e.g., "BnF", "lubimyczytac.pl").
     /// Null for existing English/OL works.
@@ -543,6 +548,7 @@ pub struct Indexer {
     pub enable_automatic_search: bool,
     pub enable_interactive_search: bool,
     pub supports_book_search: bool,
+    pub enable_rss: bool,
     pub enabled: bool,
     pub added_at: DateTime<Utc>,
 }
@@ -561,10 +567,31 @@ impl std::fmt::Debug for Indexer {
             .field("enable_automatic_search", &self.enable_automatic_search)
             .field("enable_interactive_search", &self.enable_interactive_search)
             .field("supports_book_search", &self.supports_book_search)
+            .field("enable_rss", &self.enable_rss)
             .field("enabled", &self.enabled)
             .field("added_at", &self.added_at)
             .finish()
     }
+}
+
+/// Per-indexer RSS sync state for gap detection.
+///
+/// Satisfies: RSS-GAP-001
+#[derive(Debug, Clone)]
+pub struct IndexerRssState {
+    pub indexer_id: IndexerId,
+    pub last_publish_date: Option<String>,
+    pub last_guid: Option<String>,
+}
+
+/// Indexer config singleton (RSS sync settings).
+///
+/// Satisfies: RSS-CONFIG-001
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexerConfig {
+    pub rss_sync_interval_minutes: i32,
+    pub rss_match_threshold: f64,
 }
 
 /// Sanitizes a path component for filesystem use.

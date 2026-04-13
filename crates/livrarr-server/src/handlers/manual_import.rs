@@ -243,9 +243,14 @@ pub async fn scan(
         let pos_b = pb.and_then(|p| p.series_position).unwrap_or(f64::MAX);
         let title_a = pa.map(|p| p.title.as_str()).unwrap_or("");
         let title_b = pb.map(|p| p.title.as_str()).unwrap_or("");
-        author_a.cmp(author_b)
+        author_a
+            .cmp(author_b)
             .then(series_a.cmp(series_b))
-            .then(pos_a.partial_cmp(&pos_b).unwrap_or(std::cmp::Ordering::Equal))
+            .then(
+                pos_a
+                    .partial_cmp(&pos_b)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
             .then(title_a.cmp(title_b))
     });
 
@@ -297,7 +302,9 @@ pub async fn scan(
                 }
             }
             let search_term = format!("{} {}", clean_title, p.author);
-            let ol_results = search_ol_batch(&state, &search_term).await.unwrap_or_default();
+            let ol_results = search_ol_batch(&state, &search_term)
+                .await
+                .unwrap_or_default();
 
             if !ol_results.is_empty() {
                 // First: check if any OL result matches an existing work (prefer dup detection
@@ -305,8 +312,7 @@ pub async fn scan(
                 // above the original but the original matches our library.
                 let dup_match = ol_results.iter().find_map(|result| {
                     let dup = existing_works.iter().find(|w| {
-                        (result.ol_key.is_some()
-                            && w.ol_key.as_deref() == result.ol_key.as_deref())
+                        (result.ol_key.is_some() && w.ol_key.as_deref() == result.ol_key.as_deref())
                             || (normalize_for_matching(&w.title)
                                 == normalize_for_matching(&result.title)
                                 && normalize_for_matching(&w.author_name)
@@ -582,7 +588,8 @@ pub async fn import(
     let media_mgmt = state.db.get_media_management_config().await?;
     let mut results = Vec::new();
     // Cache author OL key lookups to avoid N+1 API calls for same author.
-    let mut author_ol_cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    let mut author_ol_cache: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
 
     for item in &req.items {
         let result = import_single_item(
@@ -644,18 +651,19 @@ async fn import_single_item(
     };
 
     // Find or create the work (reuses the same pattern as work::add).
-    let work_id = match find_or_create_work(state, user_id, item, existing_works, author_ol_cache).await {
-        Ok(id) => id,
-        Err(e) => {
-            warn!("manual import: work creation failed for {}: {e}", item.path);
-            return ImportResult {
-                path: item.path.clone(),
-                status: ImportStatus::Failed,
-                work_id: None,
-                error: Some(format!("work creation failed: {e}")),
-            };
-        }
-    };
+    let work_id =
+        match find_or_create_work(state, user_id, item, existing_works, author_ol_cache).await {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("manual import: work creation failed for {}: {e}", item.path);
+                return ImportResult {
+                    path: item.path.clone(),
+                    status: ImportStatus::Failed,
+                    work_id: None,
+                    error: Some(format!("work creation failed: {e}")),
+                };
+            }
+        };
 
     // Handle delete existing (same media type only, from snapshot).
     if item.delete_existing {
@@ -934,7 +942,9 @@ async fn find_or_create_work(
     let author_ol_key = if let Some(cached) = author_ol_cache.get(&cache_key) {
         cached.clone()
     } else {
-        let result = match super::author::lookup_ol_authors(&state.http_client, &item.author, 1).await {
+        let result = match super::author::lookup_ol_authors(&state.http_client, &item.author, 1)
+            .await
+        {
             Ok(results) => results.into_iter().next().map(|r| r.ol_key),
             Err(e) => {
                 tracing::warn!(author = %item.author, error = %e, "OL author lookup failed during import, proceeding without ol_key");

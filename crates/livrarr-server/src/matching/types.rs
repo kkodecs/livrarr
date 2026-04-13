@@ -57,11 +57,21 @@ impl Extraction {
     /// Field completeness score for ranking during reconciliation.
     pub fn completeness(&self) -> u8 {
         let mut score = 0u8;
-        if self.has_title() { score += 3; }
-        if self.has_author() { score += 2; }
-        if self.year.is_some() { score += 1; }
-        if self.isbn.is_some() { score += 1; }
-        if self.series.is_some() { score += 1; }
+        if self.has_title() {
+            score += 3;
+        }
+        if self.has_author() {
+            score += 2;
+        }
+        if self.year.is_some() {
+            score += 1;
+        }
+        if self.isbn.is_some() {
+            score += 1;
+        }
+        if self.series.is_some() {
+            score += 1;
+        }
         score
     }
 }

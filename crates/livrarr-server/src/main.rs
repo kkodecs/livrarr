@@ -140,6 +140,8 @@ async fn main() {
         import_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         import_locks: Arc::new(dashmap::DashMap::new()),
         grab_search_cache: Arc::new(livrarr_server::state::GrabSearchCache::new()),
+        rss_last_run: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        rss_sync_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).

@@ -32,6 +32,7 @@ fn indexer_to_response(indexer: &Indexer) -> IndexerResponse {
         enable_automatic_search: indexer.enable_automatic_search,
         enable_interactive_search: indexer.enable_interactive_search,
         supports_book_search: indexer.supports_book_search,
+        enable_rss: indexer.enable_rss,
         enabled: indexer.enabled,
         added_at: indexer.added_at,
     }
@@ -264,6 +265,7 @@ pub async fn create(
             priority: req.priority,
             enable_automatic_search: req.enable_automatic_search,
             enable_interactive_search: req.enable_interactive_search,
+            enable_rss: req.enable_rss,
             enabled: req.enabled,
         })
         .await?;
@@ -315,6 +317,7 @@ pub async fn update(
                 priority: req.priority,
                 enable_automatic_search: req.enable_automatic_search,
                 enable_interactive_search: req.enable_interactive_search,
+                enable_rss: req.enable_rss,
                 enabled: req.enabled,
             },
         )
@@ -508,6 +511,7 @@ pub async fn import_from_prowlarr(
                 priority,
                 enable_automatic_search: pi.enable_automatic_search,
                 enable_interactive_search: pi.enable_interactive_search,
+                enable_rss: true,
                 enabled: true,
             })
             .await

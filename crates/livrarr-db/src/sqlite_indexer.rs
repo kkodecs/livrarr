@@ -3,7 +3,8 @@ use sqlx::Row;
 use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{map_db_err, parse_dt};
 use crate::{
-    CreateIndexerDbRequest, DbError, Indexer, IndexerDb, IndexerId, UpdateIndexerDbRequest,
+    CreateIndexerDbRequest, DbError, Indexer, IndexerDb, IndexerId, IndexerRssState,
+    UpdateIndexerDbRequest,
 };
 
 fn parse_categories(s: &str) -> Result<Vec<i32>, DbError> {
@@ -48,6 +49,9 @@ fn row_to_indexer(row: sqlx::sqlite::SqliteRow) -> Result<Indexer, DbError> {
         supports_book_search: row
             .try_get::<bool, _>("supports_book_search")
             .map_err(|e| DbError::Io(Box::new(e)))?,
+        enable_rss: row
+            .try_get::<bool, _>("enable_rss")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         enabled: row
             .try_get::<bool, _>("enabled")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -91,8 +95,8 @@ impl IndexerDb for SqliteDb {
         let id = sqlx::query(
             "INSERT INTO indexers \
              (name, protocol, url, api_path, api_key, categories, priority, \
-              enable_automatic_search, enable_interactive_search, enabled) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              enable_automatic_search, enable_interactive_search, enable_rss, enabled) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&req.name)
         .bind(&req.protocol)
@@ -103,6 +107,7 @@ impl IndexerDb for SqliteDb {
         .bind(req.priority)
         .bind(req.enable_automatic_search)
         .bind(req.enable_interactive_search)
+        .bind(req.enable_rss)
         .bind(req.enabled)
         .execute(self.pool())
         .await
@@ -140,6 +145,7 @@ impl IndexerDb for SqliteDb {
         let enable_interactive_search = req
             .enable_interactive_search
             .unwrap_or(current.enable_interactive_search);
+        let enable_rss = req.enable_rss.unwrap_or(current.enable_rss);
         let enabled = req.enabled.unwrap_or(current.enabled);
 
         // Reset supports_book_search only if connection-affecting fields actually changed.
@@ -161,7 +167,7 @@ impl IndexerDb for SqliteDb {
         sqlx::query(
             "UPDATE indexers SET name = ?, url = ?, api_path = ?, api_key = ?, \
              categories = ?, priority = ?, enable_automatic_search = ?, \
-             enable_interactive_search = ?, supports_book_search = ?, enabled = ? \
+             enable_interactive_search = ?, supports_book_search = ?, enable_rss = ?, enabled = ? \
              WHERE id = ?",
         )
         .bind(&name)
@@ -173,6 +179,7 @@ impl IndexerDb for SqliteDb {
         .bind(enable_automatic_search)
         .bind(enable_interactive_search)
         .bind(supports_book_search)
+        .bind(enable_rss)
         .bind(enabled)
         .bind(id)
         .execute(self.pool())
@@ -206,6 +213,65 @@ impl IndexerDb for SqliteDb {
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound { entity: "indexer" });
         }
+        Ok(())
+    }
+
+    async fn list_enabled_rss_indexers(&self) -> Result<Vec<Indexer>, DbError> {
+        let rows = sqlx::query(
+            "SELECT * FROM indexers WHERE enabled = 1 AND enable_rss = 1 \
+             ORDER BY priority, id",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_indexer).collect()
+    }
+
+    async fn get_rss_state(
+        &self,
+        indexer_id: IndexerId,
+    ) -> Result<Option<IndexerRssState>, DbError> {
+        let row = sqlx::query("SELECT * FROM indexer_rss_state WHERE indexer_id = ?")
+            .bind(indexer_id)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        match row {
+            Some(r) => Ok(Some(IndexerRssState {
+                indexer_id: r
+                    .try_get::<i64, _>("indexer_id")
+                    .map_err(|e| DbError::Io(Box::new(e)))?,
+                last_publish_date: r
+                    .try_get("last_publish_date")
+                    .map_err(|e| DbError::Io(Box::new(e)))?,
+                last_guid: r
+                    .try_get("last_guid")
+                    .map_err(|e| DbError::Io(Box::new(e)))?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    async fn upsert_rss_state(
+        &self,
+        indexer_id: IndexerId,
+        last_publish_date: Option<&str>,
+        last_guid: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO indexer_rss_state (indexer_id, last_publish_date, last_guid) \
+             VALUES (?, ?, ?) \
+             ON CONFLICT(indexer_id) DO UPDATE SET \
+             last_publish_date = excluded.last_publish_date, \
+             last_guid = excluded.last_guid",
+        )
+        .bind(indexer_id)
+        .bind(last_publish_date)
+        .bind(last_guid)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
         Ok(())
     }
 }
