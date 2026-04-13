@@ -4,8 +4,9 @@ pub use livrarr_domain::{
     Author, AuthorId, DbError, DownloadClient, DownloadClientId, DownloadClientImplementation,
     EnrichmentStatus, EventType, Grab, GrabId, GrabStatus, HistoryEvent, HistoryId, Indexer,
     IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider, MediaType,
-    NarrationType, Notification, NotificationId, NotificationType, RemotePathMapping,
-    RemotePathMappingId, RootFolder, RootFolderId, Session, User, UserId, UserRole, Work, WorkId,
+    NarrationType, Notification, NotificationId, NotificationType, PlaybackProgress,
+    RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Session, User, UserId,
+    UserRole, Work, WorkId,
 };
 
 pub mod pool;
@@ -20,6 +21,7 @@ mod sqlite_history;
 mod sqlite_indexer;
 mod sqlite_library_item;
 mod sqlite_notification;
+mod sqlite_playback_progress;
 mod sqlite_remote_path_mapping;
 mod sqlite_root_folder;
 mod sqlite_session;
@@ -1058,6 +1060,26 @@ pub trait AuthorBibliographyDb: Send + Sync {
         author_id: i64,
         entries: &[BibliographyEntry],
     ) -> Result<AuthorBibliography, DbError>;
+}
+
+/// Playback progress data access.
+#[trait_variant::make(Send)]
+pub trait PlaybackProgressDb: Send + Sync {
+    /// Get playback progress for a user + library item.
+    async fn get_progress(
+        &self,
+        user_id: UserId,
+        library_item_id: LibraryItemId,
+    ) -> Result<Option<PlaybackProgress>, DbError>;
+
+    /// Insert or update playback progress.
+    async fn upsert_progress(
+        &self,
+        user_id: UserId,
+        library_item_id: LibraryItemId,
+        position: &str,
+        progress_pct: f64,
+    ) -> Result<(), DbError>;
 }
 
 // ---------------------------------------------------------------------------
