@@ -1046,6 +1046,11 @@ async fn run_import(
                     detail_url: None,
                     language,
                     import_id: Some(import_id.to_string()),
+                    series_id: None,
+                    series_name: None,
+                    series_position: None,
+                    monitor_ebook: false,
+                    monitor_audiobook: false,
                 })
                 .await
             {

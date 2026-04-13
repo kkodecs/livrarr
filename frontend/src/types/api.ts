@@ -182,6 +182,7 @@ export interface WorkDetailResponse {
   authorId: number | null;
   description: string | null;
   year: number | null;
+  seriesId: number | null;
   seriesName: string | null;
   seriesPosition: number | null;
   genres: string[] | null;
@@ -240,6 +241,7 @@ export interface AddAuthorRequest {
 export interface UpdateAuthorRequest {
   monitored?: boolean | null;
   monitorNewItems?: boolean | null;
+  grKey?: string | null;
 }
 
 export interface AuthorResponse {
@@ -247,6 +249,7 @@ export interface AuthorResponse {
   name: string;
   sortName: string | null;
   olKey: string | null;
+  grKey: string | null;
   monitored: boolean;
   monitorNewItems: boolean;
   addedAt: string;
@@ -270,6 +273,68 @@ export interface AuthorBibliography {
   authorId: number;
   entries: BibliographyEntry[];
   fetchedAt: string;
+}
+
+// Series
+export interface SeriesResponse {
+  id: number | null;
+  name: string;
+  grKey: string;
+  bookCount: number;
+  monitorEbook: boolean;
+  monitorAudiobook: boolean;
+  worksInLibrary: number;
+}
+
+export interface SeriesListResponse {
+  series: SeriesResponse[];
+  fetchedAt: string | null;
+}
+
+export interface MonitorSeriesRequest {
+  grKey: string;
+  monitorEbook: boolean;
+  monitorAudiobook: boolean;
+}
+
+export interface UpdateSeriesRequest {
+  monitorEbook: boolean;
+  monitorAudiobook: boolean;
+}
+
+export interface GrAuthorCandidate {
+  grKey: string;
+  name: string;
+  profileUrl: string;
+}
+
+export interface SeriesWithAuthorResponse {
+  id: number;
+  name: string;
+  grKey: string;
+  bookCount: number;
+  monitorEbook: boolean;
+  monitorAudiobook: boolean;
+  worksInLibrary: number;
+  authorId: number;
+  authorName: string;
+  firstWorkId: number | null;
+}
+
+export interface SeriesDetailResponse {
+  id: number;
+  name: string;
+  grKey: string;
+  bookCount: number;
+  monitorEbook: boolean;
+  monitorAudiobook: boolean;
+  authorId: number;
+  authorName: string;
+  works: WorkDetailResponse[];
+}
+
+export interface ResolveGrResponse {
+  candidates: GrAuthorCandidate[];
 }
 
 // Notifications

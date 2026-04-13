@@ -24,6 +24,7 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         author_id: w.author_id,
         description: w.description.clone(),
         year: w.year,
+        series_id: w.series_id,
         series_name: w.series_name.clone(),
         series_position: w.series_position,
         genres: w.genres.clone(),
@@ -831,6 +832,11 @@ pub async fn add_work_internal(
             detail_url,
             language: req.language,
             import_id: None,
+            series_id: None,
+            series_name: None,
+            series_position: None,
+            monitor_ebook: false,
+            monitor_audiobook: false,
         })
         .await?;
 

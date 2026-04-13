@@ -423,6 +423,7 @@ pub struct WorkDetailResponse {
     pub author_id: Option<AuthorId>,
     pub description: Option<String>,
     pub year: Option<i32>,
+    pub series_id: Option<i64>,
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
     pub genres: Option<Vec<String>>,
@@ -527,6 +528,7 @@ pub struct AddAuthorRequest {
 pub struct UpdateAuthorApiRequest {
     pub monitored: Option<bool>,
     pub monitor_new_items: Option<bool>,
+    pub gr_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -536,6 +538,7 @@ pub struct AuthorResponse {
     pub name: String,
     pub sort_name: Option<String>,
     pub ol_key: Option<String>,
+    pub gr_key: Option<String>,
     pub monitored: bool,
     pub monitor_new_items: bool,
     pub added_at: String,
@@ -546,6 +549,87 @@ pub struct AuthorResponse {
 pub struct AuthorDetailResponse {
     pub author: AuthorResponse,
     pub works: Vec<WorkDetailResponse>,
+}
+
+// ---------------------------------------------------------------------------
+// Series API
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesResponse {
+    pub id: Option<i64>,
+    pub name: String,
+    pub gr_key: String,
+    pub book_count: i32,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+    pub works_in_library: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesListResponse {
+    pub series: Vec<SeriesResponse>,
+    pub fetched_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesWithAuthorResponse {
+    pub id: i64,
+    pub name: String,
+    pub gr_key: String,
+    pub book_count: i32,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+    pub works_in_library: i64,
+    pub author_id: AuthorId,
+    pub author_name: String,
+    pub first_work_id: Option<WorkId>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesDetailResponse {
+    pub id: i64,
+    pub name: String,
+    pub gr_key: String,
+    pub book_count: i32,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+    pub author_id: AuthorId,
+    pub author_name: String,
+    pub works: Vec<WorkDetailResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorSeriesRequest {
+    pub gr_key: String,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSeriesRequest {
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrAuthorCandidate {
+    pub gr_key: String,
+    pub name: String,
+    pub profile_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveGrResponse {
+    pub candidates: Vec<GrAuthorCandidate>,
 }
 
 // ---------------------------------------------------------------------------
