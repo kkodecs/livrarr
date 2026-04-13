@@ -69,6 +69,11 @@ import type {
   ImportPreviewResponse,
   ImportProgressResponse,
   ImportHistoryItem,
+  ListImportPreviewResponse,
+  ListImportConfirmRequest,
+  ListImportConfirmResponse,
+  ListImportSummary,
+  ListImportUndoResponse,
 } from "@/types/api";
 
 // Setup
@@ -496,3 +501,31 @@ export const readarrHistory = () =>
   apiFetch<ImportHistoryItem[]>("/import/readarr/history");
 export const readarrUndo = (importId: string) =>
   apiFetch<void>(`/import/readarr/${importId}`, { method: "DELETE" });
+
+// List imports (CSV: Goodreads, Hardcover)
+export const listImportPreview = async (file: File): Promise<ListImportPreviewResponse> => {
+  const token = (await import("./client")).getToken();
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch("/api/v1/listimport/preview", {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || res.statusText);
+  }
+  return res.json();
+};
+export const listImportConfirm = (req: ListImportConfirmRequest) =>
+  apiFetch<ListImportConfirmResponse>("/listimport/confirm", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const listImportComplete = (importId: string) =>
+  apiFetch<{ status: string }>(`/listimport/${importId}/complete`, { method: "POST" });
+export const listImportUndo = (importId: string) =>
+  apiFetch<ListImportUndoResponse>(`/listimport/${importId}`, { method: "DELETE" });
+export const listImportHistory = () =>
+  apiFetch<ListImportSummary[]>("/listimport");
