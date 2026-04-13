@@ -66,6 +66,7 @@ impl AuthorApi for SecondaryApiImpl {
                         name: None,
                         sort_name: req.sort_name.clone(),
                         ol_key: Some(req.ol_key.clone()),
+                        gr_key: None,
                         monitored: None,
                         monitor_new_items: None,
                         monitor_since: None,
@@ -142,6 +143,7 @@ impl AuthorApi for SecondaryApiImpl {
             name: None,
             sort_name: None,
             ol_key: None,
+            gr_key: req.gr_key,
             monitored: req.monitored,
             monitor_new_items: req.monitor_new_items,
             monitor_since: None,
@@ -690,6 +692,7 @@ fn author_to_response(a: &Author) -> AuthorResponse {
         name: a.name.clone(),
         sort_name: a.sort_name.clone(),
         ol_key: a.ol_key.clone(),
+        gr_key: a.gr_key.clone(),
         monitored: a.monitored,
         monitor_new_items: a.monitor_new_items,
         added_at: a.added_at.to_rfc3339(),
@@ -707,6 +710,7 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         author_id: w.author_id,
         description: w.description.clone(),
         year: w.year,
+        series_id: w.series_id,
         series_name: w.series_name.clone(),
         series_position: w.series_position,
         genres: w.genres.clone(),
@@ -882,6 +886,11 @@ impl SecondaryApiImpl {
                 detail_url: None,
                 language: None,
                 import_id: None,
+                series_id: None,
+                series_name: None,
+                series_position: None,
+                monitor_ebook: false,
+                monitor_audiobook: false,
             })
             .await
             .unwrap();
@@ -941,6 +950,11 @@ impl SecondaryApiImpl {
                 detail_url: None,
                 language: None,
                 import_id: None,
+                series_id: None,
+                series_name: None,
+                series_position: None,
+                monitor_ebook: false,
+                monitor_audiobook: false,
             })
             .await
             .unwrap();

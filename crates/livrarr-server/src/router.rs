@@ -197,6 +197,25 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/author/{id}/bibliography/refresh",
             post(handlers::author::refresh_bibliography),
         )
+        // Series
+        .route("/series", get(handlers::series::list_all))
+        .route(
+            "/author/{id}/resolve-gr",
+            post(handlers::series::resolve_gr),
+        )
+        .route("/author/{id}/series", get(handlers::series::list_series))
+        .route(
+            "/author/{id}/series/refresh",
+            post(handlers::series::refresh_series),
+        )
+        .route(
+            "/author/{id}/series/monitor",
+            post(handlers::series::monitor_series),
+        )
+        .route(
+            "/series/{id}",
+            get(handlers::series::get_detail).put(handlers::series::update_series),
+        )
         // Queue
         .route("/queue", get(handlers::queue::list))
         .route("/queue/{id}", delete(handlers::queue::remove))
