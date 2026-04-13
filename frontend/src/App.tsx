@@ -35,6 +35,13 @@ const MissingPage = lazy(() => import("@/pages/wanted/MissingPage"));
 const ReadarrImportPage = lazy(
   () => import("@/pages/import/ReadarrImportPage"),
 );
+const ListImportPage = lazy(
+  () => import("@/pages/lists/ListImportPage"),
+);
+
+// Readers (lazy, full-page — no AppLayout)
+const ReaderPage = lazy(() => import("@/pages/reader/ReaderPage"));
+const ListenPage = lazy(() => import("@/pages/reader/ListenPage"));
 
 // Settings (lazy)
 const MediaManagementPage = lazy(
@@ -109,6 +116,28 @@ export function App() {
                 <GuestGuard>
                   <LoginPage />
                 </GuestGuard>
+              }
+            />
+
+            {/* Full-page readers — authenticated but no AppLayout */}
+            <Route
+              path="/read/:id"
+              element={
+                <AuthGuard>
+                  <Suspense fallback={<FullPageLoading />}>
+                    <ReaderPage />
+                  </Suspense>
+                </AuthGuard>
+              }
+            />
+            <Route
+              path="/listen/:id"
+              element={
+                <AuthGuard>
+                  <Suspense fallback={<FullPageLoading />}>
+                    <ListenPage />
+                  </Suspense>
+                </AuthGuard>
               }
             />
 
@@ -198,6 +227,14 @@ export function App() {
                 element={
                   <LazyPage>
                     <ReadarrImportPage />
+                  </LazyPage>
+                }
+              />
+              <Route
+                path="lists"
+                element={
+                  <LazyPage>
+                    <ListImportPage />
                   </LazyPage>
                 }
               />
@@ -313,10 +350,7 @@ export function App() {
                 path="settings/customformats"
                 element={<ComingSoonPage title="Custom Formats" />}
               />
-              <Route
-                path="settings/importlists"
-                element={<ComingSoonPage title="Import Lists" />}
-              />
+              {/* Import Lists moved to /lists (main nav) */}
               <Route
                 path="settings/notifications"
                 element={<ComingSoonPage title="Notifications" />}
