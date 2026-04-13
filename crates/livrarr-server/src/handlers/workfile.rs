@@ -1,9 +1,10 @@
 use axum::extract::{Path, Query, State};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use crate::state::AppState;
 use crate::{ApiError, AuthContext, LibraryItemResponse, PaginatedResponse, PaginationQuery};
-use livrarr_db::{ConfigDb, LibraryItemDb, RootFolderDb};
+use livrarr_db::{ConfigDb, LibraryItemDb, PlaybackProgressDb, RootFolderDb};
 
 fn to_response(li: &livrarr_domain::LibraryItem) -> LibraryItemResponse {
     LibraryItemResponse {
@@ -119,4 +120,119 @@ fn format_bytes(bytes: i64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Resolve a library item to an absolute, canonicalized file path.
+/// Returns 403 if the resolved path escapes the root folder (path traversal protection).
+pub async fn resolve_file_path(
+    db: &(impl LibraryItemDb + RootFolderDb + Send + Sync),
+    user_id: livrarr_domain::UserId,
+    library_item_id: livrarr_domain::LibraryItemId,
+) -> Result<std::path::PathBuf, ApiError> {
+    let item = db.get_library_item(user_id, library_item_id).await?;
+    let root_folder = db.get_root_folder(item.root_folder_id).await?;
+    let root = std::path::Path::new(&root_folder.path);
+    let abs_path = root.join(&item.path);
+
+    // Canonicalize and verify containment.
+    let canonical = abs_path.canonicalize().map_err(|_| ApiError::NotFound)?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| ApiError::Internal(format!("Root folder not accessible: {e}")))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(ApiError::Forbidden);
+    }
+
+    Ok(canonical)
+}
+
+/// Map file extension to Content-Type.
+fn mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "epub" => "application/epub+zip",
+        "pdf" => "application/pdf",
+        "mobi" => "application/x-mobipocket-ebook",
+        "azw3" => "application/x-mobi8-ebook",
+        "m4b" | "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "ogg" => "audio/ogg",
+        _ => "application/octet-stream",
+    }
+}
+
+/// GET /api/v1/workfile/:id/download
+pub async fn download(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    req: axum::http::Request<axum::body::Body>,
+) -> Result<Response, ApiError> {
+    let path = resolve_file_path(&state.db, ctx.user.id, id).await?;
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let content_type = mime_for_ext(&ext);
+
+    // Use tower_http::services::ServeFile for correct byte-range handling.
+    use tower::Service;
+    use tower_http::services::ServeFile;
+    let mut svc = ServeFile::new(&path);
+    let resp = svc
+        .call(req)
+        .await
+        .map_err(|e| ApiError::Internal(format!("File serve error: {e}")))?;
+
+    // Override content-type to be precise.
+    let (mut parts, body) = resp.into_response().into_parts();
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        content_type.parse().unwrap(),
+    );
+    Ok(Response::from_parts(parts, body))
+}
+
+/// GET /api/v1/workfile/:id/progress
+pub async fn get_progress(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let progress = state.db.get_progress(ctx.user.id, id).await?;
+    match progress {
+        Some(p) => Ok(Json(serde_json::json!({
+            "library_item_id": p.library_item_id,
+            "position": p.position,
+            "progress_pct": p.progress_pct,
+            "updated_at": p.updated_at.to_rfc3339(),
+        }))),
+        None => Err(ApiError::NotFound),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateProgressRequest {
+    pub position: String,
+    pub progress_pct: f64,
+}
+
+/// PUT /api/v1/workfile/:id/progress
+pub async fn update_progress(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateProgressRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Validate the library item exists and belongs to the user.
+    let _item = state.db.get_library_item(ctx.user.id, id).await?;
+
+    let pct = body.progress_pct.clamp(0.0, 1.0);
+    state
+        .db
+        .upsert_progress(ctx.user.id, id, &body.position, pct)
+        .await?;
+    Ok(Json(serde_json::json!({ "success": true })))
 }
