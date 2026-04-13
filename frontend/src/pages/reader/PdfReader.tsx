@@ -1,7 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
-import "react-pdf/dist/esm/Page/AnnotationLayer.css";
-import "react-pdf/dist/esm/Page/TextLayer.css";
 import {
   getDownloadUrl,
   getPlaybackProgress,
@@ -17,7 +15,7 @@ import {
 import { useNavigate } from "react-router";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
+  /* @vite-ignore */ "pdfjs-dist/build/pdf.worker.min.mjs",
   import.meta.url,
 ).toString();
 

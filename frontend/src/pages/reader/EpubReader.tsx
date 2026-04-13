@@ -2,7 +2,11 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { ReactReader } from "react-reader";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Rendition = any;
-import { getDownloadUrl, getPlaybackProgress, updatePlaybackProgress } from "@/api";
+import {
+  getDownloadUrl,
+  getPlaybackProgress,
+  updatePlaybackProgress,
+} from "@/api";
 import { ArrowLeft, Sun, Moon, Type } from "lucide-react";
 import { useNavigate } from "react-router";
 
@@ -21,6 +25,25 @@ export function EpubReader({ libraryItemId }: Props) {
   const renditionRef = useRef<Rendition | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [initialLoaded, setInitialLoaded] = useState(false);
+  const [epubData, setEpubData] = useState<ArrayBuffer | null>(null);
+
+  // Fetch EPUB as ArrayBuffer with auth headers.
+  const url = getDownloadUrl(libraryItemId);
+  const token = localStorage.getItem("livrarr_token") ?? "";
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.arrayBuffer();
+      })
+      .then(setEpubData)
+      .catch(() => {});
+    return () => controller.abort();
+  }, [url, token]);
 
   // Load saved progress on mount.
   useEffect(() => {
@@ -79,9 +102,7 @@ export function EpubReader({ libraryItemId }: Props) {
     if (renditionRef.current) applyTheme(renditionRef.current);
   }, [applyTheme]);
 
-  const url = getDownloadUrl(libraryItemId);
-
-  if (!initialLoaded) {
+  if (!initialLoaded || !epubData) {
     return (
       <div className="flex h-screen items-center justify-center bg-zinc-900 text-zinc-400">
         Loading...
@@ -124,14 +145,9 @@ export function EpubReader({ libraryItemId }: Props) {
       {/* Reader */}
       <div className="flex-1">
         <ReactReader
-          url={url}
+          url={epubData}
           location={location}
           locationChanged={onLocationChanged}
-          epubInitOptions={{
-            requestHeaders: {
-              Authorization: `Bearer ${localStorage.getItem("livrarr_token") ?? ""}`,
-            },
-          }}
           getRendition={(rendition: Rendition) => {
             renditionRef.current = rendition;
             applyTheme(rendition);
