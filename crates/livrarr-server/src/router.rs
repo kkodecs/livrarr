@@ -233,6 +233,31 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/manualimport/search",
             post(handlers::manual_import::search),
         )
+        // Readarr import
+        .route(
+            "/import/readarr/connect",
+            post(handlers::readarr_import::connect),
+        )
+        .route(
+            "/import/readarr/preview",
+            post(handlers::readarr_import::preview),
+        )
+        .route(
+            "/import/readarr/start",
+            post(handlers::readarr_import::start),
+        )
+        .route(
+            "/import/readarr/progress",
+            get(handlers::readarr_import::progress),
+        )
+        .route(
+            "/import/readarr/history",
+            get(handlers::readarr_import::history),
+        )
+        .route(
+            "/import/readarr/{import_id}",
+            delete(handlers::readarr_import::undo),
+        )
         // Library files
         .route("/workfile", get(handlers::workfile::list))
         .route(

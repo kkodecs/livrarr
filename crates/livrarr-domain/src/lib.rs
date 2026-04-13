@@ -359,6 +359,7 @@ pub struct Work {
     pub cover_manual: bool,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    pub import_id: Option<String>,
     pub added_at: DateTime<Utc>,
     /// Foreign language provider attribution (e.g., "BnF", "lubimyczytac.pl").
     /// Null for existing English/OL works.
@@ -382,6 +383,7 @@ pub struct Author {
     pub ol_key: Option<String>,
     pub gr_key: Option<String>,
     pub hc_key: Option<String>,
+    pub import_id: Option<String>,
     pub monitored: bool,
     pub monitor_new_items: bool,
     pub monitor_since: Option<DateTime<Utc>>,
@@ -400,6 +402,7 @@ pub struct LibraryItem {
     pub path: String,
     pub media_type: MediaType,
     pub file_size: i64,
+    pub import_id: Option<String>,
     pub imported_at: DateTime<Utc>,
 }
 
@@ -608,6 +611,23 @@ pub struct IndexerRssState {
 pub struct IndexerConfig {
     pub rss_sync_interval_minutes: i32,
     pub rss_match_threshold: f64,
+}
+
+/// Import record — tracks a Readarr library import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Import {
+    pub id: String,
+    pub user_id: UserId,
+    pub source: String,
+    pub status: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub authors_created: i64,
+    pub works_created: i64,
+    pub files_imported: i64,
+    pub files_skipped: i64,
+    pub source_url: Option<String>,
+    pub target_root_folder_id: Option<i64>,
 }
 
 /// Sanitizes a path component for filesystem use.

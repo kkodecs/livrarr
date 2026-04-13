@@ -65,6 +65,10 @@ import type {
   ManualImportItem,
   ManualImportResponse,
   PaginatedResponse,
+  ReadarrRootFolder,
+  ImportPreviewResponse,
+  ImportProgressResponse,
+  ImportHistoryItem,
 } from "@/types/api";
 
 // Setup
@@ -431,3 +435,36 @@ export const executeManualImport = (items: ManualImportItem[]) =>
     method: "POST",
     body: JSON.stringify({ items }),
   });
+
+// Readarr Import
+export const readarrConnect = (url: string, apiKey: string) =>
+  apiFetch<ReadarrRootFolder[]>("/import/readarr/connect", {
+    method: "POST",
+    body: JSON.stringify({ url, apiKey }),
+  });
+export const readarrPreview = (req: {
+  url: string;
+  apiKey: string;
+  readarrRootFolderId: number;
+  livrarrRootFolderId: number;
+}) =>
+  apiFetch<ImportPreviewResponse>("/import/readarr/preview", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const readarrStartImport = (req: {
+  url: string;
+  apiKey: string;
+  readarrRootFolderId: number;
+  livrarrRootFolderId: number;
+}) =>
+  apiFetch<{ importId: string }>("/import/readarr/start", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const readarrProgress = () =>
+  apiFetch<ImportProgressResponse>("/import/readarr/progress");
+export const readarrHistory = () =>
+  apiFetch<ImportHistoryItem[]>("/import/readarr/history");
+export const readarrUndo = (importId: string) =>
+  apiFetch<void>(`/import/readarr/${importId}`, { method: "DELETE" });
