@@ -4,7 +4,6 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Book,
-  Headphones,
   Plus,
   RefreshCw,
   Rss,
@@ -31,7 +30,8 @@ import { EmptyState } from "@/components/Page/EmptyState";
 import { ConfirmModal } from "@/components/Page/ConfirmModal";
 import { cn } from "@/utils/cn";
 import { SortHeader } from "@/components/Page/SortHeader";
-import { formatMB, formatRelativeDate, getCoverUrl } from "@/utils/format";
+import { formatRelativeDate, getCoverUrl } from "@/utils/format";
+import { MediaStatusRow } from "@/components/MediaStatusRow";
 import type {
   WorkDetailResponse,
   MediaType,
@@ -681,43 +681,6 @@ function TableView({
 }
 
 // --- Shared media status row ---
-
-function MediaStatusRow({ work, activeGrabs }: { work: WorkDetailResponse; activeGrabs: Set<string> }) {
-  const ebookItems = work.libraryItems?.filter((li) => li.mediaType === "ebook") ?? [];
-  const audioItems = work.libraryItems?.filter((li) => li.mediaType === "audiobook") ?? [];
-  const ebookSize = ebookItems.reduce((acc, li) => acc + li.fileSize, 0);
-  const audioSize = audioItems.reduce((acc, li) => acc + li.fileSize, 0);
-  const ebookDownloading = activeGrabs.has(`${work.id}-ebook`);
-  const audioDownloading = activeGrabs.has(`${work.id}-audiobook`);
-
-  function typeStatus(
-    monitored: boolean,
-    hasFile: boolean,
-    fileSize: number,
-    downloading: boolean,
-  ): { color: string; label: string } {
-    if (!monitored) return { color: "text-zinc-600", label: "unmonitored" };
-    if (hasFile) return { color: "text-green-400", label: formatMB(fileSize) };
-    if (downloading) return { color: "text-purple-400", label: "downloading" };
-    return { color: "text-amber-500", label: "missing" };
-  }
-
-  const ebook = typeStatus(work.monitorEbook, ebookItems.length > 0, ebookSize, ebookDownloading);
-  const audio = typeStatus(work.monitorAudiobook, audioItems.length > 0, audioSize, audioDownloading);
-
-  return (
-    <div className="flex items-center gap-3 text-xs">
-      <span className="inline-flex items-center gap-1">
-        <Book size={12} className={ebook.color} />
-        <span className={ebook.color}>{ebook.label}</span>
-      </span>
-      <span className="inline-flex items-center gap-1">
-        <Headphones size={12} className={audio.color} />
-        <span className={audio.color}>{audio.label}</span>
-      </span>
-    </div>
-  );
-}
 
 // --- Poster View ---
 

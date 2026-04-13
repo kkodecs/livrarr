@@ -419,6 +419,232 @@ pub fn validate_cover_url(url: &str) -> bool {
 }
 
 // =============================================================================
+// Author search page parsing (for GR author ID resolution)
+// =============================================================================
+
+/// A candidate author from a GR author search page.
+#[derive(Debug, Clone)]
+pub struct GoodreadsAuthorCandidate {
+    pub gr_key: String,
+    pub name: String,
+    pub profile_url: String,
+}
+
+static RE_AUTHOR_ROW: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?si)<a[^>]*href="(?:https://www\.goodreads\.com)?(/author/show/(\d+)[^"]*)"[^>]*>\s*(?:<span[^>]*>)?([^<]+?)(?:</span>)?\s*</a>"#)
+        .unwrap()
+});
+
+/// Parse a Goodreads author search results page into candidates.
+pub fn parse_author_search_html(html: &str) -> Vec<GoodreadsAuthorCandidate> {
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for cap in RE_AUTHOR_ROW.captures_iter(html) {
+        let profile_url = cap[1].to_string();
+        let gr_key = cap[2].to_string();
+        let name = decode_html_entities(cap[3].trim());
+
+        if name.is_empty() || !seen.insert(gr_key.clone()) {
+            continue;
+        }
+
+        results.push(GoodreadsAuthorCandidate {
+            gr_key,
+            name,
+            profile_url,
+        });
+    }
+
+    results
+}
+
+// =============================================================================
+// Series list page parsing (for author's series)
+// =============================================================================
+
+/// A series entry from a GR author series list page.
+#[derive(Debug, Clone)]
+pub struct GoodreadsSeriesEntry {
+    pub name: String,
+    pub gr_key: String,
+    pub book_count: i32,
+}
+
+static RE_SERIES_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?si)<a[^>]*href="/series/(\d+)-[^"]*"[^>]*>([^<]+)</a>"#).unwrap()
+});
+
+static RE_SERIES_BOOK_COUNT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(\d+)\s+(?:books?|primary works?)"#).unwrap());
+
+static RE_NEXT_PAGE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"<a[^>]*class="next_page"[^>]*href="([^"]+)""#).unwrap());
+
+/// Parse a Goodreads series list page into series entries.
+/// Returns (entries, has_next_page).
+pub fn parse_series_list_html(html: &str) -> (Vec<GoodreadsSeriesEntry>, bool) {
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Split by series link to process each series block.
+    // Each series block contains the link and nearby book count text.
+    for cap in RE_SERIES_LINK.captures_iter(html) {
+        let gr_key = cap[1].to_string();
+        let name = decode_html_entities(cap[2].trim());
+
+        if name.is_empty() || !seen.insert(gr_key.clone()) {
+            continue;
+        }
+
+        // Find book count near this match — look at the surrounding HTML context.
+        // The book count typically follows the series link in the same row/block.
+        let match_end = cap.get(0).unwrap().end();
+        let mut ctx_end = std::cmp::min(match_end + 500, html.len());
+        while ctx_end < html.len() && !html.is_char_boundary(ctx_end) {
+            ctx_end += 1;
+        }
+        let context = &html[match_end..ctx_end];
+        let book_count = RE_SERIES_BOOK_COUNT
+            .captures(context)
+            .and_then(|c| c[1].parse::<i32>().ok())
+            .unwrap_or(0);
+
+        results.push(GoodreadsSeriesEntry {
+            name,
+            gr_key,
+            book_count,
+        });
+    }
+
+    let has_next = RE_NEXT_PAGE.is_match(html);
+    (results, has_next)
+}
+
+// =============================================================================
+// Series detail page parsing (books in a series)
+// =============================================================================
+
+/// A book entry from a GR series detail page.
+#[derive(Debug, Clone)]
+pub struct GoodreadsSeriesBook {
+    pub title: String,
+    pub gr_key: String,
+    pub position: Option<f64>,
+    pub year: Option<i32>,
+}
+
+/// Matches position headers: <h3...>Book 1</h3>, <h3...>Book 2.5</h3>
+static RE_SERIES_HEADING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?si)<h3[^>]*>\s*Book\s+(\d+(?:\.\d+)?)\s*</h3>"#).unwrap());
+
+/// Matches book title links after a heading.
+static RE_SERIES_BOOK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?si)<a[^>]*href="(?:https://www\.goodreads\.com)?/book/show/(\d+)[^"]*"[^>]*>\s*(?:<span[^>]*>)?([^<]+?)(?:</span>)?\s*</a>"#,
+    )
+    .unwrap()
+});
+
+static RE_SERIES_YEAR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"published\s+(\d{4})"#).unwrap());
+
+/// Decode common HTML entities in a string.
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+/// Returns true if a title looks like an omnibus/collection rather than a single work.
+fn is_collection_title(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    // Match common omnibus/collection patterns.
+    lower.contains("collection")
+        || lower.contains("omnibus")
+        || lower.contains("complete ")
+        || lower.contains("books collection")
+        || lower.contains(" set,")
+        || lower.contains(" set ")
+        || (lower.contains("vol.") && lower.contains('-'))
+}
+
+/// Parse a Goodreads series detail page into book entries.
+/// Returns (books, has_next_page).
+///
+/// Strategy: find all `<h3>Book N</h3>` headings, then find the first book `<a>` link
+/// after each heading. This pairs positions with titles reliably regardless of HTML structure.
+pub fn parse_series_detail_html(html: &str) -> (Vec<GoodreadsSeriesBook>, bool) {
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Collect all position headings with their byte offsets.
+    let headings: Vec<(usize, f64)> = RE_SERIES_HEADING
+        .captures_iter(html)
+        .filter_map(|cap| {
+            let pos = cap[1].parse::<f64>().ok()?;
+            Some((cap.get(0).unwrap().end(), pos))
+        })
+        .collect();
+
+    // For each heading, find the first book link after it.
+    for (i, &(heading_end, position)) in headings.iter().enumerate() {
+        // Search region: from this heading to the next heading (or end of doc).
+        let search_end = headings.get(i + 1).map(|h| h.0).unwrap_or(html.len());
+        let search_region = &html[heading_end..search_end];
+
+        let Some(book_cap) = RE_SERIES_BOOK.captures(search_region) else {
+            continue;
+        };
+
+        let gr_key = book_cap[1].to_string();
+        let raw_title = book_cap[2].trim().to_string();
+        let title = decode_html_entities(&raw_title);
+
+        if title.is_empty() || !seen.insert(gr_key.clone()) {
+            continue;
+        }
+
+        // Filter out omnibus/collection editions.
+        if is_collection_title(&title) {
+            continue;
+        }
+
+        // Look for year after the book link.
+        let book_end = heading_end + book_cap.get(0).unwrap().end();
+        let mut year_end = std::cmp::min(book_end + 500, html.len());
+        while year_end < html.len() && !html.is_char_boundary(year_end) {
+            year_end += 1;
+        }
+        let post_context = &html[book_end..year_end];
+        let year = RE_SERIES_YEAR
+            .captures(post_context)
+            .and_then(|c| c[1].parse::<i32>().ok());
+
+        // Strip series info from title: "Book Title (Series, #1)" → "Book Title"
+        let clean_title = if RE_TITLE_SERIES.is_match(&title) {
+            RE_TITLE_SERIES.replace(&title, "").trim().to_string()
+        } else {
+            title
+        };
+
+        results.push(GoodreadsSeriesBook {
+            title: clean_title,
+            gr_key,
+            position: Some(position),
+            year,
+        });
+    }
+
+    let has_next = RE_NEXT_PAGE.is_match(html);
+    (results, has_next)
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

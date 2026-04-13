@@ -102,18 +102,20 @@ impl AuthorDb for SqliteDb {
         let name = req.name.unwrap_or(current.name);
         let sort_name = req.sort_name.or(current.sort_name);
         let ol_key = req.ol_key.or(current.ol_key);
+        let gr_key = req.gr_key.or(current.gr_key);
         let monitored = req.monitored.unwrap_or(current.monitored);
         let monitor_new_items = req.monitor_new_items.unwrap_or(current.monitor_new_items);
         let monitor_since = req.monitor_since.or(current.monitor_since);
 
         sqlx::query(
-            "UPDATE authors SET name = ?, sort_name = ?, ol_key = ?, \
+            "UPDATE authors SET name = ?, sort_name = ?, ol_key = ?, gr_key = ?, \
              monitored = ?, monitor_new_items = ?, monitor_since = ? \
              WHERE id = ? AND user_id = ?",
         )
         .bind(&name)
         .bind(&sort_name)
         .bind(&ol_key)
+        .bind(&gr_key)
         .bind(monitored)
         .bind(monitor_new_items)
         .bind(monitor_since.map(|dt| dt.to_rfc3339()))

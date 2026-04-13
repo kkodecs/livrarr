@@ -15,6 +15,10 @@ import { WorksPage } from "@/pages/works/WorksPage";
 // Lazy loaded
 const WorkDetailPage = lazy(() => import("@/pages/work-detail/WorkDetailPage"));
 const AuthorsPage = lazy(() => import("@/pages/authors/AuthorsPage"));
+const SeriesPage = lazy(() => import("@/pages/series/SeriesPage"));
+const SeriesDetailPage = lazy(
+  () => import("@/pages/series/SeriesDetailPage"),
+);
 const AuthorDetailPage = lazy(
   () => import("@/pages/author-detail/AuthorDetailPage"),
 );
@@ -167,6 +171,22 @@ export function App() {
                 element={
                   <LazyPage>
                     <WorkDetailPage />
+                  </LazyPage>
+                }
+              />
+              <Route
+                path="series"
+                element={
+                  <LazyPage>
+                    <SeriesPage />
+                  </LazyPage>
+                }
+              />
+              <Route
+                path="series/:id"
+                element={
+                  <LazyPage>
+                    <SeriesDetailPage />
                   </LazyPage>
                 }
               />

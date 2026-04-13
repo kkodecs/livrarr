@@ -330,6 +330,7 @@ pub struct Work {
     pub author_id: Option<AuthorId>,
     pub description: Option<String>,
     pub year: Option<i32>,
+    pub series_id: Option<i64>,
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
     pub genres: Option<Vec<String>>,
@@ -387,6 +388,20 @@ pub struct Author {
     pub monitored: bool,
     pub monitor_new_items: bool,
     pub monitor_since: Option<DateTime<Utc>>,
+    pub added_at: DateTime<Utc>,
+}
+
+/// Series entity — tracks a monitored book series for an author.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Series {
+    pub id: i64,
+    pub user_id: UserId,
+    pub author_id: AuthorId,
+    pub name: String,
+    pub gr_key: String,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+    pub work_count: i32,
     pub added_at: DateTime<Utc>,
 }
 

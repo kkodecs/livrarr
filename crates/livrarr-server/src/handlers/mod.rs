@@ -20,6 +20,7 @@ pub mod readarr_import;
 pub mod release;
 pub mod remote_path_mapping;
 pub mod root_folder;
+pub mod series;
 pub mod setup;
 pub mod system;
 pub mod user;

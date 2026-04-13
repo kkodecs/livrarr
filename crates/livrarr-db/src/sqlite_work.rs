@@ -4,8 +4,8 @@ use sqlx::Row;
 use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{map_db_err, parse_dt};
 use crate::{
-    CreateWorkDbRequest, DbError, EnrichmentStatus, NarrationType, UpdateWorkEnrichmentDbRequest,
-    UpdateWorkUserFieldsDbRequest, Work, WorkDb, WorkId,
+    AuthorId, CreateWorkDbRequest, DbError, EnrichmentStatus, NarrationType,
+    UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, Work, WorkDb, WorkId,
 };
 
 fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
@@ -55,6 +55,9 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
             .try_get("description")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         year: row.try_get("year").map_err(|e| DbError::Io(Box::new(e)))?,
+        series_id: row
+            .try_get::<Option<i64>, _>("series_id")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         series_name: row
             .try_get("series_name")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -218,6 +221,21 @@ impl WorkDb for SqliteDb {
         rows.into_iter().map(row_to_work).collect()
     }
 
+    async fn list_works_by_author(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<Vec<Work>, DbError> {
+        let rows =
+            sqlx::query("SELECT * FROM works WHERE user_id = ? AND author_id = ? ORDER BY id")
+                .bind(user_id)
+                .bind(author_id)
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_work).collect()
+    }
+
     async fn list_works_paginated(
         &self,
         user_id: UserId,
@@ -251,8 +269,9 @@ impl WorkDb for SqliteDb {
         let now = Utc::now().to_rfc3339();
         let id = sqlx::query(
             "INSERT INTO works (user_id, title, author_name, author_id, ol_key, gr_key, year, \
-             cover_url, enrichment_status, added_at, metadata_source, detail_url, language, import_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+             cover_url, enrichment_status, added_at, metadata_source, detail_url, language, \
+             import_id, series_id, series_name, series_position, monitor_ebook, monitor_audiobook) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(req.user_id)
         .bind(&req.title)
@@ -267,6 +286,11 @@ impl WorkDb for SqliteDb {
         .bind(&req.detail_url)
         .bind(&req.language)
         .bind(&req.import_id)
+        .bind(req.series_id)
+        .bind(&req.series_name)
+        .bind(req.series_position)
+        .bind(req.monitor_ebook)
+        .bind(req.monitor_audiobook)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?
