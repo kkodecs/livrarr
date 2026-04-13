@@ -66,7 +66,7 @@ pub struct ProviderWorkDetail {
     pub publish_date: Option<String>,
     pub isbn_13: Option<String>,
     pub cover_url: Option<String>,
-    pub hardcover_id: Option<String>,
+    pub hc_key: Option<String>,
     pub asin: Option<String>,
     pub narrator: Option<Vec<String>>,
     pub narration_type: Option<NarrationType>,
@@ -154,7 +154,7 @@ pub trait HardcoverMatcher: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct HardcoverCandidate {
-    pub hardcover_id: String,
+    pub hc_key: String,
     pub title: String,
     pub author_name: Option<String>,
     pub users_read_count: i64,

@@ -191,7 +191,8 @@ export interface WorkDetailResponse {
   publisher: string | null;
   publishDate: string | null;
   olKey: string | null;
-  hardcoverId: string | null;
+  hcKey: string | null;
+  grKey: string | null;
   isbn13: string | null;
   asin: string | null;
   narrator: string[] | null;
