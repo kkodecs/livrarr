@@ -9,6 +9,7 @@ pub mod filesystem;
 pub mod history;
 pub mod import;
 pub mod indexer;
+pub mod list_import;
 pub mod manual_import;
 pub mod mediacover;
 pub mod notification;
