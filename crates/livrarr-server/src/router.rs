@@ -278,6 +278,9 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             auth_middleware,
         ));
 
+    // Stream endpoint — token auth via query param for HTML5 audio/video.
+    let stream = Router::new().route("/stream/{id}", get(handlers::workfile::stream));
+
     // Media cover serving (no auth — images loaded by browser directly).
     let mediacover = Router::new()
         .route(
@@ -294,6 +297,7 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
     let api = Router::new()
         .merge(public)
         .merge(protected)
+        .merge(stream)
         .merge(mediacover)
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(GovernorLayer::new(global_governor));

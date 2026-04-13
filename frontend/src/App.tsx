@@ -32,6 +32,10 @@ const ReadarrImportPage = lazy(
   () => import("@/pages/import/ReadarrImportPage"),
 );
 
+// Readers (lazy, full-page — no AppLayout)
+const ReaderPage = lazy(() => import("@/pages/reader/ReaderPage"));
+const ListenPage = lazy(() => import("@/pages/reader/ListenPage"));
+
 // Settings (lazy)
 const MediaManagementPage = lazy(
   () => import("@/pages/settings/media-management/MediaManagementPage"),
@@ -105,6 +109,28 @@ export function App() {
                 <GuestGuard>
                   <LoginPage />
                 </GuestGuard>
+              }
+            />
+
+            {/* Full-page readers — authenticated but no AppLayout */}
+            <Route
+              path="/read/:id"
+              element={
+                <AuthGuard>
+                  <Suspense fallback={<FullPageLoading />}>
+                    <ReaderPage />
+                  </Suspense>
+                </AuthGuard>
+              }
+            />
+            <Route
+              path="/listen/:id"
+              element={
+                <AuthGuard>
+                  <Suspense fallback={<FullPageLoading />}>
+                    <ListenPage />
+                  </Suspense>
+                </AuthGuard>
               }
             />
 

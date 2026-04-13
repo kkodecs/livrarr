@@ -404,6 +404,34 @@ export const getLibraryFile = (id: number) =>
 export const deleteLibraryFile = (id: number) =>
   apiFetch<void>(`/workfile/${id}`, { method: "DELETE" });
 
+// Playback progress
+export const getPlaybackProgress = (id: number) =>
+  apiFetch<{
+    library_item_id: number;
+    position: string;
+    progress_pct: number;
+    updated_at: string;
+  }>(`/workfile/${id}/progress`);
+export const updatePlaybackProgress = (
+  id: number,
+  position: string,
+  progress_pct: number,
+) =>
+  apiFetch<{ success: boolean }>(`/workfile/${id}/progress`, {
+    method: "PUT",
+    body: JSON.stringify({ position, progress_pct }),
+  });
+
+// File download URL (for reader/player — returns the API path, not a fetch)
+export const getDownloadUrl = (id: number) =>
+  `/api/v1/workfile/${id}/download`;
+
+// Stream URL with token auth (for HTML5 audio/video elements that can't send headers)
+export const getStreamUrl = (id: number) => {
+  const token = localStorage.getItem("livrarr_token") ?? "";
+  return `/api/v1/stream/${id}?token=${encodeURIComponent(token)}`;
+};
+
 // Unmapped Files
 export const scanRootFolder = (id: number) =>
   apiFetch<ScanResult>(`/rootfolder/${id}/scan`, { method: "POST" });

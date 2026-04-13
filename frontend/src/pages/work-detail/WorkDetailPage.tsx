@@ -14,6 +14,8 @@ import {
   Check,
   Loader2,
   Book,
+  BookOpen,
+  Play,
   Headphones,
   ExternalLink,
   Clock,
@@ -408,7 +410,11 @@ function getFileExtension(path: string): string {
   return dot >= 0 ? path.slice(dot + 1).toLowerCase() : "";
 }
 
+const READABLE_FORMATS = new Set(["epub", "pdf"]);
+const LISTENABLE_FORMATS = new Set(["m4b", "m4a", "mp3", "flac", "ogg"]);
+
 function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
   const [sendingId, setSendingId] = useState<number | null>(null);
@@ -506,6 +512,24 @@ function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
                     {formatRelativeDate(item.importedAt)}
                   </td>
                   <td className="px-3 py-2 flex items-center justify-end gap-1">
+                    {READABLE_FORMATS.has(ext) && (
+                      <button
+                        onClick={() => navigate(`/read/${item.id}`)}
+                        className="rounded p-1 text-muted hover:text-brand"
+                        title="Read"
+                      >
+                        <BookOpen size={14} />
+                      </button>
+                    )}
+                    {LISTENABLE_FORMATS.has(ext) && (
+                      <button
+                        onClick={() => navigate(`/listen/${item.id}?workId=${work.id}`)}
+                        className="rounded p-1 text-muted hover:text-brand"
+                        title="Listen"
+                      >
+                        <Play size={14} />
+                      </button>
+                    )}
                     {canSend && (
                       <button
                         onClick={() => handleSendEmail(item.id)}

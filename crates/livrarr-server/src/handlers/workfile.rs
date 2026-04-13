@@ -4,7 +4,7 @@ use axum::Json;
 
 use crate::state::AppState;
 use crate::{ApiError, AuthContext, LibraryItemResponse, PaginatedResponse, PaginationQuery};
-use livrarr_db::{ConfigDb, LibraryItemDb, PlaybackProgressDb, RootFolderDb};
+use livrarr_db::{ConfigDb, LibraryItemDb, PlaybackProgressDb, RootFolderDb, SessionDb};
 
 fn to_response(li: &livrarr_domain::LibraryItem) -> LibraryItemResponse {
     LibraryItemResponse {
@@ -193,6 +193,62 @@ pub async fn download(
         content_type.parse().unwrap(),
     );
     Ok(Response::from_parts(parts, body))
+}
+
+/// GET /api/v1/stream/:id?token=<bearer_token>
+/// Token-authenticated streaming endpoint for HTML5 audio/video elements
+/// which cannot send custom headers.
+pub async fn stream(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(params): Query<StreamQuery>,
+    req: axum::http::Request<axum::body::Body>,
+) -> Result<Response, ApiError> {
+    let token = params.token.as_deref().ok_or(ApiError::Unauthorized)?;
+
+    // Authenticate via token (same as Bearer auth).
+    use crate::auth_crypto::{AuthCryptoService, RealAuthCrypto};
+    let crypto = RealAuthCrypto;
+    let token_hash = crypto
+        .hash_token(token)
+        .await
+        .map_err(|_| ApiError::Unauthorized)?;
+
+    let session = state
+        .db
+        .get_session(&token_hash)
+        .await
+        .map_err(|_| ApiError::Unauthorized)?
+        .ok_or(ApiError::Unauthorized)?;
+
+    let path = resolve_file_path(&state.db, session.user_id, id).await?;
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let content_type = mime_for_ext(&ext);
+
+    use tower::Service;
+    use tower_http::services::ServeFile;
+    let mut svc = ServeFile::new(&path);
+    let resp = svc
+        .call(req)
+        .await
+        .map_err(|e| ApiError::Internal(format!("File serve error: {e}")))?;
+
+    let (mut parts, body) = resp.into_response().into_parts();
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        content_type.parse().unwrap(),
+    );
+    Ok(Response::from_parts(parts, body))
+}
+
+#[derive(serde::Deserialize)]
+pub struct StreamQuery {
+    pub token: Option<String>,
 }
 
 /// GET /api/v1/workfile/:id/progress
