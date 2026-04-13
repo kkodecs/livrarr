@@ -84,6 +84,7 @@ impl AuthorApi for SecondaryApiImpl {
                 ol_key: Some(req.ol_key),
                 gr_key: None,
                 hc_key: None,
+                import_id: None,
             })
             .await
             .map_err(db_err)?;
@@ -838,6 +839,7 @@ impl SecondaryApiImpl {
                 ol_key: None,
                 gr_key: None,
                 hc_key: None,
+                import_id: None,
             })
             .await
             .unwrap();
@@ -879,6 +881,7 @@ impl SecondaryApiImpl {
                 metadata_source: None,
                 detail_url: None,
                 language: None,
+                import_id: None,
             })
             .await
             .unwrap();
@@ -894,6 +897,7 @@ impl SecondaryApiImpl {
                 ),
                 media_type: MediaType::Ebook,
                 file_size: 1234,
+                import_id: None,
             })
             .await
             .unwrap();
@@ -936,6 +940,7 @@ impl SecondaryApiImpl {
                 metadata_source: None,
                 detail_url: None,
                 language: None,
+                import_id: None,
             })
             .await
             .unwrap();
@@ -948,6 +953,7 @@ impl SecondaryApiImpl {
                 path: path_str.clone(),
                 media_type: MediaType::Ebook,
                 file_size: 12,
+                import_id: None,
             })
             .await
             .unwrap();

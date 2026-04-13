@@ -13,6 +13,7 @@ pub mod handlers;
 pub mod jobs;
 pub mod matching;
 pub mod middleware;
+pub mod readarr_client;
 pub mod router;
 pub mod state;
 

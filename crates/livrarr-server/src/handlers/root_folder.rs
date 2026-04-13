@@ -211,6 +211,7 @@ pub async fn scan(
                             path: relative_str,
                             media_type,
                             file_size,
+                            import_id: None,
                         })
                         .await
                     {

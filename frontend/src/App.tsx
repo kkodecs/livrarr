@@ -28,6 +28,9 @@ const ManualImportPage = lazy(
   () => import("@/pages/manual-import/ManualImportPage"),
 );
 const MissingPage = lazy(() => import("@/pages/wanted/MissingPage"));
+const ReadarrImportPage = lazy(
+  () => import("@/pages/import/ReadarrImportPage"),
+);
 
 // Settings (lazy)
 const MediaManagementPage = lazy(
@@ -167,6 +170,14 @@ export function App() {
                 element={
                   <LazyPage>
                     <ManualImportPage />
+                  </LazyPage>
+                }
+              />
+              <Route
+                path="import/readarr"
+                element={
+                  <LazyPage>
+                    <ReadarrImportPage />
                   </LazyPage>
                 }
               />
