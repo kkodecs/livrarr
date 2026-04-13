@@ -426,6 +426,12 @@ export const updatePlaybackProgress = (
 export const getDownloadUrl = (id: number) =>
   `/api/v1/workfile/${id}/download`;
 
+// Stream URL with token auth (for HTML5 audio/video elements that can't send headers)
+export const getStreamUrl = (id: number) => {
+  const token = localStorage.getItem("livrarr_token") ?? "";
+  return `/api/v1/stream/${id}?token=${encodeURIComponent(token)}`;
+};
+
 // Unmapped Files
 export const scanRootFolder = (id: number) =>
   apiFetch<ScanResult>(`/rootfolder/${id}/scan`, { method: "POST" });

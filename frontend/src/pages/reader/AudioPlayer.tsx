@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  getDownloadUrl,
+  getStreamUrl,
   getPlaybackProgress,
   updatePlaybackProgress,
 } from "@/api";
@@ -45,8 +45,7 @@ export function AudioPlayer({ libraryItemId, workTitle, authorName, workId }: Pr
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
 
-  const url = getDownloadUrl(libraryItemId);
-  const token = localStorage.getItem("livrarr_token") ?? "";
+  const streamUrl = getStreamUrl(libraryItemId);
   const coverUrl = `/api/v1/mediacover/${workId}/cover.jpg`;
 
   // Load saved progress.
@@ -166,30 +165,6 @@ export function AudioPlayer({ libraryItemId, workTitle, authorName, workId }: Pr
     if (audioRef.current) audioRef.current.volume = v;
   };
 
-  // We need to pass auth headers. HTML5 audio doesn't support custom headers,
-  // so we fetch the blob and create an object URL.
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
-  const blobUrlRef = useRef<string | null>(null);
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: controller.signal,
-    })
-      .then((res) => res.blob())
-      .then((blob) => {
-        const objUrl = URL.createObjectURL(blob);
-        blobUrlRef.current = objUrl;
-        setBlobUrl(objUrl);
-      })
-      .catch(() => {});
-    return () => {
-      controller.abort();
-      if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, token]);
-
   return (
     <div className="flex h-screen flex-col bg-zinc-900">
       {/* Top bar */}
@@ -292,17 +267,15 @@ export function AudioPlayer({ libraryItemId, workTitle, authorName, workId }: Pr
         </div>
       </div>
 
-      {/* Hidden audio element */}
-      {blobUrl && (
-        <audio
-          ref={audioRef}
-          src={blobUrl}
-          onTimeUpdate={onTimeUpdate}
-          onLoadedMetadata={onLoadedMetadata}
-          onEnded={() => setPlaying(false)}
-          preload="metadata"
-        />
-      )}
+      {/* Hidden audio element — uses token-authenticated stream URL */}
+      <audio
+        ref={audioRef}
+        src={streamUrl}
+        onTimeUpdate={onTimeUpdate}
+        onLoadedMetadata={onLoadedMetadata}
+        onEnded={() => setPlaying(false)}
+        preload="metadata"
+      />
     </div>
   );
 }
