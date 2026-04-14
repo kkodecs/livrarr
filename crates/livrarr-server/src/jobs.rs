@@ -366,7 +366,46 @@ async fn download_poller_tick(state: AppState, _cancel: CancellationToken) -> Re
         }
     }
 
+    // Retry failed imports with exponential backoff (max 5 retries).
+    retry_failed_imports(&state).await;
+
     Ok(())
+}
+
+/// Retry importFailed grabs whose backoff has expired.
+async fn retry_failed_imports(state: &AppState) {
+    const MAX_RETRIES: i32 = 5;
+
+    let retriable = match state.db.list_retriable_grabs(MAX_RETRIES).await {
+        Ok(grabs) => grabs,
+        Err(e) => {
+            warn!("poller: list_retriable_grabs failed: {e}");
+            return;
+        }
+    };
+
+    for grab in retriable {
+        info!(
+            "import retry: grab {} '{}' (attempt {})",
+            grab.id,
+            grab.title,
+            grab.import_retry_count + 1
+        );
+        // Increment retry count before attempting (so backoff advances even on crash).
+        let _ = state
+            .db
+            .increment_import_retry(grab.user_id, grab.id)
+            .await;
+        // try_set_importing accepts importFailed — same atomic transition as normal imports.
+        let ok = state
+            .db
+            .try_set_importing(grab.user_id, grab.id)
+            .await
+            .unwrap_or(false);
+        if ok {
+            spawn_import(state, grab.user_id, grab.id);
+        }
+    }
 }
 
 /// Poll qBittorrent for completed torrents — existing logic extracted.
@@ -1195,7 +1234,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
 // Enrichment Retry Tick (JOBS-ENRICH-001)
 // ---------------------------------------------------------------------------
 
-async fn enrichment_retry_tick(state: AppState, _cancel: CancellationToken) -> Result<(), String> {
+pub async fn enrichment_retry_tick(state: AppState, _cancel: CancellationToken) -> Result<(), String> {
     let works = state
         .db
         .list_works_for_retry()

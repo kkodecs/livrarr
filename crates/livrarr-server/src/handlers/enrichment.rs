@@ -254,6 +254,136 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
         req.language = cfg.languages.first().cloned();
     }
 
+    // --- 4. Goodreads fallback for cover ---
+    // If no cover from Hardcover/OL (or cover is a tiny thumbnail < 50KB),
+    // search GR by title+author and fetch hi-res cover from the detail page.
+    let cover_too_small = if let Some(ref url) = req.cover_url {
+        // Probe the URL — if it's under 50KB it's a thumbnail, not a real cover.
+        match state.http_client.get(url).send().await {
+            Ok(resp) => resp
+                .content_length()
+                .map(|len| len < 50_000)
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
+    let gr_eligible = (req.cover_url.is_none() || cover_too_small) && !work.cover_manual;
+    let budget_ok = budget.elapsed() < max_budget;
+    tracing::info!(
+        work_id = work.id,
+        cover_url = ?req.cover_url,
+        cover_too_small,
+        cover_manual = work.cover_manual,
+        gr_eligible,
+        budget_ok,
+        budget_elapsed_ms = budget.elapsed().as_millis() as u64,
+        "GR cover fallback check"
+    );
+    if gr_eligible && budget_ok {
+        // Resolve a GR detail URL via one of three strategies (in priority order):
+        //   1. Direct lookup by gr_key (most reliable, skips search entirely)
+        //   2. Search by title+author
+        //   3. Search with ASCII-stripped title (fallback for titles with diacritics)
+        let detail_url_opt: Option<String> =
+            if let Some(gr_key) = work.gr_key.as_deref().filter(|k| !k.is_empty()) {
+                let url = format!("https://www.goodreads.com/book/show/{gr_key}");
+                tracing::info!(work_id = work.id, gr_key, "GR direct lookup by gr_key");
+                Some(url)
+            } else {
+                state.goodreads_rate_limiter.acquire().await;
+                let results = gr_search(state, work.id, title, author, per_provider).await;
+                let results = if results.is_empty() && title.chars().any(|c| !c.is_ascii()) {
+                    // Title has diacritics — strip non-ASCII and retry.
+                    let ascii_title: String = title.chars().filter(|c| c.is_ascii()).collect();
+                    tracing::info!(
+                        work_id = work.id,
+                        ascii_title = %ascii_title,
+                        "GR search retry with ASCII title"
+                    );
+                    state.goodreads_rate_limiter.acquire().await;
+                    gr_search(state, work.id, &ascii_title, author, per_provider).await
+                } else {
+                    results
+                };
+                results.into_iter().next().map(|top| {
+                    if top.detail_url.starts_with('/') {
+                        format!("https://www.goodreads.com{}", top.detail_url)
+                    } else {
+                        top.detail_url
+                    }
+                })
+            };
+
+        if let Some(detail_url) = detail_url_opt {
+            if livrarr_metadata::goodreads::validate_detail_url(&detail_url) {
+                state.goodreads_rate_limiter.acquire().await;
+                let detail_result = tokio::time::timeout(per_provider, async {
+                    let resp = state
+                        .http_client
+                        .get(&detail_url)
+                        .header(
+                            "User-Agent",
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                             (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        )
+                        .send()
+                        .await
+                        .map_err(|e| format!("GR detail: {e}"))?;
+                    if !resp.status().is_success() {
+                        return Err(format!("GR detail HTTP {}", resp.status()));
+                    }
+                    resp.text()
+                        .await
+                        .map_err(|e| format!("GR detail body: {e}"))
+                })
+                .await;
+
+                match &detail_result {
+                    Ok(Ok(_)) => {
+                        tracing::info!(work_id = work.id, url = %detail_url, "GR detail page fetched")
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(work_id = work.id, error = %e, "GR detail fetch failed")
+                    }
+                    Err(_) => tracing::warn!(work_id = work.id, "GR detail fetch timed out"),
+                }
+                if let Ok(Ok(detail_html)) = detail_result {
+                    let detail = livrarr_metadata::goodreads::parse_detail_html(&detail_html);
+                    tracing::info!(
+                        work_id = work.id,
+                        has_detail = detail.is_some(),
+                        cover = ?detail.as_ref().and_then(|d| d.cover_url.as_ref()),
+                        "GR detail parsed"
+                    );
+                    if let Some(detail) = detail {
+                        if let Some(ref cover) = detail.cover_url {
+                            if livrarr_metadata::goodreads::validate_cover_url(cover) {
+                                req.cover_url = Some(cover.clone());
+                                if !sources.contains(&"goodreads") {
+                                    sources.push("goodreads");
+                                }
+                            }
+                        }
+                        // Backfill description if still missing.
+                        if req.description.is_none() {
+                            req.description = detail.description;
+                        }
+                    }
+                }
+            }
+        }
+
+        // GR provided some data → don't leave status as Failed (stops the retry loop).
+        if req.enrichment_status == EnrichmentStatus::Failed
+            && (req.cover_url.is_some() || req.description.is_some())
+        {
+            req.enrichment_status = EnrichmentStatus::Partial;
+            req.enrichment_source = Some(sources.join("+"));
+        }
+    }
+
     // --- Download cover if we got a new URL ---
     if let Some(ref url) = req.cover_url {
         let covers_dir = state.data_dir.join("covers");
@@ -278,6 +408,66 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
     EnrichmentOutcome {
         request: req,
         messages,
+    }
+}
+
+/// Search GoodReads by title+author, return parsed results.
+/// Rate-limit call must happen *before* invoking this (for the first search);
+/// subsequent retries should acquire the limiter themselves before calling again.
+async fn gr_search(
+    state: &AppState,
+    work_id: i64,
+    title: &str,
+    author: &str,
+    timeout: std::time::Duration,
+) -> Vec<livrarr_metadata::goodreads::GoodreadsSearchResult> {
+    let search_url = format!(
+        "https://www.goodreads.com/search?q={}",
+        urlencoding::encode(&format!("{title} {author}"))
+    );
+    let result = tokio::time::timeout(timeout, async {
+        let resp = state
+            .http_client
+            .get(&search_url)
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            .send()
+            .await
+            .map_err(|e| format!("GR search: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("GR search HTTP {}", resp.status()));
+        }
+        resp.text()
+            .await
+            .map_err(|e| format!("GR read body: {e}"))
+    })
+    .await;
+
+    match &result {
+        Ok(Ok(_)) => tracing::info!(work_id, "GR search succeeded"),
+        Ok(Err(e)) => tracing::warn!(work_id, error = %e, "GR search failed"),
+        Err(_) => tracing::warn!(work_id, "GR search timed out"),
+    }
+
+    match result {
+        Ok(Ok(html)) => {
+            let results = livrarr_metadata::goodreads::parse_search_html(&html);
+            tracing::info!(work_id, count = results.len(), "GR search parsed");
+            if let Some(top) = results.first() {
+                tracing::info!(
+                    work_id,
+                    title = %top.title,
+                    detail_url = %top.detail_url,
+                    cover = ?top.cover_url,
+                    "GR top result"
+                );
+            }
+            results
+        }
+        _ => vec![],
     }
 }
 

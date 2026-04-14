@@ -30,8 +30,9 @@ import { EmptyState } from "@/components/Page/EmptyState";
 import { ConfirmModal } from "@/components/Page/ConfirmModal";
 import { cn } from "@/utils/cn";
 import { SortHeader } from "@/components/Page/SortHeader";
-import { formatRelativeDate, getCoverUrl } from "@/utils/format";
+import { formatRelativeDate } from "@/utils/format";
 import { MediaStatusRow } from "@/components/MediaStatusRow";
+import { BookCover } from "@/components/BookCover";
 import type {
   WorkDetailResponse,
   MediaType,
@@ -90,7 +91,8 @@ export function WorksPage() {
   const posterZoom = useUIStore((s) => s.posterZoom);
   const setPosterZoom = useUIStore((s) => s.setPosterZoom);
 
-  const [mediaTypeFilter, setMediaTypeFilter] = useState<MediaType | "">("");
+  const mediaTypeFilter = useUIStore((s) => s.worksMediaFilter) as MediaType | "";
+  const setMediaTypeFilter = useUIStore((s) => s.setWorksMediaFilter);
   const [searchQuery, setSearchQuery] = useState("");
 
   // Editor mode state
@@ -638,11 +640,11 @@ function TableView({
                   </td>
                 )}
                 <td className="px-3 py-2">
-                  <img
-                    src={getCoverUrl(work.id)}
-                    alt=""
-                    className="h-8 w-8 rounded object-cover"
-                    loading="lazy"
+                  <BookCover
+                    workId={work.id}
+                    title={work.title}
+                    className="h-8 w-8"
+                    iconSize={12}
                   />
                 </td>
                 <td className="px-3 py-2">
@@ -724,11 +726,11 @@ function PosterView({
               )}
             >
               <div className="aspect-[2/3] overflow-hidden">
-                <img
-                  src={getCoverUrl(work.id)}
-                  alt={work.title}
-                  className="h-full w-full object-cover transition-transform group-hover:scale-105"
-                  loading="lazy"
+                <BookCover
+                  workId={work.id}
+                  title={work.title}
+                  className="h-full w-full"
+                  iconSize={24}
                 />
               </div>
               <div className="p-2.5 space-y-1">
@@ -799,11 +801,11 @@ function OverviewView({
               </div>
             )}
             <div className="flex min-w-0 flex-1 gap-3 sm:gap-4">
-              <img
-                src={getCoverUrl(work.id)}
-                alt={work.title}
-                className="h-20 w-14 sm:h-28 sm:w-20 flex-shrink-0 rounded object-cover"
-                loading="lazy"
+              <BookCover
+                workId={work.id}
+                title={work.title}
+                className="h-20 w-14 sm:h-28 sm:w-20 flex-shrink-0"
+                iconSize={18}
               />
               <div className="min-w-0 flex-1">
                 <h3 className="font-medium text-zinc-100">

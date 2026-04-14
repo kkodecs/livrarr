@@ -145,6 +145,8 @@ async fn main() {
         readarr_import_progress: Arc::new(tokio::sync::Mutex::new(
             livrarr_server::handlers::readarr_import::ImportProgress::default(),
         )),
+        ol_rate_limiter: Arc::new(livrarr_server::state::OlRateLimiter::new()),
+        manual_import_scans: Arc::new(dashmap::DashMap::new()),
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).

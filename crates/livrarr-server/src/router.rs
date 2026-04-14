@@ -245,6 +245,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         // Manual import
         .route("/manualimport/scan", post(handlers::manual_import::scan))
         .route(
+            "/manualimport/progress/{scan_id}",
+            get(handlers::manual_import::scan_progress),
+        )
+        .route(
             "/manualimport/import",
             post(handlers::manual_import::import),
         )

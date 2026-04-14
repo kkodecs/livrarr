@@ -734,8 +734,18 @@ export interface ScanRequest {
 }
 
 export interface ScanResponse {
+  scanId: string;
   files: ScannedFile[];
   warnings: string[];
+  olTotal: number;
+  olCompleted: number;
+}
+
+export interface ScanProgressResponse {
+  files: ScannedFile[];
+  warnings: string[];
+  olTotal: number;
+  olCompleted: number;
 }
 
 export interface ScannedFile {
@@ -774,6 +784,7 @@ export interface ManualImportItem {
   title: string;
   author: string;
   deleteExisting: boolean;
+  language?: string;
 }
 
 export interface ManualImportResponse {
@@ -807,26 +818,34 @@ export interface ReadarrRootFolder {
 }
 
 export interface ImportPreviewResponse {
-  authors: ImportPreviewItem[];
-  works: ImportPreviewItem[];
-  files: ImportPreviewItem[];
-  skipped: ImportSkippedItem[];
+  authorsToCreate: number;
+  authorsExisting: number;
+  worksToCreate: number;
+  worksExisting: number;
+  filesToImport: number;
+  filesToSkip: number;
+  skippedItems: ImportSkippedItem[];
+  importFiles: ImportPreviewFileItem[];
 }
 
-export interface ImportPreviewItem {
-  name: string;
-  action: string;
-  details: string | null;
+export interface ImportPreviewFileItem {
+  title: string;
+  author: string;
+  path: string;
+  mediaType: string;
+  workStatus: "new" | "existing";
 }
 
 export interface ImportSkippedItem {
-  name: string;
+  title: string;
+  author: string;
   reason: string;
 }
 
 export interface ImportProgressResponse {
+  running: boolean;
   importId: string | null;
-  status: string;
+  phase: string;
   authorsProcessed: number;
   authorsTotal: number;
   worksProcessed: number;
@@ -834,7 +853,7 @@ export interface ImportProgressResponse {
   filesProcessed: number;
   filesTotal: number;
   filesSkipped: number;
-  error: string | null;
+  errors: string[];
 }
 
 export interface ImportHistoryItem {

@@ -56,6 +56,12 @@ pub struct PreviewRequest {
     pub api_key: String,
     pub readarr_root_folder_id: i64,
     pub livrarr_root_folder_id: i64,
+    #[serde(default)]
+    pub files_only: bool,
+    /// Path as seen inside Readarr's container (e.g. "/books").
+    pub container_path: Option<String>,
+    /// Equivalent path accessible to Livrarr (e.g. "/mnt/data/books").
+    pub host_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +74,7 @@ pub struct PreviewResponse {
     pub files_to_import: i64,
     pub files_to_skip: i64,
     pub skipped_items: Vec<SkippedItem>,
+    pub import_files: Vec<PreviewFileItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,6 +85,16 @@ pub struct SkippedItem {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewFileItem {
+    pub title: String,
+    pub author: String,
+    pub path: String,
+    pub media_type: String,
+    pub work_status: String, // "new" | "existing"
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartRequest {
@@ -85,6 +102,10 @@ pub struct StartRequest {
     pub api_key: String,
     pub readarr_root_folder_id: i64,
     pub livrarr_root_folder_id: i64,
+    #[serde(default)]
+    pub files_only: bool,
+    pub container_path: Option<String>,
+    pub host_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,6 +295,24 @@ fn validate_source_path(source: &str, readarr_root: &str) -> Result<PathBuf, Str
     Ok(canonical)
 }
 
+/// Translate a path from container-space to host-space using the optional
+/// container_path / host_path mapping. Returns the path unchanged if either
+/// side is absent or the path doesn't start with container_path.
+fn apply_path_translation(path: &str, container_path: Option<&str>, host_path: Option<&str>) -> String {
+    match (container_path, host_path) {
+        (Some(cp), Some(hp)) if !cp.is_empty() && !hp.is_empty() => {
+            let cp = cp.trim_end_matches('/');
+            let hp = hp.trim_end_matches('/');
+            if path.starts_with(cp) {
+                format!("{}{}", hp, &path[cp.len()..])
+            } else {
+                path.to_string()
+            }
+        }
+        _ => path.to_string(),
+    }
+}
+
 /// Try hardlink, fall back to copy with temp+rename.
 fn materialize_file(source: &Path, dest: &Path) -> Result<(), String> {
     // Ensure parent directory exists.
@@ -331,7 +370,7 @@ pub async fn connect(
     let client = ReadarrClient::new(
         &req.url,
         &req.api_key,
-        state.http_client_safe.inner().clone(),
+        state.http_client.inner().clone(),
     );
     let folders = client
         .root_folders()
@@ -361,45 +400,39 @@ pub async fn preview(
 ) -> Result<Json<PreviewResponse>, ApiError> {
     let user_id = auth.user.id;
 
-    // Fetch all data from Readarr.
     let client = ReadarrClient::new(
         &req.url,
         &req.api_key,
-        state.http_client_safe.inner().clone(),
+        state.http_client.inner().clone(),
     );
 
     let (authors, books, book_files, rd_folders) = fetch_all_readarr_data(&client).await?;
 
-    // Validate the selected Readarr root folder exists.
     let _readarr_root = rd_folders
         .iter()
         .find(|f| f.id == req.readarr_root_folder_id)
         .map(|f| f.path.clone())
         .ok_or_else(|| ApiError::BadRequest("Invalid Readarr root folder ID".into()))?;
 
-    // Get Livrarr root folder.
     let livrarr_root = state.db.get_root_folder(req.livrarr_root_folder_id).await?;
 
-    // Build maps.
     let author_map: HashMap<i64, &RdAuthor> = authors.iter().map(|a| (a.id, a)).collect();
     let mut book_files_by_book: HashMap<i64, Vec<&RdBookFile>> = HashMap::new();
     for bf in &book_files {
         book_files_by_book.entry(bf.book_id).or_default().push(bf);
     }
 
-    // Load existing authors and works for dedup.
     let existing_authors = state.db.list_authors(user_id).await?;
     let existing_works = state.db.list_works(user_id).await?;
 
-    let mut skipped_items = Vec::new();
+    let mut skipped_items: Vec<SkippedItem> = Vec::new();
+    let mut import_files: Vec<PreviewFileItem> = Vec::new();
     let mut authors_to_create = 0i64;
     let mut works_to_create = 0i64;
     let mut works_existing = 0i64;
-    let mut files_to_import = 0i64;
     let mut files_to_skip = 0i64;
 
-    // Track authors we'll create (by normalized name) to avoid counting duplicates.
-    let mut author_names_seen: HashMap<String, bool> = HashMap::new(); // true = existing
+    let mut author_names_seen: HashMap<String, bool> = HashMap::new();
     for a in &existing_authors {
         author_names_seen.insert(normalize_for_matching(&a.name), true);
     }
@@ -411,7 +444,6 @@ pub async fn preview(
             .unwrap_or("");
         let title = book.title.as_deref().unwrap_or("");
 
-        // Skip books with no author.
         if author_name.is_empty() {
             skipped_items.push(SkippedItem {
                 title: title.to_string(),
@@ -421,20 +453,46 @@ pub async fn preview(
             continue;
         }
 
-        // Author dedup.
+        // files_only mode: skip books that have no files in Readarr at all.
+        if req.files_only && !book_files_by_book.contains_key(&book.id) {
+            continue;
+        }
+
         let norm_author = normalize_for_matching(author_name);
         if !author_names_seen.contains_key(&norm_author) {
             author_names_seen.insert(norm_author.clone(), false);
             authors_to_create += 1;
-        } else if *author_names_seen.get(&norm_author).unwrap() {
-            // Existing author, already counted.
         }
 
-        // Check files for this book.
+        // Compute work status before file loop so we can annotate each file.
+        let edition = book.monitored_edition();
+        let isbn = edition.and_then(|e| e.isbn13.as_deref()).filter(|s| !s.is_empty());
+        let asin = edition.and_then(|e| e.asin.as_deref()).filter(|s| !s.is_empty());
+        let year = book.release_date.as_deref().and_then(extract_year);
+        let norm_title = normalize_for_matching(title);
+
+        let is_existing = if let Some(isbn_val) = isbn {
+            existing_works.iter().any(|w| w.isbn_13.as_deref() == Some(isbn_val))
+        } else if let Some(asin_val) = asin {
+            existing_works.iter().any(|w| w.asin.as_deref() == Some(asin_val))
+        } else {
+            existing_works.iter().any(|w| {
+                normalize_for_matching(&w.author_name) == norm_author
+                    && normalize_for_matching(&w.title) == norm_title
+                    && w.year == year
+            })
+        };
+
+        let work_status = if is_existing { "existing" } else { "new" };
+        if is_existing {
+            works_existing += 1;
+        } else {
+            works_to_create += 1;
+        }
+
         let files = book_files_by_book.get(&book.id);
         let file_list: Vec<&&RdBookFile> = files.map(|f| f.iter().collect()).unwrap_or_default();
 
-        // Multi-file audiobook detection.
         let audiobook_count = file_list
             .iter()
             .filter(|f| {
@@ -442,6 +500,7 @@ pub async fn preview(
                 resolve_media_type(qid, &f.path) == Some(MediaType::Audiobook)
             })
             .count();
+
         if audiobook_count > 1 {
             skipped_items.push(SkippedItem {
                 title: title.to_string(),
@@ -449,7 +508,6 @@ pub async fn preview(
                 reason: format!("Multi-file audiobook ({audiobook_count} files)"),
             });
             files_to_skip += audiobook_count as i64;
-            // Still count non-audiobook files for this book.
             let non_audio: Vec<_> = file_list
                 .iter()
                 .filter(|f| {
@@ -459,90 +517,78 @@ pub async fn preview(
                 .collect();
             for f in &non_audio {
                 let qid = extract_quality_id(f);
-                if resolve_media_type(qid, &f.path).is_none() {
-                    files_to_skip += 1;
-                    skipped_items.push(SkippedItem {
-                        title: title.to_string(),
-                        author: author_name.to_string(),
-                        reason: format!("Unknown format: {}", f.path),
-                    });
-                } else {
-                    let dest = build_dest_path(&livrarr_root.path, author_name, title, &f.path);
-                    if dest.exists() {
+                match resolve_media_type(qid, &f.path) {
+                    None => {
                         files_to_skip += 1;
                         skipped_items.push(SkippedItem {
                             title: title.to_string(),
                             author: author_name.to_string(),
-                            reason: "Destination already exists".to_string(),
+                            reason: format!("Unknown format: {}", f.path),
                         });
-                    } else {
-                        files_to_import += 1;
+                    }
+                    Some(mt) => {
+                        let dest = build_dest_path(&livrarr_root.path, author_name, title, &f.path);
+                        if dest.exists() {
+                            files_to_skip += 1;
+                            skipped_items.push(SkippedItem {
+                                title: title.to_string(),
+                                author: author_name.to_string(),
+                                reason: "Destination already exists".to_string(),
+                            });
+                        } else {
+                            import_files.push(PreviewFileItem {
+                                title: title.to_string(),
+                                author: author_name.to_string(),
+                                path: f.path.clone(),
+                                media_type: match mt {
+                                    MediaType::Ebook => "ebook".to_string(),
+                                    MediaType::Audiobook => "audiobook".to_string(),
+                                },
+                                work_status: work_status.to_string(),
+                            });
+                        }
                     }
                 }
             }
         } else {
-            // Process each file individually.
             for f in &file_list {
                 let qid = extract_quality_id(f);
-                if resolve_media_type(qid, &f.path).is_none() {
-                    files_to_skip += 1;
-                    skipped_items.push(SkippedItem {
-                        title: title.to_string(),
-                        author: author_name.to_string(),
-                        reason: format!("Unknown format: {}", f.path),
-                    });
-                    continue;
-                }
-                let dest = build_dest_path(&livrarr_root.path, author_name, title, &f.path);
-                if dest.exists() {
-                    files_to_skip += 1;
-                    skipped_items.push(SkippedItem {
-                        title: title.to_string(),
-                        author: author_name.to_string(),
-                        reason: "Destination already exists".to_string(),
-                    });
-                } else {
-                    files_to_import += 1;
+                match resolve_media_type(qid, &f.path) {
+                    None => {
+                        files_to_skip += 1;
+                        skipped_items.push(SkippedItem {
+                            title: title.to_string(),
+                            author: author_name.to_string(),
+                            reason: format!("Unknown format: {}", f.path),
+                        });
+                    }
+                    Some(mt) => {
+                        let dest = build_dest_path(&livrarr_root.path, author_name, title, &f.path);
+                        if dest.exists() {
+                            files_to_skip += 1;
+                            skipped_items.push(SkippedItem {
+                                title: title.to_string(),
+                                author: author_name.to_string(),
+                                reason: "Destination already exists".to_string(),
+                            });
+                        } else {
+                            import_files.push(PreviewFileItem {
+                                title: title.to_string(),
+                                author: author_name.to_string(),
+                                path: f.path.clone(),
+                                media_type: match mt {
+                                    MediaType::Ebook => "ebook".to_string(),
+                                    MediaType::Audiobook => "audiobook".to_string(),
+                                },
+                                work_status: work_status.to_string(),
+                            });
+                        }
+                    }
                 }
             }
         }
-
-        // Work dedup: ISBN/ASIN first, then author+title+year.
-        let edition = book.monitored_edition();
-        let isbn = edition
-            .and_then(|e| e.isbn13.as_deref())
-            .filter(|s| !s.is_empty());
-        let asin = edition
-            .and_then(|e| e.asin.as_deref())
-            .filter(|s| !s.is_empty());
-        let year = book.release_date.as_deref().and_then(extract_year);
-
-        let is_existing = if let Some(isbn_val) = isbn {
-            existing_works
-                .iter()
-                .any(|w| w.isbn_13.as_deref() == Some(isbn_val))
-        } else if let Some(asin_val) = asin {
-            existing_works
-                .iter()
-                .any(|w| w.asin.as_deref() == Some(asin_val))
-        } else {
-            // author+title+year match
-            let norm_title = normalize_for_matching(title);
-            existing_works.iter().any(|w| {
-                normalize_for_matching(&w.author_name) == norm_author
-                    && normalize_for_matching(&w.title) == norm_title
-                    && w.year == year
-            })
-        };
-
-        if is_existing {
-            works_existing += 1;
-        } else {
-            works_to_create += 1;
-        }
     }
 
-    // Count existing authors that were referenced by Readarr books.
     let authors_existing = authors
         .iter()
         .filter(|a| {
@@ -552,6 +598,8 @@ pub async fn preview(
         })
         .count() as i64;
 
+    let files_to_import = import_files.len() as i64;
+
     Ok(Json(PreviewResponse {
         authors_to_create,
         authors_existing,
@@ -560,6 +608,7 @@ pub async fn preview(
         files_to_import,
         files_to_skip,
         skipped_items,
+        import_files,
     }))
 }
 
@@ -572,8 +621,6 @@ pub async fn start(
     let user_id = auth.user.id;
     let import_id = uuid::Uuid::new_v4().to_string();
 
-    // Create import record — will fail if user already has a running import
-    // (due to partial unique index).
     state
         .db
         .create_import(CreateImportDbRequest {
@@ -591,7 +638,6 @@ pub async fn start(
             other => ApiError::from(other),
         })?;
 
-    // Set initial progress.
     {
         let mut prog = state.readarr_import_progress.lock().await;
         *prog = ImportProgress {
@@ -602,13 +648,15 @@ pub async fn start(
         };
     }
 
-    // Spawn background task.
     let state2 = state.clone();
     let import_id2 = import_id.clone();
     let url = req.url.clone();
     let api_key = req.api_key.clone();
     let readarr_root_id = req.readarr_root_folder_id;
     let livrarr_root_id = req.livrarr_root_folder_id;
+    let files_only = req.files_only;
+    let container_path = req.container_path.clone();
+    let host_path = req.host_path.clone();
 
     tokio::spawn(async move {
         if let Err(e) = run_import(
@@ -619,6 +667,9 @@ pub async fn start(
             &api_key,
             readarr_root_id,
             livrarr_root_id,
+            files_only,
+            container_path,
+            host_path,
         )
         .await
         {
@@ -626,7 +677,6 @@ pub async fn start(
             let _ = state2.db.update_import_status(&import_id2, "failed").await;
         }
 
-        // Clear progress.
         let mut prog = state2.readarr_import_progress.lock().await;
         prog.running = false;
         prog.phase = "done".to_string();
@@ -682,12 +732,24 @@ pub async fn undo(
     // 1. Query all library items with this import_id.
     let items = state.db.list_library_items_by_import(&import_id).await?;
 
+    // Look up root folder path for full-path resolution (library_items store relative paths).
+    let root_folder_path: Option<String> = if let Some(rf_id) = imp.target_root_folder_id {
+        state.db.get_root_folder(rf_id).await.ok().map(|rf| rf.path)
+    } else {
+        None
+    };
+
     let mut files_deleted = 0i64;
     let mut files_skipped = 0i64;
 
     // 2. For each item, try to delete the destination file.
     for item in &items {
-        let path = Path::new(&item.path);
+        let full_path = if let Some(ref root) = root_folder_path {
+            PathBuf::from(root).join(&item.path)
+        } else {
+            PathBuf::from(&item.path)
+        };
+        let path = full_path.as_path();
         if path.exists() {
             // Conservative: check file size matches.
             match std::fs::metadata(path) {
@@ -779,10 +841,22 @@ async fn fetch_all_readarr_data(
         .books()
         .await
         .map_err(|e| ApiError::BadGateway(format!("Readarr books: {e}")))?;
-    let book_files = client
-        .book_files()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("Readarr book files: {e}")))?;
+    let author_ids: Vec<i64> = authors.iter().map(|a| a.id).collect();
+    let file_results = futures::future::join_all(
+        author_ids.iter().map(|&aid| client.book_files_by_author(aid)),
+    )
+    .await;
+    let mut book_files: Vec<RdBookFile> = Vec::new();
+    for (aid, res) in author_ids.iter().zip(file_results) {
+        match res {
+            Ok(files) => book_files.extend(files),
+            Err(e) => {
+                return Err(ApiError::BadGateway(format!(
+                    "Readarr book files (author {aid}): {e}"
+                )));
+            }
+        }
+    }
 
     Ok((authors, books, book_files, folders))
 }
@@ -799,19 +873,28 @@ async fn run_import(
     api_key: &str,
     readarr_root_id: i64,
     livrarr_root_id: i64,
+    files_only: bool,
+    container_path: Option<String>,
+    host_path: Option<String>,
 ) -> Result<(), String> {
     // Phase 1: Fetch.
-    let client = ReadarrClient::new(url, api_key, state.http_client_safe.inner().clone());
+    let client = ReadarrClient::new(url, api_key, state.http_client.inner().clone());
     let (rd_authors, rd_books, rd_book_files, rd_folders) =
         fetch_all_readarr_data(&client)
             .await
             .map_err(|e| format!("fetch failed: {e}"))?;
 
-    let readarr_root = rd_folders
+    let readarr_root_raw = rd_folders
         .iter()
         .find(|f| f.id == readarr_root_id)
         .map(|f| f.path.clone())
         .ok_or_else(|| "Invalid Readarr root folder ID".to_string())?;
+    // Translate the root folder path to the local equivalent if a mapping is configured.
+    let readarr_root = apply_path_translation(
+        &readarr_root_raw,
+        container_path.as_deref(),
+        host_path.as_deref(),
+    );
 
     let livrarr_root = state
         .db
@@ -826,19 +909,34 @@ async fn run_import(
         book_files_by_book.entry(bf.book_id).or_default().push(bf);
     }
 
+    // When files_only: filter books to only those with files before processing.
+    let active_book_ids: std::collections::HashSet<i64> = if files_only {
+        book_files_by_book.keys().copied().collect()
+    } else {
+        rd_books.iter().map(|b| b.id).collect()
+    };
+
     // Load existing data for dedup.
     let existing_authors = state
         .db
         .list_authors(user_id)
         .await
         .map_err(|e| format!("list authors: {e}"))?;
-    // Update progress.
+
+    // Update progress — totals reflect only active books.
+    let active_books: Vec<&RdBook> = rd_books
+        .iter()
+        .filter(|b| active_book_ids.contains(&b.id))
+        .collect();
     {
         let mut prog = state.readarr_import_progress.lock().await;
         prog.phase = "processing".to_string();
         prog.authors_total = rd_authors.len() as i64;
-        prog.works_total = rd_books.len() as i64;
-        prog.files_total = rd_book_files.len() as i64;
+        prog.works_total = active_books.len() as i64;
+        prog.files_total = rd_book_files
+            .iter()
+            .filter(|f| active_book_ids.contains(&f.book_id))
+            .count() as i64;
     }
 
     // Phase 2: Process authors.
@@ -850,6 +948,19 @@ async fn run_import(
         let name = rd_author.author_name.as_deref().unwrap_or("").trim();
         if name.is_empty() {
             continue;
+        }
+
+        // files_only: skip authors with no books that have files.
+        if files_only {
+            let has_files = rd_books
+                .iter()
+                .filter(|b| b.author_id == rd_author.id)
+                .any(|b| active_book_ids.contains(&b.id));
+            if !has_files {
+                let mut prog = state.readarr_import_progress.lock().await;
+                prog.authors_processed += 1;
+                continue;
+            }
         }
 
         let norm = normalize_for_matching(name);
@@ -918,7 +1029,7 @@ async fn run_import(
         .await
         .map_err(|e| format!("list works after authors: {e}"))?;
 
-    for rd_book in &rd_books {
+    for rd_book in &active_books {
         let rd_author_id = rd_book.author_id;
         let author_name = author_map
             .get(&rd_author_id)
@@ -1057,8 +1168,6 @@ async fn run_import(
                 Ok(w) => {
                     works_created += 1;
 
-                    // Set enrichment status to skipped, plus all the extra fields.
-                    // We use update_work_enrichment to fill in the rest.
                     let _ = state
                         .db
                         .update_work_enrichment(
@@ -1094,7 +1203,6 @@ async fn run_import(
                         )
                         .await;
 
-                    // Set monitor flags.
                     let _ = state
                         .db
                         .update_work_user_fields(
@@ -1110,6 +1218,20 @@ async fn run_import(
                             },
                         )
                         .await;
+
+                    // Download the Readarr cover to disk so mediacover can serve it.
+                    if let Some(ref url) = w.cover_url {
+                        let covers_dir = state.data_dir.join("covers");
+                        let _ = tokio::fs::create_dir_all(&covers_dir).await;
+                        if let Ok(resp) = state.http_client.get(url).send().await {
+                            if resp.status().is_success() {
+                                if let Ok(bytes) = resp.bytes().await {
+                                    let path = covers_dir.join(format!("{}.jpg", w.id));
+                                    let _ = tokio::fs::write(&path, &bytes).await;
+                                }
+                            }
+                        }
+                    }
 
                     w.id
                 }
@@ -1131,8 +1253,8 @@ async fn run_import(
         }
     }
 
-    // Phase 4: Process files.
-    for rd_file in &rd_book_files {
+    // Phase 4: Process files (only those belonging to active books).
+    for rd_file in rd_book_files.iter().filter(|f| active_book_ids.contains(&f.book_id)) {
         let work_id = match rd_to_livrarr_work.get(&rd_file.book_id) {
             Some(id) => *id,
             None => {
@@ -1193,7 +1315,12 @@ async fn run_import(
         }
 
         // Validate source path.
-        let source = match validate_source_path(&rd_file.path, &readarr_root) {
+        let translated_path = apply_path_translation(
+            &rd_file.path,
+            container_path.as_deref(),
+            host_path.as_deref(),
+        );
+        let source = match validate_source_path(&translated_path, &readarr_root) {
             Ok(p) => p,
             Err(e) => {
                 warn!(path = %rd_file.path, "Source path validation failed: {e}");
@@ -1252,9 +1379,13 @@ async fn run_import(
             Ok(_) => {
                 files_imported += 1;
             }
+            Err(livrarr_domain::DbError::Constraint { .. }) => {
+                // Path already claimed by another work — destination exists in DB
+                // but not on disk. Skip silently; this is an expected collision.
+                files_skipped += 1;
+            }
             Err(e) => {
                 warn!(path = %rd_file.path, "Failed to create library item: {e}");
-                // File was created but DB row failed — leave file in place.
                 files_skipped += 1;
                 let mut prog = state.readarr_import_progress.lock().await;
                 prog.errors

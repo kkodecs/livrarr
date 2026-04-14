@@ -543,7 +543,7 @@ impl WorkDb for SqliteDb {
 impl crate::EnrichmentRetryDb for SqliteDb {
     async fn list_works_for_retry(&self) -> Result<Vec<Work>, crate::DbError> {
         let rows = sqlx::query(
-            "SELECT * FROM works WHERE enrichment_status IN ('failed', 'partial') \
+            "SELECT * FROM works WHERE enrichment_status IN ('pending', 'failed', 'partial') \
              AND enrichment_retry_count < 3 ORDER BY id",
         )
         .fetch_all(self.pool())

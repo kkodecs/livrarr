@@ -26,7 +26,7 @@ export function MediaStatusRow({
     fileSize: number,
     downloading: boolean,
   ): { color: string; label: string } {
-    if (!monitored) return { color: "text-zinc-600", label: "unmonitored" };
+    if (!monitored) return { color: "text-zinc-600", label: "Paused" };
     if (hasFile) return { color: "text-green-400", label: formatMB(fileSize) };
     if (downloading) return { color: "text-purple-400", label: "downloading" };
     return { color: "text-amber-500", label: "Missing" };

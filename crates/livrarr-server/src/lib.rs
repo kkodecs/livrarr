@@ -383,6 +383,9 @@ pub struct AddWorkRequest {
     pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail_url: Option<String>,
+    /// Skip inline enrichment — defer to background enrichment_retry job.
+    #[serde(default)]
+    pub defer_enrichment: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

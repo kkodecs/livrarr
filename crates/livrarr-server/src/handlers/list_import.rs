@@ -724,6 +724,7 @@ async fn ol_isbn_lookup(state: &AppState, isbn: &str) -> Option<AddWorkRequest> 
         metadata_source: None,
         language: None,
         detail_url: None,
+        defer_enrichment: false,
     })
 }
 
@@ -821,5 +822,6 @@ async fn ol_search(
         metadata_source: None,
         language: None,
         detail_url: None,
+        defer_enrichment: false,
     })
 }

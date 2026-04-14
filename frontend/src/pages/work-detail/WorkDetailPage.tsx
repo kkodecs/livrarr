@@ -51,9 +51,9 @@ import { SortHeader } from "@/components/Page/SortHeader";
 import {
   formatBytes,
   formatRelativeDate,
-  getCoverUrl,
   formatDuration,
 } from "@/utils/format";
+import { BookCover } from "@/components/BookCover";
 
 type ReleaseSortField = "title" | "indexer" | "size" | "seeders" | "leechers" | "publishDate";
 import type {
@@ -292,10 +292,12 @@ function WorkHeader({
 
   return (
     <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start sm:gap-6">
-      <img
-        src={getCoverUrl(work.id, coverVersion)}
-        alt={work.title}
-        className="h-[200px] w-[133px] sm:h-[300px] sm:w-[200px] flex-shrink-0 rounded-lg object-cover shadow-lg"
+      <BookCover
+        workId={work.id}
+        title={work.title}
+        coverVersion={coverVersion}
+        className="h-[200px] w-[133px] sm:h-[300px] sm:w-[200px] flex-shrink-0 rounded-lg shadow-lg"
+        iconSize={32}
       />
       <div className="min-w-0 flex-1 text-center sm:text-left">
         <div className="flex items-baseline gap-2">

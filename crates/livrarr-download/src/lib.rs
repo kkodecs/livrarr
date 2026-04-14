@@ -183,6 +183,8 @@ impl Default for GrabResult {
                 media_type: None,
                 content_path: None,
                 grabbed_at: chrono::Utc::now(),
+                import_retry_count: 0,
+                import_failed_at: None,
             },
             status: GrabStatus::Sent,
             warning: None,

@@ -60,8 +60,8 @@ impl ReadarrClient {
         self.get("/api/v1/book").await
     }
 
-    pub async fn book_files(&self) -> Result<Vec<RdBookFile>, ReadarrError> {
-        self.get("/api/v1/bookfile").await
+    pub async fn book_files_by_author(&self, author_id: i64) -> Result<Vec<RdBookFile>, ReadarrError> {
+        self.get(&format!("/api/v1/bookfile?authorId={author_id}")).await
     }
 }
 

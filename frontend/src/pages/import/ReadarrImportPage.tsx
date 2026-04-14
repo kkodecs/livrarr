@@ -19,9 +19,11 @@ import { ConfirmModal } from "@/components/Page/ConfirmModal";
 import * as api from "@/api";
 import { formatBytes, formatRelativeDate } from "@/utils/format";
 import { cn } from "@/utils/cn";
+import { HelpTip } from "@/components/HelpTip";
 import type {
   ReadarrRootFolder,
   ImportPreviewResponse,
+  ImportPreviewFileItem,
   ImportProgressResponse,
   ImportHistoryItem,
 } from "@/types/api";
@@ -51,6 +53,13 @@ export default function ReadarrImportPage() {
   const [selectedReadarrFolder, setSelectedReadarrFolder] = useState<number | null>(null);
   const [selectedLivrarrFolder, setSelectedLivrarrFolder] = useState<number | null>(null);
 
+  // Import mode
+  const [importMode, setImportMode] = useState<"all" | "files_only">("files_only");
+
+  // Path translation
+  const [containerPath, setContainerPath] = useState("");
+  const [hostPath, setHostPath] = useState("");
+
   // Preview
   const [preview, setPreview] = useState<ImportPreviewResponse | null>(null);
   const [skippedExpanded, setSkippedExpanded] = useState(false);
@@ -60,6 +69,12 @@ export default function ReadarrImportPage() {
 
   // Undo modal
   const [undoTarget, setUndoTarget] = useState<ImportHistoryItem | null>(null);
+
+  // Prefill container path from selected Readarr root folder
+  useEffect(() => {
+    const folder = readarrFolders.find((f) => f.id === selectedReadarrFolder);
+    if (folder) setContainerPath(folder.path);
+  }, [selectedReadarrFolder, readarrFolders]);
 
   // Fetch Livrarr root folders
   const { data: livrarrFolders } = useQuery({
@@ -80,13 +95,14 @@ export default function ReadarrImportPage() {
       try {
         const p = await api.readarrProgress();
         setProgress(p);
-        if (p.status === "completed") {
-          setPhase("completed");
-          toast.success("Import completed successfully");
-          refetchHistory();
-        } else if (p.status === "failed") {
-          setPhase("failed");
-          toast.error(p.error ?? "Import failed");
+        if (!p.running && p.phase === "done") {
+          const failed = p.errors.length > 0;
+          setPhase(failed ? "failed" : "completed");
+          if (failed) {
+            toast.error(p.errors[0] ?? "Import failed");
+          } else {
+            toast.success("Import completed successfully");
+          }
           refetchHistory();
         }
       } catch {
@@ -129,6 +145,9 @@ export default function ReadarrImportPage() {
         apiKey,
         readarrRootFolderId: selectedReadarrFolder,
         livrarrRootFolderId: selectedLivrarrFolder,
+        filesOnly: importMode === "files_only",
+        containerPath: containerPath || undefined,
+        hostPath: hostPath || undefined,
       });
     },
     onMutate: () => setPhase("previewing"),
@@ -153,6 +172,9 @@ export default function ReadarrImportPage() {
         apiKey,
         readarrRootFolderId: selectedReadarrFolder,
         livrarrRootFolderId: selectedLivrarrFolder,
+        filesOnly: importMode === "files_only",
+        containerPath: containerPath || undefined,
+        hostPath: hostPath || undefined,
       });
     },
     onSuccess: () => {
@@ -346,14 +368,85 @@ export default function ReadarrImportPage() {
                     </p>
                   )}
                 </div>
+
+                {/* Path translation */}
+                <div className="rounded border border-border bg-zinc-900/60 p-3">
+                  <div className="mb-2 flex items-center gap-1.5">
+                    <span className="text-sm font-medium text-zinc-300">Path translation</span>
+                    <HelpTip text="When Readarr runs in Docker, its file paths reflect the container's internal filesystem (e.g. /books). Enter the equivalent path where Livrarr can access the same files on the host. Leave blank if both apps share the same filesystem." />
+                    <Link
+                      to={`/help?question=${encodeURIComponent("How do I configure Docker volume path translation for Readarr import in Livrarr? Readarr container path: " + (containerPath || "/books"))}`}
+                      className="ml-auto text-xs text-brand hover:text-brand-hover"
+                    >
+                      AI help <ExternalLink size={10} className="inline" />
+                    </Link>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="mb-1 block text-xs text-muted">Container path</label>
+                      <input
+                        type="text"
+                        value={containerPath}
+                        onChange={(e) => { setContainerPath(e.target.value); setPreview(null); }}
+                        disabled={phase === "previewing" || phase === "importing"}
+                        placeholder="/books"
+                        className="w-full rounded border border-border bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-brand focus:outline-none disabled:opacity-50"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs text-muted">Host path</label>
+                      <input
+                        type="text"
+                        value={hostPath}
+                        onChange={(e) => { setHostPath(e.target.value); setPreview(null); }}
+                        disabled={phase === "previewing" || phase === "importing"}
+                        placeholder="/mnt/data/books"
+                        className="w-full rounded border border-border bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-brand focus:outline-none disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+                </div>
                 {(phase === "connected" || phase === "previewed" || phase === "completed" || phase === "failed") && (
-                  <button
-                    onClick={() => previewMut.mutate()}
-                    disabled={selectedReadarrFolder === null || selectedLivrarrFolder === null}
-                    className="inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
-                  >
-                    Preview Import
-                  </button>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="mb-1.5 block text-sm text-muted">Import scope</label>
+                      <div className="flex flex-col gap-2">
+                        {(["files_only", "all"] as const).map((mode) => (
+                          <label key={mode} className="flex cursor-pointer items-start gap-2.5">
+                            <input
+                              type="radio"
+                              name="importMode"
+                              value={mode}
+                              checked={importMode === mode}
+                              onChange={() => { setImportMode(mode); setPreview(null); }}
+                              disabled={phase === "previewing" || phase === "importing"}
+                              className="mt-0.5 accent-brand"
+                            />
+                            <span className="text-sm">
+                              {mode === "files_only" ? (
+                                <>
+                                  <span className="font-medium text-zinc-100">Works with files</span>
+                                  <span className="ml-1 text-muted">— only import works that have book files in Readarr</span>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="font-medium text-zinc-100">All works</span>
+                                  <span className="ml-1 text-muted">— import entire Readarr library, including works without files</span>
+                                </>
+                              )}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => previewMut.mutate()}
+                      disabled={selectedReadarrFolder === null || selectedLivrarrFolder === null}
+                      className="inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+                    >
+                      Preview Import
+                    </button>
+                  </div>
                 )}
                 {phase === "previewing" && (
                   <button disabled className="inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white opacity-50">
@@ -371,31 +464,67 @@ export default function ReadarrImportPage() {
               <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-muted">
                 Import Preview
               </h2>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <PreviewStat label="Authors" count={preview.authors.length} />
-                <PreviewStat label="Works" count={preview.works.length} />
-                <PreviewStat label="Files" count={preview.files.length} />
-                <PreviewStat label="Skipped" count={preview.skipped.length} warn />
+
+              {/* Summary stats */}
+              <div className="mb-4 flex flex-wrap gap-4 text-sm">
+                <span className="text-zinc-300">
+                  <span className="font-semibold text-zinc-100">{preview.authorsToCreate}</span> new authors
+                  {preview.authorsExisting > 0 && <span className="text-muted"> ({preview.authorsExisting} existing)</span>}
+                </span>
+                <span className="text-zinc-300">
+                  <span className="font-semibold text-zinc-100">{preview.worksToCreate}</span> new works
+                  {preview.worksExisting > 0 && <span className="text-muted"> ({preview.worksExisting} existing)</span>}
+                </span>
+                <span className="text-zinc-300">
+                  <span className="font-semibold text-zinc-100">{preview.filesToImport}</span> files
+                </span>
+                {preview.filesToSkip > 0 && (
+                  <span className="text-amber-400">
+                    <span className="font-semibold">{preview.filesToSkip}</span> skipped
+                  </span>
+                )}
               </div>
 
+              {/* File list */}
+              {preview.importFiles.length > 0 && (
+                <div className="mb-4 max-h-96 overflow-y-auto rounded border border-border">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-zinc-800">
+                      <tr className="border-b border-border text-left text-muted">
+                        <th className="px-3 py-2">Title</th>
+                        <th className="px-3 py-2">Author</th>
+                        <th className="px-3 py-2">Format</th>
+                        <th className="px-3 py-2">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {preview.importFiles.map((item, i) => (
+                        <PreviewFileRow key={i} item={item} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
               {/* Skipped items */}
-              {preview.skipped.length > 0 && (
-                <div className="mt-4">
+              {preview.skippedItems.length > 0 && (
+                <div className="mb-4">
                   <button
                     onClick={() => setSkippedExpanded(!skippedExpanded)}
                     className="flex items-center gap-1.5 text-sm text-muted hover:text-zinc-100"
                   >
                     {skippedExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    {preview.skipped.length} skipped item{preview.skipped.length !== 1 ? "s" : ""}
+                    {preview.skippedItems.length} skipped item{preview.skippedItems.length !== 1 ? "s" : ""}
                   </button>
                   {skippedExpanded && (
-                    <div className="mt-2 max-h-60 overflow-y-auto rounded border border-border bg-zinc-900 p-3">
+                    <div className="mt-2 max-h-48 overflow-y-auto rounded border border-border bg-zinc-900 p-3">
                       <div className="space-y-1.5">
-                        {preview.skipped.map((item, i) => (
+                        {preview.skippedItems.map((item, i) => (
                           <div key={i} className="flex items-start gap-2 text-xs">
                             <XCircle size={12} className="mt-0.5 shrink-0 text-red-400" />
-                            <span className="text-zinc-300">{item.name}</span>
-                            <span className="text-muted">-- {item.reason}</span>
+                            <span className="text-zinc-300">{item.title}</span>
+                            {item.author && <span className="text-zinc-500">{item.author}</span>}
+                            <span className="text-muted">— {item.reason}</span>
                           </div>
                         ))}
                       </div>
@@ -408,8 +537,8 @@ export default function ReadarrImportPage() {
               {phase === "previewed" && (
                 <button
                   onClick={() => startMut.mutate()}
-                  disabled={startMut.isPending || (preview.authors.length === 0 && preview.works.length === 0 && preview.files.length === 0)}
-                  className="mt-4 inline-flex items-center gap-2 rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
+                  disabled={startMut.isPending || preview.filesToImport === 0}
+                  className="inline-flex items-center gap-2 rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
                 >
                   {startMut.isPending ? (
                     <>
@@ -417,7 +546,7 @@ export default function ReadarrImportPage() {
                       Starting...
                     </>
                   ) : (
-                    "Confirm & Import"
+                    `Confirm & Import ${preview.filesToImport} file${preview.filesToImport !== 1 ? "s" : ""}`
                   )}
                 </button>
               )}
@@ -450,7 +579,7 @@ export default function ReadarrImportPage() {
                 <span className="text-zinc-200">
                   {phase === "importing" && "Importing..."}
                   {phase === "completed" && "Import completed"}
-                  {phase === "failed" && (progress.error ?? "Import failed")}
+                  {phase === "failed" && (progress.errors[0] ?? "Import failed")}
                 </span>
                 <span className="ml-auto text-muted">{progressPct}%</span>
               </div>
@@ -549,14 +678,34 @@ export default function ReadarrImportPage() {
   );
 }
 
-function PreviewStat({ label, count, warn }: { label: string; count: number; warn?: boolean }) {
+function PreviewFileRow({ item }: { item: ImportPreviewFileItem }) {
   return (
-    <div className="rounded border border-border bg-zinc-900 px-3 py-2 text-center">
-      <div className={cn("text-2xl font-bold", warn && count > 0 ? "text-amber-400" : "text-zinc-100")}>
-        {count}
-      </div>
-      <div className="text-xs text-muted">{label}</div>
-    </div>
+    <tr className="border-b border-border/40 last:border-0 hover:bg-zinc-700/30">
+      <td className="max-w-[200px] truncate px-3 py-1.5 text-zinc-200" title={item.title}>
+        {item.title}
+      </td>
+      <td className="max-w-[160px] truncate px-3 py-1.5 text-zinc-400" title={item.author}>
+        {item.author}
+      </td>
+      <td className="px-3 py-1.5">
+        <span className={cn(
+          "inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium",
+          item.mediaType === "audiobook"
+            ? "bg-purple-500/15 text-purple-400"
+            : "bg-blue-500/15 text-blue-400",
+        )}>
+          {item.mediaType}
+        </span>
+      </td>
+      <td className="px-3 py-1.5">
+        <span className={cn(
+          "text-xs",
+          item.workStatus === "new" ? "text-green-400" : "text-zinc-500",
+        )}>
+          {item.workStatus === "new" ? "new" : "existing"}
+        </span>
+      </td>
+    </tr>
   );
 }
 

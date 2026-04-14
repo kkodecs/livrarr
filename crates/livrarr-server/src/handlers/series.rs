@@ -565,7 +565,7 @@ pub async fn series_monitor_worker(
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("GR series detail: {e}"))?;
+            .map_err(|e| format!("GR series detail: {e:#}"))?;
 
         if !resp.status().is_success() {
             return Err(format!("GR series detail returned {}", resp.status()));

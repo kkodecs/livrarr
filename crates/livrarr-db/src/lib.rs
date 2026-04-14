@@ -584,6 +584,16 @@ pub trait GrabDb: Send + Sync {
         work_id: WorkId,
         media_type: MediaType,
     ) -> Result<bool, DbError>;
+
+    /// List importFailed grabs eligible for retry (backoff expired, under max retries).
+    async fn list_retriable_grabs(&self, max_retries: i32) -> Result<Vec<Grab>, DbError>;
+
+    /// Increment retry count and set import_failed_at timestamp on a grab.
+    async fn increment_import_retry(
+        &self,
+        user_id: UserId,
+        id: GrabId,
+    ) -> Result<(), DbError>;
 }
 
 pub struct CreateGrabDbRequest {

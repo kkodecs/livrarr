@@ -111,6 +111,37 @@ pub async fn import_grab(
     .map_err(|e| ApiError::Internal(format!("spawn_blocking join error: {e}")))?
     .map_err(|e| ApiError::Internal(format!("source enumeration failed: {e}")))?;
 
+    // File size pre-check: if grab has a known size, verify local files are
+    // at least 90% of it. Catches partially-synced files from remote seedboxes
+    // where rsync/mount hasn't finished. The import will be retried automatically.
+    if let Some(expected_size) = grab.size {
+        let local_total: i64 = source_files
+            .iter()
+            .filter_map(|f| std::fs::metadata(&f.path).ok())
+            .map(|m| m.len() as i64)
+            .sum();
+        if expected_size > 0 && local_total < expected_size * 9 / 10 {
+            let error = format!(
+                "files not fully synced: local {:.1}MB vs expected {:.1}MB",
+                local_total as f64 / 1_048_576.0,
+                expected_size as f64 / 1_048_576.0,
+            );
+            tracing::info!("import: grab {grab_id} — {error}");
+            state
+                .db
+                .update_grab_status(user_id, grab_id, GrabStatus::ImportFailed, Some(&error))
+                .await?;
+            return Ok(ImportGrabResult {
+                final_status: GrabStatus::ImportFailed,
+                imported_count: 0,
+                failed_count: 0,
+                skipped_count: 0,
+                warnings: vec![],
+                error: Some(error),
+            });
+        }
+    }
+
     if source_files.is_empty() {
         let error = "no recognized media files found".to_string();
         state

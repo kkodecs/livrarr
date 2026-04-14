@@ -864,6 +864,15 @@ pub async fn add_work_internal(
         }
     }
 
+    // Deferred enrichment: skip inline enrichment, leave as pending for background job.
+    if req.defer_enrichment {
+        return Ok(AddWorkResponse {
+            work: work_to_detail(&work),
+            author_created,
+            messages: vec![],
+        });
+    }
+
     // Foreign-language works: enrich from detail page (Goodreads etc.) if available.
     // English works: enrich from Hardcover + OL + Audnexus.
     let outcome = if livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref())
