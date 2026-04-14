@@ -37,7 +37,13 @@ pub async fn import_grab(
     let import_lock = state
         .import_locks
         .entry((user_id, work.id))
-        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .or_insert_with(|| {
+            (
+                std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                std::time::Instant::now(),
+            )
+        })
+        .0
         .clone();
     let _import_guard = import_lock.lock().await;
 

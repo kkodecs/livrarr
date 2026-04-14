@@ -1,16 +1,13 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::Json;
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use tokio::task::JoinSet;
 
 use crate::state::AppState;
 use crate::{
     ApiError, AuthContext, GrabApiRequest, GrabStatus, ReleaseResponse, ReleaseSearchResponse,
-    SearchWarning,
 };
 
 /// Maximum size for .torrent file downloads (10 MB).
@@ -85,150 +82,25 @@ pub async fn search(
     }
 
     let total_indexers = indexers.len();
-    let refresh = q.refresh;
-    let cache_only = q.cache_only;
-    let cache_title = title.to_lowercase();
-    let cache_author = author.to_lowercase();
 
-    // Fan-out search to all indexers in parallel (with cache).
-    let mut join_set = JoinSet::new();
-
-    for indexer in indexers {
-        let http = state.http_client.clone();
-        let t = title.clone();
-        let a = author.clone();
-        let cache = state.grab_search_cache.clone();
-        let ct = cache_title.clone();
-        let ca = cache_author.clone();
-
-        // Return type: (name, priority, result, cache_age_secs)
-        join_set.spawn(async move {
-            let allowed_cats: std::collections::HashSet<i32> =
-                indexer.categories.iter().copied().collect();
-
-            // Check cache first (unless refresh requested).
-            if !refresh {
-                if let Some((cached, age_secs)) = cache.get(&ct, &ca, indexer.id).await {
-                    tracing::debug!(indexer = %indexer.name, age_secs, "grab search cache hit");
-                    let filtered: Vec<_> = cached
-                        .into_iter()
-                        .filter(|r| {
-                            r.categories.is_empty()
-                                || r.categories.iter().any(|c| allowed_cats.contains(c))
-                        })
-                        .collect();
-                    return (
-                        indexer.name.clone(),
-                        indexer.priority,
-                        Ok(filtered),
-                        Some(age_secs),
-                    );
-                }
-            }
-
-            // cacheOnly mode: don't hit indexers if no cache.
-            if cache_only {
-                return (indexer.name.clone(), indexer.priority, Ok(vec![]), None);
-            }
-
-            let result = search_indexer(&http, &indexer, &t, &a).await;
-            if let Ok(ref items) = result {
-                cache.put(&ct, &ca, indexer.id, items.clone()).await;
-            }
-            let result = result.map(|items| {
-                items
-                    .into_iter()
-                    .filter(|r| {
-                        r.categories.is_empty()
-                            || r.categories.iter().any(|c| allowed_cats.contains(c))
-                    })
-                    .collect::<Vec<_>>()
-            });
-            (indexer.name.clone(), indexer.priority, result, Some(0u64))
-        });
-    }
-
-    let mut all_results: Vec<(i32, ReleaseResponse)> = Vec::new(); // (priority, result)
-    let mut warnings: Vec<SearchWarning> = Vec::new();
-    let mut max_cache_age: Option<u64> = None;
-
-    while let Some(join_result) = join_set.join_next().await {
-        match join_result {
-            Ok((_name, priority, Ok(items), age)) => {
-                if let Some(a) = age {
-                    max_cache_age = Some(max_cache_age.map_or(a, |cur: u64| cur.max(a)));
-                }
-                for item in items {
-                    all_results.push((priority, item));
-                }
-            }
-            Ok((name, _, Err(err), _)) => {
-                warnings.push(SearchWarning {
-                    indexer: name,
-                    error: err,
-                });
-            }
-            Err(e) => {
-                warnings.push(SearchWarning {
-                    indexer: "unknown".into(),
-                    error: format!("task panicked: {e}"),
-                });
-            }
-        }
-    }
-
-    // All indexers failed → 502 with structured response
-    if warnings.len() == total_indexers {
-        let body = ReleaseSearchResponse {
-            results: vec![],
-            warnings,
-            cache_age_seconds: None,
-        };
-        return Err(ApiError::StructuredBadGateway {
-            body: serde_json::to_value(&body).unwrap_or_default(),
-        });
-    }
-
-    // Dedup by guid: keep highest-priority (lowest number), break ties by seeders desc.
-    let results_before_dedup = all_results.len();
-    let mut by_guid: HashMap<String, (i32, ReleaseResponse)> = HashMap::new();
-    for (priority, result) in all_results {
-        let key = result.guid.clone();
-        match by_guid.get(&key) {
-            Some((existing_priority, existing)) => {
-                if priority < *existing_priority
-                    || (priority == *existing_priority
-                        && result.seeders.unwrap_or(0) > existing.seeders.unwrap_or(0))
-                {
-                    by_guid.insert(key, (priority, result));
-                }
-            }
-            None => {
-                by_guid.insert(key, (priority, result));
-            }
-        }
-    }
-
-    let mut results: Vec<ReleaseResponse> = by_guid.into_values().map(|(_, r)| r).collect();
-    results.sort_by(|a, b| b.seeders.unwrap_or(0).cmp(&a.seeders.unwrap_or(0)));
-
-    tracing::info!(
-        indexers_total = total_indexers,
-        indexers_succeeded = total_indexers - warnings.len(),
-        indexers_failed = warnings.len(),
-        results_before_dedup = results_before_dedup,
-        results_after_dedup = results.len(),
-        "release search complete"
+    // Delegate to service — business logic lives there, testable without Axum.
+    let svc = crate::services::release_service::ReleaseService::new(
+        state.db.clone(),
+        state.http_client.clone(),
+        state.grab_search_cache.clone(),
     );
+    let response = svc
+        .search(&title, &author, indexers, q.refresh, q.cache_only)
+        .await;
 
-    // For fresh searches (age=0), don't report as cached.
-    let cache_age_seconds = max_cache_age.filter(|&a| a > 0);
+    // All indexers failed → 502 with structured body.
+    if crate::services::release_service::ReleaseService::all_failed(&response, total_indexers) {
+        return Err(ApiError::StructuredBadGateway {
+            body: serde_json::to_value(&response).unwrap_or_default(),
+        });
+    }
 
-    Ok(Json(ReleaseSearchResponse {
-        results,
-        warnings,
-        cache_age_seconds,
-    }))
+    Ok(Json(response))
 }
 
 /// Clean a title for search: strip subtitle (after colon or parenthetical),
@@ -273,7 +145,7 @@ fn clean_search_term(title: &str, author: &str) -> String {
 }
 
 /// Search a single indexer with tiered fallback (mirrors Readarr strategy).
-async fn search_indexer(
+pub(crate) async fn search_indexer(
     http: &livrarr_http::HttpClient,
     indexer: &Indexer,
     title: &str,

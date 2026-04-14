@@ -395,7 +395,7 @@ fn write_epub(
                 Ok(_report) => {}
                 Err(e) => {
                     // Log but don't fail — our tag writing already succeeded.
-                    eprintln!("repub repair warning: {e}");
+                    tracing::warn!("repub repair warning: {e}");
                 }
             }
 

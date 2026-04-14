@@ -4,7 +4,7 @@ use serde::Serialize;
 
 /// Source method that produced an extraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum ExtractionSource {
     Embedded,
     Path,
@@ -15,7 +15,7 @@ pub enum ExtractionSource {
 
 /// Confidence level of an extraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum Confidence {
     Low,
     MediumLow,
@@ -94,7 +94,7 @@ pub struct MatchCandidate {
 
 /// Which metadata provider a candidate came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum MatchProvider {
     OpenLibrary,
     Goodreads,
@@ -119,7 +119,7 @@ pub struct MatchResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum DuplicateClass {
     ExactFile,
     SameWorkSameFormat,

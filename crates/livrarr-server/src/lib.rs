@@ -39,6 +39,7 @@ pub mod middleware;
 pub mod parsers;
 pub mod readarr_client;
 pub mod router;
+pub mod services;
 pub mod state;
 
 // Re-export DB types used in API trait signatures.
@@ -75,15 +76,54 @@ pub struct PaginatedResponse<T: Serialize> {
 // without depending on every service crate. The real composition root
 // will use the actual types.
 
-/// Placeholder for download error (from livrarr-download).
+/// Server-boundary download error — wraps livrarr-download errors at the API layer.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct DownloadError(pub String);
+pub enum DownloadError {
+    #[error("no download client configured")]
+    NoClient,
+    #[error("download client connection failed: {0}")]
+    ConnectionFailed(String),
+    #[error("download client rejected: {0}")]
+    Rejected(String),
+    #[error("invalid download source: {0}")]
+    InvalidSource(String),
+    #[error("download client error: {0}")]
+    Client(String),
+}
 
-/// Placeholder for import error (from livrarr-organize).
+impl From<livrarr_download::DownloadError> for DownloadError {
+    fn from(e: livrarr_download::DownloadError) -> Self {
+        use livrarr_download::DownloadError as D;
+        match e {
+            D::NoClient | D::NoEnabledClient => DownloadError::NoClient,
+            D::ConnectionFailed(s) | D::ProwlarrUnreachable(s) => {
+                DownloadError::ConnectionFailed(s)
+            }
+            D::Rejected { reason } => DownloadError::Rejected(reason),
+            D::InvalidUrl | D::InvalidMagnet { .. } | D::InvalidTorrentFile { .. } => {
+                DownloadError::InvalidSource(e.to_string())
+            }
+            _ => DownloadError::Client(e.to_string()),
+        }
+    }
+}
+
+/// Server-boundary import error — wraps livrarr-organize errors at the API layer.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct ImportError(pub String);
+pub enum ImportError {
+    #[error("source path not found: {path}")]
+    SourceNotFound { path: String },
+    #[error("no media files found in download")]
+    NoMediaFiles,
+    #[error("no root folder configured for this media type")]
+    NoRootFolder,
+    #[error("path conflict with existing work {existing_work_id}")]
+    PathConflict { existing_work_id: i64 },
+    #[error("disk full")]
+    DiskFull,
+    #[error("import failed: {0}")]
+    Failed(String),
+}
 
 /// Placeholder for metadata error (from livrarr-metadata).
 #[derive(Debug, thiserror::Error)]
@@ -136,7 +176,8 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AuthContext {
         std::future::ready(
             parts
                 .extensions
-                .remove::<AuthContext>()
+                .get::<AuthContext>()
+                .cloned()
                 .ok_or(ApiError::Unauthorized),
         )
     }

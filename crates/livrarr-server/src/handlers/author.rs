@@ -357,14 +357,14 @@ pub async fn bibliography(
         })
         .unwrap_or_default();
 
-    if entries_raw.is_empty() {
-        let bib = state.db.save_bibliography(id, &[]).await?;
+    if !entries_raw.is_empty() {
+        let bib = state.db.save_bibliography(id, &entries_raw).await?;
         return Ok(Json(bib));
     }
 
-    // LLM cleanup if configured.
-    let cleaned = llm_clean_bibliography(&state, &author.name, &entries_raw).await;
-    let final_entries = cleaned.as_deref().unwrap_or(&entries_raw);
+    // Primary source returned nothing — try LLM as fallback if configured.
+    let cleaned = llm_clean_bibliography(&state, &author.name, &[]).await;
+    let final_entries = cleaned.as_deref().unwrap_or(&[]);
 
     let bib = state.db.save_bibliography(id, final_entries).await?;
     Ok(Json(bib))
@@ -438,12 +438,21 @@ pub fn spawn_bibliography_fetch(state: AppState, author_id: i64, user_id: i64) {
             })
             .unwrap_or_default();
 
-        if entries_raw.is_empty() {
+        if !entries_raw.is_empty() {
+            if let Err(e) = state.db.save_bibliography(author_id, &entries_raw).await {
+                tracing::warn!("save_bibliography failed: {e}");
+            }
+            tracing::info!(
+                author = %author.name,
+                entries = entries_raw.len(),
+                "background bibliography fetch complete"
+            );
             return;
         }
 
-        let cleaned = llm_clean_bibliography(&state, &author.name, &entries_raw).await;
-        let final_entries = cleaned.as_deref().unwrap_or(&entries_raw);
+        // Primary source returned nothing — try LLM as fallback if configured.
+        let cleaned = llm_clean_bibliography(&state, &author.name, &[]).await;
+        let final_entries = cleaned.as_deref().unwrap_or(&[]);
         if let Err(e) = state.db.save_bibliography(author_id, final_entries).await {
             tracing::warn!("save_bibliography failed: {e}");
         }
@@ -451,7 +460,7 @@ pub fn spawn_bibliography_fetch(state: AppState, author_id: i64, user_id: i64) {
         tracing::info!(
             author = %author.name,
             entries = final_entries.len(),
-            "background bibliography fetch complete"
+            "background bibliography fetch complete (LLM fallback)"
         );
     });
 }

@@ -40,6 +40,8 @@ pub struct ScanState {
     pub ol_total: usize,
     pub ol_completed: std::sync::atomic::AtomicUsize,
     pub user_id: i64,
+    /// When this scan was created — used by TTL cleanup in the job runner.
+    pub created_at: std::time::Instant,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,11 +283,56 @@ pub async fn scan(
     let existing_works = state.db.list_works(user_id).await?;
     let root_folders = state.db.list_root_folders().await?;
 
+    // Pre-compute local dedup matches for all scan items (no DB I/O yet).
+    let pre_existing_work_ids: Vec<Option<livrarr_db::WorkId>> = sort_indices
+        .iter()
+        .map(|&i| {
+            let parsed = parsed_files.get(i).and_then(|p| p.as_ref());
+            parsed.and_then(|p| {
+                existing_works
+                    .iter()
+                    .find(|w| {
+                        normalize_for_matching(&w.title) == normalize_for_matching(&p.title)
+                            && normalize_for_matching(&w.author_name)
+                                == normalize_for_matching(&p.author)
+                    })
+                    .map(|w| w.id)
+            })
+        })
+        .collect();
+
+    // Batch-load library items for all matched works in a single query (N+1 fix).
+    let matched_work_ids: Vec<livrarr_db::WorkId> = pre_existing_work_ids
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let batch_items = if matched_work_ids.is_empty() {
+        vec![]
+    } else {
+        use livrarr_db::LibraryItemDb;
+        state
+            .db
+            .list_library_items_by_work_ids(user_id, &matched_work_ids)
+            .await
+            .unwrap_or_default()
+    };
+    // Index batch_items by work_id for O(1) lookup.
+    let mut items_by_work: std::collections::HashMap<
+        livrarr_db::WorkId,
+        Vec<&livrarr_domain::LibraryItem>,
+    > = std::collections::HashMap::new();
+    for item in &batch_items {
+        items_by_work.entry(item.work_id).or_default().push(item);
+    }
+
     // Phase 1: build files with parsed metadata + local dedup (no OL).
     let mut scanned_files = Vec::new();
     let mut ol_indices = Vec::new(); // indices into scanned_files that need OL lookup
 
-    for &i in &sort_indices {
+    for (loop_idx, &i) in sort_indices.iter().enumerate() {
         let si = &scan_items[i];
         let filename = si.display_name.clone();
         let parsed = parsed_files.get(i).cloned().flatten();
@@ -305,28 +352,13 @@ pub async fn scan(
 
         let routable = root_folders.iter().any(|rf| rf.media_type == si.media_type);
 
-        // Local-only dedup (normalized title+author match).
-        let existing_work_id = parsed.as_ref().and_then(|p| {
-            existing_works
-                .iter()
-                .find(|w| {
-                    normalize_for_matching(&w.title) == normalize_for_matching(&p.title)
-                        && normalize_for_matching(&w.author_name)
-                            == normalize_for_matching(&p.author)
-                })
-                .map(|w| w.id)
-        });
+        // Local-only dedup — use pre-computed match.
+        let existing_work_id = pre_existing_work_ids[loop_idx];
 
-        let has_existing_media_type = if let Some(wid) = existing_work_id {
-            state
-                .db
-                .list_library_items_by_work(user_id, wid)
-                .await
-                .map(|items| items.iter().any(|li| li.media_type == si.media_type))
-                .unwrap_or(false)
-        } else {
-            false
-        };
+        let has_existing_media_type = existing_work_id
+            .and_then(|wid| items_by_work.get(&wid))
+            .map(|items| items.iter().any(|li| li.media_type == si.media_type))
+            .unwrap_or(false);
 
         let check_path = si
             .grouped_paths
@@ -381,6 +413,7 @@ pub async fn scan(
         ol_total,
         ol_completed: std::sync::atomic::AtomicUsize::new(0),
         user_id,
+        created_at: std::time::Instant::now(),
     };
     state
         .manual_import_scans

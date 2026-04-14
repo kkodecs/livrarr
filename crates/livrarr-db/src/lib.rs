@@ -32,6 +32,9 @@ mod sqlite_session;
 mod sqlite_user;
 mod sqlite_work;
 
+#[cfg(test)]
+mod cross_user_isolation_tests;
+
 // =============================================================================
 // CRATE: livrarr-db
 // =============================================================================
@@ -547,14 +550,6 @@ pub trait GrabDb: Send + Sync {
 
     /// Reset all importing grabs to confirmed (startup recovery — JOBS-003).
     async fn reset_importing_grabs(&self) -> Result<u64, DbError>;
-
-    /// Backfill the download_id (torrent hash) on a grab record.
-    async fn set_grab_download_id(
-        &self,
-        user_id: UserId,
-        id: GrabId,
-        download_id: &str,
-    ) -> Result<(), DbError>;
 
     /// Persist the raw remote content path from the download client.
     async fn set_grab_content_path(

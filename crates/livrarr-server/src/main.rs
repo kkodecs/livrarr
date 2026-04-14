@@ -5,7 +5,7 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
-use livrarr_server::config::{AppConfig, LogLevel};
+use livrarr_server::config::{AppConfig, LogFormat, LogLevel};
 use livrarr_server::router::build_router;
 use livrarr_server::state::{AppState, ProviderHealthState};
 
@@ -242,8 +242,13 @@ fn init_tracing(
 
     let (filter, reload_handle) = tracing_subscriber::reload::Layer::new(filter);
 
-    // Console output
-    let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+    // Console output — text or JSON per config.
+    let use_json = log.format == LogFormat::Json;
+    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = if use_json {
+        Box::new(tracing_subscriber::fmt::layer().json().with_target(false))
+    } else {
+        Box::new(tracing_subscriber::fmt::layer().with_target(false))
+    };
 
     // In-memory ring buffer for UI
     let buf_layer = LogBufferLayer(log_buffer);
@@ -252,10 +257,22 @@ fn init_tracing(
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir).ok();
     let file_appender = tracing_appender::rolling::never(&log_dir, "livrarr.txt");
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_ansi(false)
-        .with_writer(file_appender);
+    let file_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = if use_json {
+        Box::new(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(file_appender),
+        )
+    } else {
+        Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(file_appender),
+        )
+    };
 
     tracing_subscriber::registry()
         .with(filter)
