@@ -6,7 +6,5 @@ CREATE TABLE IF NOT EXISTS _livrarr_meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO _livrarr_meta (key, value) VALUES ('schema_version', '10');
-INSERT OR IGNORE INTO _livrarr_meta (key, value) VALUES ('data_version', '1');
-
-UPDATE _livrarr_meta SET value = '10' WHERE key = 'schema_version';
+INSERT INTO _livrarr_meta (key, value) VALUES ('schema_version', '10');
+INSERT INTO _livrarr_meta (key, value) VALUES ('data_version', '1');

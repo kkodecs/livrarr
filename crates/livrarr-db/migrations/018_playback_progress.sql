@@ -11,5 +11,3 @@ CREATE TABLE playback_progress (
 );
 
 CREATE INDEX idx_playback_progress_user ON playback_progress(user_id);
-
-UPDATE _livrarr_meta SET value = '18' WHERE key = 'schema_version';

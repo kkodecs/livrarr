@@ -20,5 +20,3 @@ CREATE TABLE list_import_previews (
 
 CREATE INDEX idx_lip_preview_user ON list_import_previews(preview_id, user_id);
 CREATE UNIQUE INDEX idx_lip_row ON list_import_previews(preview_id, user_id, row_index);
-
-UPDATE _livrarr_meta SET value = '20' WHERE key = 'schema_version';

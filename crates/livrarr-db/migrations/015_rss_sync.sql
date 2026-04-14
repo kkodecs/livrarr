@@ -22,5 +22,3 @@ CREATE TABLE indexer_config (
     rss_match_threshold REAL NOT NULL DEFAULT 0.80
 );
 INSERT INTO indexer_config (id) VALUES (1);
-
-UPDATE _livrarr_meta SET value = '15' WHERE key = 'schema_version';
