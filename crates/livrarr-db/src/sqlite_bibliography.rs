@@ -1,5 +1,5 @@
 use crate::sqlite::SqliteDb;
-use crate::sqlite_common::map_db_err_with;
+use crate::sqlite_common::{map_db_err, map_db_err_with};
 use crate::{AuthorBibliography, AuthorBibliographyDb, BibliographyEntry, DbError};
 use sqlx::Row;
 
@@ -56,5 +56,14 @@ impl AuthorBibliographyDb for SqliteDb {
             entries: entries.to_vec(),
             fetched_at: now,
         })
+    }
+
+    async fn delete_bibliography(&self, author_id: i64) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM author_bibliography WHERE author_id = ?")
+            .bind(author_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        Ok(())
     }
 }

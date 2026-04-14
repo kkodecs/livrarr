@@ -875,10 +875,7 @@ pub async fn add_work_internal(
             super::enrichment::enrich_foreign_work(state, &work).await
         } else {
             // No detail URL — skip enrichment, mark as skipped.
-            let _ = sqlx::query("UPDATE works SET enrichment_status = 'skipped' WHERE id = ?")
-                .bind(work.id)
-                .execute(state.db.pool())
-                .await;
+            let _ = state.db.set_enrichment_status_skipped(work.id).await;
             let mut skipped_work = work;
             skipped_work.enrichment_status = livrarr_domain::EnrichmentStatus::Skipped;
             return Ok(AddWorkResponse {
