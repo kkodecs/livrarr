@@ -125,7 +125,7 @@ fn format_bytes(bytes: i64) -> String {
 /// Resolve a library item to an absolute, canonicalized file path.
 /// Returns 403 if the resolved path escapes the root folder (path traversal protection).
 pub async fn resolve_file_path(
-    db: &(impl LibraryItemDb + RootFolderDb + Send + Sync),
+    db: &(impl LibraryItemDb + RootFolderDb),
     user_id: livrarr_domain::UserId,
     library_item_id: livrarr_domain::LibraryItemId,
 ) -> Result<std::path::PathBuf, ApiError> {

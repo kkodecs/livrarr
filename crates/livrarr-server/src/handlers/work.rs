@@ -55,12 +55,6 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
     }
 }
 
-/// Rewrite an external cover URL to go through the server-side proxy.
-/// This bypasses CDN browser-blocking (e.g., Casa del Libro's Akamai).
-fn proxy_cover_url(url: &str) -> String {
-    format!("/api/v1/coverproxy?url={}", urlencoding::encode(url))
-}
-
 /// Extract the original URL from a proxy cover URL.
 /// Returns the input unchanged if it's not a proxy URL.
 fn unproxy_cover_url(url: &str) -> String {

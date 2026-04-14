@@ -79,6 +79,6 @@ pub async fn set_log_level(
     state
         .log_level_handle
         .set_level(&level)
-        .map_err(|e| ApiError::BadRequest(e))?;
+        .map_err(ApiError::BadRequest)?;
     Ok(Json(serde_json::json!({ "level": level })))
 }

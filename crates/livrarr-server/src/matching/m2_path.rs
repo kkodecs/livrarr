@@ -306,6 +306,7 @@ fn sanitize_path_author(author: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+#[allow(clippy::too_many_arguments)] // 8 params: all distinct metadata fields, no natural grouping
 fn make_extraction(
     title: &str,
     author: Option<&str>,

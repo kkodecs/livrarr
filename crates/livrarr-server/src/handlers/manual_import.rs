@@ -714,6 +714,7 @@ pub async fn import(
 /// DeletionTarget: (library_item_id, work_id, relative_path, media_type, root_folder_id)
 type DeletionTarget = (i64, i64, String, MediaType, i64);
 
+#[allow(clippy::too_many_arguments)] // 9 params: state, user, item, 3 lookups, mgmt, snapshot, cache
 async fn import_single_item(
     state: &AppState,
     user_id: i64,
@@ -1167,12 +1168,6 @@ fn enumerate_recursive(
 // ---------------------------------------------------------------------------
 // OL search helpers
 // ---------------------------------------------------------------------------
-
-/// Search OL for a single term, return best match.
-async fn search_ol_single(state: &AppState, term: &str) -> Option<WorkSearchResult> {
-    let results = search_ol_batch(state, term).await.ok()?;
-    results.into_iter().next()
-}
 
 /// Search OL and return cleaned results (reuses existing lookup_openlibrary + LLM cleanup).
 async fn search_ol_batch(state: &AppState, term: &str) -> Result<Vec<WorkSearchResult>, ApiError> {

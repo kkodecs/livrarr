@@ -216,17 +216,16 @@ fn build_cluster(members: Vec<Extraction>) -> Option<Cluster> {
 
     // Compute cluster confidence from agreement.
     let agreement_count = members.len();
-    let confidence = if agreement_count >= 3 {
-        Confidence::High
-    } else if agreement_count == 2 && primary.has_title_and_author() {
-        Confidence::High
-    } else if primary.has_title_and_author() {
-        primary.confidence
-    } else if primary.has_title() {
-        Confidence::MediumLow
-    } else {
-        Confidence::Low
-    };
+    let confidence =
+        if agreement_count >= 3 || (agreement_count == 2 && primary.has_title_and_author()) {
+            Confidence::High
+        } else if primary.has_title_and_author() {
+            primary.confidence
+        } else if primary.has_title() {
+            Confidence::MediumLow
+        } else {
+            Confidence::Low
+        };
 
     Some(Cluster {
         primary,

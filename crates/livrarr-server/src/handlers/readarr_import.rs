@@ -307,8 +307,8 @@ fn apply_path_translation(
         (Some(cp), Some(hp)) if !cp.is_empty() && !hp.is_empty() => {
             let cp = cp.trim_end_matches('/');
             let hp = hp.trim_end_matches('/');
-            if path.starts_with(cp) {
-                format!("{}{}", hp, &path[cp.len()..])
+            if let Some(suffix) = path.strip_prefix(cp) {
+                format!("{}{}", hp, suffix)
             } else {
                 path.to_string()
             }
@@ -830,6 +830,7 @@ async fn fetch_all_readarr_data(
 // Import execution
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)] // 11 params: state, user, import-id, url, key, 2 root-ids, flag, 2 path-translation opts
 async fn run_import(
     state: AppState,
     user_id: i64,

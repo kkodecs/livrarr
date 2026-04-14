@@ -640,7 +640,7 @@ pub async fn series_monitor_worker(
 
     let mut created = 0u32;
     let mut linked = 0u32;
-    let mut skipped = 0u32;
+    let skipped = 0u32;
     let max_works = 50;
 
     for book in &all_books {
