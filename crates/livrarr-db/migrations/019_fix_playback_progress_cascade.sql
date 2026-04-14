@@ -16,5 +16,3 @@ DROP TABLE playback_progress;
 ALTER TABLE playback_progress_new RENAME TO playback_progress;
 
 CREATE INDEX idx_playback_progress_user ON playback_progress(user_id);
-
-UPDATE _livrarr_meta SET value = '19' WHERE key = 'schema_version';
