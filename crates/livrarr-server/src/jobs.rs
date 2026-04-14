@@ -91,6 +91,13 @@ impl JobRunner {
             enrichment_retry_tick,
         )
         .await;
+        self.spawn_job(
+            "state_map_cleanup",
+            Duration::from_secs(1800),
+            state.clone(),
+            state_map_cleanup_tick,
+        )
+        .await;
         self.spawn_job("rss_sync", Duration::from_secs(60), state, rss_sync_tick)
             .await;
     }
@@ -476,7 +483,7 @@ async fn poll_qbittorrent(
             if grab.download_id.is_none() && !hash.is_empty() {
                 if let Err(e) = state
                     .db
-                    .set_grab_download_id(grab.user_id, grab.id, hash)
+                    .update_grab_download_id(grab.user_id, grab.id, hash)
                     .await
                 {
                     warn!(
@@ -2148,5 +2155,18 @@ pub(crate) async fn rss_sync_core(
         .rss_last_run
         .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// State Map TTL Cleanup Tick
+// ---------------------------------------------------------------------------
+
+/// Remove stale entries from `import_locks` and `manual_import_scans`.
+/// Runs every 30 minutes — evicts entries abandoned without explicit cleanup.
+async fn state_map_cleanup_tick(state: AppState, _cancel: CancellationToken) -> Result<(), String> {
+    crate::state::cleanup_import_locks(&state.import_locks);
+    crate::state::cleanup_manual_import_scans(&state.manual_import_scans);
+    trace!("state_map_cleanup: stale entries evicted");
     Ok(())
 }

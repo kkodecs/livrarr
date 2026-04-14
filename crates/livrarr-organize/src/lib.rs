@@ -190,7 +190,7 @@ pub fn copy_to_cwa(
             success: true,
             warning: None,
         },
-        Err(e) if e.raw_os_error() == Some(18) => {
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             // EXDEV — cross-filesystem, fallback to copy
             match std::fs::copy(source_path, &dst) {
                 Ok(_) => CwaResult {

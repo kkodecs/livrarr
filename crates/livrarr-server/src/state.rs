@@ -102,8 +102,31 @@ impl OlRateLimiter {
 pub type ManualImportScanMap = dashmap::DashMap<String, crate::handlers::manual_import::ScanState>;
 
 /// Per-(user, work) mutex map for serializing concurrent imports of the same work.
-pub type ImportLockMap =
-    dashmap::DashMap<(livrarr_db::UserId, livrarr_db::WorkId), Arc<tokio::sync::Mutex<()>>>;
+/// Value is `(mutex, insertion_time)` — the insertion time is used by TTL cleanup.
+pub type ImportLockMap = dashmap::DashMap<
+    (livrarr_db::UserId, livrarr_db::WorkId),
+    (Arc<tokio::sync::Mutex<()>>, std::time::Instant),
+>;
+
+const STATE_MAP_TTL: Duration = Duration::from_secs(30 * 60); // 30 minutes
+
+/// Remove entries from `import_locks` that were inserted more than 30 minutes ago.
+/// Safe to call from any context — entries still held by an active guard are still
+/// referenced via Arc, so the mutex itself is not dropped until the guard releases.
+pub fn cleanup_import_locks(map: &ImportLockMap) {
+    let cutoff = std::time::Instant::now()
+        .checked_sub(STATE_MAP_TTL)
+        .unwrap_or(std::time::Instant::now());
+    map.retain(|_, (_, ts)| *ts > cutoff);
+}
+
+/// Remove entries from `manual_import_scans` that were created more than 30 minutes ago.
+pub fn cleanup_manual_import_scans(map: &ManualImportScanMap) {
+    let cutoff = std::time::Instant::now()
+        .checked_sub(STATE_MAP_TTL)
+        .unwrap_or(std::time::Instant::now());
+    map.retain(|_, scan| scan.created_at > cutoff);
+}
 
 /// Handle for dynamically reloading the tracing EnvFilter at runtime.
 pub struct LogLevelHandle {

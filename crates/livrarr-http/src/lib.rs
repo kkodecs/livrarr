@@ -41,17 +41,6 @@ impl HttpClientBuilder {
         self
     }
 
-    pub fn retry(self, _max_attempts: u32, _backoff: Duration) -> Self {
-        // Retry logic is handled at the call site for now —
-        // reqwest doesn't have built-in retry middleware.
-        self
-    }
-
-    pub fn rate_limit(self, _rps: u32) -> Self {
-        // Rate limiting handled at call site per provider.
-        self
-    }
-
     pub fn user_agent(mut self, agent: &str) -> Self {
         self.user_agent = Some(agent.to_string());
         self
@@ -163,11 +152,11 @@ pub trait HttpClientContract {
     fn skip_ssl_validation(&self) -> bool;
 }
 
-const STANDARD_BACKOFF: [Duration; 3] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(4),
-];
+/// BackgroundClient retry backoff: two delays before final attempt.
+const BACKGROUND_BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
+
+/// ForegroundClient retry backoff: one delay before final attempt.
+const FOREGROUND_BACKOFF: [Duration; 1] = [Duration::from_secs(2)];
 
 fn livrarr_user_agent() -> String {
     format!("Livrarr/{}", env!("CARGO_PKG_VERSION"))
@@ -194,16 +183,16 @@ impl HttpClientContract for ForegroundClient {
         Duration::from_secs(3)
     }
     fn retry_enabled(&self) -> bool {
-        false
+        true
     }
     fn max_attempts(&self) -> usize {
-        1
+        2
     }
     fn backoff_schedule(&self) -> &[Duration] {
-        &[]
+        &FOREGROUND_BACKOFF
     }
-    fn retry_disposition(&self, _: HttpErrorKind) -> RetryDisposition {
-        RetryDisposition::NoRetry
+    fn retry_disposition(&self, error_kind: HttpErrorKind) -> RetryDisposition {
+        background_retry_disposition(error_kind)
     }
     fn user_agent(&self) -> String {
         livrarr_user_agent()
@@ -233,7 +222,7 @@ impl HttpClientContract for BackgroundClient {
         3
     }
     fn backoff_schedule(&self) -> &[Duration] {
-        &STANDARD_BACKOFF
+        &BACKGROUND_BACKOFF
     }
     fn retry_disposition(&self, e: HttpErrorKind) -> RetryDisposition {
         background_retry_disposition(e)
@@ -309,7 +298,7 @@ impl HttpClientContract for DownloadClient {
         3
     }
     fn backoff_schedule(&self) -> &[Duration] {
-        &STANDARD_BACKOFF
+        &BACKGROUND_BACKOFF
     }
     fn retry_disposition(&self, e: HttpErrorKind) -> RetryDisposition {
         background_retry_disposition(e)

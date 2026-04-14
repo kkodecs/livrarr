@@ -280,26 +280,6 @@ impl GrabDb for SqliteDb {
         Ok(result.rows_affected())
     }
 
-    async fn set_grab_download_id(
-        &self,
-        user_id: UserId,
-        id: GrabId,
-        download_id: &str,
-    ) -> Result<(), DbError> {
-        let result = sqlx::query("UPDATE grabs SET download_id = ? WHERE id = ? AND user_id = ?")
-            .bind(download_id)
-            .bind(id)
-            .bind(user_id)
-            .execute(self.pool())
-            .await
-            .map_err(map_db_err)?;
-
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound { entity: "grab" });
-        }
-        Ok(())
-    }
-
     async fn set_grab_content_path(
         &self,
         user_id: UserId,
