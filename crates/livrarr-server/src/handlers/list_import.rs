@@ -6,13 +6,13 @@
 use axum::extract::{Multipart, Path, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use tracing::{info, warn};
 
 use crate::handlers::work::add_work_internal;
 use crate::parsers::{self, CsvSource, ImportStatus, ParseError};
 use crate::state::AppState;
 use crate::{AddWorkRequest, ApiError, AuthContext};
+use livrarr_db::ListImportDb;
 
 // ---------------------------------------------------------------------------
 // Request/Response types
@@ -170,28 +170,25 @@ pub async fn preview(
         };
 
         // Persist to preview table.
-        sqlx::query(
-            "INSERT INTO list_import_previews \
-             (preview_id, user_id, row_index, title, author, isbn_13, isbn_10, year, \
-              source_status, source_rating, preview_status, source, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&preview_id)
-        .bind(user_id)
-        .bind(row.row_index as i64)
-        .bind(&row.title)
-        .bind(&row.author)
-        .bind(&row.isbn_13)
-        .bind(&row.isbn_10)
-        .bind(row.year)
-        .bind(row.status.map(|s| format!("{s:?}")))
-        .bind(row.rating)
-        .bind(status)
-        .bind(source_str)
-        .bind(&now)
-        .execute(state.db.pool())
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to persist preview: {e}")))?;
+        state
+            .db
+            .insert_list_import_preview_row(
+                &preview_id,
+                user_id,
+                row.row_index as i64,
+                &row.title,
+                &row.author,
+                row.isbn_13.as_deref(),
+                row.isbn_10.as_deref(),
+                row.year,
+                row.status.map(|s| format!("{s:?}")).as_deref(),
+                row.rating,
+                status,
+                source_str,
+                &now,
+            )
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to persist preview: {e}")))?;
 
         preview_rows.push(PreviewRow {
             row_index: row.row_index,
@@ -234,14 +231,11 @@ pub async fn confirm(
     let user_id = ctx.user.id;
 
     // Validate preview exists for this user.
-    let preview_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM list_import_previews WHERE preview_id = ? AND user_id = ?",
-    )
-    .bind(&req.preview_id)
-    .bind(user_id)
-    .fetch_one(state.db.pool())
-    .await
-    .map_err(|e| ApiError::Internal(format!("preview lookup failed: {e}")))?;
+    let preview_count = state
+        .db
+        .count_list_import_previews(&req.preview_id, user_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("preview lookup failed: {e}")))?;
 
     if preview_count == 0 {
         return Err(ApiError::BadRequest("preview not found or expired".into()));
@@ -250,48 +244,38 @@ pub async fn confirm(
     // Get or create import record.
     let import_id = if let Some(ref id) = req.import_id {
         // Validate ownership and status.
-        let row = sqlx::query("SELECT user_id, status FROM imports WHERE id = ?")
-            .bind(id)
-            .fetch_optional(state.db.pool())
+        let record = state
+            .db
+            .get_list_import_record(id)
             .await
             .map_err(|e| ApiError::Internal(format!("import lookup failed: {e}")))?
-            .ok_or_else(|| ApiError::NotFound)?;
+            .ok_or(ApiError::NotFound)?;
 
-        let owner: i64 = row.try_get("user_id").unwrap_or(0);
-        let status: String = row.try_get("status").unwrap_or_default();
-        if owner != user_id {
+        if record.user_id != user_id {
             return Err(ApiError::Forbidden);
         }
-        if status != "running" {
+        if record.status != "running" {
             return Err(ApiError::Conflict {
-                reason: format!("import is {status}, not running"),
+                reason: format!("import is {}, not running", record.status),
             });
         }
         id.clone()
     } else {
         // Get source from preview.
-        let source: String = sqlx::query_scalar(
-            "SELECT source FROM list_import_previews WHERE preview_id = ? AND user_id = ? LIMIT 1",
-        )
-        .bind(&req.preview_id)
-        .bind(user_id)
-        .fetch_one(state.db.pool())
-        .await
-        .map_err(|e| ApiError::Internal(format!("source lookup failed: {e}")))?;
+        let source = state
+            .db
+            .get_list_import_source(&req.preview_id, user_id)
+            .await
+            .map_err(|e| ApiError::Internal(format!("source lookup failed: {e}")))?;
 
         // Create new import record.
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO imports (id, user_id, source, status, started_at) VALUES (?, ?, ?, 'running', ?)",
-        )
-        .bind(&id)
-        .bind(user_id)
-        .bind(&source)
-        .bind(&now)
-        .execute(state.db.pool())
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to create import: {e}")))?;
+        state
+            .db
+            .create_list_import_record(&id, user_id, &source, &now)
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to create import: {e}")))?;
 
         id
     };
@@ -301,16 +285,11 @@ pub async fn confirm(
     let mut works_created: i64 = 0;
 
     for &row_idx in &req.row_indices {
-        let row = sqlx::query(
-            "SELECT * FROM list_import_previews \
-             WHERE preview_id = ? AND user_id = ? AND row_index = ?",
-        )
-        .bind(&req.preview_id)
-        .bind(user_id)
-        .bind(row_idx as i64)
-        .fetch_optional(state.db.pool())
-        .await
-        .map_err(|e| ApiError::Internal(format!("row fetch failed: {e}")))?;
+        let row = state
+            .db
+            .get_list_import_preview_row(&req.preview_id, user_id, row_idx as i64)
+            .await
+            .map_err(|e| ApiError::Internal(format!("row fetch failed: {e}")))?;
 
         let row = match row {
             Some(r) => r,
@@ -324,20 +303,14 @@ pub async fn confirm(
             }
         };
 
-        let title: String = row.try_get("title").unwrap_or_default();
-        let author: String = row.try_get("author").unwrap_or_default();
-        let isbn_13: Option<String> = row.try_get("isbn_13").ok();
-        let isbn_10: Option<String> = row.try_get("isbn_10").ok();
-        let year: Option<i32> = row.try_get("year").ok().flatten();
-
         // OL lookup: ISBN first, fallback to title+author search.
         let lookup_result = ol_lookup(
             &state,
-            isbn_13.as_deref(),
-            isbn_10.as_deref(),
-            &title,
-            &author,
-            year,
+            row.isbn_13.as_deref(),
+            row.isbn_10.as_deref(),
+            &row.title,
+            &row.author,
+            row.year,
         )
         .await;
 
@@ -358,15 +331,10 @@ pub async fn confirm(
             Ok(_response) => {
                 // Tag the newly created work with import_id.
                 // The work was just created — find it by ol_key.
-                let _ = sqlx::query(
-                    "UPDATE works SET import_id = ? WHERE user_id = ? AND id = \
-                     (SELECT id FROM works WHERE user_id = ? ORDER BY id DESC LIMIT 1)",
-                )
-                .bind(&import_id)
-                .bind(user_id)
-                .bind(user_id)
-                .execute(state.db.pool())
-                .await;
+                let _ = state
+                    .db
+                    .tag_last_work_with_import(&import_id, user_id)
+                    .await;
 
                 works_created += 1;
                 results.push(ConfirmRowResult {
@@ -394,10 +362,9 @@ pub async fn confirm(
     }
 
     // Update import counters.
-    let _ = sqlx::query("UPDATE imports SET works_created = works_created + ? WHERE id = ?")
-        .bind(works_created)
-        .bind(&import_id)
-        .execute(state.db.pool())
+    let _ = state
+        .db
+        .increment_list_import_works_created(&import_id, works_created)
         .await;
 
     info!(
@@ -421,18 +388,13 @@ pub async fn complete(
     Path(import_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let now = chrono::Utc::now().to_rfc3339();
-    let result = sqlx::query(
-        "UPDATE imports SET status = 'completed', completed_at = ? \
-         WHERE id = ? AND user_id = ? AND status = 'running'",
-    )
-    .bind(&now)
-    .bind(&import_id)
-    .bind(ctx.user.id)
-    .execute(state.db.pool())
-    .await
-    .map_err(|e| ApiError::Internal(format!("complete failed: {e}")))?;
+    let rows_affected = state
+        .db
+        .complete_list_import(&import_id, ctx.user.id, &now)
+        .await
+        .map_err(|e| ApiError::Internal(format!("complete failed: {e}")))?;
 
-    if result.rows_affected() == 0 {
+    if rows_affected == 0 {
         return Err(ApiError::NotFound);
     }
 
@@ -453,15 +415,13 @@ pub async fn undo(
     let user_id = ctx.user.id;
 
     // Validate import exists and belongs to user.
-    let row = sqlx::query("SELECT status FROM imports WHERE id = ? AND user_id = ?")
-        .bind(&import_id)
-        .bind(user_id)
-        .fetch_optional(state.db.pool())
+    let status = state
+        .db
+        .get_list_import_status_for_user(&import_id, user_id)
         .await
         .map_err(|e| ApiError::Internal(format!("import lookup failed: {e}")))?
-        .ok_or_else(|| ApiError::NotFound)?;
+        .ok_or(ApiError::NotFound)?;
 
-    let status: String = row.try_get("status").unwrap_or_default();
     if status == "undone" {
         return Err(ApiError::Conflict {
             reason: "import already undone".into(),
@@ -472,19 +432,14 @@ pub async fn undo(
     // Also delete associated library_items, grabs, history, etc. via cascading
     // or explicit cleanup. For alpha3, works is sufficient — imported works
     // won't have library items (they're metadata-only, no files).
-    let deleted = sqlx::query("DELETE FROM works WHERE import_id = ? AND user_id = ?")
-        .bind(&import_id)
-        .bind(user_id)
-        .execute(state.db.pool())
+    let deleted = state
+        .db
+        .delete_works_by_list_import(&import_id, user_id)
         .await
-        .map_err(|e| ApiError::Internal(format!("undo delete failed: {e}")))?
-        .rows_affected() as i64;
+        .map_err(|e| ApiError::Internal(format!("undo delete failed: {e}")))?;
 
     // Mark import as undone.
-    let _ = sqlx::query("UPDATE imports SET status = 'undone' WHERE id = ?")
-        .bind(&import_id)
-        .execute(state.db.pool())
-        .await;
+    let _ = state.db.mark_list_import_undone(&import_id).await;
 
     info!(user_id, import_id = %import_id, works_removed = deleted, "list import undone");
 
@@ -501,25 +456,21 @@ pub async fn list(
     State(state): State<AppState>,
     ctx: AuthContext,
 ) -> Result<Json<Vec<ImportSummary>>, ApiError> {
-    let rows = sqlx::query(
-        "SELECT id, source, status, started_at, completed_at, works_created \
-         FROM imports WHERE user_id = ? AND source IN ('goodreads', 'hardcover') \
-         ORDER BY started_at DESC LIMIT 50",
-    )
-    .bind(ctx.user.id)
-    .fetch_all(state.db.pool())
-    .await
-    .map_err(|e| ApiError::Internal(format!("list imports failed: {e}")))?;
+    let rows = state
+        .db
+        .list_list_imports(ctx.user.id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("list imports failed: {e}")))?;
 
     let imports: Vec<ImportSummary> = rows
-        .iter()
+        .into_iter()
         .map(|r| ImportSummary {
-            id: r.try_get("id").unwrap_or_default(),
-            source: r.try_get("source").unwrap_or_default(),
-            status: r.try_get("status").unwrap_or_default(),
-            started_at: r.try_get("started_at").unwrap_or_default(),
-            completed_at: r.try_get("completed_at").ok().flatten(),
-            works_created: r.try_get("works_created").unwrap_or(0),
+            id: r.id,
+            source: r.source,
+            status: r.status,
+            started_at: r.started_at,
+            completed_at: r.completed_at,
+            works_created: r.works_created,
         })
         .collect();
 
@@ -537,48 +488,24 @@ async fn check_work_exists_by_isbn(
     isbn_13: Option<&str>,
     isbn_10: Option<&str>,
 ) -> bool {
-    // Check ISBN-13 via works table.
     if let Some(isbn) = isbn_13 {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE user_id = ? AND isbn_13 = ?")
-                .bind(user_id)
-                .bind(isbn)
-                .fetch_one(state.db.pool())
-                .await
-                .unwrap_or(0);
-        if count > 0 {
-            return true;
-        }
-
-        // Also check external_ids table.
-        let ext_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM external_ids ei \
-             JOIN works w ON ei.work_id = w.id \
-             WHERE w.user_id = ? AND ei.id_type = 'isbn_13' AND ei.id_value = ?",
-        )
-        .bind(user_id)
-        .bind(isbn)
-        .fetch_one(state.db.pool())
-        .await
-        .unwrap_or(0);
-        if ext_count > 0 {
+        if state
+            .db
+            .work_exists_by_isbn_13(user_id, isbn)
+            .await
+            .unwrap_or(false)
+        {
             return true;
         }
     }
 
-    // Check ISBN-10 via external_ids.
     if let Some(isbn) = isbn_10 {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM external_ids ei \
-             JOIN works w ON ei.work_id = w.id \
-             WHERE w.user_id = ? AND ei.id_type = 'isbn_10' AND ei.id_value = ?",
-        )
-        .bind(user_id)
-        .bind(isbn)
-        .fetch_one(state.db.pool())
-        .await
-        .unwrap_or(0);
-        if count > 0 {
+        if state
+            .db
+            .work_exists_by_isbn_10(user_id, isbn)
+            .await
+            .unwrap_or(false)
+        {
             return true;
         }
     }

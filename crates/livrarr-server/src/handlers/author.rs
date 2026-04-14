@@ -380,11 +380,7 @@ pub async fn refresh_bibliography(
     let _author = state.db.get_author(ctx.user.id, id).await?;
 
     // Clear cache so bibliography() re-fetches.
-    if let Err(e) = sqlx::query("DELETE FROM author_bibliography WHERE author_id = ?")
-        .bind(id)
-        .execute(state.db.pool())
-        .await
-    {
+    if let Err(e) = state.db.delete_bibliography(id).await {
         tracing::warn!("DELETE author_bibliography failed: {e}");
     }
     bibliography(State(state), ctx, Path(id)).await

@@ -12,7 +12,8 @@ use tracing::{debug, error, info, trace, warn};
 use crate::state::AppState;
 use livrarr_db::{
     CreateHistoryEventDbRequest, CreateNotificationDbRequest, CreateWorkDbRequest,
-    DownloadClientDb, EnrichmentRetryDb, GrabDb, HistoryDb, NotificationDb, SessionDb, WorkDb,
+    DownloadClientDb, EnrichmentRetryDb, GrabDb, HistoryDb, ListImportDb, NotificationDb,
+    SessionDb, WorkDb,
 };
 use livrarr_domain::{EventType, NotificationType};
 
@@ -915,11 +916,10 @@ async fn session_cleanup_tick(state: AppState, _cancel: CancellationToken) -> Re
 
     // Clean up stale list import preview rows (older than 1 hour).
     let cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    let preview_count = sqlx::query("DELETE FROM list_import_previews WHERE created_at < ?")
-        .bind(&cutoff)
-        .execute(state.db.pool())
+    let preview_count = state
+        .db
+        .delete_stale_list_import_previews(&cutoff)
         .await
-        .map(|r| r.rows_affected())
         .unwrap_or(0);
     if preview_count > 0 {
         debug!("session cleanup: deleted {preview_count} stale list import previews");

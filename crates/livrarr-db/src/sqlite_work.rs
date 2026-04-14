@@ -538,6 +538,15 @@ impl WorkDb for SqliteDb {
         .map_err(map_db_err)?;
         rows.into_iter().map(row_to_work).collect()
     }
+
+    async fn set_enrichment_status_skipped(&self, id: WorkId) -> Result<(), DbError> {
+        sqlx::query("UPDATE works SET enrichment_status = 'skipped' WHERE id = ?")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        Ok(())
+    }
 }
 
 impl crate::EnrichmentRetryDb for SqliteDb {
