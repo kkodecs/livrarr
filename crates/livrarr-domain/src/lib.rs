@@ -368,7 +368,7 @@ pub struct Work {
     pub metadata_source: Option<String>,
     /// Detail page URL for foreign work enrichment (e.g., Goodreads book page).
     /// Server-side only — never exposed in API responses.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub detail_url: Option<String>,
 }
 

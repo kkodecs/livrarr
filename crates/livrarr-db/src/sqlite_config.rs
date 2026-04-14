@@ -129,7 +129,12 @@ impl ConfigDb for SqliteDb {
         let current = self.get_prowlarr_config().await?;
 
         let url = req.url.or(current.url);
-        let api_key = req.api_key.or(current.api_key);
+        // API key tri-state: None = keep, Some(None) = clear, Some(Some(v)) = set.
+        let api_key = match req.api_key {
+            None => current.api_key,
+            Some(None) => None,
+            Some(Some(v)) => Some(v),
+        };
         let enabled = req.enabled.unwrap_or(current.enabled);
 
         sqlx::query("UPDATE prowlarr_config SET url = ?, api_key = ?, enabled = ? WHERE id = 1")
@@ -188,12 +193,22 @@ impl ConfigDb for SqliteDb {
         let current = self.get_metadata_config().await?;
 
         let hardcover_enabled = req.hardcover_enabled.unwrap_or(current.hardcover_enabled);
-        let hardcover_api_token = req.hardcover_api_token.or(current.hardcover_api_token);
+        // Hardcover API token tri-state: None = keep, Some(None) = clear, Some(Some(v)) = set.
+        let hardcover_api_token = match req.hardcover_api_token {
+            None => current.hardcover_api_token,
+            Some(None) => None,
+            Some(Some(v)) => Some(v),
+        };
         let llm_enabled = req.llm_enabled.unwrap_or(current.llm_enabled);
         let llm_provider = req.llm_provider.or(current.llm_provider);
         let llm_provider_val = llm_provider.as_ref().map(llm_provider_str);
         let llm_endpoint = req.llm_endpoint.or(current.llm_endpoint);
-        let llm_api_key = req.llm_api_key.or(current.llm_api_key);
+        // LLM API key tri-state: None = keep, Some(None) = clear, Some(Some(v)) = set.
+        let llm_api_key = match req.llm_api_key {
+            None => current.llm_api_key,
+            Some(None) => None,
+            Some(Some(v)) => Some(v),
+        };
         let llm_model = req.llm_model.or(current.llm_model);
         let audnexus_url = req.audnexus_url.unwrap_or(current.audnexus_url);
         let languages = req.languages.unwrap_or(current.languages);
@@ -271,7 +286,12 @@ impl ConfigDb for SqliteDb {
         let smtp_port = req.smtp_port.unwrap_or(current.smtp_port);
         let encryption = req.encryption.unwrap_or(current.encryption);
         let username = req.username.or(current.username);
-        let password = req.password.or(current.password);
+        // Password tri-state: None = keep, Some(None) = clear, Some(Some(v)) = set.
+        let password = match req.password {
+            None => current.password,
+            Some(None) => None,
+            Some(Some(v)) => Some(v),
+        };
         let from_address = req.from_address.or(current.from_address);
         let recipient_email = req.recipient_email.or(current.recipient_email);
         let send_on_import = req.send_on_import.unwrap_or(current.send_on_import);

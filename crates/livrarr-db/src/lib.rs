@@ -621,6 +621,14 @@ pub struct CreateGrabDbRequest {
 #[trait_variant::make(Send)]
 pub trait DownloadClientDb: Send + Sync {
     async fn get_download_client(&self, id: DownloadClientId) -> Result<DownloadClient, DbError>;
+
+    /// Get download client with credentials (password and api_key populated).
+    /// Use for outbound connections (test, grab, import poll). Default get_download_client
+    /// is equivalent but callers making outbound calls should use this variant to signal intent.
+    async fn get_download_client_with_credentials(
+        &self,
+        id: DownloadClientId,
+    ) -> Result<DownloadClient, DbError>;
     async fn list_download_clients(&self) -> Result<Vec<DownloadClient>, DbError>;
     async fn create_download_client(
         &self,
@@ -666,10 +674,12 @@ pub struct UpdateDownloadClientDbRequest {
     pub skip_ssl_validation: Option<bool>,
     pub url_base: Option<String>,
     pub username: Option<String>,
-    pub password: Option<String>,
+    /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
+    pub password: Option<Option<String>>,
     pub category: Option<String>,
     pub enabled: Option<bool>,
-    pub api_key: Option<String>,
+    /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
+    pub api_key: Option<Option<String>>,
     pub is_default_for_protocol: Option<bool>,
 }
 
@@ -913,7 +923,8 @@ pub struct UpdateMediaManagementConfigRequest {
 
 pub struct UpdateProwlarrConfigRequest {
     pub url: Option<String>,
-    pub api_key: Option<String>,
+    /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
+    pub api_key: Option<Option<String>>,
     pub enabled: Option<bool>,
 }
 
@@ -936,7 +947,8 @@ pub struct UpdateEmailConfigRequest {
     pub smtp_port: Option<i32>,
     pub encryption: Option<String>,
     pub username: Option<String>,
-    pub password: Option<String>,
+    /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
+    pub password: Option<Option<String>>,
     pub from_address: Option<String>,
     pub recipient_email: Option<String>,
     pub send_on_import: Option<bool>,
@@ -951,11 +963,13 @@ pub struct UpdateIndexerConfigRequest {
 
 pub struct UpdateMetadataConfigRequest {
     pub hardcover_enabled: Option<bool>,
-    pub hardcover_api_token: Option<String>,
+    /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
+    pub hardcover_api_token: Option<Option<String>>,
     pub llm_enabled: Option<bool>,
     pub llm_provider: Option<LlmProvider>,
     pub llm_endpoint: Option<String>,
-    pub llm_api_key: Option<String>,
+    /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
+    pub llm_api_key: Option<Option<String>>,
     pub llm_model: Option<String>,
     pub audnexus_url: Option<String>,
     pub languages: Option<Vec<String>>,
@@ -994,6 +1008,11 @@ pub trait EnrichmentRetryDb: Send + Sync {
 #[trait_variant::make(Send)]
 pub trait IndexerDb: Send + Sync {
     async fn get_indexer(&self, id: IndexerId) -> Result<Indexer, DbError>;
+
+    /// Get indexer with credentials (api_key populated).
+    /// Use for outbound connections (test, search). Default get_indexer is equivalent
+    /// but callers that make outbound calls should use this variant to signal intent.
+    async fn get_indexer_with_credentials(&self, id: IndexerId) -> Result<Indexer, DbError>;
     async fn list_indexers(&self) -> Result<Vec<Indexer>, DbError>;
     async fn list_enabled_interactive_indexers(&self) -> Result<Vec<Indexer>, DbError>;
     async fn create_indexer(&self, req: CreateIndexerDbRequest) -> Result<Indexer, DbError>;
@@ -1047,7 +1066,8 @@ pub struct UpdateIndexerDbRequest {
     pub name: Option<String>,
     pub url: Option<String>,
     pub api_path: Option<String>,
-    pub api_key: Option<String>,
+    /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
+    pub api_key: Option<Option<String>>,
     pub categories: Option<Vec<i32>>,
     pub priority: Option<i32>,
     pub enable_automatic_search: Option<bool>,

@@ -105,11 +105,22 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(req): Json<UpdateDownloadClientApiRequest>,
 ) -> Result<Json<DownloadClientResponse>, ApiError> {
-    // USE-DLC-005: preserve existing api_key if incoming is empty/omitted.
-    let api_key = match req.api_key {
-        Some(ref k) if !k.is_empty() => Some(k.clone()),
-        _ => None,
-    };
+    // Validate tri-state secrets: empty string is invalid.
+    if let Some(Some(ref k)) = req.api_key {
+        if k.is_empty() {
+            return Err(ApiError::BadRequest(
+                "api_key must not be empty string; use null to clear".into(),
+            ));
+        }
+    }
+    if let Some(Some(ref p)) = req.password {
+        if p.is_empty() {
+            return Err(ApiError::BadRequest(
+                "password must not be empty string; use null to clear".into(),
+            ));
+        }
+    }
+    let api_key = req.api_key;
 
     // Prevent clearing the last default for a protocol.
     if req.is_default_for_protocol == Some(false) {
@@ -271,7 +282,7 @@ pub async fn test_saved(
     _admin: RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<(), ApiError> {
-    let dc = state.db.get_download_client(id).await?;
+    let dc = state.db.get_download_client_with_credentials(id).await?;
     let req = CreateDownloadClientApiRequest {
         name: dc.name,
         implementation: dc.implementation,
@@ -713,7 +724,7 @@ pub async fn import_from_prowlarr(
             .db
             .update_prowlarr_config(livrarr_db::UpdateProwlarrConfigRequest {
                 url: Some(url),
-                api_key: Some(api_key),
+                api_key: Some(Some(api_key)),
                 enabled: Some(true),
             })
             .await;

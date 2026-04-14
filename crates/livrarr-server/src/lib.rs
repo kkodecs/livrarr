@@ -3,6 +3,29 @@ pub use livrarr_domain::*;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+// ---------------------------------------------------------------------------
+// Tri-state secret deserializer
+// ---------------------------------------------------------------------------
+// Outer Option: None = field absent from JSON (keep existing).
+// Inner Option: None = explicit JSON null (clear the value).
+//               Some(s) = JSON string value (set to s).
+// Used for api_key, password, token fields on update endpoints.
+
+pub fn deserialize_optional_secret<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Option<Option<T>> with serde: we need to distinguish absent vs null vs string.
+    // serde's default Option<Option<T>> handling:
+    //   absent field  → outer None (via #[serde(default)])
+    //   null          → Some(None)
+    //   "value"       → Some(Some("value"))
+    // This is exactly what we want — just use serde's built-in double-Option deserializer.
+    Option::<Option<String>>::deserialize(deserializer)
+}
+
 #[cfg(test)]
 pub mod api_secondary_impl;
 pub mod auth_crypto;
@@ -759,10 +782,14 @@ pub struct UpdateDownloadClientApiRequest {
     pub skip_ssl_validation: Option<bool>,
     pub url_base: Option<String>,
     pub username: Option<String>,
-    pub password: Option<String>,
+    /// Tri-state: absent → keep, `null` → clear, `"value"` → set (empty string → 400).
+    #[serde(default, deserialize_with = "deserialize_optional_secret")]
+    pub password: Option<Option<String>>,
     pub category: Option<String>,
     pub enabled: Option<bool>,
-    pub api_key: Option<String>,
+    /// Tri-state: absent → keep, `null` → clear, `"value"` → set (empty string → 400).
+    #[serde(default, deserialize_with = "deserialize_optional_secret")]
+    pub api_key: Option<Option<String>>,
     pub is_default_for_protocol: Option<bool>,
 }
 
@@ -849,7 +876,9 @@ pub struct UpdateIndexerApiRequest {
     pub name: Option<String>,
     pub url: Option<String>,
     pub api_path: Option<String>,
-    pub api_key: Option<String>,
+    /// Tri-state: absent → keep, `null` → clear, `"value"` → set (empty string → 400).
+    #[serde(default, deserialize_with = "deserialize_optional_secret")]
+    pub api_key: Option<Option<String>>,
     pub categories: Option<Vec<i32>>,
     pub priority: Option<i32>,
     pub enable_automatic_search: Option<bool>,
@@ -1095,7 +1124,9 @@ pub struct UpdateMediaManagementApiRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProwlarrApiRequest {
     pub url: Option<String>,
-    pub api_key: Option<String>,
+    /// Tri-state: absent → keep, `null` → clear, `"value"` → set (empty string → 400).
+    #[serde(default, deserialize_with = "deserialize_optional_secret")]
+    pub api_key: Option<Option<String>>,
     pub enabled: Option<bool>,
 }
 
@@ -1121,7 +1152,9 @@ pub struct UpdateEmailApiRequest {
     pub smtp_port: Option<i32>,
     pub encryption: Option<String>,
     pub username: Option<String>,
-    pub password: Option<String>,
+    /// Tri-state: absent → keep, `null` → clear, `"value"` → set (empty string → 400).
+    #[serde(default, deserialize_with = "deserialize_optional_secret")]
+    pub password: Option<Option<String>>,
     pub from_address: Option<String>,
     pub recipient_email: Option<String>,
     pub send_on_import: Option<bool>,
@@ -1137,11 +1170,15 @@ pub struct SendEmailRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateMetadataApiRequest {
     pub hardcover_enabled: Option<bool>,
-    pub hardcover_api_token: Option<String>,
+    /// Tri-state: absent → keep, `null` → clear, `"value"` → set (empty string → 400).
+    #[serde(default, deserialize_with = "deserialize_optional_secret")]
+    pub hardcover_api_token: Option<Option<String>>,
     pub llm_enabled: Option<bool>,
     pub llm_provider: Option<LlmProvider>,
     pub llm_endpoint: Option<String>,
-    pub llm_api_key: Option<String>,
+    /// Tri-state: absent → keep, `null` → clear, `"value"` → set (empty string → 400).
+    #[serde(default, deserialize_with = "deserialize_optional_secret")]
+    pub llm_api_key: Option<Option<String>>,
     pub llm_model: Option<String>,
     pub audnexus_url: Option<String>,
     pub languages: Option<Vec<String>>,
