@@ -60,11 +60,8 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
 /// 4. Hostnames are resolved via DNS; rejected if *any* resolved IP is private
 ///    (prevents dual-stack DNS rebinding)
 pub async fn validate_url(url: &str) -> Result<(), SsrfError> {
-    // Allow magnet links through — they're not HTTP fetches.
-    if url.starts_with("magnet:") {
-        return Ok(());
-    }
-
+    // Magnet URIs are handled at their call sites (they don't require HTTP
+    // resolution). This function is for HTTP(S) URLs only.
     let parsed = reqwest::Url::parse(url).map_err(|e| SsrfError::InvalidUrl(e.to_string()))?;
 
     match parsed.scheme() {
@@ -134,17 +131,16 @@ impl reqwest::dns::Resolve for SsrfSafeResolver {
                 return Err("DNS resolution returned no addresses".into());
             }
 
-            // Filter out private IPs. If ALL are private, reject.
-            let safe: Vec<SocketAddr> = addrs
-                .into_iter()
-                .filter(|a| !is_private_ip(a.ip()))
-                .collect();
-
-            if safe.is_empty() {
-                return Err("all resolved addresses are private/reserved".into());
+            // Reject the whole request if ANY resolved address is private.
+            // Don't filter-and-proceed — a dual-stack DNS record with one public
+            // and one private address must not be allowed through.
+            if addrs.iter().any(|a| is_private_ip(a.ip())) {
+                return Err(
+                    "resolved address includes a private/reserved IP (SSRF protection)".into(),
+                );
             }
 
-            Ok(Box::new(safe.into_iter()) as Box<dyn Iterator<Item = SocketAddr> + Send>)
+            Ok(Box::new(addrs.into_iter()) as Box<dyn Iterator<Item = SocketAddr> + Send>)
         })
     }
 }
@@ -227,7 +223,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn allows_magnet_links() {
-        assert!(validate_url("magnet:?xt=urn:btih:abc123").await.is_ok());
+    async fn rejects_magnet_links() {
+        // Magnet URIs must be handled at call sites that need them; they
+        // should NOT pass through the HTTP SSRF validator.
+        assert!(validate_url("magnet:?xt=urn:btih:abc123").await.is_err());
     }
 }

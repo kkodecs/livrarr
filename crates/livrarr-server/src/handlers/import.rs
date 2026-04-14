@@ -86,7 +86,13 @@ pub async fn import_grab(
     let source = PathBuf::from(&source_path);
 
     // Check source exists.
-    if !source.exists() {
+    let source_exists = {
+        let s = source.clone();
+        tokio::task::spawn_blocking(move || s.exists())
+            .await
+            .unwrap_or(false)
+    };
+    if !source_exists {
         let error = format!("source path not found: {source_path}");
         state
             .db
@@ -115,11 +121,16 @@ pub async fn import_grab(
     // at least 90% of it. Catches partially-synced files from remote seedboxes
     // where rsync/mount hasn't finished. The import will be retried automatically.
     if let Some(expected_size) = grab.size {
-        let local_total: i64 = source_files
-            .iter()
-            .filter_map(|f| std::fs::metadata(&f.path).ok())
-            .map(|m| m.len() as i64)
-            .sum();
+        let paths: Vec<PathBuf> = source_files.iter().map(|f| f.path.clone()).collect();
+        let local_total: i64 = tokio::task::spawn_blocking(move || {
+            paths
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len() as i64)
+                .sum()
+        })
+        .await
+        .unwrap_or(0);
         if expected_size > 0 && local_total < expected_size * 9 / 10 {
             let error = format!(
                 "files not fully synced: local {:.1}MB vs expected {:.1}MB",
@@ -530,18 +541,26 @@ pub async fn import_single_file(
     let tw = tag_warning.is_some();
     let fin_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         if tw {
-            // Tag failed — re-copy source to a temp file, then rename atomically.
+            // Tag failed — re-copy source to a temp file, fsync, then rename atomically.
             let _ = std::fs::remove_file(&tmp_fin);
             let fallback = tmp_fin.with_extension("fallback.tmp");
             std::fs::copy(&src2, &fallback).map_err(|e| {
                 let _ = std::fs::remove_file(&fallback);
                 format!("fallback copy failed: {e}")
             })?;
+            if let Ok(f) = std::fs::File::open(&fallback) {
+                let _ = f.sync_all();
+            }
             std::fs::rename(&fallback, &final_t).map_err(|e| {
                 let _ = std::fs::remove_file(&fallback);
                 format!("fallback rename failed: {e}")
             })?;
         } else {
+            // Fsync the tagged .tmp to disk before atomic rename so partial writes
+            // (e.g., tag crate buffered data) can't be lost on power failure.
+            if let Ok(f) = std::fs::File::open(&tmp_fin) {
+                let _ = f.sync_all();
+            }
             std::fs::rename(&tmp_fin, &final_t).map_err(|e| format!("rename failed: {e}"))?;
         }
         Ok(())
@@ -742,6 +761,9 @@ async fn import_mp3_batch(
             let fallback_p = PathBuf::from(format!("{}.fallback.tmp", target_paths[i]));
             match tokio::task::spawn_blocking(move || -> Result<u64, std::io::Error> {
                 let n = std::fs::copy(&src, &fallback_p)?;
+                if let Ok(f) = std::fs::File::open(&fallback_p) {
+                    let _ = f.sync_all();
+                }
                 if let Err(e) = std::fs::rename(&fallback_p, &final_p) {
                     let _ = std::fs::remove_file(&fallback_p);
                     return Err(e);
@@ -768,8 +790,11 @@ async fn import_mp3_batch(
             }
         }
     } else {
-        // Rename all .tmps → finals.
+        // fsync each .tmp before renaming — ensures buffered tag data is durable.
         for (i, (tmp, target)) in tmp_paths.iter().zip(target_paths.iter()).enumerate() {
+            if let Ok(f) = std::fs::File::open(tmp) {
+                let _ = f.sync_all();
+            }
             if let Err(e) = std::fs::rename(tmp, target) {
                 warnings.push(format!("MP3 batch rename failed for {target}: {e}"));
                 let _ = std::fs::remove_file(tmp);
@@ -945,10 +970,11 @@ fn walk_dir_recursive(dir: &Path, files: &mut Vec<SourceFile>) -> Result<(), Str
     Ok(())
 }
 
-/// Build target path: {root}/{author}/{title}.{ext} (ebook) or {root}/{author}/{title}/{relative} (audiobook).
+/// Build target path: `{root}/{user_id}/{author}/{title}.{ext}` (ebook)
+/// or `{root}/{user_id}/{author}/{title}/{relative}` (audiobook).
 pub fn build_target_path(
     root: &str,
-    _user_id: i64,
+    user_id: i64,
     author: &str,
     title: &str,
     media_type: MediaType,
@@ -965,7 +991,7 @@ pub fn build_target_path(
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("epub");
-            format!("{root}/{author_san}/{title_san}.{ext}")
+            format!("{root}/{user_id}/{author_san}/{title_san}.{ext}")
         }
         MediaType::Audiobook => {
             // Preserve subdirectory structure from source.
@@ -979,7 +1005,7 @@ pub fn build_target_path(
                 source_file.strip_prefix(source_root).unwrap_or(source_file)
             };
             let relative_str = relative.to_string_lossy();
-            format!("{root}/{author_san}/{title_san}/{relative_str}")
+            format!("{root}/{user_id}/{author_san}/{title_san}/{relative_str}")
         }
     }
 }
@@ -994,8 +1020,9 @@ pub async fn fetch_qbit_content_path(
     let sid = super::release::qbit_login(state, &base_url, client).await?;
 
     let info_url = format!("{base_url}/api/v2/torrents/info");
+    // Admin-configured endpoint — use SSRF-safe client for redirect protection.
     let resp = state
-        .http_client
+        .http_client_safe
         .get(&info_url)
         .query(&[("hashes", hash)])
         .header("Cookie", format!("SID={sid}"))
@@ -1035,7 +1062,9 @@ async fn fetch_sabnzbd_storage_path(
 
     // SABnzbd search param searches by name, not nzo_id. Fetch recent history and match client-side.
     let url = format!("{base_url}/api?mode=history&apikey={api_key}&output=json&limit=200");
-    let resp = state.http_client.get(&url).send().await.map_err(|e| {
+    // Admin-configured endpoint — use SSRF-safe client so a redirect to an
+    // internal address is blocked.
+    let resp = state.http_client_safe.get(&url).send().await.map_err(|e| {
         ApiError::BadGateway(format!(
             "SABnzbd history request failed: {}",
             e.without_url()
@@ -1304,6 +1333,10 @@ pub async fn retag_library_items(
         .await
         {
             Ok(TagWriteStatus::Written) => {
+                // fsync tagged .tmp before atomic rename over the original.
+                if let Ok(f) = std::fs::File::open(&tmp_path) {
+                    let _ = f.sync_all();
+                }
                 // Rename .tmp over original.
                 if let Err(e) = std::fs::rename(&tmp_path, &abs_path) {
                     warnings.push(format!("rename failed for {abs_path}: {e}"));
@@ -1383,6 +1416,10 @@ pub async fn retag_library_items(
                 Ok(_) => {
                     // Rename all .tmps over originals and update file_sizes.
                     for (i, (tmp, abs)) in tmp_paths.iter().zip(abs_paths.iter()).enumerate() {
+                        // fsync tagged .tmp before atomic rename.
+                        if let Ok(f) = std::fs::File::open(tmp) {
+                            let _ = f.sync_all();
+                        }
                         if let Err(e) = std::fs::rename(tmp, abs) {
                             warnings.push(format!("MP3 batch rename failed for {abs}: {e}"));
                             let _ = std::fs::remove_file(tmp);

@@ -22,6 +22,20 @@ use livrarr_domain::{
 };
 
 // ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Outcome of a single-file undo operation. Computed on a blocking thread so
+/// log formatting and DB updates can run on the async side.
+enum UndoOutcome {
+    NotFound,
+    Deleted,
+    DeleteFailed(String),
+    SizeMismatch { expected: i64, actual: u64 },
+    StatFailed(String),
+}
+
+// ---------------------------------------------------------------------------
 // Request / Response types
 // ---------------------------------------------------------------------------
 
@@ -268,17 +282,47 @@ fn extract_cover_url(images: &Option<Vec<readarr_client::RdImage>>) -> Option<St
     None
 }
 
-/// Build destination path: {root}/{Author Name}/{Title}.{ext}
-fn build_dest_path(root: &str, author_name: &str, title: &str, source_path: &str) -> PathBuf {
-    let ext = Path::new(source_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
+/// Build destination path.
+///
+/// Ebooks:     `{root}/{user_id}/{Author}/{Title}.{ext}`
+/// Audiobooks: `{root}/{user_id}/{Author}/{Title}/{filename}`
+fn build_dest_path(
+    root: &str,
+    user_id: i64,
+    author_name: &str,
+    title: &str,
+    source_path: &str,
+    media_type: MediaType,
+) -> PathBuf {
     let author_dir = sanitize_path_component(author_name, "Unknown Author");
-    let file_stem = sanitize_path_component(title, "Unknown Title");
-    PathBuf::from(root)
-        .join(author_dir)
-        .join(format!("{file_stem}.{ext}"))
+    let title_dir = sanitize_path_component(title, "Unknown Title");
+    let base = PathBuf::from(root)
+        .join(user_id.to_string())
+        .join(author_dir);
+
+    match media_type {
+        MediaType::Audiobook => {
+            let filename = Path::new(source_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    let ext = Path::new(source_path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("bin");
+                    format!("{title_dir}.{ext}")
+                });
+            base.join(title_dir).join(filename)
+        }
+        MediaType::Ebook => {
+            let ext = Path::new(source_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("bin");
+            base.join(format!("{title_dir}.{ext}"))
+        }
+    }
 }
 
 /// Canonicalize source path and verify it's under the expected root.
@@ -341,6 +385,10 @@ fn materialize_file(source: &Path, dest: &Path) -> Result<(), String> {
                 return Err(format!(
                     "copy size mismatch: copied {copied} vs source {source_size}"
                 ));
+            }
+            // fsync the temp file before atomic rename — ensures data is durable.
+            if let Ok(f) = std::fs::File::open(&temp) {
+                let _ = f.sync_all();
             }
             std::fs::rename(&temp, dest).map_err(|e| {
                 let _ = std::fs::remove_file(&temp);
@@ -529,8 +577,21 @@ pub async fn preview(
             } else {
                 title.to_string()
             };
-            let dest = build_dest_path(&livrarr_root.path, author_name, &effective_title, &f.path);
-            if dest.exists() {
+            let dest = build_dest_path(
+                &livrarr_root.path,
+                user_id,
+                author_name,
+                &effective_title,
+                &f.path,
+                mt,
+            );
+            let dest_exists = {
+                let d = dest.clone();
+                tokio::task::spawn_blocking(move || d.exists())
+                    .await
+                    .unwrap_or(false)
+            };
+            if dest_exists {
                 files_to_skip += 1;
                 skipped_items.push(SkippedItem {
                     title: title.to_string(),
@@ -712,37 +773,55 @@ pub async fn undo(
         } else {
             PathBuf::from(&item.path)
         };
-        let path = full_path.as_path();
-        if path.exists() {
-            // Conservative: check file size matches.
+        let expected_size = item.file_size;
+        let fp = full_path.clone();
+        let undo_outcome: UndoOutcome = tokio::task::spawn_blocking(move || {
+            let path = fp.as_path();
+            if !path.exists() {
+                return UndoOutcome::NotFound;
+            }
             match std::fs::metadata(path) {
                 Ok(meta) => {
-                    if meta.len() as i64 == item.file_size {
+                    if meta.len() as i64 == expected_size {
                         match std::fs::remove_file(path) {
-                            Ok(()) => {
-                                files_deleted += 1;
-                                info!(path = %item.path, "Undo: deleted file");
-                            }
-                            Err(e) => {
-                                warn!(path = %item.path, "Undo: failed to delete file: {e}");
-                                files_skipped += 1;
-                            }
+                            Ok(()) => UndoOutcome::Deleted,
+                            Err(e) => UndoOutcome::DeleteFailed(e.to_string()),
                         }
                     } else {
-                        warn!(
-                            path = %item.path,
-                            expected = item.file_size,
-                            actual = meta.len(),
-                            "Undo: skipping file with size mismatch"
-                        );
-                        files_skipped += 1;
+                        UndoOutcome::SizeMismatch {
+                            expected: expected_size,
+                            actual: meta.len(),
+                        }
                     }
                 }
-                Err(e) => {
-                    warn!(path = %item.path, "Undo: cannot stat file: {e}");
-                    files_skipped += 1;
-                }
+                Err(e) => UndoOutcome::StatFailed(e.to_string()),
             }
+        })
+        .await
+        .unwrap_or_else(|e| UndoOutcome::StatFailed(format!("join: {e}")));
+        match undo_outcome {
+            UndoOutcome::Deleted => {
+                files_deleted += 1;
+                info!(path = %item.path, "Undo: deleted file");
+            }
+            UndoOutcome::DeleteFailed(e) => {
+                warn!(path = %item.path, "Undo: failed to delete file: {e}");
+                files_skipped += 1;
+            }
+            UndoOutcome::SizeMismatch { expected, actual } => {
+                warn!(
+                    path = %item.path,
+                    expected = expected,
+                    actual = actual,
+                    "Undo: skipping file with size mismatch"
+                );
+                files_skipped += 1;
+            }
+            UndoOutcome::StatFailed(e) => {
+                warn!(path = %item.path, "Undo: cannot stat file: {e}");
+                files_skipped += 1;
+            }
+            UndoOutcome::NotFound => {}
         }
 
         // 3. Delete the library item DB row regardless of file deletion outcome.
@@ -1189,11 +1268,30 @@ async fn run_import(
                     if let Some(ref url) = w.cover_url {
                         let covers_dir = state.data_dir.join("covers");
                         let _ = tokio::fs::create_dir_all(&covers_dir).await;
-                        if let Ok(resp) = state.http_client.get(url).send().await {
+                        // Cover URL came from a remote Readarr response — use SSRF-safe client.
+                        if let Ok(resp) = state.http_client_safe.get(url).send().await {
                             if resp.status().is_success() {
                                 if let Ok(bytes) = resp.bytes().await {
                                     let path = covers_dir.join(format!("{}.jpg", w.id));
-                                    let _ = tokio::fs::write(&path, &bytes).await;
+                                    // Atomic cover write: .tmp → fsync → rename.
+                                    let tmp_path = path.with_extension("jpg.tmp");
+                                    let tmp_b = tmp_path.clone();
+                                    let target = path.clone();
+                                    let bytes_vec = bytes.to_vec();
+                                    let write_res = tokio::task::spawn_blocking(
+                                        move || -> std::io::Result<()> {
+                                            use std::io::Write;
+                                            let mut f = std::fs::File::create(&tmp_b)?;
+                                            f.write_all(&bytes_vec)?;
+                                            f.sync_all()?;
+                                            drop(f);
+                                            std::fs::rename(&tmp_b, &target)
+                                        },
+                                    )
+                                    .await;
+                                    if !matches!(write_res, Ok(Ok(()))) {
+                                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                                    }
                                 }
                             }
                         }
@@ -1294,7 +1392,14 @@ async fn run_import(
             container_path.as_deref(),
             host_path.as_deref(),
         );
-        let source = match validate_source_path(&translated_path, &readarr_root) {
+        let source = {
+            let tp = translated_path.clone();
+            let rr = readarr_root.clone();
+            tokio::task::spawn_blocking(move || validate_source_path(&tp, &rr))
+                .await
+                .unwrap_or_else(|e| Err(format!("spawn_blocking join: {e}")))
+        };
+        let source = match source {
             Ok(p) => p,
             Err(e) => {
                 warn!(path = %rd_file.path, "Source path validation failed: {e}");
@@ -1310,13 +1415,21 @@ async fn run_import(
         // Build destination path.
         let dest = build_dest_path(
             &livrarr_root.path,
+            user_id,
             author_name,
             &effective_title,
             &rd_file.path,
+            media_type,
         );
 
         // Check if destination already exists.
-        if dest.exists() {
+        let dest_exists = {
+            let d = dest.clone();
+            tokio::task::spawn_blocking(move || d.exists())
+                .await
+                .unwrap_or(false)
+        };
+        if dest_exists {
             files_skipped += 1;
             let mut prog = state.readarr_import_progress.lock().await;
             prog.files_processed += 1;
@@ -1325,7 +1438,14 @@ async fn run_import(
         }
 
         // Materialize file (hardlink or copy).
-        if let Err(e) = materialize_file(&source, &dest) {
+        let mat_result = {
+            let src = source.clone();
+            let dst = dest.clone();
+            tokio::task::spawn_blocking(move || materialize_file(&src, &dst))
+                .await
+                .unwrap_or_else(|e| Err(format!("spawn_blocking join: {e}")))
+        };
+        if let Err(e) = mat_result {
             warn!(src = %rd_file.path, dest = %dest.display(), "File materialization failed: {e}");
             files_skipped += 1;
             let mut prog = state.readarr_import_progress.lock().await;

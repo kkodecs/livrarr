@@ -3,14 +3,14 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use crate::state::AppState;
-use livrarr_db::{AuthorDb, LibraryItemDb, UserDb, WorkDb};
+use livrarr_db::{AuthorDb, LibraryItemDb, WorkDb};
 use livrarr_domain::{LibraryItem, User, Work};
 
 // ---------------------------------------------------------------------------
 // OPDS Basic Auth
 // ---------------------------------------------------------------------------
 
-/// Extract user from HTTP Basic Auth (username + API key as password).
+/// Extract user from HTTP Basic Auth (username + password).
 /// Returns 401 with WWW-Authenticate header on failure.
 async fn basic_auth(state: &AppState, headers: &HeaderMap) -> Result<User, Response> {
     let unauthorized = || {
@@ -36,35 +36,14 @@ async fn basic_auth(state: &AppState, headers: &HeaderMap) -> Result<User, Respo
         .decode(auth_header[6..].trim().as_bytes())
         .map_err(|_| unauthorized())?;
     let creds = String::from_utf8(decoded).map_err(|_| unauthorized())?;
-    let (username, api_key) = creds.split_once(':').ok_or_else(unauthorized)?;
+    let (username, password) = creds.split_once(':').ok_or_else(unauthorized)?;
 
-    // Look up user by username, then verify API key via SHA-256 hash comparison.
-    let user = state
-        .db
-        .get_user_by_username(username)
+    use crate::AuthService;
+    state
+        .auth_service
+        .verify_credentials(username, password)
         .await
-        .map_err(|_| unauthorized())?;
-
-    // Hash the provided API key and compare with stored hash.
-    use crate::auth_crypto::{AuthCryptoService, RealAuthCrypto};
-    let crypto = RealAuthCrypto;
-    let key_hash = crypto
-        .hash_token(api_key)
-        .await
-        .map_err(|_| unauthorized())?;
-
-    let stored_user = state
-        .db
-        .get_user_by_api_key_hash(&key_hash)
-        .await
-        .map_err(|_| unauthorized())?;
-
-    // Verify it's the same user.
-    if stored_user.id != user.id {
-        return Err(unauthorized());
-    }
-
-    Ok(user)
+        .map_err(|_| unauthorized())
 }
 
 // ---------------------------------------------------------------------------

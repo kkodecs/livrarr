@@ -445,4 +445,24 @@ impl AuthService for ServerAuthService {
     async fn regenerate_user_api_key(&self, user_id: UserId) -> Result<ApiKeyResponse, AuthError> {
         self.regenerate_api_key(user_id).await
     }
+
+    async fn verify_credentials(&self, username: &str, password: &str) -> Result<User, AuthError> {
+        let user = self
+            .db
+            .get_user_by_username(username)
+            .await
+            .map_err(|e| match e {
+                DbError::NotFound { .. } => AuthError::InvalidCredentials,
+                other => AuthError::Db(other),
+            })?;
+        let valid = self
+            .crypto
+            .verify_password(password, &user.password_hash)
+            .await
+            .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
+        if !valid {
+            return Err(AuthError::InvalidCredentials);
+        }
+        Ok(user)
+    }
 }

@@ -36,12 +36,21 @@ pub fn reconcile(mut extractions: Vec<Extraction>) -> Vec<Cluster> {
     let n = extractions.len();
     let mut parent: Vec<usize> = (0..n).collect();
 
-    // Find with path compression.
+    // Find with iterative path compression.
     fn find(parent: &mut [usize], i: usize) -> usize {
-        if parent[i] != i {
-            parent[i] = find(parent, parent[i]);
+        // Walk to the root, collecting the path.
+        let mut root = i;
+        while parent[root] != root {
+            root = parent[root];
         }
-        parent[i]
+        // Compress: point every node on the path directly at the root.
+        let mut cur = i;
+        while parent[cur] != root {
+            let next = parent[cur];
+            parent[cur] = root;
+            cur = next;
+        }
+        root
     }
 
     // Build agreement graph via union-find.

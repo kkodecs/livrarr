@@ -92,7 +92,7 @@ pub async fn resolve_cover_by_isbn_casadellibro(
         return None;
     }
     let last2 = &clean[11..13];
-    let n = clean.as_bytes()[12] % 10; // last digit mod 10
+    let n = (clean.as_bytes()[12] - b'0') % 10; // last digit mod 10
     let url = format!("https://imagessl{n}.casadellibro.com/a/l/s5/{last2}/{clean}.webp");
     if let Ok(resp) = http.get(&url).send().await {
         if resp.status().is_success() {

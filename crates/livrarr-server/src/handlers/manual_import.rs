@@ -106,16 +106,21 @@ pub async fn scan(
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
     let path = PathBuf::from(&req.path);
-    if !path.exists() || !path.is_dir() {
-        return Err(ApiError::BadRequest(
-            "The file system path specified was not found.".into(),
-        ));
-    }
-    if std::fs::read_dir(&path).is_err() {
-        return Err(ApiError::BadRequest(
-            "The file system path specified was not found.".into(),
-        ));
-    }
+    let precheck: Result<(), &'static str> = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || {
+            if !path.exists() || !path.is_dir() {
+                return Err("The file system path specified was not found.");
+            }
+            if std::fs::read_dir(&path).is_err() {
+                return Err("The file system path specified was not found.");
+            }
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("spawn_blocking: {e}")))?;
+    precheck.map_err(|msg| ApiError::BadRequest(msg.into()))?;
 
     let mut warnings = Vec::new();
 
@@ -779,7 +784,13 @@ async fn import_single_item(
                     .map(|rf| rf.path.as_str())
                     .unwrap_or(&root_folder.path);
                 let full_path = PathBuf::from(rf_path).join(li_path);
-                match std::fs::remove_file(&full_path) {
+                let rm_result = {
+                    let full_path = full_path.clone();
+                    tokio::task::spawn_blocking(move || std::fs::remove_file(&full_path))
+                        .await
+                        .unwrap_or_else(|e| Err(std::io::Error::other(format!("join: {e}"))))
+                };
+                match rm_result {
                     Ok(()) => {
                         if let Err(e) = state.db.delete_library_item(user_id, *li_id).await {
                             tracing::warn!("delete_library_item failed: {e}");
@@ -852,7 +863,13 @@ async fn import_single_item(
 
     // Check if target already exists.
     let target = PathBuf::from(&target_path);
-    if target.exists() {
+    let target_exists = {
+        let t = target.clone();
+        tokio::task::spawn_blocking(move || t.exists())
+            .await
+            .unwrap_or(false)
+    };
+    if target_exists {
         let relative = target_path
             .strip_prefix(root_folder.path.trim_end_matches('/'))
             .unwrap_or(&target_path)
@@ -879,9 +896,14 @@ async fn import_single_item(
         }
         // File exists but not tracked by this user — shared file.
         // Create a library item pointing to the existing file without copying.
-        let file_size = std::fs::metadata(&target)
-            .map(|m| m.len() as i64)
-            .unwrap_or(0);
+        let file_size = {
+            let t = target.clone();
+            tokio::task::spawn_blocking(move || {
+                std::fs::metadata(&t).map(|m| m.len() as i64).unwrap_or(0)
+            })
+            .await
+            .unwrap_or(0)
+        };
         match state
             .db
             .create_library_item(livrarr_db::CreateLibraryItemDbRequest {

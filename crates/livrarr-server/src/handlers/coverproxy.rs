@@ -42,9 +42,23 @@ impl CoverProxyCache {
 
     async fn put(&self, url: String, data: Vec<u8>, content_type: String) {
         let mut cache = self.entries.write().await;
-        // Evict expired entries if cache is getting large
+        // Evict expired entries first — cheap and often enough.
         if cache.len() >= MAX_CACHE_ENTRIES {
             cache.retain(|_, e| e.fetched_at.elapsed() < CACHE_TTL);
+        }
+        // If still at capacity, evict the oldest entry so the cache stays
+        // strictly bounded and cannot grow without limit under sustained load.
+        while cache.len() >= MAX_CACHE_ENTRIES {
+            let oldest_key = cache
+                .iter()
+                .min_by_key(|(_, e)| e.fetched_at)
+                .map(|(k, _)| k.clone());
+            match oldest_key {
+                Some(k) => {
+                    cache.remove(&k);
+                }
+                None => break,
+            }
         }
         cache.insert(
             url,
@@ -150,9 +164,24 @@ pub async fn proxy_cover(
 }
 
 /// Only allow proxying from known cover image sources.
+/// Matches on the parsed host exactly (or with a known-shard suffix for CdL)
+/// so that URLs like `https://evil.com/?x=covers.openlibrary.org` are rejected.
 fn is_allowed_cover_source(url: &str) -> bool {
-    let allowed = [
-        "imagessl",                        // Casa del Libro CDN
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    if parsed.scheme() != "https" {
+        return false;
+    }
+
+    let host = match parsed.host_str() {
+        Some(h) => h.to_ascii_lowercase(),
+        None => return false,
+    };
+
+    const ALLOWED_HOSTS: &[&str] = &[
         "images-na.ssl-images-amazon.com", // Amazon covers
         "covers.openlibrary.org",          // OL covers (English)
         "image.aladin.co.kr",              // Aladin (Korean)
@@ -162,5 +191,19 @@ fn is_allowed_cover_source(url: &str) -> bool {
         "contents.kyobobook.co.kr",        // Kyobo (Korean)
         "i.gr-assets.com",                 // Goodreads covers
     ];
-    url.starts_with("https://") && allowed.iter().any(|a| url.contains(a))
+
+    if ALLOWED_HOSTS.iter().any(|h| *h == host) {
+        return true;
+    }
+
+    // Casa del Libro uses sharded hosts: imagessl0..9.casadellibro.com.
+    if let Some(shard) = host.strip_prefix("imagessl") {
+        if let Some(rest) = shard.strip_suffix(".casadellibro.com") {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+
+    false
 }

@@ -842,7 +842,8 @@ pub async fn add_work_internal(
     let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
     if let Some(url) = cover_url {
         if livrarr_metadata::llm_scraper::validate_cover_url(&url, "").is_some() {
-            let http = state.http_client.clone();
+            // Cover URL came from a remote/user-supplied source — use SSRF-safe client.
+            let http = state.http_client_safe.clone();
             let covers_dir = state.data_dir.join("covers");
             let work_id = work.id;
             let save_as_thumb = is_foreign;
@@ -1038,9 +1039,25 @@ pub async fn upload_cover(
         .map_err(|e| ApiError::Internal(format!("failed to create covers dir: {e}")))?;
 
     let cover_path = covers_dir.join(format!("{id}.jpg"));
-    tokio::fs::write(&cover_path, &body)
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to write cover: {e}")))?;
+    // Atomic write: .tmp → fsync → rename.
+    let tmp_path = cover_path.with_extension("jpg.tmp");
+    let tmp_for_blocking = tmp_path.clone();
+    let target = cover_path.clone();
+    let body_vec = body.to_vec();
+    let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_for_blocking)?;
+        f.write_all(&body_vec)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_for_blocking, &target)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("spawn error writing cover: {e}")))?;
+    if let Err(e) = write_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(ApiError::Internal(format!("failed to write cover: {e}")));
+    }
 
     // Delete stale thumbnail so it gets regenerated from the new cover.
     let thumb_path = covers_dir.join(format!("{id}_thumb.jpg"));
@@ -1263,6 +1280,29 @@ async fn download_cover_as(
     }
     let bytes = resp.bytes().await?;
     let cover_path = covers_dir.join(format!("{work_id}{suffix}.jpg"));
-    tokio::fs::write(&cover_path, &bytes).await?;
-    Ok(())
+    // Atomic write: .tmp → fsync → rename over target.
+    let tmp_path = cover_path.with_extension("jpg.tmp");
+    let tmp_for_blocking = tmp_path.clone();
+    let target = cover_path.clone();
+    let bytes_vec = bytes.to_vec();
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_for_blocking)?;
+        f.write_all(&bytes_vec)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_for_blocking, &target)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            Err(Box::new(e))
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            Err(format!("spawn error: {e}").into())
+        }
+    }
 }
