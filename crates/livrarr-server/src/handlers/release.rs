@@ -15,6 +15,9 @@ use crate::{
 
 /// Maximum size for .torrent file downloads (10 MB).
 const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
+/// Maximum size for an indexer XML response body (10 MB).
+/// Protects against hostile or misconfigured indexers sending unbounded XML.
+const MAX_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
 use livrarr_db::{
     CreateGrabDbRequest, CreateHistoryEventDbRequest, DownloadClientDb, GrabDb, HistoryDb,
     IndexerDb, WorkDb,
@@ -465,7 +468,33 @@ pub(crate) async fn fetch_and_parse(
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    let xml = resp.text().await.map_err(|e| e.without_url().to_string())?;
+    // Reject oversized responses up-front when the server advertises Content-Length.
+    if let Some(cl) = resp.content_length() {
+        if cl as usize > MAX_RESPONSE_BODY_BYTES {
+            return Err(format!(
+                "indexer response too large: {cl} bytes (max {MAX_RESPONSE_BODY_BYTES})"
+            ));
+        }
+    }
+
+    // Read body incrementally via `chunk()` so a server that lies about
+    // Content-Length (or omits it) still cannot exhaust memory — abort as
+    // soon as the cap is exceeded.
+    let mut resp = resp;
+    let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| e.without_url().to_string())?
+    {
+        if buf.len() + chunk.len() > MAX_RESPONSE_BODY_BYTES {
+            return Err(format!(
+                "indexer response exceeded {MAX_RESPONSE_BODY_BYTES} bytes"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    let xml = String::from_utf8(buf).map_err(|e| format!("invalid UTF-8 in response: {e}"))?;
     parse_torznab_xml(&xml, indexer_name)
 }
 
@@ -939,8 +968,13 @@ async fn grab_qbittorrent(
     let base_url = qbit_base_url(client);
     let sid = qbit_login(state, &base_url, client).await?;
 
-    // Extract torrent hash BEFORE sending to qBit (Servarr pattern).
-    let download_id = fetch_and_extract_hash(&state.http_client_safe, &req.download_url).await;
+    // Fetch the download once, classify, extract hash, and reuse the same bytes
+    // when posting to qBit (avoids a second download from the indexer).
+    let fetched = fetch_torrent_source(&state.http_client_safe, &req.download_url).await;
+
+    let download_id = fetched
+        .as_ref()
+        .and_then(|src| livrarr_download::extract_torrent_hash(src).ok());
 
     if let Some(ref hash) = download_id {
         tracing::info!("grab: extracted hash {hash} from download URL");
@@ -948,16 +982,34 @@ async fn grab_qbittorrent(
         tracing::warn!("grab: could not extract hash from download URL");
     }
 
-    // Add torrent.
+    // Add torrent to qBit — use the bytes we already fetched for .torrent files,
+    // or the magnet URI for magnets.
     let add_url = format!("{base_url}/api/v2/torrents/add");
+    let mut form =
+        reqwest::multipart::Form::new().text("category", client.category.as_str().to_string());
+
+    match fetched {
+        Some(livrarr_download::TorrentSource::Magnet(uri)) => {
+            form = form.text("urls", uri);
+        }
+        Some(livrarr_download::TorrentSource::TorrentFile { filename, data }) => {
+            let part = reqwest::multipart::Part::bytes(data)
+                .file_name(filename)
+                .mime_str("application/x-bittorrent")
+                .map_err(|e| ApiError::BadGateway(format!("qBittorrent mime error: {e}")))?;
+            form = form.part("torrents", part);
+        }
+        _ => {
+            // Fall back to URL if we couldn't fetch/classify.
+            form = form.text("urls", req.download_url.clone());
+        }
+    }
+
     let add_resp = state
         .http_client
         .post(&add_url)
         .header("Cookie", format!("SID={sid}"))
-        .form(&[
-            ("urls", req.download_url.as_str()),
-            ("category", client.category.as_str()),
-        ])
+        .multipart(form)
         .send()
         .await
         .map_err(|e| ApiError::BadGateway(format!("qBittorrent add failed: {e}")))?;
@@ -972,20 +1024,20 @@ async fn grab_qbittorrent(
     Ok(download_id)
 }
 
-/// Fetch a download URL and extract the torrent info_hash locally (Servarr pattern).
-/// Handles magnet links, .torrent files, and redirects.
-async fn fetch_and_extract_hash(
+/// Fetch a download URL once and classify it as a magnet URI or .torrent file.
+/// Returns the `TorrentSource` so callers can both extract the info_hash and
+/// reuse the fetched bytes (avoiding a second download).
+async fn fetch_torrent_source(
     http: &livrarr_http::HttpClient,
     download_url: &str,
-) -> Option<String> {
+) -> Option<livrarr_download::TorrentSource> {
     // SSRF protection handled by the safe client's DNS resolver.
 
-    // If it's already a magnet link, extract hash directly.
+    // If it's already a magnet link, return directly.
     if download_url.starts_with("magnet:") {
-        return livrarr_download::extract_torrent_hash(&livrarr_download::TorrentSource::Magnet(
+        return Some(livrarr_download::TorrentSource::Magnet(
             download_url.to_string(),
-        ))
-        .ok();
+        ));
     }
 
     // Fetch the URL — may redirect to magnet or return .torrent bytes.
@@ -997,10 +1049,7 @@ async fn fetch_and_extract_hash(
     // Check for magnet redirect.
     let final_url = resp.url().to_string();
     if final_url.starts_with("magnet:") {
-        return livrarr_download::extract_torrent_hash(&livrarr_download::TorrentSource::Magnet(
-            final_url,
-        ))
-        .ok();
+        return Some(livrarr_download::TorrentSource::Magnet(final_url));
     }
 
     // Enforce size limit on .torrent downloads.
@@ -1026,19 +1075,16 @@ async fn fetch_and_extract_hash(
     // Try as magnet text in body.
     if let Ok(text) = std::str::from_utf8(&bytes) {
         if text.trim().starts_with("magnet:") {
-            return livrarr_download::extract_torrent_hash(
-                &livrarr_download::TorrentSource::Magnet(text.trim().to_string()),
-            )
-            .ok();
+            return Some(livrarr_download::TorrentSource::Magnet(
+                text.trim().to_string(),
+            ));
         }
     }
 
-    // Parse as .torrent file.
-    livrarr_download::extract_torrent_hash(&livrarr_download::TorrentSource::TorrentFile {
+    Some(livrarr_download::TorrentSource::TorrentFile {
         filename: "download.torrent".to_string(),
         data: bytes.to_vec(),
     })
-    .ok()
 }
 
 /// Build qBit base URL from download client config.

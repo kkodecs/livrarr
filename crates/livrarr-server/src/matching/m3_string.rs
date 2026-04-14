@@ -15,6 +15,10 @@ pub struct SideChannel {
     pub language: Option<String>,
 }
 
+/// Index of the ambiguous "Title - Author (reversed)" pattern in `PATTERNS`.
+/// Must stay in sync with the final entry in the `PATTERNS` vec.
+const TITLE_DASH_AUTHOR_AMBIGUOUS_IDX: usize = 21;
+
 /// Parse a release title / filename / torrent name into extraction(s).
 /// Returns one extraction normally, or two if pattern 16 (ambiguous Title-Author) matches.
 pub fn parse_string(input: &str) -> (Vec<Extraction>, SideChannel) {
@@ -32,8 +36,8 @@ pub fn parse_string(input: &str) -> (Vec<Extraction>, SideChannel) {
                 .and_then(|m| m.as_str().parse::<i32>().ok())
                 .or(side.year);
 
-            if i == 21 {
-                // Pattern 22 (index 21): Title - Author is ambiguous.
+            if i == TITLE_DASH_AUTHOR_AMBIGUOUS_IDX {
+                // Pattern 22 (ambiguous): Title - Author.
                 // Produce two hypotheses.
                 let h1 = make_extraction(book.as_deref(), author.as_deref(), year);
                 let h2 = make_extraction(author.as_deref(), book.as_deref(), year);

@@ -16,6 +16,37 @@ use crate::state::AppState;
 /// Hardcover GraphQL API endpoint.
 const HARDCOVER_API_URL: &str = "https://api.hardcover.app/v1/graphql";
 
+/// Atomically write a cover file: `path.tmp` → fsync → rename over `path`.
+/// On any failure the `.tmp` is cleaned up so no partial file leaks onto disk.
+async fn atomic_write_cover(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("jpg.tmp");
+    let tmp_for_blocking = tmp.clone();
+    let bytes = bytes.to_vec();
+    let target = path.to_path_buf();
+
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_for_blocking)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_for_blocking, &target)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Err(e)
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Err(std::io::Error::other(format!("spawn error: {e}")))
+        }
+    }
+}
+
 /// Result of enrichment — data to write + messages for the user.
 pub struct EnrichmentOutcome {
     pub request: UpdateWorkEnrichmentDbRequest,
@@ -259,7 +290,8 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
     // search GR by title+author and fetch hi-res cover from the detail page.
     let cover_too_small = if let Some(ref url) = req.cover_url {
         // Probe the URL — if it's under 50KB it's a thumbnail, not a real cover.
-        match state.http_client.get(url).send().await {
+        // URL came from an external metadata provider — use SSRF-safe client.
+        match state.http_client_safe.get(url).send().await {
             Ok(resp) => resp
                 .content_length()
                 .map(|len| len < 50_000)
@@ -390,11 +422,12 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
         if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
             tracing::warn!("create_dir_all for covers failed: {e}");
         }
-        if let Ok(resp) = state.http_client.get(url).send().await {
+        // Cover URL came from an external metadata provider — use SSRF-safe client.
+        if let Ok(resp) = state.http_client_safe.get(url).send().await {
             if resp.status().is_success() {
                 if let Ok(bytes) = resp.bytes().await {
                     let path = covers_dir.join(format!("{}.jpg", work.id));
-                    if let Err(e) = tokio::fs::write(&path, &bytes).await {
+                    if let Err(e) = atomic_write_cover(&path, &bytes).await {
                         tracing::warn!("write cover file failed: {e}");
                     }
                     // Delete stale thumbnail so it gets regenerated from the new cover.
@@ -581,7 +614,9 @@ async fn query_hardcover(
     }
 
     // Tier 1: exact title + author match (case-insensitive), highest users_read_count wins.
-    let title_lower = title.trim().to_lowercase();
+    // Use `clean_title` (the same value we searched with) so we match against what
+    // we actually asked Hardcover for, not the unstripped original.
+    let title_lower = clean_title.trim().to_lowercase();
     let author_lower = author.trim().to_lowercase();
     let mut best_idx: Option<usize> = None;
     let mut best_urc: i64 = -1;
@@ -1300,11 +1335,11 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
                     if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
                         tracing::warn!("create_dir_all for covers failed: {e}");
                     }
-                    if let Ok(resp) = state.http_client.get(cover_url_str).send().await {
+                    if let Ok(resp) = state.http_client_safe.get(cover_url_str).send().await {
                         if resp.status().is_success() {
                             if let Ok(bytes) = resp.bytes().await {
                                 let path = covers_dir.join(format!("{}.jpg", work.id));
-                                if let Err(e) = tokio::fs::write(&path, &bytes).await {
+                                if let Err(e) = atomic_write_cover(&path, &bytes).await {
                                     tracing::warn!("write cover file failed: {e}");
                                 }
                                 // Keep thumbnail — useful for list views.
@@ -1525,11 +1560,11 @@ pub async fn enrich_foreign_work(state: &AppState, work: &Work) -> EnrichmentOut
                 if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
                     tracing::warn!("create_dir_all for covers failed: {e}");
                 }
-                if let Ok(resp) = state.http_client.get(&validated).send().await {
+                if let Ok(resp) = state.http_client_safe.get(&validated).send().await {
                     if resp.status().is_success() {
                         if let Ok(bytes) = resp.bytes().await {
                             let path = covers_dir.join(format!("{}.jpg", work.id));
-                            if let Err(e) = tokio::fs::write(&path, &bytes).await {
+                            if let Err(e) = atomic_write_cover(&path, &bytes).await {
                                 tracing::warn!("write cover file failed: {e}");
                             }
                         }

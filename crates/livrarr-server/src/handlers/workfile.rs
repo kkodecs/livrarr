@@ -86,9 +86,23 @@ pub async fn send_email(
         )));
     }
 
-    let file_bytes = tokio::fs::read(&abs_path).await.map_err(|e| {
-        ApiError::Internal(format!("Failed to read file {}: {e}", abs_path.display()))
-    })?;
+    // Read on a blocking thread — lettre needs the full body as Vec<u8> (no
+    // streaming attachment API), but we avoid holding up the async runtime by
+    // running the bounded (<=50 MB) read on a blocking thread with a buffered
+    // reader for allocator efficiency.
+    let read_path = abs_path.clone();
+    let expected_size = item.file_size.max(0) as usize;
+    let file_bytes = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let f = std::fs::File::open(&read_path)?;
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, f);
+        let mut buf = Vec::with_capacity(expected_size);
+        reader.read_to_end(&mut buf)?;
+        Ok(buf)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("spawn_blocking join error: {e}")))?
+    .map_err(|e| ApiError::Internal(format!("Failed to read file {}: {e}", abs_path.display())))?;
 
     let filename = abs_path
         .file_name()

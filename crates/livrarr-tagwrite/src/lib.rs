@@ -53,6 +53,11 @@ const MAX_XML_READ_BYTES: usize = 10 * 1024 * 1024;
 /// Maximum bytes for a single EPUB zip entry during rewrite.
 const MAX_EPUB_ENTRY_BYTES: usize = 50 * 1024 * 1024;
 
+/// Maximum cumulative extracted bytes across all entries during rewrite.
+/// Defends against ZIP bombs where per-entry limits pass individually but
+/// total expansion would exhaust memory / disk.
+const MAX_EPUB_EXTRACTED_BYTES: u64 = 500 * 1024 * 1024;
+
 /// Cover path used when embedding a new cover into an EPUB.
 const EPUB_COVER_PATH: &str = "OEBPS/images/cover.jpg";
 
@@ -258,6 +263,10 @@ fn write_epub(
         })?;
         let mut writer = zip::ZipWriter::new(tmp_file);
 
+        // Cumulative byte counter — aborts rewrite if total extracted bytes
+        // exceed MAX_EPUB_EXTRACTED_BYTES (ZIP bomb protection).
+        let mut total_extracted_bytes: u64 = 0;
+
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).map_err(|e| TagWriteError::EpubFailed {
                 message: format!("ZIP entry error: {e}"),
@@ -300,6 +309,14 @@ fn write_epub(
                 if entry.size() > MAX_EPUB_ENTRY_BYTES as u64 {
                     return Err(TagWriteError::EpubFailed {
                         message: format!("entry too large: {} ({} bytes)", name, entry.size()),
+                    });
+                }
+                total_extracted_bytes = total_extracted_bytes.saturating_add(entry.size());
+                if total_extracted_bytes > MAX_EPUB_EXTRACTED_BYTES {
+                    return Err(TagWriteError::EpubFailed {
+                        message: format!(
+                            "cumulative extracted bytes exceeded {MAX_EPUB_EXTRACTED_BYTES}"
+                        ),
                     });
                 }
                 let options = zip::write::SimpleFileOptions::default()

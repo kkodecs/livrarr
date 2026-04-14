@@ -159,7 +159,10 @@ impl GrabDb for SqliteDb {
         // status 'failed' or 'removed' (the WHERE clause on the DO UPDATE).
         // If the existing row has any other status, the WHERE fails and the
         // INSERT is silently ignored — we detect that via changes() == 0.
-        let result = sqlx::query(
+        // Use RETURNING id so we get the correct row id regardless of whether
+        // the INSERT or the ON CONFLICT DO UPDATE path fired. `last_insert_rowid()`
+        // is unreliable on the upsert path.
+        let row: Option<(i64,)> = sqlx::query_as(
             "INSERT INTO grabs \
              (user_id, work_id, download_client_id, title, indexer, guid, size, \
               download_url, download_id, status, media_type, grabbed_at) \
@@ -168,7 +171,8 @@ impl GrabDb for SqliteDb {
                work_id = ?2, download_client_id = ?3, title = ?4, size = ?7, \
                download_url = ?8, download_id = ?9, status = ?10, \
                import_error = NULL, media_type = ?11, grabbed_at = ?12 \
-             WHERE grabs.status IN ('failed', 'removed')",
+             WHERE grabs.status IN ('failed', 'removed') \
+             RETURNING id",
         )
         .bind(req.user_id) // ?1
         .bind(req.work_id) // ?2
@@ -182,19 +186,22 @@ impl GrabDb for SqliteDb {
         .bind(status_str) // ?10
         .bind(media_type_str) // ?11
         .bind(&now) // ?12
-        .execute(self.pool())
+        .fetch_optional(self.pool())
         .await
         .map_err(map_db_err)?;
 
-        if result.rows_affected() == 0 {
-            // Conflict with a non-replaceable status — report it.
-            return Err(DbError::Constraint {
-                message: "grab already exists for this guid/indexer with a non-replaceable status"
-                    .to_string(),
-            });
-        }
+        let id = match row {
+            Some((id,)) => id,
+            None => {
+                // Conflict with a non-replaceable status — report it.
+                return Err(DbError::Constraint {
+                    message:
+                        "grab already exists for this guid/indexer with a non-replaceable status"
+                            .to_string(),
+                });
+            }
+        };
 
-        let id = result.last_insert_rowid();
         self.get_grab(req.user_id, id).await
     }
 

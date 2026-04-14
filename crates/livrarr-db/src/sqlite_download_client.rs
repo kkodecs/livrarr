@@ -87,12 +87,16 @@ impl DownloadClientDb for SqliteDb {
         let client_type = req.implementation.client_type();
         let impl_str = client_type; // DB stores the same lowercase string
 
+        // Run clear-default + insert in one transaction so we never leave the DB
+        // with a default cleared but no replacement inserted.
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+
         // Auto-promote: if no other enabled client of this type, set as default.
         let existing_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM download_clients WHERE client_type = ? AND enabled = 1",
         )
         .bind(client_type)
-        .fetch_one(self.pool())
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_db_err)?;
 
@@ -104,7 +108,7 @@ impl DownloadClientDb for SqliteDb {
                 "UPDATE download_clients SET is_default_for_protocol = false WHERE client_type = ?",
             )
             .bind(client_type)
-            .execute(self.pool())
+            .execute(&mut *tx)
             .await
             .map_err(map_db_err)?;
         }
@@ -129,10 +133,12 @@ impl DownloadClientDb for SqliteDb {
         .bind(client_type)
         .bind(&req.api_key)
         .bind(is_default)
-        .execute(self.pool())
+        .execute(&mut *tx)
         .await
         .map_err(map_db_err)?
         .last_insert_rowid();
+
+        tx.commit().await.map_err(map_db_err)?;
 
         self.get_download_client(id).await
     }
@@ -163,12 +169,16 @@ impl DownloadClientDb for SqliteDb {
         let api_key = req.api_key.or(current.api_key);
         let is_default = req.is_default_for_protocol.unwrap_or(was_default);
 
+        // Run clear-default + update in one transaction so a partial failure
+        // cannot leave the defaults row set inconsistently.
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+
         // If promoting to default, clear other defaults for this client_type.
         if is_default && !was_default {
             sqlx::query("UPDATE download_clients SET is_default_for_protocol = false WHERE client_type = ? AND id != ?")
                 .bind(client_type)
                 .bind(id)
-                .execute(self.pool())
+                .execute(&mut *tx)
                 .await
                 .map_err(map_db_err)?;
         }
@@ -192,9 +202,11 @@ impl DownloadClientDb for SqliteDb {
         .bind(&api_key)
         .bind(is_default)
         .bind(id)
-        .execute(self.pool())
+        .execute(&mut *tx)
         .await
         .map_err(map_db_err)?;
+
+        tx.commit().await.map_err(map_db_err)?;
 
         self.get_download_client(id).await
     }

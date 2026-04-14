@@ -856,7 +856,14 @@ fn spawn_import(state: &AppState, user_id: i64, grab_id: i64) {
     let state = state.clone();
     tokio::spawn(async move {
         // Acquire permit inside the spawned task so poller doesn't block.
-        let _permit = state.import_semaphore.acquire().await;
+        // Bail out if the semaphore has been closed — we must not proceed without it.
+        let _permit = match state.import_semaphore.acquire().await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("import: semaphore acquisition failed for grab {grab_id}: {e} — aborting");
+                return;
+            }
+        };
         match crate::handlers::import::import_grab(&state, user_id, grab_id).await {
             Ok(result) => {
                 info!(
@@ -1049,12 +1056,9 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                     .get("first_publish_date")
                     .and_then(|d| d.as_str())
                     .and_then(|d| {
-                        d.chars()
-                            .filter(|c| c.is_ascii_digit())
-                            .take(4)
-                            .collect::<String>()
-                            .parse::<i32>()
-                            .ok()
+                        d.split(|c: char| !c.is_ascii_digit())
+                            .find(|tok| tok.len() == 4)
+                            .and_then(|tok| tok.parse::<i32>().ok())
                     });
 
                 let year = match publish_year {
@@ -1103,8 +1107,8 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                             series_id: None,
                             series_name: None,
                             series_position: None,
-                            monitor_ebook: false,
-                            monitor_audiobook: false,
+                            monitor_ebook: author.monitor_new_items,
+                            monitor_audiobook: author.monitor_new_items,
                         })
                         .await
                     {
@@ -1352,6 +1356,15 @@ fn media_types_from_categories(categories: &[i32]) -> Vec<MediaType> {
     types
 }
 
+/// Parse an RFC2822 publish date into a chrono DateTime for ordering.
+/// Returns `DateTime::<Utc>::MIN_UTC` for unparseable inputs so that missing or
+/// malformed dates sort as "oldest" (never mistaken for newer than a real date).
+fn parse_rfc2822_or_epoch(s: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc2822(s)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+}
+
 /// Fetch recent releases from a single indexer (no search query).
 ///
 /// Satisfies: RSS-FETCH-001
@@ -1384,7 +1397,7 @@ async fn fetch_rss(
     let mut releases = crate::handlers::release::fetch_and_parse(http, &url, &indexer.name).await?;
     // Sort: dated items first (by pubDate descending), then undated.
     releases.sort_by(|a, b| match (&b.publish_date, &a.publish_date) {
-        (Some(bd), Some(ad)) => bd.cmp(ad),
+        (Some(bd), Some(ad)) => parse_rfc2822_or_epoch(bd).cmp(&parse_rfc2822_or_epoch(ad)),
         (Some(_), None) => std::cmp::Ordering::Greater,
         (None, Some(_)) => std::cmp::Ordering::Less,
         (None, None) => std::cmp::Ordering::Equal,
@@ -1569,10 +1582,9 @@ pub(crate) async fn rss_sync_core(
             .copied()
             .collect();
         dated_items.sort_by(|a, b| {
-            b.publish_date
-                .as_deref()
-                .unwrap_or("")
-                .cmp(a.publish_date.as_deref().unwrap_or(""))
+            parse_rfc2822_or_epoch(b.publish_date.as_deref().unwrap_or("")).cmp(
+                &parse_rfc2822_or_epoch(a.publish_date.as_deref().unwrap_or("")),
+            )
         });
 
         // Gap detection (RSS-GAP-001).
@@ -1582,7 +1594,7 @@ pub(crate) async fn rss_sync_core(
                 (&es.last_publish_date, dated_items.last())
             {
                 if let Some(ref oldest_pub) = oldest_dated.publish_date {
-                    if oldest_pub > stored_date {
+                    if parse_rfc2822_or_epoch(oldest_pub) > parse_rfc2822_or_epoch(stored_date) {
                         let stored_guid = es.last_guid.as_deref().unwrap_or("");
                         let guid_in_batch = guidful.iter().any(|r| r.guid == stored_guid);
                         if !guid_in_batch {

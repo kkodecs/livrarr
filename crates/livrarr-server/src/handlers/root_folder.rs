@@ -250,26 +250,29 @@ pub async fn scan_path(
     Json(req): Json<ScanPathRequest>,
 ) -> Result<Json<ScanResult>, ApiError> {
     let path = PathBuf::from(&req.path);
-    if !path.exists() || !path.is_dir() {
-        return Err(ApiError::BadRequest(
-            "The file system path specified was not found.".into(),
-        ));
-    }
-    if std::fs::read_dir(&path).is_err() {
-        return Err(ApiError::BadRequest(
-            "The file system path specified was not found.".into(),
-        ));
-    }
-
     let user_id = auth.user.id;
 
-    // Walk directory for all media types.
-    let scan_files = tokio::task::spawn_blocking({
+    // All directory probing + walking happens on the blocking pool — no sync fs
+    // calls on the async runtime.
+    let probe_and_walk = tokio::task::spawn_blocking({
         let path = path.clone();
-        move || scan_walk_all_types(&path)
+        move || -> Result<(Vec<ScanFileTyped>, Vec<ScanErrorEntry>), String> {
+            if !path.exists() || !path.is_dir() {
+                return Err("The file system path specified was not found.".into());
+            }
+            if std::fs::read_dir(&path).is_err() {
+                return Err("The file system path specified was not found.".into());
+            }
+            Ok(scan_walk_all_types(&path))
+        }
     })
     .await
     .map_err(|e| ApiError::Internal(format!("spawn_blocking join error: {e}")))?;
+
+    let scan_files = match probe_and_walk {
+        Ok(r) => r,
+        Err(msg) => return Err(ApiError::BadRequest(msg)),
+    };
 
     let (files, scan_errors) = scan_files;
 

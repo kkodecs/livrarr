@@ -657,7 +657,7 @@ impl LibraryFileApi for SecondaryApiImpl {
     async fn delete(&self, uid: UserId, id: LibraryItemId) -> Result<(), ApiError> {
         let item = self.db.delete_library_item(uid, id).await.map_err(db_err)?;
         // Best-effort file delete
-        let _ = std::fs::remove_file(&item.path);
+        let _ = tokio::fs::remove_file(&item.path).await;
         Ok(())
     }
 }

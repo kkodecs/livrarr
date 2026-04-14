@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 
-use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 
 use crate::state::AppState;
 use crate::{
@@ -33,16 +33,23 @@ pub async fn list(
     // Pre-fetch download clients for enrichment.
     let clients = state.db.list_download_clients().await?;
 
-    // For active grabs (sent/confirmed), fetch live progress concurrently.
+    // For active grabs (sent/confirmed), fetch live progress with bounded
+    // concurrency so we don't spawn N outbound calls for a large page.
+    const PROGRESS_CONCURRENCY: usize = 10;
     let progress_futures: Vec<_> = grabs
         .iter()
         .map(|grab| {
             let state = state.clone();
-            let client = clients.iter().find(|c| c.id == grab.download_client_id);
+            let client = clients
+                .iter()
+                .find(|c| c.id == grab.download_client_id)
+                .cloned();
+            let download_id = grab.download_id.clone();
+            let status = grab.status;
             async move {
-                if matches!(grab.status, GrabStatus::Sent | GrabStatus::Confirmed) {
-                    if let (Some(client), Some(download_id)) = (client, &grab.download_id) {
-                        return fetch_progress(&state, client, download_id).await;
+                if matches!(status, GrabStatus::Sent | GrabStatus::Confirmed) {
+                    if let (Some(client), Some(download_id)) = (client, download_id) {
+                        return fetch_progress(&state, &client, &download_id).await;
                     }
                 }
                 None
@@ -50,7 +57,12 @@ pub async fn list(
         })
         .collect();
 
-    let progress_results = join_all(progress_futures).await;
+    // Use `buffered` (order-preserving) so results align with the `grabs`
+    // slice via zip below.
+    let progress_results: Vec<Option<QueueProgress>> = stream::iter(progress_futures)
+        .buffered(PROGRESS_CONCURRENCY)
+        .collect()
+        .await;
 
     let mut items = Vec::with_capacity(grabs.len());
     for (grab, progress) in grabs.iter().zip(progress_results) {

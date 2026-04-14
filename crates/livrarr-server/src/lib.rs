@@ -173,6 +173,9 @@ pub trait AuthService: Send + Sync {
 
     /// Regenerate API key for another user (admin only).
     async fn regenerate_user_api_key(&self, user_id: UserId) -> Result<ApiKeyResponse, AuthError>;
+
+    /// Verify username + password without creating a session. Used for OPDS basic auth.
+    async fn verify_credentials(&self, username: &str, password: &str) -> Result<User, AuthError>;
 }
 
 // ---------------------------------------------------------------------------
