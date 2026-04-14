@@ -501,90 +501,49 @@ pub async fn preview(
             })
             .count();
 
-        if audiobook_count > 1 {
-            skipped_items.push(SkippedItem {
-                title: title.to_string(),
-                author: author_name.to_string(),
-                reason: format!("Multi-file audiobook ({audiobook_count} files)"),
-            });
-            files_to_skip += audiobook_count as i64;
-            let non_audio: Vec<_> = file_list
-                .iter()
-                .filter(|f| {
-                    let qid = extract_quality_id(f);
-                    resolve_media_type(qid, &f.path) != Some(MediaType::Audiobook)
-                })
-                .collect();
-            for f in &non_audio {
-                let qid = extract_quality_id(f);
-                match resolve_media_type(qid, &f.path) {
-                    None => {
-                        files_to_skip += 1;
-                        skipped_items.push(SkippedItem {
-                            title: title.to_string(),
-                            author: author_name.to_string(),
-                            reason: format!("Unknown format: {}", f.path),
-                        });
-                    }
-                    Some(mt) => {
-                        let dest = build_dest_path(&livrarr_root.path, author_name, title, &f.path);
-                        if dest.exists() {
-                            files_to_skip += 1;
-                            skipped_items.push(SkippedItem {
-                                title: title.to_string(),
-                                author: author_name.to_string(),
-                                reason: "Destination already exists".to_string(),
-                            });
-                        } else {
-                            import_files.push(PreviewFileItem {
-                                title: title.to_string(),
-                                author: author_name.to_string(),
-                                path: f.path.clone(),
-                                media_type: match mt {
-                                    MediaType::Ebook => "ebook".to_string(),
-                                    MediaType::Audiobook => "audiobook".to_string(),
-                                },
-                                work_status: work_status.to_string(),
-                            });
-                        }
-                    }
+        for f in &file_list {
+            let qid = extract_quality_id(f);
+            let mt = match resolve_media_type(qid, &f.path) {
+                None => {
+                    files_to_skip += 1;
+                    skipped_items.push(SkippedItem {
+                        title: title.to_string(),
+                        author: author_name.to_string(),
+                        reason: format!("Unknown format: {}", f.path),
+                    });
+                    continue;
                 }
-            }
-        } else {
-            for f in &file_list {
-                let qid = extract_quality_id(f);
-                match resolve_media_type(qid, &f.path) {
-                    None => {
-                        files_to_skip += 1;
-                        skipped_items.push(SkippedItem {
-                            title: title.to_string(),
-                            author: author_name.to_string(),
-                            reason: format!("Unknown format: {}", f.path),
-                        });
-                    }
-                    Some(mt) => {
-                        let dest = build_dest_path(&livrarr_root.path, author_name, title, &f.path);
-                        if dest.exists() {
-                            files_to_skip += 1;
-                            skipped_items.push(SkippedItem {
-                                title: title.to_string(),
-                                author: author_name.to_string(),
-                                reason: "Destination already exists".to_string(),
-                            });
-                        } else {
-                            import_files.push(PreviewFileItem {
-                                title: title.to_string(),
-                                author: author_name.to_string(),
-                                path: f.path.clone(),
-                                media_type: match mt {
-                                    MediaType::Ebook => "ebook".to_string(),
-                                    MediaType::Audiobook => "audiobook".to_string(),
-                                },
-                                work_status: work_status.to_string(),
-                            });
-                        }
-                    }
-                }
+                Some(mt) => mt,
+            };
+            // For multi-part audiobooks, use the source filename stem to avoid path collisions.
+            let effective_title = if mt == MediaType::Audiobook && audiobook_count > 1 {
+                Path::new(&f.path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(title)
+                    .to_string()
+            } else {
+                title.to_string()
+            };
+            let dest = build_dest_path(&livrarr_root.path, author_name, &effective_title, &f.path);
+            if dest.exists() {
+                files_to_skip += 1;
+                skipped_items.push(SkippedItem {
+                    title: title.to_string(),
+                    author: author_name.to_string(),
+                    reason: "Destination already exists".to_string(),
+                });
+            } else {
+                import_files.push(PreviewFileItem {
+                    title: title.to_string(),
+                    author: author_name.to_string(),
+                    path: f.path.clone(),
+                    media_type: match mt {
+                        MediaType::Ebook => "ebook".to_string(),
+                        MediaType::Audiobook => "audiobook".to_string(),
+                    },
+                    work_status: work_status.to_string(),
+                });
             }
         }
     }
@@ -1292,9 +1251,10 @@ async fn run_import(
             }
         };
 
-        // Multi-file audiobook check.
-        if media_type == MediaType::Audiobook {
-            let book_audio_count = book_files_by_book
+        // For multi-part audiobooks, use the source filename stem as the destination name
+        // to avoid path collisions between parts.
+        let book_audio_count = if media_type == MediaType::Audiobook {
+            book_files_by_book
                 .get(&rd_file.book_id)
                 .map(|fs| {
                     fs.iter()
@@ -1304,15 +1264,19 @@ async fn run_import(
                         })
                         .count()
                 })
-                .unwrap_or(0);
-            if book_audio_count > 1 {
-                files_skipped += 1;
-                let mut prog = state.readarr_import_progress.lock().await;
-                prog.files_processed += 1;
-                prog.files_skipped += 1;
-                continue;
-            }
-        }
+                .unwrap_or(0)
+        } else {
+            1
+        };
+        let effective_title = if book_audio_count > 1 {
+            Path::new(&rd_file.path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(title)
+                .to_string()
+        } else {
+            title.to_string()
+        };
 
         // Validate source path.
         let translated_path = apply_path_translation(
@@ -1334,7 +1298,7 @@ async fn run_import(
         };
 
         // Build destination path.
-        let dest = build_dest_path(&livrarr_root.path, author_name, title, &rd_file.path);
+        let dest = build_dest_path(&livrarr_root.path, author_name, &effective_title, &rd_file.path);
 
         // Check if destination already exists.
         if dest.exists() {
