@@ -3,3 +3,5 @@ ALTER TABLE works RENAME COLUMN hardcover_id TO hc_key;
 ALTER TABLE works ADD COLUMN gr_key TEXT;
 ALTER TABLE authors ADD COLUMN gr_key TEXT;
 ALTER TABLE authors ADD COLUMN hc_key TEXT;
+
+UPDATE _livrarr_meta SET value = '16' WHERE key = 'schema_version';

@@ -23,3 +23,5 @@ CREATE UNIQUE INDEX idx_imports_running ON imports(user_id) WHERE status = 'runn
 ALTER TABLE works ADD COLUMN import_id TEXT REFERENCES imports(id);
 ALTER TABLE authors ADD COLUMN import_id TEXT REFERENCES imports(id);
 ALTER TABLE library_items ADD COLUMN import_id TEXT REFERENCES imports(id);
+
+UPDATE _livrarr_meta SET value = '17' WHERE key = 'schema_version';

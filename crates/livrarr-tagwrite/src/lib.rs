@@ -667,7 +667,8 @@ fn update_opf_metadata(
     })?;
 
     // DC elements we manage (will be replaced with our values).
-    let managed_dc: &[&[u8]] = &[
+    // Matched only when the element's prefix is "dc" (Dublin Core namespace).
+    let managed_dc_locals: &[&[u8]] = &[
         b"title",
         b"creator",
         b"description",
@@ -680,15 +681,54 @@ fn update_opf_metadata(
     // Collect preserved elements from inside metadata (non-managed dc:, non-calibre-meta).
     let mut original_cover_id: Option<String> = None;
     let mut preserved_events: Vec<Event<'static>> = Vec::new();
+    let mut skip_stack: Vec<Vec<u8>> = Vec::new();
+    let mut preserve_stack: Vec<Vec<u8>> = Vec::new();
     let mut i = meta_start + 1;
     while i < meta_end {
         let event = &events[i];
+
+        if !skip_stack.is_empty() {
+            match event {
+                Event::Start(e) => {
+                    skip_stack.push(e.local_name().as_ref().to_vec());
+                }
+                Event::End(e) => {
+                    if skip_stack.last().map(|top| top.as_slice()) == Some(e.local_name().as_ref())
+                    {
+                        skip_stack.pop();
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+
+        if !preserve_stack.is_empty() {
+            preserved_events.push(event.clone());
+            match event {
+                Event::Start(e) => {
+                    preserve_stack.push(e.local_name().as_ref().to_vec());
+                }
+                Event::End(e) => {
+                    if preserve_stack.last().map(|top| top.as_slice())
+                        == Some(e.local_name().as_ref())
+                    {
+                        preserve_stack.pop();
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+
         match event {
             Event::Start(e) | Event::Empty(e) => {
                 let local = e.local_name();
-                let is_managed_dc = managed_dc.contains(&local.as_ref());
+                let is_dc_prefix = e.name().prefix().is_some_and(|p| p.as_ref() == b"dc");
+                let is_managed_dc = is_dc_prefix && managed_dc_locals.contains(&local.as_ref());
                 let is_isbn_identifier = local.as_ref() == b"identifier" && {
-                    // Check if it has id="isbn" attribute.
                     e.attributes().flatten().any(|a| {
                         a.key.local_name().as_ref() == b"id"
                             && a.unescape_value().ok().as_deref() == Some("isbn")
@@ -712,7 +752,6 @@ fn update_opf_metadata(
                 };
 
                 if is_cover_meta {
-                    // Capture the original cover ID before stripping.
                     for a in e.attributes().flatten() {
                         if a.key.local_name().as_ref() == b"content" {
                             if let Ok(v) = a.unescape_value() {
@@ -723,50 +762,22 @@ fn update_opf_metadata(
                 }
 
                 if is_managed_dc || is_isbn_identifier || is_calibre_meta || is_cover_meta {
-                    // Skip this element (and its content if it's a Start, not Empty).
                     if matches!(event, Event::Start(_)) {
-                        // Skip until matching End.
-                        let mut depth = 1;
-                        i += 1;
-                        while i < meta_end && depth > 0 {
-                            match &events[i] {
-                                Event::Start(_) => depth += 1,
-                                Event::End(_) => depth -= 1,
-                                _ => {}
-                            }
-                            i += 1;
-                        }
-                        continue;
+                        skip_stack.push(local.as_ref().to_vec());
                     }
-                    // Empty element — just skip it.
                     i += 1;
                     continue;
                 }
 
-                // Preserve this element.
                 preserved_events.push(event.clone());
                 if matches!(event, Event::Start(_)) {
-                    // Copy until matching End.
-                    let mut depth = 1;
-                    i += 1;
-                    while i < meta_end && depth > 0 {
-                        preserved_events.push(events[i].clone());
-                        match &events[i] {
-                            Event::Start(_) => depth += 1,
-                            Event::End(_) => depth -= 1,
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-                    continue;
+                    preserve_stack.push(local.as_ref().to_vec());
                 }
             }
             Event::Text(_) => {
-                // Whitespace between elements — preserve.
                 preserved_events.push(event.clone());
             }
             Event::End(_) => {
-                // Stray end tags — shouldn't happen but preserve.
                 preserved_events.push(event.clone());
             }
             _ => {
