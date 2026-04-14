@@ -1,4 +1,2 @@
--- imported_at was present in 001_initial_schema.sql from alpha1 onward.
--- This migration was added in error (the column was never missing on any real install).
--- Making it a no-op keeps the migration history intact without breaking fresh installs.
-SELECT 1;
+-- Add imported_at timestamp to library_items (was in the original combined migration but lost in the split).
+ALTER TABLE library_items ADD COLUMN imported_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z';
