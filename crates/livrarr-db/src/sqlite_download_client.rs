@@ -71,6 +71,14 @@ impl DownloadClientDb for SqliteDb {
         row_to_download_client(row)
     }
 
+    async fn get_download_client_with_credentials(
+        &self,
+        id: DownloadClientId,
+    ) -> Result<DownloadClient, DbError> {
+        // Credentials are included in the standard row — this method signals call intent.
+        self.get_download_client(id).await
+    }
+
     async fn list_download_clients(&self) -> Result<Vec<DownloadClient>, DbError> {
         let rows = sqlx::query("SELECT * FROM download_clients ORDER BY id")
             .fetch_all(self.pool())
@@ -163,10 +171,20 @@ impl DownloadClientDb for SqliteDb {
             .unwrap_or(current.skip_ssl_validation);
         let url_base = req.url_base.or(current.url_base);
         let username = req.username.or(current.username);
-        let password = req.password.or(current.password);
+        // Password tri-state: None = keep, Some(None) = clear, Some(Some(v)) = set.
+        let password = match req.password {
+            None => current.password,
+            Some(None) => None,
+            Some(Some(v)) => Some(v),
+        };
         let category = req.category.unwrap_or(current.category);
         let enabled = req.enabled.unwrap_or(current.enabled);
-        let api_key = req.api_key.or(current.api_key);
+        // API key tri-state: None = keep, Some(None) = clear, Some(Some(v)) = set.
+        let api_key = match req.api_key {
+            None => current.api_key,
+            Some(None) => None,
+            Some(Some(v)) => Some(v),
+        };
         let is_default = req.is_default_for_protocol.unwrap_or(was_default);
 
         // Run clear-default + update in one transaction so a partial failure

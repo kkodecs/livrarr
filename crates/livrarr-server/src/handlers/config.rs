@@ -102,19 +102,45 @@ pub async fn update_metadata(
     _admin: RequireAdmin,
     Json(req): Json<UpdateMetadataApiRequest>,
 ) -> Result<Json<MetadataConfigResponse>, ApiError> {
+    // Validate tri-state secrets: empty string is invalid.
+    if let Some(Some(ref t)) = req.hardcover_api_token {
+        if t.is_empty() {
+            return Err(ApiError::BadRequest(
+                "hardcoverApiToken must not be empty string; use null to clear".into(),
+            ));
+        }
+    }
+    if let Some(Some(ref k)) = req.llm_api_key {
+        if k.is_empty() {
+            return Err(ApiError::BadRequest(
+                "llmApiKey must not be empty string; use null to clear".into(),
+            ));
+        }
+    }
+
+    // Normalize tokens (strip Bearer prefix/whitespace) when setting a value.
+    let hardcover_api_token = req
+        .hardcover_api_token
+        .map(|inner| inner.map(|t| clean_token(&t)));
+    let llm_api_key = req.llm_api_key.map(|inner| inner.map(|t| clean_token(&t)));
+
     // Validate and normalize languages before saving.
     // Use merged config (existing + request overrides) to determine LLM status,
     // so partial updates don't wrongly strip LLM languages.
     let validated_languages = if let Some(langs) = req.languages {
         let existing = state.db.get_metadata_config().await?;
+        // For llm_api_key: resolve what value will be stored after this update.
+        let effective_llm_key = match &llm_api_key {
+            None => existing.llm_api_key.as_deref().map(|s| s.to_string()),
+            Some(None) => None,
+            Some(Some(v)) => Some(v.clone()),
+        };
         let llm_configured = livrarr_metadata::language::is_llm_configured(
             req.llm_enabled.unwrap_or(existing.llm_enabled),
             req.llm_endpoint
                 .as_deref()
                 .or(existing.llm_endpoint.as_deref()),
-            req.llm_api_key
-                .as_deref()
-                .or(existing.llm_api_key.as_deref()),
+            effective_llm_key.as_deref(),
             req.llm_model.as_deref().or(existing.llm_model.as_deref()),
         );
         match livrarr_metadata::language::validate_languages(&langs, llm_configured) {
@@ -129,11 +155,11 @@ pub async fn update_metadata(
         .db
         .update_metadata_config(UpdateMetadataConfigRequest {
             hardcover_enabled: req.hardcover_enabled,
-            hardcover_api_token: req.hardcover_api_token.map(|t| clean_token(&t)),
+            hardcover_api_token,
             llm_enabled: req.llm_enabled,
             llm_provider: req.llm_provider,
             llm_endpoint: req.llm_endpoint,
-            llm_api_key: req.llm_api_key.map(|t| clean_token(&t)),
+            llm_api_key,
             llm_model: req.llm_model,
             audnexus_url: req.audnexus_url,
             languages: validated_languages,
@@ -260,6 +286,14 @@ pub async fn update_prowlarr(
     _admin: RequireAdmin,
     Json(req): Json<crate::UpdateProwlarrApiRequest>,
 ) -> Result<Json<crate::ProwlarrConfigResponse>, ApiError> {
+    // Validate tri-state api_key: empty string is invalid.
+    if let Some(Some(ref k)) = req.api_key {
+        if k.is_empty() {
+            return Err(ApiError::BadRequest(
+                "api_key must not be empty string; use null to clear".into(),
+            ));
+        }
+    }
     let c = state
         .db
         .update_prowlarr_config(livrarr_db::UpdateProwlarrConfigRequest {
@@ -299,6 +333,14 @@ pub async fn update_email(
     _admin: RequireAdmin,
     Json(req): Json<crate::UpdateEmailApiRequest>,
 ) -> Result<Json<crate::EmailConfigResponse>, ApiError> {
+    // Validate tri-state password: empty string is invalid.
+    if let Some(Some(ref p)) = req.password {
+        if p.is_empty() {
+            return Err(ApiError::BadRequest(
+                "password must not be empty string; use null to clear".into(),
+            ));
+        }
+    }
     let c = state
         .db
         .update_email_config(livrarr_db::UpdateEmailConfigRequest {

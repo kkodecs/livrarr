@@ -69,6 +69,11 @@ impl IndexerDb for SqliteDb {
         row_to_indexer(row)
     }
 
+    async fn get_indexer_with_credentials(&self, id: IndexerId) -> Result<Indexer, DbError> {
+        // Credentials are included in the standard row — this method signals call intent.
+        self.get_indexer(id).await
+    }
+
     async fn list_indexers(&self) -> Result<Vec<Indexer>, DbError> {
         let rows = sqlx::query("SELECT * FROM indexers ORDER BY priority, id")
             .fetch_all(self.pool())
@@ -131,11 +136,11 @@ impl IndexerDb for SqliteDb {
             .api_path
             .clone()
             .unwrap_or_else(|| current.api_path.clone());
-        // API key semantics: None = keep existing, Some("") = clear, Some(value) = set new.
-        let api_key_opt = match req.api_key.as_deref() {
+        // API key tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
+        let api_key_opt = match req.api_key {
             None => current.api_key.clone(), // not provided, keep existing
-            Some("") => None,                // explicitly cleared
-            Some(value) => Some(value.to_string()), // set new value
+            Some(None) => None,              // explicitly cleared
+            Some(Some(ref value)) => Some(value.clone()), // set new value
         };
         let categories = req.categories.unwrap_or(current.categories);
         let priority = req.priority.unwrap_or(current.priority);

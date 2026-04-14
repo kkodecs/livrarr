@@ -297,12 +297,18 @@ pub async fn update(
         }
     }
 
+    // Validate tri-state api_key: empty string is invalid.
+    if let Some(Some(ref k)) = req.api_key {
+        if k.is_empty() {
+            return Err(ApiError::BadRequest(
+                "api_key must not be empty string; use null to clear".into(),
+            ));
+        }
+    }
+
     // Normalize url/api_path if provided.
     let url = req.url.map(|u| normalize_url(&u));
     let api_path = req.api_path.map(|p| normalize_api_path(&p));
-
-    // Treat empty api_key as None (keep existing).
-    let api_key = req.api_key.filter(|k| !k.is_empty());
 
     let indexer = state
         .db
@@ -312,7 +318,7 @@ pub async fn update(
                 name: req.name,
                 url,
                 api_path,
-                api_key,
+                api_key: req.api_key,
                 categories: req.categories,
                 priority: req.priority,
                 enable_automatic_search: req.enable_automatic_search,
@@ -358,7 +364,7 @@ pub async fn test_saved(
     _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
 ) -> Result<Json<TestIndexerApiResponse>, ApiError> {
-    let indexer = state.db.get_indexer(id).await?;
+    let indexer = state.db.get_indexer_with_credentials(id).await?;
 
     let result = test_indexer_caps(
         &state.http_client,
@@ -527,7 +533,7 @@ pub async fn import_from_prowlarr(
             .db
             .update_prowlarr_config(livrarr_db::UpdateProwlarrConfigRequest {
                 url: Some(url),
-                api_key: Some(api_key),
+                api_key: Some(Some(api_key)),
                 enabled: Some(true),
             })
             .await;
