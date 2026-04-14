@@ -294,7 +294,7 @@ pub async fn enrich_work(state: &AppState, work: &Work) -> EnrichmentOutcome {
             } else {
                 state.goodreads_rate_limiter.acquire().await;
                 let results = gr_search(state, work.id, title, author, per_provider).await;
-                let results = if results.is_empty() && title.chars().any(|c| !c.is_ascii()) {
+                let results = if results.is_empty() && !title.is_ascii() {
                     // Title has diacritics — strip non-ASCII and retry.
                     let ascii_title: String = title.chars().filter(|c| c.is_ascii()).collect();
                     tracing::info!(

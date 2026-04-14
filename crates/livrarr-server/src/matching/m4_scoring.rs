@@ -3,7 +3,7 @@
 use rapidfuzz::distance::levenshtein;
 use unicode_normalization::UnicodeNormalization;
 
-use super::types::{Extraction, MatchCandidate, MatchProvider};
+use super::types::{Extraction, MatchCandidate};
 
 /// Compute the weighted composite match score between an extraction and a candidate.
 /// Returns 0.0–1.0. Higher is better.

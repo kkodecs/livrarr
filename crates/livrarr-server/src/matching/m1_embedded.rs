@@ -33,21 +33,17 @@ fn extract_epub(path: &Path) -> Option<Extraction> {
         .map(|c| decode_xml_entities(c.value()));
     let raw_language = metadata.language().map(|l| l.value().to_string());
 
-    let title = raw_title.and_then(|t| sanitize_title(&t, path));
+    let title = raw_title.and_then(|t| sanitize_title(&t, path))?;
     let author = raw_author.and_then(|a| sanitize_author(&a));
 
-    if title.is_none() {
-        return None;
-    }
-
-    let confidence = if title.is_some() && author.is_some() {
+    let confidence = if author.is_some() {
         Confidence::High
     } else {
         Confidence::Medium
     };
 
     Some(Extraction {
-        title,
+        title: Some(title),
         author,
         year: None,
         isbn: None, // TODO: parse dc:identifier from OPF XML for ISBN
@@ -68,21 +64,17 @@ fn extract_m4b(path: &Path) -> Option<Extraction> {
     let raw_author = tag.artist().map(|s| s.to_string());
     let raw_year = tag.year().and_then(|s| s.to_string().parse::<i32>().ok());
 
-    let title = raw_title.and_then(|t| sanitize_title(&t, path));
+    let title = raw_title.and_then(|t| sanitize_title(&t, path))?;
     let author = raw_author.and_then(|a| sanitize_author(&a));
 
-    if title.is_none() {
-        return None;
-    }
-
-    let confidence = if title.is_some() && author.is_some() {
+    let confidence = if author.is_some() {
         Confidence::High
     } else {
         Confidence::Medium
     };
 
     Some(Extraction {
-        title,
+        title: Some(title),
         author,
         year: raw_year,
         isbn: None,
@@ -141,23 +133,19 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
     // For author: use most common non-garbage artist value.
     let raw_author = most_common_non_garbage_author(&artists);
 
-    let title = raw_title;
+    let title = raw_title?;
     let author = raw_author;
-
-    if title.is_none() {
-        return None;
-    }
 
     let year = most_common(&years).copied();
 
-    let confidence = if title.is_some() && author.is_some() {
+    let confidence = if author.is_some() {
         Confidence::High
     } else {
         Confidence::Medium
     };
 
     Some(Extraction {
-        title,
+        title: Some(title),
         author,
         year,
         isbn: None,
@@ -247,14 +235,6 @@ fn sanitize_author(author: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
-}
-
-fn is_isbn(s: &str) -> bool {
-    let digits: String = s
-        .chars()
-        .filter(|c| c.is_ascii_digit() || *c == 'X')
-        .collect();
-    digits.len() == 10 || digits.len() == 13
 }
 
 /// Return the most common non-garbage title from a list of tag values.

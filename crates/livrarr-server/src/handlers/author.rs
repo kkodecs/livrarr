@@ -133,7 +133,7 @@ pub async fn lookup(
 
     let results = lookup_ol_authors(&state.http_client, &term, 20)
         .await
-        .map_err(|e| ApiError::BadGateway(e))?;
+        .map_err(ApiError::BadGateway)?;
 
     Ok(Json(results))
 }

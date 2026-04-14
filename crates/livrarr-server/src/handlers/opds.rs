@@ -150,7 +150,7 @@ fn work_entry(work: &Work, items: &[LibraryItem]) -> String {
     let desc = work
         .description
         .as_deref()
-        .map(|d| xml_escape(d))
+        .map(xml_escape)
         .unwrap_or_default();
     let lang = work
         .language
@@ -205,7 +205,7 @@ fn pagination_links(base_href: &str, page: usize, total: usize) -> String {
         ));
         links.push('\n');
     }
-    let total_pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+    let total_pages = total.div_ceil(PAGE_SIZE);
     if page < total_pages {
         let sep = if base_href.contains('?') { "&" } else { "?" };
         links.push_str(&format!(

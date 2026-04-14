@@ -2,7 +2,6 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -24,6 +23,7 @@ const MAX_CACHE_ENTRIES: usize = 200;
 const MAX_IMAGE_SIZE: usize = 500_000; // 500KB
 
 impl CoverProxyCache {
+    #[allow(clippy::new_without_default)] // RwLock doesn't derive Default
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
