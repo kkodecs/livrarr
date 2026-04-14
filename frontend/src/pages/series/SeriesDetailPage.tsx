@@ -7,7 +7,7 @@ import { PageContent } from "@/components/Page/PageContent";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
 import { MediaStatusRow } from "@/components/MediaStatusRow";
-import { getCoverUrl } from "@/utils/format";
+import { BookCover } from "@/components/BookCover";
 import { cn } from "@/utils/cn";
 
 export default function SeriesDetailPage() {
@@ -125,13 +125,11 @@ export default function SeriesDetailPage() {
               to={`/work/${work.id}`}
               className="flex items-center gap-3 sm:gap-4 rounded-lg border border-border bg-surface p-2 sm:p-3 hover:border-brand"
             >
-              <img
-                src={getCoverUrl(work.id)}
-                alt=""
-                className="h-12 w-8 sm:h-16 sm:w-11 shrink-0 rounded bg-zinc-700 object-cover"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = "none";
-                }}
+              <BookCover
+                workId={work.id}
+                title={work.title}
+                className="h-12 w-8 sm:h-16 sm:w-11"
+                iconSize={14}
               />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">

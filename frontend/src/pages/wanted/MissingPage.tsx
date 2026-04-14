@@ -17,7 +17,8 @@ import { ErrorState } from "@/components/Page/ErrorState";
 import { EmptyState } from "@/components/Page/EmptyState";
 import { SortHeader } from "@/components/Page/SortHeader";
 import { cn } from "@/utils/cn";
-import { formatRelativeDate, getCoverUrl } from "@/utils/format";
+import { formatRelativeDate } from "@/utils/format";
+import { BookCover } from "@/components/BookCover";
 import type { WorkDetailResponse } from "@/types/api";
 
 type MissingFilter = "all" | "ebook" | "audiobook";
@@ -222,11 +223,11 @@ export default function MissingPage() {
                 {missing.map((work) => (
                   <tr key={work.id} className="hover:bg-zinc-800/50">
                     <td className="px-3 py-2">
-                      <img
-                        src={getCoverUrl(work.id)}
-                        alt=""
-                        className="h-8 w-8 rounded object-cover"
-                        loading="lazy"
+                      <BookCover
+                        workId={work.id}
+                        title={work.title}
+                        className="h-8 w-8"
+                        iconSize={12}
                       />
                     </td>
                     <td className="px-3 py-2">

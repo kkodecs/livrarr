@@ -7,7 +7,7 @@ import { lookupWorks, addWork, listWorks, getMetadataConfig } from "@/api";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { EmptyState } from "@/components/Page/EmptyState";
-import { getCoverUrl } from "@/utils/format";
+import { BookCover } from "@/components/BookCover";
 import type {
   WorkSearchResult,
   AddWorkResponse,
@@ -314,10 +314,11 @@ function LibraryResult({ work }: { work: WorkDetailResponse }) {
       to={`/work/${work.id}`}
       className="flex items-center gap-2 border-b border-border/50 px-2 py-2 sm:py-1.5 hover:bg-zinc-800/50"
     >
-      <img
-        src={getCoverUrl(work.id)}
-        alt=""
-        className="h-8 w-6 shrink-0 rounded bg-zinc-700 object-cover"
+      <BookCover
+        workId={work.id}
+        title={work.title}
+        className="h-8 w-6"
+        iconSize={10}
       />
       <span className="min-w-0 truncate font-medium text-sm text-zinc-100">
         {work.title}

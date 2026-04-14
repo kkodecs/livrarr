@@ -61,6 +61,7 @@ import type {
   ScanResult,
   BrowseResponse,
   ScanResponse,
+  ScanProgressResponse,
   ManualSearchResponse,
   ManualImportItem,
   ManualImportResponse,
@@ -491,6 +492,8 @@ export const scanManualImport = (path: string) =>
     method: "POST",
     body: JSON.stringify({ path }),
   });
+export const scanManualImportProgress = (scanId: string) =>
+  apiFetch<ScanProgressResponse>(`/manualimport/progress/${scanId}`);
 export const searchManualImport = (query: string, author?: string) =>
   apiFetch<ManualSearchResponse>("/manualimport/search", {
     method: "POST",
@@ -504,15 +507,18 @@ export const executeManualImport = (items: ManualImportItem[]) =>
 
 // Readarr Import
 export const readarrConnect = (url: string, apiKey: string) =>
-  apiFetch<ReadarrRootFolder[]>("/import/readarr/connect", {
+  apiFetch<{ rootFolders: ReadarrRootFolder[] }>("/import/readarr/connect", {
     method: "POST",
     body: JSON.stringify({ url, apiKey }),
-  });
+  }).then((d) => d.rootFolders);
 export const readarrPreview = (req: {
   url: string;
   apiKey: string;
   readarrRootFolderId: number;
   livrarrRootFolderId: number;
+  filesOnly: boolean;
+  containerPath?: string;
+  hostPath?: string;
 }) =>
   apiFetch<ImportPreviewResponse>("/import/readarr/preview", {
     method: "POST",
@@ -523,6 +529,9 @@ export const readarrStartImport = (req: {
   apiKey: string;
   readarrRootFolderId: number;
   livrarrRootFolderId: number;
+  filesOnly: boolean;
+  containerPath?: string;
+  hostPath?: string;
 }) =>
   apiFetch<{ importId: string }>("/import/readarr/start", {
     method: "POST",
@@ -531,7 +540,9 @@ export const readarrStartImport = (req: {
 export const readarrProgress = () =>
   apiFetch<ImportProgressResponse>("/import/readarr/progress");
 export const readarrHistory = () =>
-  apiFetch<ImportHistoryItem[]>("/import/readarr/history");
+  apiFetch<{ imports: ImportHistoryItem[] }>("/import/readarr/history").then(
+    (d) => d.imports,
+  );
 export const readarrUndo = (importId: string) =>
   apiFetch<void>(`/import/readarr/${importId}`, { method: "DELETE" });
 

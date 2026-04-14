@@ -516,6 +516,8 @@ pub struct Grab {
     /// Raw remote path from download client (pre-path-mapping).
     pub content_path: Option<String>,
     pub grabbed_at: DateTime<Utc>,
+    pub import_retry_count: i32,
+    pub import_failed_at: Option<DateTime<Utc>>,
 }
 
 /// Remote path mapping.

@@ -42,7 +42,65 @@ pub struct AppState {
     /// Readarr import progress — polled by frontend.
     pub readarr_import_progress:
         Arc<tokio::sync::Mutex<crate::handlers::readarr_import::ImportProgress>>,
+    /// OL rate limiter for manual import parallel lookups (3 req/sec, burst 10).
+    pub ol_rate_limiter: Arc<OlRateLimiter>,
+    /// In-progress manual import scan results — OL matches stream in via polling.
+    pub manual_import_scans: Arc<ManualImportScanMap>,
 }
+
+// =============================================================================
+// OpenLibrary Rate Limiter — 3 req/sec, burst of 10
+// =============================================================================
+
+pub struct OlRateLimiter {
+    state: tokio::sync::Mutex<RateLimiterInner>,
+}
+
+const OL_RATE: f64 = 3.0; // 3 tokens per second
+const OL_BURST: f64 = 10.0;
+
+impl Default for OlRateLimiter {
+    fn default() -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(RateLimiterInner {
+                tokens: OL_BURST,
+                last_refill: std::time::Instant::now(),
+            }),
+        }
+    }
+}
+
+impl OlRateLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn acquire(&self) {
+        loop {
+            let mut inner = self.state.lock().await;
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(inner.last_refill).as_secs_f64();
+            inner.tokens = (inner.tokens + elapsed * OL_RATE).min(OL_BURST);
+            inner.last_refill = now;
+
+            if inner.tokens >= 1.0 {
+                inner.tokens -= 1.0;
+                return;
+            }
+
+            let wait = (1.0 - inner.tokens) / OL_RATE;
+            drop(inner);
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+        }
+    }
+}
+
+// =============================================================================
+// Manual Import Scan State — progressive OL lookup results
+// =============================================================================
+
+pub type ManualImportScanMap =
+    dashmap::DashMap<String, crate::handlers::manual_import::ScanState>;
 
 /// Per-(user, work) mutex map for serializing concurrent imports of the same work.
 pub type ImportLockMap =

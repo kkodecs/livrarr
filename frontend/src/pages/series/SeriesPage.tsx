@@ -16,7 +16,7 @@ import { ErrorState } from "@/components/Page/ErrorState";
 import { EmptyState } from "@/components/Page/EmptyState";
 import { FormModal } from "@/components/Page/FormModal";
 import { HelpTip } from "@/components/HelpTip";
-import { getCoverUrl } from "@/utils/format";
+import { BookCover } from "@/components/BookCover";
 import { cn } from "@/utils/cn";
 import type { AuthorResponse } from "@/types/api";
 
@@ -83,17 +83,15 @@ export default function SeriesPage() {
                   className="flex items-center gap-3 sm:gap-4 rounded-lg border border-border bg-surface p-2 sm:p-3 hover:border-brand"
                 >
                   {s.firstWorkId ? (
-                    <img
-                      src={getCoverUrl(s.firstWorkId)}
-                      alt=""
-                      className="h-12 w-8 sm:h-16 sm:w-11 shrink-0 rounded bg-zinc-700 object-cover"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = "none";
-                      }}
+                    <BookCover
+                      workId={s.firstWorkId}
+                      title={s.name}
+                      className="h-12 w-8 sm:h-16 sm:w-11"
+                      iconSize={14}
                     />
                   ) : (
-                    <div className="h-12 w-8 sm:h-16 sm:w-11 shrink-0 rounded bg-zinc-700 flex items-center justify-center">
-                      <Library size={14} className="text-zinc-500" />
+                    <div className="h-12 w-8 sm:h-16 sm:w-11 shrink-0 rounded bg-zinc-800 border border-zinc-700 flex items-center justify-center">
+                      <Library size={14} className="text-zinc-600" />
                     </div>
                   )}
                   <div className="min-w-0 flex-1">

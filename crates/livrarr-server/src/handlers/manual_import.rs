@@ -25,11 +25,33 @@ pub struct ScanRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResponse {
+    pub scan_id: String,
     pub files: Vec<ScannedFile>,
     pub warnings: Vec<String>,
+    /// Total files found; OL lookups proceed in background.
+    pub ol_total: usize,
+    pub ol_completed: usize,
+}
+
+/// In-memory state for a progressive scan. OL lookups update files in place.
+pub struct ScanState {
+    pub files: tokio::sync::RwLock<Vec<ScannedFile>>,
+    pub warnings: Vec<String>,
+    pub ol_total: usize,
+    pub ol_completed: std::sync::atomic::AtomicUsize,
+    pub user_id: i64,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanProgressResponse {
+    pub files: Vec<ScannedFile>,
+    pub warnings: Vec<String>,
+    pub ol_total: usize,
+    pub ol_completed: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScannedFile {
     pub path: String,
@@ -71,10 +93,13 @@ pub struct OlMatch {
     pub existing_work_id: Option<i64>,
 }
 
-const MAX_MEDIA_FILES: usize = 50;
-const MAX_ENTRIES_TRAVERSED: usize = 10_000;
+const MAX_MEDIA_FILES: usize = 2_000;
+const MAX_ENTRIES_TRAVERSED: usize = 50_000;
 
 /// POST /api/v1/manualimport/scan
+///
+/// Two-phase scan: returns files immediately with parsed metadata + local dedup.
+/// OL lookups run in background — poll GET /api/v1/manualimport/progress/:scan_id.
 pub async fn scan(
     State(state): State<AppState>,
     RequireAdmin(auth): RequireAdmin,
@@ -86,7 +111,6 @@ pub async fn scan(
             "The file system path specified was not found.".into(),
         ));
     }
-    // Check readability.
     if std::fs::read_dir(&path).is_err() {
         return Err(ApiError::BadRequest(
             "The file system path specified was not found.".into(),
@@ -109,14 +133,15 @@ pub async fn scan(
 
     if source_files.is_empty() {
         return Ok(Json(ScanResponse {
+            scan_id: String::new(),
             files: vec![],
             warnings,
+            ol_total: 0,
+            ol_completed: 0,
         }));
     }
 
     // ── Group multi-file audiobooks by parent directory ──
-    // When 2+ audio files share the same parent dir, collapse into a single entry
-    // using the folder path for identification instead of individual filenames.
     let scan_root = &path;
     let mut dir_audio_files: std::collections::HashMap<PathBuf, Vec<usize>> =
         std::collections::HashMap::new();
@@ -131,14 +156,10 @@ pub async fn scan(
         }
     }
 
-    // Build scan items: either individual files or folder groups.
     struct ScanItem {
-        /// Display name for LLM parsing.
         display_name: String,
-        /// Primary path (directory for groups, file for singles).
         primary_path: PathBuf,
         media_type: MediaType,
-        /// Individual file paths (None = single file, Some = group).
         grouped_paths: Option<Vec<PathBuf>>,
     }
 
@@ -150,12 +171,10 @@ pub async fn scan(
 
     let mut scan_items: Vec<ScanItem> = Vec::new();
 
-    // Add grouped audiobook directories first.
     for (dir, indices) in &dir_audio_files {
         if indices.len() < 2 {
             continue;
         }
-        // Use folder path relative to scan root for display.
         let rel = dir
             .strip_prefix(scan_root)
             .unwrap_or(dir)
@@ -181,12 +200,11 @@ pub async fn scan(
         });
     }
 
-    // Add individual files (skip those already in a group).
     for sf in source_files.iter() {
         if sf.media_type == MediaType::Audiobook {
             if let Some(parent) = sf.path.parent() {
                 if grouped_dirs.contains(parent) {
-                    continue; // Part of a group.
+                    continue;
                 }
             }
         }
@@ -205,7 +223,6 @@ pub async fn scan(
     }
 
     // Local extraction via matching engine (M1+M2+M3).
-    // M1 runs in spawn_blocking internally (file I/O safe).
     let scan_root = path.clone();
     let mut parsed_files: Vec<Option<ParsedFile>> = Vec::with_capacity(scan_items.len());
     for si in &scan_items {
@@ -230,7 +247,7 @@ pub async fn scan(
         parsed_files.push(parsed);
     }
 
-    // Sort indices by (author, series, series_position, title) for logical display order.
+    // Sort by (author, series, series_position, title).
     let mut sort_indices: Vec<usize> = (0..scan_items.len()).collect();
     sort_indices.sort_by(|&a, &b| {
         let pa = parsed_files[a].as_ref();
@@ -254,20 +271,20 @@ pub async fn scan(
             .then(title_a.cmp(title_b))
     });
 
-    // Get user's existing works for duplicate detection.
+    // Get user's existing works for local dedup.
     let user_id = auth.user.id;
     let existing_works = state.db.list_works(user_id).await?;
     let root_folders = state.db.list_root_folders().await?;
 
-    // Search OL for each item (throttled), in sorted display order.
+    // Phase 1: build files with parsed metadata + local dedup (no OL).
     let mut scanned_files = Vec::new();
+    let mut ol_indices = Vec::new(); // indices into scanned_files that need OL lookup
 
     for &i in &sort_indices {
         let si = &scan_items[i];
         let filename = si.display_name.clone();
         let parsed = parsed_files.get(i).cloned().flatten();
 
-        // Compute total size.
         let size = if let Some(ref paths) = si.grouped_paths {
             let mut total = 0u64;
             for p in paths {
@@ -283,92 +300,29 @@ pub async fn scan(
 
         let routable = root_folders.iter().any(|rf| rf.media_type == si.media_type);
 
-        let (ol_match, existing_work_id) = if let Some(ref p) = parsed {
-            // Clean title for OL search:
-            // 1. Strip parenthetical content (series info, edition, etc.)
-            //    e.g., "El ojo del mundo (La rueda del tiempo, #1)" → "El ojo del mundo"
-            // 2. Strip subtitle after colon for long titles
-            //    e.g., "The Let Them Theory: A Life-Changing Tool..." → "The Let Them Theory"
-            let mut clean_title = if let Some(paren) = p.title.find('(') {
-                p.title[..paren].trim().to_string()
-            } else {
-                p.title.trim().to_string()
-            };
-            if clean_title.len() > 60 {
-                if let Some(colon) = clean_title.find(':') {
-                    if colon > 5 {
-                        clean_title = clean_title[..colon].trim().to_string();
-                    }
-                }
-            }
-            let search_term = format!("{} {}", clean_title, p.author);
-            let ol_results = search_ol_batch(&state, &search_term)
+        // Local-only dedup (normalized title+author match).
+        let existing_work_id = parsed.as_ref().and_then(|p| {
+            existing_works
+                .iter()
+                .find(|w| {
+                    normalize_for_matching(&w.title) == normalize_for_matching(&p.title)
+                        && normalize_for_matching(&w.author_name)
+                            == normalize_for_matching(&p.author)
+                })
+                .map(|w| w.id)
+        });
+
+        let has_existing_media_type = if let Some(wid) = existing_work_id {
+            state
+                .db
+                .list_library_items_by_work(user_id, wid)
                 .await
-                .unwrap_or_default();
-
-            if !ol_results.is_empty() {
-                // First: check if any OL result matches an existing work (prefer dup detection
-                // over top-ranked result). This handles cases where a translated title ranks
-                // above the original but the original matches our library.
-                let dup_match = ol_results.iter().find_map(|result| {
-                    let dup = existing_works.iter().find(|w| {
-                        (result.ol_key.is_some() && w.ol_key.as_deref() == result.ol_key.as_deref())
-                            || (normalize_for_matching(&w.title)
-                                == normalize_for_matching(&result.title)
-                                && normalize_for_matching(&w.author_name)
-                                    == normalize_for_matching(&result.author_name))
-                    });
-                    dup.map(|w| (result, w.id))
-                });
-
-                if let Some((result, dup_id)) = dup_match {
-                    // Found an OL result that matches an existing work — use it.
-                    (
-                        Some(OlMatch {
-                            ol_key: result.ol_key.clone().unwrap_or_default(),
-                            title: result.title.clone(),
-                            author: result.author_name.clone(),
-                            cover_url: result.cover_url.clone(),
-                            existing_work_id: Some(dup_id),
-                        }),
-                        Some(dup_id),
-                    )
-                } else {
-                    // No existing work match — use the top OL result.
-                    let result = &ol_results[0];
-                    (
-                        Some(OlMatch {
-                            ol_key: result.ol_key.clone().unwrap_or_default(),
-                            title: result.title.clone(),
-                            author: result.author_name.clone(),
-                            cover_url: result.cover_url.clone(),
-                            existing_work_id: None,
-                        }),
-                        None,
-                    )
-                }
-            } else {
-                // No OL results — try local-only duplicate detection.
-                let dup = existing_works
-                    .iter()
-                    .find(|w| {
-                        normalize_for_matching(&w.title) == normalize_for_matching(&p.title)
-                            && normalize_for_matching(&w.author_name)
-                                == normalize_for_matching(&p.author)
-                    })
-                    .map(|w| w.id);
-                (None, dup)
-            }
+                .map(|items| items.iter().any(|li| li.media_type == si.media_type))
+                .unwrap_or(false)
         } else {
-            (None, None)
+            false
         };
 
-        // OL throttle.
-        if parsed.is_some() && scanned_files.len() + 1 < scan_items.len() {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-
-        // Check readability (for groups, check first file).
         let check_path = si
             .grouped_paths
             .as_ref()
@@ -380,24 +334,22 @@ pub async fn scan(
             None
         };
 
-        let has_existing_media_type = if let Some(wid) = existing_work_id {
-            let items = state.db.list_library_items_by_work(user_id, wid).await?;
-            items.iter().any(|li| li.media_type == si.media_type)
-        } else {
-            false
-        };
-
         let grouped_path_strings = si
             .grouped_paths
             .as_ref()
             .map(|paths| paths.iter().map(|p| p.display().to_string()).collect());
 
-        // For groups, show folder name with file count.
         let display_filename = if let Some(ref paths) = si.grouped_paths {
             format!("{}/ ({} files)", filename, paths.len())
         } else {
             filename
         };
+
+        let file_idx = scanned_files.len();
+        // Track files that have parsed metadata for OL lookup.
+        if parsed.is_some() {
+            ol_indices.push(file_idx);
+        }
 
         scanned_files.push(ScannedFile {
             path: si.primary_path.display().to_string(),
@@ -405,7 +357,7 @@ pub async fn scan(
             media_type: si.media_type,
             size,
             parsed,
-            ol_match,
+            ol_match: None, // Filled by background OL lookup
             existing_work_id,
             has_existing_media_type,
             routable,
@@ -414,9 +366,171 @@ pub async fn scan(
         });
     }
 
+    let ol_total = ol_indices.len();
+    let scan_id = uuid::Uuid::new_v4().to_string();
+
+    // Store scan state for progressive polling.
+    let scan_state = ScanState {
+        files: tokio::sync::RwLock::new(scanned_files.clone()),
+        warnings: warnings.clone(),
+        ol_total,
+        ol_completed: std::sync::atomic::AtomicUsize::new(0),
+        user_id,
+    };
+    state
+        .manual_import_scans
+        .insert(scan_id.clone(), scan_state);
+
+    // Phase 2: spawn background OL lookups (3 concurrent).
+    let bg_state = state.clone();
+    let bg_scan_id = scan_id.clone();
+    tokio::spawn(async move {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
+        let mut handles = Vec::new();
+
+        for file_idx in ol_indices {
+            let sem = semaphore.clone();
+            let st = bg_state.clone();
+            let sid = bg_scan_id.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = match sem.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+
+                // Rate limit via OL leaky bucket.
+                st.ol_rate_limiter.acquire().await;
+
+                // Read the file's parsed metadata.
+                let search_term = {
+                    let scan = st.manual_import_scans.get(&sid);
+                    let scan = match scan {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    let files = scan.files.read().await;
+                    let f = match files.get(file_idx) {
+                        Some(f) => f,
+                        None => return,
+                    };
+                    let p = match &f.parsed {
+                        Some(p) => p,
+                        None => return,
+                    };
+                    let mut clean_title = if let Some(paren) = p.title.find('(') {
+                        p.title[..paren].trim().to_string()
+                    } else {
+                        p.title.trim().to_string()
+                    };
+                    if clean_title.len() > 60 {
+                        if let Some(colon) = clean_title.find(':') {
+                            if colon > 5 {
+                                clean_title = clean_title[..colon].trim().to_string();
+                            }
+                        }
+                    }
+                    format!("{} {}", clean_title, p.author)
+                };
+
+                let ol_results = search_ol_batch(&st, &search_term)
+                    .await
+                    .unwrap_or_default();
+
+                // Update the scan state with OL results.
+                if let Some(scan) = st.manual_import_scans.get(&sid) {
+                    let user_id = scan.user_id;
+                    let existing_works = st.db.list_works(user_id).await.unwrap_or_default();
+
+                    let mut files = scan.files.write().await;
+                    if let Some(f) = files.get_mut(file_idx) {
+                        if !ol_results.is_empty() {
+                            // Prefer OL result that matches existing work (dedup).
+                            let dup_match = ol_results.iter().find_map(|result| {
+                                let dup = existing_works.iter().find(|w| {
+                                    (result.ol_key.is_some()
+                                        && w.ol_key.as_deref() == result.ol_key.as_deref())
+                                        || (normalize_for_matching(&w.title)
+                                            == normalize_for_matching(&result.title)
+                                            && normalize_for_matching(&w.author_name)
+                                                == normalize_for_matching(&result.author_name))
+                                });
+                                dup.map(|w| (result, w.id))
+                            });
+
+                            if let Some((result, dup_id)) = dup_match {
+                                f.ol_match = Some(OlMatch {
+                                    ol_key: result.ol_key.clone().unwrap_or_default(),
+                                    title: result.title.clone(),
+                                    author: result.author_name.clone(),
+                                    cover_url: result.cover_url.clone(),
+                                    existing_work_id: Some(dup_id),
+                                });
+                                f.existing_work_id = Some(dup_id);
+                            } else {
+                                let result = &ol_results[0];
+                                f.ol_match = Some(OlMatch {
+                                    ol_key: result.ol_key.clone().unwrap_or_default(),
+                                    title: result.title.clone(),
+                                    author: result.author_name.clone(),
+                                    cover_url: result.cover_url.clone(),
+                                    existing_work_id: None,
+                                });
+                            }
+                        }
+                        // If no OL match and no existing_work_id yet, local dedup was
+                        // already done in phase 1.
+                    }
+                    scan.ol_completed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }));
+        }
+
+        // Wait for all lookups to complete.
+        for h in handles {
+            let _ = h.await;
+        }
+
+        // Clean up scan state after 10 minutes.
+        let st = bg_state.clone();
+        let sid = bg_scan_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            st.manual_import_scans.remove(&sid);
+        });
+    });
+
     Ok(Json(ScanResponse {
+        scan_id,
         files: scanned_files,
         warnings,
+        ol_total,
+        ol_completed: 0,
+    }))
+}
+
+/// GET /api/v1/manualimport/progress/:scan_id
+pub async fn scan_progress(
+    State(state): State<AppState>,
+    RequireAdmin(_auth): RequireAdmin,
+    axum::extract::Path(scan_id): axum::extract::Path<String>,
+) -> Result<Json<ScanProgressResponse>, ApiError> {
+    let scan = state
+        .manual_import_scans
+        .get(&scan_id)
+        .ok_or(ApiError::NotFound)?;
+
+    let files = scan.files.read().await.clone();
+    let ol_completed = scan
+        .ol_completed
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    Ok(Json(ScanProgressResponse {
+        files,
+        warnings: scan.warnings.clone(),
+        ol_total: scan.ol_total,
+        ol_completed,
     }))
 }
 
@@ -503,6 +617,8 @@ pub struct ImportItem {
     pub title: String,
     pub author: String,
     pub delete_existing: bool,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -535,16 +651,6 @@ pub async fn import(
     Json(req): Json<ImportRequest>,
 ) -> Result<Json<ImportResponse>, ApiError> {
     let user_id = auth.user.id;
-
-    // Validate all items have ol_key.
-    for item in &req.items {
-        if item.ol_key.is_empty() {
-            return Err(ApiError::BadRequest(format!(
-                "missing olKey for file: {}",
-                item.path
-            )));
-        }
-    }
 
     // Fetch works and root folders once (avoid N+1 queries).
     let existing_works = state.db.list_works(user_id).await?;
@@ -957,20 +1063,38 @@ async fn find_or_create_work(
     };
 
     // Create via the same flow as work::add.
+    let ol_key = if item.ol_key.is_empty() {
+        None
+    } else {
+        Some(item.ol_key.clone())
+    };
     let add_req = AddWorkRequest {
-        ol_key: Some(item.ol_key.clone()),
+        ol_key,
         title: item.title.clone(),
         author_name: item.author.clone(),
         author_ol_key,
         year: None,
         cover_url: None,
         metadata_source: None,
-        language: None,
+        language: item.language.clone(),
         detail_url: None,
+        defer_enrichment: true,
     };
 
-    let resp = super::work::add_work_internal(state, user_id, add_req).await?;
-    Ok(resp.work.id)
+    match super::work::add_work_internal(state, user_id, add_req).await {
+        Ok(resp) => Ok(resp.work.id),
+        Err(ApiError::Conflict { .. }) => {
+            // Work was created by a prior item in the same batch (stale snapshot).
+            // Re-query to find it.
+            let fresh_works = state.db.list_works(user_id).await?;
+            find_existing_work(&fresh_works, &item.ol_key, &item.title, &item.author)
+                .map(|w| w.id)
+                .ok_or_else(|| {
+                    ApiError::Internal("work conflict but not found on re-query".into())
+                })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------

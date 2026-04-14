@@ -1,9 +1,9 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Link } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { FolderSearch, Upload, Search, AlertTriangle, Check, X } from "lucide-react";
-import { scanManualImport, executeManualImport, searchManualImport } from "@/api";
+import { scanManualImport, scanManualImportProgress, executeManualImport, searchManualImport } from "@/api";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { EmptyState } from "@/components/Page/EmptyState";
@@ -26,6 +26,10 @@ export default function ManualImportPage() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [hasCorrections, setHasCorrections] = useState(false);
   const [hasScanned, setHasScanned] = useState(false);
+  const [scanId, setScanId] = useState<string | null>(null);
+  const [olTotal, setOlTotal] = useState(0);
+  const [olCompleted, setOlCompleted] = useState(0);
+  const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
   // Inline search state
   const [searchingIdx, setSearchingIdx] = useState<number | null>(null);
@@ -44,13 +48,21 @@ export default function ManualImportPage() {
     };
   }, []);
 
+  // Helper: file is importable if it has parsed title+author OR an OL match.
+  const isImportable = useCallback(
+    (f: ScannedFile) =>
+      !!(f.correctedMatch || f.match || (f.parsed?.title && f.parsed?.author)),
+    [],
+  );
+
   const scanMutation = useMutation({
     mutationFn: (p: string) => scanManualImport(p),
     onSuccess: (data) => {
+      // Default selected if we have title+author (from parsing or OL).
       setFiles(
         data.files.map((f) => ({
           ...f,
-          selected: false,
+          selected: !!(f.parsed?.title && f.parsed?.author) && !f.hasExistingMediaType,
           deleteExisting: false,
         })),
       );
@@ -58,14 +70,64 @@ export default function ManualImportPage() {
       setPathError("");
       setHasScanned(true);
       setHasCorrections(false);
+      setOlTotal(data.olTotal);
+      setOlCompleted(data.olCompleted);
+
+      // Start polling for OL progress if there are lookups to do.
+      if (data.scanId && data.olTotal > 0) {
+        setScanId(data.scanId);
+        if (pollRef.current) clearInterval(pollRef.current);
+        pollRef.current = setInterval(async () => {
+          try {
+            const progress = await scanManualImportProgress(data.scanId);
+            setOlCompleted(progress.olCompleted);
+            // Update files with new OL matches (preserve user selections).
+            setFiles((prev) =>
+              prev.map((f, i) => {
+                const updated = progress.files[i];
+                if (!updated) return f;
+                // Deselect if OL discovered same media type already imported.
+                const newlyDuplicate = !f.hasExistingMediaType && updated.hasExistingMediaType;
+                return {
+                  ...f,
+                  match: updated.match,
+                  existingWorkId: updated.existingWorkId,
+                  hasExistingMediaType: updated.hasExistingMediaType,
+                  selected: newlyDuplicate ? false : f.selected,
+                };
+              }),
+            );
+            if (progress.olCompleted >= progress.olTotal) {
+              clearInterval(pollRef.current);
+              pollRef.current = undefined;
+              setScanId(null);
+            }
+          } catch {
+            // Scan expired or server restarted — stop polling.
+            clearInterval(pollRef.current);
+            pollRef.current = undefined;
+            setScanId(null);
+          }
+        }, 2000);
+      }
     },
     onError: (e: Error) => {
       setPathError(e.message || "The file system path specified was not found.");
       setFiles([]);
       setWarnings([]);
       setHasScanned(false);
+      setScanId(null);
+      setOlTotal(0);
+      setOlCompleted(0);
     },
   });
+
+  // Cleanup polling on unmount.
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
 
   const importMutation = useMutation({
     mutationFn: (items: ManualImportItem[]) => executeManualImport(items),
@@ -152,16 +214,21 @@ export default function ManualImportPage() {
     const selected = files.filter((f) => f.selected && hasMatch(f));
     const items: ManualImportItem[] = [];
     for (const f of selected) {
-      const m = f.correctedMatch || f.match!;
-      // Expand grouped audiobook files into individual import items.
+      // Use OL match if available, fall back to parsed metadata.
+      const m = f.correctedMatch || f.match;
+      const title = m?.title ?? f.parsed?.title ?? f.filename;
+      const author = m?.author ?? f.parsed?.author ?? "";
+      const olKey = m?.olKey ?? "";
+      const language = f.parsed?.language || undefined;
       const paths = f.groupedPaths ?? [f.path];
       for (const p of paths) {
         items.push({
           path: p,
-          olKey: m.olKey,
-          title: m.title,
-          author: m.author,
+          olKey,
+          title,
+          author,
           deleteExisting: f.deleteExisting,
+          language,
         });
       }
     }
@@ -228,7 +295,8 @@ export default function ManualImportPage() {
     setHasCorrections(true);
   };
 
-  const hasMatch = (f: FileState) => !!(f.correctedMatch || f.match);
+  const hasMatch = (f: FileState) =>
+    !!(f.correctedMatch || f.match || (f.parsed?.title && f.parsed?.author));
 
   const effectiveMatch = (f: FileState) => f.correctedMatch || f.match;
 
@@ -301,7 +369,23 @@ export default function ManualImportPage() {
         {scanMutation.isPending && (
           <div className="flex flex-col items-center justify-center py-16 gap-3">
             <LoadingSpinner size={32} />
-            <p className="text-sm text-muted">Scanning files and matching...</p>
+            <p className="text-sm text-muted">Scanning files and parsing metadata...</p>
+          </div>
+        )}
+
+        {/* OL progress bar */}
+        {!scanMutation.isPending && olTotal > 0 && olCompleted < olTotal && (
+          <div className="mb-3 space-y-1">
+            <div className="flex items-center justify-between text-xs text-muted">
+              <span>Matching against OpenLibrary...</span>
+              <span>{olCompleted}/{olTotal}</span>
+            </div>
+            <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-brand transition-all duration-300"
+                style={{ width: `${(olCompleted / olTotal) * 100}%` }}
+              />
+            </div>
           </div>
         )}
 
@@ -348,8 +432,9 @@ export default function ManualImportPage() {
                 <tbody>
                   {files.map((f, idx) => {
                     const match = effectiveMatch(f);
-                    const dupWorkId = f.existingWorkId || match?.existingWorkId;
-                    const isDuplicate = !!dupWorkId;
+                    const workId = f.existingWorkId || match?.existingWorkId;
+                    const hasWork = !!workId;
+                    const hasSameMedia = f.hasExistingMediaType;
                     const result = f.importResult;
                     const imported = isImported(f);
 
@@ -417,15 +502,15 @@ export default function ManualImportPage() {
                               >
                                 {match.title} — {match.author}
                               </button>
-                              {isDuplicate && dupWorkId && (
+                              {hasSameMedia && workId && (
                                 <Link
-                                  to={`/work/${dupWorkId}`}
+                                  to={`/work/${workId}`}
                                   className="ml-1.5 rounded bg-yellow-900/50 px-1.5 py-0.5 text-xs text-yellow-300 hover:underline"
                                 >
                                   duplicate
                                 </Link>
                               )}
-                              {f.selected && isDuplicate && (
+                              {f.selected && hasSameMedia && (
                                 <label className="mt-1 flex items-center gap-1.5 text-xs text-muted">
                                   <input
                                     type="checkbox"
@@ -436,6 +521,26 @@ export default function ManualImportPage() {
                                   />
                                   Delete existing release(s)
                                 </label>
+                              )}
+                            </div>
+                          ) : f.parsed?.title && f.parsed?.author ? (
+                            <div>
+                              <button
+                                onClick={() => handleInlineSearch(idx)}
+                                className="text-left text-xs text-zinc-400 hover:underline"
+                                disabled={imported}
+                                title="From filename — click to search OL"
+                              >
+                                {f.parsed.title} — {f.parsed.author}
+                              </button>
+                              <span className="ml-1 text-[10px] text-zinc-600">(parsed)</span>
+                              {hasSameMedia && workId && (
+                                <Link
+                                  to={`/work/${workId}`}
+                                  className="ml-1.5 rounded bg-yellow-900/50 px-1.5 py-0.5 text-xs text-yellow-300 hover:underline"
+                                >
+                                  duplicate
+                                </Link>
                               )}
                             </div>
                           ) : (

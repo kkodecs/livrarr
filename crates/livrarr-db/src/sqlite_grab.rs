@@ -56,6 +56,14 @@ fn row_to_grab(row: sqlx::sqlite::SqliteRow) -> Result<Grab, DbError> {
             .try_get("content_path")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         grabbed_at: parse_dt(&grabbed_at_str)?,
+        import_retry_count: row
+            .try_get::<i32, _>("import_retry_count")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        import_failed_at: row
+            .try_get::<Option<String>, _>("import_failed_at")
+            .map_err(|e| DbError::Io(Box::new(e)))?
+            .map(|s| parse_dt(&s))
+            .transpose()?,
     })
 }
 
@@ -197,11 +205,20 @@ impl GrabDb for SqliteDb {
         status: GrabStatus,
         import_error: Option<&str>,
     ) -> Result<(), DbError> {
+        let now = Utc::now().to_rfc3339();
+        let failed_at = if status == GrabStatus::ImportFailed {
+            Some(&now)
+        } else {
+            None
+        };
         let result = sqlx::query(
-            "UPDATE grabs SET status = ?, import_error = ? WHERE id = ? AND user_id = ?",
+            "UPDATE grabs SET status = ?, import_error = ?, \
+             import_failed_at = COALESCE(?, import_failed_at) \
+             WHERE id = ? AND user_id = ?",
         )
         .bind(grab_status_str(status))
         .bind(import_error)
+        .bind(failed_at)
         .bind(id)
         .bind(user_id)
         .execute(self.pool())
@@ -332,5 +349,43 @@ impl GrabDb for SqliteDb {
         .map_err(map_db_err)?;
         let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(Box::new(e)))?;
         Ok(cnt > 0)
+    }
+
+    async fn list_retriable_grabs(&self, max_retries: i32) -> Result<Vec<Grab>, DbError> {
+        // Return importFailed grabs under the retry limit whose backoff has expired.
+        // Backoff schedule: 2^retry * 120 seconds (2min, 4min, 8min, 16min, 32min).
+        let rows = sqlx::query(
+            "SELECT * FROM grabs \
+             WHERE status = 'importFailed' \
+               AND import_retry_count < ? \
+               AND (import_failed_at IS NULL \
+                    OR unixepoch('now') - unixepoch(import_failed_at) > (1 << import_retry_count) * 120) \
+             ORDER BY id",
+        )
+        .bind(max_retries)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_grab).collect()
+    }
+
+    async fn increment_import_retry(
+        &self,
+        user_id: UserId,
+        id: GrabId,
+    ) -> Result<(), DbError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE grabs SET import_retry_count = import_retry_count + 1, \
+             import_failed_at = ? \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(&now)
+        .bind(id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(())
     }
 }

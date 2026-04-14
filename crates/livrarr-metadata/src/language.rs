@@ -148,12 +148,11 @@ pub fn is_llm_configured(
         && llm_model.is_some_and(|s| !s.is_empty())
 }
 
-/// Returns true if the work's metadata_source indicates a foreign provider.
-/// Foreign works skip enrichment and metadata refresh.
 pub fn is_foreign_source(metadata_source: Option<&str>) -> bool {
     match metadata_source {
         None => false,
         Some("OpenLibrary") => false,
+        Some("readarr") => false,
         Some(_) => true,
     }
 }
