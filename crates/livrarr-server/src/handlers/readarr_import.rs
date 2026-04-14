@@ -298,7 +298,11 @@ fn validate_source_path(source: &str, readarr_root: &str) -> Result<PathBuf, Str
 /// Translate a path from container-space to host-space using the optional
 /// container_path / host_path mapping. Returns the path unchanged if either
 /// side is absent or the path doesn't start with container_path.
-fn apply_path_translation(path: &str, container_path: Option<&str>, host_path: Option<&str>) -> String {
+fn apply_path_translation(
+    path: &str,
+    container_path: Option<&str>,
+    host_path: Option<&str>,
+) -> String {
     match (container_path, host_path) {
         (Some(cp), Some(hp)) if !cp.is_empty() && !hp.is_empty() => {
             let cp = cp.trim_end_matches('/');
@@ -367,11 +371,7 @@ pub async fn connect(
         return Err(ApiError::BadRequest("apiKey is required".into()));
     }
 
-    let client = ReadarrClient::new(
-        &req.url,
-        &req.api_key,
-        state.http_client.inner().clone(),
-    );
+    let client = ReadarrClient::new(&req.url, &req.api_key, state.http_client.inner().clone());
     let folders = client
         .root_folders()
         .await
@@ -400,11 +400,7 @@ pub async fn preview(
 ) -> Result<Json<PreviewResponse>, ApiError> {
     let user_id = auth.user.id;
 
-    let client = ReadarrClient::new(
-        &req.url,
-        &req.api_key,
-        state.http_client.inner().clone(),
-    );
+    let client = ReadarrClient::new(&req.url, &req.api_key, state.http_client.inner().clone());
 
     let (authors, books, book_files, rd_folders) = fetch_all_readarr_data(&client).await?;
 
@@ -466,15 +462,23 @@ pub async fn preview(
 
         // Compute work status before file loop so we can annotate each file.
         let edition = book.monitored_edition();
-        let isbn = edition.and_then(|e| e.isbn13.as_deref()).filter(|s| !s.is_empty());
-        let asin = edition.and_then(|e| e.asin.as_deref()).filter(|s| !s.is_empty());
+        let isbn = edition
+            .and_then(|e| e.isbn13.as_deref())
+            .filter(|s| !s.is_empty());
+        let asin = edition
+            .and_then(|e| e.asin.as_deref())
+            .filter(|s| !s.is_empty());
         let year = book.release_date.as_deref().and_then(extract_year);
         let norm_title = normalize_for_matching(title);
 
         let is_existing = if let Some(isbn_val) = isbn {
-            existing_works.iter().any(|w| w.isbn_13.as_deref() == Some(isbn_val))
+            existing_works
+                .iter()
+                .any(|w| w.isbn_13.as_deref() == Some(isbn_val))
         } else if let Some(asin_val) = asin {
-            existing_works.iter().any(|w| w.asin.as_deref() == Some(asin_val))
+            existing_works
+                .iter()
+                .any(|w| w.asin.as_deref() == Some(asin_val))
         } else {
             existing_works.iter().any(|w| {
                 normalize_for_matching(&w.author_name) == norm_author
@@ -802,7 +806,9 @@ async fn fetch_all_readarr_data(
         .map_err(|e| ApiError::BadGateway(format!("Readarr books: {e}")))?;
     let author_ids: Vec<i64> = authors.iter().map(|a| a.id).collect();
     let file_results = futures::future::join_all(
-        author_ids.iter().map(|&aid| client.book_files_by_author(aid)),
+        author_ids
+            .iter()
+            .map(|&aid| client.book_files_by_author(aid)),
     )
     .await;
     let mut book_files: Vec<RdBookFile> = Vec::new();
@@ -1213,7 +1219,10 @@ async fn run_import(
     }
 
     // Phase 4: Process files (only those belonging to active books).
-    for rd_file in rd_book_files.iter().filter(|f| active_book_ids.contains(&f.book_id)) {
+    for rd_file in rd_book_files
+        .iter()
+        .filter(|f| active_book_ids.contains(&f.book_id))
+    {
         let work_id = match rd_to_livrarr_work.get(&rd_file.book_id) {
             Some(id) => *id,
             None => {
@@ -1298,7 +1307,12 @@ async fn run_import(
         };
 
         // Build destination path.
-        let dest = build_dest_path(&livrarr_root.path, author_name, &effective_title, &rd_file.path);
+        let dest = build_dest_path(
+            &livrarr_root.path,
+            author_name,
+            &effective_title,
+            &rd_file.path,
+        );
 
         // Check if destination already exists.
         if dest.exists() {

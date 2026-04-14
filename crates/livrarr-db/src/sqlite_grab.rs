@@ -369,11 +369,7 @@ impl GrabDb for SqliteDb {
         rows.into_iter().map(row_to_grab).collect()
     }
 
-    async fn increment_import_retry(
-        &self,
-        user_id: UserId,
-        id: GrabId,
-    ) -> Result<(), DbError> {
+    async fn increment_import_retry(&self, user_id: UserId, id: GrabId) -> Result<(), DbError> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE grabs SET import_retry_count = import_retry_count + 1, \

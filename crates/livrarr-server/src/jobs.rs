@@ -392,10 +392,7 @@ async fn retry_failed_imports(state: &AppState) {
             grab.import_retry_count + 1
         );
         // Increment retry count before attempting (so backoff advances even on crash).
-        let _ = state
-            .db
-            .increment_import_retry(grab.user_id, grab.id)
-            .await;
+        let _ = state.db.increment_import_retry(grab.user_id, grab.id).await;
         // try_set_importing accepts importFailed — same atomic transition as normal imports.
         let ok = state
             .db
@@ -1234,7 +1231,10 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
 // Enrichment Retry Tick (JOBS-ENRICH-001)
 // ---------------------------------------------------------------------------
 
-pub async fn enrichment_retry_tick(state: AppState, _cancel: CancellationToken) -> Result<(), String> {
+pub async fn enrichment_retry_tick(
+    state: AppState,
+    _cancel: CancellationToken,
+) -> Result<(), String> {
     let works = state
         .db
         .list_works_for_retry()

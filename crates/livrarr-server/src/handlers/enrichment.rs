@@ -440,9 +440,7 @@ async fn gr_search(
         if !resp.status().is_success() {
             return Err(format!("GR search HTTP {}", resp.status()));
         }
-        resp.text()
-            .await
-            .map_err(|e| format!("GR read body: {e}"))
+        resp.text().await.map_err(|e| format!("GR read body: {e}"))
     })
     .await;
 

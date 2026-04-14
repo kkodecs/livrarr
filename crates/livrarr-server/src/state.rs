@@ -99,8 +99,7 @@ impl OlRateLimiter {
 // Manual Import Scan State — progressive OL lookup results
 // =============================================================================
 
-pub type ManualImportScanMap =
-    dashmap::DashMap<String, crate::handlers::manual_import::ScanState>;
+pub type ManualImportScanMap = dashmap::DashMap<String, crate::handlers::manual_import::ScanState>;
 
 /// Per-(user, work) mutex map for serializing concurrent imports of the same work.
 pub type ImportLockMap =

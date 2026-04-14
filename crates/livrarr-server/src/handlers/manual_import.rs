@@ -433,9 +433,7 @@ pub async fn scan(
                     format!("{} {}", clean_title, p.author)
                 };
 
-                let ol_results = search_ol_batch(&st, &search_term)
-                    .await
-                    .unwrap_or_default();
+                let ol_results = search_ol_batch(&st, &search_term).await.unwrap_or_default();
 
                 // Update the scan state with OL results.
                 if let Some(scan) = st.manual_import_scans.get(&sid) {
@@ -522,9 +520,7 @@ pub async fn scan_progress(
         .ok_or(ApiError::NotFound)?;
 
     let files = scan.files.read().await.clone();
-    let ol_completed = scan
-        .ol_completed
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let ol_completed = scan.ol_completed.load(std::sync::atomic::Ordering::Relaxed);
 
     Ok(Json(ScanProgressResponse {
         files,
@@ -1089,9 +1085,7 @@ async fn find_or_create_work(
             let fresh_works = state.db.list_works(user_id).await?;
             find_existing_work(&fresh_works, &item.ol_key, &item.title, &item.author)
                 .map(|w| w.id)
-                .ok_or_else(|| {
-                    ApiError::Internal("work conflict but not found on re-query".into())
-                })
+                .ok_or_else(|| ApiError::Internal("work conflict but not found on re-query".into()))
         }
         Err(e) => Err(e),
     }
