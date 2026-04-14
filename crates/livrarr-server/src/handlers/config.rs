@@ -373,6 +373,14 @@ pub async fn update_indexer(
     Ok(Json(c))
 }
 
+struct RssSyncGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for RssSyncGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// POST /api/v1/command/rss-sync — trigger immediate RSS sync.
 ///
 /// Satisfies: RSS-TRIGGER-001
@@ -395,20 +403,18 @@ pub async fn trigger_rss_sync(
     }
 
     let s = state.clone();
-    let running = state.rss_sync_running.clone();
+    let guard = RssSyncGuard(state.rss_sync_running.clone());
     let cancel = state
         .job_runner
         .as_ref()
         .map(|jr| jr.cancel_token())
         .unwrap_or_default();
 
-    // Spawn task that owns the guard and calls core logic directly.
-    // The guard is released via drop when the task completes.
     tokio::spawn(async move {
+        let _guard = guard;
         if let Err(e) = crate::jobs::rss_sync_core(s, cancel).await {
             tracing::warn!("trigger rss_sync_core failed: {e}");
         }
-        running.store(false, Ordering::SeqCst);
     });
 
     Ok(axum::http::StatusCode::OK)
