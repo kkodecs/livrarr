@@ -9,6 +9,18 @@ use tokio::sync::RwLock;
 use crate::auth_service::ServerAuthService;
 use crate::config::AppConfig;
 
+/// Type alias for the production `DefaultProviderQueue` instance — the queue
+/// that scatter-gathers HC / OL / Audnexus / GR for live enrichment dispatch.
+pub type LiveProviderQueue = livrarr_metadata::DefaultProviderQueue<SqliteDb>;
+
+/// Type alias for the production `EnrichmentServiceImpl` instance — the IR-defined
+/// enrichment service backed by the live `DefaultProviderQueue` + `DefaultMergeEngine`.
+pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
+    SqliteDb,
+    LiveProviderQueue,
+    livrarr_metadata::DefaultMergeEngine,
+>;
+
 /// Shared application state — injected into all Axum handlers.
 ///
 /// Satisfies: RUNTIME-COMPOSE-001
@@ -46,6 +58,16 @@ pub struct AppState {
     pub ol_rate_limiter: Arc<OlRateLimiter>,
     /// In-progress manual import scan results — OL matches stream in via polling.
     pub manual_import_scans: Arc<ManualImportScanMap>,
+    /// Phase 1.5 plumbing: live `DefaultProviderQueue` constructed at startup
+    /// from the persisted `MetadataConfig` snapshot. Wired into `AppState` so
+    /// call sites can begin migrating off the legacy `enrich_work` /
+    /// `enrich_foreign_work` standalone functions one at a time. Not yet on
+    /// the live enrichment path.
+    pub provider_queue: Arc<LiveProviderQueue>,
+    /// Phase 1.5 plumbing: live `EnrichmentServiceImpl` wrapping
+    /// `provider_queue` + `DefaultMergeEngine`. Same status as `provider_queue`
+    /// — wired but not yet driving live enrichment.
+    pub enrichment_service: Arc<LiveEnrichmentService>,
 }
 
 // =============================================================================
