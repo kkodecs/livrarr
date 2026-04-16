@@ -1121,13 +1121,26 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                     {
                         Ok(new_work) => {
                             // Enrich the newly added work (30s timeout).
+                            // Routed through DefaultProviderQueue + EnrichmentServiceImpl
+                            // (Phase 1.5 cutover). Service writes to DB internally.
                             let enrich_result = tokio::time::timeout(
                                 Duration::from_secs(30),
-                                crate::handlers::enrichment::enrich_work(&state, &new_work),
+                                livrarr_metadata::EnrichmentService::enrich_work(
+                                    state.enrichment_service.as_ref(),
+                                    author.user_id,
+                                    new_work.id,
+                                    livrarr_metadata::EnrichmentMode::Background,
+                                ),
                             )
                             .await;
-                            let outcome = match enrich_result {
-                                Ok(o) => o,
+                            match enrich_result {
+                                Ok(Ok(_)) => {}
+                                Ok(Err(e)) => {
+                                    warn!(
+                                        "author monitor: enrichment failed for <work {}>: {e}",
+                                        new_work.id
+                                    );
+                                }
                                 Err(_) => {
                                     warn!(
                                         "author monitor: enrichment timeout for <work {}>",
@@ -1159,17 +1172,6 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                                     continue;
                                 }
                             };
-                            if let Err(e) = state
-                                .db
-                                .update_work_enrichment(
-                                    author.user_id,
-                                    new_work.id,
-                                    outcome.request,
-                                )
-                                .await
-                            {
-                                tracing::warn!("update_work_enrichment failed: {e}");
-                            }
 
                             if let Err(e) = state
                                 .db
@@ -1243,6 +1245,35 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
 // ---------------------------------------------------------------------------
 
 pub async fn enrichment_retry_tick(
+    _state: AppState,
+    _cancel: CancellationToken,
+) -> Result<(), String> {
+    // DISABLED during Phase 1.5 cutover.
+    //
+    // The legacy retry job pulled works from the legacy `enrichment_retry` table
+    // (populated by `update_work_enrichment` failures from the legacy direct
+    // path) and re-ran the LEGACY enrich_work / enrich_foreign_work functions
+    // against them. Now that English work refresh + add + series-add + author-
+    // monitor all route through `EnrichmentServiceImpl`, the queue manages its
+    // own retry state via `provider_retry_state` rows + `list_works_due_for_retry`.
+    //
+    // Leaving this job active caused two paths to enrich the same work
+    // concurrently — one through the new queue (rate-limited, circuit-broken),
+    // one through the legacy code (unthrottled). HC saw double the request rate
+    // and 429'd; the legacy GR cover fallback then fetched wrong covers for
+    // works whose HC failed. Caliban's War got a children's-novel cover this
+    // way during the bulk-refresh test.
+    //
+    // Proper replacement: a new background job that calls
+    // `ProviderRetryStateDb::list_works_due_for_retry` and dispatches
+    // `enrichment_service.enrich_work(_, _, EnrichmentMode::Background)` for
+    // each due (work, provider). Lands as a follow-on after the foreign path
+    // is also migrated.
+    Ok(())
+}
+
+#[allow(dead_code)]
+async fn _enrichment_retry_tick_legacy_disabled(
     state: AppState,
     _cancel: CancellationToken,
 ) -> Result<(), String> {
@@ -1259,16 +1290,13 @@ pub async fn enrichment_retry_tick(
     debug!("enrichment retry: {} works eligible", works.len());
 
     for work in &works {
-        // Route to the correct enrichment function based on metadata source.
         let is_foreign =
             livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
 
-        // Skip foreign works without a detail URL — nothing to enrich from.
         if is_foreign && work.detail_url.is_none() {
             continue;
         }
 
-        // 30s timeout per spec.
         let enrich_result = tokio::time::timeout(Duration::from_secs(30), async {
             if is_foreign {
                 crate::handlers::enrichment::enrich_foreign_work(&state, work).await
