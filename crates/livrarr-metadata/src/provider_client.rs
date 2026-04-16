@@ -197,7 +197,13 @@ impl AudnexusClient {
                     isbn_13: None,
                     asin: audnexus.asin.clone(),
                     narrator,
-                    narration_type: None,
+                    // Legacy parity: a non-empty narrators list implies human
+                    // narration (Audnexus doesn't expose narration_type explicitly).
+                    narration_type: if audnexus.narrators_empty {
+                        None
+                    } else {
+                        Some(livrarr_domain::NarrationType::Human)
+                    },
                     abridged: None,
                     rating: None,
                     rating_count: None,
@@ -266,13 +272,38 @@ impl HardcoverClient {
 
         match result {
             Ok(hc) => {
+                // Legacy parity: derive year from publish_date (YYYY prefix).
+                let year = hc
+                    .publish_date
+                    .as_deref()
+                    .and_then(|d| d.get(..4))
+                    .and_then(|y| y.parse::<i32>().ok());
+
+                // Legacy parity: when the search hit yielded an hc_key, fetch the
+                // editions list and prefer an English-language edition's ISBN-13
+                // over whatever the search result returned. The search result's
+                // ISBN often points at a non-English or sub-optimal edition.
+                let mut isbn_13 = hc.isbn_13.clone();
+                if let Some(ref hc_id) = hc.hc_key {
+                    if let Ok(Some(better_isbn)) = crate::hardcover::fetch_hardcover_editions(
+                        &self.http,
+                        hc_id,
+                        &self.token,
+                        "en",
+                    )
+                    .await
+                    {
+                        isbn_13 = Some(better_isbn);
+                    }
+                }
+
                 let payload = NormalizedWorkDetail {
                     title: hc.title,
                     subtitle: hc.subtitle,
                     original_title: hc.original_title,
                     author_name: None,
                     description: hc.description,
-                    year: None,
+                    year,
                     series_name: hc.series_name,
                     series_position: hc.series_position,
                     genres: hc.genres,
@@ -284,7 +315,7 @@ impl HardcoverClient {
                     hc_key: hc.hc_key,
                     gr_key: None,
                     ol_key: None,
-                    isbn_13: hc.isbn_13,
+                    isbn_13,
                     asin: None,
                     narrator: None,
                     narration_type: None,

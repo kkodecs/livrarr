@@ -799,7 +799,10 @@ pub async fn refresh(
     let user_id = ctx.user.id;
     let work = state.db.get_work(user_id, id).await?;
 
-    // Reset enrichment status.
+    // Reset legacy enrichment_retry table state. The new queue path manages its
+    // own retry state via provider_retry_state (cleared by
+    // enrichment_service.reset_for_manual_refresh below); the legacy reset is
+    // still needed for foreign works and for any in-flight legacy retry timer.
     if let Err(e) =
         livrarr_db::EnrichmentRetryDb::reset_enrichment_for_refresh(&state.db, user_id, id).await
     {
@@ -808,28 +811,103 @@ pub async fn refresh(
 
     // Re-enrich — route to the correct enrichment function.
     let is_foreign = livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
-    let outcome = if is_foreign && work.detail_url.is_some() {
-        super::enrichment::enrich_foreign_work(&state, &work).await
+    let (enriched, mut messages) = if is_foreign && work.detail_url.is_some() {
+        // Foreign-language works still use the legacy direct path. Migrating
+        // those alongside cover anti-bot detection (R-13) and dependent-step
+        // LLM orchestration is a follow-on cutover step.
+        let outcome = super::enrichment::enrich_foreign_work(&state, &work).await;
+        let enriched = match state
+            .db
+            .update_work_enrichment(user_id, id, outcome.request)
+            .await
+        {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(
+                    work_id = id,
+                    "update_work_enrichment failed during foreign refresh: {e}"
+                );
+                work.clone()
+            }
+        };
+        (enriched, outcome.messages)
     } else {
-        super::enrichment::enrich_work(&state, &work).await
-    };
-    let enriched = match state
-        .db
-        .update_work_enrichment(user_id, id, outcome.request)
+        // English-language works: route through DefaultProviderQueue +
+        // EnrichmentServiceImpl. First call-site cutover (Phase 1.5).
+        // Known regression vs. legacy until Phase 2: GR cover fallback for
+        // works whose HC/OL covers are missing or sub-50KB (R-13 — scheduled).
+        if let Err(e) = livrarr_metadata::EnrichmentService::reset_for_manual_refresh(
+            state.enrichment_service.as_ref(),
+            user_id,
+            id,
+        )
         .await
-    {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(
-                work_id = id,
-                "update_work_enrichment failed during refresh: {e}"
-            );
-            work
+        {
+            tracing::warn!("enrichment_service.reset_for_manual_refresh failed: {e}");
         }
+
+        let result = match livrarr_metadata::EnrichmentService::enrich_work(
+            state.enrichment_service.as_ref(),
+            user_id,
+            id,
+            livrarr_metadata::EnrichmentMode::HardRefresh,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("enrichment_service.enrich_work failed: {e}");
+                return Ok(Json(RefreshWorkResponse {
+                    work: work_to_detail(&work),
+                    messages: vec![format!("enrichment failed: {e}")],
+                }));
+            }
+        };
+
+        let enriched = result.work.clone();
+
+        // Download cover to disk if the queue produced a cover_url. Mirrors
+        // the legacy enrich_work cover-download behavior so on-disk
+        // covers/{id}.jpg stays in sync with the new path.
+        if let Some(ref cover_url) = enriched.cover_url {
+            let covers_dir = state.data_dir.join("covers");
+            if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
+                tracing::warn!("create_dir_all for covers failed: {e}");
+            }
+            if let Ok(resp) = state.http_client_safe.get(cover_url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes().await {
+                        let path = covers_dir.join(format!("{id}.jpg"));
+                        let tmp = path.with_extension("jpg.tmp");
+                        if tokio::fs::write(&tmp, &bytes).await.is_ok()
+                            && tokio::fs::rename(&tmp, &path).await.is_ok()
+                        {
+                            let thumb_path = covers_dir.join(format!("{id}_thumb.jpg"));
+                            let _ = tokio::fs::remove_file(&thumb_path).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut messages: Vec<String> = result
+            .provider_outcomes
+            .iter()
+            .filter(|(_, oc)| {
+                !matches!(
+                    oc,
+                    livrarr_domain::OutcomeClass::Success | livrarr_domain::OutcomeClass::NotFound
+                )
+            })
+            .map(|(p, oc)| format!("{p:?}: {oc:?}"))
+            .collect();
+        if result.merge_deferred {
+            messages.push("Merge deferred — retry pending".to_string());
+        }
+        (enriched, messages)
     };
 
     // TAG-V21-004: rewrite tags on existing library items after re-enrichment.
-    let mut messages = outcome.messages;
     let taggable = state.db.list_taggable_items_by_work(user_id, id).await?;
     if !taggable.is_empty() {
         let tag_warnings = super::import::retag_library_items(&state, &enriched, &taggable).await;
