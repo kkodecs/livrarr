@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
+pub mod audnexus;
 pub mod cover;
 pub mod goodreads;
 pub mod http_llm;
@@ -24,7 +25,7 @@ pub mod normalize;
 pub mod provider_client;
 pub mod provider_queue;
 
-pub use provider_client::{ProviderClient, StubProviderClient};
+pub use provider_client::{AudnexusClient, ProviderClient, StubProviderClient};
 pub use provider_queue::{
     ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
 };
