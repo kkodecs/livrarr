@@ -52,6 +52,7 @@ export function WorksPage() {
     queryKey: ["works"],
     queryFn: listWorks,
     select: (res) => res.items,
+    refetchInterval: 60_000,
   });
 
   const refreshMutation = useMutation({

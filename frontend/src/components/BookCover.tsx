@@ -43,7 +43,7 @@ export function BookCover({
     <img
       src={getCoverUrl(workId, coverVersion)}
       alt={title ?? ""}
-      className={cn("shrink-0 rounded bg-zinc-700 object-cover", className)}
+      className={cn("shrink-0 rounded bg-zinc-700 object-contain", className)}
       loading="lazy"
       onError={() => setFailed(true)}
     />

@@ -917,7 +917,7 @@ function ProwlarrImportSection({ onImported }: { onImported: () => void }) {
       if (data.imported > 0) {
         toast.success(`Imported ${data.imported} download client${data.imported !== 1 ? "s" : ""}`);
         toast.warning(
-          "Imported clients are disabled. Prowlarr does not expose passwords or API keys — edit each client to enter credentials, then enable it.",
+          "Clients that are imported from Prowlarr are disabled by default. To enable them, you must manually enter their credentials (password, API key, etc.).",
           { duration: 15000 },
         );
         onImported();

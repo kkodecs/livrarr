@@ -900,11 +900,15 @@ pub async fn refresh_all(
         let mut failed = 0usize;
 
         for work in &works {
-            let outcome = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                super::enrichment::enrich_work(&state, work),
-            )
-            .await;
+            let is_foreign =
+                livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
+            let enrich_fut = if is_foreign && work.detail_url.is_some() {
+                futures::future::Either::Left(super::enrichment::enrich_foreign_work(&state, work))
+            } else {
+                futures::future::Either::Right(super::enrichment::enrich_work(&state, work))
+            };
+            let outcome =
+                tokio::time::timeout(std::time::Duration::from_secs(30), enrich_fut).await;
 
             match outcome {
                 Ok(o) => {
