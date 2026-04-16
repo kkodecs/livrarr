@@ -1,18 +1,28 @@
 //! Per-provider client seam used by `DefaultProviderQueue`.
 //!
 //! Real network adapters are added as variants here as the cutover progresses.
-//! Phase 1.5 introduces `Audnexus` as the tracer — proves the trait shape holds
-//! against real `reqwest`/`tokio`/`HttpClient` plumbing before the rest of the
-//! providers (Hardcover, OpenLibrary, Goodreads, LLM) are wired in.
+//! Phase 1.5 (Sessions 2+3):
+//!   - Tracer: `Audnexus` (proves the trait shape against real reqwest plumbing).
+//!   - Lift complete: `Hardcover`, `OpenLibrary` (full real wrappers, smoke tested).
+//!   - Placeholder: `Goodreads` (variant exists; the existing `goodreads` module
+//!     has parsers but no fetch function — that lives in `handlers/enrichment.rs`
+//!     and gets pulled in during the orchestration cutover).
+//!   - Deferred: `Llm` — `MetadataProvider::Llm` is a dependent-step (post-HC
+//!     disambiguation, R-17), not a parallel scatter-gather provider. A
+//!     `Llm(_)` variant requires the queue to grow dependent-step orchestration
+//!     first. Lands during the orchestration cutover.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
+use livrarr_db::MetadataConfig;
 use livrarr_domain::{MetadataProvider, Work};
 use livrarr_http::HttpClient;
 
 use crate::audnexus::query_audnexus;
+use crate::hardcover::query_hardcover;
+use crate::openlibrary::query_ol_detail;
 use crate::{EnrichmentContext, NormalizedWorkDetail, ProviderOutcome};
 
 /// Heterogeneous provider client. Enum dispatch instead of `Box<dyn>` because
@@ -22,6 +32,9 @@ use crate::{EnrichmentContext, NormalizedWorkDetail, ProviderOutcome};
 pub enum ProviderClient {
     Stub(StubProviderClient),
     Audnexus(AudnexusClient),
+    Hardcover(HardcoverClient),
+    OpenLibrary(OpenLibraryClient),
+    Goodreads(GoodreadsClient),
 }
 
 impl ProviderClient {
@@ -33,6 +46,9 @@ impl ProviderClient {
         match self {
             Self::Stub(s) => s.fetch(work, ctx).await,
             Self::Audnexus(a) => a.fetch(work, ctx).await,
+            Self::Hardcover(h) => h.fetch(work, ctx).await,
+            Self::OpenLibrary(o) => o.fetch(work, ctx).await,
+            Self::Goodreads(g) => g.fetch(work, ctx).await,
         }
     }
 
@@ -40,6 +56,9 @@ impl ProviderClient {
         match self {
             Self::Stub(s) => s.provider,
             Self::Audnexus(_) => MetadataProvider::Audnexus,
+            Self::Hardcover(_) => MetadataProvider::Hardcover,
+            Self::OpenLibrary(_) => MetadataProvider::OpenLibrary,
+            Self::Goodreads(_) => MetadataProvider::Goodreads,
         }
     }
 
@@ -48,7 +67,7 @@ impl ProviderClient {
             Self::Stub(s) => s.call_count(),
             // Real network adapters don't track call counts — the queue tracks
             // dispatch counts elsewhere; this accessor exists for stub-driven tests.
-            Self::Audnexus(_) => 0,
+            Self::Audnexus(_) | Self::Hardcover(_) | Self::OpenLibrary(_) | Self::Goodreads(_) => 0,
         }
     }
 }
@@ -197,6 +216,198 @@ impl AudnexusClient {
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
             },
         }
+    }
+}
+
+/// Real-network Hardcover adapter. Wraps `livrarr_metadata::hardcover::query_hardcover`
+/// and maps its return value onto `ProviderOutcome<NormalizedWorkDetail>`.
+///
+/// Holds a clone of `MetadataConfig` because the inner query consults
+/// `llm_enabled` / `llm_endpoint` / `llm_api_key` / `llm_model` for the Tier 2
+/// disambiguation fallback. The orchestration cutover may rework that path so
+/// the LLM fan-out happens through `MetadataProvider::Llm` instead — until then,
+/// HC owns its own LLM call.
+#[derive(Clone)]
+pub struct HardcoverClient {
+    http: HttpClient,
+    token: String,
+    metadata_cfg: MetadataConfig,
+    retry_backoff_secs: i64,
+}
+
+impl HardcoverClient {
+    pub fn new(http: HttpClient, token: impl Into<String>, metadata_cfg: MetadataConfig) -> Self {
+        Self {
+            http,
+            token: token.into(),
+            metadata_cfg,
+            retry_backoff_secs: 5 * 60,
+        }
+    }
+
+    pub fn with_retry_backoff(mut self, secs: i64) -> Self {
+        self.retry_backoff_secs = secs;
+        self
+    }
+
+    async fn fetch(
+        &self,
+        work: &Work,
+        _ctx: &EnrichmentContext,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        let result = query_hardcover(
+            &self.http,
+            &work.title,
+            &work.author_name,
+            &self.token,
+            &self.metadata_cfg,
+        )
+        .await;
+
+        match result {
+            Ok(hc) => {
+                let payload = NormalizedWorkDetail {
+                    title: hc.title,
+                    subtitle: hc.subtitle,
+                    original_title: hc.original_title,
+                    author_name: None,
+                    description: hc.description,
+                    year: None,
+                    series_name: hc.series_name,
+                    series_position: hc.series_position,
+                    genres: hc.genres,
+                    language: None,
+                    page_count: hc.page_count,
+                    duration_seconds: None,
+                    publisher: hc.publisher,
+                    publish_date: hc.publish_date,
+                    hc_key: hc.hc_key,
+                    gr_key: None,
+                    ol_key: None,
+                    isbn_13: hc.isbn_13,
+                    asin: None,
+                    narrator: None,
+                    narration_type: None,
+                    abridged: None,
+                    rating: hc.rating,
+                    rating_count: hc.rating_count,
+                    cover_url: hc.cover_url,
+                    additional_isbns: Vec::new(),
+                    additional_asins: Vec::new(),
+                };
+                ProviderOutcome::Success(Box::new(payload))
+            }
+            // The legacy String error doesn't discriminate "no results" from
+            // network failure. The orchestration cutover will tighten this
+            // (typed errors per provider). For now: treat any error as
+            // WillRetry — background dispatch defers, manual coerces to merge.
+            Err(_) => ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
+            },
+        }
+    }
+}
+
+/// Real-network OpenLibrary adapter. Wraps
+/// `livrarr_metadata::openlibrary::query_ol_detail`. OL detail fetch is keyed on
+/// `work.ol_key`; works without an `ol_key` are reported as `NotFound` without
+/// hitting the network.
+#[derive(Clone)]
+pub struct OpenLibraryClient {
+    http: HttpClient,
+    retry_backoff_secs: i64,
+}
+
+impl OpenLibraryClient {
+    pub fn new(http: HttpClient) -> Self {
+        Self {
+            http,
+            retry_backoff_secs: 5 * 60,
+        }
+    }
+
+    pub fn with_retry_backoff(mut self, secs: i64) -> Self {
+        self.retry_backoff_secs = secs;
+        self
+    }
+
+    async fn fetch(
+        &self,
+        work: &Work,
+        _ctx: &EnrichmentContext,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        let ol_key = match work.ol_key.as_deref().filter(|s| !s.is_empty()) {
+            Some(k) => k,
+            None => return ProviderOutcome::NotFound,
+        };
+
+        match query_ol_detail(&self.http, ol_key).await {
+            Ok(detail) => {
+                let payload = NormalizedWorkDetail {
+                    title: None,
+                    subtitle: None,
+                    original_title: None,
+                    author_name: None,
+                    description: detail.description,
+                    year: None,
+                    series_name: None,
+                    series_position: None,
+                    genres: None,
+                    language: None,
+                    page_count: None,
+                    duration_seconds: None,
+                    publisher: None,
+                    publish_date: None,
+                    hc_key: None,
+                    gr_key: None,
+                    ol_key: Some(ol_key.to_string()),
+                    isbn_13: detail.isbn_13,
+                    asin: None,
+                    narrator: None,
+                    narration_type: None,
+                    abridged: None,
+                    rating: None,
+                    rating_count: None,
+                    cover_url: None,
+                    additional_isbns: Vec::new(),
+                    additional_asins: Vec::new(),
+                };
+                ProviderOutcome::Success(Box::new(payload))
+            }
+            Err(_) => ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
+            },
+        }
+    }
+}
+
+/// Goodreads adapter — placeholder.
+///
+/// `livrarr_metadata::goodreads` exposes parsers (`parse_search_html`,
+/// `parse_detail_html`, ...) but not an HTTP fetcher; the existing fetcher
+/// lives inside `livrarr-server`'s `enrich_foreign_work` orchestration. Pulling
+/// it out cleanly requires deciding the GR fetch interface (search-by-title
+/// vs detail-by-`detail_url` vs cover-only), which is a design decision that
+/// should land alongside the orchestration cutover, not in isolation.
+///
+/// This variant returns `NotFound` so it's safe to register but never
+/// dispatched-against in a production path until properly implemented.
+#[derive(Clone, Default)]
+pub struct GoodreadsClient;
+
+impl GoodreadsClient {
+    pub fn new() -> Self {
+        Self
+    }
+
+    async fn fetch(
+        &self,
+        _work: &Work,
+        _ctx: &EnrichmentContext,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        ProviderOutcome::NotFound
     }
 }
 

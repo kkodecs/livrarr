@@ -18,14 +18,19 @@ use chrono::{DateTime, Utc};
 pub mod audnexus;
 pub mod cover;
 pub mod goodreads;
+pub mod hardcover;
 pub mod http_llm;
 pub mod language;
 pub mod llm_scraper;
 pub mod normalize;
+pub mod openlibrary;
 pub mod provider_client;
 pub mod provider_queue;
 
-pub use provider_client::{AudnexusClient, ProviderClient, StubProviderClient};
+pub use provider_client::{
+    AudnexusClient, GoodreadsClient, HardcoverClient, OpenLibraryClient, ProviderClient,
+    StubProviderClient,
+};
 pub use provider_queue::{
     ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
 };
