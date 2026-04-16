@@ -328,14 +328,27 @@ impl HardcoverClient {
                 };
                 ProviderOutcome::Success(Box::new(payload))
             }
-            // The legacy String error doesn't discriminate "no results" from
-            // network failure. The orchestration cutover will tighten this
-            // (typed errors per provider). For now: treat any error as
-            // WillRetry — background dispatch defers, manual coerces to merge.
-            Err(_) => ProviderOutcome::WillRetry {
-                reason: livrarr_domain::WillRetryReason::ServerError,
-                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
-            },
+            // Discriminate HC's stringified errors. "No results" / "no exact
+            // match" mean HC genuinely doesn't have this book — those are
+            // NotFound, NOT a provider failure. Treating them as WillRetry
+            // counts them toward the breaker and trips it after 5 consecutive
+            // misses, suppressing HC for the rest of the bulk run. Real HTTP /
+            // network / parse errors stay WillRetry.
+            //
+            // Proper fix is typed errors out of query_hardcover; until then,
+            // string matching keeps the breaker honest.
+            Err(msg) => {
+                let benign = msg.starts_with("no results") || msg.starts_with("no exact match");
+                if benign {
+                    ProviderOutcome::NotFound
+                } else {
+                    ProviderOutcome::WillRetry {
+                        reason: livrarr_domain::WillRetryReason::ServerError,
+                        next_attempt_at: Utc::now()
+                            + chrono::Duration::seconds(self.retry_backoff_secs),
+                    }
+                }
+            }
         }
     }
 }
