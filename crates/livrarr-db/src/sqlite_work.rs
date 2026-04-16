@@ -4,8 +4,9 @@ use sqlx::Row;
 use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{map_db_err, parse_dt};
 use crate::{
-    AuthorId, CreateWorkDbRequest, DbError, EnrichmentStatus, NarrationType,
-    UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, Work, WorkDb, WorkId,
+    ApplyEnrichmentMergeRequest, ApplyMergeOutcome, AuthorId, CreateWorkDbRequest, DbError,
+    EnrichmentStatus, NarrationType, ProvenanceSetter, UpdateWorkEnrichmentDbRequest,
+    UpdateWorkUserFieldsDbRequest, Work, WorkDb, WorkId,
 };
 
 fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
@@ -159,6 +160,7 @@ fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
         "failed" => Ok(EnrichmentStatus::Failed),
         "exhausted" => Ok(EnrichmentStatus::Exhausted),
         "skipped" => Ok(EnrichmentStatus::Skipped),
+        "conflict" => Ok(EnrichmentStatus::Conflict),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown enrichment status: {s}"),
         }),
@@ -173,6 +175,8 @@ fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
         EnrichmentStatus::Failed => "failed",
         EnrichmentStatus::Exhausted => "exhausted",
         EnrichmentStatus::Skipped => "skipped",
+        // TEMP(pk-tdd): compile-only scaffold
+        EnrichmentStatus::Conflict => "conflict",
     }
 }
 
@@ -192,11 +196,22 @@ fn narration_type_str(n: &NarrationType) -> &'static str {
         NarrationType::Human => "human",
         NarrationType::Ai => "ai",
         NarrationType::AiAuthorizedReplica => "ai_authorized_replica",
+        // TEMP(pk-tdd): compile-only scaffold variants
+        NarrationType::Abridged => "abridged",
+        NarrationType::Unabridged => "unabridged",
     }
 }
 
 fn normalize(s: &str) -> String {
     s.trim().to_lowercase()
+}
+
+fn to_str<T: serde::Serialize>(v: T) -> String {
+    serde_json::to_value(v)
+        .expect("enum serialization is infallible")
+        .as_str()
+        .expect("enum serializes to string")
+        .to_string()
 }
 
 type UserId = i64;
@@ -394,6 +409,15 @@ impl WorkDb for SqliteDb {
     ) -> Result<Work, DbError> {
         let current = self.get_work(user_id, id).await?;
 
+        // [I-10]: bump merge_generation when a user edit touches an enrichable
+        // field, so concurrent enrichment dispatches detect the change via CAS.
+        // monitor_ebook / monitor_audiobook are NOT enrichable per the IR's
+        // WorkField enum, so flipping them does not bump.
+        let enrichable_changed = req.title.is_some()
+            || req.author_name.is_some()
+            || req.series_name.is_some()
+            || req.series_position.is_some();
+
         let title = req.title.unwrap_or(current.title);
         let author_name = req.author_name.unwrap_or(current.author_name);
         let series_name = req.series_name.or(current.series_name);
@@ -401,22 +425,29 @@ impl WorkDb for SqliteDb {
         let monitor_ebook = req.monitor_ebook.unwrap_or(current.monitor_ebook);
         let monitor_audiobook = req.monitor_audiobook.unwrap_or(current.monitor_audiobook);
 
-        sqlx::query(
+        let sql = if enrichable_changed {
+            "UPDATE works SET title = ?, author_name = ?, series_name = ?, series_position = ?, \
+             monitor_ebook = ?, monitor_audiobook = ?, \
+             merge_generation = merge_generation + 1 \
+             WHERE id = ? AND user_id = ?"
+        } else {
             "UPDATE works SET title = ?, author_name = ?, series_name = ?, series_position = ?, \
              monitor_ebook = ?, monitor_audiobook = ? \
-             WHERE id = ? AND user_id = ?",
-        )
-        .bind(&title)
-        .bind(&author_name)
-        .bind(&series_name)
-        .bind(series_position)
-        .bind(monitor_ebook)
-        .bind(monitor_audiobook)
-        .bind(id)
-        .bind(user_id)
-        .execute(self.pool())
-        .await
-        .map_err(map_db_err)?;
+             WHERE id = ? AND user_id = ?"
+        };
+
+        sqlx::query(sql)
+            .bind(&title)
+            .bind(&author_name)
+            .bind(&series_name)
+            .bind(series_position)
+            .bind(monitor_ebook)
+            .bind(monitor_audiobook)
+            .bind(id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         self.get_work(user_id, id).await
     }
@@ -546,6 +577,243 @@ impl WorkDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
         Ok(())
+    }
+
+    async fn apply_enrichment_merge(
+        &self,
+        req: ApplyEnrichmentMergeRequest,
+    ) -> Result<ApplyMergeOutcome, DbError> {
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+
+        // CAS check: read current merge_generation.
+        let current_gen: i64 =
+            sqlx::query_scalar("SELECT merge_generation FROM works WHERE id = ? AND user_id = ?")
+                .bind(req.work_id)
+                .bind(req.user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(map_db_err)?;
+
+        if current_gen != req.expected_merge_generation {
+            return Ok(ApplyMergeOutcome::Superseded);
+        }
+
+        // Apply work update.
+        let status_str = enrichment_status_str(req.new_enrichment_status);
+
+        if let Some(work_update) = req.work_update {
+            let u = work_update.into_inner();
+            let now = Utc::now().to_rfc3339();
+            let genres_json = u
+                .genres
+                .as_ref()
+                .map(|g| serde_json::to_string(g).map_err(|e| DbError::Io(Box::new(e))))
+                .transpose()?;
+            let narrator_json = u
+                .narrator
+                .as_ref()
+                .map(|n| serde_json::to_string(n).map_err(|e| DbError::Io(Box::new(e))))
+                .transpose()?;
+            let narration_type_val = u.narration_type.as_ref().map(narration_type_str);
+
+            // Straight assignment: None → NULL (no COALESCE).
+            sqlx::query(
+                "UPDATE works SET \
+                 title = ?, subtitle = ?, original_title = ?, author_name = ?, \
+                 description = ?, year = ?, series_name = ?, series_position = ?, \
+                 genres = ?, language = ?, page_count = ?, duration_seconds = ?, \
+                 publisher = ?, publish_date = ?, hc_key = ?, gr_key = ?, ol_key = ?, \
+                 isbn_13 = ?, asin = ?, narrator = ?, narration_type = ?, \
+                 abridged = ?, rating = ?, rating_count = ?, cover_url = ?, \
+                 enrichment_source = ?, enrichment_status = ?, enriched_at = ?, \
+                 merge_generation = merge_generation + 1 \
+                 WHERE id = ? AND user_id = ?",
+            )
+            .bind(u.title.as_deref())
+            .bind(u.subtitle.as_deref())
+            .bind(u.original_title.as_deref())
+            .bind(u.author_name.as_deref())
+            .bind(u.description.as_deref())
+            .bind(u.year)
+            .bind(u.series_name.as_deref())
+            .bind(u.series_position)
+            .bind(genres_json.as_deref())
+            .bind(u.language.as_deref())
+            .bind(u.page_count)
+            .bind(u.duration_seconds)
+            .bind(u.publisher.as_deref())
+            .bind(u.publish_date.as_deref())
+            .bind(u.hc_key.as_deref())
+            .bind(u.gr_key.as_deref())
+            .bind(u.ol_key.as_deref())
+            .bind(u.isbn_13.as_deref())
+            .bind(u.asin.as_deref())
+            .bind(narrator_json.as_deref())
+            .bind(narration_type_val)
+            .bind(u.abridged)
+            .bind(u.rating)
+            .bind(u.rating_count)
+            .bind(u.cover_url.as_deref())
+            .bind(u.enrichment_source.as_deref())
+            .bind(status_str)
+            .bind(&now)
+            .bind(req.work_id)
+            .bind(req.user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+        } else {
+            // Status-only path (e.g. Conflict).
+            sqlx::query(
+                "UPDATE works SET enrichment_status = ?, \
+                 merge_generation = merge_generation + 1 \
+                 WHERE id = ? AND user_id = ?",
+            )
+            .bind(status_str)
+            .bind(req.work_id)
+            .bind(req.user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+        }
+
+        // Write provenance upserts.
+        if !req.provenance_upserts.is_empty() {
+            let prov_now = Utc::now().to_rfc3339();
+            for prov in &req.provenance_upserts {
+                // Validate invariant inline.
+                match prov.setter {
+                    ProvenanceSetter::Provider => {
+                        if prov.source.is_none() {
+                            return Err(DbError::Constraint {
+                                message: "provider setter requires a non-null source".to_string(),
+                            });
+                        }
+                        if prov.cleared {
+                            return Err(DbError::Constraint {
+                                message: "provider setter cannot have cleared=true".to_string(),
+                            });
+                        }
+                    }
+                    ProvenanceSetter::User | ProvenanceSetter::System => {
+                        if prov.source.is_some() {
+                            return Err(DbError::Constraint {
+                                message: "user/system setter must not have a source".to_string(),
+                            });
+                        }
+                    }
+                }
+
+                let field_str = to_str(prov.field);
+                let setter_str = to_str(prov.setter);
+                let source_str = prov.source.map(to_str);
+
+                sqlx::query(
+                    "INSERT INTO work_metadata_provenance \
+                     (user_id, work_id, field, source, set_at, setter, cleared) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT(work_id, field) DO UPDATE SET \
+                     user_id = excluded.user_id, source = excluded.source, \
+                     set_at = excluded.set_at, setter = excluded.setter, \
+                     cleared = excluded.cleared",
+                )
+                .bind(prov.user_id)
+                .bind(prov.work_id)
+                .bind(&field_str)
+                .bind(&source_str)
+                .bind(&prov_now)
+                .bind(&setter_str)
+                .bind(prov.cleared as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_db_err)?;
+            }
+        }
+
+        // Write provenance deletes.
+        for field in &req.provenance_deletes {
+            let field_str = to_str(*field);
+            sqlx::query("DELETE FROM work_metadata_provenance WHERE work_id = ? AND field = ?")
+                .bind(req.work_id)
+                .bind(&field_str)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_db_err)?;
+        }
+
+        // Write external ID upserts.
+        for eid in &req.external_id_updates {
+            let id_type_str = to_str(eid.id_type);
+            sqlx::query(
+                "INSERT INTO external_ids (work_id, id_type, id_value) \
+                 VALUES (?, ?, ?) \
+                 ON CONFLICT(work_id, id_type, id_value) DO NOTHING",
+            )
+            .bind(eid.work_id)
+            .bind(&id_type_str)
+            .bind(&eid.id_value)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+        }
+
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(ApplyMergeOutcome::Applied)
+    }
+
+    async fn reset_for_manual_refresh(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<(), DbError> {
+        let result = sqlx::query(
+            "UPDATE works SET enrichment_status = 'pending', enriched_at = NULL, \
+             merge_generation = merge_generation + 1 \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(work_id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound { entity: "work" });
+        }
+
+        // Delete retry state rows (preserves provenance).
+        sqlx::query("DELETE FROM provider_retry_state WHERE work_id = ? AND user_id = ?")
+            .bind(work_id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        Ok(())
+    }
+
+    async fn list_conflict_works(&self, user_id: UserId) -> Result<Vec<Work>, DbError> {
+        let rows = sqlx::query(
+            "SELECT * FROM works WHERE user_id = ? AND enrichment_status = 'conflict' ORDER BY id",
+        )
+        .bind(user_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        rows.into_iter().map(row_to_work).collect()
+    }
+
+    async fn get_merge_generation(&self, user_id: UserId, work_id: WorkId) -> Result<i64, DbError> {
+        let gen: i64 =
+            sqlx::query_scalar("SELECT merge_generation FROM works WHERE id = ? AND user_id = ?")
+                .bind(work_id)
+                .bind(user_id)
+                .fetch_one(self.pool())
+                .await
+                .map_err(map_db_err)?;
+
+        Ok(gen)
     }
 }
 

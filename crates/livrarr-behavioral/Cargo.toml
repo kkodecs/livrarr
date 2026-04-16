@@ -1,0 +1,51 @@
+[package]
+name = "livrarr-behavioral"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+[dev-dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+trait-variant = { workspace = true }
+livrarr-domain = { workspace = true }
+livrarr-db = { workspace = true, features = ["test-helpers"] }
+livrarr-metadata = { workspace = true }
+assert_matches = "1"
+futures = "0.3"
+
+[[test]]
+name = "test_metadata_overhaul_domain"
+path = "../../tests/behavioral/test_metadata_overhaul_domain.rs"
+
+[[test]]
+name = "test_metadata_overhaul_work_db_merge"
+path = "../../tests/behavioral/test_metadata_overhaul_work_db_merge.rs"
+
+[[test]]
+name = "test_metadata_overhaul_provenance_db"
+path = "../../tests/behavioral/test_metadata_overhaul_provenance_db.rs"
+
+[[test]]
+name = "test_metadata_overhaul_retry_state_db"
+path = "../../tests/behavioral/test_metadata_overhaul_retry_state_db.rs"
+
+[[test]]
+name = "test_metadata_overhaul_external_id_db"
+path = "../../tests/behavioral/test_metadata_overhaul_external_id_db.rs"
+
+[[test]]
+name = "test_metadata_overhaul_merge_engine"
+path = "../../tests/behavioral/test_metadata_overhaul_merge_engine.rs"
+
+[[test]]
+name = "test_metadata_overhaul_enrichment_service"
+path = "../../tests/behavioral/test_metadata_overhaul_enrichment_service.rs"
+
+[[test]]
+name = "test_metadata_overhaul_provider_queue"
+path = "../../tests/behavioral/test_metadata_overhaul_provider_queue.rs"

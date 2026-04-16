@@ -77,6 +77,8 @@ pub enum EnrichmentStatus {
     Exhausted,
     /// Foreign-language work — enrichment intentionally skipped.
     Skipped,
+    /// TEMP(pk-tdd): compile-only scaffold — Conflicting metadata from providers.
+    Conflict,
 }
 
 /// History event types. Append-only.
@@ -134,6 +136,10 @@ pub enum NarrationType {
     Human,
     Ai,
     AiAuthorizedReplica,
+    /// TEMP(pk-tdd): compile-only scaffold for metadata-overhaul merge engine tests.
+    Abridged,
+    /// TEMP(pk-tdd): compile-only scaffold for metadata-overhaul merge engine tests.
+    Unabridged,
 }
 
 /// Auth mechanism used for the current request.
@@ -768,4 +774,223 @@ pub fn classify_file(path: &std::path::Path) -> Option<MediaType> {
         "mp3" | "m4a" | "m4b" | "flac" | "ogg" | "wma" => Some(MediaType::Audiobook),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// TEMP(pk-tdd): compile-only scaffolding for metadata-overhaul behavioral tests
+// All types below are IR-aligned stubs. Remove TEMP tag when implemented.
+// ---------------------------------------------------------------------------
+
+/// Which metadata provider produced a given field value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataProvider {
+    Hardcover,
+    OpenLibrary,
+    Goodreads,
+    Audnexus,
+    Llm,
+}
+
+/// A named work field that can have per-provider provenance tracked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkField {
+    Title,
+    SortTitle,
+    Subtitle,
+    OriginalTitle,
+    AuthorName,
+    Description,
+    Year,
+    SeriesName,
+    SeriesPosition,
+    Genres,
+    Language,
+    PageCount,
+    DurationSeconds,
+    Publisher,
+    PublishDate,
+    OlKey,
+    HcKey,
+    GrKey,
+    Isbn13,
+    Asin,
+    Narrator,
+    NarrationType,
+    Abridged,
+    Rating,
+    RatingCount,
+    CoverUrl,
+}
+
+impl WorkField {
+    /// TEMP(pk-tdd): compile-only scaffold — returns the normalization class for this field.
+    pub fn normalization_class(self) -> NormalizationClass {
+        match self {
+            WorkField::Description => NormalizationClass::RichText,
+            WorkField::Title
+            | WorkField::SortTitle
+            | WorkField::Subtitle
+            | WorkField::OriginalTitle
+            | WorkField::AuthorName
+            | WorkField::SeriesName
+            | WorkField::Publisher
+            | WorkField::Narrator
+            | WorkField::NarrationType => NormalizationClass::DisplayText,
+            WorkField::Isbn13 | WorkField::Asin | WorkField::OlKey | WorkField::GrKey => {
+                NormalizationClass::Identifier
+            }
+            _ => NormalizationClass::DisplayText,
+        }
+    }
+}
+
+/// Who set a field's provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceSetter {
+    Provider,
+    User,
+    System,
+}
+
+/// Provenance record for a single field value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldProvenance {
+    pub user_id: UserId,
+    pub work_id: WorkId,
+    pub field: WorkField,
+    pub source: Option<MetadataProvider>,
+    pub set_at: DateTime<Utc>,
+    pub setter: ProvenanceSetter,
+    pub cleared: bool,
+}
+
+/// Priority of a metadata request, used for queue ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RequestPriority {
+    Low,
+    Normal,
+    High,
+    Interactive,
+}
+
+/// Normalization class for a field or work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NormalizationClass {
+    /// Rich text fields (HTML, markdown).
+    RichText,
+    /// Plain display text fields.
+    DisplayText,
+    /// Structured identifier fields.
+    Identifier,
+    /// Work-level: English-language merge strategy.
+    English,
+    /// Work-level: foreign-language merge strategy.
+    ForeignLanguage,
+}
+
+/// Outcome class returned by a provider for a single field or whole work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeClass {
+    /// Provider returned a usable value.
+    Success,
+    /// Provider returned no match for this work.
+    NotFound,
+    /// Provider returned data that will be retried.
+    WillRetry,
+    /// Provider returned an error that will not resolve on retry.
+    PermanentFailure,
+    /// Provider returned data that conflicts with existing confirmed data.
+    Conflict,
+    /// Provider was suppressed (circuit open, rate-limit window, etc.).
+    Suppressed,
+}
+
+impl OutcomeClass {
+    pub fn is_phase2_terminal(&self) -> bool {
+        matches!(
+            self,
+            OutcomeClass::Success
+                | OutcomeClass::NotFound
+                | OutcomeClass::PermanentFailure
+                | OutcomeClass::Conflict
+        )
+    }
+
+    pub fn can_merge(&self) -> bool {
+        matches!(
+            self,
+            OutcomeClass::Success | OutcomeClass::NotFound | OutcomeClass::PermanentFailure
+        )
+    }
+
+    pub fn all_can_merge(outcomes: &[OutcomeClass]) -> bool {
+        outcomes.iter().all(|o| o.can_merge())
+    }
+}
+
+/// Reason a provider will be retried later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WillRetryReason {
+    Timeout,
+    RateLimit,
+    ServerError,
+    AntiBotBlock,
+}
+
+/// Reason a provider permanently failed for this work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermanentFailureReason {
+    ProviderPanic,
+    RetryBudgetExhausted,
+    InvalidResponse,
+    Unsupported,
+    IdentityMismatch,
+    SuppressionExhausted,
+}
+
+/// Result of applying an enrichment merge to the work record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplyMergeOutcome {
+    Applied,
+    NoChange,
+    Deferred,
+    Superseded,
+}
+
+/// A resolved value from a merge (newtype wrapper).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeResolved<T>(pub T);
+
+impl<T> MergeResolved<T> {
+    pub fn new(value: T) -> Self {
+        Self(value)
+    }
+
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+
+    pub fn as_inner(&self) -> &T {
+        &self.0
+    }
+}
+
+/// Typed external identifier kind for a work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalIdType {
+    Isbn10,
+    Isbn13,
+    Asin,
+    OpenLibraryWork,
+    OpenLibraryEdition,
+    GoodreadsBook,
+    HardcoverBook,
+    GoogleBooksVolume,
 }

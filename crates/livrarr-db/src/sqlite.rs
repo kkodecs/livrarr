@@ -19,4 +19,10 @@ impl SqliteDb {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+
+    /// TEMP(pk-tdd): compile-only scaffold — create an in-memory test DB.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn new_test() -> Self {
+        crate::test_helpers::create_test_db().await
+    }
 }
