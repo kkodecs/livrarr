@@ -1233,6 +1233,8 @@ async fn run_import(
                                 duration_seconds: None,
                                 publisher,
                                 publish_date: rd_book.release_date.clone(),
+                                ol_key: None,
+                                gr_key: None,
                                 hc_key: None,
                                 isbn_13: isbn.clone(),
                                 asin: asin.clone(),

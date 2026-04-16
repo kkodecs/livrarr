@@ -1,12 +1,13 @@
 use serde::Deserialize;
 
 pub use livrarr_domain::{
-    Author, AuthorId, DbError, DownloadClient, DownloadClientId, DownloadClientImplementation,
-    EnrichmentStatus, EventType, Grab, GrabId, GrabStatus, HistoryEvent, HistoryId, Import,
-    Indexer, IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider,
-    MediaType, NarrationType, Notification, NotificationId, NotificationType, PlaybackProgress,
-    RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Series, Session, User,
-    UserId, UserRole, Work, WorkId,
+    ApplyMergeOutcome, Author, AuthorId, DbError, DownloadClient, DownloadClientId,
+    DownloadClientImplementation, EnrichmentStatus, EventType, ExternalIdRowId, ExternalIdType,
+    FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent, HistoryId, Import, Indexer,
+    IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider, MediaType,
+    MergeResolved, MetadataProvider, NarrationType, Notification, NotificationId, NotificationType,
+    OutcomeClass, PlaybackProgress, ProvenanceSetter, RemotePathMapping, RemotePathMappingId,
+    RootFolder, RootFolderId, Series, Session, User, UserId, UserRole, Work, WorkField, WorkId,
 };
 
 pub mod pool;
@@ -16,6 +17,7 @@ mod sqlite_bibliography;
 pub(crate) mod sqlite_common;
 mod sqlite_config;
 mod sqlite_download_client;
+mod sqlite_external_id;
 mod sqlite_grab;
 mod sqlite_history;
 mod sqlite_import;
@@ -24,7 +26,9 @@ mod sqlite_library_item;
 mod sqlite_list_import;
 mod sqlite_notification;
 mod sqlite_playback_progress;
+mod sqlite_provenance;
 mod sqlite_remote_path_mapping;
+mod sqlite_retry_state;
 mod sqlite_root_folder;
 mod sqlite_series;
 mod sqlite_series_cache;
@@ -248,8 +252,28 @@ pub trait WorkDb: Send + Sync {
 
     /// Set enrichment_status = 'skipped' for a work (no user scope — called from add pipeline).
     async fn set_enrichment_status_skipped(&self, id: WorkId) -> Result<(), DbError>;
+
+    /// TEMP(pk-tdd): compile-only scaffold — apply a merge result to the work record.
+    async fn apply_enrichment_merge(
+        &self,
+        req: ApplyEnrichmentMergeRequest,
+    ) -> Result<ApplyMergeOutcome, DbError>;
+
+    /// TEMP(pk-tdd): compile-only scaffold — reset enrichment state for manual refresh.
+    async fn reset_for_manual_refresh(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<(), DbError>;
+
+    /// TEMP(pk-tdd): compile-only scaffold — list works in Conflict status.
+    async fn list_conflict_works(&self, user_id: UserId) -> Result<Vec<Work>, DbError>;
+
+    /// TEMP(pk-tdd): compile-only scaffold — get current merge generation counter.
+    async fn get_merge_generation(&self, user_id: UserId, work_id: WorkId) -> Result<i64, DbError>;
 }
 
+#[derive(Default)]
 pub struct CreateWorkDbRequest {
     pub user_id: UserId,
     pub title: String,
@@ -270,6 +294,7 @@ pub struct CreateWorkDbRequest {
     pub monitor_audiobook: bool,
 }
 
+#[derive(Debug, Clone, Default)]
 pub struct UpdateWorkEnrichmentDbRequest {
     pub title: Option<String>,
     pub subtitle: Option<String>,
@@ -285,6 +310,8 @@ pub struct UpdateWorkEnrichmentDbRequest {
     pub duration_seconds: Option<i32>,
     pub publisher: Option<String>,
     pub publish_date: Option<String>,
+    pub ol_key: Option<String>,
+    pub gr_key: Option<String>,
     pub hc_key: Option<String>,
     pub isbn_13: Option<String>,
     pub asin: Option<String>,
@@ -298,6 +325,7 @@ pub struct UpdateWorkEnrichmentDbRequest {
     pub cover_url: Option<String>,
 }
 
+#[derive(Default)]
 pub struct UpdateWorkUserFieldsDbRequest {
     pub title: Option<String>,
     pub author_name: Option<String>,
@@ -1450,4 +1478,180 @@ pub mod test_helpers {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         SqliteDb::new(pool)
     }
+}
+
+// ---------------------------------------------------------------------------
+// TEMP(pk-tdd): compile-only scaffolding for metadata-overhaul behavioral tests
+// ---------------------------------------------------------------------------
+
+/// Re-export for external test crates that depend on `feature = "test-helpers"`.
+#[cfg(any(test, feature = "test-helpers"))]
+pub use test_helpers::create_test_db;
+
+/// TEMP(pk-tdd): A typed external identifier for a work (DB layer).
+/// Named ExternalId to match the behavioral test type expectations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalId {
+    pub id: ExternalIdRowId,
+    pub user_id: UserId,
+    pub work_id: WorkId,
+    pub id_type: ExternalIdType,
+    pub id_value: String,
+}
+
+/// TEMP(pk-tdd): Request to upsert a typed external identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsertExternalIdRequest {
+    pub work_id: WorkId,
+    pub id_type: ExternalIdType,
+    pub id_value: String,
+}
+
+/// TEMP(pk-tdd): Request to set field provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetFieldProvenanceRequest {
+    pub user_id: UserId,
+    pub work_id: WorkId,
+    pub field: WorkField,
+    pub source: Option<MetadataProvider>,
+    pub setter: ProvenanceSetter,
+    pub cleared: bool,
+}
+
+/// TEMP(pk-tdd): Provider retry state record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRetryState {
+    pub user_id: UserId,
+    pub work_id: WorkId,
+    pub provider: MetadataProvider,
+    pub attempts: u32,
+    pub suppressed_passes: u32,
+    pub last_outcome: Option<OutcomeClass>,
+    pub next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub first_suppressed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub normalized_payload_json: Option<String>,
+}
+
+/// TEMP(pk-tdd): Request to apply an enrichment merge result to a work.
+pub struct ApplyEnrichmentMergeRequest {
+    pub user_id: UserId,
+    pub work_id: WorkId,
+    pub expected_merge_generation: i64,
+    pub work_update: Option<MergeResolved<UpdateWorkEnrichmentDbRequest>>,
+    pub new_enrichment_status: EnrichmentStatus,
+    pub provenance_upserts: Vec<SetFieldProvenanceRequest>,
+    pub provenance_deletes: Vec<WorkField>,
+    pub external_id_updates: Vec<UpsertExternalIdRequest>,
+}
+
+/// TEMP(pk-tdd): DB trait for field provenance.
+/// Uses async_trait to match behavioral test impl style.
+#[async_trait::async_trait]
+pub trait ProvenanceDb: Send + Sync {
+    async fn set_field_provenance(&self, req: SetFieldProvenanceRequest) -> Result<(), DbError>;
+
+    async fn set_field_provenance_batch(
+        &self,
+        reqs: Vec<SetFieldProvenanceRequest>,
+    ) -> Result<(), DbError>;
+
+    async fn get_field_provenance(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        field: WorkField,
+    ) -> Result<Option<FieldProvenance>, DbError>;
+
+    async fn list_work_provenance(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<FieldProvenance>, DbError>;
+
+    async fn delete_field_provenance_batch(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        fields: Vec<WorkField>,
+    ) -> Result<(), DbError>;
+
+    async fn clear_work_provenance(&self, user_id: UserId, work_id: WorkId) -> Result<(), DbError>;
+}
+
+/// TEMP(pk-tdd): DB trait for provider retry state.
+#[async_trait::async_trait]
+pub trait ProviderRetryStateDb: Send + Sync {
+    async fn get_retry_state(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        provider: MetadataProvider,
+    ) -> Result<Option<ProviderRetryState>, DbError>;
+
+    async fn list_retry_states(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<ProviderRetryState>, DbError>;
+
+    async fn record_will_retry(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        provider: MetadataProvider,
+        next_attempt_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ProviderRetryState, DbError>;
+
+    async fn record_suppressed(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        provider: MetadataProvider,
+        until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ProviderRetryState, DbError>;
+
+    async fn record_terminal_outcome(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        provider: MetadataProvider,
+        outcome: OutcomeClass,
+        normalized_payload_json: Option<String>,
+    ) -> Result<(), DbError>;
+
+    async fn reset_all_retry_states(&self, user_id: UserId, work_id: WorkId)
+        -> Result<(), DbError>;
+
+    async fn list_works_due_for_retry(
+        &self,
+        user_id: UserId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(WorkId, MetadataProvider)>, DbError>;
+
+    async fn list_works_with_terminal_provider_rows(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<(WorkId, Vec<MetadataProvider>)>, DbError>;
+}
+
+/// TEMP(pk-tdd): DB trait for typed external identifiers.
+#[async_trait::async_trait]
+pub trait ExternalIdDb: Send + Sync {
+    async fn upsert_external_id(
+        &self,
+        user_id: UserId,
+        req: UpsertExternalIdRequest,
+    ) -> Result<(), DbError>;
+
+    async fn upsert_external_ids_batch(
+        &self,
+        user_id: UserId,
+        reqs: Vec<UpsertExternalIdRequest>,
+    ) -> Result<(), DbError>;
+
+    async fn list_external_ids(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<ExternalId>, DbError>;
 }
