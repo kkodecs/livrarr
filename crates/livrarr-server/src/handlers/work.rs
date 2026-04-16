@@ -980,24 +980,24 @@ pub async fn refresh_all(
         for work in &works {
             let is_foreign =
                 livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
-            let enrich_fut = if is_foreign && work.detail_url.is_some() {
-                futures::future::Either::Left(super::enrichment::enrich_foreign_work(&state, work))
-            } else {
-                futures::future::Either::Right(super::enrichment::enrich_work(&state, work))
-            };
-            let outcome =
-                tokio::time::timeout(std::time::Duration::from_secs(30), enrich_fut).await;
 
-            match outcome {
-                Ok(o) => {
-                    match state
+            // Foreign-language works still take the legacy direct path —
+            // foreign cutover lands alongside R-13 cover anti-bot detection.
+            // English works route through DefaultProviderQueue +
+            // EnrichmentServiceImpl, matching the single-work refresh handler
+            // (Phase 1.5 sub-step 2).
+            if is_foreign && work.detail_url.is_some() {
+                let enrich_fut = super::enrichment::enrich_foreign_work(&state, work);
+                let outcome =
+                    tokio::time::timeout(std::time::Duration::from_secs(30), enrich_fut).await;
+                match outcome {
+                    Ok(o) => match state
                         .db
                         .update_work_enrichment(user_id, work.id, o.request)
                         .await
                     {
                         Ok(enriched_work) => {
                             enriched += 1;
-                            // Retag library files with updated metadata.
                             if let Ok(taggable) =
                                 state.db.list_taggable_items_by_work(user_id, work.id).await
                             {
@@ -1011,13 +1011,79 @@ pub async fn refresh_all(
                                 }
                             }
                         }
-                        Err(_) => {
-                            failed += 1;
+                        Err(_) => failed += 1,
+                    },
+                    Err(_) => failed += 1,
+                }
+                continue;
+            }
+
+            // English path through the new queue.
+            if let Err(e) = livrarr_metadata::EnrichmentService::reset_for_manual_refresh(
+                state.enrichment_service.as_ref(),
+                user_id,
+                work.id,
+            )
+            .await
+            {
+                tracing::warn!(
+                    work_id = work.id,
+                    "refresh_all: reset_for_manual_refresh failed: {e}"
+                );
+            }
+
+            let enrich_fut = livrarr_metadata::EnrichmentService::enrich_work(
+                state.enrichment_service.as_ref(),
+                user_id,
+                work.id,
+                livrarr_metadata::EnrichmentMode::HardRefresh,
+            );
+            let result =
+                match tokio::time::timeout(std::time::Duration::from_secs(30), enrich_fut).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            work_id = work.id,
+                            "refresh_all: enrichment_service.enrich_work failed: {e}"
+                        );
+                        failed += 1;
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(work_id = work.id, "refresh_all: enrichment timed out");
+                        failed += 1;
+                        continue;
+                    }
+                };
+
+            // Download cover if the queue produced a cover_url, mirroring the
+            // legacy on-disk cover behavior.
+            if let Some(ref cover_url) = result.work.cover_url {
+                let covers_dir = state.data_dir.join("covers");
+                if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
+                    tracing::warn!("create_dir_all for covers failed: {e}");
+                }
+                if let Ok(resp) = state.http_client_safe.get(cover_url).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes().await {
+                            let path = covers_dir.join(format!("{}.jpg", work.id));
+                            let tmp = path.with_extension("jpg.tmp");
+                            if tokio::fs::write(&tmp, &bytes).await.is_ok()
+                                && tokio::fs::rename(&tmp, &path).await.is_ok()
+                            {
+                                let thumb_path = covers_dir.join(format!("{}_thumb.jpg", work.id));
+                                let _ = tokio::fs::remove_file(&thumb_path).await;
+                            }
                         }
                     }
                 }
-                Err(_) => {
-                    failed += 1;
+            }
+
+            enriched += 1;
+            if let Ok(taggable) = state.db.list_taggable_items_by_work(user_id, work.id).await {
+                if !taggable.is_empty() {
+                    let _ =
+                        super::import::retag_library_items(&state, &result.work, &taggable).await;
                 }
             }
         }
