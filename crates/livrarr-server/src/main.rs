@@ -205,11 +205,10 @@ async fn main() {
             }
         }
 
-        // Goodreads — registered as a placeholder (returns NotFound) until the
-        // real fetch interface is designed during the orchestration cutover.
+        // Goodreads — real network adapter against the production URL.
         builder = builder.add_provider(
             P::Goodreads,
-            m::ProviderClient::Goodreads(m::GoodreadsClient::new()),
+            m::ProviderClient::Goodreads(m::GoodreadsClient::production(http_client.clone())),
             queue_cfg(P::Goodreads),
         );
 

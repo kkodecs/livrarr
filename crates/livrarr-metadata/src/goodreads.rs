@@ -3,6 +3,7 @@
 //! Replaces LLM-based scraping with direct HTML parsing for foreign language works.
 //! LLM is kept as fallback only (see fallback chain in design doc).
 
+use livrarr_http::HttpClient;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -383,6 +384,130 @@ fn extract_genres(html: &str) -> Vec<String> {
         }
     }
     genres
+}
+
+// =============================================================================
+// HTTP fetcher
+// =============================================================================
+
+/// Production base URL for Goodreads. Tests pass a local TcpListener URL instead.
+pub const GOODREADS_BASE_URL: &str = "https://www.goodreads.com";
+
+/// Browser-like UA — Goodreads serves a stripped page (or anti-bot challenge)
+/// without it.
+pub const GOODREADS_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/// Failure modes from a Goodreads HTTP fetch. Callers map these onto
+/// `ProviderOutcome` (queue path) or per-call retry / fallback decisions
+/// (legacy English / foreign paths in `livrarr-server`).
+#[derive(Debug, Clone)]
+pub enum GoodreadsFetchError {
+    /// Response body matched the anti-bot indicator heuristic.
+    AntiBot,
+    /// HTTP status was non-success. Caller can discriminate 429/5xx vs 4xx.
+    HttpStatus(u16),
+    /// Transport / DNS / body-read error from `reqwest`.
+    Network(String),
+    /// Detail page returned 200 OK but no JSON-LD or regex fields parsed out.
+    Parse,
+}
+
+/// Build the canonical detail URL for a `gr_key` against the configured base.
+///
+/// `gr_key` is the bare identifier (e.g. `"123"` or `"123.Title_Slug"`) — the
+/// part after `/book/show/`.
+pub fn detail_url_for_gr_key(base_url: &str, gr_key: &str) -> String {
+    format!(
+        "{}/book/show/{}",
+        base_url.trim_end_matches('/'),
+        gr_key.trim_start_matches('/'),
+    )
+}
+
+/// Resolve a (possibly relative) detail URL from `parse_search_html` against
+/// the configured base. Production: `base = https://www.goodreads.com`.
+/// Tests: `base = http://127.0.0.1:NNNN` (the TcpListener URL).
+pub fn resolve_detail_url(base_url: &str, detail_url: &str) -> String {
+    if detail_url.starts_with("http://") || detail_url.starts_with("https://") {
+        detail_url.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            base_url.trim_end_matches('/'),
+            detail_url.trim_start_matches('/'),
+        )
+    }
+}
+
+/// Extract the `gr_key` (the `123.Title_Slug` segment) from a detail URL.
+/// Returns None if the URL doesn't follow the `/book/show/{key}` shape.
+pub fn extract_gr_key(detail_url: &str) -> Option<String> {
+    let after = detail_url.split("/book/show/").nth(1)?;
+    let key = after.split(['?', '#', '/']).next()?;
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
+}
+
+/// Fetch a Goodreads HTML page. Adds the Chrome UA header, treats
+/// non-success status and anti-bot challenge pages as errors.
+///
+/// Used by both the queue path (`GoodreadsClient` in `provider_client`) and
+/// the legacy English/foreign paths in `livrarr-server`. Pacing is the
+/// caller's responsibility — queue dispatch goes through the per-provider
+/// `TokenBucket`; legacy paths still call `state.goodreads_rate_limiter`
+/// before invoking this.
+pub async fn fetch_goodreads_html(
+    http: &HttpClient,
+    url: &str,
+) -> Result<String, GoodreadsFetchError> {
+    let resp = http
+        .get(url)
+        .header("User-Agent", GOODREADS_USER_AGENT)
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send()
+        .await
+        .map_err(|e| GoodreadsFetchError::Network(format!("GR request: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(GoodreadsFetchError::HttpStatus(status.as_u16()));
+    }
+    let html = resp
+        .text()
+        .await
+        .map_err(|e| GoodreadsFetchError::Network(format!("GR body: {e}")))?;
+    if crate::llm_scraper::is_anti_bot_page(&html) {
+        return Err(GoodreadsFetchError::AntiBot);
+    }
+    Ok(html)
+}
+
+/// Search Goodreads by `title author` and parse the results page.
+pub async fn search_goodreads(
+    http: &HttpClient,
+    base_url: &str,
+    title: &str,
+    author: &str,
+) -> Result<Vec<GoodreadsSearchResult>, GoodreadsFetchError> {
+    let base = base_url.trim_end_matches('/');
+    let raw_query = format!("{title} {author}");
+    let query = urlencoding::encode(&raw_query);
+    let url = format!("{base}/search?q={query}");
+    let html = fetch_goodreads_html(http, &url).await?;
+    Ok(parse_search_html(&html))
+}
+
+/// Fetch and parse a Goodreads detail page. Returns `Err(Parse)` if the page
+/// loads but yields no useful fields.
+pub async fn fetch_goodreads_detail(
+    http: &HttpClient,
+    detail_url: &str,
+) -> Result<GoodreadsDetailResult, GoodreadsFetchError> {
+    let html = fetch_goodreads_html(http, detail_url).await?;
+    parse_detail_html(&html).ok_or(GoodreadsFetchError::Parse)
 }
 
 // =============================================================================

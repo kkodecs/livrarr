@@ -1720,6 +1720,7 @@ dependencies = [
  "trait-variant",
  "unicode-normalization",
  "url",
+ "urlencoding",
 ]
 
 [[package]]

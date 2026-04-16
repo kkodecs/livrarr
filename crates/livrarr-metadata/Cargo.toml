@@ -17,6 +17,7 @@ livrarr-http = { workspace = true }
 unicode-normalization = "0.1"
 tracing = "0.1"
 url = "2"
+urlencoding = "2"
 regex = "1"
 
 [dev-dependencies]
