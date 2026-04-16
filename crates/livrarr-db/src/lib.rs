@@ -926,6 +926,7 @@ pub struct ProwlarrConfig {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct MetadataConfig {
     pub hardcover_enabled: bool,
     pub hardcover_api_token: Option<String>,
