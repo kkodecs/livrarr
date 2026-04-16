@@ -27,12 +27,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use livrarr_db::{DbError, ProviderRetryStateDb};
 use livrarr_domain::{MetadataProvider, OutcomeClass, PermanentFailureReason, Work, WorkId};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as TokioMutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tracing::warn;
 
@@ -163,11 +163,73 @@ impl BreakerState {
     }
 }
 
+/// Async token bucket — used per-provider to enforce `requests_per_second`.
+///
+/// Pattern matches `livrarr_server::state::OlRateLimiter` /
+/// `GoodreadsRateLimiter` (which the legacy direct-call path used). When
+/// `rate_per_sec <= 0.0`, `acquire()` is a no-op — no enforcement.
+#[derive(Debug)]
+struct TokenBucket {
+    inner: TokioMutex<TokenBucketInner>,
+    rate_per_sec: f64,
+    burst: f64,
+}
+
+#[derive(Debug)]
+struct TokenBucketInner {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(rate_per_sec: f64, burst: f64) -> Self {
+        Self {
+            inner: TokioMutex::new(TokenBucketInner {
+                tokens: burst,
+                last_refill: Instant::now(),
+            }),
+            rate_per_sec,
+            burst,
+        }
+    }
+
+    async fn acquire(&self) {
+        if self.rate_per_sec <= 0.0 {
+            return;
+        }
+        loop {
+            let mut inner = self.inner.lock().await;
+            let now = Instant::now();
+            let elapsed = now.duration_since(inner.last_refill).as_secs_f64();
+            inner.tokens = (inner.tokens + elapsed * self.rate_per_sec).min(self.burst);
+            inner.last_refill = now;
+
+            if inner.tokens >= 1.0 {
+                inner.tokens -= 1.0;
+                return;
+            }
+
+            let wait = (1.0 - inner.tokens) / self.rate_per_sec;
+            drop(inner);
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+        }
+    }
+}
+
 /// Per-provider configuration registered with the queue.
 struct ProviderEntry {
     client: ProviderClient,
     config: ProviderQueueConfig,
     breaker: Arc<RwLock<BreakerState>>,
+    /// Token bucket throttle. Allows `config.requests_per_second` calls per second
+    /// with a burst of one second's worth (minimum 1). When `requests_per_second`
+    /// is 0 or negative, acquire is a no-op (no throttling).
+    rate_limiter: Arc<TokenBucket>,
+    /// Per-provider concurrency cap. `acquire().await` blocks new dispatches when
+    /// `config.concurrency` calls are already in flight. Permits are released
+    /// when the spawned task completes (or panics — JoinSet drops the future,
+    /// which drops the OwnedSemaphorePermit).
+    concurrency: Arc<Semaphore>,
 }
 
 /// Builder for `DefaultProviderQueue`. The behavioral test harness uses this to
@@ -199,19 +261,28 @@ impl DefaultProviderQueueBuilder {
         config: ProviderQueueConfig,
     ) -> Self {
         let breaker = BreakerState::new(CircuitState::Closed, config.circuit_breaker.clone());
+        // Burst of one second's worth of requests, minimum 1, so a queue
+        // configured at 0.5 req/s still accepts a single request immediately.
+        let burst = config.requests_per_second.max(1.0);
+        let rate_limiter = Arc::new(TokenBucket::new(config.requests_per_second, burst));
+        let concurrency_cap = config.concurrency.max(1) as usize;
+        let concurrency = Arc::new(Semaphore::new(concurrency_cap));
         self.providers.insert(
             provider,
             ProviderEntry {
                 client,
                 config,
                 breaker: Arc::new(RwLock::new(breaker)),
+                rate_limiter,
+                concurrency,
             },
         );
         self
     }
 
     /// Inject an initial circuit state for a registered provider. Must be called
-    /// after `add_provider` for that provider.
+    /// after `add_provider` for that provider. Preserves the entry's existing
+    /// rate limiter + concurrency semaphore.
     pub fn with_initial_circuit_state(
         mut self,
         provider: MetadataProvider,
@@ -289,9 +360,17 @@ where
             HashMap::new();
 
         // Partition providers into: skip (not applicable / restart-resumed),
-        // suppress-due-to-open-circuit, and dispatch.
-        let mut to_dispatch: Vec<(MetadataProvider, ProviderClient, ProviderQueueConfig)> =
-            Vec::new();
+        // suppress-due-to-open-circuit, and dispatch. The dispatch tuple carries
+        // clones of the per-provider rate limiter + concurrency semaphore so the
+        // spawned task can acquire them independently.
+        struct DispatchEntry {
+            provider: MetadataProvider,
+            client: ProviderClient,
+            config: ProviderQueueConfig,
+            rate_limiter: Arc<TokenBucket>,
+            concurrency: Arc<Semaphore>,
+        }
+        let mut to_dispatch: Vec<DispatchEntry> = Vec::new();
         let mut suppressed_open: Vec<(MetadataProvider, ProviderQueueConfig)> = Vec::new();
 
         for (provider, entry) in self.providers.iter() {
@@ -315,19 +394,33 @@ where
                 continue;
             }
 
-            to_dispatch.push((provider, entry.client.clone(), entry.config.clone()));
+            to_dispatch.push(DispatchEntry {
+                provider,
+                client: entry.client.clone(),
+                config: entry.config.clone(),
+                rate_limiter: entry.rate_limiter.clone(),
+                concurrency: entry.concurrency.clone(),
+            });
         }
 
         // Phase 1: scatter — spawn each provider call. Panic isolation via JoinSet.
+        // Each spawned task waits on the per-provider concurrency semaphore + token
+        // bucket BEFORE invoking client.fetch. Permit drops on task return / panic.
         let mut set: JoinSet<(MetadataProvider, DispatchedOutcome)> = JoinSet::new();
         let work_arc = Arc::new(work.clone());
         let ctx_arc = Arc::new(context.clone());
-        for (provider, client, _config) in &to_dispatch {
-            let provider = *provider;
-            let client = client.clone();
+        for d in &to_dispatch {
+            let provider = d.provider;
+            let client = d.client.clone();
+            let rate_limiter = d.rate_limiter.clone();
+            let concurrency = d.concurrency.clone();
             let work_arc = work_arc.clone();
             let ctx_arc = ctx_arc.clone();
             set.spawn(async move {
+                // Concurrency permit first (held for the full call duration).
+                let _permit = concurrency.acquire_owned().await;
+                // Then rate-limit token (token bucket pacing).
+                rate_limiter.acquire().await;
                 let outcome = client.fetch(&work_arc, &ctx_arc).await;
                 (provider, DispatchedOutcome::Returned(outcome))
             });
@@ -357,16 +450,16 @@ where
 
         // Reconcile: any to_dispatch provider that didn't show up in `dispatched`
         // panicked or was canceled — treat as ProviderPanic per IR.
-        for (provider, _, _) in &to_dispatch {
+        for d in &to_dispatch {
             dispatched
-                .entry(*provider)
+                .entry(d.provider)
                 .or_insert(DispatchedOutcome::Panicked);
         }
 
         // For each dispatched outcome, apply budget rules and persist phase-1
         // state durably ([I-11]). Then build the in-memory result outcome.
-        for (provider, _, config) in &to_dispatch {
-            let provider = *provider;
+        for d in &to_dispatch {
+            let provider = d.provider;
             let raw = dispatched
                 .remove(&provider)
                 .expect("dispatched entry must exist after reconciliation");
@@ -376,7 +469,7 @@ where
                     reason: PermanentFailureReason::ProviderPanic,
                 },
                 DispatchedOutcome::Returned(outcome) => {
-                    self.apply_budget_rules(work, provider, config, outcome)
+                    self.apply_budget_rules(work, provider, &d.config, outcome)
                         .await?
                 }
             };
