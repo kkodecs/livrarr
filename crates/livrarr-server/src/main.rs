@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use livrarr_server::config::{AppConfig, LogFormat, LogLevel};
 use livrarr_server::router::build_router;
@@ -122,6 +122,108 @@ async fn main() {
         .build()
         .expect("failed to build SSRF-safe HTTP client");
     let job_runner = livrarr_server::jobs::JobRunner::new();
+
+    // Phase 1.5 plumbing: build the live DefaultProviderQueue + EnrichmentServiceImpl
+    // from a startup-time snapshot of MetadataConfig. Live config changes (token
+    // added, URL changed) require a server restart for now — runtime reload comes
+    // alongside the orchestration cutover.
+    let (provider_queue, enrichment_service) = {
+        use livrarr_db::ConfigDb;
+        use livrarr_domain::MetadataProvider as P;
+        use livrarr_metadata as m;
+
+        let metadata_cfg = db.get_metadata_config().await.unwrap_or_else(|e| {
+            warn!("Failed to read metadata config at startup ({e}); enrichment queue will start with default Audnexus URL only");
+            livrarr_db::MetadataConfig {
+                hardcover_enabled: false,
+                hardcover_api_token: None,
+                llm_enabled: false,
+                llm_provider: None,
+                llm_endpoint: None,
+                llm_api_key: None,
+                llm_model: None,
+                audnexus_url: "https://api.audnex.us".to_string(),
+                languages: vec!["en".to_string()],
+            }
+        });
+
+        let queue_cfg = |provider| m::ProviderQueueConfig {
+            provider,
+            concurrency: 2,
+            requests_per_second: 1.0,
+            circuit_breaker: m::CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+            max_attempts: 5,
+            max_suppressed_passes: 3,
+            max_suppression_window_secs: 3600,
+        };
+
+        let mut builder = m::DefaultProviderQueueBuilder::new();
+
+        // Audnexus — always available.
+        builder = builder.add_provider(
+            P::Audnexus,
+            m::ProviderClient::Audnexus(m::AudnexusClient::new(
+                http_client.clone(),
+                metadata_cfg.audnexus_url.clone(),
+            )),
+            queue_cfg(P::Audnexus),
+        );
+
+        // OpenLibrary — always available.
+        builder = builder.add_provider(
+            P::OpenLibrary,
+            m::ProviderClient::OpenLibrary(m::OpenLibraryClient::new(http_client.clone())),
+            queue_cfg(P::OpenLibrary),
+        );
+
+        // Hardcover — only if explicitly enabled with a non-empty token.
+        if metadata_cfg.hardcover_enabled {
+            if let Some(token) = metadata_cfg
+                .hardcover_api_token
+                .as_deref()
+                .map(|t| {
+                    t.trim()
+                        .trim_start_matches("Bearer ")
+                        .trim_start_matches("bearer ")
+                })
+                .filter(|t| !t.is_empty())
+            {
+                builder = builder.add_provider(
+                    P::Hardcover,
+                    m::ProviderClient::Hardcover(m::HardcoverClient::new(
+                        http_client.clone(),
+                        token.to_string(),
+                        metadata_cfg.clone(),
+                    )),
+                    queue_cfg(P::Hardcover),
+                );
+            }
+        }
+
+        // Goodreads — registered as a placeholder (returns NotFound) until the
+        // real fetch interface is designed during the orchestration cutover.
+        builder = builder.add_provider(
+            P::Goodreads,
+            m::ProviderClient::Goodreads(m::GoodreadsClient::new()),
+            queue_cfg(P::Goodreads),
+        );
+
+        let db_arc = Arc::new(db.clone());
+        let queue = Arc::new(builder.build(db_arc.clone()));
+        let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
+        let service = Arc::new(m::EnrichmentServiceImpl::new(
+            db_arc,
+            queue.clone(),
+            merge_engine,
+        ));
+        (queue, service)
+    };
+
     let state = AppState {
         db,
         auth_service,
@@ -147,6 +249,8 @@ async fn main() {
         )),
         ol_rate_limiter: Arc::new(livrarr_server::state::OlRateLimiter::new()),
         manual_import_scans: Arc::new(dashmap::DashMap::new()),
+        provider_queue,
+        enrichment_service,
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
