@@ -1245,30 +1245,91 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
 // ---------------------------------------------------------------------------
 
 pub async fn enrichment_retry_tick(
-    _state: AppState,
-    _cancel: CancellationToken,
+    state: AppState,
+    cancel: CancellationToken,
 ) -> Result<(), String> {
-    // DISABLED during Phase 1.5 cutover.
-    //
-    // The legacy retry job pulled works from the legacy `enrichment_retry` table
-    // (populated by `update_work_enrichment` failures from the legacy direct
-    // path) and re-ran the LEGACY enrich_work / enrich_foreign_work functions
-    // against them. Now that English work refresh + add + series-add + author-
-    // monitor all route through `EnrichmentServiceImpl`, the queue manages its
-    // own retry state via `provider_retry_state` rows + `list_works_due_for_retry`.
-    //
-    // Leaving this job active caused two paths to enrich the same work
-    // concurrently — one through the new queue (rate-limited, circuit-broken),
-    // one through the legacy code (unthrottled). HC saw double the request rate
-    // and 429'd; the legacy GR cover fallback then fetched wrong covers for
-    // works whose HC failed. Caliban's War got a children's-novel cover this
-    // way during the bulk-refresh test.
-    //
-    // Proper replacement: a new background job that calls
-    // `ProviderRetryStateDb::list_works_due_for_retry` and dispatches
-    // `enrichment_service.enrich_work(_, _, EnrichmentMode::Background)` for
-    // each due (work, provider). Lands as a follow-on after the foreign path
-    // is also migrated.
+    // Queue-aware retry tick. For each user, asks the new
+    // ProviderRetryStateDb which (work_id, provider) pairs have
+    // next_attempt_at <= now and are in WillRetry or Suppressed state.
+    // Dedups by work_id and dispatches one enrich_work call per due work
+    // — the queue's restart-safety logic skips providers whose retry-state
+    // row is already terminal, so only the actually-due providers run.
+    // Circuit breaker, throttling, and merge-engine all apply automatically.
+    use livrarr_db::{ProviderRetryStateDb, UserDb};
+    use std::collections::HashSet;
+
+    let users = match state.db.list_users().await {
+        Ok(u) => u,
+        Err(e) => return Err(format!("list_users: {e}")),
+    };
+
+    let now = chrono::Utc::now();
+    let mut total_due = 0usize;
+    let mut total_dispatched = 0usize;
+
+    for user in &users {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        let due = match state.db.list_works_due_for_retry(user.id, now).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(
+                    "enrichment_retry: list_works_due_for_retry({}): {e}",
+                    user.id
+                );
+                continue;
+            }
+        };
+        if due.is_empty() {
+            continue;
+        }
+        total_due += due.len();
+
+        // Dedup by work_id — one dispatch covers all due providers for that
+        // work (queue skips already-terminal providers via restart-safety).
+        let work_ids: HashSet<livrarr_domain::WorkId> = due.iter().map(|(w, _)| *w).collect();
+
+        for work_id in work_ids {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            match tokio::time::timeout(
+                Duration::from_secs(30),
+                livrarr_metadata::EnrichmentService::enrich_work(
+                    state.enrichment_service.as_ref(),
+                    user.id,
+                    work_id,
+                    livrarr_metadata::EnrichmentMode::Background,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
+                    total_dispatched += 1;
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        "enrichment_retry: enrich_work({}, {}) failed: {e}",
+                        user.id, work_id
+                    );
+                }
+                Err(_) => {
+                    warn!(
+                        "enrichment_retry: enrich_work({}, {}) timed out",
+                        user.id, work_id
+                    );
+                }
+            }
+        }
+    }
+
+    if total_due > 0 {
+        debug!(
+            "enrichment_retry: {} due (work,provider) pairs across users; dispatched {} works",
+            total_due, total_dispatched,
+        );
+    }
     Ok(())
 }
 
