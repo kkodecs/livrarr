@@ -740,24 +740,29 @@ pub async fn series_monitor_worker(
                     "created work from series"
                 );
                 // Enrich in background (best-effort, 30s timeout per work).
+                // Routed through DefaultProviderQueue + EnrichmentServiceImpl
+                // (Phase 1.5 cutover). Service writes to DB internally; no
+                // explicit update_work_enrichment call needed.
                 let enrich_state = state.clone();
                 let work_clone = work.clone();
                 tokio::spawn(async move {
-                    let outcome = tokio::time::timeout(
+                    let result = tokio::time::timeout(
                         std::time::Duration::from_secs(30),
-                        super::enrichment::enrich_work(&enrich_state, &work_clone),
+                        livrarr_metadata::EnrichmentService::enrich_work(
+                            enrich_state.enrichment_service.as_ref(),
+                            work_clone.user_id,
+                            work_clone.id,
+                            livrarr_metadata::EnrichmentMode::Background,
+                        ),
                     )
                     .await;
-                    match outcome {
-                        Ok(o) => {
-                            let _ = enrich_state
-                                .db
-                                .update_work_enrichment(
-                                    work_clone.user_id,
-                                    work_clone.id,
-                                    o.request,
-                                )
-                                .await;
+                    match result {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                work_id = work_clone.id,
+                                "series-add enrichment failed: {e}"
+                            );
                         }
                         Err(_) => {
                             tracing::warn!(work_id = work_clone.id, "enrichment timed out");

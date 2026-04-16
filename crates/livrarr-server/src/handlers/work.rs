@@ -579,11 +579,24 @@ pub async fn add_work_internal(
     }
 
     // Foreign-language works: enrich from detail page (Goodreads etc.) if available.
-    // English works: enrich from Hardcover + OL + Audnexus.
-    let outcome = if livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref())
-    {
+    // English works: enrich through DefaultProviderQueue + EnrichmentServiceImpl
+    // (Phase 1.5 cutover). Foreign path stays on legacy until R-13.
+    let is_foreign = livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
+    let (enriched_work, messages) = if is_foreign {
         if work.detail_url.is_some() {
-            super::enrichment::enrich_foreign_work(state, &work).await
+            let outcome = super::enrichment::enrich_foreign_work(state, &work).await;
+            let enriched_work = match state
+                .db
+                .update_work_enrichment(user_id, work.id, outcome.request)
+                .await
+            {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!(work_id = work.id, "update_work_enrichment failed: {e}");
+                    work
+                }
+            };
+            (enriched_work, outcome.messages)
         } else {
             // No detail URL — skip enrichment, mark as skipped.
             let _ = state.db.set_enrichment_status_skipped(work.id).await;
@@ -596,24 +609,42 @@ pub async fn add_work_internal(
             });
         }
     } else {
-        super::enrichment::enrich_work(state, &work).await
-    };
-    let enriched_work = match state
-        .db
-        .update_work_enrichment(user_id, work.id, outcome.request)
+        // English path through the new queue. EnrichmentServiceImpl writes to
+        // DB internally via apply_enrichment_merge.
+        match livrarr_metadata::EnrichmentService::enrich_work(
+            state.enrichment_service.as_ref(),
+            user_id,
+            work.id,
+            livrarr_metadata::EnrichmentMode::Background,
+        )
         .await
-    {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(work_id = work.id, "update_work_enrichment failed: {e}");
-            work
+        {
+            Ok(result) => {
+                let messages: Vec<String> = result
+                    .provider_outcomes
+                    .iter()
+                    .filter(|(_, oc)| {
+                        !matches!(
+                            oc,
+                            livrarr_domain::OutcomeClass::Success
+                                | livrarr_domain::OutcomeClass::NotFound
+                        )
+                    })
+                    .map(|(p, oc)| format!("{p:?}: {oc:?}"))
+                    .collect();
+                (result.work, messages)
+            }
+            Err(e) => {
+                tracing::warn!(work_id = work.id, "add_work: enrichment failed: {e}");
+                (work, vec![format!("enrichment failed: {e}")])
+            }
         }
     };
 
     Ok(AddWorkResponse {
         work: work_to_detail(&enriched_work),
         author_created,
-        messages: outcome.messages,
+        messages,
     })
 }
 
