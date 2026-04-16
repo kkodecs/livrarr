@@ -1031,110 +1031,12 @@ async fn query_ol_detail(
 // =============================================================================
 // Audnexus
 // =============================================================================
+// `query_audnexus`, `parse_audnexus`, and `AudnexusResult` were lifted to
+// `livrarr_metadata::audnexus` in Phase 1.5 so the same code can serve both the
+// inline pipeline (still on the legacy direct path) and `ProviderClient::Audnexus`
+// behind `DefaultProviderQueue`. Behavior unchanged.
 
-struct AudnexusResult {
-    narrators: Vec<String>,
-    narrators_empty: bool,
-    duration_seconds: Option<i32>,
-    asin: Option<String>,
-}
-
-async fn query_audnexus(
-    http: &livrarr_http::HttpClient,
-    base_url: &str,
-    asin: Option<&str>,
-    title: &str,
-    author: &str,
-) -> Result<Option<AudnexusResult>, String> {
-    let base = base_url.trim_end_matches('/');
-
-    // Try by ASIN first.
-    if let Some(asin) = asin {
-        let url = format!("{base}/books/{asin}");
-        if let Ok(resp) = http.get(&url).send().await {
-            if resp.status().is_success() {
-                if let Ok(data) = resp.json::<serde_json::Value>().await {
-                    return Ok(Some(parse_audnexus(&data, Some(asin))));
-                }
-            }
-        }
-    }
-
-    // Fallback: search by title + author.
-    let url = format!(
-        "{base}/books?title={}&author={}",
-        urlencoding(title),
-        urlencoding(author),
-    );
-    let resp = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Ok(None);
-    }
-
-    let data: serde_json::Value = resp.json().await.map_err(|e| format!("parse: {e}"))?;
-
-    let book = if data.is_array() {
-        data.as_array().and_then(|a| a.first()).cloned()
-    } else {
-        Some(data)
-    };
-
-    match book {
-        Some(b) => Ok(Some(parse_audnexus(&b, None))),
-        None => Ok(None),
-    }
-}
-
-fn parse_audnexus(data: &serde_json::Value, asin_hint: Option<&str>) -> AudnexusResult {
-    let narrators = data
-        .get("narrators")
-        .and_then(|n| n.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|n| {
-                    n.get("name")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    let duration_seconds = data
-        .get("runtimeLengthSec")
-        .or_else(|| data.get("runtime_length_sec"))
-        .and_then(|v| v.as_i64())
-        .map(|v| v as i32);
-
-    let asin = data
-        .get("asin")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| asin_hint.map(|s| s.to_string()));
-
-    let narrators_empty = narrators.is_empty();
-
-    AudnexusResult {
-        narrators,
-        narrators_empty,
-        duration_seconds,
-        asin,
-    }
-}
-
-/// Simple URL encoding for query parameters.
-fn urlencoding(s: &str) -> String {
-    s.replace(' ', "+")
-        .replace('&', "%26")
-        .replace('=', "%3D")
-        .replace('?', "%3F")
-        .replace('#', "%23")
-}
+use livrarr_metadata::audnexus::query_audnexus;
 
 // =============================================================================
 // Foreign work enrichment — Goodreads / LLM scraper detail pages
