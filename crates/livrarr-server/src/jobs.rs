@@ -1083,11 +1083,15 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                     continue;
                 }
 
-                let work_title = entry
+                let raw_title = entry
                     .get("title")
                     .and_then(|t| t.as_str())
                     .unwrap_or("Unknown")
                     .to_string();
+                // Auto-add still benefits from cleanup so the stored title
+                // is canonical even though it isn't user-validated.
+                let work_title = livrarr_metadata::title_cleanup::clean_title(&raw_title);
+                let cleaned_author = livrarr_metadata::title_cleanup::clean_author(&author.name);
 
                 info!(
                     "author monitor: new work detected for <author {}> ({})",
@@ -1101,7 +1105,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                         .create_work(CreateWorkDbRequest {
                             user_id: author.user_id,
                             title: work_title.clone(),
-                            author_name: author.name.clone(),
+                            author_name: cleaned_author,
                             author_id: Some(author.id),
                             ol_key: Some(work_ol_key.clone()),
                             gr_key: None,
@@ -1120,6 +1124,18 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                         .await
                     {
                         Ok(new_work) => {
+                            // AutoAdded provenance — honest about origin
+                            // (system pulled from OL bibliography, user did
+                            // not per-work validate). Not a lock anchor for
+                            // LLM identity check until a future user-confirm
+                            // UX transitions it to setter=User.
+                            crate::handlers::work::write_addtime_provenance(
+                                &state.db,
+                                author.user_id,
+                                &new_work,
+                                livrarr_domain::ProvenanceSetter::AutoAdded,
+                            )
+                            .await;
                             // Enrich the newly added work (30s timeout).
                             // Routed through DefaultProviderQueue + EnrichmentServiceImpl
                             // (Phase 1.5 cutover). Service writes to DB internally.

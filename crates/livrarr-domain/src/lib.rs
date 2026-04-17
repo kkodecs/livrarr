@@ -846,13 +846,25 @@ impl WorkField {
     }
 }
 
-/// Who set a field's provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvenanceSetter {
+    /// Field value was set by a metadata provider during enrichment.
     Provider,
+    /// Field value was directly set or selected by the user (typing it,
+    /// picking from search results, manually editing). Acts as the
+    /// identity-lock anchor for LLM validation — providers returning data
+    /// inconsistent with a User-set field have their payload rejected.
     User,
+    /// Field value was set by the system in a contextless way (e.g.
+    /// system-assigned defaults). Not a lock anchor.
     System,
+    /// Field value originated from an automated add path (author-monitor
+    /// auto-add or series auto-add) where the user did not per-work
+    /// validate. Honest about provenance — NOT treated as a lock anchor
+    /// for LLM identity verification. A user-confirm UX (future) can
+    /// transition AutoAdded → User on confirm.
+    AutoAdded,
 }
 
 /// Provenance record for a single field value.

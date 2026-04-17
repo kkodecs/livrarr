@@ -1187,12 +1187,17 @@ async fn run_import(
             let monitor_ebook = has_ebook_file || rd_book.monitored.unwrap_or(false);
             let monitor_audiobook = has_audiobook_file;
 
+            // Cleanup title + author at import-time so the locked identity
+            // anchor stores canonical form (Readarr's titles are typically
+            // clean but cleanup is cheap and uniform).
+            let cleaned_title = livrarr_metadata::title_cleanup::clean_title(title);
+            let cleaned_author = livrarr_metadata::title_cleanup::clean_author(author_name);
             match state
                 .db
                 .create_work(CreateWorkDbRequest {
                     user_id,
-                    title: title.to_string(),
-                    author_name: author_name.to_string(),
+                    title: cleaned_title,
+                    author_name: cleaned_author,
                     author_id: livrarr_author_id,
                     ol_key: None,
                     gr_key: rd_book.foreign_book_id.clone(),
@@ -1212,6 +1217,16 @@ async fn run_import(
             {
                 Ok(w) => {
                     works_created += 1;
+                    // Readarr import is user-validated (Pete's Readarr
+                    // instance picked these works for import) — lock as
+                    // setter=User.
+                    crate::handlers::work::write_addtime_provenance(
+                        &state.db,
+                        user_id,
+                        &w,
+                        livrarr_domain::ProvenanceSetter::User,
+                    )
+                    .await;
 
                     let _ = state
                         .db
