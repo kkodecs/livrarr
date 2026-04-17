@@ -215,10 +215,46 @@ async fn main() {
         let db_arc = Arc::new(db.clone());
         let queue = Arc::new(builder.build(db_arc.clone()));
         let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
+
+        // LLM validator: Gemini when configured, no-op otherwise. Per
+        // Principle 11, LLM is value-add and never gatekeeps enrichment.
+        // Default model is gemini-3.1-flash-lite-preview (validated in
+        // session 12 — ~1.5-2s/call, strong identity-mismatch detection).
+        let validator = {
+            let key = metadata_cfg
+                .llm_api_key
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            let model = metadata_cfg
+                .llm_model
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("gemini-3.1-flash-lite-preview");
+            if metadata_cfg.llm_enabled {
+                if let Some(key) = key {
+                    tracing::info!(model, "LLM validator: Gemini configured");
+                    m::llm_validator::EitherLlmValidator::gemini(
+                        http_client.clone(),
+                        key.to_string(),
+                        model.to_string(),
+                    )
+                } else {
+                    tracing::info!("LLM validator: NoOp (llm_enabled but no api_key)");
+                    m::llm_validator::EitherLlmValidator::noop()
+                }
+            } else {
+                tracing::info!("LLM validator: NoOp (llm_enabled=false)");
+                m::llm_validator::EitherLlmValidator::noop()
+            }
+        };
+
         let service = Arc::new(m::EnrichmentServiceImpl::new(
             db_arc,
             queue.clone(),
             merge_engine,
+            Arc::new(validator),
         ));
         (queue, service)
     };

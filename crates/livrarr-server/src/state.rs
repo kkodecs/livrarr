@@ -13,12 +13,18 @@ use crate::config::AppConfig;
 /// that scatter-gathers HC / OL / Audnexus / GR for live enrichment dispatch.
 pub type LiveProviderQueue = livrarr_metadata::DefaultProviderQueue<SqliteDb>;
 
+/// Type alias for the production LLM validator — boxed-enum to keep the
+/// AppState type concrete while supporting both the no-op and Gemini paths.
+pub type LiveLlmValidator = livrarr_metadata::llm_validator::EitherLlmValidator;
+
 /// Type alias for the production `EnrichmentServiceImpl` instance — the IR-defined
-/// enrichment service backed by the live `DefaultProviderQueue` + `DefaultMergeEngine`.
+/// enrichment service backed by the live `DefaultProviderQueue` + `DefaultMergeEngine`
+/// + LLM validator (no-op or Gemini per `MetadataConfig.llm_*`).
 pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
     SqliteDb,
     LiveProviderQueue,
     livrarr_metadata::DefaultMergeEngine,
+    LiveLlmValidator,
 >;
 
 /// Shared application state — injected into all Axum handlers.

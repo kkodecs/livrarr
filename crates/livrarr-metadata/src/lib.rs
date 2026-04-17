@@ -22,10 +22,12 @@ pub mod hardcover;
 pub mod http_llm;
 pub mod language;
 pub mod llm_scraper;
+pub mod llm_validator;
 pub mod normalize;
 pub mod openlibrary;
 pub mod provider_client;
 pub mod provider_queue;
+pub mod title_cleanup;
 
 pub use provider_client::{
     AudnexusClient, GoodreadsClient, HardcoverClient, OpenLibraryClient, ProviderClient,
@@ -889,16 +891,21 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
 type PerWorkLocks = tokio::sync::Mutex<HashMap<(UserId, WorkId), Arc<tokio::sync::Mutex<()>>>>;
 
 /// Enrichment service implementation.
-/// Generic over DB, Q (ProviderQueue), and ME (MergeEngine) to avoid dyn-compatibility issues.
-pub struct EnrichmentServiceImpl<DB, Q, ME> {
+/// Generic over DB, Q (ProviderQueue), ME (MergeEngine), and V (LlmValidator)
+/// to avoid dyn-compatibility issues.
+pub struct EnrichmentServiceImpl<DB, Q, ME, V> {
     db: Arc<DB>,
     queue: Arc<Q>,
     merge_engine: Arc<ME>,
+    /// Cross-provider semantic validator. Inserts an identity-check +
+    /// per-provider accept/reject step between scatter-gather and merge.
+    /// Use `NoOpLlmValidator` to disable when LLM is not configured.
+    validator: Arc<V>,
     /// Per-work lock map [I-12]: serializes concurrent enrichment calls for the same (user_id, work_id).
     locks: Arc<PerWorkLocks>,
 }
 
-impl<DB, Q, ME> EnrichmentServiceImpl<DB, Q, ME>
+impl<DB, Q, ME, V> EnrichmentServiceImpl<DB, Q, ME, V>
 where
     DB: livrarr_db::WorkDb
         + livrarr_db::ProvenanceDb
@@ -909,18 +916,20 @@ where
         + 'static,
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
+    V: crate::llm_validator::LlmValidator + Send + Sync + 'static,
 {
-    pub fn new(db: Arc<DB>, queue: Arc<Q>, merge_engine: Arc<ME>) -> Self {
+    pub fn new(db: Arc<DB>, queue: Arc<Q>, merge_engine: Arc<ME>, validator: Arc<V>) -> Self {
         Self {
             db,
             queue,
             merge_engine,
+            validator,
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 }
 
-impl<DB, Q, ME> EnrichmentService for EnrichmentServiceImpl<DB, Q, ME>
+impl<DB, Q, ME, V> EnrichmentService for EnrichmentServiceImpl<DB, Q, ME, V>
 where
     DB: livrarr_db::WorkDb
         + livrarr_db::ProvenanceDb
@@ -931,6 +940,7 @@ where
         + 'static,
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
+    V: crate::llm_validator::LlmValidator + Send + Sync + 'static,
 {
     async fn enrich_work(
         &self,
@@ -1082,6 +1092,85 @@ where
                     );
                 }
             }
+        }
+
+        // Step 8.5: LLM cross-provider validation (identity check +
+        // per-provider accept/reject + selective field nullification).
+        // No-op when LLM is not configured (NoOpLlmValidator) or when the
+        // work has no User-set anchor in provenance.
+        //
+        // On LLM error: log and pass through unchanged — LLM is value-add,
+        // never gatekeeps enrichment per project Principle 11.
+        let validation = match self
+            .validator
+            .validate(&current_work, &current_provenance, reconstructed)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    work_id,
+                    user_id,
+                    "LLM validation failed; passing outcomes through: {e}"
+                );
+                // Re-build reconstructed unmodified — but we already moved it.
+                // Easiest path: re-reconstruct from scatter_result.
+                let mut rebuilt: HashMap<livrarr_domain::MetadataProvider, ReconstructedOutcome> =
+                    HashMap::new();
+                for (provider, outcome) in &scatter_result.outcomes {
+                    let class = outcome.class();
+                    let payload = if class == livrarr_domain::OutcomeClass::Success {
+                        let retry_state =
+                            self.db.get_retry_state(user_id, work_id, *provider).await?;
+                        retry_state
+                            .and_then(|s| s.normalized_payload_json)
+                            .and_then(|j| serde_json::from_str::<NormalizedWorkDetail>(&j).ok())
+                    } else {
+                        None
+                    };
+                    rebuilt.insert(*provider, ReconstructedOutcome { class, payload });
+                }
+                crate::llm_validator::ValidationOutcome {
+                    reconstructed: rebuilt,
+                    rejections: HashMap::new(),
+                    all_success_rejected: false,
+                }
+            }
+        };
+        let reconstructed = validation.reconstructed;
+
+        // If the LLM rejected EVERY Success payload, escalate the work to
+        // Conflict status (terminal, exit only via reset_for_manual_refresh).
+        // Skip the merge entirely — there's no usable provider data, and we
+        // need the user to manually review which providers are wrong (or
+        // edit the locked anchor).
+        if validation.all_success_rejected {
+            tracing::warn!(
+                work_id,
+                user_id,
+                rejection_count = validation.rejections.len(),
+                "all Success providers rejected by LLM identity check — escalating to Conflict"
+            );
+            let apply_req = ApplyEnrichmentMergeRequest {
+                user_id,
+                work_id,
+                expected_merge_generation: generation,
+                work_update: None,
+                new_enrichment_status: livrarr_domain::EnrichmentStatus::Conflict,
+                provenance_upserts: Vec::new(),
+                provenance_deletes: Vec::new(),
+                external_id_updates: Vec::new(),
+            };
+            let _ = self.db.apply_enrichment_merge(apply_req).await?;
+            let result_work = self.db.get_work(user_id, work_id).await?;
+            return Ok(EnrichmentResult {
+                enrichment_status: livrarr_domain::EnrichmentStatus::Conflict,
+                enrichment_source: result_work.enrichment_source.clone(),
+                llm_task_spawned: false,
+                work: result_work,
+                merge_deferred,
+                provider_outcomes,
+            });
         }
 
         // Determine priority model based on work language

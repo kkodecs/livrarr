@@ -9,9 +9,72 @@ use crate::{
 };
 use livrarr_db::{
     AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, LibraryItemDb, NotificationDb,
-    UpdateWorkUserFieldsDbRequest, WorkDb,
+    ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
 };
-use livrarr_domain::Work;
+use livrarr_domain::{ProvenanceSetter, Work, WorkField};
+
+/// Write add-time provenance entries for a freshly-created work.
+///
+/// Tracks which identity fields originated at add-time and the setter
+/// (User for user-driven adds, AutoAdded for author-monitor / series-add).
+/// User-set fields act as the LLM identity-lock anchor at enrichment time;
+/// AutoAdded fields are tracked honestly but do not anchor.
+///
+/// Best-effort: errors are logged but do not fail the add — at worst the
+/// work runs unanchored and the LLM check falls back to no-anchor mode
+/// (equivalent to legacy enrichment).
+pub(crate) async fn write_addtime_provenance(
+    db: &livrarr_db::sqlite::SqliteDb,
+    user_id: i64,
+    work: &Work,
+    setter: ProvenanceSetter,
+) {
+    let mut reqs: Vec<SetFieldProvenanceRequest> = Vec::new();
+    let push = |reqs: &mut Vec<SetFieldProvenanceRequest>, field: WorkField| {
+        reqs.push(SetFieldProvenanceRequest {
+            user_id,
+            work_id: work.id,
+            field,
+            source: None,
+            setter,
+            cleared: false,
+        });
+    };
+    if !work.title.is_empty() {
+        push(&mut reqs, WorkField::Title);
+    }
+    if !work.author_name.is_empty() {
+        push(&mut reqs, WorkField::AuthorName);
+    }
+    if work.ol_key.is_some() {
+        push(&mut reqs, WorkField::OlKey);
+    }
+    if work.gr_key.is_some() {
+        push(&mut reqs, WorkField::GrKey);
+    }
+    if work.language.is_some() {
+        push(&mut reqs, WorkField::Language);
+    }
+    if work.year.is_some() {
+        push(&mut reqs, WorkField::Year);
+    }
+    if work.series_name.is_some() {
+        push(&mut reqs, WorkField::SeriesName);
+    }
+    if work.series_position.is_some() {
+        push(&mut reqs, WorkField::SeriesPosition);
+    }
+    if reqs.is_empty() {
+        return;
+    }
+    if let Err(e) = db.set_field_provenance_batch(reqs).await {
+        tracing::warn!(
+            work_id = work.id,
+            ?setter,
+            "write_addtime_provenance failed: {e}"
+        );
+    }
+}
 
 fn work_to_detail(w: &Work) -> WorkDetailResponse {
     WorkDetailResponse {
@@ -489,8 +552,15 @@ pub async fn add_work_internal(
         }
     }
 
+    // Cleanup title + author at add-time so the locked identity anchor
+    // (setter=User in provenance) stores the canonical canonical form, not
+    // whatever cruft came from the search result. See
+    // `livrarr_metadata::title_cleanup`.
+    let cleaned_title = livrarr_metadata::title_cleanup::clean_title(&req.title);
+    let cleaned_author = livrarr_metadata::title_cleanup::clean_author(&req.author_name);
+
     // Find or create author.
-    let author_name_normalized = req.author_name.trim().to_lowercase();
+    let author_name_normalized = cleaned_author.trim().to_lowercase();
     let existing_author = state
         .db
         .find_author_by_name(user_id, &author_name_normalized)
@@ -503,7 +573,7 @@ pub async fn add_work_internal(
                 .db
                 .create_author(CreateAuthorDbRequest {
                     user_id,
-                    name: req.author_name.clone(),
+                    name: cleaned_author.clone(),
                     sort_name: None,
                     ol_key: req.author_ol_key.clone(),
                     gr_key: None,
@@ -525,8 +595,8 @@ pub async fn add_work_internal(
         .db
         .create_work(CreateWorkDbRequest {
             user_id,
-            title: req.title,
-            author_name: req.author_name,
+            title: cleaned_title,
+            author_name: cleaned_author,
             author_id,
             ol_key: req.ol_key.clone(),
             gr_key: None,
@@ -543,6 +613,11 @@ pub async fn add_work_internal(
             monitor_audiobook: false,
         })
         .await?;
+
+    // User adds get the identity lock — title + author + ol_key + language
+    // are user-validated by the act of selecting (or typing) the search
+    // result. Best-effort write; failure logs but doesn't abort the add.
+    write_addtime_provenance(&state.db, user_id, &work, ProvenanceSetter::User).await;
 
     // Download cover image in background (best-effort, don't fail the add).
     // Unwrap proxy URLs back to the original external URL before downloading.
@@ -729,14 +804,25 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(req): Json<UpdateWorkRequest>,
 ) -> Result<Json<WorkDetailResponse>, ApiError> {
+    // Run cleanup on title/author when the user is editing them. Edited
+    // values become the new locked identity anchor (setter=User).
+    let cleaned_title = req
+        .title
+        .as_deref()
+        .map(livrarr_metadata::title_cleanup::clean_title);
+    let cleaned_author = req
+        .author_name
+        .as_deref()
+        .map(livrarr_metadata::title_cleanup::clean_author);
+
     let work = state
         .db
         .update_work_user_fields(
             ctx.user.id,
             id,
             UpdateWorkUserFieldsDbRequest {
-                title: req.title,
-                author_name: req.author_name,
+                title: cleaned_title.clone(),
+                author_name: cleaned_author.clone(),
                 series_name: req.series_name,
                 series_position: req.series_position,
                 monitor_ebook: req.monitor_ebook,
@@ -744,6 +830,37 @@ pub async fn update(
             },
         )
         .await?;
+
+    // Write provenance for fields the user edited so they re-lock as
+    // setter=User. Only writes for fields actually present in the request.
+    let mut prov_reqs: Vec<SetFieldProvenanceRequest> = Vec::new();
+    let user_id = ctx.user.id;
+    if cleaned_title.is_some() {
+        prov_reqs.push(SetFieldProvenanceRequest {
+            user_id,
+            work_id: id,
+            field: WorkField::Title,
+            source: None,
+            setter: ProvenanceSetter::User,
+            cleared: false,
+        });
+    }
+    if cleaned_author.is_some() {
+        prov_reqs.push(SetFieldProvenanceRequest {
+            user_id,
+            work_id: id,
+            field: WorkField::AuthorName,
+            source: None,
+            setter: ProvenanceSetter::User,
+            cleared: false,
+        });
+    }
+    if !prov_reqs.is_empty() {
+        if let Err(e) = state.db.set_field_provenance_batch(prov_reqs).await {
+            tracing::warn!(work_id = id, "user-edit provenance write failed: {e}");
+        }
+    }
+
     Ok(Json(work_to_detail(&work)))
 }
 

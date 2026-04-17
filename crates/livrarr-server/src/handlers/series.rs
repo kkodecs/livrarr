@@ -709,12 +709,16 @@ pub async fn series_monitor_worker(
         }
 
         // No match — create new work.
+        // Auto-add still benefits from cleanup so the stored title is
+        // canonical even though it isn't user-validated.
+        let cleaned_title = livrarr_metadata::title_cleanup::clean_title(&book.title);
+        let cleaned_author = livrarr_metadata::title_cleanup::clean_author(&author.name);
         match state
             .db
             .create_work(CreateWorkDbRequest {
                 user_id: author.user_id,
-                title: book.title.clone(),
-                author_name: author.name.clone(),
+                title: cleaned_title.clone(),
+                author_name: cleaned_author,
                 author_id: Some(author.id),
                 ol_key: None,
                 gr_key: Some(book.gr_key.clone()),
@@ -734,6 +738,16 @@ pub async fn series_monitor_worker(
         {
             Ok(work) => {
                 created += 1;
+                // AutoAdded provenance — system pulled this from a GR
+                // series page; no per-work user validation. Not a lock
+                // anchor for LLM identity check.
+                crate::handlers::work::write_addtime_provenance(
+                    &state.db,
+                    author.user_id,
+                    &work,
+                    livrarr_domain::ProvenanceSetter::AutoAdded,
+                )
+                .await;
                 tracing::debug!(
                     work_id = work.id,
                     title = %book.title,
