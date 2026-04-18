@@ -20,15 +20,26 @@ Three modes (not five — deliberate simplification):
 | Manual | User clicks "Refresh" | Immediate, single work |
 | HardRefresh | User forces full re-enrichment | Clears provider state, re-queries all |
 
-## Flow
+## Flow (Consolidation — Single Implementation)
+
+After consolidation, `EnrichmentWorkflow` is the single implementation. `WorkService::add` delegates to it.
 
 1. Work added (via search, RSS, or manual import)
 2. Identity locked at add-time using LLM validator (if configured)
-3. Deterministic provider query (Hardcover by ISBN/ASIN, then OL)
-4. If ambiguous: LLM validator selects best match
-5. MergeEngine applies provider results with provenance tracking
-6. Per-field provenance: tracks which provider sourced each field
-7. User edits take precedence (ProvenanceSetter::User)
+3. Provider dispatch (scatter-gather): Hardcover, OL, Audnexus queried based on mode
+4. Normalize results via `NormalizedWorkDetail`
+5. MergeEngine applies provider results with provenance tracking (pure — no DB calls)
+6. Merge output includes: field updates, provenance upserts/deletes, external ID updates, conflict detection
+7. Atomic merge apply via CAS (`merge_generation` column on works table)
+8. Cover cached to `{data_dir}/covers/{work_id}.jpg`
+
+## Hardcover Matching Detail
+
+- **Deterministic (tier 1):** normalize titles, exact case-insensitive match, highest `users_read_count` breaks ties
+- **LLM fallback (tier 2):** if tier 1 ambiguous and LLM configured, background task resolves
+- GraphQL endpoint: `https://api.hardcover.app/v1/graphql` (fixed, not configurable)
+- Auth: `authorization: <token>` header (no Bearer prefix)
+- Language filtering: select edition matching configured language prefs with highest `users_read_count` for primary ISBN
 
 ## Provenance System
 
