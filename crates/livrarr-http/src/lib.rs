@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+pub mod fetcher;
 pub mod ssrf;
 
 /// Composable HTTP client.

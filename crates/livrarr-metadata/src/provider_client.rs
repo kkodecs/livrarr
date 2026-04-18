@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use livrarr_db::MetadataConfig;
 use livrarr_domain::{MetadataProvider, Work};
 use livrarr_http::HttpClient;
 
@@ -237,17 +236,18 @@ impl AudnexusClient {
 #[derive(Clone)]
 pub struct HardcoverClient {
     http: HttpClient,
-    token: String,
-    metadata_cfg: MetadataConfig,
+    /// Reads `hardcover_enabled` + `hardcover_api_token` per fetch — config
+    /// changes via UI take effect on the next enrichment without restart.
+    /// Also exposes `llm_*` fields for the inner llm_disambiguate fallback.
+    live_config: crate::live_config::LiveMetadataConfig,
     retry_backoff_secs: i64,
 }
 
 impl HardcoverClient {
-    pub fn new(http: HttpClient, token: impl Into<String>, metadata_cfg: MetadataConfig) -> Self {
+    pub fn new(http: HttpClient, live_config: crate::live_config::LiveMetadataConfig) -> Self {
         Self {
             http,
-            token: token.into(),
-            metadata_cfg,
+            live_config,
             retry_backoff_secs: 5 * 60,
         }
     }
@@ -262,12 +262,30 @@ impl HardcoverClient {
         work: &Work,
         _ctx: &EnrichmentContext,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
+        let cfg = self.live_config.snapshot();
+        if !cfg.hardcover_enabled {
+            return ProviderOutcome::NotFound;
+        }
+        let token = match cfg
+            .hardcover_api_token
+            .as_deref()
+            .map(|t| {
+                t.trim()
+                    .trim_start_matches("Bearer ")
+                    .trim_start_matches("bearer ")
+            })
+            .filter(|t| !t.is_empty())
+        {
+            Some(t) => t.to_string(),
+            None => return ProviderOutcome::NotFound,
+        };
+
         let result = query_hardcover(
             &self.http,
             &work.title,
             &work.author_name,
-            &self.token,
-            &self.metadata_cfg,
+            &token,
+            cfg.as_ref(),
         )
         .await;
 
@@ -286,13 +304,9 @@ impl HardcoverClient {
                 // ISBN often points at a non-English or sub-optimal edition.
                 let mut isbn_13 = hc.isbn_13.clone();
                 if let Some(ref hc_id) = hc.hc_key {
-                    if let Ok(Some(better_isbn)) = crate::hardcover::fetch_hardcover_editions(
-                        &self.http,
-                        hc_id,
-                        &self.token,
-                        "en",
-                    )
-                    .await
+                    if let Ok(Some(better_isbn)) =
+                        crate::hardcover::fetch_hardcover_editions(&self.http, hc_id, &token, "en")
+                            .await
                     {
                         isbn_13 = Some(better_isbn);
                     }
@@ -456,6 +470,11 @@ pub struct GoodreadsClient {
     http: HttpClient,
     base_url: String,
     retry_backoff_secs: i64,
+    /// Reads `llm_*` per fetch — the LLM extraction fallback for
+    /// foreign-language pages activates whenever live config has LLM
+    /// configured. None means the client wasn't given a live-config handle
+    /// (test / smoke-test path); LLM fallback disabled.
+    live_config: Option<crate::live_config::LiveMetadataConfig>,
 }
 
 impl GoodreadsClient {
@@ -464,11 +483,21 @@ impl GoodreadsClient {
             http,
             base_url: base_url.into(),
             retry_backoff_secs: 5 * 60,
+            live_config: None,
         }
     }
 
     pub fn with_retry_backoff(mut self, secs: i64) -> Self {
         self.retry_backoff_secs = secs;
+        self
+    }
+
+    /// Enable the LLM extraction fallback by giving the client a handle to
+    /// the shared live config. The client reads `llm_*` per fetch, so config
+    /// changes (enable/disable, key/model swap) take effect on the next
+    /// enrichment call without restart.
+    pub fn with_live_config(mut self, live_config: crate::live_config::LiveMetadataConfig) -> Self {
+        self.live_config = Some(live_config);
         self
     }
 
@@ -483,16 +512,90 @@ impl GoodreadsClient {
             Err(err) => return self.map_fetch_err(err),
         };
 
-        match goodreads::fetch_goodreads_detail(&self.http, &detail_url).await {
-            Ok(detail) => ProviderOutcome::Success(Box::new(self.normalize(&detail_url, detail))),
-            Err(GoodreadsFetchError::Parse) => ProviderOutcome::NotFound,
-            Err(err) => self.map_fetch_err(err),
+        // Direct parse path. On Parse failure, optionally fall through to
+        // LLM extraction if configured (typical for foreign-language pages
+        // where JSON-LD / regex don't match the locale-specific HTML).
+        let html = match goodreads::fetch_goodreads_html(&self.http, &detail_url).await {
+            Ok(h) => h,
+            Err(err) => return self.map_fetch_err(err),
+        };
+
+        if let Some(detail) = goodreads::parse_detail_html(&html) {
+            return ProviderOutcome::Success(Box::new(self.normalize(&detail_url, detail)));
         }
+
+        // Direct parse yielded nothing. Try LLM extraction when live config
+        // has LLM enabled + key + endpoint set.
+        if let Some(live) = &self.live_config {
+            let cfg = live.snapshot();
+            let key = cfg
+                .llm_api_key
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            let endpoint = cfg
+                .llm_endpoint
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            if cfg.llm_enabled && key.is_some() && endpoint.is_some() {
+                let model = cfg
+                    .llm_model
+                    .as_deref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("gemini-3.1-flash-lite-preview");
+                let language_hint = work
+                    .language
+                    .as_deref()
+                    .and_then(crate::language::get_language_info)
+                    .map(|info| info.english_name)
+                    .unwrap_or("the original");
+                match goodreads::extract_with_llm(
+                    &self.http,
+                    endpoint.unwrap(),
+                    key.unwrap(),
+                    model,
+                    &html,
+                    language_hint,
+                )
+                .await
+                {
+                    Ok(mut payload) => {
+                        // Normalize gr_key from the resolved URL — the LLM
+                        // doesn't know our identifier scheme.
+                        if payload.gr_key.is_none() {
+                            payload.gr_key = goodreads::extract_gr_key(&detail_url);
+                        }
+                        return ProviderOutcome::Success(Box::new(payload));
+                    }
+                    Err(GoodreadsFetchError::Parse) => return ProviderOutcome::NotFound,
+                    Err(err) => return self.map_fetch_err(err),
+                }
+            }
+        }
+
+        // No LLM configured + direct parse failed → NotFound.
+        ProviderOutcome::NotFound
     }
 
     async fn resolve_detail_url(&self, work: &Work) -> Result<Option<String>, GoodreadsFetchError> {
+        // Priority order:
+        //   1. work.gr_key — canonical GR identity (R-21).
+        //   2. work.detail_url — typically set on foreign-work add (the GR
+        //      URL the user picked from the foreign search results).
+        //   3. Search by title+author with ASCII-strip diacritics fallback.
         if let Some(key) = work.gr_key.as_deref().filter(|k| !k.is_empty()) {
             return Ok(Some(goodreads::detail_url_for_gr_key(&self.base_url, key)));
+        }
+
+        if let Some(url) = work.detail_url.as_deref().filter(|u| !u.is_empty()) {
+            // Validate it's a Goodreads URL (SSRF guard against stale data
+            // pointing somewhere unexpected).
+            if goodreads::validate_detail_url(url) {
+                let resolved = goodreads::resolve_detail_url(&self.base_url, url);
+                return Ok(Some(resolved));
+            }
         }
 
         let title = &work.title;

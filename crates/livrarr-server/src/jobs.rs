@@ -12,8 +12,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::state::AppState;
 use livrarr_db::{
     CreateHistoryEventDbRequest, CreateNotificationDbRequest, CreateWorkDbRequest,
-    DownloadClientDb, EnrichmentRetryDb, GrabDb, HistoryDb, ListImportDb, NotificationDb,
-    SessionDb, WorkDb,
+    DownloadClientDb, GrabDb, HistoryDb, ListImportDb, NotificationDb, SessionDb, WorkDb,
 };
 use livrarr_domain::{EventType, NotificationType};
 
@@ -1321,8 +1320,14 @@ pub async fn enrichment_retry_tick(
             )
             .await
             {
-                Ok(Ok(_)) => {
+                Ok(Ok(result)) => {
                     total_dispatched += 1;
+                    if let Some(ref cover_url) = result.work.cover_url {
+                        crate::handlers::work::download_post_enrich_cover(
+                            &state, work_id, cover_url,
+                        )
+                        .await;
+                    }
                 }
                 Ok(Err(e)) => {
                     warn!(
@@ -1346,86 +1351,6 @@ pub async fn enrichment_retry_tick(
             total_due, total_dispatched,
         );
     }
-    Ok(())
-}
-
-#[allow(dead_code)]
-async fn _enrichment_retry_tick_legacy_disabled(
-    state: AppState,
-    _cancel: CancellationToken,
-) -> Result<(), String> {
-    let works = state
-        .db
-        .list_works_for_retry()
-        .await
-        .map_err(|e| format!("list works for retry: {e}"))?;
-
-    if works.is_empty() {
-        return Ok(());
-    }
-
-    debug!("enrichment retry: {} works eligible", works.len());
-
-    for work in &works {
-        let is_foreign =
-            livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
-
-        if is_foreign && work.detail_url.is_none() {
-            continue;
-        }
-
-        let enrich_result = tokio::time::timeout(Duration::from_secs(30), async {
-            if is_foreign {
-                crate::handlers::enrichment::enrich_foreign_work(&state, work).await
-            } else {
-                crate::handlers::enrichment::enrich_work(&state, work).await
-            }
-        })
-        .await;
-
-        let outcome = match enrich_result {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                warn!("enrichment retry: timeout for work {}", work.id);
-                if let Err(e) = state.db.increment_retry_count(work.user_id, work.id).await {
-                    tracing::warn!("increment_retry_count failed: {e}");
-                }
-                continue;
-            }
-        };
-
-        match state
-            .db
-            .update_work_enrichment(work.user_id, work.id, outcome.request)
-            .await
-        {
-            Ok(updated) => {
-                if updated.enrichment_status == livrarr_domain::EnrichmentStatus::Enriched
-                    || updated.enrichment_status == livrarr_domain::EnrichmentStatus::Partial
-                {
-                    debug!("enrichment retry: work {} enriched successfully", work.id);
-                } else {
-                    if let Err(e) = state.db.increment_retry_count(work.user_id, work.id).await {
-                        tracing::warn!("increment_retry_count failed: {e}");
-                    }
-                    debug!(
-                        "enrichment retry: work {} still failed, count incremented",
-                        work.id
-                    );
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "enrichment retry: DB update failed for work {}: {e}",
-                    work.id
-                );
-                if let Err(e) = state.db.increment_retry_count(work.user_id, work.id).await {
-                    tracing::warn!("increment_retry_count failed: {e}");
-                }
-            }
-        }
-    }
-
     Ok(())
 }
 

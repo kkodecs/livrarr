@@ -11,6 +11,6 @@ tracing = "0.1"
 livrarr-domain = { workspace = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.37"
-repub = { path = "/mnt/opt/repub" }
+repub = { git = "https://github.com/kkodecs/repub", tag = "v0.1.0-alpha" }
 mp4ameta = "0.13"
 id3 = "1.16"

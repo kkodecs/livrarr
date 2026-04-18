@@ -564,8 +564,11 @@ pub trait AuthorApi: Send + Sync {
     ) -> Result<Vec<AuthorSearchResult>, ApiError>;
 
     /// Add author (from OL result).
-    async fn add(&self, user_id: UserId, req: AddAuthorRequest)
-        -> Result<AuthorResponse, ApiError>;
+    async fn add(
+        &self,
+        user_id: UserId,
+        req: AddAuthorApiRequest,
+    ) -> Result<AuthorResponse, ApiError>;
 
     /// List user's authors.
     async fn list(&self, user_id: UserId) -> Result<Vec<AuthorResponse>, ApiError>;
@@ -587,7 +590,7 @@ pub trait AuthorApi: Send + Sync {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AddAuthorRequest {
+pub struct AddAuthorApiRequest {
     pub name: String,
     pub sort_name: Option<String>,
     pub ol_key: String,
@@ -1488,6 +1491,42 @@ pub enum ApiError {
     Scan(#[from] ScanError),
     #[error("{0}")]
     Db(#[from] DbError),
+}
+
+// --- Service error → ApiError mappings (Phase 4) ---
+
+impl From<livrarr_domain::services::AuthorServiceError> for ApiError {
+    fn from(e: livrarr_domain::services::AuthorServiceError) -> Self {
+        use livrarr_domain::services::AuthorServiceError;
+        match e {
+            AuthorServiceError::NotFound => ApiError::NotFound,
+            AuthorServiceError::AlreadyExists => ApiError::Conflict {
+                reason: "author already exists".into(),
+            },
+            AuthorServiceError::Validation { field, message } => ApiError::Validation {
+                errors: vec![FieldError { field, message }],
+            },
+            AuthorServiceError::OlRateLimited => ApiError::ServiceUnavailable,
+            AuthorServiceError::Provider(msg) => ApiError::BadGateway(msg),
+            AuthorServiceError::Db(db_err) => ApiError::Db(db_err),
+        }
+    }
+}
+
+impl From<livrarr_domain::services::SeriesServiceError> for ApiError {
+    fn from(e: livrarr_domain::services::SeriesServiceError) -> Self {
+        use livrarr_domain::services::SeriesServiceError;
+        match e {
+            SeriesServiceError::NotFound => ApiError::NotFound,
+            SeriesServiceError::Validation { field, message } => ApiError::Validation {
+                errors: vec![FieldError { field, message }],
+            },
+            SeriesServiceError::GoodreadsUnavailable => {
+                ApiError::BadGateway("Goodreads unavailable".into())
+            }
+            SeriesServiceError::Db(db_err) => ApiError::Db(db_err),
+        }
+    }
 }
 
 /// JSON error response body matching frontend's normalizeError expectations.

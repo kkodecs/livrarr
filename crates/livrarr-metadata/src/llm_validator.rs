@@ -100,43 +100,6 @@ pub trait LlmValidator: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// EitherLlmValidator — enum dispatch, used by AppState
-// ---------------------------------------------------------------------------
-
-/// Concrete enum so the production `AppState` can hold the validator without
-/// resorting to `Box<dyn>`. The trait is `trait_variant::make(Send)` and is
-/// therefore not dyn-compatible (same constraint as `ProviderClient`).
-#[derive(Clone)]
-pub enum EitherLlmValidator {
-    NoOp(NoOpLlmValidator),
-    Gemini(GeminiLlmValidator),
-}
-
-impl EitherLlmValidator {
-    pub fn noop() -> Self {
-        Self::NoOp(NoOpLlmValidator::new())
-    }
-
-    pub fn gemini(http: HttpClient, api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::Gemini(GeminiLlmValidator::new(http, api_key, model))
-    }
-}
-
-impl LlmValidator for EitherLlmValidator {
-    async fn validate(
-        &self,
-        work: &Work,
-        provenance: &[FieldProvenance],
-        reconstructed: HashMap<MetadataProvider, ReconstructedOutcome>,
-    ) -> Result<ValidationOutcome, LlmValidationError> {
-        match self {
-            Self::NoOp(v) => v.validate(work, provenance, reconstructed).await,
-            Self::Gemini(v) => v.validate(work, provenance, reconstructed).await,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // NoOpLlmValidator
 // ---------------------------------------------------------------------------
 
@@ -168,28 +131,30 @@ impl LlmValidator for NoOpLlmValidator {
 }
 
 // ---------------------------------------------------------------------------
-// GeminiLlmValidator
+// LiveLlmValidator — production validator, reads credentials from
+// LiveMetadataConfig on each call so user config changes propagate
+// immediately (no server restart required).
 // ---------------------------------------------------------------------------
 
-/// Gemini-backed LLM validator. Uses the Gemini API directly via HTTPS.
+/// Production LLM validator. Uses Gemini when `MetadataConfig.llm_enabled` +
+/// `llm_api_key` are set in the live config; falls back to no-op behavior
+/// otherwise. Reads the live snapshot per-call (cheap — Arc bump, no DB hit).
 ///
 /// Default model is `gemini-3.1-flash-lite-preview` per session-12 empirical
 /// validation (~1.5-2s per call; strong quality on identity-mismatch and
-/// language-guard cases).
+/// language-guard cases). Overridden by `MetadataConfig.llm_model` when set.
 #[derive(Clone)]
-pub struct GeminiLlmValidator {
+pub struct LiveLlmValidator {
     http: HttpClient,
-    api_key: String,
-    model: String,
+    live_config: crate::live_config::LiveMetadataConfig,
     timeout: Duration,
 }
 
-impl GeminiLlmValidator {
-    pub fn new(http: HttpClient, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+impl LiveLlmValidator {
+    pub fn new(http: HttpClient, live_config: crate::live_config::LiveMetadataConfig) -> Self {
         Self {
             http,
-            api_key: api_key.into(),
-            model: model.into(),
+            live_config,
             timeout: Duration::from_millis(2_500),
         }
     }
@@ -200,15 +165,42 @@ impl GeminiLlmValidator {
     }
 }
 
-impl LlmValidator for GeminiLlmValidator {
+impl LlmValidator for LiveLlmValidator {
     async fn validate(
         &self,
         work: &Work,
         provenance: &[FieldProvenance],
         mut reconstructed: HashMap<MetadataProvider, ReconstructedOutcome>,
     ) -> Result<ValidationOutcome, LlmValidationError> {
-        // Skip validation when there is no User-set anchor to validate
-        // against. AutoAdded works run unanchored — no LLM call.
+        let cfg = self.live_config.snapshot();
+        let api_key = cfg
+            .llm_api_key
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        let endpoint = cfg
+            .llm_endpoint
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        if !cfg.llm_enabled || api_key.is_none() || endpoint.is_none() {
+            // No LLM configured (need both endpoint and key) — pass through
+            // unchanged. Same shape as the NoOpLlmValidator response.
+            return Ok(ValidationOutcome {
+                reconstructed,
+                rejections: HashMap::new(),
+                all_success_rejected: false,
+            });
+        }
+        let model = cfg
+            .llm_model
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("gemini-3.1-flash-lite-preview");
+
+        // Skip LLM call when there is no User-set anchor to validate
+        // against. AutoAdded / unanchored works run unfiltered — no LLM call.
         if !has_user_anchor(provenance) {
             return Ok(ValidationOutcome {
                 reconstructed,
@@ -231,10 +223,11 @@ impl LlmValidator for GeminiLlmValidator {
         }
 
         let prompt_input = build_prompt(work, &reconstructed);
-        let response = call_gemini(
+        let response = call_validator_llm(
             &self.http,
-            &self.api_key,
-            &self.model,
+            endpoint.unwrap(),
+            api_key.unwrap(),
+            model,
             &prompt_input,
             self.timeout,
         )
@@ -264,18 +257,12 @@ impl LlmValidator for GeminiLlmValidator {
                 }
                 "accept" => {
                     surviving_success += 1;
-                    // Apply per-field nullifications. The LLM's `merged`
-                    // field for that provider may have certain fields set
-                    // to null indicating "drop this field even though the
-                    // payload is otherwise accepted" (e.g. wrong-language
-                    // description).
                     if let (Some(payload), Some(per_field)) =
                         (entry.payload.as_mut(), verdict.dropped_fields.as_ref())
                     {
                         apply_dropped_fields(payload, per_field);
                     }
                 }
-                // "absent" or anything else — unchanged.
                 _ => {
                     surviving_success += 1;
                 }
@@ -437,26 +424,34 @@ fn build_prompt<'a>(
 // Gemini API call
 // ---------------------------------------------------------------------------
 
-const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-
 const SYSTEM_INSTRUCTION: &str = r#"You are a metadata enrichment validator for a book library system.
 
 INPUT: a LOCKED IDENTITY ANCHOR (title + author the user validated at add-time, immutable) plus per-provider PAYLOADS from Hardcover, OpenLibrary, Goodreads, Audnexus.
 
 YOUR JOB:
 1. For each provider, decide if its payload is about the SAME WORK as the anchor. Tolerate cosmetic differences (capitalization, punctuation, series suffix in title, edition markers, "Last, First" vs "First Last" in author). REJECT if the title/author indicates a DIFFERENT WORK (different book entirely, different author, wrong-edition cases like a series-mate substituted for the anchor work).
-2. For accepted providers: optionally nullify individual fields in the payload that are clearly wrong (e.g. description in a language different from the anchor language hint — drop it; LLM-detected language mismatch on subtitle — drop it). Surface dropped field names in `dropped_fields`. The provider's other fields pass through.
+2. For accepted providers: optionally nullify individual fields in the payload that are clearly wrong (e.g. description in a language different from the anchor language hint — drop it; subtitle in another language — drop it). Surface dropped field names in `dropped_fields`. The provider's other fields pass through.
 3. NEVER suggest changes to title or author — they are locked.
 
-OUTPUT JSON SCHEMA:
-- providers: per-provider verdict
-  - verdict: "accept" or "reject"
-  - reason: short human-readable string
-  - dropped_fields: array of field names to nullify (only meaningful when verdict=accept)
-- notes: brief flags about anomalies"#;
+Return ONLY a JSON object with EXACTLY this structure (these names are required):
+{
+  "providers": {
+    "hardcover":   {"verdict": "accept" | "reject", "reason": "<short string>", "dropped_fields": ["<field>", ...] | null},
+    "openlibrary": {"verdict": "accept" | "reject", "reason": "<short string>", "dropped_fields": ["<field>", ...] | null},
+    "goodreads":   {"verdict": "accept" | "reject", "reason": "<short string>", "dropped_fields": ["<field>", ...] | null},
+    "audnexus":    {"verdict": "accept" | "reject", "reason": "<short string>", "dropped_fields": ["<field>", ...] | null}
+  },
+  "notes": "<brief anomaly flags or empty string>"
+}
+
+Rules for the output:
+- Include every provider key from the input. If a provider's payload was not in the input (no Success outcome to validate), still include the key with verdict="accept" and reason="no payload to validate".
+- "verdict" must be exactly "accept" or "reject". No other values.
+- "dropped_fields" is an array of strings naming fields to nullify. Use null (or omit) when no fields should be dropped. Valid field names: "description", "year", "page_count", "publisher", "publish_date", "isbn_13", "asin", "series_name", "series_position", "genres", "language", "rating", "rating_count", "cover_url", "subtitle", "original_title". Do NOT include "title" or "author_name" — those are immutable.
+- Output ONLY the JSON object. No markdown code fences. No commentary."#;
 
 #[derive(Debug, Deserialize)]
-struct GeminiResponse {
+struct ValidatorLlmResponse {
     providers: HashMap<String, ProviderVerdict>,
     #[allow(dead_code)]
     #[serde(default)]
@@ -471,45 +466,42 @@ struct ProviderVerdict {
     dropped_fields: Option<Vec<String>>,
 }
 
-async fn call_gemini(
+/// Provider-agnostic LLM call using OpenAI-compatible chat-completions.
+/// Works with Groq, OpenAI, Gemini's `/v1beta/openai/...` surface, OpenRouter,
+/// LMStudio, Ollama, and anything else that implements the OpenAI chat API.
+///
+/// `endpoint` is the base URL the user configured in `MetadataConfig`
+/// (e.g. `https://api.groq.com/openai/v1` or
+/// `https://generativelanguage.googleapis.com/v1beta/openai`). The function
+/// appends `/chat/completions` after trimming any trailing slash.
+async fn call_validator_llm(
     http: &HttpClient,
+    endpoint: &str,
     api_key: &str,
     model: &str,
     prompt_input: &PromptInput<'_>,
     timeout: Duration,
-) -> Result<GeminiResponse, LlmValidationError> {
-    let url = format!("{GEMINI_API_BASE}/{model}:generateContent?key={api_key}");
+) -> Result<ValidatorLlmResponse, LlmValidationError> {
+    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
     let user_msg = serde_json::to_string(prompt_input)
         .map_err(|e| LlmValidationError::MalformedResponse(format!("prompt encode: {e}")))?;
 
     let body = serde_json::json!({
-        "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
-        "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
-        "generationConfig": {
-            "temperature": 0.0,
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "providers": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "hardcover":   {"type": "OBJECT", "properties": {"verdict": {"type": "STRING", "enum": ["accept","reject"]}, "reason": {"type": "STRING"}, "dropped_fields": {"type": "ARRAY", "items": {"type": "STRING"}, "nullable": true}}, "required": ["verdict","reason"]},
-                            "openlibrary": {"type": "OBJECT", "properties": {"verdict": {"type": "STRING", "enum": ["accept","reject"]}, "reason": {"type": "STRING"}, "dropped_fields": {"type": "ARRAY", "items": {"type": "STRING"}, "nullable": true}}, "required": ["verdict","reason"]},
-                            "goodreads":   {"type": "OBJECT", "properties": {"verdict": {"type": "STRING", "enum": ["accept","reject"]}, "reason": {"type": "STRING"}, "dropped_fields": {"type": "ARRAY", "items": {"type": "STRING"}, "nullable": true}}, "required": ["verdict","reason"]},
-                            "audnexus":    {"type": "OBJECT", "properties": {"verdict": {"type": "STRING", "enum": ["accept","reject"]}, "reason": {"type": "STRING"}, "dropped_fields": {"type": "ARRAY", "items": {"type": "STRING"}, "nullable": true}}, "required": ["verdict","reason"]}
-                        }
-                    },
-                    "notes": {"type": "STRING"}
-                },
-                "required": ["providers"]
-            }
-        }
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user",   "content": user_msg},
+        ],
+        "temperature": 0.0,
+        // Universally-supported structured-output hint. Most modern providers
+        // (Groq, OpenAI, Gemini-compat, OpenRouter) honor this.
+        "response_format": {"type": "json_object"},
     });
 
     let resp = tokio::time::timeout(
         timeout,
         http.post(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .json(&body)
             .send(),
@@ -531,15 +523,21 @@ async fn call_gemini(
         .map_err(|e| LlmValidationError::MalformedResponse(format!("envelope parse: {e}")))?;
 
     let content_str = envelope
-        .pointer("/candidates/0/content/parts/0/text")
+        .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            LlmValidationError::MalformedResponse(
-                "missing candidates[0].content.parts[0].text".to_string(),
-            )
+            LlmValidationError::MalformedResponse("missing choices[0].message.content".to_string())
         })?;
 
-    serde_json::from_str::<GeminiResponse>(content_str).map_err(|e| {
+    // Tolerate code-fence wrapping that some providers add.
+    let trimmed = content_str.trim();
+    let unfenced = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed);
+    let unfenced = unfenced.strip_suffix("```").unwrap_or(unfenced).trim();
+
+    serde_json::from_str::<ValidatorLlmResponse>(unfenced).map_err(|e| {
         LlmValidationError::MalformedResponse(format!("inner parse: {e} | body: {content_str}"))
     })
 }

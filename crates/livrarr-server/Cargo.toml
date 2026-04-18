@@ -1,6 +1,6 @@
 [package]
 name = "livrarr-server"
-version = "0.1.0-alpha2"
+version = "0.1.0-alpha3"
 edition = "2021"
 license = "GPL-3.0-only"
 
@@ -20,6 +20,7 @@ livrarr-db = { workspace = true }
 livrarr-http = { workspace = true }
 livrarr-metadata = { workspace = true }
 livrarr-download = { workspace = true }
+livrarr-organize = { workspace = true }
 livrarr-tagwrite = { workspace = true }
 futures = "0.3"
 libc = "0.2"

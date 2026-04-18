@@ -19,6 +19,8 @@ tracing = "0.1"
 url = "2"
 urlencoding = "2"
 regex = "1"
+csv = "1"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 livrarr-db = { workspace = true, features = ["test-helpers"] }

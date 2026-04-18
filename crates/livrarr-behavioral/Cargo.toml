@@ -5,6 +5,11 @@ edition = "2021"
 license = "GPL-3.0-only"
 publish = false
 
+[dependencies]
+livrarr-domain = { workspace = true }
+livrarr-db = { workspace = true, features = ["test-helpers"] }
+tokio = { workspace = true }
+
 [dev-dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
@@ -15,8 +20,13 @@ trait-variant = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true, features = ["test-helpers"] }
 livrarr-metadata = { workspace = true }
+livrarr-download = { workspace = true }
+livrarr-organize = { workspace = true }
+livrarr-http = { workspace = true }
+axum = "0.8"
 assert_matches = "1"
 futures = "0.3"
+tempfile = "3"
 
 [[test]]
 name = "test_metadata_overhaul_domain"
@@ -49,3 +59,65 @@ path = "../../tests/behavioral/test_metadata_overhaul_enrichment_service.rs"
 [[test]]
 name = "test_metadata_overhaul_provider_queue"
 path = "../../tests/behavioral/test_metadata_overhaul_provider_queue.rs"
+
+# --- Consolidation behavioral tests ---
+
+[[test]]
+name = "test_consolidation_http_fetcher"
+path = "../../tests/behavioral/test_consolidation_http_fetcher.rs"
+
+[[test]]
+name = "test_consolidation_llm_caller"
+path = "../../tests/behavioral/test_consolidation_llm_caller.rs"
+
+[[test]]
+name = "test_consolidation_file_ops"
+path = "../../tests/behavioral/test_consolidation_file_ops.rs"
+
+[[test]]
+name = "test_consolidation_work_service"
+path = "../../tests/behavioral/test_consolidation_work_service.rs"
+
+[[test]]
+name = "test_consolidation_author_service"
+path = "../../tests/behavioral/test_consolidation_author_service.rs"
+
+[[test]]
+name = "test_consolidation_series_service"
+path = "../../tests/behavioral/test_consolidation_series_service.rs"
+
+[[test]]
+name = "test_consolidation_release_service"
+path = "../../tests/behavioral/test_consolidation_release_service.rs"
+
+[[test]]
+name = "test_consolidation_grab_service"
+path = "../../tests/behavioral/test_consolidation_grab_service.rs"
+
+[[test]]
+name = "test_consolidation_file_service"
+path = "../../tests/behavioral/test_consolidation_file_service.rs"
+
+[[test]]
+name = "test_consolidation_list_service"
+path = "../../tests/behavioral/test_consolidation_list_service.rs"
+
+[[test]]
+name = "test_consolidation_import_workflow"
+path = "../../tests/behavioral/test_consolidation_import_workflow.rs"
+
+[[test]]
+name = "test_consolidation_enrichment_workflow"
+path = "../../tests/behavioral/test_consolidation_enrichment_workflow.rs"
+
+[[test]]
+name = "test_consolidation_rss_sync"
+path = "../../tests/behavioral/test_consolidation_rss_sync.rs"
+
+[[test]]
+name = "test_consolidation_author_monitor"
+path = "../../tests/behavioral/test_consolidation_author_monitor.rs"
+
+[[test]]
+name = "test_consolidation_dto"
+path = "../../tests/behavioral/test_consolidation_dto.rs"

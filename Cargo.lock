@@ -1618,6 +1618,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
 name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1629,13 +1635,18 @@ version = "0.1.0"
 dependencies = [
  "assert_matches",
  "async-trait",
+ "axum",
  "chrono",
  "futures",
  "livrarr-db",
  "livrarr-domain",
+ "livrarr-download",
+ "livrarr-http",
  "livrarr-metadata",
+ "livrarr-organize",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "trait-variant",
 ]
@@ -1668,6 +1679,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "trait-variant",
 ]
 
 [[package]]
@@ -1680,8 +1693,10 @@ dependencies = [
  "livrarr-db",
  "livrarr-domain",
  "serde",
+ "serde_json",
  "sha1",
  "thiserror 2.0.18",
+ "tokio",
  "trait-variant",
 ]
 
@@ -1689,9 +1704,13 @@ dependencies = [
 name = "livrarr-http"
 version = "0.1.0"
 dependencies = [
+ "livrarr-domain",
  "reqwest",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "trait-variant",
+ "url",
 ]
 
 [[package]]
@@ -1708,6 +1727,7 @@ name = "livrarr-metadata"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "csv",
  "livrarr-db",
  "livrarr-domain",
  "livrarr-http",
@@ -1721,6 +1741,7 @@ dependencies = [
  "unicode-normalization",
  "url",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]
@@ -1728,8 +1749,11 @@ name = "livrarr-organize"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "livrarr-db",
  "livrarr-domain",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "trait-variant",
 ]
 
@@ -1756,6 +1780,7 @@ dependencies = [
  "livrarr-download",
  "livrarr-http",
  "livrarr-metadata",
+ "livrarr-organize",
  "livrarr-tagwrite",
  "mp4ameta",
  "once_cell",
@@ -2668,12 +2693,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots",
 ]
@@ -2725,6 +2752,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rustix"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+dependencies = [
+ "bitflags 2.11.1",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3277,6 +3317,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.2",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3930,6 +3983,19 @@ dependencies = [
  "indexmap",
  "wasm-encoder",
  "wasmparser",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
