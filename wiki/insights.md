@@ -2,6 +2,8 @@
 
 Top learnings a fresh CC session needs to know. For deeper coverage see linked wiki pages.
 
+> **This wiki is new (April 2026).** It was bulk-ingested from build artifacts and may contain inaccuracies — especially where specs evolved faster than the ingest could track. If you find something wrong, **fix it**. Update the wiki page, update this file if affected, and append to wiki/log.md. The wiki only gets better if you correct it when you spot errors. Code is always authoritative over wiki content.
+
 ## Architecture
 
 1. **10-crate workspace.** All deps point toward `livrarr-domain`. `livrarr-server` is the composition root. See [overview](architecture/overview.md).

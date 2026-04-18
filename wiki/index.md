@@ -2,6 +2,8 @@
 
 Domain knowledge for the Livrarr project. Grows with each build cycle. Start here, then drill into sections.
 
+> **Wiki is new — verify and correct.** Bulk-ingested April 2026. If wiki content conflicts with code, code wins. Fix the wiki when you spot errors.
+
 ## Architecture
 
 - [Overview](architecture/overview.md) — crate dependency graph, key invariants, composition root
