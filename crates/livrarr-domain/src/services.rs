@@ -168,22 +168,49 @@ pub enum EnrichmentMode {
 #[derive(Debug)]
 pub struct AddWorkRequest {
     pub title: String,
-    pub author_name: Option<String>,
-    pub isbn: Option<String>,
+    pub author_name: String,
+    pub author_ol_key: Option<String>,
     pub ol_key: Option<String>,
-    pub hc_key: Option<String>,
-    pub detail_url: Option<String>,
+    pub gr_key: Option<String>,
+    pub year: Option<i32>,
     pub cover_url: Option<String>,
-    pub media_type: Option<MediaType>,
-    pub monitored: bool,
+    pub metadata_source: Option<String>,
+    pub language: Option<String>,
+    pub detail_url: Option<String>,
+    pub series_name: Option<String>,
+    pub series_position: Option<f64>,
+    pub defer_enrichment: bool,
+}
+
+#[derive(Debug)]
+pub struct AddWorkResult {
+    pub work: Work,
+    pub author_created: bool,
+    pub messages: Vec<String>,
 }
 
 #[derive(Debug)]
 pub struct UpdateWorkRequest {
     pub title: Option<String>,
     pub author_name: Option<String>,
-    pub monitored: Option<bool>,
-    pub language: Option<String>,
+    pub series_name: Option<String>,
+    pub series_position: Option<f64>,
+    pub monitor_ebook: Option<bool>,
+    pub monitor_audiobook: Option<bool>,
+}
+
+#[derive(Debug)]
+pub struct WorkDetailView {
+    pub work: Work,
+    pub library_items: Vec<LibraryItem>,
+}
+
+#[derive(Debug)]
+pub struct PaginatedWorksView {
+    pub works: Vec<WorkDetailView>,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
 }
 
 #[derive(Debug)]
@@ -754,13 +781,28 @@ pub trait LlmCaller: Send + Sync {
 
 #[trait_variant::make(Send)]
 pub trait WorkService: Send + Sync {
-    async fn add(&self, user_id: UserId, req: AddWorkRequest) -> Result<Work, WorkServiceError>;
+    async fn add(
+        &self,
+        user_id: UserId,
+        req: AddWorkRequest,
+    ) -> Result<AddWorkResult, WorkServiceError>;
     async fn get(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError>;
+    async fn get_detail(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<WorkDetailView, WorkServiceError>;
     async fn list(
         &self,
         user_id: UserId,
         filter: WorkFilter,
     ) -> Result<Vec<Work>, WorkServiceError>;
+    async fn list_paginated(
+        &self,
+        user_id: UserId,
+        page: u32,
+        page_size: u32,
+    ) -> Result<PaginatedWorksView, WorkServiceError>;
     async fn update(
         &self,
         user_id: UserId,

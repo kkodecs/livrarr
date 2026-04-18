@@ -196,14 +196,18 @@ where
 
             let add_req = AddWorkRequest {
                 title: row.title.clone(),
-                author_name: row.author.clone(),
-                isbn: row.isbn.clone(),
+                author_name: row.author.clone().unwrap_or_default(),
+                author_ol_key: None,
                 ol_key: None,
-                hc_key: None,
-                detail_url: None,
+                gr_key: None,
+                year: None,
                 cover_url: None,
-                media_type: None,
-                monitored: false,
+                metadata_source: None,
+                language: None,
+                detail_url: None,
+                series_name: None,
+                series_position: None,
+                defer_enrichment: false,
             };
 
             match self.work_service.add(user_id, add_req).await {
