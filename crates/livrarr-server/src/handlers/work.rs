@@ -8,8 +8,8 @@ use crate::{
     RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
 use livrarr_db::{
-    AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, LibraryItemDb, NotificationDb,
-    ProvenanceDb, SetFieldProvenanceRequest, WorkDb,
+    AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, NotificationDb, ProvenanceDb,
+    SetFieldProvenanceRequest, WorkDb,
 };
 use livrarr_domain::services::{WorkDetailView, WorkService};
 use livrarr_domain::{ProvenanceSetter, Work, WorkField};
@@ -985,85 +985,33 @@ pub async fn refresh(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<RefreshWorkResponse>, ApiError> {
-    let user_id = ctx.user.id;
-    let work = state.db.get_work(user_id, id).await?;
+    let result = state.work_service.refresh(ctx.user.id, id).await?;
 
-    // Reset legacy enrichment_retry table state. The new queue path manages its
-    // own retry state via provider_retry_state (cleared by
-    // enrichment_service.reset_for_manual_refresh below); the legacy reset is
-    // still needed for foreign works and for any in-flight legacy retry timer.
-    if let Err(e) =
-        livrarr_db::EnrichmentRetryDb::reset_enrichment_for_refresh(&state.db, user_id, id).await
-    {
-        tracing::warn!("reset_enrichment_for_refresh failed: {e}");
-    }
-
-    // Re-enrich — both English and foreign now route through the queue.
-    // GoodreadsClient handles foreign-work URLs internally; LLM validator
-    // identity-checks providers against the user-locked anchor.
-    if let Err(e) = livrarr_metadata::EnrichmentService::reset_for_manual_refresh(
-        state.enrichment_service.as_ref(),
-        user_id,
-        id,
-    )
-    .await
-    {
-        tracing::warn!("enrichment_service.reset_for_manual_refresh failed: {e}");
-    }
-
-    let result = match livrarr_metadata::EnrichmentService::enrich_work(
-        state.enrichment_service.as_ref(),
-        user_id,
-        id,
-        livrarr_metadata::EnrichmentMode::HardRefresh,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("enrichment_service.enrich_work failed: {e}");
-            return Ok(Json(RefreshWorkResponse {
-                work: work_to_detail(&work),
-                messages: vec![format!("enrichment failed: {e}")],
-            }));
-        }
-    };
-
-    let enriched = result.work.clone();
-
-    if let Some(ref cover_url) = enriched.cover_url {
+    if let Some(ref cover_url) = result.work.cover_url {
         download_post_enrich_cover(&state, id, cover_url).await;
     }
 
-    let mut messages: Vec<String> = result
-        .provider_outcomes
-        .iter()
-        .filter(|(_, oc)| {
-            !matches!(
-                oc,
-                livrarr_domain::OutcomeClass::Success | livrarr_domain::OutcomeClass::NotFound
-            )
-        })
-        .map(|(p, oc)| format!("{p:?}: {oc:?}"))
-        .collect();
+    let mut messages = result.messages;
     if result.merge_deferred {
         messages.push("Merge deferred — retry pending".to_string());
     }
 
-    // TAG-V21-004: rewrite tags on existing library items after re-enrichment.
-    let taggable = state.db.list_taggable_items_by_work(user_id, id).await?;
-    if !taggable.is_empty() {
-        let tag_warnings = super::import::retag_library_items(&state, &enriched, &taggable).await;
+    if !result.taggable_items.is_empty() {
+        let tag_warnings =
+            super::import::retag_library_items(&state, &result.work, &result.taggable_items).await;
         for w in &tag_warnings {
             messages.push(format!("tag rewrite warning: {w}"));
         }
-        if tag_warnings.is_empty() && !taggable.is_empty() {
-            messages.push(format!("tags rewritten on {} file(s)", taggable.len()));
+        if tag_warnings.is_empty() {
+            messages.push(format!(
+                "tags rewritten on {} file(s)",
+                result.taggable_items.len()
+            ));
         }
     }
 
     Ok(Json(RefreshWorkResponse {
-        work: work_to_detail(&enriched),
+        work: work_to_detail(&result.work),
         messages,
     }))
 }
@@ -1091,7 +1039,6 @@ pub async fn refresh_all(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let user_id = ctx.user.id;
 
-    // Deduplication: reject if a refresh is already running for this user.
     {
         let mut guard = state.refresh_in_progress.lock().unwrap();
         if !guard.insert(user_id) {
@@ -1101,74 +1048,69 @@ pub async fn refresh_all(
         }
     }
 
-    // RAII guard — handles cleanup on all paths (empty, error, panic, completion).
     let refresh_guard = RefreshGuard {
         user_id,
         set: state.refresh_in_progress.clone(),
     };
 
-    let works = state.db.list_works(user_id).await?;
+    let works = state
+        .work_service
+        .list(
+            user_id,
+            livrarr_domain::services::WorkFilter {
+                author_id: None,
+                monitored: None,
+                enrichment_status: None,
+                media_type: None,
+                sort_by: None,
+                sort_dir: None,
+            },
+        )
+        .await
+        .map_err(ApiError::from)?;
 
     if works.is_empty() {
         return Ok(axum::http::StatusCode::ACCEPTED);
-        // refresh_guard dropped here
     }
 
     let total = works.len();
     tokio::spawn(async move {
-        let _guard = refresh_guard; // ensure guard lives for the task's lifetime
+        let _guard = refresh_guard;
         let mut enriched = 0usize;
         let mut failed = 0usize;
 
         for work in &works {
-            // Both English and foreign paths route through the queue.
-            if let Err(e) = livrarr_metadata::EnrichmentService::reset_for_manual_refresh(
-                state.enrichment_service.as_ref(),
-                user_id,
-                work.id,
+            let result = match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                state.work_service.refresh(user_id, work.id),
             )
             .await
             {
-                tracing::warn!(
-                    work_id = work.id,
-                    "refresh_all: reset_for_manual_refresh failed: {e}"
-                );
-            }
-
-            let enrich_fut = livrarr_metadata::EnrichmentService::enrich_work(
-                state.enrichment_service.as_ref(),
-                user_id,
-                work.id,
-                livrarr_metadata::EnrichmentMode::HardRefresh,
-            );
-            let result =
-                match tokio::time::timeout(std::time::Duration::from_secs(30), enrich_fut).await {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            work_id = work.id,
-                            "refresh_all: enrichment_service.enrich_work failed: {e}"
-                        );
-                        failed += 1;
-                        continue;
-                    }
-                    Err(_) => {
-                        tracing::warn!(work_id = work.id, "refresh_all: enrichment timed out");
-                        failed += 1;
-                        continue;
-                    }
-                };
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    tracing::warn!(work_id = work.id, "refresh_all: refresh failed: {e}");
+                    failed += 1;
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!(work_id = work.id, "refresh_all: refresh timed out");
+                    failed += 1;
+                    continue;
+                }
+            };
 
             if let Some(ref cover_url) = result.work.cover_url {
                 download_post_enrich_cover(&state, work.id, cover_url).await;
             }
 
             enriched += 1;
-            if let Ok(taggable) = state.db.list_taggable_items_by_work(user_id, work.id).await {
-                if !taggable.is_empty() {
-                    let _ =
-                        super::import::retag_library_items(&state, &result.work, &taggable).await;
-                }
+            if !result.taggable_items.is_empty() {
+                let _ = super::import::retag_library_items(
+                    &state,
+                    &result.work,
+                    &result.taggable_items,
+                )
+                .await;
             }
         }
 
@@ -1191,8 +1133,6 @@ pub async fn refresh_all(
         {
             tracing::warn!("create_notification failed: {e}");
         }
-
-        // _guard dropped here — RefreshGuard::drop removes user_id from set.
     });
 
     Ok(axum::http::StatusCode::ACCEPTED)

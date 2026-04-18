@@ -241,6 +241,14 @@ pub enum SortDirection {
 }
 
 #[derive(Debug)]
+pub struct RefreshWorkResult {
+    pub work: Work,
+    pub messages: Vec<String>,
+    pub taggable_items: Vec<LibraryItem>,
+    pub merge_deferred: bool,
+}
+
+#[derive(Debug)]
 pub struct RefreshAllHandle {
     pub total_works: usize,
 }
@@ -810,7 +818,11 @@ pub trait WorkService: Send + Sync {
         req: UpdateWorkRequest,
     ) -> Result<Work, WorkServiceError>;
     async fn delete(&self, user_id: UserId, work_id: WorkId) -> Result<(), WorkServiceError>;
-    async fn refresh(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError>;
+    async fn refresh(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<RefreshWorkResult, WorkServiceError>;
     async fn refresh_all(&self, user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError>;
     async fn upload_cover(
         &self,

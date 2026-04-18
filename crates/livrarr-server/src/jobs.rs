@@ -1311,11 +1311,11 @@ pub async fn enrichment_retry_tick(
             }
             match tokio::time::timeout(
                 Duration::from_secs(30),
-                livrarr_metadata::EnrichmentService::enrich_work(
-                    state.enrichment_service.as_ref(),
+                livrarr_domain::services::EnrichmentWorkflow::enrich_work(
+                    state.enrichment_workflow.as_ref(),
                     user.id,
                     work_id,
-                    livrarr_metadata::EnrichmentMode::Background,
+                    livrarr_domain::services::EnrichmentMode::Background,
                 ),
             )
             .await
