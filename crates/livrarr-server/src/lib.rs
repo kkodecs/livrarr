@@ -1529,6 +1529,24 @@ impl From<livrarr_domain::services::SeriesServiceError> for ApiError {
     }
 }
 
+impl From<livrarr_domain::services::WorkServiceError> for ApiError {
+    fn from(e: livrarr_domain::services::WorkServiceError) -> Self {
+        use livrarr_domain::services::WorkServiceError;
+        match e {
+            WorkServiceError::NotFound => ApiError::NotFound,
+            WorkServiceError::AlreadyExists => ApiError::Conflict {
+                reason: "work already exists".into(),
+            },
+            WorkServiceError::EnrichmentConflict => ApiError::Conflict {
+                reason: "enrichment conflict".into(),
+            },
+            WorkServiceError::CoverTooLarge => ApiError::BadRequest("cover too large".into()),
+            WorkServiceError::Enrichment(msg) => ApiError::Internal(msg),
+            WorkServiceError::Db(db_err) => ApiError::Db(db_err),
+        }
+    }
+}
+
 /// JSON error response body matching frontend's normalizeError expectations.
 ///
 /// Format: { status, error, message, fieldErrors? }

@@ -164,14 +164,18 @@ where
                     // Auto-add via WorkService
                     let add_req = AddWorkRequest {
                         title: entry_title.clone(),
-                        author_name: Some(author.name.clone()),
-                        isbn: None,
+                        author_name: author.name.clone(),
+                        author_ol_key: None,
                         ol_key: Some(entry_ol_key.clone()),
-                        hc_key: None,
-                        detail_url: None,
+                        gr_key: None,
+                        year: None,
                         cover_url: None,
-                        media_type: None,
-                        monitored: true,
+                        metadata_source: None,
+                        language: None,
+                        detail_url: None,
+                        series_name: None,
+                        series_position: None,
+                        defer_enrichment: false,
                     };
 
                     match self.work_service.add(user_id, add_req).await {

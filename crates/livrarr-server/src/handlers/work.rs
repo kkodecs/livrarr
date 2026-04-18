@@ -9,8 +9,9 @@ use crate::{
 };
 use livrarr_db::{
     AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, LibraryItemDb, NotificationDb,
-    ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
+    ProvenanceDb, SetFieldProvenanceRequest, WorkDb,
 };
+use livrarr_domain::services::{WorkDetailView, WorkService};
 use livrarr_domain::{ProvenanceSetter, Work, WorkField};
 
 /// Write add-time provenance entries for a freshly-created work.
@@ -116,6 +117,22 @@ fn work_to_detail(w: &Work) -> WorkDetailResponse {
         library_items: vec![],
         metadata_source: w.metadata_source.clone(),
     }
+}
+
+fn detail_from_view(view: WorkDetailView) -> WorkDetailResponse {
+    let mut detail = work_to_detail(&view.work);
+    detail.library_items = view
+        .library_items
+        .iter()
+        .map(|li| crate::LibraryItemResponse {
+            id: li.id,
+            path: li.path.clone(),
+            media_type: li.media_type,
+            file_size: li.file_size,
+            imported_at: li.imported_at.to_rfc3339(),
+        })
+        .collect();
+    detail
 }
 
 /// Extract the original URL from a proxy cover URL.
@@ -822,38 +839,21 @@ pub async fn list(
     ctx: AuthContext,
     Query(pq): Query<crate::PaginationQuery>,
 ) -> Result<Json<crate::PaginatedResponse<WorkDetailResponse>>, ApiError> {
-    let user_id = ctx.user.id;
-    let page = pq.page();
-    let page_size = pq.page_size();
-    let (works, total) = state
-        .db
-        .list_works_paginated(user_id, page, page_size)
-        .await?;
-    let work_ids: Vec<i64> = works.iter().map(|w| w.id).collect();
-    let page_items = state
-        .db
-        .list_library_items_by_work_ids(user_id, &work_ids)
+    let view = state
+        .work_service
+        .list_paginated(ctx.user.id, pq.page(), pq.page_size())
         .await?;
 
-    let mut results: Vec<WorkDetailResponse> = works.iter().map(work_to_detail).collect();
-    for detail in &mut results {
-        detail.library_items = page_items
-            .iter()
-            .filter(|li| li.work_id == detail.id)
-            .map(|li| crate::LibraryItemResponse {
-                id: li.id,
-                path: li.path.clone(),
-                media_type: li.media_type,
-                file_size: li.file_size,
-                imported_at: li.imported_at.to_rfc3339(),
-            })
-            .collect();
-    }
+    let items = view
+        .works
+        .into_iter()
+        .map(|wv| detail_from_view(wv))
+        .collect();
     Ok(Json(crate::PaginatedResponse {
-        items: results,
-        total,
-        page,
-        page_size,
+        items,
+        total: view.total,
+        page: view.page,
+        page_size: view.page_size,
     }))
 }
 
@@ -863,21 +863,8 @@ pub async fn get(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<WorkDetailResponse>, ApiError> {
-    let user_id = ctx.user.id;
-    let work = state.db.get_work(user_id, id).await?;
-    let items = state.db.list_library_items_by_work(user_id, id).await?;
-    let mut detail = work_to_detail(&work);
-    detail.library_items = items
-        .into_iter()
-        .map(|li| crate::LibraryItemResponse {
-            id: li.id,
-            path: li.path,
-            media_type: li.media_type,
-            file_size: li.file_size,
-            imported_at: li.imported_at.to_rfc3339(),
-        })
-        .collect();
-    Ok(Json(detail))
+    let view = state.work_service.get_detail(ctx.user.id, id).await?;
+    Ok(Json(detail_from_view(view)))
 }
 
 /// PUT /api/v1/work/:id
@@ -887,8 +874,8 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(req): Json<UpdateWorkRequest>,
 ) -> Result<Json<WorkDetailResponse>, ApiError> {
-    // Run cleanup on title/author when the user is editing them. Edited
-    // values become the new locked identity anchor (setter=User).
+    use livrarr_domain::services::{UpdateWorkRequest as DomainUpdateWorkRequest, WorkService};
+
     let cleaned_title = req
         .title
         .as_deref()
@@ -899,13 +886,13 @@ pub async fn update(
         .map(livrarr_metadata::title_cleanup::clean_author);
 
     let work = state
-        .db
-        .update_work_user_fields(
+        .work_service
+        .update(
             ctx.user.id,
             id,
-            UpdateWorkUserFieldsDbRequest {
-                title: cleaned_title.clone(),
-                author_name: cleaned_author.clone(),
+            DomainUpdateWorkRequest {
+                title: cleaned_title,
+                author_name: cleaned_author,
                 series_name: req.series_name,
                 series_position: req.series_position,
                 monitor_ebook: req.monitor_ebook,
@@ -913,36 +900,6 @@ pub async fn update(
             },
         )
         .await?;
-
-    // Write provenance for fields the user edited so they re-lock as
-    // setter=User. Only writes for fields actually present in the request.
-    let mut prov_reqs: Vec<SetFieldProvenanceRequest> = Vec::new();
-    let user_id = ctx.user.id;
-    if cleaned_title.is_some() {
-        prov_reqs.push(SetFieldProvenanceRequest {
-            user_id,
-            work_id: id,
-            field: WorkField::Title,
-            source: None,
-            setter: ProvenanceSetter::User,
-            cleared: false,
-        });
-    }
-    if cleaned_author.is_some() {
-        prov_reqs.push(SetFieldProvenanceRequest {
-            user_id,
-            work_id: id,
-            field: WorkField::AuthorName,
-            source: None,
-            setter: ProvenanceSetter::User,
-            cleared: false,
-        });
-    }
-    if !prov_reqs.is_empty() {
-        if let Err(e) = state.db.set_field_provenance_batch(prov_reqs).await {
-            tracing::warn!(work_id = id, "user-edit provenance write failed: {e}");
-        }
-    }
 
     Ok(Json(work_to_detail(&work)))
 }
@@ -1017,7 +974,8 @@ pub async fn delete(
     Path(id): Path<i64>,
     Query(_q): Query<DeleteQuery>,
 ) -> Result<Json<DeleteWorkResponse>, ApiError> {
-    let _work = state.db.delete_work(ctx.user.id, id).await?;
+    use livrarr_domain::services::WorkService;
+    state.work_service.delete(ctx.user.id, id).await?;
     Ok(Json(DeleteWorkResponse { warnings: vec![] }))
 }
 
