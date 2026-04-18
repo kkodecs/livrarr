@@ -239,13 +239,15 @@ async fn main() {
 
     let svc_db = db.clone();
     let svc_enrichment = enrichment_service.clone();
+    let import_semaphore = Arc::new(tokio::sync::Semaphore::new(2));
+    let data_dir_arc = Arc::new(data_dir.clone());
     let state = AppState {
         db,
         auth_service,
         http_client,
         http_client_safe,
         config: Arc::new(config.clone()),
-        data_dir: Arc::new(data_dir.clone()),
+        data_dir: data_dir_arc.clone(),
         startup_time: chrono::Utc::now(),
         job_runner: Some(job_runner.clone()),
         provider_health: Arc::new(ProviderHealthState::new()),
@@ -255,7 +257,7 @@ async fn main() {
         log_buffer,
         log_level_handle,
         refresh_in_progress: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        import_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+        import_semaphore: import_semaphore.clone(),
         import_locks: Arc::new(dashmap::DashMap::new()),
         grab_search_cache: Arc::new(livrarr_server::state::GrabSearchCache::new()),
         rss_last_run: Arc::new(std::sync::atomic::AtomicI64::new(0)),
@@ -328,7 +330,26 @@ async fn main() {
             Arc::new(livrarr_organize::import_workflow::ImportWorkflowImpl::new(
                 svc_db.clone(),
                 fs,
+                import_semaphore.clone(),
+                data_dir_arc.clone(),
             ))
+        },
+        rss_sync_workflow: {
+            let rs = Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
+                svc_db.clone(),
+                livrarr_http::fetcher::HttpFetcherImpl::new()
+                    .expect("HttpFetcherImpl construction for rss sync"),
+            ));
+            Arc::new(
+                livrarr_metadata::rss_sync_workflow::RssSyncWorkflowImpl::new(
+                    Arc::new(svc_db.clone()),
+                    Arc::new(
+                        livrarr_http::fetcher::HttpFetcherImpl::new()
+                            .expect("HttpFetcherImpl construction for rss sync fetch"),
+                    ),
+                    rs,
+                ),
+            )
         },
         list_service: {
             let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(

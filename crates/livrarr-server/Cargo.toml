@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 trait-variant = { workspace = true }
 livrarr-domain = { workspace = true }
+livrarr-matching = { workspace = true }
 livrarr-db = { workspace = true }
 livrarr-http = { workspace = true }
 livrarr-metadata = { workspace = true }
@@ -48,13 +49,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 uuid = { version = "1", features = ["v4"] }
 tower_governor = "0.8.0"
 dashmap = "6.1.0"
-rapidfuzz = "0.5"
-unicode-normalization = "0.1"
-once_cell = "1"
 regex = "1"
-rbook = "0.4"
-mp4ameta = "0.13"
-id3 = "1.16"
 data-encoding = "2.10.0"
 
 [dev-dependencies]

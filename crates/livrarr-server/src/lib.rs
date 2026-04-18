@@ -34,7 +34,7 @@ pub mod auth_service;
 pub mod config;
 pub mod handlers;
 pub mod jobs;
-pub mod matching;
+pub use livrarr_matching as matching;
 pub mod middleware;
 pub mod parsers;
 pub mod readarr_client;
@@ -1584,6 +1584,28 @@ impl From<livrarr_domain::services::GrabServiceError> for ApiError {
             GrabServiceError::NotFound => ApiError::NotFound,
             GrabServiceError::ClientUnreachable(msg) => ApiError::BadGateway(msg),
             GrabServiceError::Db(db_err) => ApiError::Db(db_err),
+        }
+    }
+}
+
+impl From<livrarr_domain::services::ImportWorkflowError> for ApiError {
+    fn from(e: livrarr_domain::services::ImportWorkflowError) -> Self {
+        use livrarr_domain::services::ImportWorkflowError;
+        match e {
+            ImportWorkflowError::GrabNotFound => ApiError::NotFound,
+            ImportWorkflowError::SourceNotResolved(msg) => ApiError::BadGateway(msg),
+            ImportWorkflowError::ClientUnreachable(msg) => ApiError::BadGateway(msg),
+            ImportWorkflowError::NoRootFolder { media_type } => {
+                ApiError::BadRequest(format!("no root folder configured for {media_type:?}"))
+            }
+            ImportWorkflowError::SourceInaccessible => {
+                ApiError::BadGateway("source directory not found or inaccessible".into())
+            }
+            ImportWorkflowError::ScanExpired => ApiError::NotFound,
+            ImportWorkflowError::ScanForbidden => ApiError::Forbidden,
+            ImportWorkflowError::ImportFailed(msg) => ApiError::Internal(msg),
+            ImportWorkflowError::TagWriteFailed(msg) => ApiError::Internal(msg),
+            ImportWorkflowError::Db(db_err) => ApiError::Db(db_err),
         }
     }
 }

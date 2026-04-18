@@ -679,6 +679,10 @@ pub enum ImportWorkflowError {
     ScanExpired,
     #[error("scan belongs to another user")]
     ScanForbidden,
+    #[error("import failed: {0}")]
+    ImportFailed(String),
+    #[error("tag write failed: {0}")]
+    TagWriteFailed(String),
     #[error("database error: {0}")]
     Db(#[from] DbError),
 }
@@ -724,6 +728,18 @@ pub struct RssSyncReport {
     pub grabs_attempted: usize,
     pub grabs_succeeded: usize,
     pub warnings: Vec<String>,
+}
+
+impl RssSyncReport {
+    pub fn empty() -> Self {
+        Self {
+            feeds_checked: 0,
+            releases_matched: 0,
+            grabs_attempted: 0,
+            grabs_succeeded: 0,
+            warnings: vec![],
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

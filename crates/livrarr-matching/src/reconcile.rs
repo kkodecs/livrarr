@@ -1,7 +1,7 @@
 //! Reconciliation engine — clusters hypotheses, scores, merges supplementary fields.
 
-use super::m4_scoring;
-use super::types::{Confidence, Extraction, ExtractionSource};
+use crate::m4_scoring;
+use crate::types::{Confidence, Extraction, ExtractionSource};
 
 /// A cluster of agreeing extractions, with a merged result.
 #[derive(Debug)]
@@ -36,14 +36,11 @@ pub fn reconcile(mut extractions: Vec<Extraction>) -> Vec<Cluster> {
     let n = extractions.len();
     let mut parent: Vec<usize> = (0..n).collect();
 
-    // Find with iterative path compression.
     fn find(parent: &mut [usize], i: usize) -> usize {
-        // Walk to the root, collecting the path.
         let mut root = i;
         while parent[root] != root {
             root = parent[root];
         }
-        // Compress: point every node on the path directly at the root.
         let mut cur = i;
         while parent[cur] != root {
             let next = parent[cur];
@@ -53,7 +50,6 @@ pub fn reconcile(mut extractions: Vec<Extraction>) -> Vec<Cluster> {
         root
     }
 
-    // Build agreement graph via union-find.
     for i in 0..n {
         for j in (i + 1)..n {
             if extractions_agree(&extractions[i], &extractions[j]) {
@@ -66,7 +62,6 @@ pub fn reconcile(mut extractions: Vec<Extraction>) -> Vec<Cluster> {
         }
     }
 
-    // Collect connected components.
     let mut cluster_map: std::collections::HashMap<usize, Vec<usize>> =
         std::collections::HashMap::new();
     for i in 0..n {
@@ -121,7 +116,6 @@ pub fn generate_synthetic(extractions: &[Extraction]) -> Vec<Extraction> {
     let mut synthetic = vec![];
     for title in &titles {
         for author in &authors {
-            // Skip pairs that already exist as original hypotheses.
             let already_exists = extractions.iter().any(|e| {
                 e.title.as_deref() == Some(*title) && e.author.as_deref() == Some(*author)
             });
@@ -152,7 +146,6 @@ pub fn generate_synthetic(extractions: &[Extraction]) -> Vec<Extraction> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Check if two extractions agree (title_sim > 0.80 AND author_sim > 0.80 or either author missing).
 fn extractions_agree(a: &Extraction, b: &Extraction) -> bool {
     let title_a = a.title.as_deref().unwrap_or("");
     let title_b = b.title.as_deref().unwrap_or("");
@@ -173,18 +166,15 @@ fn extractions_agree(a: &Extraction, b: &Extraction) -> bool {
         (Some(aa), Some(bb)) if !aa.is_empty() && !bb.is_empty() => {
             m4_scoring::author_similarity(aa, bb) > 0.80
         }
-        // If either author is missing, agreement on title is enough.
         _ => true,
     }
 }
 
-/// Build a cluster from member extractions.
 fn build_cluster(members: Vec<Extraction>) -> Option<Cluster> {
     if members.is_empty() {
         return None;
     }
 
-    // Pick primary: highest completeness, then source trust (Embedded > Path > String).
     let primary_idx = members
         .iter()
         .enumerate()
@@ -198,7 +188,6 @@ fn build_cluster(members: Vec<Extraction>) -> Option<Cluster> {
 
     let mut primary = members[primary_idx].clone();
 
-    // Merge supplementary fields from other members (don't override primary title/author).
     for member in &members {
         if primary.year.is_none() {
             primary.year = member.year;
@@ -223,7 +212,6 @@ fn build_cluster(members: Vec<Extraction>) -> Option<Cluster> {
         }
     }
 
-    // Compute cluster confidence from agreement.
     let agreement_count = members.len();
     let confidence =
         if agreement_count >= 3 || (agreement_count == 2 && primary.has_title_and_author()) {

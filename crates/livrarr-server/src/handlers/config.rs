@@ -1,5 +1,6 @@
 use axum::extract::State;
 use axum::Json;
+use livrarr_domain::services::RssSyncWorkflow;
 
 /// Strip whitespace and "Bearer " prefix from token inputs.
 fn clean_token(token: &str) -> String {
@@ -451,16 +452,22 @@ pub async fn trigger_rss_sync(
 
     let s = state.clone();
     let guard = RssSyncGuard(state.rss_sync_running.clone());
-    let cancel = state
-        .job_runner
-        .as_ref()
-        .map(|jr| jr.cancel_token())
-        .unwrap_or_default();
 
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) = crate::jobs::rss_sync_core(s, cancel).await {
-            tracing::warn!("trigger rss_sync_core failed: {e}");
+        match s.rss_sync_workflow.run_sync().await {
+            Ok(report) => {
+                s.rss_last_run.store(
+                    chrono::Utc::now().timestamp(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                for w in &report.warnings {
+                    tracing::warn!("RSS sync: {w}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("trigger rss_sync failed: {e}");
+            }
         }
     });
 
