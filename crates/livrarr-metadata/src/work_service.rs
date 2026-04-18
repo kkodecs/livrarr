@@ -1,6 +1,6 @@
 use livrarr_db::{
-    AuthorDb, CreateAuthorDbRequest, CreateWorkDbRequest, LibraryItemDb, ProvenanceDb,
-    SetFieldProvenanceRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
+    AuthorDb, CreateAuthorDbRequest, CreateWorkDbRequest, EnrichmentRetryDb, LibraryItemDb,
+    ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
@@ -63,7 +63,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
 
 impl<D, E> WorkService for WorkServiceImpl<D, E>
 where
-    D: WorkDb + AuthorDb + LibraryItemDb + ProvenanceDb + Send + Sync,
+    D: WorkDb + AuthorDb + LibraryItemDb + ProvenanceDb + EnrichmentRetryDb + Send + Sync,
     E: EnrichmentWorkflow + Send + Sync,
 {
     async fn add(
@@ -352,14 +352,12 @@ where
             })
     }
 
-    async fn refresh(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError> {
-        self.db
-            .get_work(user_id, work_id)
-            .await
-            .map_err(|e| match e {
-                DbError::NotFound { .. } => WorkServiceError::NotFound,
-                other => WorkServiceError::Db(other),
-            })?;
+    async fn refresh(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<RefreshWorkResult, WorkServiceError> {
+        let work = self.get(user_id, work_id).await?;
 
         let lock = {
             let mut locks = self.refresh_locks.lock().await;
@@ -370,18 +368,54 @@ where
         };
         let _guard = lock.lock().await;
 
-        self.enrichment
+        if let Err(e) = self.db.reset_enrichment_for_refresh(user_id, work_id).await {
+            tracing::warn!("reset_enrichment_for_refresh failed: {e}");
+        }
+
+        if let Err(e) = self
+            .enrichment
+            .reset_for_manual_refresh(user_id, work_id)
+            .await
+        {
+            tracing::warn!("enrichment reset_for_manual_refresh failed: {e}");
+        }
+
+        let (enriched_work, messages, merge_deferred) = match self
+            .enrichment
             .enrich_work(user_id, work_id, EnrichmentMode::HardRefresh)
             .await
-            .map_err(|e| WorkServiceError::Enrichment(e.to_string()))?;
+        {
+            Ok(result) => {
+                let msgs: Vec<String> = result
+                    .provider_outcomes
+                    .iter()
+                    .filter(|(_, oc)| !matches!(oc, OutcomeClass::Success | OutcomeClass::NotFound))
+                    .map(|(p, oc)| format!("{p:?}: {oc:?}"))
+                    .collect();
+                let w = match self.db.get_work(user_id, work_id).await {
+                    Ok(w) => w,
+                    Err(_) => result.work,
+                };
+                (w, msgs, result.merge_deferred)
+            }
+            Err(e) => {
+                tracing::warn!(work_id, "enrichment failed: {e}");
+                (work, vec![format!("enrichment failed: {e}")], false)
+            }
+        };
 
-        self.db
-            .get_work(user_id, work_id)
+        let taggable_items = self
+            .db
+            .list_taggable_items_by_work(user_id, work_id)
             .await
-            .map_err(|e| match e {
-                DbError::NotFound { .. } => WorkServiceError::NotFound,
-                other => WorkServiceError::Db(other),
-            })
+            .unwrap_or_default();
+
+        Ok(RefreshWorkResult {
+            work: enriched_work,
+            messages,
+            taggable_items,
+            merge_deferred,
+        })
     }
 
     async fn refresh_all(&self, user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError> {
