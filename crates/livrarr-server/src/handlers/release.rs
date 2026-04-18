@@ -17,7 +17,6 @@ const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
 use livrarr_db::{
     CreateGrabDbRequest, CreateHistoryEventDbRequest, DownloadClientDb, GrabDb, HistoryDb,
-    IndexerDb, WorkDb,
 };
 use livrarr_domain::{EventType, Indexer};
 
@@ -33,13 +32,13 @@ pub struct SearchQuery {
 }
 
 /// GET /api/v1/release?workId=...  — searches all enabled Torznab indexers
-///
-/// Satisfies: SEARCH-001 through SEARCH-013
 pub async fn search(
     State(state): State<AppState>,
     ctx: AuthContext,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<ReleaseSearchResponse>, ApiError> {
+    use livrarr_domain::services::{ReleaseService, SearchReleasesRequest};
+
     let work_id = match q.work_id {
         Some(id) => id,
         None => {
@@ -51,56 +50,53 @@ pub async fn search(
         }
     };
 
-    let work = state.db.get_work(ctx.user.id, work_id).await?;
-    let title = work.title.clone();
-    let author = work.author_name.clone();
+    let svc_response = state
+        .release_service
+        .search(
+            ctx.user.id,
+            SearchReleasesRequest {
+                work_id,
+                refresh: q.refresh,
+                cache_only: q.cache_only,
+            },
+        )
+        .await?;
 
-    let indexers = state.db.list_enabled_interactive_indexers().await?;
-    if indexers.is_empty() {
-        return Err(ApiError::Conflict {
-            reason: "No indexers configured".into(),
-        });
-    }
-
-    // Filter out indexers with empty categories.
-    let indexers: Vec<Indexer> = indexers
+    let results = svc_response
+        .results
         .into_iter()
-        .filter(|idx| {
-            if idx.categories.is_empty() {
-                tracing::info!(indexer = %idx.name, "skipping indexer with no categories");
-                false
-            } else {
-                true
-            }
+        .map(|r| ReleaseResponse {
+            title: r.title,
+            indexer: r.indexer,
+            size: r.size,
+            guid: r.guid,
+            download_url: r.download_url,
+            seeders: r.seeders,
+            leechers: r.leechers,
+            publish_date: r.publish_date,
+            protocol: r.protocol.to_string(),
+            categories: r.categories,
         })
         .collect();
 
-    if indexers.is_empty() {
-        return Err(ApiError::Conflict {
-            reason: "No indexers configured".into(),
-        });
-    }
+    let warnings = svc_response
+        .warnings
+        .into_iter()
+        .map(|w| {
+            let (indexer, error) = w
+                .strip_prefix("indexer ")
+                .and_then(|s| s.split_once(": "))
+                .map(|(i, e)| (i.to_string(), e.to_string()))
+                .unwrap_or_else(|| (String::new(), w));
+            crate::SearchWarning { indexer, error }
+        })
+        .collect();
 
-    let total_indexers = indexers.len();
-
-    // Delegate to service — business logic lives there, testable without Axum.
-    let svc = crate::services::release_service::ReleaseService::new(
-        state.db.clone(),
-        state.http_client.clone(),
-        state.grab_search_cache.clone(),
-    );
-    let response = svc
-        .search(&title, &author, indexers, q.refresh, q.cache_only)
-        .await;
-
-    // All indexers failed → 502 with structured body.
-    if crate::services::release_service::ReleaseService::all_failed(&response, total_indexers) {
-        return Err(ApiError::StructuredBadGateway {
-            body: serde_json::to_value(&response).unwrap_or_default(),
-        });
-    }
-
-    Ok(Json(response))
+    Ok(Json(ReleaseSearchResponse {
+        results,
+        warnings,
+        cache_age_seconds: svc_response.cache_age_seconds,
+    }))
 }
 
 /// Clean a title for search: strip subtitle (after colon or parenthetical),
@@ -557,38 +553,31 @@ pub async fn grab(
     ctx: AuthContext,
     Json(req): Json<GrabApiRequest>,
 ) -> Result<(), ApiError> {
-    let internal = InternalGrabRequest {
-        user_id: ctx.user.id,
-        work_id: req.work_id,
-        download_url: req.download_url,
-        title: req.title,
-        indexer: req.indexer,
-        guid: req.guid,
-        size: req.size,
-        protocol: req.protocol.unwrap_or_else(|| "torrent".to_string()),
-        categories: req.categories,
-        download_client_id: req.download_client_id,
-        source: "manual".to_string(),
+    use livrarr_domain::services::{DownloadProtocol, GrabRequest, GrabSource, ReleaseService};
+
+    let protocol = match req.protocol.as_deref() {
+        Some("usenet") => DownloadProtocol::Usenet,
+        _ => DownloadProtocol::Torrent,
     };
 
-    do_grab_internal(&state, internal)
-        .await
-        .map_err(|e| match e {
-            GrabError::NoClient { protocol } => {
-                let label = if protocol == "usenet" {
-                    "Usenet"
-                } else {
-                    "torrent"
-                };
-                ApiError::BadRequest(format!("No {label} download client configured"))
-            }
-            GrabError::ClientProtocolMismatch { protocol } => ApiError::BadRequest(format!(
-                "Selected download client does not support {protocol} protocol"
-            )),
-            GrabError::ClientUnreachable { message } => ApiError::BadGateway(message),
-            GrabError::Ssrf(msg) => ApiError::BadRequest(format!("Invalid download URL: {msg}")),
-            GrabError::Db(db_err) => ApiError::from(db_err),
-        })?;
+    state
+        .release_service
+        .grab(
+            ctx.user.id,
+            GrabRequest {
+                work_id: req.work_id,
+                download_url: req.download_url,
+                title: req.title,
+                indexer: req.indexer,
+                guid: req.guid,
+                size: req.size,
+                protocol,
+                categories: req.categories,
+                download_client_id: req.download_client_id,
+                source: GrabSource::Manual,
+            },
+        )
+        .await?;
 
     Ok(())
 }

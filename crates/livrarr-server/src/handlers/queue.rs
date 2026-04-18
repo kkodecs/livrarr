@@ -218,10 +218,8 @@ pub async fn remove(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<(), ApiError> {
-    state
-        .db
-        .update_grab_status(ctx.user.id, id, GrabStatus::Removed, None)
-        .await?;
+    use livrarr_domain::services::GrabService;
+    state.grab_service.remove(ctx.user.id, id).await?;
     Ok(())
 }
 

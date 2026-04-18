@@ -4,7 +4,7 @@
 //! and streaming body-size enforcement.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use livrarr_domain::services::{
@@ -25,14 +25,15 @@ struct BucketLimiter {
 
 /// Simple per-bucket rate limiter. Blocks (sleeps) until the minimum interval
 /// since the last request in the same bucket has elapsed.
+#[derive(Clone)]
 struct RateLimiterMap {
-    buckets: Mutex<HashMap<RateBucket, BucketLimiter>>,
+    buckets: Arc<Mutex<HashMap<RateBucket, BucketLimiter>>>,
 }
 
 impl RateLimiterMap {
     fn new() -> Self {
         Self {
-            buckets: Mutex::new(HashMap::new()),
+            buckets: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -124,6 +125,7 @@ fn user_agent_string(profile: &UserAgentProfile) -> String {
 // ---------------------------------------------------------------------------
 
 /// Production implementation of [`HttpFetcher`].
+#[derive(Clone)]
 pub struct HttpFetcherImpl {
     client: reqwest::Client,
     ssrf_client: reqwest::Client,
