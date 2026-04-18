@@ -30,8 +30,19 @@ Every enrichable field has per-field provenance tracking:
 - Whether the user overrode it (User > Provider > System)
 - User-owned provenance survives manual refresh
 
+## Monitoring
+
+Per-media-type monitoring (not a single boolean):
+- `monitor_ebook` — watch for ebook releases via RSS sync
+- `monitor_audiobook` — watch for audiobook releases via RSS sync
+
+These are independent. A work can be monitored for ebook only, audiobook only, or both. RSS filter checks release categories (7020 = ebook, 3030 = audiobook) against the corresponding flag.
+
+Series monitoring sets these flags on member works. Unmonitoring a series clears them.
+
 ## Semantics
 
 - "Missing" (no file on disk) is NOT the same as "wanted" (monitored for download). Don't conflate these.
 - A Work can have both ebook and audiobook releases simultaneously.
 - Works belong to Authors (many-to-one primary, with additional authors possible).
+- Works belong to exactly one collection (root folder). Collections are the scoping boundary for multi-user visibility.
