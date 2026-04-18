@@ -297,6 +297,72 @@ impl SeriesQueryService for StubSeriesQueryService {
 }
 
 // =============================================================================
+// StubImportWorkflow — returns empty import results
+// =============================================================================
+
+pub struct StubImportWorkflow;
+
+impl ImportWorkflow for StubImportWorkflow {
+    async fn import_grab(
+        &self,
+        _user_id: UserId,
+        grab_id: GrabId,
+    ) -> Result<ImportResult, ImportWorkflowError> {
+        Ok(ImportResult {
+            grab_id,
+            final_status: GrabStatus::Imported,
+            imported_files: vec![],
+            failed_files: vec![],
+            skipped_files: vec![],
+            warnings: vec![],
+        })
+    }
+
+    async fn retry_import(
+        &self,
+        _user_id: UserId,
+        grab_id: GrabId,
+    ) -> Result<ImportResult, ImportWorkflowError> {
+        Ok(ImportResult {
+            grab_id,
+            final_status: GrabStatus::Imported,
+            imported_files: vec![],
+            failed_files: vec![],
+            skipped_files: vec![],
+            warnings: vec![],
+        })
+    }
+
+    async fn confirm_scan(
+        &self,
+        _user_id: UserId,
+        _scan_id: &str,
+        _selections: Vec<ScanConfirmation>,
+    ) -> Result<ImportResult, ImportWorkflowError> {
+        Ok(ImportResult {
+            grab_id: 0,
+            final_status: GrabStatus::Imported,
+            imported_files: vec![],
+            failed_files: vec![],
+            skipped_files: vec![],
+            warnings: vec![],
+        })
+    }
+}
+
+// =============================================================================
+// StubRssSyncWorkflow — returns empty report
+// =============================================================================
+
+pub struct StubRssSyncWorkflow;
+
+impl RssSyncWorkflow for StubRssSyncWorkflow {
+    async fn run_sync(&self) -> Result<RssSyncReport, RssSyncError> {
+        Ok(RssSyncReport::empty())
+    }
+}
+
+// =============================================================================
 // Test helper: create users
 // =============================================================================
 

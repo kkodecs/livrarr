@@ -4,6 +4,7 @@ members = [
     "crates/livrarr-domain",
     "crates/livrarr-http",
     "crates/livrarr-db",
+    "crates/livrarr-matching",
     "crates/livrarr-metadata",
     "crates/livrarr-download",
     "crates/livrarr-organize",
@@ -32,6 +33,7 @@ livrarr-download = { path = "crates/livrarr-download" }
 livrarr-organize = { path = "crates/livrarr-organize" }
 livrarr-tagwrite = { path = "crates/livrarr-tagwrite" }
 livrarr-jobs = { path = "crates/livrarr-jobs" }
+livrarr-matching = { path = "crates/livrarr-matching" }
 livrarr-server = { path = "crates/livrarr-server" }
 
 [profile.release]

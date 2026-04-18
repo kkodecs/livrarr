@@ -3,7 +3,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use super::types::{Confidence, Extraction, ExtractionSource};
+use crate::types::{Confidence, Extraction, ExtractionSource};
 
 /// Side-channel metadata extracted during cleaning.
 #[derive(Debug, Default)]
@@ -37,8 +37,6 @@ pub fn parse_string(input: &str) -> (Vec<Extraction>, SideChannel) {
                 .or(side.year);
 
             if i == TITLE_DASH_AUTHOR_AMBIGUOUS_IDX {
-                // Pattern 22 (ambiguous): Title - Author.
-                // Produce two hypotheses.
                 let h1 = make_extraction(book.as_deref(), author.as_deref(), year);
                 let h2 = make_extraction(author.as_deref(), book.as_deref(), year);
                 return (vec![h1, h2], side);
@@ -67,7 +65,6 @@ pub fn parse_string(input: &str) -> (Vec<Extraction>, SideChannel) {
         }
     }
 
-    // No regex matched — return cleaned string as title-only.
     (
         vec![Extraction {
             title: Some(cleaned.trim().to_string()),
@@ -135,7 +132,6 @@ fn clean_input(input: &str) -> (String, SideChannel) {
     let mut s = input.to_string();
     let mut side = SideChannel::default();
 
-    // Extract side-channel metadata before stripping.
     if let Some(cap) = NARRATOR_EXTRACT.captures(&s) {
         side.narrator = cap
             .get(1)
@@ -148,19 +144,16 @@ fn clean_input(input: &str) -> (String, SideChannel) {
     if let Some(cap) = LANG_TAG.captures(&s) {
         side.language = Some(cap[1].to_string());
     }
-    // Extract year from parenthesized or bracketed form.
     if let Some(cap) = YEAR_EXTRACT.captures(&s) {
         let y: i32 = cap[1].parse().unwrap_or(0);
         if (1800..=2030).contains(&y) {
             side.year = Some(y);
         }
     }
-    // Extract format.
     if let Some(cap) = QUALITY_TAG.captures(&s) {
         side.format = Some(cap[1].to_uppercase());
     }
 
-    // Now strip.
     s = FILE_EXT.replace(&s, "").to_string();
     s = WEBSITE_PREFIX.replace(&s, "").to_string();
     s = WEBSITE_POSTFIX.replace(&s, "").to_string();
@@ -169,22 +162,17 @@ fn clean_input(input: &str) -> (String, SideChannel) {
     s = ABRIDGED_EXTRACT.replace_all(&s, "").to_string();
     s = LANG_TAG.replace_all(&s, "").to_string();
 
-    // Replace underscores and dots with spaces (but not within 4-digit years).
     s = s.replace('_', " ");
-    // Dots: replace with spaces, then fix any digit-space-digit sequences back.
-    // (Preserve "2015.01" style patterns.)
     static DIGIT_SPACE_DIGIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d) (\d)").unwrap());
     static MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s{2,}").unwrap());
 
     s = s.replace('.', " ");
     s = DIGIT_SPACE_DIGIT.replace_all(&s, "$1.$2").to_string();
 
-    // Strip group suffix (but only if it looks like a scene tag, not part of a name).
     if s.contains(" - ") || s.contains(" – ") {
         s = GROUP_SUFFIX.replace(&s, "").to_string();
     }
 
-    // Collapse whitespace.
     s = MULTI_SPACE.replace_all(&s, " ").to_string();
 
     (s.trim().to_string(), side)
@@ -200,71 +188,27 @@ struct Pattern {
 
 static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
     vec![
-        // 1. Book by Author [...] (MyAnonamouse)
         Pattern { regex: Regex::new(r"^(?P<book>.+)\bby\b(?P<author>.+?)(?:\[|\()").unwrap() },
-
-        // 2. (Genre) [Source] Author - Book - Year (ruTracker)
         Pattern { regex: Regex::new(r"^(?:\(.+?\))(?:\W*(?:\[.+?\]))?\W*(?P<author>.+?)(?: - )(?P<book>.+?)(?: - )(?P<releaseyear>\d{4})").unwrap() },
-
-        // 3. Author - Book - Version - Source - Year (scene)
         Pattern { regex: Regex::new(r"^(?P<author>.+?)[-](?P<book>.+?)[-](?:[\(\[]?)(?:.+?(?:Edition)?)(?:[\)\]]?)[-](?:\d?CD|WEB).+?(?P<releaseyear>\d{4})").unwrap() },
-
-        // 4. Author - Book - Source - Year
         Pattern { regex: Regex::new(r"^(?P<author>.+?)[-](?P<book>.+?)[-](?:\d?CD|WEB).+?(?P<releaseyear>\d{4})").unwrap() },
-
-        // 5. Author - Book (Year) strict
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?: - )+)(?P<book>.+?)\W*(?:\(|\[).+?(?P<releaseyear>\d{4})").unwrap() },
-
-        // 6. Author - Book (Year) loose
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?: - )+)(?P<book>.+?)\W*(?:\(|\[)(?P<releaseyear>\d{4})").unwrap() },
-
-        // 7. Author - Book - Year [something]
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?: - )+)(?P<book>.+?)\W*(?: - )(?P<releaseyear>\d{4})\W*(?:\(|\[)").unwrap() },
-
-        // 8. Author - Book [something] or Author - Book (something)
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?: - )+)(?P<book>.+?)\W*(?:\(|\[)").unwrap() },
-
-        // 9. Author - Book Year
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?: - )+)(?P<book>.+?)\W*(?P<releaseyear>\d{4})").unwrap() },
-
-        // 10. Author-Book (Year) strict (hyphen no space)
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?:-)+)(?P<book>.+?)\W*(?:\(|\[).+?(?P<releaseyear>\d{4})").unwrap() },
-
-        // 11. Author-Book (Year) loose (hyphen no space)
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?:-)+)(?P<book>.+?)\W*(?:\(|\[)(?P<releaseyear>\d{4})").unwrap() },
-
-        // 12. Author-Book [something] (hyphen no space)
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?:-)+)(?P<book>.+?)\W*(?:\(|\[)").unwrap() },
-
-        // 13. Author-Book-something-Year
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?:-)+)(?P<book>.+?)(?:-.+?)(?P<releaseyear>\d{4})").unwrap() },
-
-        // 14. Author-Book Year (hyphen no space)
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?:-)+)(?:(?P<book>.+?)(?:-)+)(?P<releaseyear>\d{4})").unwrap() },
-
-        // 15. Author - Year - Book
         Pattern { regex: Regex::new(r"^(?:(?P<author>.+?)(?:-))(?P<releaseyear>\d{4})(?:-)(?P<book>[^-]+)").unwrap() },
-
-        // 16. Author - Series # - Title
         Pattern { regex: Regex::new(r"^(?P<author>.+?)\s+-\s+.+?\s+\d+\s+-\s+(?P<book>.+)$").unwrap() },
-
-        // 17. Author - [Series ##] - Title
         Pattern { regex: Regex::new(r"^(?P<author>.+?)\s+-\s+\[.+?\s*\d+\]\s+-\s+(?P<book>.+)$").unwrap() },
-
-        // 18. Author - Title {Narrator}
         Pattern { regex: Regex::new(r"^(?P<author>.+?)\s+-\s+(?P<book>.+?)\s+\{.+?\}$").unwrap() },
-
-        // 19. Author - Title (Narrated by ...)
         Pattern { regex: Regex::new(r"^(?P<author>.+?)\s+-\s+(?P<book>.+?)\s+\((?:Narrated|Read) by .+?\)$").unwrap() },
-
-        // 20. Title (Author)
         Pattern { regex: Regex::new(r"^(?P<book>.+?)\s+\((?P<author>[^)]+)\)\s*$").unwrap() },
-
-        // 21. [Author] Title (Asian LN / private trackers)
         Pattern { regex: Regex::new(r"^\[(?P<author>[^\]]+)\]\s*(?P<book>.+)$").unwrap() },
-
-        // 22. Title - Author (reversed) — AMBIGUOUS: produces two hypotheses
-        // Placed last among hyphen patterns so more specific patterns get priority.
         Pattern { regex: Regex::new(r"^(?P<book>.+?)\s+-\s+(?P<author>.+)$").unwrap() },
     ]
 });

@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 // Import lock map type
 // ---------------------------------------------------------------------------
 
-type ImportLockMap = Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>;
+pub type ImportLockMap = Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>;
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -30,15 +30,28 @@ pub struct ImportWorkflowImpl<D, F> {
     db: D,
     file_service: F,
     import_locks: ImportLockMap,
+    import_semaphore: Arc<tokio::sync::Semaphore>,
+    data_dir: Arc<PathBuf>,
 }
 
 impl<D, F> ImportWorkflowImpl<D, F> {
-    pub fn new(db: D, file_service: F) -> Self {
+    pub fn new(
+        db: D,
+        file_service: F,
+        import_semaphore: Arc<tokio::sync::Semaphore>,
+        data_dir: Arc<PathBuf>,
+    ) -> Self {
         Self {
             db,
             file_service,
             import_locks: Arc::new(Mutex::new(HashMap::new())),
+            import_semaphore,
+            data_dir,
         }
+    }
+
+    pub fn import_locks(&self) -> &ImportLockMap {
+        &self.import_locks
     }
 }
 
@@ -163,6 +176,60 @@ fn validate_target_path(target: &Path, root_folder_path: &str) -> Result<(), Str
 }
 
 // ---------------------------------------------------------------------------
+// Format filtering
+// ---------------------------------------------------------------------------
+
+fn filter_preferred_formats(
+    files: Vec<SourceFile>,
+    config: &livrarr_db::MediaManagementConfig,
+) -> Vec<SourceFile> {
+    let ebook_prefs = &config.preferred_ebook_formats;
+    let audio_prefs = &config.preferred_audiobook_formats;
+
+    let ext_of = |f: &SourceFile| -> String {
+        f.path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+    };
+
+    let best_ebook_ext = ebook_prefs.iter().find(|pref| {
+        files
+            .iter()
+            .any(|f| f.media_type == MediaType::Ebook && ext_of(f) == **pref)
+    });
+
+    let best_audio_ext = audio_prefs.iter().find(|pref| {
+        files
+            .iter()
+            .any(|f| f.media_type == MediaType::Audiobook && ext_of(f) == **pref)
+    });
+
+    files
+        .into_iter()
+        .filter(|f| {
+            let ext = f
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            match f.media_type {
+                MediaType::Ebook => match best_ebook_ext {
+                    Some(best) => ext == *best,
+                    None => true,
+                },
+                MediaType::Audiobook => match best_audio_ext {
+                    Some(best) => ext == *best,
+                    None => true,
+                },
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Trait implementation
 // ---------------------------------------------------------------------------
 
@@ -252,6 +319,14 @@ where
                 .map_err(|e| {
                     ImportWorkflowError::SourceNotResolved(format!("enumeration failed: {e}"))
                 })?;
+
+        // Filter to preferred formats (e.g., epub over mobi when both exist)
+        let media_mgmt = self
+            .db
+            .get_media_management_config()
+            .await
+            .map_err(ImportWorkflowError::Db)?;
+        let source_files = filter_preferred_formats(source_files, &media_mgmt);
 
         if source_files.is_empty() {
             self.db

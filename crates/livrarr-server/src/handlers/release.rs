@@ -6,19 +6,12 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use crate::state::AppState;
-use crate::{
-    ApiError, AuthContext, GrabApiRequest, GrabStatus, ReleaseResponse, ReleaseSearchResponse,
-};
+use crate::{ApiError, AuthContext, GrabApiRequest, ReleaseResponse, ReleaseSearchResponse};
 
-/// Maximum size for .torrent file downloads (10 MB).
-const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 /// Maximum size for an indexer XML response body (10 MB).
 /// Protects against hostile or misconfigured indexers sending unbounded XML.
 const MAX_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
-use livrarr_db::{
-    CreateGrabDbRequest, CreateHistoryEventDbRequest, DownloadClientDb, GrabDb, HistoryDb,
-};
-use livrarr_domain::{EventType, Indexer};
+use livrarr_domain::Indexer;
 
 #[derive(serde::Deserialize)]
 pub struct SearchQuery {
@@ -582,21 +575,6 @@ pub async fn grab(
     Ok(())
 }
 
-/// Request for internal grab (used by both API handler and RSS job).
-pub struct InternalGrabRequest {
-    pub user_id: livrarr_domain::UserId,
-    pub work_id: livrarr_domain::WorkId,
-    pub download_url: String,
-    pub title: String,
-    pub indexer: String,
-    pub guid: String,
-    pub size: i64,
-    pub protocol: String,
-    pub categories: Vec<i32>,
-    pub download_client_id: Option<livrarr_domain::DownloadClientId>,
-    pub source: String,
-}
-
 #[derive(Debug)]
 pub enum GrabError {
     NoClient { protocol: String },
@@ -612,345 +590,7 @@ impl From<livrarr_domain::DbError> for GrabError {
     }
 }
 
-/// Core grab logic shared between HTTP handler and RSS job.
-pub async fn do_grab_internal(
-    state: &AppState,
-    req: InternalGrabRequest,
-) -> Result<livrarr_domain::Grab, GrabError> {
-    // SSRF protection
-    livrarr_http::ssrf::validate_url(&req.download_url)
-        .await
-        .map_err(|e| GrabError::Ssrf(e.to_string()))?;
-
-    let protocol = req.protocol.as_str();
-
-    // Get download client: specified, or default for protocol.
-    let client_type = match protocol {
-        "usenet" => "sabnzbd",
-        _ => "qbittorrent",
-    };
-
-    let client = if let Some(client_id) = req.download_client_id {
-        let c = state.db.get_download_client(client_id).await?;
-        if c.client_type() != client_type {
-            return Err(GrabError::ClientProtocolMismatch {
-                protocol: protocol.to_string(),
-            });
-        }
-        c
-    } else {
-        state
-            .db
-            .get_default_download_client(client_type)
-            .await?
-            .ok_or_else(|| GrabError::NoClient {
-                protocol: protocol.to_string(),
-            })?
-    };
-
-    // Build a temporary GrabApiRequest for the existing helpers.
-    let api_req = GrabApiRequest {
-        work_id: req.work_id,
-        download_url: req.download_url.clone(),
-        title: req.title.clone(),
-        indexer: req.indexer.clone(),
-        guid: req.guid.clone(),
-        size: req.size,
-        download_client_id: req.download_client_id,
-        protocol: Some(req.protocol.clone()),
-        categories: req.categories.clone(),
-    };
-
-    let download_id = match client.client_type() {
-        "sabnzbd" => grab_sabnzbd(state, &client, &api_req).await.map_err(|e| {
-            GrabError::ClientUnreachable {
-                message: e.to_string(),
-            }
-        })?,
-        _ => grab_qbittorrent(state, &client, &api_req)
-            .await
-            .map_err(|e| GrabError::ClientUnreachable {
-                message: e.to_string(),
-            })?,
-    };
-
-    // Derive media type from categories: 7020 = ebook, 3030 = audiobook.
-    let media_type = if req.categories.contains(&7020) {
-        Some(crate::MediaType::Ebook)
-    } else if req.categories.contains(&3030) {
-        Some(crate::MediaType::Audiobook)
-    } else if req.categories.iter().any(|&c| (7000..8000).contains(&c)) {
-        Some(crate::MediaType::Ebook)
-    } else if req.categories.iter().any(|&c| (3000..4000).contains(&c)) {
-        Some(crate::MediaType::Audiobook)
-    } else {
-        None
-    };
-
-    // Record grab in DB.
-    let grab_record = state
-        .db
-        .upsert_grab(CreateGrabDbRequest {
-            user_id: req.user_id,
-            work_id: req.work_id,
-            download_client_id: client.id,
-            title: req.title.clone(),
-            indexer: req.indexer.clone(),
-            guid: req.guid,
-            size: Some(req.size),
-            download_url: req.download_url,
-            download_id,
-            status: GrabStatus::Sent,
-            media_type,
-        })
-        .await?;
-
-    // Record history event.
-    if let Err(e) = state
-        .db
-        .create_history_event(CreateHistoryEventDbRequest {
-            user_id: req.user_id,
-            work_id: Some(req.work_id),
-            event_type: EventType::Grabbed,
-            data: serde_json::json!({
-                "title": req.title,
-                "indexer": req.indexer,
-                "downloadClient": client.name,
-                "protocol": protocol,
-                "source": req.source,
-            }),
-        })
-        .await
-    {
-        tracing::warn!("create_history_event failed: {e}");
-    }
-
-    Ok(grab_record)
-}
-
-/// USE-GRAB-002: Grab via SABnzbd — download NZB, push via addfile multipart.
-async fn grab_sabnzbd(
-    state: &AppState,
-    client: &livrarr_domain::DownloadClient,
-    req: &GrabApiRequest,
-) -> Result<Option<String>, ApiError> {
-    let base_url = super::download_client::client_base_url(client);
-    let api_key = client.api_key.as_deref().unwrap_or("");
-
-    // Step 1: Download NZB from indexer into memory (SSRF-safe client).
-    let nzb_resp = state
-        .http_client_safe
-        .get(&req.download_url)
-        .send()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("Failed to download NZB from indexer: {e}")))?;
-
-    if !nzb_resp.status().is_success() {
-        return Err(ApiError::BadGateway(format!(
-            "Indexer returned {} when fetching NZB",
-            nzb_resp.status()
-        )));
-    }
-
-    let nzb_bytes = nzb_resp
-        .bytes()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("Failed to read NZB bytes: {e}")))?;
-
-    // Step 2: Push to SABnzbd via multipart addfile.
-    let filename = format!("{}.nzb", req.title.replace('/', "_"));
-    let file_part = reqwest::multipart::Part::bytes(nzb_bytes.to_vec())
-        .file_name(filename)
-        .mime_str("application/x-nzb")
-        .unwrap();
-
-    let form = reqwest::multipart::Form::new()
-        .text("mode", "addfile")
-        .text("cat", client.category.clone())
-        .text("apikey", api_key.to_string())
-        .text("output", "json")
-        .part("name", file_part);
-
-    let sab_url = format!("{base_url}/api");
-    let resp = state
-        .http_client
-        .post(&sab_url)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("SABnzbd addfile failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        return Err(ApiError::BadGateway(format!(
-            "SABnzbd returned {}",
-            resp.status()
-        )));
-    }
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("SABnzbd response parse error: {e}")))?;
-
-    // Check for SABnzbd rejection (e.g., duplicate).
-    if body.get("status").and_then(|s| s.as_bool()) == Some(false) {
-        let error = body
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or("unknown error");
-        return Err(ApiError::BadGateway(format!(
-            "SABnzbd rejected NZB: {error}"
-        )));
-    }
-
-    // Extract nzo_id.
-    let nzo_id = body
-        .get("nzo_ids")
-        .and_then(|ids| ids.as_array())
-        .and_then(|ids| ids.first())
-        .and_then(|id| id.as_str())
-        .map(|s| s.to_string());
-
-    if let Some(ref id) = nzo_id {
-        tracing::info!("grab: sent NZB to SABnzbd, nzo_id={id}");
-    } else {
-        tracing::warn!("grab: SABnzbd accepted NZB but returned no nzo_id");
-    }
-
-    Ok(nzo_id)
-}
-
-/// Grab via qBittorrent — existing torrent flow extracted to helper.
-async fn grab_qbittorrent(
-    state: &AppState,
-    client: &livrarr_domain::DownloadClient,
-    req: &GrabApiRequest,
-) -> Result<Option<String>, ApiError> {
-    let base_url = qbit_base_url(client);
-    let sid = qbit_login(state, &base_url, client).await?;
-
-    // Fetch the download once, classify, extract hash, and reuse the same bytes
-    // when posting to qBit (avoids a second download from the indexer).
-    let fetched = fetch_torrent_source(&state.http_client_safe, &req.download_url).await;
-
-    let download_id = fetched
-        .as_ref()
-        .and_then(|src| livrarr_download::extract_torrent_hash(src).ok());
-
-    if let Some(ref hash) = download_id {
-        tracing::info!("grab: extracted hash {hash} from download URL");
-    } else {
-        tracing::warn!("grab: could not extract hash from download URL");
-    }
-
-    // Add torrent to qBit — use the bytes we already fetched for .torrent files,
-    // or the magnet URI for magnets.
-    let add_url = format!("{base_url}/api/v2/torrents/add");
-    let mut form =
-        reqwest::multipart::Form::new().text("category", client.category.as_str().to_string());
-
-    match fetched {
-        Some(livrarr_download::TorrentSource::Magnet(uri)) => {
-            form = form.text("urls", uri);
-        }
-        Some(livrarr_download::TorrentSource::TorrentFile { filename, data }) => {
-            let part = reqwest::multipart::Part::bytes(data)
-                .file_name(filename)
-                .mime_str("application/x-bittorrent")
-                .map_err(|e| ApiError::BadGateway(format!("qBittorrent mime error: {e}")))?;
-            form = form.part("torrents", part);
-        }
-        _ => {
-            // Fall back to URL if we couldn't fetch/classify.
-            form = form.text("urls", req.download_url.clone());
-        }
-    }
-
-    let add_resp = state
-        .http_client
-        .post(&add_url)
-        .header("Cookie", format!("SID={sid}"))
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("qBittorrent add failed: {e}")))?;
-
-    if !add_resp.status().is_success() {
-        let body = add_resp.text().await.unwrap_or_default();
-        return Err(ApiError::BadGateway(format!(
-            "qBittorrent add torrent failed: {body}"
-        )));
-    }
-
-    Ok(download_id)
-}
-
-/// Fetch a download URL once and classify it as a magnet URI or .torrent file.
-/// Returns the `TorrentSource` so callers can both extract the info_hash and
-/// reuse the fetched bytes (avoiding a second download).
-async fn fetch_torrent_source(
-    http: &livrarr_http::HttpClient,
-    download_url: &str,
-) -> Option<livrarr_download::TorrentSource> {
-    // SSRF protection handled by the safe client's DNS resolver.
-
-    // If it's already a magnet link, return directly.
-    if download_url.starts_with("magnet:") {
-        return Some(livrarr_download::TorrentSource::Magnet(
-            download_url.to_string(),
-        ));
-    }
-
-    // Fetch the URL — may redirect to magnet or return .torrent bytes.
-    let resp = http.get(download_url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    // Check for magnet redirect.
-    let final_url = resp.url().to_string();
-    if final_url.starts_with("magnet:") {
-        return Some(livrarr_download::TorrentSource::Magnet(final_url));
-    }
-
-    // Enforce size limit on .torrent downloads.
-    if let Some(content_length) = resp.content_length() {
-        if content_length as usize > MAX_DOWNLOAD_BYTES {
-            tracing::warn!(
-                content_length,
-                "download URL content-length exceeds MAX_DOWNLOAD_BYTES"
-            );
-            return None;
-        }
-    }
-
-    let bytes = resp.bytes().await.ok()?;
-    if bytes.len() > MAX_DOWNLOAD_BYTES {
-        tracing::warn!(
-            size = bytes.len(),
-            "download URL response exceeds MAX_DOWNLOAD_BYTES"
-        );
-        return None;
-    }
-
-    // Try as magnet text in body.
-    if let Ok(text) = std::str::from_utf8(&bytes) {
-        if text.trim().starts_with("magnet:") {
-            return Some(livrarr_download::TorrentSource::Magnet(
-                text.trim().to_string(),
-            ));
-        }
-    }
-
-    Some(livrarr_download::TorrentSource::TorrentFile {
-        filename: "download.torrent".to_string(),
-        data: bytes.to_vec(),
-    })
-}
-
-/// Build qBit base URL from download client config.
 pub(crate) fn qbit_base_url(client: &livrarr_domain::DownloadClient) -> String {
-    // If host already has scheme, use it directly.
     if client.host.starts_with("http://") || client.host.starts_with("https://") {
         let url_base = client.url_base.as_deref().unwrap_or("");
         return format!("{}{url_base}", client.host.trim_end_matches('/'));
@@ -965,7 +605,6 @@ pub(crate) fn qbit_base_url(client: &livrarr_domain::DownloadClient) -> String {
     }
 }
 
-/// Authenticate to qBittorrent and return SID cookie.
 pub(crate) async fn qbit_login(
     state: &AppState,
     base_url: &str,
@@ -974,7 +613,6 @@ pub(crate) async fn qbit_login(
     let username = client.username.as_deref().unwrap_or("");
     let password = client.password.as_deref().unwrap_or("");
 
-    // Anonymous mode — no auth needed.
     if username.is_empty() && password.is_empty() {
         return Ok(String::new());
     }
@@ -988,7 +626,6 @@ pub(crate) async fn qbit_login(
         .await
         .map_err(|e| ApiError::BadGateway(format!("qBittorrent login failed: {e}")))?;
 
-    // Extract SID from Set-Cookie header before consuming body.
     let sid = resp
         .headers()
         .get_all("set-cookie")

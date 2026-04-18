@@ -3,7 +3,7 @@
 use rapidfuzz::distance::levenshtein;
 use unicode_normalization::UnicodeNormalization;
 
-use super::types::{Extraction, MatchCandidate};
+use crate::types::{Extraction, MatchCandidate};
 
 /// Compute the weighted composite match score between an extraction and a candidate.
 /// Returns 0.0–1.0. Higher is better.
@@ -79,7 +79,6 @@ pub fn fails_hard_gate(extraction: &Extraction, candidate: &MatchCandidate) -> b
 
     let title_sim = string_similarity(title_ext, &candidate.title);
 
-    // Title-only extraction can never auto-confirm.
     if author_ext.is_none() || author_ext.is_some_and(|a| a.is_empty()) {
         return true;
     }
@@ -120,6 +119,7 @@ pub fn author_similarity(a: &str, b: &str) -> f64 {
 }
 
 /// Year similarity with asymmetric penalty.
+#[allow(clippy::if_same_then_else)]
 pub fn year_similarity(extracted: i32, candidate: i32) -> f64 {
     let diff = (extracted - candidate).unsigned_abs();
     if diff == 0 {
@@ -129,7 +129,7 @@ pub fn year_similarity(extracted: i32, candidate: i32) -> f64 {
     } else if diff <= 3 {
         0.5
     } else if extracted > candidate {
-        // Extracted year is newer (e.g., audiobook release vs original publication).
+        // Newer extraction (e.g. audiobook release vs original publication) — lenient
         0.5
     } else {
         0.0
@@ -145,10 +145,8 @@ pub fn year_similarity(extracted: i32, candidate: i32) -> f64 {
 /// lowercase, strip non-alphanumeric (preserving CJK/Arabic/Cyrillic),
 /// normalize articles, & → and.
 pub fn normalize(s: &str) -> String {
-    // NFKD decomposition.
     let decomposed: String = s.nfkd().collect();
 
-    // Strip combining marks (category M) but keep base characters.
     let stripped: String = decomposed
         .chars()
         .filter(|c| !unicode_is_combining_mark(*c))
@@ -156,10 +154,8 @@ pub fn normalize(s: &str) -> String {
 
     let mut result = stripped.to_lowercase();
 
-    // & → and
     result = result.replace('&', " and ");
 
-    // Handle articles: "The X" / "X, The" → "X"
     for article in &["the ", "a ", "an "] {
         if result.starts_with(article) {
             result = result[article.len()..].to_string();
@@ -171,19 +167,15 @@ pub fn normalize(s: &str) -> String {
         }
     }
 
-    // Strip non-alphanumeric, keeping CJK/Arabic/Cyrillic/spaces.
     result = result
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == ' ')
         .collect();
 
-    // Collapse whitespace.
     result.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Canonicalize author names: "Last, First" → "First Last".
 fn canonicalize_author(author: &str) -> String {
-    // Handle "Last, First" format.
     if author.contains(',') {
         let parts: Vec<&str> = author.splitn(2, ',').map(|s| s.trim()).collect();
         if parts.len() == 2 && !parts[1].is_empty() {
@@ -213,30 +205,25 @@ fn token_set_similarity(a: &str, b: &str) -> f64 {
 }
 
 fn unicode_is_combining_mark(c: char) -> bool {
-    // Unicode General Category M (Mark): Mn, Mc, Me
     matches!(unicode_general_category(c),
-        '\u{0300}'..='\u{036F}'  // Combining Diacritical Marks
-        | '\u{0483}'..='\u{0489}' // Cyrillic combining
-        | '\u{0591}'..='\u{05BD}' // Hebrew
-        | '\u{0610}'..='\u{061A}' // Arabic
-        | '\u{064B}'..='\u{065F}' // Arabic
+        '\u{0300}'..='\u{036F}'
+        | '\u{0483}'..='\u{0489}'
+        | '\u{0591}'..='\u{05BD}'
+        | '\u{0610}'..='\u{061A}'
+        | '\u{064B}'..='\u{065F}'
         | '\u{0670}'
-        | '\u{06D6}'..='\u{06DC}' // Arabic
-        | '\u{0730}'..='\u{074A}' // Syriac
-        | '\u{0900}'..='\u{0903}' // Devanagari
-        | '\u{093A}'..='\u{094F}' // Devanagari
-        | '\u{0951}'..='\u{0957}' // Devanagari
-        | '\u{0981}'..='\u{0983}' // Bengali
-        | '\u{FE00}'..='\u{FE0F}' // Variation selectors
-        | '\u{FE20}'..='\u{FE2F}' // Combining half marks
-        | '\u{20D0}'..='\u{20FF}' // Combining for symbols
+        | '\u{06D6}'..='\u{06DC}'
+        | '\u{0730}'..='\u{074A}'
+        | '\u{0900}'..='\u{0903}'
+        | '\u{093A}'..='\u{094F}'
+        | '\u{0951}'..='\u{0957}'
+        | '\u{0981}'..='\u{0983}'
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FE20}'..='\u{FE2F}'
+        | '\u{20D0}'..='\u{20FF}'
     )
 }
 
-// This is a simplified check — we use char ranges for common combining marks.
-// For full Unicode correctness, we'd use the `unicode-general-category` crate,
-// but this covers Latin, Cyrillic, Arabic, Hebrew, and Devanagari diacritics
-// which are our primary use cases.
 fn unicode_general_category(c: char) -> char {
-    c // passthrough — the match is done in the caller
+    c
 }

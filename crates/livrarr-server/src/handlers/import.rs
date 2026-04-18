@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use crate::state::AppState;
 use crate::{ApiError, GrabStatus, MediaType};
 use livrarr_db::{
-    ConfigDb, CreateHistoryEventDbRequest, CreateLibraryItemDbRequest, DownloadClientDb, GrabDb,
-    HistoryDb, LibraryItemDb, RemotePathMappingDb, RootFolderDb, WorkDb,
+    ConfigDb, CreateLibraryItemDbRequest, DownloadClientDb, GrabDb, LibraryItemDb,
+    RemotePathMappingDb, RootFolderDb, WorkDb,
 };
-use livrarr_domain::EventType;
-use livrarr_domain::{classify_file, sanitize_path_component};
+use livrarr_domain::sanitize_path_component;
+use livrarr_domain::services::ImportWorkflow;
 use livrarr_tagwrite::TagWriteStatus;
 
 /// Result of an import attempt, returned to the caller (retry handler).
@@ -20,8 +20,8 @@ pub struct ImportGrabResult {
     pub error: Option<String>,
 }
 
-/// Run the import pipeline for a grab. Called by the retry handler (Phase 3a)
-/// and later by the download poller (Phase 4).
+/// Run the import pipeline for a grab. Called by the retry handler
+/// and by the download poller via spawn_import.
 ///
 /// Precondition: grab status already atomically set to `importing` by caller.
 pub async fn import_grab(
@@ -29,438 +29,158 @@ pub async fn import_grab(
     user_id: i64,
     grab_id: i64,
 ) -> Result<ImportGrabResult, ApiError> {
+    // Pre-service: ensure content_path is populated.
+    // The download poller persists content_path when confirming a download.
+    // For manual retries, content_path may be missing — resolve from the
+    // download client.
     let grab = state.db.get_grab(user_id, grab_id).await?;
-    let work = state.db.get_work(user_id, grab.work_id).await?;
-
-    // Per-(user, work) import lock — prevents concurrent imports of the same
-    // work from racing on target paths. Second importer waits, then dedup-skips.
-    let import_lock = state
-        .import_locks
-        .entry((user_id, work.id))
-        .or_insert_with(|| {
-            (
-                std::sync::Arc::new(tokio::sync::Mutex::new(())),
-                std::time::Instant::now(),
-            )
-        })
-        .0
-        .clone();
-    let _import_guard = import_lock.lock().await;
-
-    // Resolve source path: grab.download_url has the torrent name,
-    // but we need content_path from the grab record. For Phase 3a,
-    // the source path comes from the download client + remote path mapping.
-    // Since we don't have qBit content_path stored yet (that's poller territory),
-    // we need the download client to query qBit for the torrent's content_path.
-    let client = state
-        .db
-        .get_download_client(grab.download_client_id)
-        .await?;
-
-    // Resolve source path. Use persisted content_path if available (avoids
-    // re-querying the download client, which may have removed the torrent/NZB).
-    let source_path = if let Some(ref remote_path) = grab.content_path {
-        // Re-apply path mapping (user may have fixed mapping config since grab).
-        apply_remote_path_mapping(state, &client.host, remote_path)
-            .await?
-            .local_path
-    } else if let Some(ref id) = grab.download_id {
-        let content_path = if client.client_type() == "sabnzbd" {
-            fetch_sabnzbd_storage_path(state, &client, id).await?
-        } else {
-            fetch_qbit_content_path(state, &client, id).await?
-        };
-        apply_remote_path_mapping(state, &client.host, &content_path)
-            .await?
-            .local_path
-    } else {
-        let error = "no download_id or content_path — download not confirmed in client".to_string();
-        state
-            .db
-            .update_grab_status(user_id, grab_id, GrabStatus::ImportFailed, Some(&error))
-            .await?;
-        return Ok(ImportGrabResult {
-            final_status: GrabStatus::ImportFailed,
-            imported_count: 0,
-            failed_count: 0,
-            skipped_count: 0,
-            warnings: vec![],
-            error: Some(error),
-        });
-    };
-
-    let source = PathBuf::from(&source_path);
-
-    // Check source exists.
-    let source_exists = {
-        let s = source.clone();
-        tokio::task::spawn_blocking(move || s.exists())
-            .await
-            .unwrap_or(false)
-    };
-    if !source_exists {
-        let error = format!("source path not found: {source_path}");
-        state
-            .db
-            .update_grab_status(user_id, grab_id, GrabStatus::ImportFailed, Some(&error))
-            .await?;
-        return Ok(ImportGrabResult {
-            final_status: GrabStatus::ImportFailed,
-            imported_count: 0,
-            failed_count: 0,
-            skipped_count: 0,
-            warnings: vec![],
-            error: Some(error),
-        });
-    }
-
-    // Enumerate files from source (single file or directory).
-    let source_files = tokio::task::spawn_blocking({
-        let source = source.clone();
-        move || enumerate_source_files(&source)
-    })
-    .await
-    .map_err(|e| ApiError::Internal(format!("spawn_blocking join error: {e}")))?
-    .map_err(|e| ApiError::Internal(format!("source enumeration failed: {e}")))?;
-
-    // File size pre-check: if grab has a known size, verify local files are
-    // at least 90% of it. Catches partially-synced files from remote seedboxes
-    // where rsync/mount hasn't finished. The import will be retried automatically.
-    if let Some(expected_size) = grab.size {
-        let paths: Vec<PathBuf> = source_files.iter().map(|f| f.path.clone()).collect();
-        let local_total: i64 = tokio::task::spawn_blocking(move || {
-            paths
-                .iter()
-                .filter_map(|p| std::fs::metadata(p).ok())
-                .map(|m| m.len() as i64)
-                .sum()
-        })
-        .await
-        .unwrap_or(0);
-        if expected_size > 0 && local_total < expected_size * 9 / 10 {
-            let error = format!(
-                "files not fully synced: local {:.1}MB vs expected {:.1}MB",
-                local_total as f64 / 1_048_576.0,
-                expected_size as f64 / 1_048_576.0,
-            );
-            tracing::info!("import: grab {grab_id} — {error}");
+    if grab.content_path.is_none() {
+        if let Some(ref download_id) = grab.download_id {
+            let client = state
+                .db
+                .get_download_client(grab.download_client_id)
+                .await?;
+            let content_path = if client.client_type() == "sabnzbd" {
+                fetch_sabnzbd_storage_path(state, &client, download_id).await?
+            } else {
+                fetch_qbit_content_path(state, &client, download_id).await?
+            };
             state
                 .db
-                .update_grab_status(user_id, grab_id, GrabStatus::ImportFailed, Some(&error))
+                .set_grab_content_path(user_id, grab_id, &content_path)
                 .await?;
-            return Ok(ImportGrabResult {
-                final_status: GrabStatus::ImportFailed,
-                imported_count: 0,
-                failed_count: 0,
-                skipped_count: 0,
-                warnings: vec![],
-                error: Some(error),
-            });
         }
     }
 
-    if source_files.is_empty() {
-        let error = "no recognized media files found".to_string();
-        state
-            .db
-            .update_grab_status(user_id, grab_id, GrabStatus::ImportFailed, Some(&error))
-            .await?;
-        return Ok(ImportGrabResult {
-            final_status: GrabStatus::ImportFailed,
-            imported_count: 0,
-            failed_count: 0,
-            skipped_count: 0,
-            warnings: vec![],
-            error: Some(error),
-        });
-    }
+    // Service handles: source resolution, enumeration, format filtering,
+    // file copy, library item creation, status update, history event.
+    let result = state.import_workflow.import_grab(user_id, grab_id).await?;
 
-    // Get root folders for routing.
-    let root_folders = state.db.list_root_folders().await?;
+    let mut warnings = result.warnings;
 
-    // Get CWA config.
-    let media_mgmt = state.db.get_media_management_config().await?;
+    // Post-service I/O: tag imported files + CWA copy + email.
+    if !result.imported_files.is_empty() {
+        let work = state.db.get_work(user_id, grab.work_id).await?;
 
-    let author_name = work.author_name.clone();
-    let title = work.title.clone();
-    let work_id = work.id;
-
-    // Filter ebooks to best preferred format when multiple formats exist.
-    // E.g., if a torrent has epub+mobi+pdf and preference is [epub], only import the epub.
-    let source_files = filter_preferred_formats(source_files, &media_mgmt);
-
-    let mut imported_count = 0usize;
-    let mut failed_count = 0usize;
-    let mut skipped_dedup = 0usize; // file exists with matching library_item
-    let mut warnings = Vec::new();
-    let mut errors = Vec::new();
-
-    // Validate and plan all files first, separating MP3s for batch handling.
-    let mut validated: Vec<ValidatedFile> = Vec::new();
-
-    for sf in &source_files {
-        let media_type = sf.media_type;
-
-        let root_folder = match root_folders.iter().find(|rf| rf.media_type == media_type) {
-            Some(rf) => rf,
-            None => {
-                warnings.push(format!(
-                    "no root folder for {:?}, skipping: {}",
-                    media_type,
-                    sf.path.display()
-                ));
-                failed_count += 1;
-                continue;
-            }
-        };
-
-        let target_path = build_target_path(
-            &root_folder.path,
-            user_id,
-            &author_name,
-            &title,
-            media_type,
-            &sf.path,
-            &source,
-        );
-
-        let target = PathBuf::from(&target_path);
-
-        if target.components().any(|c| c.as_os_str() == "..") {
-            errors.push(format!(
-                "path traversal blocked: target {} contains '..'",
-                target_path
-            ));
-            failed_count += 1;
-            continue;
-        }
-
-        // Verify target is within the root folder.
-        let root_path = Path::new(&root_folder.path);
-        let canonical_root = std::fs::canonicalize(root_path).unwrap_or(root_path.to_path_buf());
-        let canonical_target = match target.strip_prefix(root_path) {
-            Ok(relative) => {
-                if relative.has_root() {
-                    errors.push(format!(
-                        "path traversal blocked: relative path is rooted: {}",
-                        target_path
-                    ));
-                    failed_count += 1;
-                    continue;
-                }
-                canonical_root.join(relative)
-            }
-            Err(_) => {
-                if let Some(parent) = target.parent() {
-                    match std::fs::canonicalize(parent) {
-                        Ok(p) => p.join(target.file_name().unwrap_or_default()),
-                        Err(_) => target.clone(),
-                    }
-                } else {
-                    target.clone()
-                }
-            }
-        };
-
-        if !canonical_target.starts_with(&canonical_root) {
-            errors.push(format!(
-                "path traversal blocked: target {} not within {}",
-                target_path,
-                canonical_root.display()
-            ));
-            failed_count += 1;
-            continue;
-        }
-
-        if target.exists() {
-            let relative = target_path
-                .strip_prefix(&root_folder.path)
-                .unwrap_or(&target_path)
-                .trim_start_matches('/')
-                .to_string();
-            let existing_items = state
+        // Tag writing — retag the just-imported files if enrichment data available.
+        if work.enrichment_status != livrarr_domain::EnrichmentStatus::Pending {
+            let items = state
                 .db
-                .list_library_items_by_work(user_id, work_id)
-                .await?;
-            if existing_items.iter().any(|li| li.path == relative) {
-                skipped_dedup += 1;
-                continue;
-            }
-            // File exists but no library_item — recovery from prior DB failure.
-            // Validate the file before adopting it.
-            let meta = target.metadata();
-            if meta.as_ref().map_or(true, |m| !m.is_file() || m.len() == 0) {
-                errors.push(format!(
-                    "target exists but is invalid (not a regular file or zero-length): {target_path}"
-                ));
-                failed_count += 1;
-                continue;
-            }
-            let file_size = meta.unwrap().len() as i64;
-            match state
-                .db
-                .create_library_item(CreateLibraryItemDbRequest {
-                    user_id,
-                    work_id,
-                    root_folder_id: root_folder.id,
-                    path: relative,
-                    media_type,
-                    file_size,
-                    import_id: None,
-                })
+                .list_library_items_by_work(user_id, work.id)
                 .await
+                .unwrap_or_default();
+            let imported_ids: Vec<i64> = result
+                .imported_files
+                .iter()
+                .map(|f| f.library_item_id)
+                .collect();
+            let matching: Vec<_> = items
+                .iter()
+                .filter(|i| imported_ids.contains(&i.id))
+                .cloned()
+                .collect();
+            if !matching.is_empty() {
+                let tag_warnings = retag_library_items(state, &work, &matching).await;
+                warnings.extend(tag_warnings);
+            }
+        }
+
+        // CWA copy + email — fire-and-forget for ebooks.
+        let media_mgmt = state.db.get_media_management_config().await.ok();
+        let root_folders = state.db.list_root_folders().await.unwrap_or_default();
+        for imp in &result.imported_files {
+            if imp.media_type != MediaType::Ebook {
+                continue;
+            }
+            let rf = match root_folders
+                .iter()
+                .find(|rf| rf.media_type == MediaType::Ebook)
             {
-                Ok(_) => {
-                    imported_count += 1;
-                    warnings.push(format!("recovered existing file: {target_path}"));
+                Some(rf) => rf,
+                None => continue,
+            };
+            let abs_path = format!("{}/{}", rf.path, imp.target_relative_path);
+
+            // CWA
+            if let Some(ref mgmt) = media_mgmt {
+                if let Some(ref cwa_path) = mgmt.cwa_ingest_path {
+                    let ext = Path::new(&imp.target_relative_path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("epub")
+                        .to_string();
+                    let work = state.db.get_work(user_id, grab.work_id).await.ok();
+                    if let Some(work) = work {
+                        let tp = abs_path.clone();
+                        let cwa = cwa_path.clone();
+                        let auth = work.author_name.clone();
+                        let t = work.title.clone();
+                        let cwa_result = tokio::task::spawn_blocking(move || {
+                            cwa_copy(&tp, &cwa, user_id, &auth, &t, &ext)
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some(warn) = cwa_result {
+                            warnings.push(warn);
+                        }
+                    }
                 }
-                Err(e) => {
-                    errors.push(format!("DB recovery failed for {target_path}: {e}"));
-                    failed_count += 1;
+            }
+
+            // Auto-send to email/Kindle
+            if let Ok(email_cfg) = state.db.get_email_config().await {
+                if email_cfg.send_on_import && email_cfg.enabled {
+                    let ext = Path::new(&imp.target_relative_path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if super::email::ACCEPTED_EXTENSIONS.contains(&ext.as_str())
+                        && (imp.file_size as i64) <= super::email::MAX_EMAIL_SIZE
+                    {
+                        match tokio::fs::read(&abs_path).await {
+                            Ok(bytes) => {
+                                let filename = Path::new(&abs_path)
+                                    .file_name()
+                                    .and_then(|f| f.to_str())
+                                    .unwrap_or("book");
+                                if let Err(e) =
+                                    super::email::send_file(&email_cfg, bytes, filename, &ext).await
+                                {
+                                    tracing::warn!(file = %abs_path, "Auto-send email failed: {e}");
+                                } else {
+                                    tracing::info!(file = %abs_path, "Auto-sent to email on import");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(file = %abs_path, "Auto-send: failed to read file: {e}");
+                            }
+                        }
+                    }
                 }
             }
-            continue;
         }
-
-        let is_mp3 = sf
-            .path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("mp3"))
-            .unwrap_or(false);
-
-        validated.push(ValidatedFile {
-            source: sf.path.clone(),
-            target_path,
-            root_folder_id: root_folder.id,
-            root_folder_path: root_folder.path.clone(),
-            media_type,
-            is_mp3,
-        });
     }
 
-    // Separate MP3 and non-MP3 files.
-    let (mp3_files, other_files): (Vec<_>, Vec<_>) = validated.into_iter().partition(|f| f.is_mp3);
-
-    // Read tag metadata + cover once (shared across all files).
-    let has_enrichment = work.enrichment_status != livrarr_domain::EnrichmentStatus::Pending;
-    let tag_metadata = if has_enrichment {
-        Some(build_tag_metadata(&work))
-    } else {
+    let error_msg = if result.failed_files.is_empty() {
         None
-    };
-    let cover_data = if has_enrichment {
-        read_cover_bytes(state, work_id).await
     } else {
-        None
-    };
-
-    // --- Process non-MP3 files (per-file .tmp → tag → rename) ---
-    for vf in &other_files {
-        let result = import_single_file(
-            state,
-            &vf.source,
-            &vf.target_path,
-            &vf.root_folder_path,
-            vf.root_folder_id,
-            vf.media_type,
-            user_id,
-            work_id,
-            tag_metadata.as_ref(),
-            cover_data.as_deref(),
-            &media_mgmt,
-            &author_name,
-            &title,
+        Some(
+            result
+                .failed_files
+                .iter()
+                .map(|f| f.error.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
         )
-        .await;
-        match result {
-            Ok(()) => imported_count += 1,
-            Err(ImportFileError::Warning(w)) => {
-                warnings.push(w);
-                imported_count += 1; // file imported, just tag warning
-            }
-            Err(ImportFileError::Failed(e)) => {
-                errors.push(e);
-                failed_count += 1;
-            }
-        }
-    }
-
-    // --- Process MP3 files (batch .tmp → tag → rename, all-or-nothing) ---
-    if !mp3_files.is_empty() {
-        let batch_result = import_mp3_batch(
-            state,
-            &mp3_files,
-            user_id,
-            work_id,
-            tag_metadata.as_ref(),
-            cover_data.as_deref(),
-            &media_mgmt,
-            &author_name,
-            &title,
-        )
-        .await;
-        match batch_result {
-            Ok((count, batch_warnings)) => {
-                imported_count += count;
-                warnings.extend(batch_warnings);
-            }
-            Err(e) => {
-                errors.push(e);
-                failed_count += mp3_files.len();
-            }
-        }
-    }
-
-    // Determine final status. Dedup-skipped files count as success (crash recovery).
-    let final_status = if failed_count > 0 {
-        GrabStatus::ImportFailed
-    } else if imported_count > 0 || skipped_dedup > 0 {
-        GrabStatus::Imported
-    } else {
-        GrabStatus::ImportFailed // nothing importable
     };
-
-    let error_msg = if errors.is_empty() {
-        None
-    } else {
-        Some(errors.join("; "))
-    };
-
-    state
-        .db
-        .update_grab_status(user_id, grab_id, final_status, error_msg.as_deref())
-        .await?;
-
-    // Record history event.
-    let event_type = if final_status == GrabStatus::Imported {
-        EventType::Imported
-    } else {
-        EventType::ImportFailed
-    };
-    if let Err(e) = state
-        .db
-        .create_history_event(CreateHistoryEventDbRequest {
-            user_id,
-            work_id: Some(grab.work_id),
-            event_type,
-            data: serde_json::json!({
-                "title": grab.title,
-                "imported": imported_count,
-                "failed": failed_count,
-                "error": error_msg,
-            }),
-        })
-        .await
-    {
-        tracing::warn!("create_history_event failed: {e}");
-    }
 
     Ok(ImportGrabResult {
-        final_status,
-        imported_count,
-        failed_count,
-        skipped_count: skipped_dedup,
+        final_status: result.final_status,
+        imported_count: result.imported_files.len(),
+        failed_count: result.failed_files.len(),
+        skipped_count: result.skipped_files.len(),
         warnings,
         error: error_msg,
     })
@@ -673,307 +393,6 @@ pub async fn import_single_file(
         Some(w) => Err(ImportFileError::Warning(w)),
         None => Ok(()),
     }
-}
-
-// ---------------------------------------------------------------------------
-// MP3 batch import (TAG-006 all-or-nothing)
-// ---------------------------------------------------------------------------
-
-struct ValidatedFile {
-    source: PathBuf,
-    target_path: String,
-    root_folder_id: i64,
-    root_folder_path: String,
-    media_type: MediaType,
-    is_mp3: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn import_mp3_batch(
-    state: &AppState,
-    files: &[ValidatedFile],
-    user_id: i64,
-    work_id: i64,
-    tag_metadata: Option<&livrarr_tagwrite::TagMetadata>,
-    cover: Option<&[u8]>,
-    _media_mgmt: &livrarr_db::MediaManagementConfig,
-    _author_name: &str,
-    _title: &str,
-) -> Result<(usize, Vec<String>), String> {
-    let mut tmp_paths: Vec<String> = Vec::new();
-    let mut target_paths: Vec<String> = Vec::new();
-    let mut warnings = Vec::new();
-
-    // Step 1: Copy all source → .tmp files.
-    for vf in files {
-        let tmp_path = format!("{}.tmp", vf.target_path);
-        let src = vf.source.clone();
-        let tmp_clone = PathBuf::from(&tmp_path);
-        let copy_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            if let Some(parent) = tmp_clone.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("create_dir_all failed: {e}"))?;
-            }
-            std::fs::copy(&src, &tmp_clone).map_err(|e| format!("copy failed: {e}"))?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| format!("spawn error: {e}"))?;
-
-        if let Err(e) = copy_result {
-            // Clean up THIS file's partial .tmp + all prior .tmps.
-            let _ = std::fs::remove_file(&tmp_path);
-            for tmp in &tmp_paths {
-                let _ = std::fs::remove_file(tmp);
-            }
-            return Err(format!(
-                "MP3 batch copy failed for {}: {e}",
-                vf.source.display()
-            ));
-        }
-
-        tmp_paths.push(tmp_path);
-        target_paths.push(vf.target_path.clone());
-    }
-
-    // Step 2: Batch tag all .tmp files.
-    let mut tag_failed = false;
-    if let Some(metadata) = tag_metadata {
-        match livrarr_tagwrite::write_tags_batch(
-            tmp_paths.clone(),
-            metadata.clone(),
-            cover.map(|c| c.to_vec()),
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                warnings.push(format!("MP3 batch tag write failed: {e}"));
-                tag_failed = true;
-            }
-        }
-    }
-
-    // Step 3: Finalize.
-    // Track which files were successfully placed on disk.
-    let mut file_placed = vec![false; files.len()];
-
-    if tag_failed {
-        // Delete all .tmps, re-copy all sources untagged via atomic fallback.
-        for (i, vf) in files.iter().enumerate() {
-            let _ = std::fs::remove_file(&tmp_paths[i]);
-            let src = vf.source.clone();
-            let final_p = PathBuf::from(&target_paths[i]);
-            let fallback_p = PathBuf::from(format!("{}.fallback.tmp", target_paths[i]));
-            match tokio::task::spawn_blocking(move || -> Result<u64, std::io::Error> {
-                let n = std::fs::copy(&src, &fallback_p)?;
-                if let Ok(f) = std::fs::File::open(&fallback_p) {
-                    let _ = f.sync_all();
-                }
-                if let Err(e) = std::fs::rename(&fallback_p, &final_p) {
-                    let _ = std::fs::remove_file(&fallback_p);
-                    return Err(e);
-                }
-                Ok(n)
-            })
-            .await
-            {
-                Ok(Ok(_)) => {
-                    file_placed[i] = true;
-                }
-                Ok(Err(e)) => {
-                    warnings.push(format!(
-                        "MP3 batch re-copy failed for {}: {e}",
-                        vf.source.display()
-                    ));
-                }
-                Err(e) => {
-                    warnings.push(format!(
-                        "MP3 batch re-copy spawn error for {}: {e}",
-                        vf.source.display()
-                    ));
-                }
-            }
-        }
-    } else {
-        // fsync each .tmp before renaming — ensures buffered tag data is durable.
-        for (i, (tmp, target)) in tmp_paths.iter().zip(target_paths.iter()).enumerate() {
-            if let Ok(f) = std::fs::File::open(tmp) {
-                let _ = f.sync_all();
-            }
-            if let Err(e) = std::fs::rename(tmp, target) {
-                warnings.push(format!("MP3 batch rename failed for {target}: {e}"));
-                let _ = std::fs::remove_file(tmp);
-            } else {
-                file_placed[i] = true;
-            }
-        }
-    }
-
-    // Step 4: Measure sizes and create library items — only for files successfully placed.
-    let mut count = 0;
-    for (i, vf) in files.iter().enumerate() {
-        if !file_placed[i] {
-            continue;
-        }
-        let target = PathBuf::from(&target_paths[i]);
-        let file_size = target.metadata().map(|m| m.len() as i64).unwrap_or(0);
-        let relative = target_paths[i]
-            .strip_prefix(&vf.root_folder_path)
-            .unwrap_or(&target_paths[i])
-            .trim_start_matches('/')
-            .to_string();
-
-        match state
-            .db
-            .create_library_item(CreateLibraryItemDbRequest {
-                user_id,
-                work_id,
-                root_folder_id: vf.root_folder_id,
-                path: relative,
-                media_type: vf.media_type,
-                file_size,
-                import_id: None,
-            })
-            .await
-        {
-            Ok(_) => count += 1,
-            Err(e) => {
-                // Do NOT delete the file — leave on disk for retry recovery.
-                return Err(format!(
-                    "DB batch insert failed at {}: {e}",
-                    target_paths[i]
-                ));
-            }
-        }
-    }
-
-    Ok((count, warnings))
-}
-
-// ---------------------------------------------------------------------------
-// File enumeration helpers
-// ---------------------------------------------------------------------------
-
-struct SourceFile {
-    path: PathBuf,
-    media_type: MediaType,
-}
-
-/// Filter source files to only the best preferred format per media type.
-/// For ebooks: if a torrent has epub+mobi+pdf and prefs are [epub], only keep the epub.
-/// For audiobooks: if prefs are [m4b] and both m4b+mp3 exist, only keep m4b files.
-/// Files with formats not in the preference list at all are kept (no preference = accept).
-fn filter_preferred_formats(
-    files: Vec<SourceFile>,
-    config: &livrarr_db::MediaManagementConfig,
-) -> Vec<SourceFile> {
-    let ebook_prefs = &config.preferred_ebook_formats;
-    let audio_prefs = &config.preferred_audiobook_formats;
-
-    // Find the best (lowest-index) preferred format present for each media type.
-    let ext_of = |f: &SourceFile| -> String {
-        f.path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase()
-    };
-
-    let best_ebook_ext = ebook_prefs.iter().find(|pref| {
-        files
-            .iter()
-            .any(|f| f.media_type == MediaType::Ebook && ext_of(f) == **pref)
-    });
-
-    let best_audio_ext = audio_prefs.iter().find(|pref| {
-        files
-            .iter()
-            .any(|f| f.media_type == MediaType::Audiobook && ext_of(f) == **pref)
-    });
-
-    files
-        .into_iter()
-        .filter(|f| {
-            let ext = f
-                .path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            match f.media_type {
-                MediaType::Ebook => match best_ebook_ext {
-                    Some(best) => ext == *best,
-                    None => true, // no preferred format found, keep all
-                },
-                MediaType::Audiobook => match best_audio_ext {
-                    Some(best) => ext == *best,
-                    None => true,
-                },
-            }
-        })
-        .collect()
-}
-
-/// Enumerate files from a source path (single file or directory).
-/// Skips hidden files, symlinks, and unrecognized extensions.
-fn enumerate_source_files(source: &Path) -> Result<Vec<SourceFile>, String> {
-    let mut files = Vec::new();
-
-    if source.is_file() {
-        // Single-file torrent (IMPORT-006a).
-        if let Some(media_type) = classify_file(source) {
-            files.push(SourceFile {
-                path: source.to_path_buf(),
-                media_type,
-            });
-        }
-    } else if source.is_dir() {
-        // Multi-file torrent — recursive walk.
-        walk_dir_recursive(source, &mut files)?;
-    } else {
-        return Err(format!(
-            "source is neither file nor directory: {}",
-            source.display()
-        ));
-    }
-
-    Ok(files)
-}
-
-fn walk_dir_recursive(dir: &Path, files: &mut Vec<SourceFile>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
-
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry error: {e}"))?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-
-        // Skip hidden files/dirs.
-        if name.starts_with('.') {
-            continue;
-        }
-
-        let ft = entry
-            .file_type()
-            .map_err(|e| format!("file_type error: {e}"))?;
-
-        // Skip symlinks (IMPORT-013).
-        if ft.is_symlink() {
-            continue;
-        }
-
-        if ft.is_dir() {
-            walk_dir_recursive(&path, files)?;
-        } else if ft.is_file() {
-            if let Some(media_type) = classify_file(&path) {
-                files.push(SourceFile { path, media_type });
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Build target path: `{root}/{user_id}/{author}/{title}.{ext}` (ebook)

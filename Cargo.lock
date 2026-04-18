@@ -1723,6 +1723,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "livrarr-matching"
+version = "0.1.0-alpha3"
+dependencies = [
+ "id3",
+ "livrarr-domain",
+ "mp4ameta",
+ "once_cell",
+ "rapidfuzz",
+ "rbook",
+ "regex",
+ "serde",
+ "tokio",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "livrarr-metadata"
 version = "0.1.0"
 dependencies = [
@@ -1731,6 +1747,7 @@ dependencies = [
  "livrarr-db",
  "livrarr-domain",
  "livrarr-http",
+ "livrarr-matching",
  "regex",
  "serde",
  "serde_json",
@@ -1751,9 +1768,11 @@ dependencies = [
  "libc",
  "livrarr-db",
  "livrarr-domain",
+ "livrarr-tagwrite",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "trait-variant",
 ]
 
@@ -1771,7 +1790,6 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hex",
- "id3",
  "image",
  "lettre",
  "libc",
@@ -1779,14 +1797,11 @@ dependencies = [
  "livrarr-domain",
  "livrarr-download",
  "livrarr-http",
+ "livrarr-matching",
  "livrarr-metadata",
  "livrarr-organize",
  "livrarr-tagwrite",
- "mp4ameta",
- "once_cell",
  "quick-xml",
- "rapidfuzz",
- "rbook",
  "regex",
  "reqwest",
  "serde",
@@ -1805,7 +1820,6 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "trait-variant",
- "unicode-normalization",
  "urlencoding",
  "uuid",
 ]

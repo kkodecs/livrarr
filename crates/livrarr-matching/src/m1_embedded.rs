@@ -5,7 +5,7 @@ use std::path::Path;
 use id3::TagLike;
 use rbook::Ebook;
 
-use super::types::{Confidence, Extraction, ExtractionSource};
+use crate::types::{Confidence, Extraction, ExtractionSource};
 
 /// Extract metadata from a file's embedded tags.
 /// Returns None only if no usable title can be extracted.
@@ -46,7 +46,7 @@ fn extract_epub(path: &Path) -> Option<Extraction> {
         title: Some(title),
         author,
         year: None,
-        isbn: None, // TODO: parse dc:identifier from OPF XML for ISBN
+        isbn: None,
         language: raw_language,
         series: None,
         series_position: None,
@@ -89,7 +89,6 @@ fn extract_m4b(path: &Path) -> Option<Extraction> {
 }
 
 fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Option<Extraction> {
-    // For grouped audiobooks, sample up to 5 files and find consensus.
     let paths_to_read: Vec<&Path> = if let Some(group) = grouped_paths {
         group.iter().take(5).map(|p| p.as_path()).collect()
     } else {
@@ -118,19 +117,16 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
         }
     }
 
-    // For audiobook MP3s: prefer TALB (album) over TIT2 (title).
-    // TIT2 is often chapter-level ("Chapter 01"), TALB is the actual book title.
     let raw_title = {
         let most_common_album = most_common_non_garbage_title(&albums, path);
         let most_common_title = most_common_non_garbage_title(&titles, path);
         match (most_common_album, most_common_title) {
-            (Some(a), _) => Some(a),    // Album is valid — use it (book title).
-            (None, Some(t)) => Some(t), // Album garbage, fall back to TIT2.
+            (Some(a), _) => Some(a),
+            (None, Some(t)) => Some(t),
             _ => None,
         }
     };
 
-    // For author: use most common non-garbage artist value.
     let raw_author = most_common_non_garbage_author(&artists);
 
     let title = raw_title?;
@@ -159,7 +155,6 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
     })
 }
 
-/// Decode common XML/HTML entities that rbook may leave unescaped.
 fn decode_xml_entities(s: &str) -> String {
     s.replace("&amp;", "&")
         .replace("&lt;", "<")
@@ -210,14 +205,10 @@ fn sanitize_title(title: &str, path: &Path) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    // Check if title equals filename stem.
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        if trimmed.eq_ignore_ascii_case(stem) {
-            // Title IS the filename — likely auto-generated, not real metadata.
-            // But only discard if it also looks generic.
-            if GARBAGE_TITLE.iter().any(|re| re.is_match(trimmed)) {
-                return None;
-            }
+        if trimmed.eq_ignore_ascii_case(stem) && GARBAGE_TITLE.iter().any(|re| re.is_match(trimmed))
+        {
+            return None;
         }
     }
     if GARBAGE_TITLE.iter().any(|re| re.is_match(trimmed)) {
@@ -237,7 +228,6 @@ fn sanitize_author(author: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// Return the most common non-garbage title from a list of tag values.
 fn most_common_non_garbage_title(values: &[String], path: &Path) -> Option<String> {
     let clean: Vec<String> = values
         .iter()
@@ -246,13 +236,11 @@ fn most_common_non_garbage_title(values: &[String], path: &Path) -> Option<Strin
     most_common(&clean).cloned()
 }
 
-/// Return the most common non-garbage author from a list of tag values.
 fn most_common_non_garbage_author(values: &[String]) -> Option<String> {
     let clean: Vec<String> = values.iter().filter_map(|v| sanitize_author(v)).collect();
     most_common(&clean).cloned()
 }
 
-/// Return the most common element in a slice.
 fn most_common<T: Eq + std::hash::Hash>(values: &[T]) -> Option<&T> {
     if values.is_empty() {
         return None;

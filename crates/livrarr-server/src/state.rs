@@ -61,6 +61,11 @@ pub type LiveImportWorkflow =
     livrarr_organize::import_workflow::ImportWorkflowImpl<SqliteDb, LiveFileService>;
 pub type LiveListService =
     livrarr_metadata::list_service::ListServiceImpl<SqliteDb, LiveWorkService>;
+pub type LiveRssSyncWorkflow = livrarr_metadata::rss_sync_workflow::RssSyncWorkflowImpl<
+    SqliteDb,
+    livrarr_http::fetcher::HttpFetcherImpl,
+    LiveReleaseService,
+>;
 
 /// Shared application state — injected into all Axum handlers.
 ///
@@ -127,6 +132,7 @@ pub struct AppState {
     pub file_service: Arc<LiveFileService>,
     pub import_workflow: Arc<LiveImportWorkflow>,
     pub list_service: Arc<LiveListService>,
+    pub rss_sync_workflow: Arc<LiveRssSyncWorkflow>,
     pub enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
 }
 
