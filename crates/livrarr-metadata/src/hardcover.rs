@@ -135,6 +135,9 @@ pub async fn query_hardcover(
     }
 
     // Tier 2: LLM disambiguation when exact match fails (SEARCH-007).
+    // The early-return on `hits.is_empty()` above prevents wasted LLM calls
+    // for genuine HC misses; once HC returned candidates we always ask the
+    // LLM to disambiguate (matches alpha2 behavior).
     let doc_idx = match best_idx {
         Some(i) => i,
         None => match llm_disambiguate(http, metadata_cfg, title, author, &hits).await {

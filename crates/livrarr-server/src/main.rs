@@ -127,13 +127,14 @@ async fn main() {
     // from a startup-time snapshot of MetadataConfig. Live config changes (token
     // added, URL changed) require a server restart for now — runtime reload comes
     // alongside the orchestration cutover.
-    let (provider_queue, enrichment_service) = {
+    // LiveMetadataConfig — all credential-dependent components hold a clone
+    // of this and read fresh per call. The update_metadata_config handler
+    // calls .replace() after a DB write so the new credentials are live on
+    // the next enrichment without restart.
+    let live_metadata_config = {
         use livrarr_db::ConfigDb;
-        use livrarr_domain::MetadataProvider as P;
-        use livrarr_metadata as m;
-
-        let metadata_cfg = db.get_metadata_config().await.unwrap_or_else(|e| {
-            warn!("Failed to read metadata config at startup ({e}); enrichment queue will start with default Audnexus URL only");
+        let initial = db.get_metadata_config().await.unwrap_or_else(|e| {
+            warn!("Failed to read metadata config at startup ({e}); using defaults");
             livrarr_db::MetadataConfig {
                 hardcover_enabled: false,
                 hardcover_api_token: None,
@@ -146,6 +147,14 @@ async fn main() {
                 languages: vec!["en".to_string()],
             }
         });
+        livrarr_metadata::live_config::LiveMetadataConfig::new(initial)
+    };
+
+    let (provider_queue, enrichment_service) = {
+        use livrarr_domain::MetadataProvider as P;
+        use livrarr_metadata as m;
+
+        let cfg_snapshot = live_metadata_config.snapshot();
 
         let queue_cfg = |provider| m::ProviderQueueConfig {
             provider,
@@ -164,51 +173,45 @@ async fn main() {
 
         let mut builder = m::DefaultProviderQueueBuilder::new();
 
-        // Audnexus — always available.
+        // Audnexus — always available. URL is captured at startup; if you
+        // want a custom audnexus_url to take effect live too, that's a
+        // small follow-up (same LiveMetadataConfig pattern).
         builder = builder.add_provider(
             P::Audnexus,
             m::ProviderClient::Audnexus(m::AudnexusClient::new(
                 http_client.clone(),
-                metadata_cfg.audnexus_url.clone(),
+                cfg_snapshot.audnexus_url.clone(),
             )),
             queue_cfg(P::Audnexus),
         );
 
-        // OpenLibrary — always available.
+        // OpenLibrary — always available, no credentials needed.
         builder = builder.add_provider(
             P::OpenLibrary,
             m::ProviderClient::OpenLibrary(m::OpenLibraryClient::new(http_client.clone())),
             queue_cfg(P::OpenLibrary),
         );
 
-        // Hardcover — only if explicitly enabled with a non-empty token.
-        if metadata_cfg.hardcover_enabled {
-            if let Some(token) = metadata_cfg
-                .hardcover_api_token
-                .as_deref()
-                .map(|t| {
-                    t.trim()
-                        .trim_start_matches("Bearer ")
-                        .trim_start_matches("bearer ")
-                })
-                .filter(|t| !t.is_empty())
-            {
-                builder = builder.add_provider(
-                    P::Hardcover,
-                    m::ProviderClient::Hardcover(m::HardcoverClient::new(
-                        http_client.clone(),
-                        token.to_string(),
-                        metadata_cfg.clone(),
-                    )),
-                    queue_cfg(P::Hardcover),
-                );
-            }
-        }
+        // Hardcover — always registered. The client itself reads the live
+        // config per-fetch; if `hardcover_enabled=false` or the token is
+        // empty, it returns NotFound without a network call. Enabling HC
+        // via the UI takes effect on the next enrichment.
+        builder = builder.add_provider(
+            P::Hardcover,
+            m::ProviderClient::Hardcover(m::HardcoverClient::new(
+                http_client.clone(),
+                live_metadata_config.clone(),
+            )),
+            queue_cfg(P::Hardcover),
+        );
 
-        // Goodreads — real network adapter against the production URL.
+        // Goodreads — always registered. The LLM extraction fallback for
+        // foreign-language pages reads live config per-fetch.
+        let gr_client = m::GoodreadsClient::production(http_client.clone())
+            .with_live_config(live_metadata_config.clone());
         builder = builder.add_provider(
             P::Goodreads,
-            m::ProviderClient::Goodreads(m::GoodreadsClient::production(http_client.clone())),
+            m::ProviderClient::Goodreads(gr_client),
             queue_cfg(P::Goodreads),
         );
 
@@ -216,39 +219,14 @@ async fn main() {
         let queue = Arc::new(builder.build(db_arc.clone()));
         let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
 
-        // LLM validator: Gemini when configured, no-op otherwise. Per
-        // Principle 11, LLM is value-add and never gatekeeps enrichment.
-        // Default model is gemini-3.1-flash-lite-preview (validated in
-        // session 12 — ~1.5-2s/call, strong identity-mismatch detection).
-        let validator = {
-            let key = metadata_cfg
-                .llm_api_key
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
-            let model = metadata_cfg
-                .llm_model
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("gemini-3.1-flash-lite-preview");
-            if metadata_cfg.llm_enabled {
-                if let Some(key) = key {
-                    tracing::info!(model, "LLM validator: Gemini configured");
-                    m::llm_validator::EitherLlmValidator::gemini(
-                        http_client.clone(),
-                        key.to_string(),
-                        model.to_string(),
-                    )
-                } else {
-                    tracing::info!("LLM validator: NoOp (llm_enabled but no api_key)");
-                    m::llm_validator::EitherLlmValidator::noop()
-                }
-            } else {
-                tracing::info!("LLM validator: NoOp (llm_enabled=false)");
-                m::llm_validator::EitherLlmValidator::noop()
-            }
-        };
+        // LLM validator — single LiveLlmValidator that reads credentials
+        // from live config per-call. When `llm_enabled=false` or
+        // `llm_api_key` is empty, behaves as a pass-through (no-op).
+        // Per Principle 11, LLM is value-add and never gatekeeps enrichment.
+        let validator = m::llm_validator::LiveLlmValidator::new(
+            http_client.clone(),
+            live_metadata_config.clone(),
+        );
 
         let service = Arc::new(m::EnrichmentServiceImpl::new(
             db_arc,
@@ -259,6 +237,8 @@ async fn main() {
         (queue, service)
     };
 
+    let svc_db = db.clone();
+    let svc_enrichment = enrichment_service.clone();
     let state = AppState {
         db,
         auth_service,
@@ -271,6 +251,7 @@ async fn main() {
         provider_health: Arc::new(ProviderHealthState::new()),
         cover_proxy_cache: Arc::new(livrarr_server::handlers::coverproxy::CoverProxyCache::new()),
         goodreads_rate_limiter: Arc::new(livrarr_server::state::GoodreadsRateLimiter::new()),
+        live_metadata_config: live_metadata_config.clone(),
         log_buffer,
         log_level_handle,
         refresh_in_progress: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -285,7 +266,87 @@ async fn main() {
         ol_rate_limiter: Arc::new(livrarr_server::state::OlRateLimiter::new()),
         manual_import_scans: Arc::new(dashmap::DashMap::new()),
         provider_queue,
-        enrichment_service,
+        enrichment_service: enrichment_service.clone(),
+
+        // --- Service layer (Phase 4) ---
+        author_service: Arc::new(livrarr_metadata::author_service::AuthorServiceImpl::new(
+            svc_db.clone(),
+            livrarr_http::fetcher::HttpFetcherImpl::new()
+                .expect("HttpFetcherImpl construction for author service"),
+            {
+                let cfg = live_metadata_config.snapshot();
+                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                    cfg.llm_endpoint.clone(),
+                    cfg.llm_api_key.clone(),
+                    cfg.llm_model.clone(),
+                    livrarr_http::HttpClient::builder()
+                        .build()
+                        .expect("LLM HttpClient"),
+                )
+            },
+        )),
+        series_service: Arc::new(livrarr_metadata::series_service::SeriesServiceImpl::new(
+            svc_db.clone(),
+        )),
+        series_query_service: Arc::new(
+            livrarr_metadata::series_query_service::SeriesQueryServiceImpl::new(
+                svc_db.clone(),
+                livrarr_http::fetcher::HttpFetcherImpl::new()
+                    .expect("HttpFetcherImpl construction for series query service"),
+                {
+                    let ew =
+                        livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                            svc_enrichment.clone(),
+                            svc_db.clone(),
+                        );
+                    Arc::new(ew)
+                },
+            ),
+        ),
+        work_service: {
+            let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                svc_enrichment.clone(),
+                svc_db.clone(),
+            );
+            Arc::new(livrarr_metadata::work_service::WorkServiceImpl::new(
+                svc_db.clone(),
+                ew,
+            ))
+        },
+        grab_service: Arc::new(livrarr_download::grab_service::GrabServiceImpl::new(
+            svc_db.clone(),
+        )),
+        release_service: Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
+            svc_db.clone(),
+            livrarr_http::fetcher::HttpFetcherImpl::new().expect("HttpFetcherImpl construction"),
+        )),
+        file_service: Arc::new(livrarr_organize::file_service::FileServiceImpl::new(
+            svc_db.clone(),
+        )),
+        import_workflow: {
+            let fs = livrarr_organize::file_service::FileServiceImpl::new(svc_db.clone());
+            Arc::new(livrarr_organize::import_workflow::ImportWorkflowImpl::new(
+                svc_db.clone(),
+                fs,
+            ))
+        },
+        list_service: {
+            let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                svc_enrichment.clone(),
+                svc_db.clone(),
+            );
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(svc_db.clone(), ew);
+            Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
+                svc_db.clone(),
+                ws,
+            ))
+        },
+        enrichment_workflow: Arc::new(
+            livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                svc_enrichment.clone(),
+                svc_db.clone(),
+            ),
+        ),
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).

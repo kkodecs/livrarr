@@ -1,18 +1,16 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 
 use crate::middleware::RequireAdmin;
 use crate::state::AppState;
 use crate::{
-    AddAuthorRequest, ApiError, AuthContext, AuthorDetailResponse, AuthorResponse,
-    AuthorSearchResult, FieldError, UpdateAuthorApiRequest, WorkDetailResponse,
+    AddAuthorApiRequest, ApiError, AuthContext, AuthorDetailResponse, AuthorResponse,
+    AuthorSearchResult, UpdateAuthorApiRequest, WorkDetailResponse,
 };
-use livrarr_db::{
-    AuthorBibliographyDb, AuthorDb, BibliographyEntry, ConfigDb, CreateAuthorDbRequest,
-    UpdateAuthorDbRequest, WorkDb,
+use livrarr_domain::services::{
+    AddAuthorRequest, AuthorService, UpdateAuthorRequest, WorkFilter, WorkService,
 };
 use livrarr_domain::{Author, Work};
 
@@ -131,59 +129,45 @@ pub async fn lookup(
         return Ok(Json(vec![]));
     }
 
-    let results = lookup_ol_authors(&state.http_client, &term, 20)
-        .await
-        .map_err(ApiError::BadGateway)?;
-
-    Ok(Json(results))
+    let results = state.author_service.lookup(&term, 20).await?;
+    Ok(Json(
+        results
+            .into_iter()
+            .map(|r| AuthorSearchResult {
+                ol_key: r.ol_key,
+                name: r.name,
+                sort_name: r.sort_name,
+            })
+            .collect(),
+    ))
 }
 
 /// POST /api/v1/author
 pub async fn add(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Json(req): Json<AddAuthorRequest>,
+    Json(req): Json<AddAuthorApiRequest>,
 ) -> Result<Json<AuthorResponse>, ApiError> {
     let user_id = ctx.user.id;
 
-    // Check if author exists by name (dedup).
-    if let Some(existing) = state.db.find_author_by_name(user_id, &req.name).await? {
-        // Update existing with new ol_key.
-        let updated = state
-            .db
-            .update_author(
-                user_id,
-                existing.id,
-                UpdateAuthorDbRequest {
-                    name: None,
-                    sort_name: req.sort_name,
-                    ol_key: Some(req.ol_key),
-                    gr_key: None,
-                    monitored: None,
-                    monitor_new_items: None,
-                    monitor_since: None,
-                },
-            )
-            .await?;
-        return Ok(Json(author_to_response(&updated)));
-    }
-
-    let author = state
-        .db
-        .create_author(CreateAuthorDbRequest {
+    let result = state
+        .author_service
+        .add(
             user_id,
-            name: req.name,
-            sort_name: req.sort_name,
-            ol_key: Some(req.ol_key),
-            gr_key: None,
-            hc_key: None,
-            import_id: None,
-        })
+            AddAuthorRequest {
+                name: req.name,
+                sort_name: req.sort_name,
+                ol_key: Some(req.ol_key),
+                monitored: false,
+            },
+        )
         .await?;
 
-    spawn_bibliography_fetch(state.clone(), author.id, user_id);
+    if result.is_created() {
+        spawn_bibliography_fetch(state.clone(), result.author().id, user_id);
+    }
 
-    Ok(Json(author_to_response(&author)))
+    Ok(Json(author_to_response(result.author())))
 }
 
 /// GET /api/v1/author
@@ -191,7 +175,7 @@ pub async fn list(
     State(state): State<AppState>,
     ctx: AuthContext,
 ) -> Result<Json<Vec<AuthorResponse>>, ApiError> {
-    let authors = state.db.list_authors(ctx.user.id).await?;
+    let authors = state.author_service.list(ctx.user.id).await?;
     Ok(Json(authors.iter().map(author_to_response).collect()))
 }
 
@@ -202,13 +186,23 @@ pub async fn get(
     Path(id): Path<i64>,
 ) -> Result<Json<AuthorDetailResponse>, ApiError> {
     let user_id = ctx.user.id;
-    let author = state.db.get_author(user_id, id).await?;
-    let works = state.db.list_works(user_id).await?;
-    let author_works: Vec<WorkDetailResponse> = works
-        .iter()
-        .filter(|w| w.author_id == Some(id))
-        .map(work_to_detail)
-        .collect();
+    let author = state.author_service.get(user_id, id).await?;
+    let works = state
+        .work_service
+        .list(
+            user_id,
+            WorkFilter {
+                author_id: Some(id),
+                monitored: None,
+                enrichment_status: None,
+                media_type: None,
+                sort_by: None,
+                sort_dir: None,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let author_works: Vec<WorkDetailResponse> = works.iter().map(work_to_detail).collect();
 
     Ok(Json(AuthorDetailResponse {
         author: author_to_response(&author),
@@ -223,48 +217,21 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(req): Json<UpdateAuthorApiRequest>,
 ) -> Result<Json<AuthorResponse>, ApiError> {
-    let user_id = ctx.user.id;
-    let author = state.db.get_author(user_id, id).await?;
-
-    // Validate: monitored=true requires ol_key.
-    if req.monitored == Some(true) && author.ol_key.is_none() {
-        return Err(ApiError::Validation {
-            errors: vec![FieldError {
-                field: "monitored".into(),
-                message: "cannot monitor author without OL linkage".into(),
-            }],
-        });
-    }
-
-    // Validate: monitor_new_items=true requires monitored=true.
-    if req.monitor_new_items == Some(true) {
-        let will_be_monitored = req.monitored.unwrap_or(author.monitored);
-        if !will_be_monitored {
-            return Err(ApiError::Validation {
-                errors: vec![FieldError {
-                    field: "monitor_new_items".into(),
-                    message: "monitor_new_items requires monitored=true".into(),
-                }],
-            });
-        }
-    }
-
-    let mut db_req = UpdateAuthorDbRequest {
-        name: None,
-        sort_name: None,
-        ol_key: None,
-        gr_key: req.gr_key,
-        monitored: req.monitored,
-        monitor_new_items: req.monitor_new_items,
-        monitor_since: None,
-    };
-
-    // Set monitor_since when first enabling monitoring.
-    if req.monitored == Some(true) && !author.monitored {
-        db_req.monitor_since = Some(Utc::now());
-    }
-
-    let updated = state.db.update_author(user_id, id, db_req).await?;
+    let updated = state
+        .author_service
+        .update(
+            ctx.user.id,
+            id,
+            UpdateAuthorRequest {
+                name: None,
+                sort_name: None,
+                ol_key: None,
+                gr_key: req.gr_key,
+                monitored: req.monitored,
+                monitor_new_items: req.monitor_new_items,
+            },
+        )
+        .await?;
 
     Ok(Json(author_to_response(&updated)))
 }
@@ -275,7 +242,7 @@ pub async fn delete(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<(), ApiError> {
-    state.db.delete_author(ctx.user.id, id).await?;
+    state.author_service.delete(ctx.user.id, id).await?;
     Ok(())
 }
 
@@ -296,78 +263,9 @@ pub async fn bibliography(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-) -> Result<Json<livrarr_db::AuthorBibliography>, ApiError> {
-    // Verify ownership BEFORE any cache read — prevents cross-user data leak.
-    let author = state.db.get_author(ctx.user.id, id).await?;
-
-    // Check cache — skip empty caches (failed previous fetch).
-    if let Ok(Some(cached)) = state.db.get_bibliography(id).await {
-        if !cached.entries.is_empty() {
-            return Ok(Json(cached));
-        }
-    }
-    let ol_key = author
-        .ol_key
-        .as_deref()
-        .ok_or_else(|| ApiError::BadRequest("Author has no Open Library key".into()))?;
-
-    let url = format!("https://openlibrary.org/authors/{ol_key}/works.json?limit=100");
-    let resp = state
-        .http_client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("OL request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        return Err(ApiError::BadGateway(format!(
-            "OL returned {}",
-            resp.status()
-        )));
-    }
-
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("OL parse: {e}")))?;
-
-    let entries_raw: Vec<BibliographyEntry> = data
-        .get("entries")
-        .and_then(|e| e.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|doc| {
-                    let title = doc.get("title")?.as_str()?;
-                    let key = doc.get("key")?.as_str()?;
-                    let ol_key = key.trim_start_matches("/works/").to_string();
-                    let year = doc
-                        .get("first_publish_date")
-                        .and_then(|d| d.as_str())
-                        .and_then(|s| s.get(..4))
-                        .and_then(|y| y.parse().ok());
-                    Some(BibliographyEntry {
-                        ol_key,
-                        title: title.to_string(),
-                        year,
-                        series_name: None,
-                        series_position: None,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if !entries_raw.is_empty() {
-        let bib = state.db.save_bibliography(id, &entries_raw).await?;
-        return Ok(Json(bib));
-    }
-
-    // Primary source returned nothing — try LLM as fallback if configured.
-    let cleaned = llm_clean_bibliography(&state, &author.name, &[]).await;
-    let final_entries = cleaned.as_deref().unwrap_or(&[]);
-
-    let bib = state.db.save_bibliography(id, final_entries).await?;
-    Ok(Json(bib))
+) -> Result<Json<Vec<livrarr_domain::services::BibliographyEntry>>, ApiError> {
+    let entries = state.author_service.bibliography(ctx.user.id, id).await?;
+    Ok(Json(entries))
 }
 
 /// POST /api/v1/author/{id}/bibliography/refresh — force re-fetch.
@@ -375,198 +273,34 @@ pub async fn refresh_bibliography(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-) -> Result<Json<livrarr_db::AuthorBibliography>, ApiError> {
-    // Verify ownership BEFORE any cache mutation — prevents cross-user cache wipe.
-    let _author = state.db.get_author(ctx.user.id, id).await?;
-
-    // Clear cache so bibliography() re-fetches.
-    if let Err(e) = state.db.delete_bibliography(id).await {
-        tracing::warn!("DELETE author_bibliography failed: {e}");
-    }
-    bibliography(State(state), ctx, Path(id)).await
+) -> Result<Json<Vec<livrarr_domain::services::BibliographyEntry>>, ApiError> {
+    let entries = state
+        .author_service
+        .refresh_bibliography(ctx.user.id, id)
+        .await?;
+    Ok(Json(entries))
 }
 
 /// Spawn a background task to fetch and cache an author's bibliography.
 /// Fire-and-forget — errors are logged, never block the caller.
 pub fn spawn_bibliography_fetch(state: AppState, author_id: i64, user_id: i64) {
     tokio::spawn(async move {
-        // Small delay to let the author creation transaction commit.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-        let author = match state.db.get_author(user_id, author_id).await {
-            Ok(a) => a,
-            Err(_) => return,
-        };
-        let ol_key = match author.ol_key.as_deref() {
-            Some(k) => k,
-            None => return,
-        };
-
-        let url = format!("https://openlibrary.org/authors/{ol_key}/works.json?limit=100");
-        let resp = match state.http_client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            _ => return,
-        };
-        let data: serde_json::Value = match resp.json().await {
-            Ok(d) => d,
-            Err(_) => return,
-        };
-
-        let entries_raw: Vec<BibliographyEntry> = data
-            .get("entries")
-            .and_then(|e| e.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|doc| {
-                        let title = doc.get("title")?.as_str()?;
-                        let key = doc.get("key")?.as_str()?;
-                        let ol_key = key.trim_start_matches("/works/").to_string();
-                        let year = doc
-                            .get("first_publish_date")
-                            .and_then(|d| d.as_str())
-                            .and_then(|s| s.get(..4))
-                            .and_then(|y| y.parse().ok());
-                        Some(BibliographyEntry {
-                            ol_key,
-                            title: title.to_string(),
-                            year,
-                            series_name: None,
-                            series_position: None,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if !entries_raw.is_empty() {
-            if let Err(e) = state.db.save_bibliography(author_id, &entries_raw).await {
-                tracing::warn!("save_bibliography failed: {e}");
+        match state
+            .author_service
+            .refresh_bibliography(user_id, author_id)
+            .await
+        {
+            Ok(entries) => {
+                tracing::info!(
+                    author_id,
+                    entries = entries.len(),
+                    "background bibliography fetch complete"
+                );
             }
-            tracing::info!(
-                author = %author.name,
-                entries = entries_raw.len(),
-                "background bibliography fetch complete"
-            );
-            return;
+            Err(e) => {
+                tracing::debug!(author_id, "background bibliography fetch skipped: {e}");
+            }
         }
-
-        // Primary source returned nothing — try LLM as fallback if configured.
-        let cleaned = llm_clean_bibliography(&state, &author.name, &[]).await;
-        let final_entries = cleaned.as_deref().unwrap_or(&[]);
-        if let Err(e) = state.db.save_bibliography(author_id, final_entries).await {
-            tracing::warn!("save_bibliography failed: {e}");
-        }
-
-        tracing::info!(
-            author = %author.name,
-            entries = final_entries.len(),
-            "background bibliography fetch complete (LLM fallback)"
-        );
     });
-}
-
-async fn llm_clean_bibliography(
-    state: &AppState,
-    author_name: &str,
-    entries: &[BibliographyEntry],
-) -> Option<Vec<BibliographyEntry>> {
-    let cfg = state.db.get_metadata_config().await.ok()?;
-    if !cfg.llm_enabled {
-        return None;
-    }
-    let endpoint = cfg.llm_endpoint.as_deref().filter(|s| !s.is_empty())?;
-    let api_key = cfg.llm_api_key.as_deref().filter(|s| !s.is_empty())?;
-    let model = cfg.llm_model.as_deref().filter(|s| !s.is_empty())?;
-
-    let mut listing = String::new();
-    for (i, e) in entries.iter().enumerate() {
-        listing.push_str(&format!(
-            "{}: \"{}\" ({})\n",
-            i,
-            e.title,
-            e.year.map(|y| y.to_string()).unwrap_or_default(),
-        ));
-    }
-
-    let prompt = format!(
-        "These are works by {author_name} from a book database:\n\n\
-         {listing}\n\
-         Clean up this list:\n\
-         1. Remove duplicates, foreign editions, comic adaptations, anthologies, and compilations\n\
-         2. Fix spelling and capitalization\n\
-         3. Add series name and position if you know it\n\
-         4. Order results in the most logical way for a reader\n\n\
-         Return a JSON array. Each entry: {{\"idx\": <original index>, \"title\": \"<cleaned title>\", \
-         \"series\": \"<series name or null>\", \"position\": <number or null>}}\n\
-         Return ONLY the JSON array, no other text."
-    );
-
-    let url = format!(
-        "{}chat/completions",
-        endpoint.trim_end_matches('/').to_owned() + "/"
-    );
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000,
-        "temperature": 0.0,
-    });
-
-    let resp = state
-        .http_client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .ok()?;
-
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let data: serde_json::Value = resp.json().await.ok()?;
-    let answer = data
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-
-    let json_str = answer
-        .strip_prefix("```json")
-        .or_else(|| answer.strip_prefix("```"))
-        .unwrap_or(answer)
-        .strip_suffix("```")
-        .unwrap_or(answer)
-        .trim();
-
-    let llm_entries: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
-
-    let cleaned: Vec<BibliographyEntry> = llm_entries
-        .iter()
-        .filter_map(|entry| {
-            let idx = entry.get("idx")?.as_u64()? as usize;
-            if idx >= entries.len() {
-                return None;
-            }
-            let mut e = entries[idx].clone();
-            if let Some(t) = entry.get("title").and_then(|v| v.as_str()) {
-                e.title = t.to_string();
-            }
-            e.series_name = entry
-                .get("series")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            e.series_position = entry.get("position").and_then(|v| v.as_f64());
-            Some(e)
-        })
-        .collect();
-
-    if cleaned.is_empty() {
-        return None;
-    }
-
-    Some(cleaned)
 }

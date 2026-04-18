@@ -5,53 +5,43 @@ FROM node:20-alpine AS frontend
 
 WORKDIR /app
 
-# Install pnpm
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
-# Install dependencies (cache layer)
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
-# Build
 COPY frontend/ ./
 RUN pnpm build
 
 # ─────────────────────────────────────────────
-# Stage 2: Build backend
+# Stage 2: Build backend (musl static binary)
 # ─────────────────────────────────────────────
-FROM rust:1.88-slim-bookworm AS backend
+FROM rust:1.88-alpine AS backend
 
 WORKDIR /app
 
-# Build dependencies (no libssl-dev needed — reqwest uses rustls, not native OpenSSL)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends pkg-config && \
-    rm -rf /var/lib/apt/lists/*
+# musl-dev + gcc required by sqlx bundled (compiles SQLite from C source)
+RUN apk add --no-cache musl-dev gcc
 
-# Copy workspace manifests first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 
-# Build release binary (server only — skips unused test deps)
+# Alpine's default target is x86_64-unknown-linux-musl — no --target flag needed
 RUN cargo build --release -p livrarr-server
 
 # ─────────────────────────────────────────────
-# Stage 3: Runtime image
+# Stage 3: Runtime image (~35-40MB)
 # ─────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM alpine:3.21
 
-# CA certs for HTTPS outbound + wget for healthcheck
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates wget && \
-    rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates tzdata tini curl
 
-# Non-root user with fixed UID/GID 1000
-RUN groupadd -g 1000 livrarr && \
-    useradd -u 1000 -g livrarr -d /app -s /usr/sbin/nologin livrarr
+# Non-root user
+RUN addgroup -g 1000 livrarr && \
+    adduser -u 1000 -G livrarr -D -H -s /sbin/nologin livrarr
 
 WORKDIR /app
 
-# Copy binary and frontend assets
 COPY --from=backend /app/target/release/livrarr ./livrarr
 COPY --from=frontend /app/dist ./ui
 
@@ -59,9 +49,8 @@ RUN chown -R livrarr:livrarr /app
 
 USER livrarr
 
-# Config and data live in a volume — not baked in
 VOLUME ["/config"]
 
 EXPOSE 8789
 
-ENTRYPOINT ["/app/livrarr", "--data", "/config", "--ui-dir", "/app/ui"]
+ENTRYPOINT ["/sbin/tini", "--", "/app/livrarr", "--data", "/config", "--ui-dir", "/app/ui"]

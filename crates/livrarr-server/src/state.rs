@@ -13,9 +13,10 @@ use crate::config::AppConfig;
 /// that scatter-gathers HC / OL / Audnexus / GR for live enrichment dispatch.
 pub type LiveProviderQueue = livrarr_metadata::DefaultProviderQueue<SqliteDb>;
 
-/// Type alias for the production LLM validator — boxed-enum to keep the
-/// AppState type concrete while supporting both the no-op and Gemini paths.
-pub type LiveLlmValidator = livrarr_metadata::llm_validator::EitherLlmValidator;
+/// Type alias for the production LLM validator — single struct that reads
+/// credentials from the live metadata config per-call. Behaves as a no-op
+/// when LLM is not configured; calls Gemini when llm_enabled + key are set.
+pub type LiveLlmValidator = livrarr_metadata::llm_validator::LiveLlmValidator;
 
 /// Type alias for the production `EnrichmentServiceImpl` instance — the IR-defined
 /// enrichment service backed by the live `DefaultProviderQueue` + `DefaultMergeEngine`
@@ -26,6 +27,40 @@ pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
     livrarr_metadata::DefaultMergeEngine,
     LiveLlmValidator,
 >;
+
+// =============================================================================
+// Service layer type aliases — Phase 4 handler migration
+// =============================================================================
+
+pub type LiveEnrichmentWorkflow =
+    livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl<
+        LiveEnrichmentService,
+        SqliteDb,
+    >;
+
+pub type LiveAuthorService = livrarr_metadata::author_service::AuthorServiceImpl<
+    SqliteDb,
+    livrarr_http::fetcher::HttpFetcherImpl,
+    livrarr_metadata::llm_caller_service::LlmCallerImpl,
+>;
+pub type LiveSeriesService = livrarr_metadata::series_service::SeriesServiceImpl<SqliteDb>;
+pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::SeriesQueryServiceImpl<
+    SqliteDb,
+    livrarr_http::fetcher::HttpFetcherImpl,
+    LiveEnrichmentWorkflow,
+>;
+pub type LiveWorkService =
+    livrarr_metadata::work_service::WorkServiceImpl<SqliteDb, LiveEnrichmentWorkflow>;
+pub type LiveGrabService = livrarr_download::grab_service::GrabServiceImpl<SqliteDb>;
+pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceImpl<
+    SqliteDb,
+    livrarr_http::fetcher::HttpFetcherImpl,
+>;
+pub type LiveFileService = livrarr_organize::file_service::FileServiceImpl<SqliteDb>;
+pub type LiveImportWorkflow =
+    livrarr_organize::import_workflow::ImportWorkflowImpl<SqliteDb, LiveFileService>;
+pub type LiveListService =
+    livrarr_metadata::list_service::ListServiceImpl<SqliteDb, LiveWorkService>;
 
 /// Shared application state — injected into all Axum handlers.
 ///
@@ -45,6 +80,13 @@ pub struct AppState {
     pub provider_health: Arc<ProviderHealthState>,
     pub cover_proxy_cache: Arc<crate::handlers::coverproxy::CoverProxyCache>,
     pub goodreads_rate_limiter: Arc<GoodreadsRateLimiter>,
+    /// Shared, mutable snapshot of `MetadataConfig`. The
+    /// `update_metadata_config` handlers call `.replace()` after persisting
+    /// to the DB so the new credentials are live on the next enrichment
+    /// without a restart. All credential-dependent components
+    /// (LiveLlmValidator, HardcoverClient, GoodreadsClient LLM fallback)
+    /// hold a clone and read fresh per call.
+    pub live_metadata_config: livrarr_metadata::live_config::LiveMetadataConfig,
     pub log_buffer: Arc<LogBuffer>,
     pub log_level_handle: Arc<LogLevelHandle>,
     pub refresh_in_progress: Arc<std::sync::Mutex<HashSet<livrarr_db::UserId>>>,
@@ -74,6 +116,18 @@ pub struct AppState {
     /// `provider_queue` + `DefaultMergeEngine`. Same status as `provider_queue`
     /// — wired but not yet driving live enrichment.
     pub enrichment_service: Arc<LiveEnrichmentService>,
+
+    // --- Service layer (Phase 4) ---
+    pub author_service: Arc<LiveAuthorService>,
+    pub series_service: Arc<LiveSeriesService>,
+    pub series_query_service: Arc<LiveSeriesQueryService>,
+    pub work_service: Arc<LiveWorkService>,
+    pub grab_service: Arc<LiveGrabService>,
+    pub release_service: Arc<LiveReleaseService>,
+    pub file_service: Arc<LiveFileService>,
+    pub import_workflow: Arc<LiveImportWorkflow>,
+    pub list_service: Arc<LiveListService>,
+    pub enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
 }
 
 // =============================================================================

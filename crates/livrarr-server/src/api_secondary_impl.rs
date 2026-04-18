@@ -48,7 +48,7 @@ impl AuthorApi for SecondaryApiImpl {
         Ok(vec![])
     }
 
-    async fn add(&self, uid: UserId, req: AddAuthorRequest) -> Result<AuthorResponse, ApiError> {
+    async fn add(&self, uid: UserId, req: AddAuthorApiRequest) -> Result<AuthorResponse, ApiError> {
         // Check if author exists by name
         if let Some(existing) = self
             .db

@@ -166,6 +166,11 @@ pub async fn update_metadata(
         })
         .await?;
 
+    // Publish the new snapshot so live components (LLM validator, HC client,
+    // GR LLM fallback) pick up the change on their next call. No restart
+    // needed.
+    state.live_metadata_config.replace(cfg.clone());
+
     let provider_status = state.provider_health.statuses().await;
     Ok(Json(metadata_to_response(cfg, provider_status)))
 }

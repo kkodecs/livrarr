@@ -28,8 +28,11 @@
 //!   2. Capitalization fix when input is all-uppercase or all-lowercase.
 //!   3. "Last, First" → "First Last" normalization.
 
+use livrarr_http::HttpClient;
 use regex::Regex;
+use serde::Deserialize;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 /// Trailing parenthetical at the end of a title, e.g. "(Series, #1)".
 static RE_TRAILING_PAREN: LazyLock<Regex> =
@@ -115,41 +118,219 @@ pub fn clean_author(raw: &str) -> String {
     s
 }
 
+// ---------------------------------------------------------------------------
+// LLM-assisted polish at add-time (Option C from session 12 spec)
+// ---------------------------------------------------------------------------
+
+/// 2.5s ceiling on the LLM call per the design spec — keeps add-work fast.
+const LLM_POLISH_TIMEOUT: Duration = Duration::from_millis(2_500);
+
+const POLISH_SYSTEM_INSTRUCTION: &str = r#"You are a metadata normalization tool for a book library system. Given a raw book title and author from a search result, return cleaned canonical forms.
+
+Return ONLY a JSON object with EXACTLY these fields (these names are required):
+{
+  "title": "<cleaned title string>",
+  "author_name": "<cleaned author string>",
+  "series_name": "<series name or null>",
+  "series_position": <number or null>
+}
+
+Cleanup rules for "title":
+- Apply proper Title Case. Capitalize the first letter of every significant word. Keep small words ("the", "of", "and", "a", "an", "to", "in", "on", "or", "for", "with", "but", "as", "by", "at", "from") lowercase EXCEPT when they are the first or last word of the title or subtitle.
+- Examples: "the power broker: robert moses and the fall of new york" → "The Power Broker: Robert Moses and the Fall of New York". "DUNE" → "Dune". "the way of kings" → "The Way of Kings".
+- Preserve intentionally stylized words that contain INTERNAL uppercase letters (e.g. "iCon", "iPhone", "MacBook", "eBay") — leave those words exactly as written.
+- Strip trailing parentheticals matching: series info like "(Series Name, #N)", edition markers like "(Deluxe Edition)", "(Hardcover)", "(Paperback)", "(Audiobook)", "(Unabridged)", year markers like "(1963)".
+- Strip series-marker suffixes after a colon like ": Book Two of the Expanse", ": Volume 1", ": A Novel". DO NOT strip substantive descriptive subtitles like "Robert Moses and the Fall of New York" or "Steve Jobs, The Greatest Second Act in the History of Business" — those ARE part of the work identity and must be preserved.
+- Trim and collapse internal whitespace.
+
+Cleanup rules for "author_name":
+- Normalize "Last, First" → "First Last".
+- Fix all-caps or all-lowercase author names to proper Name Case.
+- Preserve initials and punctuation (e.g. "Robert A. Caro", "J.R.R. Tolkien").
+
+Extract "series_name" and "series_position" ONLY when explicitly present in the raw title (e.g. inside parens like "(The Expanse, #2)"). Use null when not present.
+
+Output ONLY the JSON object. No markdown code fences. No commentary."#;
+
+/// Polished add-time output. `title` and `author_name` are the locked
+/// identity anchor values. `series_name` and `series_position` are extracted
+/// when present in the input — usable to populate the Work record at add-time.
+#[derive(Debug, Clone)]
+pub struct PolishedAddTime {
+    pub title: String,
+    pub author_name: String,
+    pub series_name: Option<String>,
+    pub series_position: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LlmPolishResponse {
+    title: String,
+    author_name: String,
+    #[serde(default)]
+    series_name: Option<String>,
+    #[serde(default)]
+    series_position: Option<f64>,
+}
+
+/// Polish a raw title + author at add-time using the LLM if configured.
+///
+/// On any failure (LLM not configured, timeout, HTTP error, malformed
+/// response), falls back to the deterministic `clean_title` / `clean_author`
+/// pair. Per project Principle 11, LLM is value-add and never gatekeeps.
+///
+/// `llm_config` is `(endpoint, api_key, model)`. Pass None to skip the LLM
+/// attempt entirely (purely deterministic path). The endpoint is the
+/// OpenAI-compat base URL (e.g. `https://api.groq.com/openai/v1`,
+/// `https://generativelanguage.googleapis.com/v1beta/openai`).
+pub async fn polish_addtime(
+    http: &HttpClient,
+    llm_config: Option<(&str, &str, &str)>,
+    raw_title: &str,
+    raw_author: &str,
+) -> PolishedAddTime {
+    let deterministic = || PolishedAddTime {
+        title: clean_title(raw_title),
+        author_name: clean_author(raw_author),
+        series_name: None,
+        series_position: None,
+    };
+
+    let Some((endpoint, api_key, model)) = llm_config else {
+        return deterministic();
+    };
+
+    match tokio::time::timeout(
+        LLM_POLISH_TIMEOUT,
+        call_polish_llm(http, endpoint, api_key, model, raw_title, raw_author),
+    )
+    .await
+    {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => {
+            tracing::info!(
+                raw_title,
+                raw_author,
+                "LLM add-time polish failed, falling back to deterministic: {e}"
+            );
+            deterministic()
+        }
+        Err(_) => {
+            tracing::info!(
+                raw_title,
+                raw_author,
+                "LLM add-time polish timed out (>2.5s), falling back to deterministic"
+            );
+            deterministic()
+        }
+    }
+}
+
+async fn call_polish_llm(
+    http: &HttpClient,
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+    raw_title: &str,
+    raw_author: &str,
+) -> Result<PolishedAddTime, String> {
+    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+    let user_msg = format!("title_raw: {raw_title}\nauthor_raw: {raw_author}");
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": POLISH_SYSTEM_INSTRUCTION},
+            {"role": "user",   "content": user_msg},
+        ],
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+    });
+
+    let resp = http
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("status {}", resp.status()));
+    }
+    let envelope: serde_json::Value = resp.json().await.map_err(|e| format!("envelope: {e}"))?;
+    let content_raw = envelope
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .ok_or("missing choices[0].message.content")?;
+    // Tolerate code-fence wrapping that some providers add.
+    let trimmed = content_raw.trim();
+    let unfenced = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed);
+    let unfenced = unfenced.strip_suffix("```").unwrap_or(unfenced).trim();
+    let parsed: LlmPolishResponse =
+        serde_json::from_str(unfenced).map_err(|e| format!("inner parse: {e}"))?;
+    Ok(PolishedAddTime {
+        title: parsed.title,
+        author_name: parsed.author_name,
+        series_name: parsed.series_name,
+        series_position: parsed.series_position,
+    })
+}
+
 fn collapse_whitespace(s: &str) -> String {
     RE_WHITESPACE.replace_all(s.trim(), " ").to_string()
 }
 
-/// Apply title-case if the input has no mixed casing (i.e. all-caps or
-/// all-lowercase). Preserve mixed-case input as-is so stylized forms
-/// (e.g. "iCon", "MASH", "eBook") survive.
+/// Apply per-word title-case. Words with INTERNAL uppercase letters
+/// (e.g. "iCon", "iPhone", "MacBook", "FBI", "X-Men") are preserved as-is
+/// so stylized forms survive. Other words are lower-cased then capitalized
+/// (with small-word lowercase rule for non-edge positions).
 fn fix_casing_if_needed(s: &str) -> String {
-    let has_lower = s.chars().any(|c| c.is_lowercase());
-    let has_upper = s.chars().any(|c| c.is_uppercase());
-    let needs_fix = !(has_lower && has_upper);
-    if !needs_fix {
-        return s.to_string();
-    }
     title_case(s)
 }
 
-/// Convert "all caps" or "all lowercase" string to title case, respecting
-/// small-word lowercasing rules.
 fn title_case(s: &str) -> String {
     let words: Vec<&str> = s.split_whitespace().collect();
     let last_idx = words.len().saturating_sub(1);
     words
         .iter()
         .enumerate()
-        .map(|(i, w)| {
-            let lower = w.to_lowercase();
-            if i != 0 && i != last_idx && SMALL_WORDS.contains(&lower.as_str()) {
-                lower
-            } else {
-                capitalize_first(&lower)
-            }
-        })
+        .map(|(i, w)| title_case_word(w, i == 0 || i == last_idx))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Casing rule for a single word:
+///   - Stylized words (have at least one lowercase AND at least one
+///     non-leading uppercase letter) are preserved verbatim — covers
+///     "iCon", "iPhone", "MacBook", "McDonald", "X-Men".
+///   - Everything else (all-lowercase, all-uppercase, or first-cap-only) is
+///     lowercased then re-capitalized via small-word rules. This normalizes
+///     "york" → "York", "DUNE" → "Dune", "POWER" → "Power".
+///   - All-uppercase acronyms ("FBI") get normalized too — acceptable
+///     trade-off; user can manually edit if they meant the acronym.
+fn title_case_word(word: &str, edge: bool) -> String {
+    let chars: Vec<char> = word.chars().collect();
+    let has_lower = chars.iter().any(|c| c.is_lowercase());
+    let has_internal_upper = chars
+        .iter()
+        .skip(1)
+        .any(|c| c.is_alphabetic() && c.is_uppercase());
+    if has_lower && has_internal_upper {
+        return word.to_string();
+    }
+    // Tokens with periods are dotted initials ("J.R.R.", "U.S.A."),
+    // honorifics ("Mr.", "Dr.", "Jr."), or abbreviations — preserve.
+    if word.contains('.') {
+        return word.to_string();
+    }
+    let lower = word.to_lowercase();
+    if !edge && SMALL_WORDS.contains(&lower.as_str()) {
+        return lower;
+    }
+    capitalize_first(&lower)
 }
 
 fn capitalize_first(s: &str) -> String {
@@ -352,10 +533,22 @@ mod tests {
     }
 
     #[test]
-    fn author_mixed_case_preserved() {
-        // Mixed-case stylized author handles preserved.
-        assert_eq!(clean_author("danah boyd"), "Danah Boyd"); // all-lowercase → fixed
-        assert_eq!(clean_author("danah Boyd"), "danah Boyd"); // mixed → preserved
+    fn author_per_word_casing_normalizes_lowercase_words() {
+        // Per-word casing fixes lowercase-word-by-lowercase-word; only words
+        // with internal uppercase (like "iPad" or "MacBook") are preserved.
+        assert_eq!(clean_author("danah boyd"), "Danah Boyd");
+        assert_eq!(clean_author("danah Boyd"), "Danah Boyd");
+    }
+
+    #[test]
+    fn title_mixed_case_with_lowercase_words_normalized() {
+        // The motivating bug: titles where some words are uppercase and
+        // some are lowercase used to be preserved as-is. Per-word casing
+        // now fixes the lowercase ones.
+        assert_eq!(
+            clean_title("The power broker: Robert Moses and the fall of New York"),
+            "The Power Broker: Robert Moses and the Fall of New York"
+        );
     }
 
     #[test]

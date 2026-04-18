@@ -4,7 +4,6 @@ pub mod config;
 pub mod coverproxy;
 pub mod download_client;
 pub mod email;
-pub mod enrichment;
 pub mod filesystem;
 pub mod history;
 pub mod import;

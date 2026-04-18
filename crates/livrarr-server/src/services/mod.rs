@@ -6,7 +6,6 @@
 //!
 //! No service traits — concrete structs only.
 
-pub mod enrichment_service;
 pub mod import_service;
 pub mod manual_import_service;
 pub mod readarr_import_service;

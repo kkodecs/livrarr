@@ -553,11 +553,48 @@ pub async fn add_work_internal(
     }
 
     // Cleanup title + author at add-time so the locked identity anchor
-    // (setter=User in provenance) stores the canonical canonical form, not
-    // whatever cruft came from the search result. See
-    // `livrarr_metadata::title_cleanup`.
-    let cleaned_title = livrarr_metadata::title_cleanup::clean_title(&req.title);
-    let cleaned_author = livrarr_metadata::title_cleanup::clean_author(&req.author_name);
+    // (setter=User in provenance) stores the canonical form, not whatever
+    // cruft came from the search result. LLM-assisted polish when configured
+    // (with 2.5s timeout); deterministic fallback otherwise. Reads from the
+    // shared live snapshot — no DB hit, no restart required for config
+    // changes. See `livrarr_metadata::title_cleanup`.
+    let polish_llm_config = {
+        let cfg = state.live_metadata_config.snapshot();
+        let key = cfg
+            .llm_api_key
+            .as_deref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let endpoint = cfg
+            .llm_endpoint
+            .as_deref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if cfg.llm_enabled && key.is_some() && endpoint.is_some() {
+            let model = cfg
+                .llm_model
+                .as_deref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "gemini-3.1-flash-lite-preview".to_string());
+            Some((endpoint.unwrap(), key.unwrap(), model))
+        } else {
+            None
+        }
+    };
+    let polished = livrarr_metadata::title_cleanup::polish_addtime(
+        &state.http_client,
+        polish_llm_config
+            .as_ref()
+            .map(|(e, k, m)| (e.as_str(), k.as_str(), m.as_str())),
+        &req.title,
+        &req.author_name,
+    )
+    .await;
+    let cleaned_title = polished.title;
+    let cleaned_author = polished.author_name;
+    let llm_extracted_series_name = polished.series_name;
+    let llm_extracted_series_position = polished.series_position;
 
     // Find or create author.
     let author_name_normalized = cleaned_author.trim().to_lowercase();
@@ -607,8 +644,8 @@ pub async fn add_work_internal(
             language: req.language,
             import_id: None,
             series_id: None,
-            series_name: None,
-            series_position: None,
+            series_name: llm_extracted_series_name,
+            series_position: llm_extracted_series_position,
             monitor_ebook: false,
             monitor_audiobook: false,
         })
@@ -653,74 +690,120 @@ pub async fn add_work_internal(
         });
     }
 
-    // Foreign-language works: enrich from detail page (Goodreads etc.) if available.
-    // English works: enrich through DefaultProviderQueue + EnrichmentServiceImpl
-    // (Phase 1.5 cutover). Foreign path stays on legacy until R-13.
-    let is_foreign = livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
-    let (enriched_work, messages) = if is_foreign {
-        if work.detail_url.is_some() {
-            let outcome = super::enrichment::enrich_foreign_work(state, &work).await;
-            let enriched_work = match state
-                .db
-                .update_work_enrichment(user_id, work.id, outcome.request)
-                .await
-            {
-                Ok(w) => w,
-                Err(e) => {
-                    tracing::warn!(work_id = work.id, "update_work_enrichment failed: {e}");
-                    work
-                }
-            };
-            (enriched_work, outcome.messages)
-        } else {
-            // No detail URL — skip enrichment, mark as skipped.
-            let _ = state.db.set_enrichment_status_skipped(work.id).await;
-            let mut skipped_work = work;
-            skipped_work.enrichment_status = livrarr_domain::EnrichmentStatus::Skipped;
-            return Ok(AddWorkResponse {
-                work: work_to_detail(&skipped_work),
-                author_created,
-                messages: vec![],
-            });
+    // Both English and foreign paths route through the queue
+    // (DefaultProviderQueue + EnrichmentServiceImpl). The GoodreadsClient
+    // handles foreign-work URLs internally (gr_key → detail_url →
+    // search-by-title) and falls back to LLM extraction when configured.
+    // The LLM validator at the EnrichmentService level cross-checks each
+    // provider's payload against the user-locked anchor (title + author).
+    let (enriched_work, messages) = match livrarr_metadata::EnrichmentService::enrich_work(
+        state.enrichment_service.as_ref(),
+        user_id,
+        work.id,
+        livrarr_metadata::EnrichmentMode::Background,
+    )
+    .await
+    {
+        Ok(result) => {
+            let messages: Vec<String> = result
+                .provider_outcomes
+                .iter()
+                .filter(|(_, oc)| {
+                    !matches!(
+                        oc,
+                        livrarr_domain::OutcomeClass::Success
+                            | livrarr_domain::OutcomeClass::NotFound
+                    )
+                })
+                .map(|(p, oc)| format!("{p:?}: {oc:?}"))
+                .collect();
+            (result.work, messages)
         }
-    } else {
-        // English path through the new queue. EnrichmentServiceImpl writes to
-        // DB internally via apply_enrichment_merge.
-        match livrarr_metadata::EnrichmentService::enrich_work(
-            state.enrichment_service.as_ref(),
-            user_id,
-            work.id,
-            livrarr_metadata::EnrichmentMode::Background,
-        )
-        .await
-        {
-            Ok(result) => {
-                let messages: Vec<String> = result
-                    .provider_outcomes
-                    .iter()
-                    .filter(|(_, oc)| {
-                        !matches!(
-                            oc,
-                            livrarr_domain::OutcomeClass::Success
-                                | livrarr_domain::OutcomeClass::NotFound
-                        )
-                    })
-                    .map(|(p, oc)| format!("{p:?}: {oc:?}"))
-                    .collect();
-                (result.work, messages)
-            }
-            Err(e) => {
-                tracing::warn!(work_id = work.id, "add_work: enrichment failed: {e}");
-                (work, vec![format!("enrichment failed: {e}")])
-            }
+        Err(e) => {
+            tracing::warn!(work_id = work.id, "add_work: enrichment failed: {e}");
+            (work, vec![format!("enrichment failed: {e}")])
         }
     };
+
+    if let Some(ref cover_url) = enriched_work.cover_url {
+        download_post_enrich_cover(state, enriched_work.id, cover_url).await;
+    }
 
     Ok(AddWorkResponse {
         work: work_to_detail(&enriched_work),
         author_created,
         messages,
     })
+}
+
+/// Fetch the merge-resolved cover URL and write it atomically to
+/// `covers/{work_id}.jpg`. Best-effort — every failure is logged but
+/// returns `()` so callers don't have to handle errors. Uses the
+/// SSRF-safe HTTP client.
+pub(crate) async fn download_post_enrich_cover(state: &AppState, work_id: i64, cover_url: &str) {
+    let covers_dir = state.data_dir.join("covers");
+    if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
+        tracing::warn!(work_id, "create_dir_all for covers failed: {e}");
+        return;
+    }
+    let resp = match state.http_client_safe.get(cover_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(work_id, cover_url, "cover download request failed: {e}");
+            return;
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::warn!(
+            work_id,
+            cover_url,
+            status = %resp.status(),
+            "cover download returned non-success status"
+        );
+        return;
+    }
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(work_id, "cover body read failed: {e}");
+            return;
+        }
+    };
+    let path = covers_dir.join(format!("{work_id}.jpg"));
+    if let Err(e) = atomic_write_cover_handler(&path, &bytes).await {
+        tracing::warn!(work_id, "cover atomic write failed: {e}");
+        return;
+    }
+    let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
+    let _ = tokio::fs::remove_file(&thumb).await;
+}
+
+/// Atomically write a cover file: `path.tmp` → fsync → rename.
+async fn atomic_write_cover_handler(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("jpg.tmp");
+    let tmp_for_blocking = tmp.clone();
+    let bytes = bytes.to_vec();
+    let target = path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_for_blocking)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_for_blocking, &target)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Err(e)
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Err(std::io::Error::other(format!("spawn error: {e}")))
+        }
+    }
 }
 
 /// POST /api/v1/work
@@ -957,103 +1040,57 @@ pub async fn refresh(
         tracing::warn!("reset_enrichment_for_refresh failed: {e}");
     }
 
-    // Re-enrich — route to the correct enrichment function.
-    let is_foreign = livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
-    let (enriched, mut messages) = if is_foreign && work.detail_url.is_some() {
-        // Foreign-language works still use the legacy direct path. Migrating
-        // those alongside cover anti-bot detection (R-13) and dependent-step
-        // LLM orchestration is a follow-on cutover step.
-        let outcome = super::enrichment::enrich_foreign_work(&state, &work).await;
-        let enriched = match state
-            .db
-            .update_work_enrichment(user_id, id, outcome.request)
-            .await
-        {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!(
-                    work_id = id,
-                    "update_work_enrichment failed during foreign refresh: {e}"
-                );
-                work.clone()
-            }
-        };
-        (enriched, outcome.messages)
-    } else {
-        // English-language works: route through DefaultProviderQueue +
-        // EnrichmentServiceImpl. First call-site cutover (Phase 1.5).
-        // Known regression vs. legacy until Phase 2: GR cover fallback for
-        // works whose HC/OL covers are missing or sub-50KB (R-13 — scheduled).
-        if let Err(e) = livrarr_metadata::EnrichmentService::reset_for_manual_refresh(
-            state.enrichment_service.as_ref(),
-            user_id,
-            id,
-        )
-        .await
-        {
-            tracing::warn!("enrichment_service.reset_for_manual_refresh failed: {e}");
+    // Re-enrich — both English and foreign now route through the queue.
+    // GoodreadsClient handles foreign-work URLs internally; LLM validator
+    // identity-checks providers against the user-locked anchor.
+    if let Err(e) = livrarr_metadata::EnrichmentService::reset_for_manual_refresh(
+        state.enrichment_service.as_ref(),
+        user_id,
+        id,
+    )
+    .await
+    {
+        tracing::warn!("enrichment_service.reset_for_manual_refresh failed: {e}");
+    }
+
+    let result = match livrarr_metadata::EnrichmentService::enrich_work(
+        state.enrichment_service.as_ref(),
+        user_id,
+        id,
+        livrarr_metadata::EnrichmentMode::HardRefresh,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("enrichment_service.enrich_work failed: {e}");
+            return Ok(Json(RefreshWorkResponse {
+                work: work_to_detail(&work),
+                messages: vec![format!("enrichment failed: {e}")],
+            }));
         }
-
-        let result = match livrarr_metadata::EnrichmentService::enrich_work(
-            state.enrichment_service.as_ref(),
-            user_id,
-            id,
-            livrarr_metadata::EnrichmentMode::HardRefresh,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("enrichment_service.enrich_work failed: {e}");
-                return Ok(Json(RefreshWorkResponse {
-                    work: work_to_detail(&work),
-                    messages: vec![format!("enrichment failed: {e}")],
-                }));
-            }
-        };
-
-        let enriched = result.work.clone();
-
-        // Download cover to disk if the queue produced a cover_url. Mirrors
-        // the legacy enrich_work cover-download behavior so on-disk
-        // covers/{id}.jpg stays in sync with the new path.
-        if let Some(ref cover_url) = enriched.cover_url {
-            let covers_dir = state.data_dir.join("covers");
-            if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
-                tracing::warn!("create_dir_all for covers failed: {e}");
-            }
-            if let Ok(resp) = state.http_client_safe.get(cover_url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(bytes) = resp.bytes().await {
-                        let path = covers_dir.join(format!("{id}.jpg"));
-                        let tmp = path.with_extension("jpg.tmp");
-                        if tokio::fs::write(&tmp, &bytes).await.is_ok()
-                            && tokio::fs::rename(&tmp, &path).await.is_ok()
-                        {
-                            let thumb_path = covers_dir.join(format!("{id}_thumb.jpg"));
-                            let _ = tokio::fs::remove_file(&thumb_path).await;
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut messages: Vec<String> = result
-            .provider_outcomes
-            .iter()
-            .filter(|(_, oc)| {
-                !matches!(
-                    oc,
-                    livrarr_domain::OutcomeClass::Success | livrarr_domain::OutcomeClass::NotFound
-                )
-            })
-            .map(|(p, oc)| format!("{p:?}: {oc:?}"))
-            .collect();
-        if result.merge_deferred {
-            messages.push("Merge deferred — retry pending".to_string());
-        }
-        (enriched, messages)
     };
+
+    let enriched = result.work.clone();
+
+    if let Some(ref cover_url) = enriched.cover_url {
+        download_post_enrich_cover(&state, id, cover_url).await;
+    }
+
+    let mut messages: Vec<String> = result
+        .provider_outcomes
+        .iter()
+        .filter(|(_, oc)| {
+            !matches!(
+                oc,
+                livrarr_domain::OutcomeClass::Success | livrarr_domain::OutcomeClass::NotFound
+            )
+        })
+        .map(|(p, oc)| format!("{p:?}: {oc:?}"))
+        .collect();
+    if result.merge_deferred {
+        messages.push("Merge deferred — retry pending".to_string());
+    }
 
     // TAG-V21-004: rewrite tags on existing library items after re-enrichment.
     let taggable = state.db.list_taggable_items_by_work(user_id, id).await?;
@@ -1126,47 +1163,7 @@ pub async fn refresh_all(
         let mut failed = 0usize;
 
         for work in &works {
-            let is_foreign =
-                livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
-
-            // Foreign-language works still take the legacy direct path —
-            // foreign cutover lands alongside R-13 cover anti-bot detection.
-            // English works route through DefaultProviderQueue +
-            // EnrichmentServiceImpl, matching the single-work refresh handler
-            // (Phase 1.5 sub-step 2).
-            if is_foreign && work.detail_url.is_some() {
-                let enrich_fut = super::enrichment::enrich_foreign_work(&state, work);
-                let outcome =
-                    tokio::time::timeout(std::time::Duration::from_secs(30), enrich_fut).await;
-                match outcome {
-                    Ok(o) => match state
-                        .db
-                        .update_work_enrichment(user_id, work.id, o.request)
-                        .await
-                    {
-                        Ok(enriched_work) => {
-                            enriched += 1;
-                            if let Ok(taggable) =
-                                state.db.list_taggable_items_by_work(user_id, work.id).await
-                            {
-                                if !taggable.is_empty() {
-                                    let _ = super::import::retag_library_items(
-                                        &state,
-                                        &enriched_work,
-                                        &taggable,
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
-                        Err(_) => failed += 1,
-                    },
-                    Err(_) => failed += 1,
-                }
-                continue;
-            }
-
-            // English path through the new queue.
+            // Both English and foreign paths route through the queue.
             if let Err(e) = livrarr_metadata::EnrichmentService::reset_for_manual_refresh(
                 state.enrichment_service.as_ref(),
                 user_id,
@@ -1204,27 +1201,8 @@ pub async fn refresh_all(
                     }
                 };
 
-            // Download cover if the queue produced a cover_url, mirroring the
-            // legacy on-disk cover behavior.
             if let Some(ref cover_url) = result.work.cover_url {
-                let covers_dir = state.data_dir.join("covers");
-                if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
-                    tracing::warn!("create_dir_all for covers failed: {e}");
-                }
-                if let Ok(resp) = state.http_client_safe.get(cover_url).send().await {
-                    if resp.status().is_success() {
-                        if let Ok(bytes) = resp.bytes().await {
-                            let path = covers_dir.join(format!("{}.jpg", work.id));
-                            let tmp = path.with_extension("jpg.tmp");
-                            if tokio::fs::write(&tmp, &bytes).await.is_ok()
-                                && tokio::fs::rename(&tmp, &path).await.is_ok()
-                            {
-                                let thumb_path = covers_dir.join(format!("{}_thumb.jpg", work.id));
-                                let _ = tokio::fs::remove_file(&thumb_path).await;
-                            }
-                        }
-                    }
-                }
+                download_post_enrich_cover(&state, work.id, cover_url).await;
             }
 
             enriched += 1;

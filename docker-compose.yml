@@ -1,6 +1,6 @@
 services:
   livrarr:
-    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha1   # pin to a specific release; avoid :latest for alpha
+    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha3   # pin to a specific release; avoid :latest for alpha
     container_name: livrarr
     ports:
       - 8789:8789

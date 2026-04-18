@@ -16,18 +16,29 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 pub mod audnexus;
+pub mod author_service;
 pub mod cover;
+pub mod enrichment_workflow_service;
 pub mod goodreads;
 pub mod hardcover;
 pub mod http_llm;
 pub mod language;
+pub mod list_service;
+pub mod live_config;
+pub mod llm_caller_service;
 pub mod llm_scraper;
 pub mod llm_validator;
 pub mod normalize;
 pub mod openlibrary;
 pub mod provider_client;
 pub mod provider_queue;
+pub mod series_query_service;
+pub mod series_service;
 pub mod title_cleanup;
+pub mod work_service;
+
+pub mod author_monitor_workflow;
+pub mod rss_sync_workflow;
 
 pub use provider_client::{
     AudnexusClient, GoodreadsClient, HardcoverClient, OpenLibraryClient, ProviderClient,
