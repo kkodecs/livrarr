@@ -1547,6 +1547,47 @@ impl From<livrarr_domain::services::WorkServiceError> for ApiError {
     }
 }
 
+impl From<livrarr_domain::services::ReleaseServiceError> for ApiError {
+    fn from(e: livrarr_domain::services::ReleaseServiceError) -> Self {
+        use livrarr_domain::services::ReleaseServiceError;
+        match e {
+            ReleaseServiceError::NoClient { protocol } => {
+                let label = if protocol == "usenet" {
+                    "Usenet"
+                } else {
+                    "torrent"
+                };
+                ApiError::BadRequest(format!("No {label} download client configured"))
+            }
+            ReleaseServiceError::ClientProtocolMismatch { protocol } => ApiError::BadRequest(
+                format!("Selected download client does not support {protocol} protocol"),
+            ),
+            ReleaseServiceError::ClientUnreachable(msg) => ApiError::BadGateway(msg),
+            ReleaseServiceError::DownloadClientAuth => {
+                ApiError::BadGateway("Download client auth failed".into())
+            }
+            ReleaseServiceError::Ssrf(msg) => {
+                ApiError::BadRequest(format!("Invalid download URL: {msg}"))
+            }
+            ReleaseServiceError::AllIndexersFailed => {
+                ApiError::BadGateway("All indexers failed".into())
+            }
+            ReleaseServiceError::Db(db_err) => ApiError::Db(db_err),
+        }
+    }
+}
+
+impl From<livrarr_domain::services::GrabServiceError> for ApiError {
+    fn from(e: livrarr_domain::services::GrabServiceError) -> Self {
+        use livrarr_domain::services::GrabServiceError;
+        match e {
+            GrabServiceError::NotFound => ApiError::NotFound,
+            GrabServiceError::ClientUnreachable(msg) => ApiError::BadGateway(msg),
+            GrabServiceError::Db(db_err) => ApiError::Db(db_err),
+        }
+    }
+}
+
 /// JSON error response body matching frontend's normalizeError expectations.
 ///
 /// Format: { status, error, message, fieldErrors? }
