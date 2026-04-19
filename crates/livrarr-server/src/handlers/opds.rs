@@ -4,6 +4,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::state::AppState;
 use livrarr_db::{AuthorDb, LibraryItemDb, WorkDb};
+use livrarr_domain::services::FileService;
 use livrarr_domain::{LibraryItem, User, Work};
 
 // ---------------------------------------------------------------------------
@@ -484,9 +485,11 @@ pub async fn download(
 ) -> Result<Response, Response> {
     let user = basic_auth(&state, &headers).await?;
 
-    let path = super::workfile::resolve_file_path(&state.db, user.id, item_id)
+    let path = state
+        .file_service
+        .resolve_path(user.id, item_id)
         .await
-        .map_err(api_err_to_response)?;
+        .map_err(|e| api_err_to_response(crate::ApiError::from(e)))?;
 
     let ext = path
         .extension()

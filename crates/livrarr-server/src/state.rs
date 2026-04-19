@@ -67,6 +67,12 @@ pub type LiveListService = livrarr_metadata::list_service::ListServiceImpl<
     livrarr_http::fetcher::HttpFetcherImpl,
     livrarr_metadata::list_service::NoOpBibliographyTrigger,
 >;
+pub type LiveAuthorMonitorWorkflow =
+    livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl<
+        SqliteDb,
+        LiveWorkService,
+        livrarr_http::fetcher::HttpFetcherImpl,
+    >;
 pub type LiveRssSyncWorkflow = livrarr_metadata::rss_sync_workflow::RssSyncWorkflowImpl<
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
@@ -139,6 +145,7 @@ pub struct AppState {
     pub import_workflow: Arc<LiveImportWorkflow>,
     pub list_service: Arc<LiveListService>,
     pub rss_sync_workflow: Arc<LiveRssSyncWorkflow>,
+    pub author_monitor_workflow: Arc<LiveAuthorMonitorWorkflow>,
     pub enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
 }
 

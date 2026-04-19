@@ -376,6 +376,29 @@ async fn main() {
                 svc_db.clone(),
             ),
         ),
+        author_monitor_workflow: {
+            let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                svc_enrichment.clone(),
+                svc_db.clone(),
+            );
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
+                svc_db.clone(),
+                ew,
+                livrarr_http::fetcher::HttpFetcherImpl::new()
+                    .expect("HttpFetcherImpl construction for author monitor work service"),
+                data_dir.clone(),
+            );
+            Arc::new(
+                livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::new(
+                    Arc::new(svc_db.clone()),
+                    Arc::new(ws),
+                    Arc::new(
+                        livrarr_http::fetcher::HttpFetcherImpl::new()
+                            .expect("HttpFetcherImpl construction for author monitor"),
+                    ),
+                ),
+            )
+        },
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
