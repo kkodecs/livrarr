@@ -11,8 +11,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::state::AppState;
 use livrarr_db::{
-    ConfigDb, CreateHistoryEventDbRequest, CreateNotificationDbRequest, CreateWorkDbRequest,
-    DownloadClientDb, GrabDb, HistoryDb, ListImportDb, NotificationDb, SessionDb, WorkDb,
+    ConfigDb, CreateHistoryEventDbRequest, CreateNotificationDbRequest, DownloadClientDb, GrabDb,
+    HistoryDb, ListImportDb, NotificationDb, SessionDb, WorkDb,
 };
 use livrarr_domain::services::RssSyncWorkflow;
 use livrarr_domain::{EventType, NotificationType};

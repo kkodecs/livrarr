@@ -36,7 +36,6 @@ pub mod handlers;
 pub mod jobs;
 pub use livrarr_matching as matching;
 pub mod middleware;
-pub mod parsers;
 pub mod readarr_client;
 pub mod router;
 pub mod services;
