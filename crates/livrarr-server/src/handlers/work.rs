@@ -7,10 +7,7 @@ use crate::{
     AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse,
     RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
-use livrarr_db::{
-    AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, NotificationDb, ProvenanceDb,
-    SetFieldProvenanceRequest, WorkDb,
-};
+use livrarr_db::{NotificationDb, ProvenanceDb, SetFieldProvenanceRequest};
 use livrarr_domain::services::{WorkDetailView, WorkService};
 use livrarr_domain::{ProvenanceSetter, Work, WorkField};
 
@@ -135,18 +132,6 @@ fn detail_from_view(view: WorkDetailView) -> WorkDetailResponse {
     detail
 }
 
-/// Extract the original URL from a proxy cover URL.
-/// Returns the input unchanged if it's not a proxy URL.
-fn unproxy_cover_url(url: &str) -> String {
-    if let Some(rest) = url.strip_prefix("/api/v1/coverproxy?url=") {
-        urlencoding::decode(rest)
-            .map(|s| s.into_owned())
-            .unwrap_or_else(|_| url.to_string())
-    } else {
-        url.to_string()
-    }
-}
-
 #[derive(serde::Deserialize)]
 pub struct LookupQuery {
     pub term: Option<String>,
@@ -195,230 +180,6 @@ pub async fn lookup(
         .collect();
 
     Ok(Json(api_results))
-}
-
-/// Use LLM to clean up search results — remove duplicates, foreign editions,
-/// comics, anthologies, and misattributions. Returns None if LLM not configured or fails.
-async fn llm_clean_search_results(
-    http: &livrarr_http::HttpClient,
-    cfg: Option<&livrarr_db::MetadataConfig>,
-    search_term: &str,
-    results: &[WorkSearchResult],
-    foreign: bool,
-) -> Option<Vec<WorkSearchResult>> {
-    let cfg = cfg?;
-    if !cfg.llm_enabled {
-        return None;
-    }
-    let endpoint = cfg.llm_endpoint.as_deref().filter(|s| !s.is_empty())?;
-    let api_key = cfg.llm_api_key.as_deref().filter(|s| !s.is_empty())?;
-    let model = cfg.llm_model.as_deref().filter(|s| !s.is_empty())?;
-
-    // Build numbered list of results for the LLM.
-    let mut listing = String::new();
-    for (i, r) in results.iter().enumerate() {
-        listing.push_str(&format!(
-            "{}: \"{}\" by {} ({})\n",
-            i,
-            r.title,
-            r.author_name,
-            r.year.map(|y| y.to_string()).unwrap_or_default(),
-        ));
-    }
-
-    let instructions = if foreign {
-        "Clean up this list:\n\
-         1. Remove academic papers, theses, and literary criticism — keep only the actual books\n\
-         2. Remove exact duplicates (same title + same author), but KEEP different editions of the same work\n\
-         3. Do NOT change title capitalization — preserve the original casing exactly as shown. \
-            Many languages (Spanish, French, German, etc.) do NOT capitalize every word in titles like English does.\n\
-         4. Fix author names: remove translator/editor info, keep only the primary author (First Last format)\n\
-         5. Add series name and position if you know it\n\n\
-         Keep multiple editions — they may have different ISBNs needed for cover resolution.\n\
-         Order: most relevant/popular edition first."
-    } else {
-        "Clean up this list:\n\
-         1. Remove duplicates, foreign editions, comic adaptations, and anthologies\n\
-         2. Fix spelling and capitalization of titles and author names\n\
-         3. Remove series info from titles (e.g. \"The Great Hunt (The Wheel of Time Book 2)\" → \"The Great Hunt\")\n\
-         4. Add series name and position if you know it\n\n\
-         Order results in the most logical way for a reader."
-    };
-
-    let prompt = format!(
-        "I searched a book database for \"{search_term}\". Here are the raw results:\n\n\
-         {listing}\n\
-         {instructions}\n\n\
-         Return a JSON array. Each entry: {{\"idx\": <original index>, \"title\": \"<cleaned title>\", \
-         \"author\": \"<cleaned author>\", \"series\": \"<series name or null>\", \"position\": <number or null>}}\n\
-         Return ONLY the JSON array, no other text."
-    );
-
-    let url = format!(
-        "{}chat/completions",
-        endpoint.trim_end_matches('/').to_owned() + "/"
-    );
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 2000,
-        "temperature": 0.0,
-    });
-
-    let resp = http
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .ok()?;
-
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let data: serde_json::Value = resp.json().await.ok()?;
-    let answer = data
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-
-    if answer.is_empty() {
-        return None;
-    }
-
-    // Strip markdown code fences if present.
-    let json_str = answer
-        .strip_prefix("```json")
-        .or_else(|| answer.strip_prefix("```"))
-        .unwrap_or(answer)
-        .strip_suffix("```")
-        .unwrap_or(answer)
-        .trim();
-
-    let entries: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
-
-    let cleaned: Vec<WorkSearchResult> = entries
-        .iter()
-        .filter_map(|entry| {
-            let idx = entry.get("idx")?.as_u64()? as usize;
-            if idx >= results.len() {
-                return None;
-            }
-            let mut r = results[idx].clone();
-            if let Some(t) = entry.get("title").and_then(|v| v.as_str()) {
-                r.title = t.to_string();
-            }
-            if let Some(a) = entry.get("author").and_then(|v| v.as_str()) {
-                r.author_name = a.to_string();
-            }
-            r.series_name = entry
-                .get("series")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            r.series_position = entry.get("position").and_then(|v| v.as_f64());
-            Some(r)
-        })
-        .collect();
-
-    if cleaned.is_empty() {
-        return None;
-    }
-
-    Some(cleaned)
-}
-
-async fn lookup_openlibrary(
-    http: &livrarr_http::HttpClient,
-    term: &str,
-) -> Result<Json<Vec<WorkSearchResult>>, ApiError> {
-    let resp = http
-        .get("https://openlibrary.org/search.json")
-        .query(&[
-            ("q", term),
-            ("limit", "50"),
-            (
-                "fields",
-                "key,title,author_name,author_key,first_publish_year,cover_i",
-            ),
-        ])
-        .send()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("OpenLibrary request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        return Err(ApiError::BadGateway(format!(
-            "OpenLibrary returned {}",
-            resp.status()
-        )));
-    }
-
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("OpenLibrary parse error: {e}")))?;
-
-    let docs = data
-        .get("docs")
-        .and_then(|d| d.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let results: Vec<WorkSearchResult> = docs
-        .iter()
-        .filter_map(|doc| {
-            let key = doc.get("key")?.as_str()?;
-            let title = doc.get("title")?.as_str()?;
-            let ol_key = key.trim_start_matches("/works/").to_string();
-
-            let author_name = doc
-                .get("author_name")
-                .and_then(|a| a.as_array())
-                .and_then(|a| a.first())
-                .and_then(|a| a.as_str())
-                .unwrap_or("Unknown")
-                .to_string();
-
-            let author_ol_key = doc
-                .get("author_key")
-                .and_then(|a| a.as_array())
-                .and_then(|a| a.first())
-                .and_then(|a| a.as_str())
-                .map(|k| k.trim_start_matches("/authors/").to_string());
-
-            let year = doc
-                .get("first_publish_year")
-                .and_then(|y| y.as_i64())
-                .map(|y| y as i32);
-
-            let cover_url = doc
-                .get("cover_i")
-                .and_then(|c| c.as_i64())
-                .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-M.jpg"));
-
-            Some(WorkSearchResult {
-                ol_key: Some(ol_key),
-                title: title.to_string(),
-                author_name,
-                author_ol_key,
-                year,
-                cover_url,
-                description: None,
-                series_name: None,
-                series_position: None,
-                source: None,
-                source_type: None,
-                language: None,
-                detail_url: None,
-                rating: None,
-            })
-        })
-        .collect();
-
-    Ok(Json(results))
 }
 
 /// Internal work creation — shared by the HTTP handler and manual import.
@@ -612,9 +373,6 @@ pub async fn update(
     Ok(Json(work_to_detail(&work)))
 }
 
-/// Maximum upload size for cover images (1 MB).
-const MAX_COVER_BYTES: usize = 1_024 * 1_024;
-
 /// POST /api/v1/work/:id/cover
 pub async fn upload_cover(
     State(state): State<AppState>,
@@ -799,55 +557,4 @@ pub async fn refresh_all(
     });
 
     Ok(axum::http::StatusCode::ACCEPTED)
-}
-
-/// Download a cover image from a URL and save to the covers directory.
-async fn download_cover(
-    http: &livrarr_http::HttpClient,
-    url: &str,
-    covers_dir: &std::path::Path,
-    work_id: i64,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    download_cover_as(http, url, covers_dir, work_id, "").await
-}
-
-async fn download_cover_as(
-    http: &livrarr_http::HttpClient,
-    url: &str,
-    covers_dir: &std::path::Path,
-    work_id: i64,
-    suffix: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tokio::fs::create_dir_all(covers_dir).await?;
-    let resp = http.get(url).send().await?;
-    if !resp.status().is_success() {
-        return Err(format!("cover download returned {}", resp.status()).into());
-    }
-    let bytes = resp.bytes().await?;
-    let cover_path = covers_dir.join(format!("{work_id}{suffix}.jpg"));
-    // Atomic write: .tmp → fsync → rename over target.
-    let tmp_path = cover_path.with_extension("jpg.tmp");
-    let tmp_for_blocking = tmp_path.clone();
-    let target = cover_path.clone();
-    let bytes_vec = bytes.to_vec();
-    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp_for_blocking)?;
-        f.write_all(&bytes_vec)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp_for_blocking, &target)
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            Err(Box::new(e))
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            Err(format!("spawn error: {e}").into())
-        }
-    }
 }
