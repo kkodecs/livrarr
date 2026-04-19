@@ -11,30 +11,15 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use crate::readarr_client::{self, RdAuthor, RdBook, RdBookFile, RdRootFolder, ReadarrClient};
+use crate::readarr_import_service::ReadarrImportService;
 use crate::state::AppState;
 use crate::{ApiError, AuthContext};
 use livrarr_db::{
-    AuthorDb, CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest, ImportDb,
-    LibraryItemDb, RootFolderDb, WorkDb,
+    CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest, CreateWorkDbRequest,
 };
-use livrarr_domain::services::WorkService;
 use livrarr_domain::{
     derive_sort_name, normalize_for_matching, sanitize_path_component, Import, MediaType,
 };
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Outcome of a single-file undo operation. Computed on a blocking thread so
-/// log formatting and DB updates can run on the async side.
-enum UndoOutcome {
-    NotFound,
-    Deleted,
-    DeleteFailed(String),
-    SizeMismatch { expected: i64, actual: u64 },
-    StatFailed(String),
-}
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -283,47 +268,17 @@ fn extract_cover_url(images: &Option<Vec<readarr_client::RdImage>>) -> Option<St
     None
 }
 
-/// Build destination path.
-///
-/// Ebooks:     `{root}/{user_id}/{Author}/{Title}.{ext}`
-/// Audiobooks: `{root}/{user_id}/{Author}/{Title}/{filename}`
-fn build_dest_path(
-    root: &str,
-    user_id: i64,
-    author_name: &str,
-    title: &str,
-    source_path: &str,
-    media_type: MediaType,
-) -> PathBuf {
+/// Build destination path: {root}/{Author Name}/{Title}.{ext}
+fn build_dest_path(root: &str, author_name: &str, title: &str, source_path: &str) -> PathBuf {
+    let ext = Path::new(source_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
     let author_dir = sanitize_path_component(author_name, "Unknown Author");
-    let title_dir = sanitize_path_component(title, "Unknown Title");
-    let base = PathBuf::from(root)
-        .join(user_id.to_string())
-        .join(author_dir);
-
-    match media_type {
-        MediaType::Audiobook => {
-            let filename = Path::new(source_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    let ext = Path::new(source_path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("bin");
-                    format!("{title_dir}.{ext}")
-                });
-            base.join(title_dir).join(filename)
-        }
-        MediaType::Ebook => {
-            let ext = Path::new(source_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("bin");
-            base.join(format!("{title_dir}.{ext}"))
-        }
-    }
+    let file_stem = sanitize_path_component(title, "Unknown Title");
+    PathBuf::from(root)
+        .join(author_dir)
+        .join(format!("{file_stem}.{ext}"))
 }
 
 /// Canonicalize source path and verify it's under the expected root.
@@ -352,8 +307,8 @@ fn apply_path_translation(
         (Some(cp), Some(hp)) if !cp.is_empty() && !hp.is_empty() => {
             let cp = cp.trim_end_matches('/');
             let hp = hp.trim_end_matches('/');
-            if let Some(suffix) = path.strip_prefix(cp) {
-                format!("{}{}", hp, suffix)
+            if path.starts_with(cp) {
+                format!("{}{}", hp, &path[cp.len()..])
             } else {
                 path.to_string()
             }
@@ -386,10 +341,6 @@ fn materialize_file(source: &Path, dest: &Path) -> Result<(), String> {
                 return Err(format!(
                     "copy size mismatch: copied {copied} vs source {source_size}"
                 ));
-            }
-            // fsync the temp file before atomic rename — ensures data is durable.
-            if let Ok(f) = std::fs::File::open(&temp) {
-                let _ = f.sync_all();
             }
             std::fs::rename(&temp, dest).map_err(|e| {
                 let _ = std::fs::remove_file(&temp);
@@ -459,7 +410,11 @@ pub async fn preview(
         .map(|f| f.path.clone())
         .ok_or_else(|| ApiError::BadRequest("Invalid Readarr root folder ID".into()))?;
 
-    let livrarr_root = state.db.get_root_folder(req.livrarr_root_folder_id).await?;
+    let livrarr_root = state
+        .readarr_import_service
+        .get_root_folder(req.livrarr_root_folder_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let author_map: HashMap<i64, &RdAuthor> = authors.iter().map(|a| (a.id, a)).collect();
     let mut book_files_by_book: HashMap<i64, Vec<&RdBookFile>> = HashMap::new();
@@ -467,27 +422,16 @@ pub async fn preview(
         book_files_by_book.entry(bf.book_id).or_default().push(bf);
     }
 
-    use livrarr_domain::services::{AuthorService, WorkFilter, WorkService};
     let existing_authors = state
-        .author_service
-        .list(user_id)
+        .readarr_import_service
+        .list_authors(user_id)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let existing_works = state
-        .work_service
-        .list(
-            user_id,
-            WorkFilter {
-                author_id: None,
-                monitored: None,
-                enrichment_status: None,
-                media_type: None,
-                sort_by: None,
-                sort_dir: None,
-            },
-        )
+        .readarr_import_service
+        .list_works(user_id)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let mut skipped_items: Vec<SkippedItem> = Vec::new();
     let mut import_files: Vec<PreviewFileItem> = Vec::new();
@@ -573,62 +517,90 @@ pub async fn preview(
             })
             .count();
 
-        for f in &file_list {
-            let qid = extract_quality_id(f);
-            let mt = match resolve_media_type(qid, &f.path) {
-                None => {
-                    files_to_skip += 1;
-                    skipped_items.push(SkippedItem {
-                        title: title.to_string(),
-                        author: author_name.to_string(),
-                        reason: format!("Unknown format: {}", f.path),
-                    });
-                    continue;
+        if audiobook_count > 1 {
+            skipped_items.push(SkippedItem {
+                title: title.to_string(),
+                author: author_name.to_string(),
+                reason: format!("Multi-file audiobook ({audiobook_count} files)"),
+            });
+            files_to_skip += audiobook_count as i64;
+            let non_audio: Vec<_> = file_list
+                .iter()
+                .filter(|f| {
+                    let qid = extract_quality_id(f);
+                    resolve_media_type(qid, &f.path) != Some(MediaType::Audiobook)
+                })
+                .collect();
+            for f in &non_audio {
+                let qid = extract_quality_id(f);
+                match resolve_media_type(qid, &f.path) {
+                    None => {
+                        files_to_skip += 1;
+                        skipped_items.push(SkippedItem {
+                            title: title.to_string(),
+                            author: author_name.to_string(),
+                            reason: format!("Unknown format: {}", f.path),
+                        });
+                    }
+                    Some(mt) => {
+                        let dest = build_dest_path(&livrarr_root.path, author_name, title, &f.path);
+                        if dest.exists() {
+                            files_to_skip += 1;
+                            skipped_items.push(SkippedItem {
+                                title: title.to_string(),
+                                author: author_name.to_string(),
+                                reason: "Destination already exists".to_string(),
+                            });
+                        } else {
+                            import_files.push(PreviewFileItem {
+                                title: title.to_string(),
+                                author: author_name.to_string(),
+                                path: f.path.clone(),
+                                media_type: match mt {
+                                    MediaType::Ebook => "ebook".to_string(),
+                                    MediaType::Audiobook => "audiobook".to_string(),
+                                },
+                                work_status: work_status.to_string(),
+                            });
+                        }
+                    }
                 }
-                Some(mt) => mt,
-            };
-            // For multi-part audiobooks, use the source filename stem to avoid path collisions.
-            let effective_title = if mt == MediaType::Audiobook && audiobook_count > 1 {
-                Path::new(&f.path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(title)
-                    .to_string()
-            } else {
-                title.to_string()
-            };
-            let dest = build_dest_path(
-                &livrarr_root.path,
-                user_id,
-                author_name,
-                &effective_title,
-                &f.path,
-                mt,
-            );
-            let dest_exists = {
-                let d = dest.clone();
-                tokio::task::spawn_blocking(move || d.exists())
-                    .await
-                    .unwrap_or(false)
-            };
-            if dest_exists {
-                files_to_skip += 1;
-                skipped_items.push(SkippedItem {
-                    title: title.to_string(),
-                    author: author_name.to_string(),
-                    reason: "Destination already exists".to_string(),
-                });
-            } else {
-                import_files.push(PreviewFileItem {
-                    title: title.to_string(),
-                    author: author_name.to_string(),
-                    path: f.path.clone(),
-                    media_type: match mt {
-                        MediaType::Ebook => "ebook".to_string(),
-                        MediaType::Audiobook => "audiobook".to_string(),
-                    },
-                    work_status: work_status.to_string(),
-                });
+            }
+        } else {
+            for f in &file_list {
+                let qid = extract_quality_id(f);
+                match resolve_media_type(qid, &f.path) {
+                    None => {
+                        files_to_skip += 1;
+                        skipped_items.push(SkippedItem {
+                            title: title.to_string(),
+                            author: author_name.to_string(),
+                            reason: format!("Unknown format: {}", f.path),
+                        });
+                    }
+                    Some(mt) => {
+                        let dest = build_dest_path(&livrarr_root.path, author_name, title, &f.path);
+                        if dest.exists() {
+                            files_to_skip += 1;
+                            skipped_items.push(SkippedItem {
+                                title: title.to_string(),
+                                author: author_name.to_string(),
+                                reason: "Destination already exists".to_string(),
+                            });
+                        } else {
+                            import_files.push(PreviewFileItem {
+                                title: title.to_string(),
+                                author: author_name.to_string(),
+                                path: f.path.clone(),
+                                media_type: match mt {
+                                    MediaType::Ebook => "ebook".to_string(),
+                                    MediaType::Audiobook => "audiobook".to_string(),
+                                },
+                                work_status: work_status.to_string(),
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -666,7 +638,7 @@ pub async fn start(
     let import_id = uuid::Uuid::new_v4().to_string();
 
     state
-        .db
+        .readarr_import_service
         .create_import(CreateImportDbRequest {
             id: import_id.clone(),
             user_id,
@@ -676,10 +648,12 @@ pub async fn start(
         })
         .await
         .map_err(|e| match e {
-            livrarr_domain::DbError::Constraint { .. } => ApiError::Conflict {
+            crate::readarr_import_service::ReadarrImportError::Db(
+                livrarr_domain::DbError::Constraint { .. },
+            ) => ApiError::Conflict {
                 reason: "An import is already running for this user".to_string(),
             },
-            other => ApiError::from(other),
+            other => ApiError::Internal(other.to_string()),
         })?;
 
     {
@@ -718,7 +692,10 @@ pub async fn start(
         .await
         {
             error!(import_id = %import_id2, "Readarr import failed: {e}");
-            let _ = state2.db.update_import_status(&import_id2, "failed").await;
+            let _ = state2
+                .readarr_import_service
+                .update_import_status(&import_id2, "failed")
+                .await;
         }
 
         let mut prog = state2.readarr_import_progress.lock().await;
@@ -743,7 +720,11 @@ pub async fn history(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<ImportHistoryResponse>, ApiError> {
-    let imports = state.db.list_imports(auth.user.id).await?;
+    let imports = state
+        .readarr_import_service
+        .list_imports(auth.user.id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let records = imports.iter().map(import_to_record).collect();
     Ok(Json(ImportHistoryResponse { imports: records }))
 }
@@ -758,9 +739,10 @@ pub async fn undo(
 
     // Verify import exists and belongs to user.
     let imp = state
-        .db
+        .readarr_import_service
         .get_import(&import_id)
-        .await?
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or(ApiError::NotFound)?;
 
     if imp.user_id != user_id {
@@ -774,11 +756,20 @@ pub async fn undo(
     }
 
     // 1. Query all library items with this import_id.
-    let items = state.db.list_library_items_by_import(&import_id).await?;
+    let items = state
+        .readarr_import_service
+        .list_library_items_by_import(&import_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     // Look up root folder path for full-path resolution (library_items store relative paths).
     let root_folder_path: Option<String> = if let Some(rf_id) = imp.target_root_folder_id {
-        state.db.get_root_folder(rf_id).await.ok().map(|rf| rf.path)
+        state
+            .readarr_import_service
+            .get_root_folder(rf_id)
+            .await
+            .ok()
+            .map(|rf| rf.path)
     } else {
         None
     };
@@ -793,79 +784,69 @@ pub async fn undo(
         } else {
             PathBuf::from(&item.path)
         };
-        let expected_size = item.file_size;
-        let fp = full_path.clone();
-        let undo_outcome: UndoOutcome = tokio::task::spawn_blocking(move || {
-            let path = fp.as_path();
-            if !path.exists() {
-                return UndoOutcome::NotFound;
-            }
+        let path = full_path.as_path();
+        if path.exists() {
+            // Conservative: check file size matches.
             match std::fs::metadata(path) {
                 Ok(meta) => {
-                    if meta.len() as i64 == expected_size {
+                    if meta.len() as i64 == item.file_size {
                         match std::fs::remove_file(path) {
-                            Ok(()) => UndoOutcome::Deleted,
-                            Err(e) => UndoOutcome::DeleteFailed(e.to_string()),
+                            Ok(()) => {
+                                files_deleted += 1;
+                                info!(path = %item.path, "Undo: deleted file");
+                            }
+                            Err(e) => {
+                                warn!(path = %item.path, "Undo: failed to delete file: {e}");
+                                files_skipped += 1;
+                            }
                         }
                     } else {
-                        UndoOutcome::SizeMismatch {
-                            expected: expected_size,
-                            actual: meta.len(),
-                        }
+                        warn!(
+                            path = %item.path,
+                            expected = item.file_size,
+                            actual = meta.len(),
+                            "Undo: skipping file with size mismatch"
+                        );
+                        files_skipped += 1;
                     }
                 }
-                Err(e) => UndoOutcome::StatFailed(e.to_string()),
+                Err(e) => {
+                    warn!(path = %item.path, "Undo: cannot stat file: {e}");
+                    files_skipped += 1;
+                }
             }
-        })
-        .await
-        .unwrap_or_else(|e| UndoOutcome::StatFailed(format!("join: {e}")));
-        match undo_outcome {
-            UndoOutcome::Deleted => {
-                files_deleted += 1;
-                info!(path = %item.path, "Undo: deleted file");
-            }
-            UndoOutcome::DeleteFailed(e) => {
-                warn!(path = %item.path, "Undo: failed to delete file: {e}");
-                files_skipped += 1;
-            }
-            UndoOutcome::SizeMismatch { expected, actual } => {
-                warn!(
-                    path = %item.path,
-                    expected = expected,
-                    actual = actual,
-                    "Undo: skipping file with size mismatch"
-                );
-                files_skipped += 1;
-            }
-            UndoOutcome::StatFailed(e) => {
-                warn!(path = %item.path, "Undo: cannot stat file: {e}");
-                files_skipped += 1;
-            }
-            UndoOutcome::NotFound => {}
         }
 
         // 3. Delete the library item DB row regardless of file deletion outcome.
-        if let Err(e) = state.db.delete_library_item_by_id(item.id).await {
+        if let Err(e) = state
+            .readarr_import_service
+            .delete_library_item_by_id(item.id)
+            .await
+        {
             warn!(id = item.id, "Undo: failed to delete library item: {e}");
         }
     }
 
     // 4. Delete orphan works (import_id match, zero library items).
     let works_deleted = state
-        .db
+        .readarr_import_service
         .delete_orphan_works_by_import(&import_id)
         .await
         .unwrap_or(0);
 
     // 5. Delete orphan authors (import_id match, zero works).
     let authors_deleted = state
-        .db
+        .readarr_import_service
         .delete_orphan_authors_by_import(&import_id)
         .await
         .unwrap_or(0);
 
     // 6. Mark import as undone.
-    state.db.update_import_status(&import_id, "undone").await?;
+    state
+        .readarr_import_service
+        .update_import_status(&import_id, "undone")
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(UndoResponse {
         files_deleted,
@@ -929,7 +910,6 @@ async fn fetch_all_readarr_data(
 // Import execution
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)] // 11 params: state, user, import-id, url, key, 2 root-ids, flag, 2 path-translation opts
 async fn run_import(
     state: AppState,
     user_id: i64,
@@ -962,7 +942,7 @@ async fn run_import(
     );
 
     let livrarr_root = state
-        .db
+        .readarr_import_service
         .get_root_folder(livrarr_root_id)
         .await
         .map_err(|e| format!("get livrarr root folder: {e}"))?;
@@ -983,7 +963,7 @@ async fn run_import(
 
     // Load existing data for dedup.
     let existing_authors = state
-        .db
+        .readarr_import_service
         .list_authors(user_id)
         .await
         .map_err(|e| format!("list authors: {e}"))?;
@@ -1047,7 +1027,7 @@ async fn run_import(
                 .unwrap_or_else(|| derive_sort_name(name));
 
             match state
-                .db
+                .readarr_import_service
                 .create_author(CreateAuthorDbRequest {
                     user_id,
                     name: name.to_string(),
@@ -1089,7 +1069,7 @@ async fn run_import(
 
     // Refresh existing works to include newly created ones.
     let all_works = state
-        .db
+        .readarr_import_service
         .list_works(user_id)
         .await
         .map_err(|e| format!("list works after authors: {e}"))?;
@@ -1207,29 +1187,34 @@ async fn run_import(
             let monitor_ebook = has_ebook_file || rd_book.monitored.unwrap_or(false);
             let monitor_audiobook = has_audiobook_file;
 
-            let add_req = livrarr_domain::services::AddWorkRequest {
-                title: title.to_string(),
-                author_name: author_name.to_string(),
-                author_ol_key: None,
-                ol_key: None,
-                gr_key: rd_book.foreign_book_id.clone(),
-                year,
-                cover_url,
-                metadata_source: Some("readarr".to_string()),
-                language,
-                detail_url: None,
-                series_name: None,
-                series_position: None,
-                defer_enrichment: true,
-                provenance_setter: None,
-            };
-            match state.work_service.add(user_id, add_req).await {
-                Ok(result) => {
-                    let w = result.work;
+            match state
+                .readarr_import_service
+                .create_work(CreateWorkDbRequest {
+                    user_id,
+                    title: title.to_string(),
+                    author_name: author_name.to_string(),
+                    author_id: livrarr_author_id,
+                    ol_key: None,
+                    gr_key: rd_book.foreign_book_id.clone(),
+                    year,
+                    cover_url,
+                    metadata_source: Some("readarr".to_string()),
+                    detail_url: None,
+                    language,
+                    import_id: Some(import_id.to_string()),
+                    series_id: None,
+                    series_name: None,
+                    series_position: None,
+                    monitor_ebook: false,
+                    monitor_audiobook: false,
+                })
+                .await
+            {
+                Ok(w) => {
                     works_created += 1;
 
                     let _ = state
-                        .db
+                        .readarr_import_service
                         .update_work_enrichment(
                             user_id,
                             w.id,
@@ -1266,7 +1251,7 @@ async fn run_import(
                         .await;
 
                     let _ = state
-                        .db
+                        .readarr_import_service
                         .update_work_user_fields(
                             user_id,
                             w.id,
@@ -1285,30 +1270,11 @@ async fn run_import(
                     if let Some(ref url) = w.cover_url {
                         let covers_dir = state.data_dir.join("covers");
                         let _ = tokio::fs::create_dir_all(&covers_dir).await;
-                        // Cover URL came from a remote Readarr response — use SSRF-safe client.
-                        if let Ok(resp) = state.http_client_safe.get(url).send().await {
+                        if let Ok(resp) = state.http_client.get(url).send().await {
                             if resp.status().is_success() {
                                 if let Ok(bytes) = resp.bytes().await {
                                     let path = covers_dir.join(format!("{}.jpg", w.id));
-                                    // Atomic cover write: .tmp → fsync → rename.
-                                    let tmp_path = path.with_extension("jpg.tmp");
-                                    let tmp_b = tmp_path.clone();
-                                    let target = path.clone();
-                                    let bytes_vec = bytes.to_vec();
-                                    let write_res = tokio::task::spawn_blocking(
-                                        move || -> std::io::Result<()> {
-                                            use std::io::Write;
-                                            let mut f = std::fs::File::create(&tmp_b)?;
-                                            f.write_all(&bytes_vec)?;
-                                            f.sync_all()?;
-                                            drop(f);
-                                            std::fs::rename(&tmp_b, &target)
-                                        },
-                                    )
-                                    .await;
-                                    if !matches!(write_res, Ok(Ok(()))) {
-                                        let _ = tokio::fs::remove_file(&tmp_path).await;
-                                    }
+                                    let _ = tokio::fs::write(&path, &bytes).await;
                                 }
                             }
                         }
@@ -1376,10 +1342,9 @@ async fn run_import(
             }
         };
 
-        // For multi-part audiobooks, use the source filename stem as the destination name
-        // to avoid path collisions between parts.
-        let book_audio_count = if media_type == MediaType::Audiobook {
-            book_files_by_book
+        // Multi-file audiobook check.
+        if media_type == MediaType::Audiobook {
+            let book_audio_count = book_files_by_book
                 .get(&rd_file.book_id)
                 .map(|fs| {
                     fs.iter()
@@ -1389,19 +1354,15 @@ async fn run_import(
                         })
                         .count()
                 })
-                .unwrap_or(0)
-        } else {
-            1
-        };
-        let effective_title = if book_audio_count > 1 {
-            Path::new(&rd_file.path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(title)
-                .to_string()
-        } else {
-            title.to_string()
-        };
+                .unwrap_or(0);
+            if book_audio_count > 1 {
+                files_skipped += 1;
+                let mut prog = state.readarr_import_progress.lock().await;
+                prog.files_processed += 1;
+                prog.files_skipped += 1;
+                continue;
+            }
+        }
 
         // Validate source path.
         let translated_path = apply_path_translation(
@@ -1409,14 +1370,7 @@ async fn run_import(
             container_path.as_deref(),
             host_path.as_deref(),
         );
-        let source = {
-            let tp = translated_path.clone();
-            let rr = readarr_root.clone();
-            tokio::task::spawn_blocking(move || validate_source_path(&tp, &rr))
-                .await
-                .unwrap_or_else(|e| Err(format!("spawn_blocking join: {e}")))
-        };
-        let source = match source {
+        let source = match validate_source_path(&translated_path, &readarr_root) {
             Ok(p) => p,
             Err(e) => {
                 warn!(path = %rd_file.path, "Source path validation failed: {e}");
@@ -1430,23 +1384,10 @@ async fn run_import(
         };
 
         // Build destination path.
-        let dest = build_dest_path(
-            &livrarr_root.path,
-            user_id,
-            author_name,
-            &effective_title,
-            &rd_file.path,
-            media_type,
-        );
+        let dest = build_dest_path(&livrarr_root.path, author_name, title, &rd_file.path);
 
         // Check if destination already exists.
-        let dest_exists = {
-            let d = dest.clone();
-            tokio::task::spawn_blocking(move || d.exists())
-                .await
-                .unwrap_or(false)
-        };
-        if dest_exists {
+        if dest.exists() {
             files_skipped += 1;
             let mut prog = state.readarr_import_progress.lock().await;
             prog.files_processed += 1;
@@ -1455,14 +1396,7 @@ async fn run_import(
         }
 
         // Materialize file (hardlink or copy).
-        let mat_result = {
-            let src = source.clone();
-            let dst = dest.clone();
-            tokio::task::spawn_blocking(move || materialize_file(&src, &dst))
-                .await
-                .unwrap_or_else(|e| Err(format!("spawn_blocking join: {e}")))
-        };
-        if let Err(e) = mat_result {
+        if let Err(e) = materialize_file(&source, &dest) {
             warn!(src = %rd_file.path, dest = %dest.display(), "File materialization failed: {e}");
             files_skipped += 1;
             let mut prog = state.readarr_import_progress.lock().await;
@@ -1480,7 +1414,7 @@ async fn run_import(
 
         // Create library item.
         match state
-            .db
+            .readarr_import_service
             .create_library_item(CreateLibraryItemDbRequest {
                 user_id,
                 work_id,
@@ -1495,7 +1429,9 @@ async fn run_import(
             Ok(_) => {
                 files_imported += 1;
             }
-            Err(livrarr_domain::DbError::Constraint { .. }) => {
+            Err(crate::readarr_import_service::ReadarrImportError::Db(
+                livrarr_domain::DbError::Constraint { .. },
+            )) => {
                 // Path already claimed by another work — destination exists in DB
                 // but not on disk. Skip silently; this is an expected collision.
                 files_skipped += 1;
@@ -1517,7 +1453,7 @@ async fn run_import(
 
     // Update counters and mark completed.
     let _ = state
-        .db
+        .readarr_import_service
         .update_import_counts(
             import_id,
             authors_created,
@@ -1528,7 +1464,7 @@ async fn run_import(
         .await;
 
     state
-        .db
+        .readarr_import_service
         .set_import_completed(import_id)
         .await
         .map_err(|e| format!("set completed: {e}"))?;

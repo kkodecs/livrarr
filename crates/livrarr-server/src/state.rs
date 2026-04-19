@@ -73,6 +73,8 @@ pub type LiveAuthorMonitorWorkflow =
         LiveWorkService,
         livrarr_http::fetcher::HttpFetcherImpl,
     >;
+pub type ReadarrImportServiceImpl =
+    crate::readarr_import_service::LiveReadarrImportService<SqliteDb>;
 pub type LiveRssSyncWorkflow = livrarr_metadata::rss_sync_workflow::RssSyncWorkflowImpl<
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
@@ -147,6 +149,7 @@ pub struct AppState {
     pub rss_sync_workflow: Arc<LiveRssSyncWorkflow>,
     pub author_monitor_workflow: Arc<LiveAuthorMonitorWorkflow>,
     pub enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
+    pub readarr_import_service: Arc<ReadarrImportServiceImpl>,
 }
 
 // =============================================================================

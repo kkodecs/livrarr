@@ -399,6 +399,9 @@ async fn main() {
                 ),
             )
         },
+        readarr_import_service: Arc::new(
+            livrarr_server::readarr_import_service::LiveReadarrImportService::new(svc_db.clone()),
+        ),
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
