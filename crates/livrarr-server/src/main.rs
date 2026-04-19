@@ -313,6 +313,9 @@ async fn main() {
             Arc::new(livrarr_metadata::work_service::WorkServiceImpl::new(
                 svc_db.clone(),
                 ew,
+                livrarr_http::fetcher::HttpFetcherImpl::new()
+                    .expect("HttpFetcherImpl construction for work service"),
+                data_dir.clone(),
             ))
         },
         grab_service: Arc::new(livrarr_download::grab_service::GrabServiceImpl::new(
@@ -356,7 +359,13 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
-            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(svc_db.clone(), ew);
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
+                svc_db.clone(),
+                ew,
+                livrarr_http::fetcher::HttpFetcherImpl::new()
+                    .expect("HttpFetcherImpl construction for list work service"),
+                data_dir.clone(),
+            );
             Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
                 svc_db.clone(),
                 ws,

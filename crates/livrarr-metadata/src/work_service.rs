@@ -1,34 +1,45 @@
 use livrarr_db::{
-    AuthorDb, CreateAuthorDbRequest, CreateWorkDbRequest, EnrichmentRetryDb, LibraryItemDb,
-    ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
+    AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, EnrichmentRetryDb,
+    LibraryItemDb, ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-pub struct WorkServiceImpl<D, E> {
+pub struct WorkServiceImpl<D, E, H> {
     db: D,
     enrichment: E,
+    http: H,
+    data_dir: PathBuf,
     refresh_locks: Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>,
 }
 
-impl<D, E> WorkServiceImpl<D, E> {
-    pub fn new(db: D, enrichment: E) -> Self {
+impl<D, E, H> WorkServiceImpl<D, E, H> {
+    pub fn new(db: D, enrichment: E, http: H, data_dir: PathBuf) -> Self {
         Self {
             db,
             enrichment,
+            http,
+            data_dir,
             refresh_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
-impl<D> WorkServiceImpl<D, ()> {
-    pub fn without_enrichment(db: D) -> WorkServiceImpl<D, StubNoEnrichment> {
+impl<D, H> WorkServiceImpl<D, (), H> {
+    pub fn without_enrichment(
+        db: D,
+        http: H,
+        data_dir: PathBuf,
+    ) -> WorkServiceImpl<D, StubNoEnrichment, H> {
         WorkServiceImpl {
             db,
             enrichment: StubNoEnrichment,
+            http,
+            data_dir,
             refresh_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -61,22 +72,31 @@ impl EnrichmentWorkflow for StubNoEnrichment {
     }
 }
 
-impl<D, E> WorkService for WorkServiceImpl<D, E>
+impl<D, E, H> WorkService for WorkServiceImpl<D, E, H>
 where
-    D: WorkDb + AuthorDb + LibraryItemDb + ProvenanceDb + EnrichmentRetryDb + Send + Sync,
+    D: WorkDb
+        + AuthorDb
+        + LibraryItemDb
+        + ProvenanceDb
+        + EnrichmentRetryDb
+        + ConfigDb
+        + Send
+        + Sync,
     E: EnrichmentWorkflow + Send + Sync,
+    H: HttpFetcher + Clone + Send + Sync + 'static,
 {
     async fn add(
         &self,
         user_id: UserId,
         req: AddWorkRequest,
     ) -> Result<AddWorkResult, WorkServiceError> {
-        let title = req.title.trim().to_string();
-        if title.is_empty() {
+        let cleaned_title = crate::title_cleanup::clean_title(&req.title);
+        if cleaned_title.is_empty() {
             return Err(WorkServiceError::Enrichment(
                 "title must not be empty".into(),
             ));
         }
+        let cleaned_author = crate::title_cleanup::clean_author(&req.author_name);
 
         if let Some(ref ol_key) = req.ol_key {
             if self
@@ -89,10 +109,9 @@ where
             }
         }
 
-        let author_name = req.author_name.trim().to_string();
         let mut author_created = false;
-        let author_id = if !author_name.is_empty() {
-            let normalized = author_name.to_lowercase();
+        let author_id = if !cleaned_author.is_empty() {
+            let normalized = cleaned_author.to_lowercase();
             match self
                 .db
                 .find_author_by_name(user_id, &normalized)
@@ -105,7 +124,7 @@ where
                         .db
                         .create_author(CreateAuthorDbRequest {
                             user_id,
-                            name: author_name.clone(),
+                            name: cleaned_author.clone(),
                             sort_name: None,
                             ol_key: req.author_ol_key,
                             gr_key: None,
@@ -122,12 +141,14 @@ where
             None
         };
 
+        let cover_url = req.cover_url.clone();
+
         let work = self
             .db
             .create_work(CreateWorkDbRequest {
                 user_id,
-                title,
-                author_name,
+                title: cleaned_title,
+                author_name: cleaned_author,
                 author_id,
                 ol_key: req.ol_key,
                 gr_key: req.gr_key,
@@ -143,12 +164,37 @@ where
             .await
             .map_err(WorkServiceError::Db)?;
 
-        write_addtime_provenance(&self.db, user_id, &work, ProvenanceSetter::User).await;
+        let setter = req.provenance_setter.unwrap_or(ProvenanceSetter::User);
+        write_addtime_provenance(&self.db, user_id, &work, setter).await;
+
+        // Background cover download (best-effort, never fails the add).
+        // Unproxy URL, validate SSRF, foreign works save as thumbnail.
+        let is_foreign = crate::language::is_foreign_source(work.metadata_source.as_deref());
+        let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
+        if let Some(ref url) = cover_url {
+            if crate::llm_scraper::validate_cover_url(url, "").is_some() {
+                let covers_dir = self.data_dir.join("covers");
+                let work_id = work.id;
+                let suffix = if is_foreign { "_thumb" } else { "" };
+                let url = url.clone();
+                let http = self.http.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        download_cover_to_disk(&http, &url, &covers_dir, work_id, suffix).await
+                    {
+                        tracing::warn!(work_id, %url, "background cover download failed: {e}");
+                    }
+                });
+            } else {
+                tracing::warn!(%url, "cover URL rejected by SSRF validation");
+            }
+        }
 
         if req.defer_enrichment {
             return Ok(AddWorkResult {
                 work,
                 author_created,
+                author_id,
                 messages: vec![],
             });
         }
@@ -175,9 +221,27 @@ where
             Err(_) => work,
         };
 
+        // Post-enrichment cover download (enrichment may have found a better cover URL).
+        if let Some(ref cover_url) = enriched_work.cover_url {
+            let covers_dir = self.data_dir.join("covers");
+            let work_id = enriched_work.id;
+            let url = cover_url.clone();
+            let http = self.http.clone();
+            tokio::spawn(async move {
+                if let Err(e) = download_cover_to_disk(&http, &url, &covers_dir, work_id, "").await
+                {
+                    tracing::warn!(work_id, "post-enrich cover download failed: {e}");
+                }
+                // Delete stale thumbnail.
+                let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
+                let _ = tokio::fs::remove_file(&thumb).await;
+            });
+        }
+
         Ok(AddWorkResult {
             work: enriched_work,
             author_created,
+            author_id,
             messages,
         })
     }
@@ -432,19 +496,304 @@ where
 
     async fn upload_cover(
         &self,
-        _user_id: UserId,
-        _work_id: WorkId,
-        _bytes: &[u8],
+        user_id: UserId,
+        work_id: WorkId,
+        bytes: &[u8],
     ) -> Result<(), WorkServiceError> {
-        todo!("upload_cover requires filesystem/cover cache integration")
+        const MAX_COVER_BYTES: usize = 1_024 * 1_024;
+
+        if bytes.len() > MAX_COVER_BYTES {
+            return Err(WorkServiceError::Enrichment(format!(
+                "cover too large: {} bytes (max {})",
+                bytes.len(),
+                MAX_COVER_BYTES
+            )));
+        }
+        if bytes.is_empty() {
+            return Err(WorkServiceError::Enrichment("empty image data".into()));
+        }
+
+        let _work = self.get(user_id, work_id).await?;
+
+        let covers_dir = self.data_dir.join("covers");
+        tokio::fs::create_dir_all(&covers_dir)
+            .await
+            .map_err(|e| WorkServiceError::Enrichment(format!("create covers dir: {e}")))?;
+
+        let cover_path = covers_dir.join(format!("{work_id}.jpg"));
+        let tmp_path = cover_path.with_extension("jpg.tmp");
+        let tmp_clone = tmp_path.clone();
+        let target = cover_path.clone();
+        let bytes_vec = bytes.to_vec();
+        let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp_clone)?;
+            f.write_all(&bytes_vec)?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp_clone, &target)
+        })
+        .await
+        .map_err(|e| WorkServiceError::Enrichment(format!("spawn error: {e}")))?;
+
+        if let Err(e) = write_result {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(WorkServiceError::Enrichment(format!("write cover: {e}")));
+        }
+
+        let thumb_path = covers_dir.join(format!("{work_id}_thumb.jpg"));
+        let _ = tokio::fs::remove_file(&thumb_path).await;
+
+        self.db
+            .set_cover_manual(user_id, work_id, true)
+            .await
+            .map_err(WorkServiceError::Db)?;
+
+        Ok(())
     }
 
     async fn download_cover(
         &self,
-        _user_id: UserId,
-        _work_id: WorkId,
+        user_id: UserId,
+        work_id: WorkId,
     ) -> Result<Vec<u8>, WorkServiceError> {
-        todo!("download_cover requires filesystem/cover cache integration")
+        let _work = self.get(user_id, work_id).await?;
+
+        let cover_path = self.data_dir.join("covers").join(format!("{work_id}.jpg"));
+        let bytes = tokio::fs::read(&cover_path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                WorkServiceError::NotFound
+            } else {
+                WorkServiceError::Enrichment(format!("read cover: {e}"))
+            }
+        })?;
+        Ok(bytes)
+    }
+
+    async fn lookup(&self, req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError> {
+        let term = req.term.trim().to_string();
+        if term.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let cfg = self.db.get_metadata_config().await.ok();
+        let default_lang = cfg
+            .as_ref()
+            .and_then(|c| c.languages.first().cloned())
+            .unwrap_or_else(|| "en".to_string());
+        let lang = req.lang_override.as_deref().unwrap_or(&default_lang);
+
+        if lang != "en" && !crate::language::is_supported_language(lang) {
+            return Err(WorkServiceError::Enrichment(format!(
+                "unsupported language: {lang}"
+            )));
+        }
+
+        // Non-English: Goodreads search with regex HTML parsing.
+        if lang != "en" {
+            return self.lookup_goodreads(&term, lang).await;
+        }
+
+        // English: OpenLibrary search.
+        let results = self.lookup_openlibrary(&term).await?;
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
+        Ok(vec![])
+    }
+}
+
+impl<D, E, H> WorkServiceImpl<D, E, H>
+where
+    D: ConfigDb + Send + Sync,
+    H: HttpFetcher + Send + Sync,
+{
+    async fn lookup_goodreads(
+        &self,
+        term: &str,
+        lang: &str,
+    ) -> Result<Vec<LookupResult>, WorkServiceError> {
+        let search_url = format!(
+            "https://www.goodreads.com/search?q={}",
+            urlencoding::encode(term)
+        );
+
+        let fetch_req = FetchRequest {
+            url: search_url,
+            method: HttpMethod::Get,
+            headers: vec![("Accept-Language".into(), "en-US,en;q=0.9".into())],
+            body: None,
+            timeout: std::time::Duration::from_secs(10),
+            rate_bucket: RateBucket::Goodreads,
+            max_body_bytes: 2 * 1024 * 1024,
+            anti_bot_check: true,
+            user_agent: UserAgentProfile::Browser,
+        };
+
+        let resp = match self.http.fetch(fetch_req).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Goodreads search fetch failed: {e}");
+                return Ok(vec![]);
+            }
+        };
+
+        if resp.status >= 400 {
+            tracing::warn!(
+                status = resp.status,
+                "Goodreads search returned non-success"
+            );
+            return Ok(vec![]);
+        }
+
+        let raw_html = String::from_utf8_lossy(&resp.body);
+
+        if crate::llm_scraper::is_anti_bot_page(&raw_html) {
+            tracing::warn!("Goodreads search: anti-bot page detected");
+            return Ok(vec![]);
+        }
+
+        let parsed = crate::goodreads::parse_search_html(&raw_html);
+
+        if parsed.is_empty() && raw_html.contains("itemtype=\"http") {
+            tracing::warn!(
+                "Goodreads parser drift: HTML contains schema.org Book rows but 0 passed \
+                 validation. HTML structure may have changed."
+            );
+        }
+
+        let lang_owned = lang.to_string();
+        let results = parsed
+            .into_iter()
+            .map(|r| {
+                let full_url = if r.detail_url.starts_with('/') {
+                    format!("https://www.goodreads.com{}", r.detail_url)
+                } else {
+                    r.detail_url.clone()
+                };
+                let validated_url = if crate::goodreads::validate_detail_url(&full_url) {
+                    Some(full_url)
+                } else {
+                    None
+                };
+                LookupResult {
+                    ol_key: None,
+                    title: r.title,
+                    author_name: r.author.unwrap_or_default(),
+                    author_ol_key: None,
+                    year: r.year,
+                    cover_url: r.cover_url,
+                    description: None,
+                    series_name: r.series_name,
+                    series_position: r.series_position,
+                    source: Some("Goodreads".to_string()),
+                    source_type: Some("goodreads".to_string()),
+                    language: Some(lang_owned.clone()),
+                    detail_url: validated_url,
+                    rating: r.rating,
+                }
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    async fn lookup_openlibrary(&self, term: &str) -> Result<Vec<LookupResult>, WorkServiceError> {
+        let url = format!(
+            "https://openlibrary.org/search.json?q={}&limit=50&fields=key,title,author_name,author_key,first_publish_year,cover_i",
+            urlencoding::encode(term)
+        );
+
+        let fetch_req = FetchRequest {
+            url,
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: std::time::Duration::from_secs(10),
+            rate_bucket: RateBucket::OpenLibrary,
+            max_body_bytes: 2 * 1024 * 1024,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+        };
+
+        let resp = match self.http.fetch(fetch_req).await {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(WorkServiceError::Enrichment(format!(
+                    "OpenLibrary request failed: {e}"
+                )));
+            }
+        };
+
+        if resp.status >= 400 {
+            return Err(WorkServiceError::Enrichment(format!(
+                "OpenLibrary returned {}",
+                resp.status
+            )));
+        }
+
+        let data: serde_json::Value = serde_json::from_slice(&resp.body)
+            .map_err(|e| WorkServiceError::Enrichment(format!("OpenLibrary parse error: {e}")))?;
+
+        let docs = data
+            .get("docs")
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let results = docs
+            .iter()
+            .filter_map(|doc| {
+                let key = doc.get("key")?.as_str()?;
+                let title = doc.get("title")?.as_str()?;
+                let ol_key = key.trim_start_matches("/works/").to_string();
+
+                let author_name = doc
+                    .get("author_name")
+                    .and_then(|a| a.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+
+                let author_ol_key = doc
+                    .get("author_key")
+                    .and_then(|a| a.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|a| a.as_str())
+                    .map(|k| k.trim_start_matches("/authors/").to_string());
+
+                let year = doc
+                    .get("first_publish_year")
+                    .and_then(|y| y.as_i64())
+                    .map(|y| y as i32);
+
+                let cover_url = doc
+                    .get("cover_i")
+                    .and_then(|c| c.as_i64())
+                    .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-M.jpg"));
+
+                Some(LookupResult {
+                    ol_key: Some(ol_key),
+                    title: title.to_string(),
+                    author_name,
+                    author_ol_key,
+                    year,
+                    cover_url,
+                    description: None,
+                    series_name: None,
+                    series_position: None,
+                    source: None,
+                    source_type: None,
+                    language: None,
+                    detail_url: None,
+                    rating: None,
+                })
+            })
+            .collect();
+
+        Ok(results)
     }
 }
 
@@ -498,5 +847,71 @@ async fn write_addtime_provenance<D: ProvenanceDb>(
             ?setter,
             "write_addtime_provenance failed: {e}"
         );
+    }
+}
+
+fn unproxy_cover_url(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("/api/v1/coverproxy?url=") {
+        urlencoding::decode(rest)
+            .map(|s| s.into_owned())
+            .unwrap_or_else(|_| url.to_string())
+    } else {
+        url.to_string()
+    }
+}
+
+async fn download_cover_to_disk<H: HttpFetcher>(
+    http: &H,
+    url: &str,
+    covers_dir: &std::path::Path,
+    work_id: i64,
+    suffix: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tokio::fs::create_dir_all(covers_dir).await?;
+
+    let req = FetchRequest {
+        url: url.to_string(),
+        method: HttpMethod::Get,
+        headers: vec![],
+        body: None,
+        timeout: std::time::Duration::from_secs(30),
+        rate_bucket: RateBucket::None,
+        max_body_bytes: 10 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+    };
+
+    let resp = http
+        .fetch_ssrf_safe(req)
+        .await
+        .map_err(|e| format!("fetch: {e}"))?;
+    if resp.status >= 400 {
+        return Err(format!("cover download returned {}", resp.status).into());
+    }
+
+    let cover_path = covers_dir.join(format!("{work_id}{suffix}.jpg"));
+    let tmp_path = cover_path.with_extension("jpg.tmp");
+    let tmp_clone = tmp_path.clone();
+    let target = cover_path.clone();
+    let bytes = resp.body;
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_clone)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_clone, &target)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            Err(Box::new(e))
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            Err(format!("spawn error: {e}").into())
+        }
     }
 }

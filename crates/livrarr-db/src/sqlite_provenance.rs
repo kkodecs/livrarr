@@ -47,7 +47,10 @@ fn validate_req(req: &SetFieldProvenanceRequest) -> Result<(), DbError> {
                 });
             }
         }
-        ProvenanceSetter::User | ProvenanceSetter::System | ProvenanceSetter::AutoAdded => {
+        ProvenanceSetter::User
+        | ProvenanceSetter::System
+        | ProvenanceSetter::AutoAdded
+        | ProvenanceSetter::Imported => {
             if req.source.is_some() {
                 return Err(DbError::Constraint {
                     message: "user/system/auto_added setter must not have a source".to_string(),

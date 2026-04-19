@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::{
     Author, AuthorId, DbError, EnrichmentStatus, Grab, GrabId, GrabStatus, LibraryItem, MediaType,
-    MetadataProvider, OutcomeClass, Series, UserId, Work, WorkId,
+    MetadataProvider, OutcomeClass, ProvenanceSetter, Series, UserId, Work, WorkId,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -180,12 +180,14 @@ pub struct AddWorkRequest {
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
     pub defer_enrichment: bool,
+    pub provenance_setter: Option<ProvenanceSetter>,
 }
 
 #[derive(Debug)]
 pub struct AddWorkResult {
     pub work: Work,
     pub author_created: bool,
+    pub author_id: Option<i64>,
     pub messages: Vec<String>,
 }
 
@@ -251,6 +253,37 @@ pub struct RefreshWorkResult {
 #[derive(Debug)]
 pub struct RefreshAllHandle {
     pub total_works: usize,
+}
+
+#[derive(Debug)]
+pub struct LookupRequest {
+    pub term: String,
+    pub lang_override: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LookupResult {
+    pub ol_key: Option<String>,
+    pub title: String,
+    pub author_name: String,
+    pub author_ol_key: Option<String>,
+    pub year: Option<i32>,
+    pub cover_url: Option<String>,
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_position: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rating: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -851,6 +884,7 @@ pub trait WorkService: Send + Sync {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<Vec<u8>, WorkServiceError>;
+    async fn lookup(&self, req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError>;
 }
 
 #[trait_variant::make(Send)]
