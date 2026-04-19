@@ -1610,6 +1610,32 @@ impl From<livrarr_domain::services::ImportWorkflowError> for ApiError {
     }
 }
 
+impl From<livrarr_domain::services::ListServiceError> for ApiError {
+    fn from(e: livrarr_domain::services::ListServiceError) -> Self {
+        use livrarr_domain::services::ListServiceError;
+        match e {
+            ListServiceError::NotFound => ApiError::NotFound,
+            ListServiceError::Parse(msg) => ApiError::BadRequest(msg),
+            ListServiceError::Conflict(msg) => ApiError::Conflict { reason: msg },
+            ListServiceError::Db(db_err) => ApiError::Db(db_err),
+        }
+    }
+}
+
+impl From<livrarr_domain::services::FileServiceError> for ApiError {
+    fn from(e: livrarr_domain::services::FileServiceError) -> Self {
+        use livrarr_domain::services::FileServiceError;
+        match e {
+            FileServiceError::NotFound => ApiError::NotFound,
+            FileServiceError::RootFolderNotFound => ApiError::NotFound,
+            FileServiceError::Forbidden => ApiError::Forbidden,
+            FileServiceError::BadRequest(msg) => ApiError::BadRequest(msg),
+            FileServiceError::Io(io_err) => ApiError::Internal(format!("I/O error: {io_err}")),
+            FileServiceError::Db(db_err) => ApiError::Db(db_err),
+        }
+    }
+}
+
 /// JSON error response body matching frontend's normalizeError expectations.
 ///
 /// Format: { status, error, message, fieldErrors? }

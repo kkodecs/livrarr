@@ -165,169 +165,36 @@ pub async fn lookup(
     _ctx: AuthContext,
     Query(q): Query<LookupQuery>,
 ) -> Result<Json<Vec<WorkSearchResult>>, ApiError> {
-    let term = q.term.unwrap_or_default();
-    if term.is_empty() {
-        return Ok(Json(vec![]));
-    }
+    use livrarr_domain::services::WorkService;
 
-    // Determine target language (default to primary from metadata config).
-    let cfg = state.db.get_metadata_config().await.ok();
-    let default_lang = cfg
-        .as_ref()
-        .and_then(|c| c.languages.first().cloned())
-        .unwrap_or_else(|| "en".to_string());
-    let lang = q.lang.as_deref().unwrap_or(&default_lang);
+    let req = livrarr_domain::services::LookupRequest {
+        term: q.term.unwrap_or_default(),
+        lang_override: q.lang,
+    };
 
-    // Validate language code.
-    if lang != "en" && !livrarr_metadata::language::is_supported_language(lang) {
-        return Err(ApiError::BadRequest(format!(
-            "unsupported language: {lang}"
-        )));
-    }
+    let results = state.work_service.lookup(req).await?;
 
-    // Non-English: direct Goodreads search with regex parsing.
-    if lang != "en" {
-        let lang_owned = lang.to_string();
+    let api_results = results
+        .into_iter()
+        .map(|r| WorkSearchResult {
+            ol_key: r.ol_key,
+            title: r.title,
+            author_name: r.author_name,
+            author_ol_key: r.author_ol_key,
+            year: r.year,
+            cover_url: r.cover_url,
+            description: r.description,
+            series_name: r.series_name,
+            series_position: r.series_position,
+            source: r.source,
+            source_type: r.source_type,
+            language: r.language,
+            detail_url: r.detail_url,
+            rating: r.rating,
+        })
+        .collect();
 
-        // Rate limit outbound Goodreads requests.
-        state.goodreads_rate_limiter.acquire().await;
-
-        let search_url = format!(
-            "https://www.goodreads.com/search?q={}",
-            urlencoding::encode(&term)
-        );
-
-        let fetch_result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            state
-                .http_client
-                .get(&search_url)
-                .header(
-                    "User-Agent",
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-                     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                )
-                .header("Accept-Language", "en-US,en;q=0.9")
-                .send(),
-        )
-        .await;
-
-        let response = match fetch_result {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => {
-                state
-                    .provider_health
-                    .set_error("goodreads", format!("HTTP error: {e}"))
-                    .await;
-                tracing::warn!("Goodreads search fetch failed: {e}");
-                return Ok(Json(vec![]));
-            }
-            Err(_) => {
-                state
-                    .provider_health
-                    .set_error("goodreads", "timeout".into())
-                    .await;
-                tracing::warn!("Goodreads search fetch timed out");
-                return Ok(Json(vec![]));
-            }
-        };
-
-        if !response.status().is_success() {
-            let status = response.status();
-            state
-                .provider_health
-                .set_error("goodreads", format!("HTTP {status}"))
-                .await;
-            tracing::warn!(%status, "Goodreads search returned non-success status");
-            return Ok(Json(vec![]));
-        }
-
-        let raw_html = match response.text().await {
-            Ok(html) => html,
-            Err(e) => {
-                tracing::warn!("Goodreads search body read failed: {e}");
-                return Ok(Json(vec![]));
-            }
-        };
-
-        // Anti-bot detection — error, no fallback.
-        if livrarr_metadata::llm_scraper::is_anti_bot_page(&raw_html) {
-            state
-                .provider_health
-                .set_error("goodreads", "anti-bot challenge detected".into())
-                .await;
-            tracing::warn!("Goodreads search: anti-bot page detected");
-            return Ok(Json(vec![]));
-        }
-
-        state.provider_health.clear_error("goodreads").await;
-
-        // Direct regex parsing of search results.
-        let parsed = livrarr_metadata::goodreads::parse_search_html(&raw_html);
-
-        // Parser drift detection: if the HTML had book rows but none passed
-        // validation, Goodreads likely changed their markup.
-        if parsed.is_empty() && raw_html.contains("itemtype=\"http") {
-            tracing::warn!(
-                "Goodreads parser drift: HTML contains schema.org Book rows but 0 passed \
-                 validation. HTML structure may have changed — please report this at \
-                 https://github.com/kkodecs/livrarr/issues"
-            );
-        }
-
-        // Include detail_url directly in each result for pass-through to add.
-        let api_results: Vec<WorkSearchResult> = parsed
-            .into_iter()
-            .map(|r| {
-                let full_url = if r.detail_url.starts_with('/') {
-                    format!("https://www.goodreads.com{}", r.detail_url)
-                } else {
-                    r.detail_url.clone()
-                };
-                let validated_url = if livrarr_metadata::goodreads::validate_detail_url(&full_url) {
-                    Some(full_url)
-                } else {
-                    None
-                };
-                WorkSearchResult {
-                    ol_key: None,
-                    title: r.title,
-                    author_name: r.author.unwrap_or_default(),
-                    author_ol_key: None,
-                    year: r.year,
-                    cover_url: r.cover_url,
-                    description: None,
-                    series_name: r.series_name,
-                    series_position: r.series_position,
-                    source: Some("Goodreads".to_string()),
-                    source_type: Some("goodreads".to_string()),
-                    language: Some(lang_owned.clone()),
-                    detail_url: validated_url,
-                    rating: r.rating,
-                }
-            })
-            .collect();
-
-        return Ok(Json(api_results));
-    }
-
-    // English: existing OpenLibrary flow.
-    let results = lookup_openlibrary(&state.http_client, &term).await?;
-    let results = results.0; // unwrap Json
-
-    if !results.is_empty() {
-        return Ok(Json(results));
-    }
-
-    // Primary source returned nothing — try LLM as fallback if configured.
-    let cfg = state.db.get_metadata_config().await.ok();
-    if let Some(cleaned) =
-        llm_clean_search_results(&state.http_client, cfg.as_ref(), &term, &[], false).await
-    {
-        return Ok(Json(cleaned));
-    }
-
-    Ok(Json(vec![]))
+    Ok(Json(api_results))
 }
 
 /// Use LLM to clean up search results — remove duplicates, foreign editions,
@@ -560,196 +427,37 @@ pub async fn add_work_internal(
     user_id: i64,
     req: AddWorkRequest,
 ) -> Result<AddWorkResponse, ApiError> {
-    // Check duplicate by ol_key (only when provided).
-    if let Some(ref ol_key) = req.ol_key {
-        if state.db.work_exists_by_ol_key(user_id, ol_key).await? {
-            return Err(ApiError::Conflict {
-                reason: "work already exists".into(),
-            });
-        }
-    }
+    use livrarr_domain::services::WorkService;
 
-    // Cleanup title + author at add-time so the locked identity anchor
-    // (setter=User in provenance) stores the canonical form, not whatever
-    // cruft came from the search result. LLM-assisted polish when configured
-    // (with 2.5s timeout); deterministic fallback otherwise. Reads from the
-    // shared live snapshot — no DB hit, no restart required for config
-    // changes. See `livrarr_metadata::title_cleanup`.
-    let polish_llm_config = {
-        let cfg = state.live_metadata_config.snapshot();
-        let key = cfg
-            .llm_api_key
-            .as_deref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let endpoint = cfg
-            .llm_endpoint
-            .as_deref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        if cfg.llm_enabled && key.is_some() && endpoint.is_some() {
-            let model = cfg
-                .llm_model
-                .as_deref()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "gemini-3.1-flash-lite-preview".to_string());
-            Some((endpoint.unwrap(), key.unwrap(), model))
-        } else {
-            None
-        }
-    };
-    let polished = livrarr_metadata::title_cleanup::polish_addtime(
-        &state.http_client,
-        polish_llm_config
-            .as_ref()
-            .map(|(e, k, m)| (e.as_str(), k.as_str(), m.as_str())),
-        &req.title,
-        &req.author_name,
-    )
-    .await;
-    let cleaned_title = polished.title;
-    let cleaned_author = polished.author_name;
-    let llm_extracted_series_name = polished.series_name;
-    let llm_extracted_series_position = polished.series_position;
-
-    // Find or create author.
-    let author_name_normalized = cleaned_author.trim().to_lowercase();
-    let existing_author = state
-        .db
-        .find_author_by_name(user_id, &author_name_normalized)
-        .await?;
-
-    let (author_id, author_created) = match existing_author {
-        Some(a) => (Some(a.id), false),
-        None => {
-            let author = state
-                .db
-                .create_author(CreateAuthorDbRequest {
-                    user_id,
-                    name: cleaned_author.clone(),
-                    sort_name: None,
-                    ol_key: req.author_ol_key.clone(),
-                    gr_key: None,
-                    hc_key: None,
-                    import_id: None,
-                })
-                .await?;
-            crate::handlers::author::spawn_bibliography_fetch((*state).clone(), author.id, user_id);
-            (Some(author.id), true)
-        }
+    let svc_req = livrarr_domain::services::AddWorkRequest {
+        title: req.title,
+        author_name: req.author_name,
+        author_ol_key: req.author_ol_key,
+        ol_key: req.ol_key,
+        gr_key: None,
+        year: req.year,
+        cover_url: req.cover_url,
+        metadata_source: req.metadata_source,
+        language: req.language,
+        detail_url: req.detail_url,
+        series_name: None,
+        series_position: None,
+        defer_enrichment: req.defer_enrichment,
+        provenance_setter: None,
     };
 
-    let cover_url = req.cover_url.clone();
+    let result = state.work_service.add(user_id, svc_req).await?;
 
-    // Detail URL comes from the frontend (passed through from search results).
-    let detail_url = req.detail_url.clone();
-
-    let work = state
-        .db
-        .create_work(CreateWorkDbRequest {
-            user_id,
-            title: cleaned_title,
-            author_name: cleaned_author,
-            author_id,
-            ol_key: req.ol_key.clone(),
-            gr_key: None,
-            year: req.year,
-            cover_url: req.cover_url,
-            metadata_source: req.metadata_source,
-            detail_url,
-            language: req.language,
-            import_id: None,
-            series_id: None,
-            series_name: llm_extracted_series_name,
-            series_position: llm_extracted_series_position,
-            monitor_ebook: false,
-            monitor_audiobook: false,
-        })
-        .await?;
-
-    // User adds get the identity lock — title + author + ol_key + language
-    // are user-validated by the act of selecting (or typing) the search
-    // result. Best-effort write; failure logs but doesn't abort the add.
-    write_addtime_provenance(&state.db, user_id, &work, ProvenanceSetter::User).await;
-
-    // Download cover image in background (best-effort, don't fail the add).
-    // Unwrap proxy URLs back to the original external URL before downloading.
-    // Foreign works: save as thumbnail ({id}_thumb.jpg) — enrichment saves hi-res later.
-    // English works: save as main cover ({id}.jpg).
-    let is_foreign = livrarr_metadata::language::is_foreign_source(work.metadata_source.as_deref());
-    let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
-    if let Some(url) = cover_url {
-        if livrarr_metadata::llm_scraper::validate_cover_url(&url, "").is_some() {
-            // Cover URL came from a remote/user-supplied source — use SSRF-safe client.
-            let http = state.http_client_safe.clone();
-            let covers_dir = state.data_dir.join("covers");
-            let work_id = work.id;
-            let save_as_thumb = is_foreign;
-            tokio::spawn(async move {
-                if save_as_thumb {
-                    let _ = download_cover_as(&http, &url, &covers_dir, work_id, "_thumb").await;
-                } else {
-                    let _ = download_cover(&http, &url, &covers_dir, work_id).await;
-                }
-            });
-        } else {
-            tracing::warn!(url = %url, "cover URL rejected by SSRF validation");
+    if result.author_created {
+        if let Some(author_id) = result.author_id {
+            crate::handlers::author::spawn_bibliography_fetch((*state).clone(), author_id, user_id);
         }
-    }
-
-    // Deferred enrichment: skip inline enrichment, leave as pending for background job.
-    if req.defer_enrichment {
-        return Ok(AddWorkResponse {
-            work: work_to_detail(&work),
-            author_created,
-            messages: vec![],
-        });
-    }
-
-    // Both English and foreign paths route through the queue
-    // (DefaultProviderQueue + EnrichmentServiceImpl). The GoodreadsClient
-    // handles foreign-work URLs internally (gr_key → detail_url →
-    // search-by-title) and falls back to LLM extraction when configured.
-    // The LLM validator at the EnrichmentService level cross-checks each
-    // provider's payload against the user-locked anchor (title + author).
-    let (enriched_work, messages) = match livrarr_metadata::EnrichmentService::enrich_work(
-        state.enrichment_service.as_ref(),
-        user_id,
-        work.id,
-        livrarr_metadata::EnrichmentMode::Background,
-    )
-    .await
-    {
-        Ok(result) => {
-            let messages: Vec<String> = result
-                .provider_outcomes
-                .iter()
-                .filter(|(_, oc)| {
-                    !matches!(
-                        oc,
-                        livrarr_domain::OutcomeClass::Success
-                            | livrarr_domain::OutcomeClass::NotFound
-                    )
-                })
-                .map(|(p, oc)| format!("{p:?}: {oc:?}"))
-                .collect();
-            (result.work, messages)
-        }
-        Err(e) => {
-            tracing::warn!(work_id = work.id, "add_work: enrichment failed: {e}");
-            (work, vec![format!("enrichment failed: {e}")])
-        }
-    };
-
-    if let Some(ref cover_url) = enriched_work.cover_url {
-        download_post_enrich_cover(state, enriched_work.id, cover_url).await;
     }
 
     Ok(AddWorkResponse {
-        work: work_to_detail(&enriched_work),
-        author_created,
-        messages,
+        work: work_to_detail(&result.work),
+        author_created: result.author_created,
+        messages: result.messages,
     })
 }
 
@@ -914,56 +622,11 @@ pub async fn upload_cover(
     Path(id): Path<i64>,
     body: Bytes,
 ) -> Result<(), ApiError> {
-    let user_id = ctx.user.id;
-
-    // Reject oversized uploads (413 Payload Too Large).
-    if body.len() > MAX_COVER_BYTES {
-        return Err(ApiError::PayloadTooLarge {
-            max_bytes: MAX_COVER_BYTES,
-        });
-    }
-
-    // Verify work exists.
-    let _work = state.db.get_work(user_id, id).await?;
-
-    if body.is_empty() {
-        return Err(ApiError::BadRequest("empty image data".into()));
-    }
-
-    // Store cover file on disk.
-    let covers_dir = state.data_dir.join("covers");
-    tokio::fs::create_dir_all(&covers_dir)
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to create covers dir: {e}")))?;
-
-    let cover_path = covers_dir.join(format!("{id}.jpg"));
-    // Atomic write: .tmp → fsync → rename.
-    let tmp_path = cover_path.with_extension("jpg.tmp");
-    let tmp_for_blocking = tmp_path.clone();
-    let target = cover_path.clone();
-    let body_vec = body.to_vec();
-    let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp_for_blocking)?;
-        f.write_all(&body_vec)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp_for_blocking, &target)
-    })
-    .await
-    .map_err(|e| ApiError::Internal(format!("spawn error writing cover: {e}")))?;
-    if let Err(e) = write_result {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Err(ApiError::Internal(format!("failed to write cover: {e}")));
-    }
-
-    // Delete stale thumbnail so it gets regenerated from the new cover.
-    let thumb_path = covers_dir.join(format!("{id}_thumb.jpg"));
-    let _ = tokio::fs::remove_file(&thumb_path).await;
-
-    // Set cover_manual flag.
-    state.db.set_cover_manual(user_id, id, true).await?;
-
+    use livrarr_domain::services::WorkService;
+    state
+        .work_service
+        .upload_cover(ctx.user.id, id, &body)
+        .await?;
     Ok(())
 }
 
