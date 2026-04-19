@@ -167,30 +167,27 @@ where
         let setter = req.provenance_setter.unwrap_or(ProvenanceSetter::User);
         write_addtime_provenance(&self.db, user_id, &work, setter).await;
 
-        // Background cover download (best-effort, never fails the add).
-        // Unproxy URL, validate SSRF, foreign works save as thumbnail.
         let is_foreign = crate::language::is_foreign_source(work.metadata_source.as_deref());
         let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
-        if let Some(ref url) = cover_url {
-            if crate::llm_scraper::validate_cover_url(url, "").is_some() {
-                let covers_dir = self.data_dir.join("covers");
-                let work_id = work.id;
-                let suffix = if is_foreign { "_thumb" } else { "" };
-                let url = url.clone();
-                let http = self.http.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        download_cover_to_disk(&http, &url, &covers_dir, work_id, suffix).await
-                    {
-                        tracing::warn!(work_id, %url, "background cover download failed: {e}");
-                    }
-                });
-            } else {
-                tracing::warn!(%url, "cover URL rejected by SSRF validation");
-            }
-        }
 
         if req.defer_enrichment {
+            // Download cover now since enrichment won't run to provide a better one.
+            if let Some(ref url) = cover_url {
+                if crate::llm_scraper::validate_cover_url(url, "").is_some() {
+                    let covers_dir = self.data_dir.join("covers");
+                    let work_id = work.id;
+                    let suffix = if is_foreign { "_thumb" } else { "" };
+                    let url = url.clone();
+                    let http = self.http.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            download_cover_to_disk(&http, &url, &covers_dir, work_id, suffix).await
+                        {
+                            tracing::warn!(work_id, %url, "background cover download failed: {e}");
+                        }
+                    });
+                }
+            }
             return Ok(AddWorkResult {
                 work,
                 author_created,
