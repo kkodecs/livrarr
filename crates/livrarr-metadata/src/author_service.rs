@@ -304,17 +304,21 @@ where
         let raw_entries = self.fetch_ol_bibliography(ol_key).await?;
 
         if !raw_entries.is_empty() {
+            let cleaned = self
+                .llm_clean_bibliography(&author.name, &raw_entries)
+                .await
+                .unwrap_or(raw_entries);
             let _ = self
                 .db
-                .save_bibliography(author_id, &raw_entries)
+                .save_bibliography(author_id, &cleaned)
                 .await
                 .map_err(AuthorServiceError::Db)?;
             return Ok(self
-                .enrich_bibliography(user_id, author_id, raw_entries)
+                .enrich_bibliography(user_id, author_id, cleaned)
                 .await);
         }
 
-        // OL returned nothing — try LLM as fallback.
+        // OL returned nothing — try LLM from scratch as fallback.
         let llm_entries = self.llm_clean_bibliography(&author.name, &[]).await;
         let final_entries = llm_entries.unwrap_or_default();
         let _ = self
@@ -346,6 +350,21 @@ where
         }
 
         self.bibliography(user_id, author_id).await
+    }
+
+    fn spawn_bibliography_refresh(&self, _author_id: i64, _user_id: i64) {
+        // Stub — server wires this up via the concrete AppState spawn
+    }
+
+    async fn lookup_authors(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<
+        Vec<livrarr_domain::services::AuthorLookupResult>,
+        livrarr_domain::services::AuthorServiceError,
+    > {
+        self.lookup(query, limit).await
     }
 }
 
@@ -471,13 +490,14 @@ where
 
         let system = "You are a librarian assistant. Clean up book bibliography lists.";
         let user_template = format!(
-            "These are works by {author_name} from a book database:\n\n\
+            "These are works attributed to \"{author_name}\" from a book database:\n\n\
              {listing}\n\
              Clean up this list:\n\
-             1. Remove duplicates, foreign editions, comic adaptations, anthologies, and compilations\n\
-             2. Fix spelling and capitalization\n\
-             3. Add series name and position if you know it\n\
-             4. Order results in the most logical way for a reader\n\n\
+             1. REMOVE works by a different person who shares the same name (e.g. a 16th-century playwright vs a modern author)\n\
+             2. Remove duplicates, foreign-language editions of the same work, comic adaptations, anthologies, and compilations\n\
+             3. Fix spelling and capitalization\n\
+             4. Add series name and position if you know it\n\
+             5. Order by series first (in reading order), then standalone works by publication year\n\n\
              Return a JSON array. Each entry: {{\"idx\": <original index>, \"title\": \"<cleaned title>\", \
              \"series\": \"<series name or null>\", \"position\": <number or null>}}\n\
              Return ONLY the JSON array, no other text."

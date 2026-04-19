@@ -8,7 +8,6 @@ use tower_governor::GovernorLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::handlers;
 use crate::middleware::auth_middleware;
 use crate::state::AppState;
 
@@ -34,279 +33,398 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
 
     // Public API routes (no auth required).
     let public = Router::new()
-        .route("/setup/status", get(handlers::setup::setup_status))
-        .route("/setup", post(handlers::setup::setup))
+        .route(
+            "/setup/status",
+            get(livrarr_handlers::setup::setup_status::<AppState>),
+        )
+        .route("/setup", post(livrarr_handlers::setup::setup::<AppState>))
         .route(
             "/auth/login",
-            post(handlers::auth::login).layer(GovernorLayer::new(login_governor)),
+            post(livrarr_handlers::auth::login::<AppState>)
+                .layer(GovernorLayer::new(login_governor)),
         );
 
     // Protected API routes (auth middleware applied).
     let protected = Router::new()
         // Auth
-        .route("/auth/logout", post(handlers::auth::logout))
-        .route("/auth/me", get(handlers::auth::me))
-        .route("/auth/profile", put(handlers::profile::update_profile))
-        .route("/auth/apikey", post(handlers::profile::regenerate_api_key))
+        .route(
+            "/auth/logout",
+            post(livrarr_handlers::auth::logout::<AppState>),
+        )
+        .route("/auth/me", get(livrarr_handlers::auth::me::<AppState>))
+        .route(
+            "/auth/profile",
+            put(livrarr_handlers::profile::update_profile::<AppState>),
+        )
+        .route(
+            "/auth/apikey",
+            post(livrarr_handlers::profile::regenerate_api_key::<AppState>),
+        )
         // Users (admin)
         .route(
             "/user",
-            get(handlers::user::list).post(handlers::user::create),
+            get(livrarr_handlers::user::list::<AppState>)
+                .post(livrarr_handlers::user::create::<AppState>),
         )
         .route(
             "/user/{id}",
-            get(handlers::user::get)
-                .put(handlers::user::update)
-                .delete(handlers::user::delete),
+            get(livrarr_handlers::user::get::<AppState>)
+                .put(livrarr_handlers::user::update::<AppState>)
+                .delete(livrarr_handlers::user::delete::<AppState>),
         )
         .route(
             "/user/{id}/apikey",
-            post(handlers::user::regenerate_user_api_key),
+            post(livrarr_handlers::user::regenerate_user_api_key::<AppState>),
         )
         // Root folders
         .route(
             "/rootfolder",
-            get(handlers::root_folder::list).post(handlers::root_folder::create),
+            get(livrarr_handlers::root_folder::list::<AppState>)
+                .post(livrarr_handlers::root_folder::create::<AppState>),
         )
-        .route("/rootfolder/{id}", delete(handlers::root_folder::delete))
-        .route("/rootfolder/{id}/scan", post(handlers::root_folder::scan))
+        .route(
+            "/rootfolder/{id}",
+            delete(livrarr_handlers::root_folder::delete::<AppState>),
+        )
+        .route(
+            "/rootfolder/{id}/scan",
+            post(livrarr_handlers::root_folder::scan::<AppState>),
+        )
         // Unmapped file scan (arbitrary path)
-        .route("/unmapped/scan", post(handlers::root_folder::scan_path))
+        .route(
+            "/unmapped/scan",
+            post(livrarr_handlers::root_folder::scan_path::<AppState>),
+        )
         // Download clients
         .route(
             "/downloadclient",
-            get(handlers::download_client::list).post(handlers::download_client::create),
+            get(livrarr_handlers::download_client::list::<AppState>)
+                .post(livrarr_handlers::download_client::create::<AppState>),
         )
         .route(
             "/downloadclient/test",
-            post(handlers::download_client::test),
+            post(livrarr_handlers::download_client::test::<AppState>),
         )
         .route(
             "/downloadclient/import/prowlarr",
-            post(handlers::download_client::import_from_prowlarr),
+            post(livrarr_handlers::download_client::import_from_prowlarr::<AppState>),
         )
         .route(
             "/downloadclient/{id}",
-            get(handlers::download_client::get)
-                .put(handlers::download_client::update)
-                .delete(handlers::download_client::delete),
+            get(livrarr_handlers::download_client::get::<AppState>)
+                .put(livrarr_handlers::download_client::update::<AppState>)
+                .delete(livrarr_handlers::download_client::delete::<AppState>),
         )
         .route(
             "/downloadclient/{id}/test",
-            post(handlers::download_client::test_saved),
+            post(livrarr_handlers::download_client::test_saved::<AppState>),
         )
         // Remote path mappings
         .route(
             "/remotepathmapping",
-            get(handlers::remote_path_mapping::list).post(handlers::remote_path_mapping::create),
+            get(livrarr_handlers::remote_path_mapping::list::<AppState>)
+                .post(livrarr_handlers::remote_path_mapping::create::<AppState>),
         )
         .route(
             "/remotepathmapping/{id}",
-            get(handlers::remote_path_mapping::get)
-                .put(handlers::remote_path_mapping::update)
-                .delete(handlers::remote_path_mapping::delete),
+            get(livrarr_handlers::remote_path_mapping::get::<AppState>)
+                .put(livrarr_handlers::remote_path_mapping::update::<AppState>)
+                .delete(livrarr_handlers::remote_path_mapping::delete::<AppState>),
         )
         // Config
-        .route("/config/naming", get(handlers::config::get_naming))
+        .route(
+            "/config/naming",
+            get(livrarr_handlers::config::get_naming::<AppState>),
+        )
         .route(
             "/config/mediamanagement",
-            get(handlers::config::get_media_management)
-                .put(handlers::config::update_media_management),
+            get(livrarr_handlers::config::get_media_management::<AppState>)
+                .put(livrarr_handlers::config::update_media_management::<AppState>),
         )
         .route(
             "/config/prowlarr",
-            get(handlers::config::get_prowlarr).put(handlers::config::update_prowlarr),
+            get(livrarr_handlers::config::get_prowlarr::<AppState>)
+                .put(livrarr_handlers::config::update_prowlarr::<AppState>),
         )
         .route(
             "/config/email",
-            get(handlers::config::get_email).put(handlers::config::update_email),
+            get(livrarr_handlers::config::get_email::<AppState>)
+                .put(livrarr_handlers::config::update_email::<AppState>),
         )
-        .route("/config/email/test", post(handlers::config::test_email))
+        .route(
+            "/config/email/test",
+            post(livrarr_handlers::config::test_email::<AppState>),
+        )
         .route(
             "/config/indexer",
-            get(handlers::config::get_indexer).put(handlers::config::update_indexer),
+            get(livrarr_handlers::config::get_indexer_config::<AppState>)
+                .put(livrarr_handlers::config::update_indexer_config::<AppState>),
         )
         // RSS sync trigger
         .route(
             "/command/rss-sync",
-            post(handlers::config::trigger_rss_sync),
+            post(livrarr_handlers::config::trigger_rss_sync::<AppState>),
         )
         // Indexers (replaces /config/prowlarr — DEFERRED-001)
         .route(
             "/indexer",
-            get(handlers::indexer::list).post(handlers::indexer::create),
+            get(livrarr_handlers::indexer::list::<AppState>)
+                .post(livrarr_handlers::indexer::create::<AppState>),
         )
-        .route("/indexer/test", post(handlers::indexer::test))
+        .route(
+            "/indexer/test",
+            post(livrarr_handlers::indexer::test::<AppState>),
+        )
         .route(
             "/indexer/import/prowlarr",
-            post(handlers::indexer::import_from_prowlarr),
+            post(livrarr_handlers::indexer::import_from_prowlarr::<AppState>),
         )
         .route(
             "/indexer/{id}",
-            get(handlers::indexer::get)
-                .put(handlers::indexer::update)
-                .delete(handlers::indexer::delete),
+            get(livrarr_handlers::indexer::get::<AppState>)
+                .put(livrarr_handlers::indexer::update::<AppState>)
+                .delete(livrarr_handlers::indexer::delete::<AppState>),
         )
-        .route("/indexer/{id}/test", post(handlers::indexer::test_saved))
+        .route(
+            "/indexer/{id}/test",
+            post(livrarr_handlers::indexer::test_saved::<AppState>),
+        )
         .route(
             "/config/metadata",
-            get(handlers::config::get_metadata).put(handlers::config::update_metadata),
+            get(livrarr_handlers::config::get_metadata::<AppState>)
+                .put(livrarr_handlers::config::update_metadata::<AppState>),
         )
         .route(
             "/config/metadata/test/hardcover",
-            post(handlers::config::test_hardcover),
+            post(livrarr_handlers::config::test_hardcover::<AppState>),
         )
         .route(
             "/config/metadata/test/audnexus",
-            post(handlers::config::test_audnexus),
+            post(livrarr_handlers::config::test_audnexus::<AppState>),
         )
         .route(
             "/config/metadata/test/llm",
-            post(handlers::config::test_llm),
+            post(livrarr_handlers::config::test_llm::<AppState>),
         )
         // Works
-        .route("/work/lookup", get(handlers::work::lookup))
-        .route("/work/refresh", post(handlers::work::refresh_all))
-        .route("/work", get(handlers::work::list).post(handlers::work::add))
+        .route(
+            "/work/lookup",
+            get(livrarr_handlers::work::lookup::<AppState>),
+        )
+        .route(
+            "/work/refresh",
+            post(livrarr_handlers::work::refresh_all::<AppState>),
+        )
+        .route(
+            "/work",
+            get(livrarr_handlers::work::list::<AppState>)
+                .post(livrarr_handlers::work::add::<AppState>),
+        )
         .route(
             "/work/{id}",
-            get(handlers::work::get)
-                .put(handlers::work::update)
-                .delete(handlers::work::delete),
+            get(livrarr_handlers::work::get::<AppState>)
+                .put(livrarr_handlers::work::update::<AppState>)
+                .delete(livrarr_handlers::work::delete::<AppState>),
         )
-        .route("/work/{id}/cover", post(handlers::work::upload_cover))
-        .route("/work/{id}/refresh", post(handlers::work::refresh))
+        .route(
+            "/work/{id}/cover",
+            post(livrarr_handlers::work::upload_cover::<AppState>),
+        )
+        .route(
+            "/work/{id}/refresh",
+            post(livrarr_handlers::work::refresh::<AppState>),
+        )
         // Authors
-        .route("/author/lookup", get(handlers::author::lookup))
-        .route("/author/search", post(handlers::author::search))
+        .route(
+            "/author/lookup",
+            get(livrarr_handlers::author::lookup::<AppState>),
+        )
+        .route(
+            "/author/search",
+            post(livrarr_handlers::work::author_search::<AppState>),
+        )
         .route(
             "/author",
-            get(handlers::author::list).post(handlers::author::add),
+            get(livrarr_handlers::author::list::<AppState>)
+                .post(livrarr_handlers::author::add::<AppState>),
         )
         .route(
             "/author/{id}",
-            get(handlers::author::get)
-                .put(handlers::author::update)
-                .delete(handlers::author::delete),
+            get(livrarr_handlers::author::get::<AppState>)
+                .put(livrarr_handlers::author::update::<AppState>)
+                .delete(livrarr_handlers::author::delete::<AppState>),
         )
         .route(
             "/author/{id}/bibliography",
-            get(handlers::author::bibliography),
+            get(livrarr_handlers::author::bibliography::<AppState>),
         )
         .route(
             "/author/{id}/bibliography/refresh",
-            post(handlers::author::refresh_bibliography),
+            post(livrarr_handlers::author::refresh_bibliography::<AppState>),
         )
         // Series
-        .route("/series", get(handlers::series::list_all))
+        .route(
+            "/series",
+            get(livrarr_handlers::series::list_all::<AppState>),
+        )
         .route(
             "/author/{id}/resolve-gr",
-            post(handlers::series::resolve_gr),
+            post(livrarr_handlers::series::resolve_gr::<AppState>),
         )
-        .route("/author/{id}/series", get(handlers::series::list_series))
+        .route(
+            "/author/{id}/series",
+            get(livrarr_handlers::series::list_series::<AppState>),
+        )
         .route(
             "/author/{id}/series/refresh",
-            post(handlers::series::refresh_series),
+            post(livrarr_handlers::series::refresh_series::<AppState>),
         )
         .route(
             "/author/{id}/series/monitor",
-            post(handlers::series::monitor_series),
+            post(livrarr_handlers::series::monitor_series::<AppState>),
         )
         .route(
             "/series/{id}",
-            get(handlers::series::get_detail).put(handlers::series::update_series),
+            get(livrarr_handlers::series::get_detail::<AppState>)
+                .put(livrarr_handlers::series::update_series::<AppState>),
         )
         // Queue
-        .route("/queue", get(handlers::queue::list))
-        .route("/queue/{id}", delete(handlers::queue::remove))
+        .route("/queue", get(livrarr_handlers::queue::list::<AppState>))
+        .route(
+            "/queue/{id}",
+            delete(livrarr_handlers::queue::remove::<AppState>),
+        )
         // Grabs
-        .route("/grab/{id}/retry", post(handlers::queue::retry_import))
+        .route(
+            "/grab/{id}/retry",
+            post(livrarr_handlers::queue::retry_import::<AppState>),
+        )
         // Releases
-        .route("/release", get(handlers::release::search))
-        .route("/release/grab", post(handlers::release::grab))
+        .route(
+            "/release",
+            get(livrarr_handlers::release::search::<AppState>),
+        )
+        .route(
+            "/release/grab",
+            post(livrarr_handlers::release::grab::<AppState>),
+        )
         // Notifications
         .route(
             "/notification",
-            get(handlers::notification::list).delete(handlers::notification::dismiss_all),
+            get(livrarr_handlers::notification::list::<AppState>)
+                .delete(livrarr_handlers::notification::dismiss_all::<AppState>),
         )
         .route(
             "/notification/{id}",
-            put(handlers::notification::mark_read).delete(handlers::notification::dismiss),
+            put(livrarr_handlers::notification::mark_read::<AppState>)
+                .delete(livrarr_handlers::notification::dismiss::<AppState>),
         )
         // History
-        .route("/history", get(handlers::history::list))
+        .route("/history", get(livrarr_handlers::history::list::<AppState>))
         // System
-        .route("/health", get(handlers::system::health))
-        .route("/system/status", get(handlers::system::status))
-        .route("/system/logs/tail", get(handlers::system::log_tail))
-        .route("/system/logs/level", put(handlers::system::set_log_level))
+        .route("/health", get(livrarr_handlers::system::health::<AppState>))
+        .route(
+            "/system/status",
+            get(livrarr_handlers::system::status::<AppState>),
+        )
+        .route(
+            "/system/logs/tail",
+            get(livrarr_handlers::system::log_tail::<AppState>),
+        )
+        .route(
+            "/system/logs/level",
+            put(livrarr_handlers::system::set_log_level::<AppState>),
+        )
         // Filesystem browse
-        .route("/filesystem", get(handlers::filesystem::browse))
+        .route(
+            "/filesystem",
+            get(livrarr_handlers::filesystem::browse::<AppState>),
+        )
         // Manual import
-        .route("/manualimport/scan", post(handlers::manual_import::scan))
+        .route(
+            "/manualimport/scan",
+            post(livrarr_handlers::manual_import::scan::<AppState>),
+        )
         .route(
             "/manualimport/progress/{scan_id}",
-            get(handlers::manual_import::scan_progress),
+            get(livrarr_handlers::manual_import::scan_progress::<AppState>),
         )
         .route(
             "/manualimport/import",
-            post(handlers::manual_import::import),
+            post(livrarr_handlers::manual_import::import::<AppState>),
         )
         .route(
             "/manualimport/search",
-            post(handlers::manual_import::search),
+            post(livrarr_handlers::manual_import::search::<AppState>),
         )
         // Readarr import
         .route(
             "/import/readarr/connect",
-            post(handlers::readarr_import::connect),
+            post(livrarr_handlers::readarr_import::connect::<AppState>),
         )
         .route(
             "/import/readarr/preview",
-            post(handlers::readarr_import::preview),
+            post(livrarr_handlers::readarr_import::preview::<AppState>),
         )
         .route(
             "/import/readarr/start",
-            post(handlers::readarr_import::start),
+            post(livrarr_handlers::readarr_import::start::<AppState>),
         )
         .route(
             "/import/readarr/progress",
-            get(handlers::readarr_import::progress),
+            get(livrarr_handlers::readarr_import::progress::<AppState>),
         )
         .route(
             "/import/readarr/history",
-            get(handlers::readarr_import::history),
+            get(livrarr_handlers::readarr_import::history::<AppState>),
         )
         .route(
             "/import/readarr/{import_id}",
-            delete(handlers::readarr_import::undo),
+            delete(livrarr_handlers::readarr_import::undo::<AppState>),
         )
         // List imports (CSV: Goodreads, Hardcover)
-        .route("/listimport", get(handlers::list_import::list))
-        .route("/listimport/preview", post(handlers::list_import::preview))
-        .route("/listimport/confirm", post(handlers::list_import::confirm))
+        .route(
+            "/listimport",
+            get(livrarr_handlers::list_import::list::<AppState>),
+        )
+        .route(
+            "/listimport/preview",
+            post(livrarr_handlers::list_import::preview::<AppState>),
+        )
+        .route(
+            "/listimport/confirm",
+            post(livrarr_handlers::list_import::confirm::<AppState>),
+        )
         .route(
             "/listimport/{import_id}/complete",
-            post(handlers::list_import::complete),
+            post(livrarr_handlers::list_import::complete::<AppState>),
         )
         .route(
             "/listimport/{import_id}",
-            delete(handlers::list_import::undo),
+            delete(livrarr_handlers::list_import::undo::<AppState>),
         )
         // Library files
-        .route("/workfile", get(handlers::workfile::list))
+        .route(
+            "/workfile",
+            get(livrarr_handlers::workfile::list::<AppState>),
+        )
         .route(
             "/workfile/{id}",
-            get(handlers::workfile::get).delete(handlers::workfile::delete),
+            get(livrarr_handlers::workfile::get::<AppState>)
+                .delete(livrarr_handlers::workfile::delete::<AppState>),
         )
         .route(
             "/workfile/{id}/send-email",
-            post(handlers::workfile::send_email),
+            post(livrarr_handlers::work::send_email::<AppState>),
         )
-        .route("/workfile/{id}/download", get(handlers::workfile::download))
+        .route(
+            "/workfile/{id}/download",
+            get(livrarr_handlers::work::download::<AppState>),
+        )
         .route(
             "/workfile/{id}/progress",
-            get(handlers::workfile::get_progress).put(handlers::workfile::update_progress),
+            get(livrarr_handlers::workfile::get_progress::<AppState>)
+                .put(livrarr_handlers::workfile::update_progress::<AppState>),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -314,19 +432,25 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         ));
 
     // Stream endpoint — token auth via query param for HTML5 audio/video.
-    let stream = Router::new().route("/stream/{id}", get(handlers::workfile::stream));
+    let stream = Router::new().route(
+        "/stream/{id}",
+        get(livrarr_handlers::work::stream::<AppState>),
+    );
 
     // Media cover serving (no auth — images loaded by browser directly).
     let mediacover = Router::new()
         .route(
             "/mediacover/{id}/cover.jpg",
-            get(handlers::mediacover::get_cover),
+            get(livrarr_handlers::mediacover::get_cover::<AppState>),
         )
         .route(
             "/mediacover/{id}/thumb.jpg",
-            get(handlers::mediacover::get_thumb),
+            get(livrarr_handlers::mediacover::get_thumb::<AppState>),
         )
-        .route("/coverproxy", get(handlers::coverproxy::proxy_cover));
+        .route(
+            "/coverproxy",
+            get(livrarr_handlers::coverproxy::proxy_cover::<AppState>),
+        );
 
     // Combine API routes. Unmatched API paths return 404.
     let api = Router::new()
@@ -339,14 +463,26 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
 
     // OPDS routes — top level, before SPA fallback. Basic Auth handled per-handler.
     let opds = Router::new()
-        .route("/", get(handlers::opds::root))
-        .route("/recent", get(handlers::opds::recent))
-        .route("/author", get(handlers::opds::author_list))
-        .route("/author/{id}", get(handlers::opds::author_works))
-        .route("/search", get(handlers::opds::search))
-        .route("/osd", get(handlers::opds::opensearch))
-        .route("/cover/{work_id}", get(handlers::opds::cover))
-        .route("/download/{library_item_id}", get(handlers::opds::download));
+        .route("/", get(livrarr_handlers::opds::root::<AppState>))
+        .route("/recent", get(livrarr_handlers::opds::recent::<AppState>))
+        .route(
+            "/author",
+            get(livrarr_handlers::opds::author_list::<AppState>),
+        )
+        .route(
+            "/author/{id}",
+            get(livrarr_handlers::opds::author_works::<AppState>),
+        )
+        .route("/search", get(livrarr_handlers::opds::search::<AppState>))
+        .route("/osd", get(livrarr_handlers::opds::opensearch::<AppState>))
+        .route(
+            "/cover/{work_id}",
+            get(livrarr_handlers::opds::cover::<AppState>),
+        )
+        .route(
+            "/download/{library_item_id}",
+            get(livrarr_handlers::opds::download::<AppState>),
+        );
 
     let app = Router::new().nest("/api/v1", api).nest("/opds", opds);
 

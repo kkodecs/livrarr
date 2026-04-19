@@ -307,7 +307,7 @@ impl DownloadClientApi for SecondaryApiImpl {
         req: CreateDownloadClientApiRequest,
     ) -> Result<DownloadClientResponse, ApiError> {
         validate_download_client(&req)?;
-        let (host, ssl_override) = crate::handlers::download_client::normalize_host(&req.host);
+        let (host, ssl_override) = livrarr_handlers::download_client::normalize_host(&req.host);
         let use_ssl = ssl_override.unwrap_or(req.use_ssl);
         let dc = self
             .db
@@ -342,7 +342,7 @@ impl DownloadClientApi for SecondaryApiImpl {
     ) -> Result<DownloadClientResponse, ApiError> {
         let (host, ssl_override) = match &req.host {
             Some(h) => {
-                let (clean, ssl) = crate::handlers::download_client::normalize_host(h);
+                let (clean, ssl) = livrarr_handlers::download_client::normalize_host(h);
                 (Some(clean), ssl)
             }
             None => (None, None),

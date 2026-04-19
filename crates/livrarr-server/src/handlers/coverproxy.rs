@@ -30,7 +30,7 @@ impl CoverProxyCache {
         }
     }
 
-    async fn get(&self, url: &str) -> Option<(Vec<u8>, String)> {
+    pub async fn get(&self, url: &str) -> Option<(Vec<u8>, String)> {
         let cache = self.entries.read().await;
         let entry = cache.get(url)?;
         if entry.fetched_at.elapsed() < CACHE_TTL {
@@ -40,7 +40,7 @@ impl CoverProxyCache {
         }
     }
 
-    async fn put(&self, url: String, data: Vec<u8>, content_type: String) {
+    pub async fn put(&self, url: String, data: Vec<u8>, content_type: String) {
         let mut cache = self.entries.write().await;
         // Evict expired entries first — cheap and often enough.
         if cache.len() >= MAX_CACHE_ENTRIES {

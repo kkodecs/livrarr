@@ -228,7 +228,7 @@ export default function WorkDetailPage() {
         </Tabs.Root>
       </PageContent>
 
-      <EditModal work={work} open={editOpen} onOpenChange={setEditOpen} />
+      <EditModal work={work} open={editOpen} onOpenChange={setEditOpen} onCoverUploaded={() => setCoverVersion((v) => v + 1)} />
 
       <ConfirmModal
         open={deleteOpen}
@@ -1200,10 +1200,12 @@ function EditModal({
   work,
   open,
   onOpenChange,
+  onCoverUploaded,
 }: {
   work: WorkDetailResponse;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onCoverUploaded?: () => void;
 }) {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1238,6 +1240,7 @@ function EditModal({
     mutationFn: (file: Blob) => uploadWorkCover(work.id, file),
     onSuccess: () => {
       toast.success("Cover uploaded");
+      onCoverUploaded?.();
       queryClient.invalidateQueries({ queryKey: ["work", String(work.id)] });
     },
     onError: () => toast.error("Failed to upload cover"),

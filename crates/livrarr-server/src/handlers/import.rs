@@ -1,13 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use crate::services::settings_service::SettingsService;
 use crate::state::AppState;
 use crate::{ApiError, GrabStatus, MediaType};
-use livrarr_db::{
-    ConfigDb, CreateLibraryItemDbRequest, DownloadClientDb, GrabDb, LibraryItemDb,
-    RemotePathMappingDb, RootFolderDb, WorkDb,
-};
 use livrarr_domain::sanitize_path_component;
-use livrarr_domain::services::ImportWorkflow;
+use livrarr_domain::services::{ImportIoService, ImportWorkflow};
 use livrarr_tagwrite::TagWriteStatus;
 
 /// Result of an import attempt, returned to the caller (retry handler).
@@ -33,11 +30,11 @@ pub async fn import_grab(
     // The download poller persists content_path when confirming a download.
     // For manual retries, content_path may be missing — resolve from the
     // download client.
-    let grab = state.db.get_grab(user_id, grab_id).await?;
+    let grab = state.import_io_service.get_grab(user_id, grab_id).await?;
     if grab.content_path.is_none() {
         if let Some(ref download_id) = grab.download_id {
             let client = state
-                .db
+                .import_io_service
                 .get_download_client(grab.download_client_id)
                 .await?;
             let content_path = if client.client_type() == "sabnzbd" {
@@ -46,7 +43,7 @@ pub async fn import_grab(
                 fetch_qbit_content_path(state, &client, download_id).await?
             };
             state
-                .db
+                .import_io_service
                 .set_grab_content_path(user_id, grab_id, &content_path)
                 .await?;
         }
@@ -60,12 +57,15 @@ pub async fn import_grab(
 
     // Post-service I/O: tag imported files + CWA copy + email.
     if !result.imported_files.is_empty() {
-        let work = state.db.get_work(user_id, grab.work_id).await?;
+        let work = state
+            .import_io_service
+            .get_work(user_id, grab.work_id)
+            .await?;
 
         // Tag writing — retag the just-imported files if enrichment data available.
         if work.enrichment_status != livrarr_domain::EnrichmentStatus::Pending {
             let items = state
-                .db
+                .import_io_service
                 .list_library_items_by_work(user_id, work.id)
                 .await
                 .unwrap_or_default();
@@ -86,8 +86,16 @@ pub async fn import_grab(
         }
 
         // CWA copy + email — fire-and-forget for ebooks.
-        let media_mgmt = state.db.get_media_management_config().await.ok();
-        let root_folders = state.db.list_root_folders().await.unwrap_or_default();
+        let media_mgmt = state
+            .settings_service
+            .get_media_management_config()
+            .await
+            .ok();
+        let root_folders = state
+            .import_io_service
+            .list_root_folders()
+            .await
+            .unwrap_or_default();
         for imp in &result.imported_files {
             if imp.media_type != MediaType::Ebook {
                 continue;
@@ -109,7 +117,11 @@ pub async fn import_grab(
                         .and_then(|e| e.to_str())
                         .unwrap_or("epub")
                         .to_string();
-                    let work = state.db.get_work(user_id, grab.work_id).await.ok();
+                    let work = state
+                        .import_io_service
+                        .get_work(user_id, grab.work_id)
+                        .await
+                        .ok();
                     if let Some(work) = work {
                         let tp = abs_path.clone();
                         let cwa = cwa_path.clone();
@@ -129,7 +141,7 @@ pub async fn import_grab(
             }
 
             // Auto-send to email/Kindle
-            if let Ok(email_cfg) = state.db.get_email_config().await {
+            if let Ok(email_cfg) = state.settings_service.get_email_config().await {
                 if email_cfg.send_on_import && email_cfg.enabled {
                     let ext = Path::new(&imp.target_relative_path)
                         .extension()
@@ -313,8 +325,8 @@ pub async fn import_single_file(
         .to_string();
 
     state
-        .db
-        .create_library_item(CreateLibraryItemDbRequest {
+        .import_io_service
+        .create_library_item(livrarr_domain::services::CreateLibraryItemRequest {
             user_id,
             work_id,
             root_folder_id,
@@ -355,7 +367,7 @@ pub async fn import_single_file(
 
     // Auto-send to email/Kindle on import (ebooks only, non-fatal).
     if media_type == MediaType::Ebook {
-        if let Ok(email_cfg) = state.db.get_email_config().await {
+        if let Ok(email_cfg) = state.settings_service.get_email_config().await {
             if email_cfg.send_on_import && email_cfg.enabled {
                 let ext = source
                     .extension()
@@ -482,7 +494,7 @@ async fn fetch_sabnzbd_storage_path(
     client: &livrarr_domain::DownloadClient,
     nzo_id: &str,
 ) -> Result<String, ApiError> {
-    let base_url = super::download_client::client_base_url(client);
+    let base_url = livrarr_handlers::download_client::client_base_url(client);
     let api_key = client.api_key.as_deref().unwrap_or("");
 
     // SABnzbd search param searches by name, not nzo_id. Fetch recent history and match client-side.
@@ -550,7 +562,7 @@ pub async fn apply_remote_path_mapping(
     // like C:\Downloads\book.epub that need to match Linux forward-slash mappings.
     let content_path = &content_path.replace('\\', "/");
 
-    let mappings = state.db.list_remote_path_mappings().await?;
+    let mappings = state.import_io_service.list_remote_path_mappings().await?;
 
     // Extract hostname from client_host URL (strip scheme, port, path).
     let client_hostname = client_host
@@ -717,7 +729,11 @@ pub async fn retag_library_items(
 
     // Non-MP3: per-file .tmp lifecycle.
     for item in &other_items {
-        let root = match state.db.get_root_folder(item.root_folder_id).await {
+        let root = match state
+            .import_io_service
+            .get_root_folder(item.root_folder_id)
+            .await
+        {
             Ok(rf) => rf,
             Err(e) => {
                 warnings.push(format!(
@@ -773,7 +789,7 @@ pub async fn retag_library_items(
                         .map(|m| m.len() as i64)
                         .unwrap_or(0);
                     if let Err(e) = state
-                        .db
+                        .import_io_service
                         .update_library_item_size(item.user_id, item.id, new_size)
                         .await
                     {
@@ -794,7 +810,11 @@ pub async fn retag_library_items(
 
     // MP3 batch: .tmp lifecycle for all MP3 items.
     if !mp3_items.is_empty() {
-        let root = match state.db.get_root_folder(mp3_items[0].root_folder_id).await {
+        let root = match state
+            .import_io_service
+            .get_root_folder(mp3_items[0].root_folder_id)
+            .await
+        {
             Ok(rf) => rf,
             Err(e) => {
                 warnings.push(format!("root folder lookup failed: {e}"));
@@ -855,7 +875,7 @@ pub async fn retag_library_items(
                                 .map(|m| m.len() as i64)
                                 .unwrap_or(0);
                             if let Err(e) = state
-                                .db
+                                .import_io_service
                                 .update_library_item_size(
                                     mp3_items[i].user_id,
                                     mp3_items[i].id,

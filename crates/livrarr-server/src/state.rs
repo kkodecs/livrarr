@@ -48,6 +48,7 @@ pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::Series
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
     LiveEnrichmentWorkflow,
+    livrarr_metadata::llm_caller_service::LlmCallerImpl,
 >;
 pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     SqliteDb,
@@ -59,8 +60,8 @@ pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceI
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
 >;
-pub type LiveFileService = livrarr_organize::file_service::FileServiceImpl<SqliteDb>;
-pub type LiveImportWorkflow = livrarr_organize::import_workflow::ImportWorkflowImpl<SqliteDb>;
+pub type LiveFileService = livrarr_library::file_service::FileServiceImpl<SqliteDb>;
+pub type LiveImportWorkflow = livrarr_library::import_workflow::ImportWorkflowImpl<SqliteDb>;
 pub type LiveListService = livrarr_metadata::list_service::ListServiceImpl<
     SqliteDb,
     LiveWorkService,
@@ -75,11 +76,18 @@ pub type LiveAuthorMonitorWorkflow =
     >;
 pub type ReadarrImportServiceImpl =
     crate::readarr_import_service::LiveReadarrImportService<SqliteDb>;
+pub type LiveSettingsService = crate::services::settings_service::LiveSettingsService<SqliteDb>;
 pub type LiveRssSyncWorkflow = livrarr_metadata::rss_sync_workflow::RssSyncWorkflowImpl<
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
     LiveReleaseService,
 >;
+pub type LiveNotificationService = crate::notification_service::NotificationServiceImpl<SqliteDb>;
+pub type LiveHistoryService = crate::history_service::HistoryServiceImpl<SqliteDb>;
+pub type LiveQueueService = crate::queue_service::QueueServiceImpl<SqliteDb>;
+pub type LiveImportIoService = crate::import_io_service::ImportIoServiceImpl<SqliteDb>;
+pub type LiveManualImportDbService =
+    crate::manual_import_service::ManualImportServiceImpl<SqliteDb>;
 
 /// Shared application state — injected into all Axum handlers.
 ///
@@ -120,7 +128,7 @@ pub struct AppState {
     pub rss_sync_running: Arc<std::sync::atomic::AtomicBool>,
     /// Readarr import progress — polled by frontend.
     pub readarr_import_progress:
-        Arc<tokio::sync::Mutex<crate::handlers::readarr_import::ImportProgress>>,
+        Arc<tokio::sync::Mutex<crate::readarr_import_service::ReadarrImportProgress>>,
     /// OL rate limiter for manual import parallel lookups (3 req/sec, burst 10).
     pub ol_rate_limiter: Arc<OlRateLimiter>,
     /// In-progress manual import scan results — OL matches stream in via polling.
@@ -150,6 +158,249 @@ pub struct AppState {
     pub author_monitor_workflow: Arc<LiveAuthorMonitorWorkflow>,
     pub enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
     pub readarr_import_service: Arc<ReadarrImportServiceImpl>,
+    pub settings_service: Arc<LiveSettingsService>,
+    pub notification_service: Arc<LiveNotificationService>,
+    pub history_service: Arc<LiveHistoryService>,
+    pub queue_service: Arc<LiveQueueService>,
+    pub import_io_service: Arc<LiveImportIoService>,
+    pub manual_import_db_service: Arc<LiveManualImportDbService>,
+
+    // --- Phase 5: infrastructure accessors ---
+    pub rss_sync_state: RssSyncState,
+    pub system_state: SystemState,
+    pub provider_health_accessor: ProviderHealthAccessorImpl,
+    pub live_metadata_config_accessor: LiveMetadataConfigAccessorImpl,
+    pub cover_proxy_cache_accessor: CoverProxyCacheAccessorImpl,
+    pub tag_service: Arc<crate::tag_service::LiveTagService<LiveImportIoService>>,
+    pub email_svc: Arc<crate::email_service::LiveEmailService<livrarr_db::sqlite::SqliteDb>>,
+    pub import_svc: Arc<crate::import_service::LiveImportService>,
+    pub matching_svc: crate::matching_service::LiveMatchingService,
+    pub manual_import_scan_svc: crate::manual_import_scan_service::LiveManualImportScanService,
+    pub readarr_import_wf: Arc<crate::readarr_import_workflow::LiveReadarrImportWorkflow>,
+}
+
+// =============================================================================
+// AppContext impl
+// =============================================================================
+
+// =============================================================================
+// Accessor trait impls for AppContext infrastructure
+// =============================================================================
+
+/// Wrapper for provider health status — satisfies orphan rule.
+#[derive(Clone)]
+pub struct ProviderHealthAccessorImpl(pub Arc<ProviderHealthState>);
+
+impl livrarr_handlers::accessors::ProviderHealthAccessor for ProviderHealthAccessorImpl {
+    async fn statuses(&self) -> HashMap<String, String> {
+        self.0.statuses().await
+    }
+}
+
+/// Wrapper for live metadata config — satisfies orphan rule.
+#[derive(Clone)]
+pub struct LiveMetadataConfigAccessorImpl(pub livrarr_metadata::live_config::LiveMetadataConfig);
+
+impl livrarr_handlers::accessors::LiveMetadataConfigAccessor for LiveMetadataConfigAccessorImpl {
+    fn replace(&self, cfg: livrarr_domain::settings::MetadataConfig) {
+        self.0.replace(cfg);
+    }
+}
+
+/// Wrapper around the two RSS sync atomics.
+#[derive(Clone)]
+pub struct RssSyncState {
+    pub running: Arc<std::sync::atomic::AtomicBool>,
+    pub last_run: Arc<std::sync::atomic::AtomicI64>,
+}
+
+impl livrarr_handlers::accessors::RssSyncAccessor for RssSyncState {
+    fn try_acquire(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+    fn release(&self) {
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn set_last_run(&self, ts: i64) {
+        self.last_run
+            .store(ts, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Wrapper combining LogBuffer + LogLevelHandle for the SystemAccessor trait.
+#[derive(Clone)]
+pub struct SystemState {
+    pub log_buffer: Arc<LogBuffer>,
+    pub log_level_handle: Arc<LogLevelHandle>,
+}
+
+impl livrarr_handlers::accessors::SystemAccessor for SystemState {
+    fn log_tail(&self, n: usize) -> Vec<String> {
+        self.log_buffer.tail(n)
+    }
+    fn current_log_level(&self) -> String {
+        self.log_level_handle.current_level()
+    }
+    fn set_log_level(&self, level: &str) -> Result<(), String> {
+        self.log_level_handle.set_level(level)
+    }
+}
+
+/// Wrapper for cover proxy cache — satisfies orphan rule.
+#[derive(Clone)]
+pub struct CoverProxyCacheAccessorImpl(pub Arc<crate::handlers::coverproxy::CoverProxyCache>);
+
+impl livrarr_handlers::accessors::CoverProxyCacheAccessor for CoverProxyCacheAccessorImpl {
+    async fn get(&self, url: &str) -> Option<(Vec<u8>, String)> {
+        self.0.get(url).await
+    }
+    async fn put(&self, url: String, data: Vec<u8>, content_type: String) {
+        self.0.put(url, data, content_type).await
+    }
+}
+
+// =============================================================================
+// AppContext impl
+// =============================================================================
+
+impl livrarr_handlers::context::AppContext for AppState {
+    // --- Domain services ---
+    type WorkSvc = LiveWorkService;
+    type FileSvc = LiveFileService;
+    type AuthorSvc = LiveAuthorService;
+    type SeriesSvc = LiveSeriesService;
+    type SeriesQuerySvc = LiveSeriesQueryService;
+    type GrabSvc = LiveGrabService;
+    type ReleaseSvc = LiveReleaseService;
+    type ListSvc = LiveListService;
+    type SettingsSvc = LiveSettingsService;
+    type NotificationSvc = LiveNotificationService;
+    type QueueSvc = LiveQueueService;
+    type ImportIoSvc = LiveImportIoService;
+    type ManualImportSvc = LiveManualImportDbService;
+    type HistorySvc = LiveHistoryService;
+    type AuthSvc = ServerAuthService;
+    type ImportWf = LiveImportWorkflow;
+    type EnrichmentWf = LiveEnrichmentWorkflow;
+    type RssSyncWf = LiveRssSyncWorkflow;
+    type TagSvc = crate::tag_service::LiveTagService<LiveImportIoService>;
+    type EmailSvc = crate::email_service::LiveEmailService<livrarr_db::sqlite::SqliteDb>;
+    type AuthorMonitorWf = LiveAuthorMonitorWorkflow;
+    type ImportSvc = crate::import_service::LiveImportService;
+    type MatchingSvc = crate::matching_service::LiveMatchingService;
+    type ManualImportScan = crate::manual_import_scan_service::LiveManualImportScanService;
+    type ReadarrImportWf = crate::readarr_import_workflow::LiveReadarrImportWorkflow;
+
+    // --- Infrastructure ---
+    type ProviderHealth = ProviderHealthAccessorImpl;
+    type LiveConfig = LiveMetadataConfigAccessorImpl;
+    type RssSync = RssSyncState;
+    type System = SystemState;
+    type CoverCache = CoverProxyCacheAccessorImpl;
+
+    fn work_service(&self) -> &Self::WorkSvc {
+        &self.work_service
+    }
+    fn file_service(&self) -> &Self::FileSvc {
+        &self.file_service
+    }
+    fn author_service(&self) -> &Self::AuthorSvc {
+        &self.author_service
+    }
+    fn series_service(&self) -> &Self::SeriesSvc {
+        &self.series_service
+    }
+    fn series_query_service(&self) -> &Self::SeriesQuerySvc {
+        &self.series_query_service
+    }
+    fn grab_service(&self) -> &Self::GrabSvc {
+        &self.grab_service
+    }
+    fn release_service(&self) -> &Self::ReleaseSvc {
+        &self.release_service
+    }
+    fn list_service(&self) -> &Self::ListSvc {
+        &self.list_service
+    }
+    fn settings_service(&self) -> &Self::SettingsSvc {
+        &self.settings_service
+    }
+    fn notification_service(&self) -> &Self::NotificationSvc {
+        &self.notification_service
+    }
+    fn queue_service(&self) -> &Self::QueueSvc {
+        &self.queue_service
+    }
+    fn import_io_service(&self) -> &Self::ImportIoSvc {
+        &self.import_io_service
+    }
+    fn manual_import_service(&self) -> &Self::ManualImportSvc {
+        &self.manual_import_db_service
+    }
+    fn history_service(&self) -> &Self::HistorySvc {
+        &self.history_service
+    }
+    fn auth_service(&self) -> &Self::AuthSvc {
+        &self.auth_service
+    }
+    fn import_workflow(&self) -> &Self::ImportWf {
+        &self.import_workflow
+    }
+    fn enrichment_workflow(&self) -> &Self::EnrichmentWf {
+        &self.enrichment_workflow
+    }
+    fn rss_sync_workflow(&self) -> &Self::RssSyncWf {
+        &self.rss_sync_workflow
+    }
+    fn tag_service(&self) -> &Self::TagSvc {
+        &self.tag_service
+    }
+    fn email_service(&self) -> &Self::EmailSvc {
+        &self.email_svc
+    }
+    fn author_monitor_workflow(&self) -> &Self::AuthorMonitorWf {
+        &self.author_monitor_workflow
+    }
+    fn import_service(&self) -> &Self::ImportSvc {
+        &self.import_svc
+    }
+    fn matching_service(&self) -> &Self::MatchingSvc {
+        &self.matching_svc
+    }
+    fn manual_import_scan(&self) -> &Self::ManualImportScan {
+        &self.manual_import_scan_svc
+    }
+    fn readarr_import_workflow(&self) -> &Self::ReadarrImportWf {
+        &self.readarr_import_wf
+    }
+    fn http_client(&self) -> &livrarr_http::HttpClient {
+        &self.http_client
+    }
+    fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+    fn startup_time(&self) -> chrono::DateTime<chrono::Utc> {
+        self.startup_time
+    }
+    fn provider_health(&self) -> &Self::ProviderHealth {
+        &self.provider_health_accessor
+    }
+    fn live_metadata_config(&self) -> &Self::LiveConfig {
+        &self.live_metadata_config_accessor
+    }
+    fn rss_sync(&self) -> &Self::RssSync {
+        &self.rss_sync_state
+    }
+    fn system(&self) -> &Self::System {
+        &self.system_state
+    }
+    fn cover_proxy_cache(&self) -> &Self::CoverCache {
+        &self.cover_proxy_cache_accessor
+    }
 }
 
 // =============================================================================
@@ -203,7 +454,16 @@ impl OlRateLimiter {
 // Manual Import Scan State — progressive OL lookup results
 // =============================================================================
 
-pub type ManualImportScanMap = dashmap::DashMap<String, crate::handlers::manual_import::ScanState>;
+pub struct ManualImportScanState {
+    pub files: std::sync::RwLock<Vec<livrarr_handlers::manual_import::ScannedFile>>,
+    pub warnings: Vec<String>,
+    pub ol_total: usize,
+    pub ol_completed: std::sync::atomic::AtomicUsize,
+    pub user_id: i64,
+    pub created_at: std::time::Instant,
+}
+
+pub type ManualImportScanMap = dashmap::DashMap<String, ManualImportScanState>;
 
 /// Per-(user, work) mutex map for serializing concurrent imports of the same work.
 /// Value is `(mutex, insertion_time)` — the insertion time is used by TTL cleanup.
@@ -228,7 +488,7 @@ pub fn cleanup_import_locks(map: &ImportLockMap) {
 pub fn cleanup_manual_import_scans(map: &ManualImportScanMap) {
     let cutoff = std::time::Instant::now()
         .checked_sub(STATE_MAP_TTL)
-        .unwrap_or(std::time::Instant::now());
+        .unwrap_or_else(std::time::Instant::now);
     map.retain(|_, scan| scan.created_at > cutoff);
 }
 

@@ -1642,10 +1642,11 @@ dependencies = [
  "livrarr-domain",
  "livrarr-download",
  "livrarr-http",
+ "livrarr-library",
  "livrarr-metadata",
- "livrarr-organize",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1699,7 +1700,35 @@ dependencies = [
  "sha1",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "trait-variant",
+]
+
+[[package]]
+name = "livrarr-handlers"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "data-encoding",
+ "futures",
+ "image",
+ "libc",
+ "livrarr-domain",
+ "livrarr-http",
+ "quick-xml",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+ "trait-variant",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]
@@ -1721,6 +1750,21 @@ version = "0.1.0"
 dependencies = [
  "livrarr-domain",
  "thiserror 2.0.18",
+ "trait-variant",
+]
+
+[[package]]
+name = "livrarr-library"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "livrarr-db",
+ "livrarr-domain",
+ "livrarr-tagwrite",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "trait-variant",
 ]
 
@@ -1765,21 +1809,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "livrarr-organize"
-version = "0.1.0"
-dependencies = [
- "libc",
- "livrarr-db",
- "livrarr-domain",
- "livrarr-tagwrite",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "trait-variant",
-]
-
-[[package]]
 name = "livrarr-server"
 version = "0.1.0-alpha3"
 dependencies = [
@@ -1799,10 +1828,11 @@ dependencies = [
  "livrarr-db",
  "livrarr-domain",
  "livrarr-download",
+ "livrarr-handlers",
  "livrarr-http",
+ "livrarr-library",
  "livrarr-matching",
  "livrarr-metadata",
- "livrarr-organize",
  "livrarr-tagwrite",
  "quick-xml",
  "regex",

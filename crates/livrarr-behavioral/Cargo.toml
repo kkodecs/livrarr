@@ -22,7 +22,7 @@ livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true, features = ["test-helpers"] }
 livrarr-metadata = { workspace = true }
 livrarr-download = { workspace = true }
-livrarr-organize = { workspace = true }
+livrarr-library = { workspace = true }
 livrarr-http = { workspace = true }
 axum = "0.8"
 assert_matches = "1"

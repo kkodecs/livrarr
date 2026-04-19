@@ -465,4 +465,28 @@ impl AuthService for ServerAuthService {
         }
         Ok(user)
     }
+
+    async fn is_setup_complete(&self) -> Result<bool, AuthError> {
+        match self.db.get_user(1).await {
+            Ok(user) => Ok(!user.setup_pending),
+            Err(DbError::NotFound { .. }) => Ok(false),
+            Err(e) => Err(AuthError::Db(e)),
+        }
+    }
+
+    async fn verify_token(&self, token: &str) -> Result<i64, AuthError> {
+        let token_hash = self
+            .crypto
+            .hash_token(token)
+            .await
+            .map_err(|_| AuthError::InvalidCredentials)?;
+        use livrarr_db::SessionDb;
+        let session = self
+            .db
+            .get_session(&token_hash)
+            .await
+            .map_err(AuthError::Db)?
+            .ok_or(AuthError::InvalidCredentials)?;
+        Ok(session.user_id)
+    }
 }

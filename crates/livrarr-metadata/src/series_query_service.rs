@@ -8,23 +8,27 @@ use livrarr_db::{
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 
-pub struct SeriesQueryServiceImpl<D, F, E> {
+pub struct SeriesQueryServiceImpl<D, F, E, L = crate::llm_caller_service::LlmCallerImpl> {
     db: D,
     fetcher: F,
     enrichment: Arc<E>,
+    data_dir: std::path::PathBuf,
+    llm: L,
 }
 
-impl<D, F, E> SeriesQueryServiceImpl<D, F, E> {
-    pub fn new(db: D, fetcher: F, enrichment: Arc<E>) -> Self {
+impl<D, F, E, L> SeriesQueryServiceImpl<D, F, E, L> {
+    pub fn new(db: D, fetcher: F, enrichment: Arc<E>, data_dir: std::path::PathBuf, llm: L) -> Self {
         Self {
             db,
             fetcher,
             enrichment,
+            data_dir,
+            llm,
         }
     }
 }
 
-impl<D, F, E> SeriesQueryService for SeriesQueryServiceImpl<D, F, E>
+impl<D, F, E, L> SeriesQueryService for SeriesQueryServiceImpl<D, F, E, L>
 where
     D: SeriesDb
         + AuthorDb
@@ -36,8 +40,9 @@ where
         + Send
         + Sync
         + 'static,
-    F: HttpFetcher + Send + Sync + 'static,
+    F: HttpFetcher + Clone + Send + Sync + 'static,
     E: EnrichmentWorkflow + Send + Sync + 'static,
+    L: LlmCaller + Send + Sync,
 {
     async fn list_enriched(
         &self,
@@ -240,14 +245,45 @@ where
 
         let html = fetch_gr_html(&self.fetcher, &url).await?;
 
-        let candidates = crate::goodreads::parse_author_search_html(&html)
-            .into_iter()
-            .map(|c| GrAuthorCandidateView {
-                gr_key: c.gr_key,
-                name: c.name,
-                profile_url: format!("https://www.goodreads.com{}", c.profile_url),
-            })
-            .collect();
+        let candidates: Vec<GrAuthorCandidateView> =
+            crate::goodreads::parse_author_search_html(&html)
+                .into_iter()
+                .map(|c| GrAuthorCandidateView {
+                    gr_key: c.gr_key,
+                    name: c.name,
+                    profile_url: format!("https://www.goodreads.com{}", c.profile_url),
+                })
+                .collect();
+
+        // Auto-link if the first candidate is a strong name match.
+        const AUTO_LINK_THRESHOLD: f64 = 0.90;
+        if let Some(first) = candidates.first() {
+            let sim = livrarr_matching::author_similarity(&author.name, &first.name);
+            if sim >= AUTO_LINK_THRESHOLD && author.gr_key.is_none() {
+                tracing::info!(
+                    author = %author.name,
+                    gr_candidate = %first.name,
+                    similarity = %sim,
+                    "auto-linking Goodreads author"
+                );
+                let _ = self
+                    .db
+                    .update_author(
+                        user_id,
+                        author_id,
+                        livrarr_db::UpdateAuthorDbRequest {
+                            gr_key: Some(first.gr_key.clone()),
+                            name: None,
+                            sort_name: None,
+                            ol_key: None,
+                            monitored: None,
+                            monitor_new_items: None,
+                            monitor_since: None,
+                        },
+                    )
+                    .await;
+            }
+        }
 
         Ok(candidates)
     }
@@ -278,7 +314,10 @@ where
         let (cache_entries, fetched_at) = if let Some(cached) = cache {
             (cached.entries, Some(cached.fetched_at))
         } else {
-            let entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+            let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+            let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
+                .await
+                .unwrap_or(raw_entries);
             let saved = self
                 .db
                 .save_series_cache(author_id, &entries)
@@ -617,9 +656,10 @@ where
                         title = %book.title,
                         "created work from series"
                     );
-                    // Enrich in background (best-effort, 30s timeout per work).
                     let enrichment = self.enrichment.clone();
                     let work_id = work.id;
+                    let covers_dir = self.data_dir.join("covers");
+                    let fetcher = self.fetcher.clone();
                     tokio::spawn(async move {
                         let result = tokio::time::timeout(
                             Duration::from_secs(30),
@@ -627,7 +667,21 @@ where
                         )
                         .await;
                         match result {
-                            Ok(Ok(_)) => {}
+                            Ok(Ok(r)) => {
+                                if let Some(ref url) = r.work.cover_url {
+                                    if let Err(e) = crate::work_service::download_cover_to_disk(
+                                        &fetcher,
+                                        url,
+                                        &covers_dir,
+                                        work_id,
+                                        "",
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(work_id, "cover download failed: {e}");
+                                    }
+                                }
+                            }
                             Ok(Err(e)) => {
                                 tracing::warn!(work_id, "series-add enrichment failed: {e}");
                             }
@@ -757,6 +811,77 @@ fn build_merged_series_list(
             }
         })
         .collect()
+}
+
+async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
+    llm: &L,
+    author_name: &str,
+    entries: &[SeriesCacheEntry],
+) -> Option<Vec<SeriesCacheEntry>> {
+    use std::collections::HashMap;
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut listing = String::new();
+    for (i, e) in entries.iter().enumerate() {
+        listing.push_str(&format!("{}: \"{}\" ({} books)\n", i, e.name, e.book_count));
+    }
+
+    let user_template = format!(
+        "These are book series attributed to \"{author_name}\" from Goodreads:\n\n\
+         {listing}\n\
+         Clean up this list:\n\
+         1. REMOVE series by a different person who shares the same name\n\
+         2. REMOVE anthologies, compilations, box sets, and omnibus editions\n\
+         3. REMOVE series where this author only contributed a foreword, introduction, or single story\n\
+         4. Keep the author's own original series\n\n\
+         Return a JSON array of indices to KEEP: [0, 2, 5, ...]\n\
+         Return ONLY the JSON array, no other text."
+    );
+
+    let mut context = HashMap::new();
+    context.insert(LlmField::AuthorName, LlmValue::Text(author_name.into()));
+    context.insert(LlmField::BibliographyHtml, LlmValue::Text(listing));
+
+    let req = LlmCallRequest {
+        system_template: Box::leak(
+            "You are a librarian assistant. Clean up book series lists."
+                .to_string()
+                .into_boxed_str(),
+        ),
+        user_template: Box::leak(user_template.into_boxed_str()),
+        context,
+        allowed_fields: &[LlmField::AuthorName, LlmField::BibliographyHtml],
+        timeout: Duration::from_secs(15),
+        purpose: LlmPurpose::BibliographyCleanup,
+    };
+
+    let resp = llm.call(req).await.ok()?;
+
+    let json_str = resp
+        .content
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| resp.content.trim().strip_prefix("```"))
+        .unwrap_or(resp.content.trim())
+        .strip_suffix("```")
+        .unwrap_or(resp.content.trim())
+        .trim();
+
+    let indices: Vec<usize> = serde_json::from_str(json_str).ok()?;
+
+    let cleaned: Vec<SeriesCacheEntry> = indices
+        .into_iter()
+        .filter_map(|i| entries.get(i).cloned())
+        .collect();
+
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    Some(cleaned)
 }
 
 fn normalize_for_match(s: &str) -> String {

@@ -470,12 +470,20 @@ async fn poll_qbittorrent(
             .find(|g| {
                 g.download_id
                     .as_deref()
-                    .is_some_and(|id| id.eq_ignore_ascii_case(hash))
+                    .is_some_and(|id| id != "pending" && id.eq_ignore_ascii_case(hash))
             })
             .or_else(|| {
                 active_grabs
                     .iter()
                     .find(|g| g.title.eq_ignore_ascii_case(name))
+            })
+            .or_else(|| {
+                // Fuzzy match for grabs with pending download_id — the torrent
+                // name often differs from the grab title (indexer vs tracker).
+                active_grabs.iter().find(|g| {
+                    g.download_id.as_deref() == Some("pending")
+                        && livrarr_matching::string_similarity(&g.title, name) >= 0.6
+                })
             });
 
         if let Some(grab) = grab {
@@ -591,7 +599,7 @@ async fn poll_sabnzbd(
     state: &AppState,
     client: &livrarr_domain::DownloadClient,
 ) -> Result<(), String> {
-    let base_url = crate::handlers::download_client::client_base_url(client);
+    let base_url = livrarr_handlers::download_client::client_base_url(client);
     let api_key = client.api_key.as_deref().unwrap_or("");
 
     // Fetch queue (active downloads).

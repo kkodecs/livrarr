@@ -9,9 +9,9 @@ use livrarr_db::{
 };
 use livrarr_domain::services::*;
 use livrarr_domain::{MediaType, UserRole};
+use livrarr_library::file_service::FileServiceImpl;
 use livrarr_metadata::list_service::{ListServiceImpl, NoOpBibliographyTrigger};
 use livrarr_metadata::work_service::WorkServiceImpl;
-use livrarr_organize::file_service::FileServiceImpl;
 use std::path::PathBuf;
 
 fn stub_http() -> StubHttpFetcher {

@@ -625,6 +625,11 @@ function ResolveGrModal({
     setLoading(true);
     try {
       const resp = await resolveGr(authorId);
+      if (resp.autoLinked) {
+        toast.success("Goodreads author auto-linked");
+        onLinked();
+        return;
+      }
       setCandidates(resp.candidates);
     } catch {
       toast.error("Failed to search Goodreads");

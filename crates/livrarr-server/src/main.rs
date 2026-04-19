@@ -241,6 +241,17 @@ async fn main() {
     let svc_enrichment = enrichment_service.clone();
     let import_semaphore = Arc::new(tokio::sync::Semaphore::new(2));
     let data_dir_arc = Arc::new(data_dir.clone());
+    let provider_health = Arc::new(ProviderHealthState::new());
+    let cover_proxy_cache = Arc::new(livrarr_server::handlers::coverproxy::CoverProxyCache::new());
+    let rss_last_run = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let rss_sync_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let http_client_for_scan = http_client.clone();
+    let settings_service_arc = Arc::new(
+        livrarr_server::services::settings_service::LiveSettingsService::new(svc_db.clone()),
+    );
+    let import_io_arc = Arc::new(livrarr_server::import_io_service::ImportIoServiceImpl::new(
+        svc_db.clone(),
+    ));
     let state = AppState {
         db,
         auth_service,
@@ -250,20 +261,20 @@ async fn main() {
         data_dir: data_dir_arc.clone(),
         startup_time: chrono::Utc::now(),
         job_runner: Some(job_runner.clone()),
-        provider_health: Arc::new(ProviderHealthState::new()),
-        cover_proxy_cache: Arc::new(livrarr_server::handlers::coverproxy::CoverProxyCache::new()),
+        provider_health: provider_health.clone(),
+        cover_proxy_cache: cover_proxy_cache.clone(),
         goodreads_rate_limiter: Arc::new(livrarr_server::state::GoodreadsRateLimiter::new()),
         live_metadata_config: live_metadata_config.clone(),
-        log_buffer,
-        log_level_handle,
+        log_buffer: log_buffer.clone(),
+        log_level_handle: log_level_handle.clone(),
         refresh_in_progress: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         import_semaphore: import_semaphore.clone(),
         import_locks: Arc::new(dashmap::DashMap::new()),
         grab_search_cache: Arc::new(livrarr_server::state::GrabSearchCache::new()),
-        rss_last_run: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        rss_sync_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        rss_last_run: rss_last_run.clone(),
+        rss_sync_running: rss_sync_running.clone(),
         readarr_import_progress: Arc::new(tokio::sync::Mutex::new(
-            livrarr_server::handlers::readarr_import::ImportProgress::default(),
+            livrarr_server::readarr_import_service::ReadarrImportProgress::default(),
         )),
         ol_rate_limiter: Arc::new(livrarr_server::state::OlRateLimiter::new()),
         manual_import_scans: Arc::new(dashmap::DashMap::new()),
@@ -303,6 +314,18 @@ async fn main() {
                         );
                     Arc::new(ew)
                 },
+                data_dir.clone(),
+                {
+                    let cfg = live_metadata_config.snapshot();
+                    livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                        cfg.llm_endpoint.clone(),
+                        cfg.llm_api_key.clone(),
+                        cfg.llm_model.clone(),
+                        livrarr_http::HttpClient::builder()
+                            .build()
+                            .expect("LLM HttpClient for series query"),
+                    )
+                },
             ),
         ),
         work_service: {
@@ -325,10 +348,10 @@ async fn main() {
             svc_db.clone(),
             livrarr_http::fetcher::HttpFetcherImpl::new().expect("HttpFetcherImpl construction"),
         )),
-        file_service: Arc::new(livrarr_organize::file_service::FileServiceImpl::new(
+        file_service: Arc::new(livrarr_library::file_service::FileServiceImpl::new(
             svc_db.clone(),
         )),
-        import_workflow: Arc::new(livrarr_organize::import_workflow::ImportWorkflowImpl::new(
+        import_workflow: Arc::new(livrarr_library::import_workflow::ImportWorkflowImpl::new(
             svc_db.clone(),
             import_semaphore.clone(),
             data_dir_arc.clone(),
@@ -402,7 +425,63 @@ async fn main() {
         readarr_import_service: Arc::new(
             livrarr_server::readarr_import_service::LiveReadarrImportService::new(svc_db.clone()),
         ),
+        settings_service: settings_service_arc.clone(),
+        notification_service: Arc::new(
+            livrarr_server::notification_service::NotificationServiceImpl::new(svc_db.clone()),
+        ),
+        history_service: Arc::new(livrarr_server::history_service::HistoryServiceImpl::new(
+            svc_db.clone(),
+        )),
+        queue_service: Arc::new(livrarr_server::queue_service::QueueServiceImpl::new(
+            svc_db.clone(),
+            http_client_for_scan.clone(),
+        )),
+        import_io_service: import_io_arc.clone(),
+        manual_import_db_service: Arc::new(
+            livrarr_server::manual_import_service::ManualImportServiceImpl::new(svc_db.clone()),
+        ),
+
+        // --- Phase 5: infrastructure accessors (share Arcs with fields above) ---
+        rss_sync_state: livrarr_server::state::RssSyncState {
+            running: rss_sync_running.clone(),
+            last_run: rss_last_run.clone(),
+        },
+        system_state: livrarr_server::state::SystemState {
+            log_buffer: log_buffer.clone(),
+            log_level_handle: log_level_handle.clone(),
+        },
+        provider_health_accessor: livrarr_server::state::ProviderHealthAccessorImpl(
+            provider_health.clone(),
+        ),
+        live_metadata_config_accessor: livrarr_server::state::LiveMetadataConfigAccessorImpl(
+            live_metadata_config.clone(),
+        ),
+        cover_proxy_cache_accessor: livrarr_server::state::CoverProxyCacheAccessorImpl(
+            cover_proxy_cache.clone(),
+        ),
+        tag_service: Arc::new(livrarr_server::tag_service::LiveTagService::new(
+            import_io_arc.clone(),
+            data_dir_arc.clone(),
+        )),
+        email_svc: Arc::new(livrarr_server::email_service::LiveEmailService::new(
+            settings_service_arc.clone(),
+        )),
+        import_svc: Arc::new(livrarr_server::import_service::LiveImportService::new()),
+        matching_svc: livrarr_server::matching_service::LiveMatchingService,
+        manual_import_scan_svc:
+            livrarr_server::manual_import_scan_service::LiveManualImportScanService {
+                scans: Arc::new(dashmap::DashMap::new()),
+                ol_rate_limiter: Arc::new(livrarr_server::state::OlRateLimiter::new()),
+                http_client: http_client_for_scan,
+            },
+        readarr_import_wf: Arc::new(
+            livrarr_server::readarr_import_workflow::LiveReadarrImportWorkflow::new(),
+        ),
     };
+
+    // Late-init: wire services that need AppState (breaks circular dep via OnceLock<Box<AppState>>).
+    state.import_svc.init(state.clone());
+    state.readarr_import_wf.init(state.clone());
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
     livrarr_server::jobs::recover_interrupted_state(&state).await;

@@ -16,12 +16,13 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 trait-variant = { workspace = true }
 livrarr-domain = { workspace = true }
+livrarr-handlers = { workspace = true }
 livrarr-matching = { workspace = true }
 livrarr-db = { workspace = true }
 livrarr-http = { workspace = true }
 livrarr-metadata = { workspace = true }
 livrarr-download = { workspace = true }
-livrarr-organize = { workspace = true }
+livrarr-library = { workspace = true }
 livrarr-tagwrite = { workspace = true }
 futures = "0.3"
 libc = "0.2"

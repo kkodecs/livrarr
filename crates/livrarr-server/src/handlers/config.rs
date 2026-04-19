@@ -14,19 +14,22 @@ fn clean_token(token: &str) -> String {
 }
 
 use crate::middleware::RequireAdmin;
+use crate::services::settings_service::SettingsService;
 use crate::state::AppState;
 use crate::{
     ApiError, MediaManagementConfigResponse, MetadataConfigResponse, NamingConfigResponse,
     UpdateMediaManagementApiRequest, UpdateMetadataApiRequest,
 };
-use livrarr_db::{ConfigDb, UpdateMediaManagementConfigRequest, UpdateMetadataConfigRequest};
+use livrarr_domain::settings::{
+    UpdateEmailParams, UpdateMediaManagementParams, UpdateMetadataParams, UpdateProwlarrParams,
+};
 
 /// GET /api/v1/config/naming
 pub async fn get_naming(
     State(state): State<AppState>,
     _admin: RequireAdmin,
 ) -> Result<Json<NamingConfigResponse>, ApiError> {
-    let cfg = state.db.get_naming_config().await?;
+    let cfg = state.settings_service.get_naming_config().await?;
     Ok(Json(NamingConfigResponse {
         author_folder_format: cfg.author_folder_format,
         book_folder_format: cfg.book_folder_format,
@@ -40,7 +43,7 @@ pub async fn get_media_management(
     State(state): State<AppState>,
     _admin: RequireAdmin,
 ) -> Result<Json<MediaManagementConfigResponse>, ApiError> {
-    let cfg = state.db.get_media_management_config().await?;
+    let cfg = state.settings_service.get_media_management_config().await?;
     Ok(Json(MediaManagementConfigResponse {
         cwa_ingest_path: cfg.cwa_ingest_path,
         preferred_ebook_formats: cfg.preferred_ebook_formats,
@@ -55,8 +58,8 @@ pub async fn update_media_management(
     Json(req): Json<UpdateMediaManagementApiRequest>,
 ) -> Result<Json<MediaManagementConfigResponse>, ApiError> {
     let cfg = state
-        .db
-        .update_media_management_config(UpdateMediaManagementConfigRequest {
+        .settings_service
+        .update_media_management_config(UpdateMediaManagementParams {
             cwa_ingest_path: req.cwa_ingest_path,
             preferred_ebook_formats: req.preferred_ebook_formats,
             preferred_audiobook_formats: req.preferred_audiobook_formats,
@@ -74,13 +77,13 @@ pub async fn get_metadata(
     State(state): State<AppState>,
     _admin: RequireAdmin,
 ) -> Result<Json<MetadataConfigResponse>, ApiError> {
-    let cfg = state.db.get_metadata_config().await?;
+    let cfg = state.settings_service.get_metadata_config().await?;
     let provider_status = state.provider_health.statuses().await;
     Ok(Json(metadata_to_response(cfg, provider_status)))
 }
 
 fn metadata_to_response(
-    cfg: livrarr_db::MetadataConfig,
+    cfg: livrarr_domain::settings::MetadataConfig,
     provider_status: std::collections::HashMap<String, String>,
 ) -> MetadataConfigResponse {
     MetadataConfigResponse {
@@ -129,7 +132,7 @@ pub async fn update_metadata(
     // Use merged config (existing + request overrides) to determine LLM status,
     // so partial updates don't wrongly strip LLM languages.
     let validated_languages = if let Some(langs) = req.languages {
-        let existing = state.db.get_metadata_config().await?;
+        let existing = state.settings_service.get_metadata_config().await?;
         // For llm_api_key: resolve what value will be stored after this update.
         let effective_llm_key = match &llm_api_key {
             None => existing.llm_api_key.as_deref().map(|s| s.to_string()),
@@ -153,8 +156,8 @@ pub async fn update_metadata(
     };
 
     let cfg = state
-        .db
-        .update_metadata_config(UpdateMetadataConfigRequest {
+        .settings_service
+        .update_metadata_config(UpdateMetadataParams {
             hardcover_enabled: req.hardcover_enabled,
             hardcover_api_token,
             llm_enabled: req.llm_enabled,
@@ -181,7 +184,7 @@ pub async fn test_hardcover(
     State(state): State<AppState>,
     _admin: RequireAdmin,
 ) -> Result<(), ApiError> {
-    let cfg = state.db.get_metadata_config().await?;
+    let cfg = state.settings_service.get_metadata_config().await?;
     let token = cfg
         .hardcover_api_token
         .ok_or_else(|| ApiError::BadRequest("Hardcover API token not configured".into()))?;
@@ -211,7 +214,7 @@ pub async fn test_audnexus(
     State(state): State<AppState>,
     _admin: RequireAdmin,
 ) -> Result<(), ApiError> {
-    let cfg = state.db.get_metadata_config().await?;
+    let cfg = state.settings_service.get_metadata_config().await?;
     let url = format!(
         "{}/authors/B000AQ0842",
         cfg.audnexus_url.trim_end_matches('/')
@@ -235,7 +238,7 @@ pub async fn test_audnexus(
 
 /// POST /api/v1/config/metadata/test/llm
 pub async fn test_llm(State(state): State<AppState>, _admin: RequireAdmin) -> Result<(), ApiError> {
-    let cfg = state.db.get_metadata_config().await?;
+    let cfg = state.settings_service.get_metadata_config().await?;
     let endpoint = cfg
         .llm_endpoint
         .ok_or_else(|| ApiError::BadRequest("LLM endpoint not configured".into()))?;
@@ -278,7 +281,7 @@ pub async fn get_prowlarr(
     State(state): State<AppState>,
     _admin: RequireAdmin,
 ) -> Result<Json<crate::ProwlarrConfigResponse>, ApiError> {
-    let c = state.db.get_prowlarr_config().await?;
+    let c = state.settings_service.get_prowlarr_config().await?;
     Ok(Json(crate::ProwlarrConfigResponse {
         url: c.url,
         api_key_set: c.api_key.is_some(),
@@ -301,8 +304,8 @@ pub async fn update_prowlarr(
         }
     }
     let c = state
-        .db
-        .update_prowlarr_config(livrarr_db::UpdateProwlarrConfigRequest {
+        .settings_service
+        .update_prowlarr_config(UpdateProwlarrParams {
             url: req.url,
             api_key: req.api_key,
             enabled: req.enabled,
@@ -319,7 +322,7 @@ pub async fn update_prowlarr(
 pub async fn get_email(
     State(state): State<AppState>,
 ) -> Result<Json<crate::EmailConfigResponse>, ApiError> {
-    let c = state.db.get_email_config().await?;
+    let c = state.settings_service.get_email_config().await?;
     Ok(Json(crate::EmailConfigResponse {
         enabled: c.enabled,
         smtp_host: c.smtp_host,
@@ -348,8 +351,8 @@ pub async fn update_email(
         }
     }
     let c = state
-        .db
-        .update_email_config(livrarr_db::UpdateEmailConfigRequest {
+        .settings_service
+        .update_email_config(UpdateEmailParams {
             enabled: req.enabled,
             smtp_host: req.smtp_host,
             smtp_port: req.smtp_port,
@@ -379,7 +382,7 @@ pub async fn test_email(
     State(state): State<AppState>,
     _admin: RequireAdmin,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let cfg = state.db.get_email_config().await?;
+    let cfg = state.settings_service.get_email_config().await?;
     super::email::send_test(&cfg)
         .await
         .map_err(ApiError::BadRequest)?;
@@ -391,7 +394,7 @@ pub async fn get_indexer(
     State(state): State<AppState>,
     _admin: RequireAdmin,
 ) -> Result<Json<livrarr_domain::IndexerConfig>, ApiError> {
-    let c = state.db.get_indexer_config().await?;
+    let c = state.settings_service.get_indexer_config().await?;
     Ok(Json(c))
 }
 
@@ -399,7 +402,7 @@ pub async fn get_indexer(
 pub async fn update_indexer(
     State(state): State<AppState>,
     _admin: RequireAdmin,
-    Json(req): Json<livrarr_db::UpdateIndexerConfigRequest>,
+    Json(req): Json<livrarr_domain::settings::UpdateIndexerConfigParams>,
 ) -> Result<Json<livrarr_domain::IndexerConfig>, ApiError> {
     // Validate interval: 0 (disabled) or 10..=1440
     if let Some(interval) = req.rss_sync_interval_minutes {
@@ -417,7 +420,7 @@ pub async fn update_indexer(
             ));
         }
     }
-    let c = state.db.update_indexer_config(req).await?;
+    let c = state.settings_service.update_indexer_config(req).await?;
     Ok(Json(c))
 }
 

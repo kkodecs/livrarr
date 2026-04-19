@@ -17,6 +17,7 @@ pub struct WorkServiceImpl<D, E, H> {
     http: H,
     data_dir: PathBuf,
     refresh_locks: RefreshLockMap,
+    bulk_refresh_users: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
 }
 
 impl<D, E, H> WorkServiceImpl<D, E, H> {
@@ -27,6 +28,7 @@ impl<D, E, H> WorkServiceImpl<D, E, H> {
             http,
             data_dir,
             refresh_locks: Arc::new(Mutex::new(HashMap::new())),
+            bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 }
@@ -43,6 +45,7 @@ impl<D, H> WorkServiceImpl<D, (), H> {
             http,
             data_dir,
             refresh_locks: Arc::new(Mutex::new(HashMap::new())),
+            bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 }
@@ -161,6 +164,8 @@ where
                 language: req.language,
                 series_name: req.series_name,
                 series_position: req.series_position,
+                monitor_ebook: true,
+                monitor_audiobook: true,
                 ..Default::default()
             })
             .await
@@ -347,9 +352,13 @@ where
                 other => WorkServiceError::Db(other),
             })?;
 
+        let has_title = req.title.is_some();
+        let has_author = req.author_name.is_some();
         let db_req = UpdateWorkUserFieldsDbRequest {
-            title: req.title.clone(),
-            author_name: req.author_name.clone(),
+            title: req.title.map(|t| crate::title_cleanup::clean_title(&t)),
+            author_name: req
+                .author_name
+                .map(|a| crate::title_cleanup::clean_author(&a)),
             series_name: req.series_name,
             series_position: req.series_position,
             monitor_ebook: req.monitor_ebook,
@@ -367,7 +376,7 @@ where
 
         // Write provenance for edited fields (re-lock as setter=User).
         let mut prov_reqs: Vec<SetFieldProvenanceRequest> = Vec::new();
-        if req.title.is_some() {
+        if has_title {
             prov_reqs.push(SetFieldProvenanceRequest {
                 user_id,
                 work_id,
@@ -377,7 +386,7 @@ where
                 cleared: false,
             });
         }
-        if req.author_name.is_some() {
+        if has_author {
             prov_reqs.push(SetFieldProvenanceRequest {
                 user_id,
                 work_id,
@@ -600,6 +609,27 @@ where
         }
 
         Ok(vec![])
+    }
+
+    async fn download_cover_from_url(&self, work_id: i64, cover_url: &str) {
+        let covers_dir = self.data_dir.join("covers");
+        if let Err(e) =
+            download_cover_to_disk(&self.http, cover_url, &covers_dir, work_id, "").await
+        {
+            tracing::warn!(work_id, cover_url, "download_cover_from_url failed: {e}");
+        }
+        let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
+        let _ = tokio::fs::remove_file(&thumb).await;
+    }
+
+    fn try_start_bulk_refresh(&self, user_id: i64) -> bool {
+        let mut guard = self.bulk_refresh_users.lock().unwrap();
+        guard.insert(user_id)
+    }
+
+    fn finish_bulk_refresh(&self, user_id: i64) {
+        let mut guard = self.bulk_refresh_users.lock().unwrap();
+        guard.remove(&user_id);
     }
 }
 
@@ -859,7 +889,7 @@ fn unproxy_cover_url(url: &str) -> String {
     }
 }
 
-async fn download_cover_to_disk<H: HttpFetcher>(
+pub async fn download_cover_to_disk<H: HttpFetcher>(
     http: &H,
     url: &str,
     covers_dir: &std::path::Path,

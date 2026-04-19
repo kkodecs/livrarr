@@ -1,13 +1,17 @@
 use serde::Deserialize;
 
+pub use livrarr_domain::settings::{
+    EmailConfig, MediaManagementConfig, MetadataConfig, NamingConfig, ProwlarrConfig,
+};
 pub use livrarr_domain::{
     ApplyMergeOutcome, Author, AuthorId, DbError, DownloadClient, DownloadClientId,
     DownloadClientImplementation, EnrichmentStatus, EventType, ExternalIdRowId, ExternalIdType,
-    FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent, HistoryId, Import, Indexer,
-    IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider, MediaType,
-    MergeResolved, MetadataProvider, NarrationType, Notification, NotificationId, NotificationType,
-    OutcomeClass, PlaybackProgress, ProvenanceSetter, RemotePathMapping, RemotePathMappingId,
-    RootFolder, RootFolderId, Series, Session, User, UserId, UserRole, Work, WorkField, WorkId,
+    FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent, HistoryFilter, HistoryId, Import,
+    Indexer, IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider,
+    MediaType, MergeResolved, MetadataProvider, NarrationType, Notification, NotificationId,
+    NotificationType, OutcomeClass, PlaybackProgress, ProvenanceSetter, RemotePathMapping,
+    RemotePathMappingId, RootFolder, RootFolderId, Series, Session, User, UserId, UserRole, Work,
+    WorkField, WorkId,
 };
 
 pub mod pool;
@@ -764,13 +768,6 @@ pub trait HistoryDb: Send + Sync {
     async fn create_history_event(&self, req: CreateHistoryEventDbRequest) -> Result<(), DbError>;
 }
 
-pub struct HistoryFilter {
-    pub event_type: Option<EventType>,
-    pub work_id: Option<WorkId>,
-    pub start_date: Option<chrono::DateTime<chrono::Utc>>,
-    pub end_date: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 pub struct CreateHistoryEventDbRequest {
     pub user_id: UserId,
     pub work_id: Option<WorkId>,
@@ -906,38 +903,8 @@ pub trait ConfigDb: Send + Sync {
     ) -> Result<IndexerConfig, DbError>;
 }
 
-pub struct NamingConfig {
-    pub author_folder_format: String,
-    pub book_folder_format: String,
-    pub rename_files: bool,
-    pub replace_illegal_chars: bool,
-}
-
-pub struct MediaManagementConfig {
-    pub cwa_ingest_path: Option<String>,
-    pub preferred_ebook_formats: Vec<String>,
-    pub preferred_audiobook_formats: Vec<String>,
-}
-
-#[derive(Default)]
-pub struct ProwlarrConfig {
-    pub url: Option<String>,
-    pub api_key: Option<String>,
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct MetadataConfig {
-    pub hardcover_enabled: bool,
-    pub hardcover_api_token: Option<String>,
-    pub llm_enabled: bool,
-    pub llm_provider: Option<LlmProvider>,
-    pub llm_endpoint: Option<String>,
-    pub llm_api_key: Option<String>,
-    pub llm_model: Option<String>,
-    pub audnexus_url: String,
-    pub languages: Vec<String>,
-}
+// NamingConfig, MediaManagementConfig, ProwlarrConfig, MetadataConfig
+// re-exported from livrarr_domain::settings above.
 
 pub struct UpdateMediaManagementConfigRequest {
     pub cwa_ingest_path: Option<String>,
@@ -952,18 +919,7 @@ pub struct UpdateProwlarrConfigRequest {
     pub enabled: Option<bool>,
 }
 
-#[derive(Default)]
-pub struct EmailConfig {
-    pub enabled: bool,
-    pub smtp_host: String,
-    pub smtp_port: i32,
-    pub encryption: String,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub from_address: Option<String>,
-    pub recipient_email: Option<String>,
-    pub send_on_import: bool,
-}
+// EmailConfig re-exported from livrarr_domain::settings above.
 
 pub struct UpdateEmailConfigRequest {
     pub enabled: Option<bool>,
@@ -997,6 +953,150 @@ pub struct UpdateMetadataConfigRequest {
     pub llm_model: Option<String>,
     pub audnexus_url: Option<String>,
     pub languages: Option<Vec<String>>,
+}
+
+// ---------------------------------------------------------------------------
+// From impls: domain params -> DB request types
+// ---------------------------------------------------------------------------
+
+use livrarr_domain::settings::{
+    CreateDownloadClientParams, CreateIndexerParams, UpdateDownloadClientParams, UpdateEmailParams,
+    UpdateIndexerConfigParams, UpdateIndexerParams, UpdateMediaManagementParams,
+    UpdateMetadataParams, UpdateProwlarrParams,
+};
+
+impl From<UpdateMediaManagementParams> for UpdateMediaManagementConfigRequest {
+    fn from(p: UpdateMediaManagementParams) -> Self {
+        Self {
+            cwa_ingest_path: p.cwa_ingest_path,
+            preferred_ebook_formats: p.preferred_ebook_formats,
+            preferred_audiobook_formats: p.preferred_audiobook_formats,
+        }
+    }
+}
+
+impl From<UpdateMetadataParams> for UpdateMetadataConfigRequest {
+    fn from(p: UpdateMetadataParams) -> Self {
+        Self {
+            hardcover_enabled: p.hardcover_enabled,
+            hardcover_api_token: p.hardcover_api_token,
+            llm_enabled: p.llm_enabled,
+            llm_provider: p.llm_provider,
+            llm_endpoint: p.llm_endpoint,
+            llm_api_key: p.llm_api_key,
+            llm_model: p.llm_model,
+            audnexus_url: p.audnexus_url,
+            languages: p.languages,
+        }
+    }
+}
+
+impl From<UpdateProwlarrParams> for UpdateProwlarrConfigRequest {
+    fn from(p: UpdateProwlarrParams) -> Self {
+        Self {
+            url: p.url,
+            api_key: p.api_key,
+            enabled: p.enabled,
+        }
+    }
+}
+
+impl From<UpdateEmailParams> for UpdateEmailConfigRequest {
+    fn from(p: UpdateEmailParams) -> Self {
+        Self {
+            enabled: p.enabled,
+            smtp_host: p.smtp_host,
+            smtp_port: p.smtp_port,
+            encryption: p.encryption,
+            username: p.username,
+            password: p.password,
+            from_address: p.from_address,
+            recipient_email: p.recipient_email,
+            send_on_import: p.send_on_import,
+        }
+    }
+}
+
+impl From<UpdateIndexerConfigParams> for UpdateIndexerConfigRequest {
+    fn from(p: UpdateIndexerConfigParams) -> Self {
+        Self {
+            rss_sync_interval_minutes: p.rss_sync_interval_minutes,
+            rss_match_threshold: p.rss_match_threshold,
+        }
+    }
+}
+
+impl From<CreateDownloadClientParams> for CreateDownloadClientDbRequest {
+    fn from(p: CreateDownloadClientParams) -> Self {
+        Self {
+            name: p.name,
+            implementation: p.implementation,
+            host: p.host,
+            port: p.port,
+            use_ssl: p.use_ssl,
+            skip_ssl_validation: p.skip_ssl_validation,
+            url_base: p.url_base,
+            username: p.username,
+            password: p.password,
+            category: p.category,
+            enabled: p.enabled,
+            api_key: p.api_key,
+        }
+    }
+}
+
+impl From<UpdateDownloadClientParams> for UpdateDownloadClientDbRequest {
+    fn from(p: UpdateDownloadClientParams) -> Self {
+        Self {
+            name: p.name,
+            host: p.host,
+            port: p.port,
+            use_ssl: p.use_ssl,
+            skip_ssl_validation: p.skip_ssl_validation,
+            url_base: p.url_base,
+            username: p.username,
+            password: p.password,
+            category: p.category,
+            enabled: p.enabled,
+            api_key: p.api_key,
+            is_default_for_protocol: p.is_default_for_protocol,
+        }
+    }
+}
+
+impl From<CreateIndexerParams> for CreateIndexerDbRequest {
+    fn from(p: CreateIndexerParams) -> Self {
+        Self {
+            name: p.name,
+            protocol: p.protocol,
+            url: p.url,
+            api_path: p.api_path,
+            api_key: p.api_key,
+            categories: p.categories,
+            priority: p.priority,
+            enable_automatic_search: p.enable_automatic_search,
+            enable_interactive_search: p.enable_interactive_search,
+            enable_rss: p.enable_rss,
+            enabled: p.enabled,
+        }
+    }
+}
+
+impl From<UpdateIndexerParams> for UpdateIndexerDbRequest {
+    fn from(p: UpdateIndexerParams) -> Self {
+        Self {
+            name: p.name,
+            url: p.url,
+            api_path: p.api_path,
+            api_key: p.api_key,
+            categories: p.categories,
+            priority: p.priority,
+            enable_automatic_search: p.enable_automatic_search,
+            enable_interactive_search: p.enable_interactive_search,
+            enable_rss: p.enable_rss,
+            enabled: p.enabled,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
