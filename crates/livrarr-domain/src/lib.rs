@@ -1,4 +1,6 @@
+pub mod readarr;
 pub mod services;
+pub mod settings;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -550,6 +552,13 @@ pub struct HistoryEvent {
     pub date: DateTime<Utc>,
 }
 
+pub struct HistoryFilter {
+    pub event_type: Option<EventType>,
+    pub work_id: Option<WorkId>,
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+}
+
 /// Notification.
 ///
 /// Satisfies: AUTHOR-003, AUTHOR-005
@@ -1009,4 +1018,12 @@ pub enum ExternalIdType {
     GoodreadsBook,
     HardcoverBook,
     GoogleBooksVolume,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueProgress {
+    pub percent: f64,
+    pub eta: Option<i64>,
+    pub download_status: String,
 }

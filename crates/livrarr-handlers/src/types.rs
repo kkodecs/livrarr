@@ -1,0 +1,17 @@
+pub mod api_error;
+pub mod auth;
+pub mod author;
+pub mod config;
+pub mod download_client;
+pub mod history;
+pub mod indexer;
+pub mod notification;
+pub mod pagination;
+pub mod queue;
+pub mod release;
+pub mod remote_path_mapping;
+pub mod root_folder;
+pub mod scan;
+pub mod series;
+pub mod system;
+pub mod work;

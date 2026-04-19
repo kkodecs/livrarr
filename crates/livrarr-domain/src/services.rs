@@ -6,10 +6,17 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::settings::{
+    CreateDownloadClientParams, CreateIndexerParams, UpdateDownloadClientParams, UpdateEmailParams,
+    UpdateIndexerConfigParams, UpdateIndexerParams, UpdateMediaManagementParams,
+    UpdateMetadataParams, UpdateProwlarrParams,
+};
 use crate::{
-    Author, AuthorId, DbError, EnrichmentStatus, Grab, GrabId, GrabStatus, LibraryItem, MediaType,
-    MetadataProvider, OutcomeClass, PlaybackProgress, ProvenanceSetter, Series, UserId, Work,
-    WorkId,
+    Author, AuthorId, DbError, DownloadClient, DownloadClientId, EnrichmentStatus, Grab, GrabId,
+    GrabStatus, HistoryEvent, HistoryFilter, Indexer, IndexerConfig, IndexerId, LibraryItem,
+    LibraryItemId, MediaType, MetadataProvider, Notification, NotificationId, NotificationType,
+    OutcomeClass, PlaybackProgress, ProvenanceSetter, QueueProgress, RemotePathMapping,
+    RemotePathMappingId, RootFolder, RootFolderId, Series, UserId, Work, WorkId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -923,6 +930,9 @@ pub trait WorkService: Send + Sync {
         work_id: WorkId,
     ) -> Result<Vec<u8>, WorkServiceError>;
     async fn lookup(&self, req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError>;
+    async fn download_cover_from_url(&self, work_id: i64, cover_url: &str);
+    fn try_start_bulk_refresh(&self, user_id: i64) -> bool;
+    fn finish_bulk_refresh(&self, user_id: i64);
 }
 
 #[trait_variant::make(Send)]
@@ -959,6 +969,12 @@ pub trait AuthorService: Send + Sync {
         user_id: UserId,
         author_id: AuthorId,
     ) -> Result<Vec<BibliographyEntry>, AuthorServiceError>;
+    fn spawn_bibliography_refresh(&self, author_id: i64, user_id: i64);
+    async fn lookup_authors(
+        &self,
+        term: &str,
+        limit: u32,
+    ) -> Result<Vec<AuthorLookupResult>, AuthorServiceError>;
 }
 
 #[trait_variant::make(Send)]
@@ -1149,6 +1165,8 @@ pub trait GrabService: Send + Sync {
 
 #[trait_variant::make(Send)]
 pub trait FileService: Send + Sync {
+    async fn list(&self, user_id: UserId) -> Result<Vec<LibraryItem>, FileServiceError>;
+
     // CRUD
     async fn list_paginated(
         &self,
@@ -1271,6 +1289,373 @@ pub trait AuthorMonitorWorkflow: Send + Sync {
         &self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<MonitorReport, MonitorError>;
+    fn trigger_monitor(&self);
+}
+
+// =============================================================================
+// Notification service
+// =============================================================================
+
+#[derive(Debug, thiserror::Error)]
+pub enum NotificationServiceError {
+    #[error("notification not found")]
+    NotFound,
+    #[error("database error: {0}")]
+    Db(#[from] DbError),
+}
+
+pub struct CreateNotificationRequest {
+    pub user_id: UserId,
+    pub notification_type: NotificationType,
+    pub ref_key: Option<String>,
+    pub message: String,
+    pub data: serde_json::Value,
+}
+
+#[trait_variant::make(Send)]
+pub trait NotificationService: Send + Sync {
+    async fn list_paginated(
+        &self,
+        user_id: UserId,
+        unread_only: bool,
+        page: u32,
+        page_size: u32,
+    ) -> Result<(Vec<Notification>, i64), NotificationServiceError>;
+
+    async fn mark_read(
+        &self,
+        user_id: UserId,
+        id: NotificationId,
+    ) -> Result<(), NotificationServiceError>;
+
+    async fn dismiss(
+        &self,
+        user_id: UserId,
+        id: NotificationId,
+    ) -> Result<(), NotificationServiceError>;
+
+    async fn dismiss_all(&self, user_id: UserId) -> Result<(), NotificationServiceError>;
+
+    async fn create(
+        &self,
+        req: CreateNotificationRequest,
+    ) -> Result<Notification, NotificationServiceError>;
+}
+
+// =============================================================================
+// History service — abstracts DB queries for history handlers
+// =============================================================================
+
+#[derive(Debug, thiserror::Error)]
+pub enum HistoryServiceError {
+    #[error("not found")]
+    NotFound,
+    #[error("database error: {0}")]
+    Db(#[from] DbError),
+}
+
+#[trait_variant::make(Send)]
+pub trait HistoryService: Send + Sync {
+    async fn list_paginated(
+        &self,
+        user_id: UserId,
+        filter: HistoryFilter,
+        page: u32,
+        page_size: u32,
+    ) -> Result<(Vec<HistoryEvent>, i64), HistoryServiceError>;
+}
+
+// =============================================================================
+// Queue service
+// =============================================================================
+
+#[derive(Debug, thiserror::Error)]
+pub enum QueueServiceError {
+    #[error("grab not found")]
+    NotFound,
+    #[error("not in importable state")]
+    NotImportable,
+    #[error("database error: {0}")]
+    Db(#[from] DbError),
+}
+
+#[trait_variant::make(Send)]
+pub trait QueueService: Send + Sync {
+    async fn list_grabs_paginated(
+        &self,
+        user_id: UserId,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<Grab>, i64), QueueServiceError>;
+
+    async fn list_download_clients(&self) -> Result<Vec<DownloadClient>, QueueServiceError>;
+
+    async fn try_set_importing(
+        &self,
+        user_id: UserId,
+        grab_id: GrabId,
+    ) -> Result<bool, QueueServiceError>;
+
+    async fn update_grab_status(
+        &self,
+        user_id: UserId,
+        grab_id: GrabId,
+        status: GrabStatus,
+        error: Option<&str>,
+    ) -> Result<(), QueueServiceError>;
+
+    async fn fetch_download_progress(
+        &self,
+        client: &DownloadClient,
+        download_id: &str,
+    ) -> Option<QueueProgress>;
+}
+
+// =============================================================================
+// Import IO service — wraps DB calls used by import pipeline handlers
+// =============================================================================
+
+pub struct CreateLibraryItemRequest {
+    pub user_id: UserId,
+    pub work_id: WorkId,
+    pub root_folder_id: RootFolderId,
+    pub path: String,
+    pub media_type: MediaType,
+    pub file_size: i64,
+    pub import_id: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ImportIoServiceError {
+    #[error("not found")]
+    NotFound,
+    #[error("database error: {0}")]
+    Db(#[from] DbError),
+}
+
+#[trait_variant::make(Send)]
+pub trait ImportIoService: Send + Sync {
+    async fn get_grab(
+        &self,
+        user_id: UserId,
+        grab_id: GrabId,
+    ) -> Result<Grab, ImportIoServiceError>;
+
+    async fn get_download_client(
+        &self,
+        client_id: DownloadClientId,
+    ) -> Result<DownloadClient, ImportIoServiceError>;
+
+    async fn set_grab_content_path(
+        &self,
+        user_id: UserId,
+        grab_id: GrabId,
+        content_path: &str,
+    ) -> Result<(), ImportIoServiceError>;
+
+    async fn get_work(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Work, ImportIoServiceError>;
+
+    async fn list_library_items_by_work(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<LibraryItem>, ImportIoServiceError>;
+
+    async fn get_root_folder(
+        &self,
+        root_folder_id: RootFolderId,
+    ) -> Result<RootFolder, ImportIoServiceError>;
+
+    async fn list_root_folders(&self) -> Result<Vec<RootFolder>, ImportIoServiceError>;
+
+    async fn list_remote_path_mappings(
+        &self,
+    ) -> Result<Vec<crate::RemotePathMapping>, ImportIoServiceError>;
+
+    async fn update_library_item_size(
+        &self,
+        user_id: UserId,
+        item_id: LibraryItemId,
+        new_size: i64,
+    ) -> Result<(), ImportIoServiceError>;
+
+    async fn create_library_item(
+        &self,
+        req: CreateLibraryItemRequest,
+    ) -> Result<LibraryItem, ImportIoServiceError>;
+}
+
+// =============================================================================
+// Manual import session service — abstracts in-memory scan state + DB queries
+// =============================================================================
+
+#[derive(Debug, thiserror::Error)]
+pub enum ManualImportServiceError {
+    #[error("not found")]
+    NotFound,
+    #[error("database error: {0}")]
+    Db(#[from] DbError),
+}
+
+#[trait_variant::make(Send)]
+pub trait ManualImportService: Send + Sync {
+    async fn list_works(&self, user_id: UserId) -> Result<Vec<Work>, ManualImportServiceError>;
+
+    async fn list_root_folders(&self) -> Result<Vec<RootFolder>, ManualImportServiceError>;
+
+    async fn list_library_items_by_work(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<LibraryItem>, ManualImportServiceError>;
+
+    async fn list_library_items_by_work_ids(
+        &self,
+        user_id: UserId,
+        work_ids: &[WorkId],
+    ) -> Result<Vec<LibraryItem>, ManualImportServiceError>;
+
+    async fn get_work(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Work, ManualImportServiceError>;
+
+    async fn delete_library_item(
+        &self,
+        user_id: UserId,
+        item_id: LibraryItemId,
+    ) -> Result<LibraryItem, ManualImportServiceError>;
+
+    async fn create_library_item(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        root_folder_id: RootFolderId,
+        path: String,
+        media_type: MediaType,
+        file_size: i64,
+    ) -> Result<LibraryItem, ManualImportServiceError>;
+
+    async fn create_history_event(
+        &self,
+        user_id: UserId,
+        work_id: Option<WorkId>,
+        event_type: crate::EventType,
+        data: serde_json::Value,
+    ) -> Result<(), ManualImportServiceError>;
+}
+
+// =============================================================================
+// Settings Service
+// =============================================================================
+
+#[trait_variant::make(Send)]
+pub trait SettingsService: Send + Sync {
+    // --- Config ---
+    async fn get_naming_config(&self) -> Result<crate::settings::NamingConfig, DbError>;
+    async fn get_media_management_config(
+        &self,
+    ) -> Result<crate::settings::MediaManagementConfig, DbError>;
+    async fn update_media_management_config(
+        &self,
+        params: UpdateMediaManagementParams,
+    ) -> Result<crate::settings::MediaManagementConfig, DbError>;
+    async fn get_metadata_config(&self) -> Result<crate::settings::MetadataConfig, DbError>;
+    async fn update_metadata_config(
+        &self,
+        params: UpdateMetadataParams,
+    ) -> Result<crate::settings::MetadataConfig, DbError>;
+    async fn get_prowlarr_config(&self) -> Result<crate::settings::ProwlarrConfig, DbError>;
+    async fn update_prowlarr_config(
+        &self,
+        params: UpdateProwlarrParams,
+    ) -> Result<crate::settings::ProwlarrConfig, DbError>;
+    async fn get_email_config(&self) -> Result<crate::settings::EmailConfig, DbError>;
+    async fn update_email_config(
+        &self,
+        params: UpdateEmailParams,
+    ) -> Result<crate::settings::EmailConfig, DbError>;
+    async fn validate_metadata_languages(
+        &self,
+        languages: &[String],
+        llm_enabled: Option<bool>,
+        llm_endpoint: Option<&str>,
+        llm_api_key: Option<&str>,
+        llm_model: Option<&str>,
+    ) -> Result<Vec<String>, String>;
+
+    async fn get_indexer_config(&self) -> Result<IndexerConfig, DbError>;
+    async fn update_indexer_config(
+        &self,
+        params: UpdateIndexerConfigParams,
+    ) -> Result<IndexerConfig, DbError>;
+
+    // --- Download clients ---
+    async fn get_download_client(&self, id: DownloadClientId) -> Result<DownloadClient, DbError>;
+    async fn get_download_client_with_credentials(
+        &self,
+        id: DownloadClientId,
+    ) -> Result<DownloadClient, DbError>;
+    async fn list_download_clients(&self) -> Result<Vec<DownloadClient>, DbError>;
+    async fn create_download_client(
+        &self,
+        params: CreateDownloadClientParams,
+    ) -> Result<DownloadClient, DbError>;
+    async fn update_download_client(
+        &self,
+        id: DownloadClientId,
+        params: UpdateDownloadClientParams,
+    ) -> Result<DownloadClient, DbError>;
+    async fn delete_download_client(&self, id: DownloadClientId) -> Result<(), DbError>;
+
+    // --- Indexers ---
+    async fn get_indexer(&self, id: IndexerId) -> Result<Indexer, DbError>;
+    async fn get_indexer_with_credentials(&self, id: IndexerId) -> Result<Indexer, DbError>;
+    async fn list_indexers(&self) -> Result<Vec<Indexer>, DbError>;
+    async fn create_indexer(&self, params: CreateIndexerParams) -> Result<Indexer, DbError>;
+    async fn update_indexer(
+        &self,
+        id: IndexerId,
+        params: UpdateIndexerParams,
+    ) -> Result<Indexer, DbError>;
+    async fn delete_indexer(&self, id: IndexerId) -> Result<(), DbError>;
+    async fn set_supports_book_search(&self, id: IndexerId, supports: bool) -> Result<(), DbError>;
+
+    // --- Root folders ---
+    async fn get_root_folder(&self, id: RootFolderId) -> Result<RootFolder, DbError>;
+    async fn list_root_folders(&self) -> Result<Vec<RootFolder>, DbError>;
+    async fn create_root_folder(
+        &self,
+        path: &str,
+        media_type: MediaType,
+    ) -> Result<RootFolder, DbError>;
+    async fn delete_root_folder(&self, id: RootFolderId) -> Result<(), DbError>;
+
+    // --- Remote path mappings ---
+    async fn get_remote_path_mapping(
+        &self,
+        id: RemotePathMappingId,
+    ) -> Result<RemotePathMapping, DbError>;
+    async fn list_remote_path_mappings(&self) -> Result<Vec<RemotePathMapping>, DbError>;
+    async fn create_remote_path_mapping(
+        &self,
+        host: &str,
+        remote_path: &str,
+        local_path: &str,
+    ) -> Result<RemotePathMapping, DbError>;
+    async fn update_remote_path_mapping(
+        &self,
+        id: RemotePathMappingId,
+        host: &str,
+        remote_path: &str,
+        local_path: &str,
+    ) -> Result<RemotePathMapping, DbError>;
+    async fn delete_remote_path_mapping(&self, id: RemotePathMappingId) -> Result<(), DbError>;
 }
 
 // =============================================================================
@@ -1380,4 +1765,179 @@ pub async fn cwa_copy(src: &Path, dst: &Path) -> CwaResult {
     })
     .await
     .expect("spawn_blocking panicked")
+}
+
+// =============================================================================
+// Phase 5: General service error
+// =============================================================================
+
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceError {
+    #[error("{0}")]
+    Db(DbError),
+    #[error("not found")]
+    NotFound,
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl From<DbError> for ServiceError {
+    fn from(e: DbError) -> Self {
+        match e {
+            DbError::NotFound { .. } => ServiceError::NotFound,
+            other => ServiceError::Db(other),
+        }
+    }
+}
+
+// =============================================================================
+// Phase 5: Import pipeline services
+// =============================================================================
+
+#[derive(Debug, Clone)]
+pub struct ImportGrabResult {
+    pub final_status: GrabStatus,
+    pub imported_count: usize,
+    pub failed_count: usize,
+    pub skipped_count: usize,
+    pub warnings: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ImportSingleFileRequest {
+    pub source: std::path::PathBuf,
+    pub target_path: String,
+    pub root_folder_path: String,
+    pub root_folder_id: i64,
+    pub media_type: MediaType,
+    pub user_id: i64,
+    pub work_id: i64,
+    pub author_name: String,
+    pub title: String,
+}
+
+#[derive(Debug)]
+pub enum ImportFileResult {
+    Ok,
+    Warning(String),
+    Failed(String),
+}
+
+#[trait_variant::make(Send)]
+pub trait ImportService: Send + Sync {
+    async fn import_grab(
+        &self,
+        user_id: i64,
+        grab_id: i64,
+    ) -> Result<ImportGrabResult, ServiceError>;
+
+    async fn import_single_file(&self, req: ImportSingleFileRequest) -> ImportFileResult;
+
+    fn build_target_path(
+        &self,
+        root_folder_path: &str,
+        user_id: i64,
+        author: &str,
+        title: &str,
+        media_type: MediaType,
+        source: &std::path::Path,
+        source_root: &std::path::Path,
+    ) -> String;
+}
+
+#[trait_variant::make(Send)]
+pub trait TagService: Send + Sync {
+    async fn retag_library_items(&self, work: &Work, items: &[LibraryItem]) -> Vec<String>;
+}
+
+#[trait_variant::make(Send)]
+pub trait CoverIoService: Send + Sync {
+    async fn read_cover_bytes(&self, work_id: i64) -> Option<Vec<u8>>;
+}
+
+// =============================================================================
+// Phase 5: Email service
+// =============================================================================
+
+#[derive(Debug, thiserror::Error)]
+pub enum EmailServiceError {
+    #[error("{0}")]
+    Config(String),
+    #[error("{0}")]
+    Send(String),
+}
+
+#[trait_variant::make(Send)]
+pub trait EmailService: Send + Sync {
+    async fn send_test(&self) -> Result<(), EmailServiceError>;
+    async fn send_file(
+        &self,
+        file_bytes: Vec<u8>,
+        filename: &str,
+        extension: &str,
+    ) -> Result<(), EmailServiceError>;
+}
+
+// =============================================================================
+// Phase 5: Matching service
+// =============================================================================
+
+#[derive(Debug, Clone)]
+pub struct MatchCluster {
+    pub author: Option<String>,
+    pub title: Option<String>,
+    pub series: Option<String>,
+    pub series_position: Option<f64>,
+    pub language: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct MatchInput {
+    pub file_path: Option<std::path::PathBuf>,
+    pub grouped_paths: Option<Vec<std::path::PathBuf>>,
+    pub parse_string: Option<String>,
+    pub media_type: Option<MediaType>,
+    pub scan_root: Option<std::path::PathBuf>,
+}
+
+#[trait_variant::make(Send)]
+pub trait MatchingService: Send + Sync {
+    async fn extract_and_reconcile(&self, input: &MatchInput) -> Vec<MatchCluster>;
+}
+
+// =============================================================================
+// Phase 5: Readarr import workflow
+// =============================================================================
+
+#[trait_variant::make(Send)]
+pub trait ReadarrImportWorkflow: Send + Sync {
+    async fn connect(
+        &self,
+        req: crate::readarr::ReadarrConnectRequest,
+    ) -> Result<crate::readarr::ReadarrConnectResponse, ServiceError>;
+
+    async fn preview(
+        &self,
+        req: crate::readarr::ReadarrImportRequest,
+    ) -> Result<crate::readarr::ReadarrPreviewResponse, ServiceError>;
+
+    async fn start(
+        &self,
+        user_id: i64,
+        req: crate::readarr::ReadarrImportRequest,
+    ) -> Result<crate::readarr::ReadarrStartResponse, ServiceError>;
+
+    async fn progress(&self) -> crate::readarr::ReadarrImportProgress;
+
+    async fn history(
+        &self,
+        user_id: i64,
+    ) -> Result<crate::readarr::ReadarrHistoryResponse, ServiceError>;
+
+    async fn undo(
+        &self,
+        user_id: i64,
+        import_id: String,
+    ) -> Result<crate::readarr::ReadarrUndoResponse, ServiceError>;
 }

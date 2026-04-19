@@ -1,110 +1,23 @@
 use std::time::Duration;
 
-use axum::extract::{Query, State};
-use axum::Json;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use crate::state::AppState;
-use crate::{ApiError, AuthContext, GrabApiRequest, ReleaseResponse, ReleaseSearchResponse};
-
-/// Maximum size for an indexer XML response body (10 MB).
-/// Protects against hostile or misconfigured indexers sending unbounded XML.
-const MAX_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
+use crate::{ApiError, ReleaseResponse};
 use livrarr_domain::Indexer;
+use livrarr_http::HttpClient;
 
-#[derive(serde::Deserialize)]
-pub struct SearchQuery {
-    #[serde(rename = "workId")]
-    pub work_id: Option<i64>,
-    #[serde(default)]
-    pub refresh: bool,
-    /// If true, only return cached results — never hit indexers.
-    #[serde(default, rename = "cacheOnly")]
-    pub cache_only: bool,
-}
+const MAX_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
 
-/// GET /api/v1/release?workId=...  — searches all enabled Torznab indexers
-pub async fn search(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Query(q): Query<SearchQuery>,
-) -> Result<Json<ReleaseSearchResponse>, ApiError> {
-    use livrarr_domain::services::{ReleaseService, SearchReleasesRequest};
-
-    let work_id = match q.work_id {
-        Some(id) => id,
-        None => {
-            return Ok(Json(ReleaseSearchResponse {
-                results: vec![],
-                warnings: vec![],
-                cache_age_seconds: None,
-            }))
-        }
-    };
-
-    let svc_response = state
-        .release_service
-        .search(
-            ctx.user.id,
-            SearchReleasesRequest {
-                work_id,
-                refresh: q.refresh,
-                cache_only: q.cache_only,
-            },
-        )
-        .await?;
-
-    let results = svc_response
-        .results
-        .into_iter()
-        .map(|r| ReleaseResponse {
-            title: r.title,
-            indexer: r.indexer,
-            size: r.size,
-            guid: r.guid,
-            download_url: r.download_url,
-            seeders: r.seeders,
-            leechers: r.leechers,
-            publish_date: r.publish_date,
-            protocol: r.protocol.to_string(),
-            categories: r.categories,
-        })
-        .collect();
-
-    let warnings = svc_response
-        .warnings
-        .into_iter()
-        .map(|w| {
-            let (indexer, error) = w
-                .strip_prefix("indexer ")
-                .and_then(|s| s.split_once(": "))
-                .map(|(i, e)| (i.to_string(), e.to_string()))
-                .unwrap_or_else(|| (String::new(), w));
-            crate::SearchWarning { indexer, error }
-        })
-        .collect();
-
-    Ok(Json(ReleaseSearchResponse {
-        results,
-        warnings,
-        cache_age_seconds: svc_response.cache_age_seconds,
-    }))
-}
-
-/// Clean a title for search: strip subtitle (after colon or parenthetical),
-/// strip author prefix, remove leading "the ", replace non-word chars, remove accents.
-/// Mirrors Readarr's `SplitBookTitle` + `GetQueryTitle`.
 fn clean_search_term(title: &str, author: &str) -> String {
     let mut t = title.to_string();
 
-    // Strip "Author: Title" prefix.
     let prefix = format!("{author}:");
     if t.starts_with(&prefix) {
         t = t[prefix.len()..].trim().to_string();
     }
 
-    // Strip subtitle after colon or parenthetical (whichever comes first).
     let colon = t.find(':');
     let paren = t.find('(');
     let split_at = match (colon, paren) {
@@ -119,23 +32,18 @@ fn clean_search_term(title: &str, author: &str) -> String {
         }
     }
 
-    // Strip leading "the ".
     if t.to_lowercase().starts_with("the ") {
         t = t[4..].to_string();
     }
 
-    // Replace & with space, . with space.
     t = t.replace(" & ", " ").replace('.', " ");
-
-    // Collapse whitespace.
     t = t.split_whitespace().collect::<Vec<_>>().join(" ");
 
     t
 }
 
-/// Search a single indexer with tiered fallback (mirrors Readarr strategy).
 pub(crate) async fn search_indexer(
-    http: &livrarr_http::HttpClient,
+    http: &HttpClient,
     indexer: &Indexer,
     title: &str,
     author: &str,
@@ -161,9 +69,7 @@ pub(crate) async fn search_indexer(
         }
     };
 
-    // Tier 1: structured book search (if supported)
     if indexer.supports_book_search {
-        // 1a: author + title
         let url = build_torznab_url(
             &indexer.url,
             &indexer.api_path,
@@ -181,7 +87,6 @@ pub(crate) async fn search_indexer(
             add_results(items, &mut all_results, &mut seen_guids);
         }
 
-        // 1b: title only
         let url = build_torznab_url(
             &indexer.url,
             &indexer.api_path,
@@ -203,7 +108,6 @@ pub(crate) async fn search_indexer(
         }
     }
 
-    // Tier 2: freetext — title + author
     let query = format!("{clean_title} {author}");
     let url = build_torznab_url(
         &indexer.url,
@@ -221,7 +125,6 @@ pub(crate) async fn search_indexer(
         add_results(items, &mut all_results, &mut seen_guids);
     }
 
-    // Tier 2b: author + title (reversed)
     let query_rev = format!("{author} {clean_title}");
     let url = build_torznab_url(
         &indexer.url,
@@ -243,7 +146,6 @@ pub(crate) async fn search_indexer(
         return Ok(all_results);
     }
 
-    // Tier 3: title only (last resort)
     let url = build_torznab_url(
         &indexer.url,
         &indexer.api_path,
@@ -289,10 +191,8 @@ pub(crate) fn build_torznab_url(
     url
 }
 
-/// Redact apikey from URL for logging.
 fn redact_url(url: &str) -> String {
     let mut result = url.to_string();
-    // Redact API key.
     if let Some(pos) = result.find("apikey=") {
         let end = result[pos..]
             .find('&')
@@ -300,7 +200,6 @@ fn redact_url(url: &str) -> String {
             .unwrap_or(result.len());
         result = format!("{}apikey=[REDACTED]{}", &result[..pos], &result[end..]);
     }
-    // Redact search query (contains book title).
     if let Some(pos) = result.find("q=") {
         let end = result[pos..]
             .find('&')
@@ -312,7 +211,7 @@ fn redact_url(url: &str) -> String {
 }
 
 pub(crate) async fn fetch_and_parse(
-    http: &livrarr_http::HttpClient,
+    http: &HttpClient,
     url: &str,
     indexer_name: &str,
 ) -> Result<Vec<ReleaseResponse>, String> {
@@ -329,7 +228,6 @@ pub(crate) async fn fetch_and_parse(
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    // Reject oversized responses up-front when the server advertises Content-Length.
     if let Some(cl) = resp.content_length() {
         if cl as usize > MAX_RESPONSE_BODY_BYTES {
             return Err(format!(
@@ -338,9 +236,6 @@ pub(crate) async fn fetch_and_parse(
         }
     }
 
-    // Read body incrementally via `chunk()` so a server that lies about
-    // Content-Length (or omits it) still cannot exhaust memory — abort as
-    // soon as the cap is exceeded.
     let mut resp = resp;
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
     while let Some(chunk) = resp
@@ -437,7 +332,6 @@ fn parse_torznab_xml(xml: &str, indexer_name: &str) -> Result<Vec<ReleaseRespons
                             }
                         }
                     }
-                    // <torznab:attr> / <newznab:attr> — local name is "attr"
                     b"attr" if in_item => {
                         let mut attr_name = String::new();
                         let mut attr_value = String::new();
@@ -508,7 +402,6 @@ fn parse_torznab_xml(xml: &str, indexer_name: &str) -> Result<Vec<ReleaseRespons
                         );
                         continue;
                     }
-                    // Detect protocol from enclosure type (USE-GRAB-001).
                     let protocol = if current_enclosure_type.contains("nzb") {
                         "usenet"
                     } else {
@@ -538,56 +431,6 @@ fn parse_torznab_xml(xml: &str, indexer_name: &str) -> Result<Vec<ReleaseRespons
     }
 
     Ok(results)
-}
-
-/// POST /api/v1/release/grab — route to qBittorrent or SABnzbd based on protocol
-pub async fn grab(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Json(req): Json<GrabApiRequest>,
-) -> Result<(), ApiError> {
-    use livrarr_domain::services::{DownloadProtocol, GrabRequest, GrabSource, ReleaseService};
-
-    let protocol = match req.protocol.as_deref() {
-        Some("usenet") => DownloadProtocol::Usenet,
-        _ => DownloadProtocol::Torrent,
-    };
-
-    state
-        .release_service
-        .grab(
-            ctx.user.id,
-            GrabRequest {
-                work_id: req.work_id,
-                download_url: req.download_url,
-                title: req.title,
-                indexer: req.indexer,
-                guid: req.guid,
-                size: req.size,
-                protocol,
-                categories: req.categories,
-                download_client_id: req.download_client_id,
-                source: GrabSource::Manual,
-            },
-        )
-        .await?;
-
-    Ok(())
-}
-
-#[derive(Debug)]
-pub enum GrabError {
-    NoClient { protocol: String },
-    ClientProtocolMismatch { protocol: String },
-    ClientUnreachable { message: String },
-    Ssrf(String),
-    Db(livrarr_domain::DbError),
-}
-
-impl From<livrarr_domain::DbError> for GrabError {
-    fn from(e: livrarr_domain::DbError) -> Self {
-        GrabError::Db(e)
-    }
 }
 
 pub(crate) fn qbit_base_url(client: &livrarr_domain::DownloadClient) -> String {

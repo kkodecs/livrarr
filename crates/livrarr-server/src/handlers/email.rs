@@ -3,7 +3,7 @@
 use lettre::message::{header::ContentType, Attachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
-use livrarr_db::EmailConfig;
+use livrarr_domain::settings::EmailConfig;
 
 /// Accepted file extensions for email delivery.
 pub const ACCEPTED_EXTENSIONS: &[&str] =

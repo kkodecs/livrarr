@@ -335,6 +335,7 @@ export interface SeriesDetailResponse {
 
 export interface ResolveGrResponse {
   candidates: GrAuthorCandidate[];
+  autoLinked?: boolean;
 }
 
 // Notifications

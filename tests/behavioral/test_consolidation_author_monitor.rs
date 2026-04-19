@@ -156,6 +156,12 @@ impl WorkService for StubWorkService {
     async fn lookup(&self, _req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError> {
         Ok(vec![])
     }
+
+    async fn download_cover_from_url(&self, _work_id: i64, _cover_url: &str) {}
+    fn try_start_bulk_refresh(&self, _user_id: i64) -> bool {
+        true
+    }
+    fn finish_bulk_refresh(&self, _user_id: i64) {}
 }
 
 // =============================================================================

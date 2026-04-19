@@ -6,7 +6,7 @@ Top learnings a fresh CC session needs to know. For deeper coverage see linked w
 
 ## Architecture
 
-1. **10-crate workspace.** All deps point toward `livrarr-domain`. `livrarr-server` is the composition root. See [overview](architecture/overview.md).
+1. **11-crate workspace.** All deps point toward `livrarr-domain`. `livrarr-server` is the composition root. `livrarr-handlers` owns all route handlers behind a compile wall. See [overview](architecture/overview.md).
 2. **BIG7 entities:** Author, Series, Work, Release, Grab, LibraryItem, List. See [big7](domain/big7.md).
 3. **Work-first, not author-first.** The Work is the primary entity everywhere.
 4. **One app, both formats.** Ebooks and audiobooks. Per-media-type monitoring (`monitor_ebook`, `monitor_audiobook`).
@@ -18,6 +18,12 @@ Top learnings a fresh CC session needs to know. For deeper coverage see linked w
 7. **trait + impl + stub.** Trait in domain, impl in crate, stub in behavioral. See [async-service](patterns/async-service.md).
 8. **`trait_variant::make(Send)`** — not `async-trait`. Non-dyn-compatible — use generics/enum dispatch exclusively.
 9. **No SQL outside livrarr-db.** No business logic in handlers. Handlers: validate → call trait → map result.
+9b. **Compile wall.** `livrarr-handlers` must NOT depend on `livrarr-db`, `livrarr-metadata`, `livrarr-tagwrite`, or `livrarr-download`. Handlers are generic over `S: AppContext`. Verify with `cargo tree -p livrarr-handlers`.
+9c. **Arc<ServiceImpl> pattern.** All service fields in AppState are `Arc<T>`. AppContext type is the inner `T`. Accessor returns `&self.field` — deref coercion handles `&Arc<T>` → `&T`. Service impls don't need Clone.
+9d. **Circular dep: OnceLock<Box<AppState>>.** Services that call functions taking `&AppState` (ImportService, ReadarrImportWorkflow) can't hold `AppState` directly — infinite-size type. Use `OnceLock<Box<AppState>>`: Box is pointer-sized (breaks the compile-time layout cycle), OnceLock allows post-construction init. Call `service.init(state.clone())` after AppState construction. `Arc<OnceLock<...>>` and `OnceLock<AppState>` (without Box) both fail — the compiler still needs AppState's size.
+9e. **Trait signature type safety.** Service traits in `livrarr-domain/src/services.rs` must not reference types from walled-off crates — `TaggableItem` (livrarr-tagwrite), `Create*DbRequest` (livrarr-db), `TagMetadata` (livrarr-tagwrite) are banned from signatures. Use domain equivalents: `LibraryItem` for `TaggableItem`, domain request structs for DB request types. Note: `WorkId`/`UserId` are safe — they're defined in livrarr-domain, not livrarr-db. Server impls convert at the boundary.
+9f. **Accessor newtype wrappers for orphan rule.** When handlers need server-owned infrastructure (logs, caches, atomics), define a minimal accessor trait in `livrarr-handlers/src/accessors.rs` and a newtype wrapper in server's `state.rs` that delegates to the real type. Required because: compile wall blocks putting the trait in server, orphan rule blocks impl'ing a handler trait on a server type, and `trait_variant::make(Send)` blocks `dyn Trait` (insight 8). Wire the wrapper as the AppContext associated type.
+9g. **Handler-level spawning for background work.** Services receive `&self` and can't clone `AppContext` or move it into `tokio::spawn`. Handlers own `State<S>` and can `state.clone()` + `tokio::spawn`. Use this for fire-and-forget side effects (bibliography refresh, author monitor) and long-running background jobs (bulk refresh). OnceLock<Box<AppState>> (9d) is the escape hatch for when a service *must* access full state; handler spawning is the default.
 10. **All blocking I/O in `spawn_blocking`.** Never block the async executor.
 11. **`chrono` for datetime.** Never `time` crate. Project-wide.
 

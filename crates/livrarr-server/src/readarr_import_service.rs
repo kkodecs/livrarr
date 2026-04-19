@@ -235,3 +235,5 @@ where
         Ok(self.db.create_library_item(req).await?)
     }
 }
+
+pub use livrarr_domain::readarr::ReadarrImportProgress;

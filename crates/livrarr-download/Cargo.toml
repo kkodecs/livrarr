@@ -16,3 +16,4 @@ serde_json = { workspace = true }
 sha1 = "0.10"
 data-encoding = "2"
 bendy = { version = "0.6", features = ["std"] }
+tracing = "0.1"

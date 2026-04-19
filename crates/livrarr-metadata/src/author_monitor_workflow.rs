@@ -362,4 +362,8 @@ where
 
         Ok(report)
     }
+
+    fn trigger_monitor(&self) {
+        // Stub — server wires this up to spawn(author_monitor_tick).
+    }
 }

@@ -495,6 +495,7 @@ export default function ReadarrImportPage() {
                         <th className="px-3 py-2">Author</th>
                         <th className="px-3 py-2">Format</th>
                         <th className="px-3 py-2">Status</th>
+                        <th className="px-3 py-2">Action</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -700,9 +701,14 @@ function PreviewFileRow({ item }: { item: ImportPreviewFileItem }) {
       <td className="px-3 py-1.5">
         <span className={cn(
           "text-xs",
-          item.workStatus === "new" ? "text-green-400" : "text-zinc-500",
+          item.workStatus === "new" ? "text-green-400" : "text-blue-400",
         )}>
-          {item.workStatus === "new" ? "new" : "existing"}
+          {item.workStatus === "new" ? "New" : "In Library"}
+        </span>
+      </td>
+      <td className="px-3 py-1.5">
+        <span className="text-xs text-green-400">
+          {item.workStatus === "new" ? "Create & Import" : "Add file"}
         </span>
       </td>
     </tr>
