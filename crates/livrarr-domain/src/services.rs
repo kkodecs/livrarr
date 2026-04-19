@@ -11,7 +11,6 @@ use crate::{
     MetadataProvider, OutcomeClass, PlaybackProgress, ProvenanceSetter, Series, UserId, Work,
     WorkId,
 };
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
