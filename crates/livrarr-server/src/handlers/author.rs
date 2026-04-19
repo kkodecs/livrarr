@@ -263,9 +263,22 @@ pub async fn bibliography(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<livrarr_domain::services::BibliographyEntry>>, ApiError> {
+) -> Result<Json<livrarr_db::AuthorBibliography>, ApiError> {
     let entries = state.author_service.bibliography(ctx.user.id, id).await?;
-    Ok(Json(entries))
+    Ok(Json(livrarr_db::AuthorBibliography {
+        author_id: id,
+        entries: entries
+            .into_iter()
+            .map(|e| livrarr_db::BibliographyEntry {
+                ol_key: e.ol_key.unwrap_or_default(),
+                title: e.title,
+                year: e.year,
+                series_name: None,
+                series_position: None,
+            })
+            .collect(),
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+    }))
 }
 
 /// POST /api/v1/author/{id}/bibliography/refresh — force re-fetch.
@@ -273,12 +286,25 @@ pub async fn refresh_bibliography(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<livrarr_domain::services::BibliographyEntry>>, ApiError> {
+) -> Result<Json<livrarr_db::AuthorBibliography>, ApiError> {
     let entries = state
         .author_service
         .refresh_bibliography(ctx.user.id, id)
         .await?;
-    Ok(Json(entries))
+    Ok(Json(livrarr_db::AuthorBibliography {
+        author_id: id,
+        entries: entries
+            .into_iter()
+            .map(|e| livrarr_db::BibliographyEntry {
+                ol_key: e.ol_key.unwrap_or_default(),
+                title: e.title,
+                year: e.year,
+                series_name: None,
+                series_position: None,
+            })
+            .collect(),
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+    }))
 }
 
 /// Spawn a background task to fetch and cache an author's bibliography.
