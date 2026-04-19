@@ -1,22 +1,14 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use livrarr_db::{LibraryItemDb, RootFolderDb, WorkDb};
-use livrarr_domain::services::{
-    FileService, FileServiceError, FileStream, ScanResult, ScannedFile,
-};
-use livrarr_domain::{classify_file, DbError, LibraryItem, UserId, WorkId};
-use tokio::sync::RwLock;
+use livrarr_db::{ConfigDb, LibraryItemDb, PlaybackProgressDb, RootFolderDb};
+use livrarr_domain::services::{EmailPayload, FileService, FileServiceError};
+use livrarr_domain::{DbError, LibraryItem, PlaybackProgress, UserId};
 
-// ---------------------------------------------------------------------------
-// Scan state (in-memory, ephemeral)
-// ---------------------------------------------------------------------------
+/// Accepted file extensions for email delivery (mirrors handler constant).
+const ACCEPTED_EXTENSIONS: &[&str] = &["epub", "pdf", "docx", "doc", "rtf", "htm", "html", "txt"];
 
-struct ScanState {
-    user_id: UserId,
-    result: ScanResult,
-}
+/// Maximum file size for email attachments (50 MB).
+const MAX_EMAIL_SIZE: i64 = 50 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -24,84 +16,28 @@ struct ScanState {
 
 pub struct FileServiceImpl<D> {
     db: D,
-    scan_states: Arc<RwLock<HashMap<String, ScanState>>>,
 }
 
 impl<D> FileServiceImpl<D> {
     pub fn new(db: D) -> Self {
-        Self {
-            db,
-            scan_states: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-}
-
-/// Validate that a relative path has no `..` components and is not absolute.
-fn validate_relative_path(path: &str) -> Result<(), FileServiceError> {
-    let p = Path::new(path);
-    if p.is_absolute() {
-        return Err(FileServiceError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path traversal: absolute path not allowed",
-        )));
-    }
-    for component in p.components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Err(FileServiceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path traversal: '..' component not allowed",
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Resolve a library item to its full filesystem path.
-fn resolve_full_path(root_path: &str, relative_path: &str) -> PathBuf {
-    Path::new(root_path).join(relative_path)
-}
-
-fn clone_scan_result(r: &ScanResult) -> ScanResult {
-    ScanResult {
-        scan_id: r.scan_id.clone(),
-        files: r
-            .files
-            .iter()
-            .map(|f| ScannedFile {
-                relative_path: f.relative_path.clone(),
-                filename: f.filename.clone(),
-                media_type: f.media_type,
-                size: f.size,
-                matched_work_id: f.matched_work_id,
-                has_existing_item: f.has_existing_item,
-            })
-            .collect(),
-        warnings: r.warnings.clone(),
+        Self { db }
     }
 }
 
 impl<D> FileService for FileServiceImpl<D>
 where
-    D: LibraryItemDb + RootFolderDb + WorkDb + Clone + Send + Sync + 'static,
+    D: LibraryItemDb + RootFolderDb + ConfigDb + PlaybackProgressDb + Send + Sync + 'static,
 {
-    async fn list(
+    async fn list_paginated(
         &self,
         user_id: UserId,
-        work_id: Option<WorkId>,
-    ) -> Result<Vec<LibraryItem>, FileServiceError> {
-        let items = match work_id {
-            Some(wid) => self
-                .db
-                .list_library_items_by_work(user_id, wid)
-                .await
-                .map_err(map_db_err)?,
-            None => self
-                .db
-                .list_library_items(user_id)
-                .await
-                .map_err(map_db_err)?,
-        };
-        Ok(items)
+        page: u32,
+        page_size: u32,
+    ) -> Result<(Vec<LibraryItem>, i64), FileServiceError> {
+        self.db
+            .list_library_items_paginated(user_id, page, page_size)
+            .await
+            .map_err(map_db_err)
     }
 
     async fn get(&self, user_id: UserId, item_id: i64) -> Result<LibraryItem, FileServiceError> {
@@ -112,193 +48,147 @@ where
     }
 
     async fn delete(&self, user_id: UserId, item_id: i64) -> Result<(), FileServiceError> {
-        let item = self
-            .db
-            .get_library_item(user_id, item_id)
-            .await
-            .map_err(map_db_err)?;
-
-        // Validate path before any filesystem operation
-        validate_relative_path(&item.path)?;
-
-        // Resolve full path and best-effort delete physical file
-        let root = self
-            .db
-            .get_root_folder(item.root_folder_id)
-            .await
-            .map_err(map_db_err)?;
-        let full_path = resolve_full_path(&root.path, &item.path);
-
-        // Best-effort delete — ignore missing file
-        let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(&full_path))
-            .await
-            .expect("spawn_blocking panicked");
-
-        // Delete DB record
         self.db
             .delete_library_item(user_id, item_id)
             .await
             .map_err(map_db_err)?;
-
         Ok(())
     }
 
-    async fn retag(&self, _user_id: UserId, _item_id: i64) -> Result<(), FileServiceError> {
-        Err(FileServiceError::TagWrite(
-            "retag not yet implemented".into(),
-        ))
-    }
-
-    async fn read_file(
+    async fn resolve_path(
         &self,
         user_id: UserId,
         item_id: i64,
-    ) -> Result<FileStream, FileServiceError> {
+    ) -> Result<PathBuf, FileServiceError> {
         let item = self
             .db
             .get_library_item(user_id, item_id)
             .await
             .map_err(map_db_err)?;
+        let root_folder =
+            self.db
+                .get_root_folder(item.root_folder_id)
+                .await
+                .map_err(|e| match e {
+                    DbError::NotFound { .. } => FileServiceError::RootFolderNotFound,
+                    other => FileServiceError::Db(other),
+                })?;
 
-        validate_relative_path(&item.path)?;
+        let root = Path::new(&root_folder.path);
+        let abs_path = root.join(&item.path);
 
-        let root = self
+        // Canonicalize and verify containment (path traversal protection).
+        let canonical = abs_path
+            .canonicalize()
+            .map_err(|_| FileServiceError::NotFound)?;
+        let canonical_root = root.canonicalize().map_err(|e| {
+            FileServiceError::Io(std::io::Error::other(format!(
+                "Root folder not accessible: {e}"
+            )))
+        })?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(FileServiceError::Forbidden);
+        }
+
+        Ok(canonical)
+    }
+
+    async fn prepare_email(
+        &self,
+        user_id: UserId,
+        item_id: i64,
+    ) -> Result<EmailPayload, FileServiceError> {
+        let item = self
             .db
-            .get_root_folder(item.root_folder_id)
+            .get_library_item(user_id, item_id)
             .await
             .map_err(map_db_err)?;
-        let full_path = resolve_full_path(&root.path, &item.path);
+        let root_folder =
+            self.db
+                .get_root_folder(item.root_folder_id)
+                .await
+                .map_err(|e| match e {
+                    DbError::NotFound { .. } => FileServiceError::RootFolderNotFound,
+                    other => FileServiceError::Db(other),
+                })?;
 
-        let file = tokio::fs::File::open(&full_path).await?;
-        let metadata = file.metadata().await?;
-        let size = metadata.len();
+        let abs_path = Path::new(&root_folder.path).join(&item.path);
 
-        let filename = Path::new(&item.path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "download".into());
+        // Validate extension against allowlist.
+        let ext = abs_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if !ACCEPTED_EXTENSIONS.contains(&ext.as_str()) {
+            return Err(FileServiceError::BadRequest(format!(
+                "Format '.{ext}' not accepted. Supported: EPUB, PDF, DOCX, RTF, TXT, HTML."
+            )));
+        }
 
-        Ok(FileStream {
-            reader: Box::new(file),
-            size,
-            media_type: item.media_type,
-            filename,
-        })
-    }
+        // Validate size (50 MB limit).
+        if item.file_size > MAX_EMAIL_SIZE {
+            return Err(FileServiceError::BadRequest(format!(
+                "File exceeds the 50 MB email limit ({})",
+                format_bytes(item.file_size)
+            )));
+        }
 
-    async fn scan_root_folder(
-        &self,
-        user_id: UserId,
-        root_folder_id: i64,
-    ) -> Result<ScanResult, FileServiceError> {
-        let root = self
-            .db
-            .get_root_folder(root_folder_id)
+        // Read file in spawn_blocking for blocking I/O safety.
+        let path_clone = abs_path.clone();
+        let file_bytes = tokio::task::spawn_blocking(move || std::fs::read(&path_clone))
             .await
-            .map_err(|e| match e {
-                DbError::NotFound { .. } => FileServiceError::RootFolderNotFound,
-                other => FileServiceError::Db(other),
+            .expect("spawn_blocking panicked")
+            .map_err(|e| {
+                FileServiceError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("Failed to read file {}: {e}", abs_path.display()),
+                ))
             })?;
 
-        // User-scoped scan directory
-        let scan_dir = PathBuf::from(&root.path).join(user_id.to_string());
+        let filename = abs_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("book")
+            .to_owned();
 
-        // Walk filesystem in spawn_blocking
-        let scan_dir_clone = scan_dir.clone();
-        let paths: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
-            let mut result = Vec::new();
-            if !scan_dir_clone.exists() {
-                return result;
-            }
-            fn walk_dir(dir: &Path, result: &mut Vec<PathBuf>) {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_dir() {
-                            walk_dir(&path, result);
-                        } else {
-                            result.push(path);
-                        }
-                    }
-                }
-            }
-            walk_dir(&scan_dir_clone, &mut result);
-            result
+        Ok(EmailPayload {
+            file_bytes,
+            filename,
+            extension: ext,
         })
-        .await
-        .expect("spawn_blocking panicked");
-
-        let mut files = Vec::new();
-        let mut warnings = Vec::new();
-        let root_path = PathBuf::from(&root.path);
-
-        for path in &paths {
-            let media_type = match classify_file(path) {
-                Some(mt) => mt,
-                None => continue,
-            };
-
-            let relative = match path.strip_prefix(&root_path) {
-                Ok(r) => r.to_string_lossy().into_owned(),
-                Err(_) => {
-                    warnings.push(format!("path outside root: {}", path.display()));
-                    continue;
-                }
-            };
-
-            if validate_relative_path(&relative).is_err() {
-                warnings.push(format!("invalid path skipped: {relative}"));
-                continue;
-            }
-
-            let filename = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-
-            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
-
-            files.push(ScannedFile {
-                relative_path: relative,
-                filename,
-                media_type,
-                size,
-                matched_work_id: None,
-                has_existing_item: false,
-            });
-        }
-
-        let scan_id = generate_scan_id();
-
-        let result = ScanResult {
-            scan_id: scan_id.clone(),
-            files,
-            warnings,
-        };
-
-        // Store scan state
-        let state = ScanState {
-            user_id,
-            result: clone_scan_result(&result),
-        };
-        self.scan_states.write().await.insert(scan_id, state);
-
-        Ok(result)
     }
 
-    async fn get_scan(
+    async fn get_progress(
         &self,
         user_id: UserId,
-        scan_id: &str,
-    ) -> Result<ScanResult, FileServiceError> {
-        let states = self.scan_states.read().await;
-        let state = states.get(scan_id).ok_or(FileServiceError::ScanExpired)?;
+        item_id: i64,
+    ) -> Result<Option<PlaybackProgress>, FileServiceError> {
+        self.db
+            .get_progress(user_id, item_id)
+            .await
+            .map_err(FileServiceError::Db)
+    }
 
-        if state.user_id != user_id {
-            return Err(FileServiceError::ScanForbidden);
-        }
+    async fn update_progress(
+        &self,
+        user_id: UserId,
+        item_id: i64,
+        position: &str,
+        progress_pct: f64,
+    ) -> Result<(), FileServiceError> {
+        // Validate the library item exists and belongs to the user.
+        let _item = self
+            .db
+            .get_library_item(user_id, item_id)
+            .await
+            .map_err(map_db_err)?;
 
-        Ok(clone_scan_result(&state.result))
+        let pct = progress_pct.clamp(0.0, 1.0);
+        self.db
+            .upsert_progress(user_id, item_id, position, pct)
+            .await
+            .map_err(FileServiceError::Db)
     }
 }
 
@@ -309,12 +199,18 @@ fn map_db_err(e: DbError) -> FileServiceError {
     }
 }
 
-fn generate_scan_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let tid = format!("{:?}", std::thread::current().id());
-    format!("{t:032x}-{tid}")
+fn format_bytes(bytes: i64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
 }

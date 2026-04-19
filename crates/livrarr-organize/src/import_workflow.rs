@@ -7,8 +7,8 @@ use livrarr_db::{
     LibraryItemDb, RemotePathMappingDb, RootFolderDb, WorkDb,
 };
 use livrarr_domain::services::{
-    atomic_copy, FailedFile, FileService, FileServiceError, ImportResult, ImportWorkflow,
-    ImportWorkflowError, ImportedFile, ScanConfirmation, SkippedFile,
+    atomic_copy, FailedFile, ImportResult, ImportWorkflow, ImportWorkflowError, ImportedFile,
+    ScanConfirmation, SkippedFile,
 };
 use livrarr_domain::{
     classify_file, sanitize_path_component, DbError, EventType, GrabId, GrabStatus, MediaType,
@@ -26,24 +26,21 @@ pub type ImportLockMap = Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>;
 // Implementation
 // ---------------------------------------------------------------------------
 
-pub struct ImportWorkflowImpl<D, F> {
+pub struct ImportWorkflowImpl<D> {
     db: D,
-    file_service: F,
     import_locks: ImportLockMap,
     import_semaphore: Arc<tokio::sync::Semaphore>,
     data_dir: Arc<PathBuf>,
 }
 
-impl<D, F> ImportWorkflowImpl<D, F> {
+impl<D> ImportWorkflowImpl<D> {
     pub fn new(
         db: D,
-        file_service: F,
         import_semaphore: Arc<tokio::sync::Semaphore>,
         data_dir: Arc<PathBuf>,
     ) -> Self {
         Self {
             db,
-            file_service,
             import_locks: Arc::new(Mutex::new(HashMap::new())),
             import_semaphore,
             data_dir,
@@ -233,7 +230,7 @@ fn filter_preferred_formats(
 // Trait implementation
 // ---------------------------------------------------------------------------
 
-impl<D, F> ImportWorkflow for ImportWorkflowImpl<D, F>
+impl<D> ImportWorkflow for ImportWorkflowImpl<D>
 where
     D: GrabDb
         + WorkDb
@@ -246,7 +243,6 @@ where
         + Send
         + Sync
         + 'static,
-    F: FileService + Send + Sync + 'static,
 {
     async fn import_grab(
         &self,
@@ -679,174 +675,12 @@ where
 
     async fn confirm_scan(
         &self,
-        user_id: UserId,
-        scan_id: &str,
-        selections: Vec<ScanConfirmation>,
+        _user_id: UserId,
+        _scan_id: &str,
+        _selections: Vec<ScanConfirmation>,
     ) -> Result<ImportResult, ImportWorkflowError> {
-        // Look up scan state from FileService
-        let scan = self
-            .file_service
-            .get_scan(user_id, scan_id)
-            .await
-            .map_err(|e| match e {
-                FileServiceError::ScanExpired => ImportWorkflowError::ScanExpired,
-                FileServiceError::ScanForbidden => ImportWorkflowError::ScanForbidden,
-                other => ImportWorkflowError::Db(DbError::Io(Box::new(std::io::Error::other(
-                    other.to_string(),
-                )))),
-            })?;
-
-        // Build set of valid paths from the scan
-        let valid_paths: std::collections::HashSet<&str> = scan
-            .files
-            .iter()
-            .map(|f| f.relative_path.as_str())
-            .collect();
-
-        let root_folders = self
-            .db
-            .list_root_folders()
-            .await
-            .map_err(ImportWorkflowError::Db)?;
-
-        let mut imported_files = Vec::new();
-        let mut failed_files = Vec::new();
-        let skipped_files = Vec::new();
-
-        for selection in &selections {
-            // Validate relative_path is in scan results
-            if !valid_paths.contains(selection.relative_path.as_str()) {
-                failed_files.push(FailedFile {
-                    source_name: selection.relative_path.clone(),
-                    error: "path not found in scan results".into(),
-                });
-                continue;
-            }
-
-            // Validate no path traversal
-            let rel_path = Path::new(&selection.relative_path);
-            if rel_path.is_absolute()
-                || rel_path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                failed_files.push(FailedFile {
-                    source_name: selection.relative_path.clone(),
-                    error: "path traversal not allowed".into(),
-                });
-                continue;
-            }
-
-            // Find root folder for the media type
-            let root_folder = match root_folders
-                .iter()
-                .find(|rf| rf.media_type == selection.media_type)
-            {
-                Some(rf) => rf,
-                None => {
-                    failed_files.push(FailedFile {
-                        source_name: selection.relative_path.clone(),
-                        error: format!("no root folder for {:?}", selection.media_type),
-                    });
-                    continue;
-                }
-            };
-
-            // Resolve full source path from root folder + relative path
-            let source_full = Path::new(&root_folder.path).join(&selection.relative_path);
-
-            // Look up work for target path building
-            let work = match self.db.get_work(user_id, selection.work_id).await {
-                Ok(w) => w,
-                Err(e) => {
-                    failed_files.push(FailedFile {
-                        source_name: selection.relative_path.clone(),
-                        error: format!("work lookup failed: {e}"),
-                    });
-                    continue;
-                }
-            };
-
-            // Build target path
-            let filename = Path::new(&selection.relative_path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            let ext = Path::new(&selection.relative_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("epub");
-            let author_san = sanitize_path_component(&work.author_name, "Unknown Author");
-            let title_san = sanitize_path_component(&work.title, "Unknown Title");
-            let root_path = root_folder.path.trim_end_matches('/');
-            let target_path = format!("{root_path}/{user_id}/{author_san}/{title_san}.{ext}");
-            let target = PathBuf::from(&target_path);
-
-            // Compute relative path for DB storage
-            let relative = target_path
-                .strip_prefix(&root_folder.path)
-                .unwrap_or(&target_path)
-                .trim_start_matches('/')
-                .to_string();
-
-            // Copy
-            match atomic_copy(&source_full, &target).await {
-                Ok(copied) => {
-                    match self
-                        .db
-                        .create_library_item(CreateLibraryItemDbRequest {
-                            user_id,
-                            work_id: selection.work_id,
-                            root_folder_id: root_folder.id,
-                            path: relative.clone(),
-                            media_type: selection.media_type,
-                            file_size: copied as i64,
-                            import_id: None,
-                        })
-                        .await
-                    {
-                        Ok(item) => {
-                            imported_files.push(ImportedFile {
-                                source_name: filename.into_owned(),
-                                target_relative_path: relative,
-                                media_type: selection.media_type,
-                                file_size: copied,
-                                library_item_id: item.id,
-                                tags_written: false,
-                                cwa_copied: false,
-                            });
-                        }
-                        Err(e) => {
-                            failed_files.push(FailedFile {
-                                source_name: filename.into_owned(),
-                                error: format!("DB error after copy: {e}"),
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    failed_files.push(FailedFile {
-                        source_name: filename.into_owned(),
-                        error: format!("copy failed: {e}"),
-                    });
-                }
-            }
-        }
-
-        let final_status = if !imported_files.is_empty() {
-            GrabStatus::Imported
-        } else {
-            GrabStatus::ImportFailed
-        };
-
-        Ok(ImportResult {
-            grab_id: 0, // sentinel — manual import, no grab
-            final_status,
-            imported_files,
-            failed_files,
-            skipped_files,
-            warnings: vec![],
-        })
+        // Scan-based import will move to ManualImportService (deferred).
+        Err(ImportWorkflowError::ScanExpired)
     }
 }
 

@@ -1,252 +1,652 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+//! ListService implementation — CSV imports from Goodreads and Hardcover.
+//!
+//! 5-step workflow: preview -> confirm (batched) -> complete -> undo -> list.
+//! All business logic lives here. Handlers: validate -> call ONE service -> map result.
+
+use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::RwLock;
+use tracing::{info, warn};
 
 use livrarr_db::ListImportDb;
 use livrarr_domain::services::*;
-use livrarr_domain::{UserId, WorkId};
+use livrarr_domain::{ProvenanceSetter, UserId};
 
-// ---------------------------------------------------------------------------
-// Internal preview row — stored in memory, separate from domain type
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-struct InternalPreviewRow {
-    title: String,
-    author: Option<String>,
-    isbn: Option<String>,
-    matched_work_id: Option<WorkId>,
-    match_status: ListMatchStatus,
-}
-
-#[derive(Debug, Clone)]
-struct PreviewState {
-    user_id: UserId,
-    source: ListSource,
-    rows: Vec<InternalPreviewRow>,
-}
-
-// ---------------------------------------------------------------------------
-// Parsed row from CSV/JSON input
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct ParsedRow {
-    title: String,
-    author: Option<String>,
-    isbn: Option<String>,
-}
+use crate::parsers::{self, CsvSource, ParseError};
 
 // ---------------------------------------------------------------------------
 // ListServiceImpl
 // ---------------------------------------------------------------------------
 
-pub struct ListServiceImpl<D, W> {
+pub struct ListServiceImpl<D, W, H, B> {
     pub db: D,
     pub work_service: W,
-    previews: Arc<RwLock<HashMap<String, PreviewState>>>,
+    pub http: H,
+    pub bibliography_trigger: B,
 }
 
-impl<D, W> ListServiceImpl<D, W> {
-    pub fn new(db: D, work_service: W) -> Self {
+impl<D, W, H, B> ListServiceImpl<D, W, H, B> {
+    pub fn new(db: D, work_service: W, http: H, bibliography_trigger: B) -> Self {
         Self {
             db,
             work_service,
-            previews: Arc::new(RwLock::new(HashMap::new())),
+            http,
+            bibliography_trigger,
         }
     }
 }
 
-impl<D, W> ListService for ListServiceImpl<D, W>
+// ---------------------------------------------------------------------------
+// OL lookup helpers (private)
+// ---------------------------------------------------------------------------
+
+impl<D, W, H, B> ListServiceImpl<D, W, H, B>
+where
+    H: HttpFetcher + Send + Sync,
+{
+    /// Look up a book on OpenLibrary by ISBN (preferred) or title+author search.
+    /// Returns an AddWorkRequest on success, or an error message.
+    async fn ol_lookup(
+        &self,
+        isbn_13: Option<&str>,
+        isbn_10: Option<&str>,
+        title: &str,
+        author: &str,
+        year: Option<i32>,
+    ) -> Result<AddWorkRequest, String> {
+        // Try ISBN lookup first (more precise).
+        let isbn = isbn_13.or(isbn_10);
+        if let Some(isbn) = isbn {
+            if let Some(req) = self.ol_isbn_lookup(isbn).await {
+                return Ok(req);
+            }
+        }
+
+        // Fallback: title + author search.
+        self.ol_search(title, author, year).await
+    }
+
+    /// OpenLibrary ISBN lookup -> AddWorkRequest.
+    async fn ol_isbn_lookup(&self, isbn: &str) -> Option<AddWorkRequest> {
+        let url = format!("https://openlibrary.org/isbn/{isbn}.json");
+        let req = FetchRequest {
+            url,
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(10),
+            rate_bucket: RateBucket::OpenLibrary,
+            max_body_bytes: 1024 * 1024,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+        };
+
+        let resp = self.http.fetch(req).await.ok()?;
+        if resp.status != 200 {
+            return None;
+        }
+
+        let data: serde_json::Value = serde_json::from_slice(&resp.body).ok()?;
+
+        // ISBN endpoint returns an edition — follow the works link.
+        let works_key = data
+            .get("works")
+            .and_then(|w| w.as_array())
+            .and_then(|a| a.first())
+            .and_then(|w| w.get("key"))
+            .and_then(|k| k.as_str())?;
+
+        let ol_key = works_key.trim_start_matches("/works/").to_string();
+
+        // Fetch the work record for title/author.
+        let work_url = format!("https://openlibrary.org{works_key}.json");
+        let work_req = FetchRequest {
+            url: work_url,
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(10),
+            rate_bucket: RateBucket::OpenLibrary,
+            max_body_bytes: 1024 * 1024,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+        };
+
+        let work_resp = self.http.fetch(work_req).await.ok()?;
+        let work_data: serde_json::Value = serde_json::from_slice(&work_resp.body).ok()?;
+
+        let title = work_data
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+
+        // Get author from the work's authors array.
+        let author_keys = work_data
+            .get("authors")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let (author_name, author_ol_key) = if let Some(first) = author_keys.first() {
+            let author_key = first
+                .get("author")
+                .and_then(|a| a.get("key"))
+                .or_else(|| first.get("key"))
+                .and_then(|k| k.as_str())
+                .unwrap_or("");
+
+            let author_ol = author_key.trim_start_matches("/authors/").to_string();
+
+            // Fetch author name from OL author endpoint.
+            let name = if !author_key.is_empty() {
+                let author_url = format!("https://openlibrary.org{author_key}.json");
+                let author_req = FetchRequest {
+                    url: author_url,
+                    method: HttpMethod::Get,
+                    headers: vec![],
+                    body: None,
+                    timeout: Duration::from_secs(5),
+                    rate_bucket: RateBucket::OpenLibrary,
+                    max_body_bytes: 1024 * 1024,
+                    anti_bot_check: false,
+                    user_agent: UserAgentProfile::Server,
+                };
+                match self.http.fetch(author_req).await {
+                    Ok(resp) => serde_json::from_slice::<serde_json::Value>(&resp.body)
+                        .ok()
+                        .and_then(|v| v.get("name")?.as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    Err(_) => "Unknown".to_string(),
+                }
+            } else {
+                "Unknown".to_string()
+            };
+
+            (name, Some(author_ol).filter(|s| !s.is_empty()))
+        } else {
+            ("Unknown".to_string(), None)
+        };
+
+        let year = data
+            .get("publish_date")
+            .and_then(|d| d.as_str())
+            .and_then(|d| {
+                d.split_whitespace()
+                    .find_map(|w| w.parse::<i32>().ok().filter(|&y| y > 1000 && y < 3000))
+            });
+
+        let cover_url = data
+            .get("covers")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.as_i64())
+            .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
+
+        Some(AddWorkRequest {
+            ol_key: Some(ol_key),
+            title,
+            author_name,
+            author_ol_key,
+            year,
+            cover_url,
+            metadata_source: None,
+            language: None,
+            detail_url: None,
+            gr_key: None,
+            series_name: None,
+            series_position: None,
+            defer_enrichment: false,
+            provenance_setter: Some(ProvenanceSetter::Imported),
+        })
+    }
+
+    /// OpenLibrary search by title + author -> AddWorkRequest.
+    async fn ol_search(
+        &self,
+        title: &str,
+        author: &str,
+        csv_year: Option<i32>,
+    ) -> Result<AddWorkRequest, String> {
+        let search_term = format!("{title} {author}");
+        let encoded = urlencoding::encode(&search_term);
+        let url = format!(
+            "https://openlibrary.org/search.json?q={encoded}&limit=5&fields=key,title,author_name,author_key,first_publish_year,cover_i"
+        );
+
+        let req = FetchRequest {
+            url,
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(10),
+            rate_bucket: RateBucket::OpenLibrary,
+            max_body_bytes: 2 * 1024 * 1024,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+        };
+
+        let resp = self
+            .http
+            .fetch(req)
+            .await
+            .map_err(|e| format!("OpenLibrary request failed: {e}"))?;
+
+        if resp.status != 200 {
+            return Err(format!("OpenLibrary returned {}", resp.status));
+        }
+
+        let data: serde_json::Value = serde_json::from_slice(&resp.body)
+            .map_err(|e| format!("OpenLibrary parse error: {e}"))?;
+
+        let docs = data
+            .get("docs")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| "no results from OpenLibrary".to_string())?;
+
+        let doc = docs
+            .first()
+            .ok_or_else(|| format!("no OpenLibrary results for '{title}' by '{author}'"))?;
+
+        let key = doc
+            .get("key")
+            .and_then(|k| k.as_str())
+            .ok_or_else(|| "missing key in OL result".to_string())?;
+        let ol_key = key.trim_start_matches("/works/").to_string();
+
+        let result_title = doc
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or(title)
+            .to_string();
+
+        let author_name = doc
+            .get("author_name")
+            .and_then(|a| a.as_array())
+            .and_then(|a| a.first())
+            .and_then(|a| a.as_str())
+            .unwrap_or(author)
+            .to_string();
+
+        let author_ol_key = doc
+            .get("author_key")
+            .and_then(|a| a.as_array())
+            .and_then(|a| a.first())
+            .and_then(|a| a.as_str())
+            .map(|k| k.trim_start_matches("/authors/").to_string());
+
+        let year = doc
+            .get("first_publish_year")
+            .and_then(|y| y.as_i64())
+            .map(|y| y as i32)
+            .or(csv_year);
+
+        let cover_url = doc
+            .get("cover_i")
+            .and_then(|c| c.as_i64())
+            .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
+
+        Ok(AddWorkRequest {
+            ol_key: Some(ol_key),
+            title: result_title,
+            author_name,
+            author_ol_key,
+            year,
+            cover_url,
+            metadata_source: None,
+            language: None,
+            detail_url: None,
+            gr_key: None,
+            series_name: None,
+            series_position: None,
+            defer_enrichment: false,
+            provenance_setter: Some(ProvenanceSetter::Imported),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ListService trait implementation
+// ---------------------------------------------------------------------------
+
+impl<D, W, H, B> ListService for ListServiceImpl<D, W, H, B>
 where
     D: ListImportDb + livrarr_db::WorkDb + Send + Sync,
     W: WorkService + Send + Sync,
+    H: HttpFetcher + Send + Sync,
+    B: BibliographyTrigger + Send + Sync,
 {
     async fn preview(
         &self,
         user_id: UserId,
-        req: ListPreviewRequest,
+        bytes: Vec<u8>,
     ) -> Result<ListPreviewResponse, ListServiceError> {
-        if req.content.trim().is_empty() {
-            return Err(ListServiceError::Parse("content is empty".into()));
+        if bytes.is_empty() {
+            return Err(ListServiceError::Parse("uploaded file is empty".into()));
+        }
+        if bytes.len() > 20 * 1024 * 1024 {
+            return Err(ListServiceError::Parse("file too large (max 20MB)".into()));
         }
 
-        let parsed = match req.source {
-            ListSource::GoodreadsCsv => parse_goodreads_csv(&req.content)?,
-            ListSource::OpenLibrary => parse_openlibrary_json(&req.content)?,
+        // Auto-detect source and parse.
+        let stripped = parsers::strip_bom_pub(&bytes);
+        let mut rdr = csv::ReaderBuilder::new()
+            .flexible(true)
+            .from_reader(stripped);
+
+        let headers = rdr
+            .headers()
+            .map_err(|e| ListServiceError::Parse(format!("invalid CSV: {e}")))?
+            .clone();
+
+        let source = parsers::detect_csv_source(&headers).map_err(|e| match e {
+            ParseError::UnknownFormat {
+                detected_headers, ..
+            } => ListServiceError::Parse(format!(
+                "unrecognized CSV format. Detected headers: {}",
+                detected_headers.join(", ")
+            )),
+            other => ListServiceError::Parse(other.to_string()),
+        })?;
+
+        let rows = match source {
+            CsvSource::Goodreads => parsers::parse_goodreads_csv(&bytes),
+            CsvSource::Hardcover => parsers::parse_hardcover_csv(&bytes),
+        }
+        .map_err(|e| ListServiceError::Parse(e.to_string()))?;
+
+        let source_str = match source {
+            CsvSource::Goodreads => "goodreads",
+            CsvSource::Hardcover => "hardcover",
         };
 
-        let import_id = uuid::Uuid::new_v4().to_string();
+        // Generate preview_id.
+        let preview_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
 
-        // Pre-fetch existing works for matching.
-        let existing_works = self
-            .db
-            .list_works(user_id)
-            .await
-            .map_err(ListServiceError::Db)?;
+        // Check local DB for existing works by ISBN and persist preview rows.
+        let mut preview_rows = Vec::with_capacity(rows.len());
 
-        // Build preview rows by checking existing works.
-        let mut internal_rows = Vec::with_capacity(parsed.len());
-        for p in parsed {
-            let (match_status, matched_work_id) = if p.title.is_empty() {
-                (ListMatchStatus::NotFound, None)
+        for row in &rows {
+            let status = if row.title.is_empty() {
+                "parse_error"
             } else {
-                // Check by ISBN first.
-                let isbn_exists = if let Some(ref isbn) = p.isbn {
-                    self.db
-                        .work_exists_by_isbn_13(user_id, isbn)
-                        .await
-                        .unwrap_or(false)
+                // Check if work already exists by ISBN.
+                let exists = check_work_exists_by_isbn(
+                    &self.db,
+                    user_id,
+                    row.isbn_13.as_deref(),
+                    row.isbn_10.as_deref(),
+                )
+                .await;
+                if exists {
+                    "already_exists"
                 } else {
-                    false
-                };
-
-                if isbn_exists {
-                    (ListMatchStatus::AlreadyExists, None)
-                } else {
-                    // Fallback: check by normalized title.
-                    let normalized_title = p.title.trim().to_lowercase();
-                    let existing = existing_works
-                        .iter()
-                        .find(|w| w.title.trim().to_lowercase() == normalized_title);
-                    if let Some(w) = existing {
-                        (ListMatchStatus::AlreadyExists, Some(w.id))
-                    } else if p.isbn.is_some() || !p.title.is_empty() {
-                        (ListMatchStatus::Matched, None)
-                    } else {
-                        (ListMatchStatus::NotFound, None)
-                    }
+                    "new"
                 }
             };
 
-            internal_rows.push(InternalPreviewRow {
-                title: p.title,
-                author: p.author,
-                isbn: p.isbn,
-                matched_work_id,
-                match_status,
+            // Persist to preview table.
+            if let Err(e) = self
+                .db
+                .insert_list_import_preview_row(
+                    &preview_id,
+                    user_id,
+                    row.row_index as i64,
+                    &row.title,
+                    &row.author,
+                    row.isbn_13.as_deref(),
+                    row.isbn_10.as_deref(),
+                    row.year,
+                    row.status.map(|s| format!("{s:?}")).as_deref(),
+                    row.rating,
+                    status,
+                    source_str,
+                    &now,
+                )
+                .await
+            {
+                return Err(ListServiceError::Db(e));
+            }
+
+            preview_rows.push(ListPreviewRow {
+                row_index: row.row_index,
+                title: row.title.clone(),
+                author: row.author.clone(),
+                isbn_13: row.isbn_13.clone(),
+                isbn_10: row.isbn_10.clone(),
+                year: row.year,
+                source_status: row.status.map(|s| format!("{s:?}")),
+                source_rating: row.rating,
+                preview_status: status.to_string(),
             });
         }
 
-        // Build response rows.
-        let response_rows: Vec<ListPreviewRow> = internal_rows
-            .iter()
-            .map(|r| ListPreviewRow {
-                title: r.title.clone(),
-                author: r.author.clone(),
-                isbn: r.isbn.clone(),
-                matched_work_id: r.matched_work_id,
-                match_status: r.match_status,
-            })
-            .collect();
-
-        // Store preview state.
-        let state = PreviewState {
+        info!(
             user_id,
-            source: req.source,
-            rows: internal_rows,
-        };
-        self.previews.write().await.insert(import_id.clone(), state);
+            source = source_str,
+            rows = preview_rows.len(),
+            preview_id = %preview_id,
+            "list import preview created"
+        );
 
         Ok(ListPreviewResponse {
-            rows: response_rows,
-            import_id,
+            preview_id,
+            source: source_str.to_string(),
+            total_rows: preview_rows.len(),
+            rows: preview_rows,
         })
     }
 
     async fn confirm(
         &self,
         user_id: UserId,
-        import_id: &str,
+        preview_id: &str,
+        import_id: Option<&str>,
+        row_indices: &[usize],
     ) -> Result<ListConfirmResponse, ListServiceError> {
-        // Single-use: remove preview state.
-        let state = self
-            .previews
-            .write()
+        // Validate preview exists for this user.
+        let preview_count = self
+            .db
+            .count_list_import_previews(preview_id, user_id)
             .await
-            .remove(import_id)
-            .ok_or(ListServiceError::NotFound)?;
+            .map_err(ListServiceError::Db)?;
 
-        if state.user_id != user_id {
-            return Err(ListServiceError::NotFound);
+        if preview_count == 0 {
+            return Err(ListServiceError::Parse(
+                "preview not found or expired".into(),
+            ));
         }
 
-        // Create import record in DB.
-        let source_str = match state.source {
-            ListSource::GoodreadsCsv => "goodreads",
-            ListSource::OpenLibrary => "openlibrary",
-        };
-        let now = Utc::now().to_rfc3339();
-        let _ = self
-            .db
-            .create_list_import_record(import_id, user_id, source_str, &now)
-            .await;
+        // Get or create import record.
+        let resolved_import_id = if let Some(id) = import_id {
+            // Validate ownership and status.
+            let record = self
+                .db
+                .get_list_import_record(id)
+                .await
+                .map_err(ListServiceError::Db)?
+                .ok_or(ListServiceError::NotFound)?;
 
-        let mut added: usize = 0;
-        let mut skipped: usize = 0;
-        let mut failed: Vec<ListFailedRow> = Vec::new();
-
-        for row in &state.rows {
-            if row.match_status == ListMatchStatus::AlreadyExists {
-                skipped += 1;
-                continue;
+            if record.user_id != user_id {
+                return Err(ListServiceError::NotFound);
             }
+            if record.status != "running" {
+                return Err(ListServiceError::Conflict(format!(
+                    "import is {}, not running",
+                    record.status
+                )));
+            }
+            id.to_string()
+        } else {
+            // Get source from preview.
+            let source = self
+                .db
+                .get_list_import_source(preview_id, user_id)
+                .await
+                .map_err(ListServiceError::Db)?;
 
-            let add_req = AddWorkRequest {
-                title: row.title.clone(),
-                author_name: row.author.clone().unwrap_or_default(),
-                author_ol_key: None,
-                ol_key: None,
-                gr_key: None,
-                year: None,
-                cover_url: None,
-                metadata_source: None,
-                language: None,
-                detail_url: None,
-                series_name: None,
-                series_position: None,
-                defer_enrichment: false,
-                provenance_setter: None,
+            // Create new import record.
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = Utc::now().to_rfc3339();
+            self.db
+                .create_list_import_record(&id, user_id, &source, &now)
+                .await
+                .map_err(ListServiceError::Db)?;
+            id
+        };
+
+        // Process each requested row.
+        let mut results = Vec::with_capacity(row_indices.len());
+        let mut works_created: i64 = 0;
+        let mut new_author_ids: Vec<i64> = Vec::new();
+
+        for &row_idx in row_indices {
+            let row = self
+                .db
+                .get_list_import_preview_row(preview_id, user_id, row_idx as i64)
+                .await
+                .map_err(ListServiceError::Db)?;
+
+            let row = match row {
+                Some(r) => r,
+                None => {
+                    results.push(ListConfirmRowResult {
+                        row_index: row_idx,
+                        status: "add_failed".into(),
+                        message: Some("row not found in preview".into()),
+                    });
+                    continue;
+                }
             };
 
+            // OL lookup: ISBN first, fallback to title+author search.
+            let lookup_result = self
+                .ol_lookup(
+                    row.isbn_13.as_deref(),
+                    row.isbn_10.as_deref(),
+                    &row.title,
+                    &row.author,
+                    row.year,
+                )
+                .await;
+
+            let add_req = match lookup_result {
+                Ok(req) => req,
+                Err(msg) => {
+                    results.push(ListConfirmRowResult {
+                        row_index: row_idx,
+                        status: "lookup_error".into(),
+                        message: Some(msg),
+                    });
+                    continue;
+                }
+            };
+
+            // Try to add via WorkService.
             match self.work_service.add(user_id, add_req).await {
-                Ok(_work) => {
-                    let _ = self.db.tag_last_work_with_import(import_id, user_id).await;
-                    added += 1;
+                Ok(add_result) => {
+                    // Tag the work with import_id (explicit, race-free).
+                    if let Err(e) = self
+                        .db
+                        .tag_work_with_import(user_id, add_result.work.id, &resolved_import_id)
+                        .await
+                    {
+                        warn!(
+                            user_id,
+                            work_id = add_result.work.id,
+                            import_id = %resolved_import_id,
+                            "tag_work_with_import failed (non-fatal): {e}"
+                        );
+                    }
+
+                    // Track new authors for bibliography trigger.
+                    if add_result.author_created {
+                        if let Some(author_id) = add_result.author_id {
+                            if !new_author_ids.contains(&author_id) {
+                                new_author_ids.push(author_id);
+                            }
+                        }
+                    }
+
+                    works_created += 1;
+                    results.push(ListConfirmRowResult {
+                        row_index: row_idx,
+                        status: "added".into(),
+                        message: None,
+                    });
                 }
                 Err(WorkServiceError::AlreadyExists) => {
-                    skipped += 1;
+                    results.push(ListConfirmRowResult {
+                        row_index: row_idx,
+                        status: "already_exists".into(),
+                        message: None,
+                    });
                 }
                 Err(e) => {
-                    failed.push(ListFailedRow {
-                        title: row.title.clone(),
-                        error: e.to_string(),
+                    warn!(row_idx, error = %e, "list import: add_work failed");
+                    results.push(ListConfirmRowResult {
+                        row_index: row_idx,
+                        status: "add_failed".into(),
+                        message: Some(format!("{e}")),
                     });
                 }
             }
         }
 
-        // Update import record.
-        let _ = self
+        // Update import counters (non-fatal if this fails).
+        if let Err(e) = self
             .db
-            .increment_list_import_works_created(import_id, added as i64)
-            .await;
-        let completed_at = Utc::now().to_rfc3339();
-        let _ = self
-            .db
-            .complete_list_import(import_id, user_id, &completed_at)
-            .await;
+            .increment_list_import_works_created(&resolved_import_id, works_created)
+            .await
+        {
+            warn!(
+                import_id = %resolved_import_id,
+                "increment_list_import_works_created failed (non-fatal): {e}"
+            );
+        }
+
+        // Trigger bibliography for newly created authors.
+        for author_id in new_author_ids {
+            self.bibliography_trigger.trigger(author_id, user_id);
+        }
+
+        info!(
+            user_id,
+            import_id = %resolved_import_id,
+            batch_size = row_indices.len(),
+            works_created,
+            "list import confirm batch processed"
+        );
 
         Ok(ListConfirmResponse {
-            added,
-            skipped,
-            failed,
+            import_id: resolved_import_id,
+            results,
         })
     }
 
-    async fn undo(&self, user_id: UserId, import_id: &str) -> Result<usize, ListServiceError> {
+    async fn complete(&self, user_id: UserId, import_id: &str) -> Result<(), ListServiceError> {
+        let now = Utc::now().to_rfc3339();
+        let rows_affected = self
+            .db
+            .complete_list_import(import_id, user_id, &now)
+            .await
+            .map_err(ListServiceError::Db)?;
+
+        if rows_affected == 0 {
+            return Err(ListServiceError::NotFound);
+        }
+
+        info!(user_id, import_id = %import_id, "list import completed");
+        Ok(())
+    }
+
+    async fn undo(
+        &self,
+        user_id: UserId,
+        import_id: &str,
+    ) -> Result<ListUndoResponse, ListServiceError> {
+        // Validate import exists and belongs to user.
         let status = self
             .db
             .get_list_import_status_for_user(import_id, user_id)
@@ -255,22 +655,51 @@ where
             .ok_or(ListServiceError::NotFound)?;
 
         if status == "undone" {
-            return Err(ListServiceError::NotFound);
+            return Err(ListServiceError::Conflict("import already undone".into()));
         }
 
-        let deleted = self
+        // Enumerate works created by this import and delete via WorkService.
+        let work_ids = self
             .db
-            .delete_works_by_list_import(import_id, user_id)
+            .list_works_by_import(import_id, user_id)
             .await
             .map_err(ListServiceError::Db)?;
 
-        if deleted == 0 {
-            return Err(ListServiceError::NotFound);
+        let mut works_removed: usize = 0;
+        let mut works_skipped: usize = 0;
+
+        for work_id in &work_ids {
+            match self.work_service.delete(user_id, *work_id).await {
+                Ok(()) => works_removed += 1,
+                Err(e) => {
+                    warn!(
+                        user_id,
+                        work_id,
+                        import_id = %import_id,
+                        "undo: work delete failed (skipping): {e}"
+                    );
+                    works_skipped += 1;
+                }
+            }
         }
 
-        let _ = self.db.mark_list_import_undone(import_id).await;
+        // Mark import as undone.
+        if let Err(e) = self.db.mark_list_import_undone(import_id).await {
+            warn!(import_id = %import_id, "mark_list_import_undone failed: {e}");
+        }
 
-        Ok(deleted as usize)
+        info!(
+            user_id,
+            import_id = %import_id,
+            works_removed,
+            works_skipped,
+            "list import undone"
+        );
+
+        Ok(ListUndoResponse {
+            works_removed,
+            works_skipped,
+        })
     }
 
     async fn list_imports(
@@ -285,21 +714,13 @@ where
 
         let summaries = rows
             .into_iter()
-            .map(|r| {
-                let source = match r.source.as_str() {
-                    "goodreads" => ListSource::GoodreadsCsv,
-                    _ => ListSource::OpenLibrary,
-                };
-                ListImportSummary {
-                    import_id: r.id,
-                    source,
-                    added_count: r.works_created as usize,
-                    skipped_count: 0,
-                    failed_count: 0,
-                    created_at: chrono::DateTime::parse_from_rfc3339(&r.started_at)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                }
+            .map(|r| ListImportSummary {
+                id: r.id,
+                source: r.source,
+                status: r.status,
+                started_at: r.started_at,
+                completed_at: r.completed_at,
+                works_created: r.works_created,
             })
             .collect();
 
@@ -308,116 +729,46 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// CSV / JSON Parsers
+// Helpers
 // ---------------------------------------------------------------------------
 
-fn parse_goodreads_csv(content: &str) -> Result<Vec<ParsedRow>, ListServiceError> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .flexible(true)
-        .from_reader(content.as_bytes());
-
-    let headers = rdr
-        .headers()
-        .map_err(|e| ListServiceError::Parse(format!("invalid CSV headers: {e}")))?
-        .clone();
-
-    let find_col = |name: &str| -> Option<usize> {
-        headers
-            .iter()
-            .position(|h| h.trim().eq_ignore_ascii_case(name))
-    };
-
-    let title_idx = find_col("Title")
-        .ok_or_else(|| ListServiceError::Parse("missing 'Title' column".into()))?;
-    let author_idx = find_col("Author").or_else(|| find_col("Author l-f"));
-    let isbn_idx = find_col("ISBN13").or_else(|| find_col("ISBN"));
-
-    let mut rows = Vec::new();
-    for result in rdr.records() {
-        let record = result.map_err(|e| ListServiceError::Parse(format!("CSV row error: {e}")))?;
-        let title = record
-            .get(title_idx)
-            .unwrap_or("")
-            .trim()
-            .trim_matches('"')
-            .to_string();
-        let author = author_idx.and_then(|i| {
-            let v = record.get(i).unwrap_or("").trim().to_string();
-            if v.is_empty() {
-                None
-            } else {
-                Some(v)
-            }
-        });
-        let isbn = isbn_idx.and_then(|i| {
-            let v = record
-                .get(i)
-                .unwrap_or("")
-                .trim()
-                .trim_matches('"')
-                .trim_matches('=')
-                .trim_matches('"')
-                .to_string();
-            if v.is_empty() || v == "\"\"" {
-                None
-            } else {
-                Some(v)
-            }
-        });
-
-        if !title.is_empty() {
-            rows.push(ParsedRow {
-                title,
-                author,
-                isbn,
-            });
+/// Check if a work already exists for this user by ISBN-13 or ISBN-10.
+async fn check_work_exists_by_isbn<D: ListImportDb>(
+    db: &D,
+    user_id: i64,
+    isbn_13: Option<&str>,
+    isbn_10: Option<&str>,
+) -> bool {
+    if let Some(isbn) = isbn_13 {
+        if db
+            .work_exists_by_isbn_13(user_id, isbn)
+            .await
+            .unwrap_or(false)
+        {
+            return true;
         }
     }
-
-    if rows.is_empty() {
-        return Err(ListServiceError::Parse("no valid rows found".into()));
+    if let Some(isbn) = isbn_10 {
+        if db
+            .work_exists_by_isbn_10(user_id, isbn)
+            .await
+            .unwrap_or(false)
+        {
+            return true;
+        }
     }
-
-    Ok(rows)
+    false
 }
 
-fn parse_openlibrary_json(content: &str) -> Result<Vec<ParsedRow>, ListServiceError> {
-    let items: Vec<serde_json::Value> = serde_json::from_str(content)
-        .map_err(|e| ListServiceError::Parse(format!("invalid JSON: {e}")))?;
+// ---------------------------------------------------------------------------
+// No-op BibliographyTrigger for tests
+// ---------------------------------------------------------------------------
 
-    let mut rows = Vec::new();
-    for item in &items {
-        let title = item
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let author = item
-            .get("author")
-            .or_else(|| item.get("author_name"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let isbn = item
-            .get("isbn_13")
-            .or_else(|| item.get("isbn"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+/// No-op bibliography trigger for unit/behavioral tests.
+pub struct NoOpBibliographyTrigger;
 
-        if !title.is_empty() {
-            rows.push(ParsedRow {
-                title,
-                author,
-                isbn,
-            });
-        }
+impl BibliographyTrigger for NoOpBibliographyTrigger {
+    fn trigger(&self, _author_id: i64, _user_id: UserId) {
+        // no-op
     }
-
-    if rows.is_empty() {
-        return Err(ListServiceError::Parse("no valid items found".into()));
-    }
-
-    Ok(rows)
 }

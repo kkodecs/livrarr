@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use crate::{
     Author, AuthorId, DbError, EnrichmentStatus, Grab, GrabId, GrabStatus, LibraryItem, MediaType,
-    MetadataProvider, OutcomeClass, ProvenanceSetter, Series, UserId, Work, WorkId,
+    MetadataProvider, OutcomeClass, PlaybackProgress, ProvenanceSetter, Series, UserId, Work,
+    WorkId,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -554,11 +555,13 @@ pub struct ScannedFile {
     pub has_existing_item: bool,
 }
 
-pub struct FileStream {
-    pub reader: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
-    pub size: u64,
-    pub media_type: MediaType,
+/// Prepared email payload — contains validated file data for the handler to send via SMTP.
+/// The handler is responsible for fetching `EmailConfig` and calling `email::send_file`.
+#[derive(Debug)]
+pub struct EmailPayload {
+    pub file_bytes: Vec<u8>,
     pub filename: String,
+    pub extension: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -567,12 +570,10 @@ pub enum FileServiceError {
     NotFound,
     #[error("root folder not found")]
     RootFolderNotFound,
-    #[error("scan not found or expired")]
-    ScanExpired,
-    #[error("scan belongs to another user")]
-    ScanForbidden,
-    #[error("tag write failed: {0}")]
-    TagWrite(String),
+    #[error("path traversal denied")]
+    Forbidden,
+    #[error("bad request: {0}")]
+    BadRequest(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("database error: {0}")]
@@ -583,6 +584,8 @@ pub enum FileServiceError {
 // List Service types
 // =============================================================================
 
+/// Kept for backward compatibility with existing behavioral tests.
+/// New code should use the redesigned preview(bytes) API.
 #[derive(Debug)]
 pub struct ListPreviewRequest {
     pub source: ListSource,
@@ -594,23 +597,33 @@ pub struct ListPreviewRequest {
 pub enum ListSource {
     GoodreadsCsv,
     OpenLibrary,
+    Hardcover,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListPreviewResponse {
+    pub preview_id: String,
+    pub source: String,
+    pub total_rows: usize,
     pub rows: Vec<ListPreviewRow>,
-    pub import_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListPreviewRow {
+    pub row_index: usize,
     pub title: String,
-    pub author: Option<String>,
-    pub isbn: Option<String>,
-    pub matched_work_id: Option<WorkId>,
-    pub match_status: ListMatchStatus,
+    pub author: String,
+    pub isbn_13: Option<String>,
+    pub isbn_10: Option<String>,
+    pub year: Option<i32>,
+    pub source_status: Option<String>,
+    pub source_rating: Option<f32>,
+    pub preview_status: String,
 }
 
+/// Legacy match status for backward-compat behavioral tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListMatchStatus {
@@ -619,8 +632,24 @@ pub enum ListMatchStatus {
     AlreadyExists,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListConfirmResponse {
+    pub import_id: String,
+    pub results: Vec<ListConfirmRowResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListConfirmRowResult {
+    pub row_index: usize,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+/// Legacy response shape for backward-compat behavioral tests.
+#[derive(Debug)]
+pub struct ListConfirmLegacyResponse {
     pub added: usize,
     pub skipped: usize,
     pub failed: Vec<ListFailedRow>,
@@ -632,14 +661,22 @@ pub struct ListFailedRow {
     pub error: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListUndoResponse {
+    pub works_removed: usize,
+    pub works_skipped: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListImportSummary {
-    pub import_id: String,
-    pub source: ListSource,
-    pub added_count: usize,
-    pub skipped_count: usize,
-    pub failed_count: usize,
-    pub created_at: DateTime<Utc>,
+    pub id: String,
+    pub source: String,
+    pub status: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub works_created: i64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -648,6 +685,8 @@ pub enum ListServiceError {
     NotFound,
     #[error("parse error: {0}")]
     Parse(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("database error: {0}")]
     Db(#[from] DbError),
 }
@@ -1111,29 +1150,43 @@ pub trait GrabService: Send + Sync {
 
 #[trait_variant::make(Send)]
 pub trait FileService: Send + Sync {
-    async fn list(
+    // CRUD
+    async fn list_paginated(
         &self,
         user_id: UserId,
-        work_id: Option<WorkId>,
-    ) -> Result<Vec<LibraryItem>, FileServiceError>;
+        page: u32,
+        page_size: u32,
+    ) -> Result<(Vec<LibraryItem>, i64), FileServiceError>;
     async fn get(&self, user_id: UserId, item_id: i64) -> Result<LibraryItem, FileServiceError>;
     async fn delete(&self, user_id: UserId, item_id: i64) -> Result<(), FileServiceError>;
-    async fn retag(&self, user_id: UserId, item_id: i64) -> Result<(), FileServiceError>;
-    async fn read_file(
+
+    // File access — returns validated, canonicalized path for ServeFile
+    async fn resolve_path(
         &self,
         user_id: UserId,
         item_id: i64,
-    ) -> Result<FileStream, FileServiceError>;
-    async fn scan_root_folder(
+    ) -> Result<std::path::PathBuf, FileServiceError>;
+
+    // Email preparation (validation + file read, not SMTP send)
+    async fn prepare_email(
         &self,
         user_id: UserId,
-        root_folder_id: i64,
-    ) -> Result<ScanResult, FileServiceError>;
-    async fn get_scan(
+        item_id: i64,
+    ) -> Result<EmailPayload, FileServiceError>;
+
+    // Progress tracking
+    async fn get_progress(
         &self,
         user_id: UserId,
-        scan_id: &str,
-    ) -> Result<ScanResult, FileServiceError>;
+        item_id: i64,
+    ) -> Result<Option<PlaybackProgress>, FileServiceError>;
+    async fn update_progress(
+        &self,
+        user_id: UserId,
+        item_id: i64,
+        position: &str,
+        progress_pct: f64,
+    ) -> Result<(), FileServiceError>;
 }
 
 #[trait_variant::make(Send)]
@@ -1141,18 +1194,36 @@ pub trait ListService: Send + Sync {
     async fn preview(
         &self,
         user_id: UserId,
-        req: ListPreviewRequest,
+        bytes: Vec<u8>,
     ) -> Result<ListPreviewResponse, ListServiceError>;
+
     async fn confirm(
         &self,
         user_id: UserId,
-        import_id: &str,
+        preview_id: &str,
+        import_id: Option<&str>,
+        row_indices: &[usize],
     ) -> Result<ListConfirmResponse, ListServiceError>;
-    async fn undo(&self, user_id: UserId, import_id: &str) -> Result<usize, ListServiceError>;
+
+    async fn complete(&self, user_id: UserId, import_id: &str) -> Result<(), ListServiceError>;
+
+    async fn undo(
+        &self,
+        user_id: UserId,
+        import_id: &str,
+    ) -> Result<ListUndoResponse, ListServiceError>;
+
     async fn list_imports(
         &self,
         user_id: UserId,
     ) -> Result<Vec<ListImportSummary>, ListServiceError>;
+}
+
+/// Fire-and-forget bibliography fetch trigger for newly created authors.
+/// Trait lives in domain; impl in livrarr-server (spawns background task).
+#[trait_variant::make(Send)]
+pub trait BibliographyTrigger: Send + Sync {
+    fn trigger(&self, author_id: i64, user_id: UserId);
 }
 
 #[trait_variant::make(Send)]
@@ -1197,7 +1268,10 @@ pub trait RssSyncWorkflow: Send + Sync {
 
 #[trait_variant::make(Send)]
 pub trait AuthorMonitorWorkflow: Send + Sync {
-    async fn run_monitor(&self, user_id: UserId) -> Result<MonitorReport, MonitorError>;
+    async fn run_monitor(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<MonitorReport, MonitorError>;
 }
 
 // =============================================================================

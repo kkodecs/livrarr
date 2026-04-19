@@ -30,6 +30,7 @@ pub mod llm_scraper;
 pub mod llm_validator;
 pub mod normalize;
 pub mod openlibrary;
+pub mod parsers;
 pub mod provider_client;
 pub mod provider_queue;
 pub mod series_query_service;

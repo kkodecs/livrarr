@@ -11,3 +11,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 trait-variant = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }

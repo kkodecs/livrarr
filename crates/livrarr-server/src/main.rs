@@ -328,15 +328,11 @@ async fn main() {
         file_service: Arc::new(livrarr_organize::file_service::FileServiceImpl::new(
             svc_db.clone(),
         )),
-        import_workflow: {
-            let fs = livrarr_organize::file_service::FileServiceImpl::new(svc_db.clone());
-            Arc::new(livrarr_organize::import_workflow::ImportWorkflowImpl::new(
-                svc_db.clone(),
-                fs,
-                import_semaphore.clone(),
-                data_dir_arc.clone(),
-            ))
-        },
+        import_workflow: Arc::new(livrarr_organize::import_workflow::ImportWorkflowImpl::new(
+            svc_db.clone(),
+            import_semaphore.clone(),
+            data_dir_arc.clone(),
+        )),
         rss_sync_workflow: {
             let rs = Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
                 svc_db.clone(),
@@ -369,6 +365,9 @@ async fn main() {
             Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
                 svc_db.clone(),
                 ws,
+                livrarr_http::fetcher::HttpFetcherImpl::new()
+                    .expect("HttpFetcherImpl construction for list service"),
+                livrarr_metadata::list_service::NoOpBibliographyTrigger,
             ))
         },
         enrichment_workflow: Arc::new(

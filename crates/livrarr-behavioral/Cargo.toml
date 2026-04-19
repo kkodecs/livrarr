@@ -16,6 +16,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 trait-variant = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true, features = ["test-helpers"] }
