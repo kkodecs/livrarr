@@ -4,6 +4,7 @@ use crate::sqlite::SqliteDb;
 use crate::sqlite_common::map_db_err;
 use crate::{
     DbError, ListImportDb, ListImportPreviewRow, ListImportRecord, ListImportSummaryRow, UserId,
+    WorkId,
 };
 
 impl ListImportDb for SqliteDb {
@@ -318,5 +319,36 @@ impl ListImportDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
         Ok(result.rows_affected())
+    }
+
+    async fn tag_work_with_import(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        import_id: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE works SET import_id = ? WHERE id = ? AND user_id = ?")
+            .bind(import_id)
+            .bind(work_id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        Ok(())
+    }
+
+    async fn list_works_by_import(
+        &self,
+        import_id: &str,
+        user_id: UserId,
+    ) -> Result<Vec<WorkId>, DbError> {
+        let rows: Vec<WorkId> =
+            sqlx::query_scalar("SELECT id FROM works WHERE import_id = ? AND user_id = ?")
+                .bind(import_id)
+                .bind(user_id)
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_db_err)?;
+        Ok(rows)
     }
 }

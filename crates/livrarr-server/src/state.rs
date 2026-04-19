@@ -60,10 +60,13 @@ pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceI
     livrarr_http::fetcher::HttpFetcherImpl,
 >;
 pub type LiveFileService = livrarr_organize::file_service::FileServiceImpl<SqliteDb>;
-pub type LiveImportWorkflow =
-    livrarr_organize::import_workflow::ImportWorkflowImpl<SqliteDb, LiveFileService>;
-pub type LiveListService =
-    livrarr_metadata::list_service::ListServiceImpl<SqliteDb, LiveWorkService>;
+pub type LiveImportWorkflow = livrarr_organize::import_workflow::ImportWorkflowImpl<SqliteDb>;
+pub type LiveListService = livrarr_metadata::list_service::ListServiceImpl<
+    SqliteDb,
+    LiveWorkService,
+    livrarr_http::fetcher::HttpFetcherImpl,
+    livrarr_metadata::list_service::NoOpBibliographyTrigger,
+>;
 pub type LiveRssSyncWorkflow = livrarr_metadata::rss_sync_workflow::RssSyncWorkflowImpl<
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,

@@ -9,6 +9,7 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 trait-variant = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 livrarr-domain = { workspace = true }

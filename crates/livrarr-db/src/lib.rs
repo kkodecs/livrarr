@@ -1448,6 +1448,21 @@ pub trait ListImportDb: Send + Sync {
 
     /// Delete list_import_previews rows older than the given cutoff (RFC3339 string).
     async fn delete_stale_list_import_previews(&self, cutoff: &str) -> Result<u64, DbError>;
+
+    /// Tag a specific work with an import_id. Explicit, race-free (unlike tag_last_work).
+    async fn tag_work_with_import(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        import_id: &str,
+    ) -> Result<(), DbError>;
+
+    /// List work IDs tagged with the given import_id for a user.
+    async fn list_works_by_import(
+        &self,
+        import_id: &str,
+        user_id: UserId,
+    ) -> Result<Vec<WorkId>, DbError>;
 }
 
 // ---------------------------------------------------------------------------

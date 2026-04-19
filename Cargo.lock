@@ -1648,6 +1648,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "trait-variant",
 ]
 
@@ -1680,6 +1681,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "trait-variant",
 ]
 
@@ -1753,6 +1755,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "trait-variant",
  "unicode-normalization",
