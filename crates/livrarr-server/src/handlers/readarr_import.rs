@@ -14,9 +14,10 @@ use crate::readarr_client::{self, RdAuthor, RdBook, RdBookFile, RdRootFolder, Re
 use crate::state::AppState;
 use crate::{ApiError, AuthContext};
 use livrarr_db::{
-    AuthorDb, CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest,
-    CreateWorkDbRequest, ImportDb, LibraryItemDb, RootFolderDb, WorkDb,
+    AuthorDb, CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest, ImportDb,
+    LibraryItemDb, RootFolderDb, WorkDb,
 };
+use livrarr_domain::services::WorkService;
 use livrarr_domain::{
     derive_sort_name, normalize_for_matching, sanitize_path_component, Import, MediaType,
 };
@@ -466,8 +467,27 @@ pub async fn preview(
         book_files_by_book.entry(bf.book_id).or_default().push(bf);
     }
 
-    let existing_authors = state.db.list_authors(user_id).await?;
-    let existing_works = state.db.list_works(user_id).await?;
+    use livrarr_domain::services::{AuthorService, WorkFilter, WorkService};
+    let existing_authors = state
+        .author_service
+        .list(user_id)
+        .await
+        .map_err(ApiError::from)?;
+    let existing_works = state
+        .work_service
+        .list(
+            user_id,
+            WorkFilter {
+                author_id: None,
+                monitored: None,
+                enrichment_status: None,
+                media_type: None,
+                sort_by: None,
+                sort_dir: None,
+            },
+        )
+        .await
+        .map_err(ApiError::from)?;
 
     let mut skipped_items: Vec<SkippedItem> = Vec::new();
     let mut import_files: Vec<PreviewFileItem> = Vec::new();
@@ -1187,46 +1207,26 @@ async fn run_import(
             let monitor_ebook = has_ebook_file || rd_book.monitored.unwrap_or(false);
             let monitor_audiobook = has_audiobook_file;
 
-            // Cleanup title + author at import-time so the locked identity
-            // anchor stores canonical form (Readarr's titles are typically
-            // clean but cleanup is cheap and uniform).
-            let cleaned_title = livrarr_metadata::title_cleanup::clean_title(title);
-            let cleaned_author = livrarr_metadata::title_cleanup::clean_author(author_name);
-            match state
-                .db
-                .create_work(CreateWorkDbRequest {
-                    user_id,
-                    title: cleaned_title,
-                    author_name: cleaned_author,
-                    author_id: livrarr_author_id,
-                    ol_key: None,
-                    gr_key: rd_book.foreign_book_id.clone(),
-                    year,
-                    cover_url,
-                    metadata_source: Some("readarr".to_string()),
-                    detail_url: None,
-                    language,
-                    import_id: Some(import_id.to_string()),
-                    series_id: None,
-                    series_name: None,
-                    series_position: None,
-                    monitor_ebook: false,
-                    monitor_audiobook: false,
-                })
-                .await
-            {
-                Ok(w) => {
+            let add_req = livrarr_domain::services::AddWorkRequest {
+                title: title.to_string(),
+                author_name: author_name.to_string(),
+                author_ol_key: None,
+                ol_key: None,
+                gr_key: rd_book.foreign_book_id.clone(),
+                year,
+                cover_url,
+                metadata_source: Some("readarr".to_string()),
+                language,
+                detail_url: None,
+                series_name: None,
+                series_position: None,
+                defer_enrichment: true,
+                provenance_setter: None,
+            };
+            match state.work_service.add(user_id, add_req).await {
+                Ok(result) => {
+                    let w = result.work;
                     works_created += 1;
-                    // Readarr import is user-validated (Pete's Readarr
-                    // instance picked these works for import) — lock as
-                    // setter=User.
-                    crate::handlers::work::write_addtime_provenance(
-                        &state.db,
-                        user_id,
-                        &w,
-                        livrarr_domain::ProvenanceSetter::User,
-                    )
-                    .await;
 
                     let _ = state
                         .db
