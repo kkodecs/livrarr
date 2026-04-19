@@ -37,6 +37,7 @@ pub mod jobs;
 pub use livrarr_matching as matching;
 pub mod middleware;
 pub mod readarr_client;
+pub mod readarr_import_service;
 pub mod router;
 pub mod services;
 pub mod state;
@@ -1631,6 +1632,17 @@ impl From<livrarr_domain::services::FileServiceError> for ApiError {
             FileServiceError::BadRequest(msg) => ApiError::BadRequest(msg),
             FileServiceError::Io(io_err) => ApiError::Internal(format!("I/O error: {io_err}")),
             FileServiceError::Db(db_err) => ApiError::Db(db_err),
+        }
+    }
+}
+
+impl From<crate::readarr_import_service::ReadarrImportError> for ApiError {
+    fn from(e: crate::readarr_import_service::ReadarrImportError) -> Self {
+        use crate::readarr_import_service::ReadarrImportError;
+        match e {
+            ReadarrImportError::NotFound(msg) => ApiError::BadRequest(msg),
+            ReadarrImportError::Conflict(msg) => ApiError::Conflict { reason: msg },
+            ReadarrImportError::Db(db_err) => ApiError::Db(db_err),
         }
     }
 }
