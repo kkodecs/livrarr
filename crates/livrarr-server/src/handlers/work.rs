@@ -7,72 +7,9 @@ use crate::{
     AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse,
     RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
-use livrarr_db::{NotificationDb, ProvenanceDb, SetFieldProvenanceRequest};
+use livrarr_db::NotificationDb;
 use livrarr_domain::services::{WorkDetailView, WorkService};
-use livrarr_domain::{ProvenanceSetter, Work, WorkField};
-
-/// Write add-time provenance entries for a freshly-created work.
-///
-/// Tracks which identity fields originated at add-time and the setter
-/// (User for user-driven adds, AutoAdded for author-monitor / series-add).
-/// User-set fields act as the LLM identity-lock anchor at enrichment time;
-/// AutoAdded fields are tracked honestly but do not anchor.
-///
-/// Best-effort: errors are logged but do not fail the add — at worst the
-/// work runs unanchored and the LLM check falls back to no-anchor mode
-/// (equivalent to legacy enrichment).
-pub(crate) async fn write_addtime_provenance(
-    db: &livrarr_db::sqlite::SqliteDb,
-    user_id: i64,
-    work: &Work,
-    setter: ProvenanceSetter,
-) {
-    let mut reqs: Vec<SetFieldProvenanceRequest> = Vec::new();
-    let push = |reqs: &mut Vec<SetFieldProvenanceRequest>, field: WorkField| {
-        reqs.push(SetFieldProvenanceRequest {
-            user_id,
-            work_id: work.id,
-            field,
-            source: None,
-            setter,
-            cleared: false,
-        });
-    };
-    if !work.title.is_empty() {
-        push(&mut reqs, WorkField::Title);
-    }
-    if !work.author_name.is_empty() {
-        push(&mut reqs, WorkField::AuthorName);
-    }
-    if work.ol_key.is_some() {
-        push(&mut reqs, WorkField::OlKey);
-    }
-    if work.gr_key.is_some() {
-        push(&mut reqs, WorkField::GrKey);
-    }
-    if work.language.is_some() {
-        push(&mut reqs, WorkField::Language);
-    }
-    if work.year.is_some() {
-        push(&mut reqs, WorkField::Year);
-    }
-    if work.series_name.is_some() {
-        push(&mut reqs, WorkField::SeriesName);
-    }
-    if work.series_position.is_some() {
-        push(&mut reqs, WorkField::SeriesPosition);
-    }
-    if reqs.is_empty() {
-        return;
-    }
-    if let Err(e) = db.set_field_provenance_batch(reqs).await {
-        tracing::warn!(
-            work_id = work.id,
-            ?setter,
-            "write_addtime_provenance failed: {e}"
-        );
-    }
-}
+use livrarr_domain::Work;
 
 fn work_to_detail(w: &Work) -> WorkDetailResponse {
     WorkDetailResponse {
