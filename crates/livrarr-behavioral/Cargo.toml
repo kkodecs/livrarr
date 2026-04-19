@@ -28,6 +28,7 @@ axum = "0.8"
 assert_matches = "1"
 futures = "0.3"
 tempfile = "3"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 
 [[test]]
 name = "test_metadata_overhaul_domain"
@@ -122,3 +123,7 @@ path = "../../tests/behavioral/test_consolidation_author_monitor.rs"
 [[test]]
 name = "test_consolidation_dto"
 path = "../../tests/behavioral/test_consolidation_dto.rs"
+
+[[test]]
+name = "test_stress_phase4a"
+path = "../../tests/behavioral/test_stress_phase4a.rs"
