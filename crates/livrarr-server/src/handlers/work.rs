@@ -250,11 +250,7 @@ pub async fn list(
         .list_paginated(ctx.user.id, pq.page(), pq.page_size())
         .await?;
 
-    let items = view
-        .works
-        .into_iter()
-        .map(|wv| detail_from_view(wv))
-        .collect();
+    let items = view.works.into_iter().map(detail_from_view).collect();
     Ok(Json(crate::PaginatedResponse {
         items,
         total: view.total,

@@ -9,12 +9,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+type RefreshLockMap = Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>;
+
 pub struct WorkServiceImpl<D, E, H> {
     db: D,
     enrichment: E,
     http: H,
     data_dir: PathBuf,
-    refresh_locks: Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>,
+    refresh_locks: RefreshLockMap,
 }
 
 impl<D, E, H> WorkServiceImpl<D, E, H> {

@@ -538,7 +538,7 @@ impl GoodreadsClient {
                 .as_deref()
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty());
-            if cfg.llm_enabled && key.is_some() && endpoint.is_some() {
+            if let (true, Some(endpoint), Some(key)) = (cfg.llm_enabled, endpoint, key) {
                 let model = cfg
                     .llm_model
                     .as_deref()
@@ -553,8 +553,8 @@ impl GoodreadsClient {
                     .unwrap_or("the original");
                 match goodreads::extract_with_llm(
                     &self.http,
-                    endpoint.unwrap(),
-                    key.unwrap(),
+                    endpoint,
+                    key,
                     model,
                     &html,
                     language_hint,

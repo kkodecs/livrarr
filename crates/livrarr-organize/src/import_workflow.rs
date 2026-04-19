@@ -29,8 +29,8 @@ pub type ImportLockMap = Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>;
 pub struct ImportWorkflowImpl<D> {
     db: D,
     import_locks: ImportLockMap,
-    import_semaphore: Arc<tokio::sync::Semaphore>,
-    data_dir: Arc<PathBuf>,
+    _import_semaphore: Arc<tokio::sync::Semaphore>,
+    _data_dir: Arc<PathBuf>,
 }
 
 impl<D> ImportWorkflowImpl<D> {
@@ -42,8 +42,8 @@ impl<D> ImportWorkflowImpl<D> {
         Self {
             db,
             import_locks: Arc::new(Mutex::new(HashMap::new())),
-            import_semaphore,
-            data_dir,
+            _import_semaphore: import_semaphore,
+            _data_dir: data_dir,
         }
     }
 

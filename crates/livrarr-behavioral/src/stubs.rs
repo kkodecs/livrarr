@@ -16,6 +16,12 @@ pub struct StubHttpFetcher {
     call_count: Arc<AtomicUsize>,
 }
 
+impl Default for StubHttpFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StubHttpFetcher {
     pub fn new() -> Self {
         Self {
@@ -94,8 +100,7 @@ impl StubHttpFetcher {
                 }),
             }
         } else {
-            let r = responses.remove(0);
-            r
+            responses.remove(0)
         }
     }
 }
