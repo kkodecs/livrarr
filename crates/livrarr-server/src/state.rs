@@ -49,8 +49,11 @@ pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::Series
     livrarr_http::fetcher::HttpFetcherImpl,
     LiveEnrichmentWorkflow,
 >;
-pub type LiveWorkService =
-    livrarr_metadata::work_service::WorkServiceImpl<SqliteDb, LiveEnrichmentWorkflow>;
+pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
+    SqliteDb,
+    LiveEnrichmentWorkflow,
+    livrarr_http::fetcher::HttpFetcherImpl,
+>;
 pub type LiveGrabService = livrarr_download::grab_service::GrabServiceImpl<SqliteDb>;
 pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceImpl<
     SqliteDb,

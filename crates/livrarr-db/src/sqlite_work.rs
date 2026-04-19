@@ -697,7 +697,8 @@ impl WorkDb for SqliteDb {
                     }
                     ProvenanceSetter::User
                     | ProvenanceSetter::System
-                    | ProvenanceSetter::AutoAdded => {
+                    | ProvenanceSetter::AutoAdded
+                    | ProvenanceSetter::Imported => {
                         if prov.source.is_some() {
                             return Err(DbError::Constraint {
                                 message: "user/system/auto_added setter must not have a source"

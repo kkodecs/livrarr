@@ -867,6 +867,8 @@ pub enum ProvenanceSetter {
     /// for LLM identity verification. A user-confirm UX (future) can
     /// transition AutoAdded → User on confirm.
     AutoAdded,
+    /// Field value originated from a bulk list import (CSV upload).
+    Imported,
 }
 
 /// Provenance record for a single field value.

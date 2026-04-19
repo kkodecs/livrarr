@@ -176,6 +176,7 @@ where
                         series_name: None,
                         series_position: None,
                         defer_enrichment: false,
+                        provenance_setter: None,
                     };
 
                     match self.work_service.add(user_id, add_req).await {
