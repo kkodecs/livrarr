@@ -117,7 +117,7 @@ export default function GuidedTour({
           padding: 16,
           backgroundColor: "#27272a",
           color: "#e4e4e7",
-          zIndex: 10000,
+          zIndex: 40,
         },
         tooltipTitle: {
           color: "#e4e4e7",

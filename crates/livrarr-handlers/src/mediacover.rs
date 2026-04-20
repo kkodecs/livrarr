@@ -24,7 +24,7 @@ pub async fn get_thumb<S: AppContext>(
 
     if !thumb_path.exists() {
         if !full_path.exists() {
-            return StatusCode::NOT_FOUND.into_response();
+            return placeholder_response();
         }
         match tokio::fs::read(&full_path).await {
             Ok(bytes) => {
@@ -41,7 +41,7 @@ pub async fn get_thumb<S: AppContext>(
                 })
                 .await;
             }
-            Err(_) => return StatusCode::NOT_FOUND.into_response(),
+            Err(_) => return placeholder_response(),
         }
     }
 
@@ -65,9 +65,29 @@ fn generate_thumbnail_jpeg(bytes: &[u8], max_width: u32) -> Result<Vec<u8>, Stri
     Ok(out)
 }
 
+const PLACEHOLDER_SVG: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 180'><rect width='120' height='180' rx='4' fill='rgb(39,39,42)'/></svg>";
+
+fn placeholder_response() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("image/svg+xml"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=30"),
+            ),
+        ],
+        PLACEHOLDER_SVG.to_owned().into_bytes(),
+    )
+        .into_response()
+}
+
 async fn serve_image(path: &std::path::Path, id: i64, req_headers: &HeaderMap) -> Response {
     if !path.exists() {
-        return StatusCode::NOT_FOUND.into_response();
+        return placeholder_response();
     }
 
     let etag = tokio::fs::metadata(path)

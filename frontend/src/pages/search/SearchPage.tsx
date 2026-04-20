@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useSearchParams, useNavigate, Link } from "react-router";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Search, Plus, Loader2, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 import { lookupWorks, addWork, listWorks, getMetadataConfig } from "@/api";
@@ -18,6 +18,7 @@ import { ApiError } from "@/api/client";
 
 export default function SearchPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const query = searchParams.get("q")?.trim() ?? "";
   const urlLang = searchParams.get("lang") ?? "";
@@ -102,6 +103,8 @@ export default function SearchPage() {
     },
     onSuccess: (data: AddWorkResponse) => {
       setAddingKey(null);
+      queryClient.invalidateQueries({ queryKey: ["works"] });
+      queryClient.invalidateQueries({ queryKey: ["authors"] });
       data.messages.forEach((msg) => toast.success(msg));
       navigate(`/work/${data.work.id}`);
     },

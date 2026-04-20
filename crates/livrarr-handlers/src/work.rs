@@ -12,7 +12,7 @@ use crate::{
 };
 use livrarr_domain::services::{
     AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
-    TagService, WorkDetailView, WorkService,
+    SeriesQueryService, TagService, WorkDetailView, WorkService,
 };
 use livrarr_domain::Work;
 
@@ -185,8 +185,23 @@ pub async fn add<S: AppContext>(
                     tracing::debug!(author_id, "background bibliography fetch skipped: {e}");
                 }
             });
+
+            let s_gr = state.clone();
+            let uid = ctx.user.id;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if let Err(e) = s_gr
+                    .series_query_service()
+                    .resolve_gr_candidates(uid, author_id)
+                    .await
+                {
+                    tracing::debug!(author_id, "background GR resolve skipped: {e}");
+                }
+            });
         }
     }
+
+    state.enrichment_notify().notify_one();
 
     Ok(Json(AddWorkResponse {
         work: work_to_detail(&result.work),

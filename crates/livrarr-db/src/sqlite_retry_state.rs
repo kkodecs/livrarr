@@ -292,7 +292,7 @@ impl crate::ProviderRetryStateDb for SqliteDb {
              JOIN works w ON prs.work_id = w.id \
              WHERE w.user_id = ? AND prs.next_attempt_at IS NOT NULL \
              AND prs.next_attempt_at <= ? \
-             ORDER BY prs.work_id",
+             ORDER BY w.added_at ASC, prs.work_id ASC",
         )
         .bind(user_id)
         .bind(&now_str)

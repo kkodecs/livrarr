@@ -84,4 +84,5 @@ pub trait AppContext: Clone + Send + Sync + 'static {
     fn rss_sync(&self) -> &Self::RssSync;
     fn system(&self) -> &Self::System;
     fn cover_proxy_cache(&self) -> &Self::CoverCache;
+    fn enrichment_notify(&self) -> &tokio::sync::Notify;
 }

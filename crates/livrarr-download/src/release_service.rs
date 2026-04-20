@@ -81,182 +81,7 @@ fn is_ssrf_url(url: &str) -> bool {
     false
 }
 
-/// Parse Torznab XML response into ReleaseResult items.
-/// Returns (results, warnings). Items missing guid or download_url are skipped with warning.
-fn parse_torznab_xml(xml: &[u8], indexer_name: &str) -> (Vec<ReleaseResult>, Vec<String>) {
-    let mut results = Vec::new();
-    let mut warnings = Vec::new();
-
-    let xml_str = match std::str::from_utf8(xml) {
-        Ok(s) => s,
-        Err(e) => {
-            warnings.push(format!(
-                "indexer {indexer_name}: invalid UTF-8 in response: {e}"
-            ));
-            return (results, warnings);
-        }
-    };
-
-    // Simple XML parsing for Torznab responses.
-    // Torznab XML format:
-    // <rss><channel><item>
-    //   <title>...</title>
-    //   <guid>...</guid>
-    //   <link>...</link> (or <enclosure url="...">)
-    //   <size>...</size>
-    //   <newznab:attr name="seeders" value="..."/>
-    //   <newznab:attr name="peers" value="..."/>
-    //   <newznab:attr name="category" value="..."/>
-    //   <pubDate>...</pubDate>
-    // </item></channel></rss>
-
-    // Split into items
-    let items: Vec<&str> = xml_str.split("<item>").skip(1).collect();
-
-    for item_str in items {
-        let item_end = item_str.find("</item>").unwrap_or(item_str.len());
-        let item_xml = &item_str[..item_end];
-
-        let title = extract_xml_element(item_xml, "title").unwrap_or_default();
-        let guid = extract_xml_element(item_xml, "guid");
-        let link = extract_xml_element(item_xml, "link");
-        let enclosure_url = extract_xml_attr(item_xml, "enclosure", "url");
-        let size_str = extract_xml_element(item_xml, "size")
-            .or_else(|| extract_torznab_attr(item_xml, "size"));
-        let seeders_str = extract_torznab_attr(item_xml, "seeders");
-        let leechers_str = extract_torznab_attr(item_xml, "peers");
-        let pub_date = extract_xml_element(item_xml, "pubDate");
-        let categories = extract_torznab_categories(item_xml);
-
-        // guid is required
-        let guid = match guid {
-            Some(g) if !g.is_empty() => g,
-            _ => {
-                warnings.push(format!(
-                    "indexer {indexer_name}: skipped item missing guid (title: {})",
-                    if title.is_empty() {
-                        "<unknown>"
-                    } else {
-                        &title
-                    }
-                ));
-                continue;
-            }
-        };
-
-        // download_url: prefer enclosure url, fall back to link
-        let download_url = enclosure_url.or(link);
-        let download_url = match download_url {
-            Some(u) if !u.is_empty() => u,
-            _ => {
-                warnings.push(format!(
-                    "indexer {indexer_name}: skipped item missing downloadUrl (guid: {guid})"
-                ));
-                continue;
-            }
-        };
-
-        let size = size_str.and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-        let seeders = seeders_str.and_then(|s| s.parse::<i32>().ok());
-        let leechers = leechers_str.and_then(|s| s.parse::<i32>().ok());
-
-        // Determine protocol from categories or URL
-        let protocol = if download_url.starts_with("magnet:")
-            || download_url.ends_with(".torrent")
-            || categories.iter().any(|c| *c / 1000 == 7 || *c / 1000 == 5)
-        {
-            DownloadProtocol::Torrent
-        } else {
-            // Default to torrent for now; usenet NZBs typically have .nzb extension
-            if download_url.ends_with(".nzb") {
-                DownloadProtocol::Usenet
-            } else {
-                DownloadProtocol::Torrent
-            }
-        };
-
-        results.push(ReleaseResult {
-            title,
-            indexer: indexer_name.to_string(),
-            size,
-            guid,
-            download_url,
-            seeders,
-            leechers,
-            publish_date: pub_date,
-            protocol,
-            categories,
-        });
-    }
-
-    (results, warnings)
-}
-
-fn extract_xml_element(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
-    let content = &xml[start..end];
-    // Handle CDATA
-    let content = if let Some(inner) = content.strip_prefix("<![CDATA[") {
-        inner.strip_suffix("]]>").unwrap_or(inner)
-    } else {
-        content
-    };
-    Some(content.to_string())
-}
-
-fn extract_xml_attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
-    let tag_open = format!("<{tag} ");
-    let start = xml.find(&tag_open)?;
-    let tag_str = &xml[start..];
-    let end = tag_str.find('>')? + start;
-    let tag_content = &xml[start..=end];
-
-    let attr_prefix = format!("{attr}=\"");
-    let attr_start = tag_content.find(&attr_prefix)? + attr_prefix.len();
-    let attr_end = tag_content[attr_start..].find('"')? + attr_start;
-    Some(tag_content[attr_start..attr_end].to_string())
-}
-
-fn extract_torznab_attr(xml: &str, name: &str) -> Option<String> {
-    // Match both newznab:attr and torznab:attr
-    let patterns = [
-        format!("newznab:attr name=\"{name}\" value=\""),
-        format!("torznab:attr name=\"{name}\" value=\""),
-    ];
-    for pattern in &patterns {
-        if let Some(start) = xml.find(pattern.as_str()) {
-            let val_start = start + pattern.len();
-            if let Some(end) = xml[val_start..].find('"') {
-                return Some(xml[val_start..val_start + end].to_string());
-            }
-        }
-    }
-    None
-}
-
-fn extract_torznab_categories(xml: &str) -> Vec<i32> {
-    let mut cats = Vec::new();
-    let patterns = [
-        "newznab:attr name=\"category\" value=\"",
-        "torznab:attr name=\"category\" value=\"",
-    ];
-    for pattern in &patterns {
-        let mut search_from = 0;
-        while let Some(pos) = xml[search_from..].find(pattern) {
-            let val_start = search_from + pos + pattern.len();
-            if let Some(end) = xml[val_start..].find('"') {
-                if let Ok(cat) = xml[val_start..val_start + end].parse::<i32>() {
-                    cats.push(cat);
-                }
-            }
-            search_from = val_start;
-        }
-    }
-    cats
-}
+use livrarr_domain::torznab::{parse_torznab_xml, TorznabParseResult};
 
 impl<D, H> ReleaseService for ReleaseServiceImpl<D, H>
 where
@@ -362,9 +187,61 @@ where
             match join_result {
                 Ok((indexer_name, Ok(body))) => {
                     any_success = true;
-                    let (mut results, mut parse_warnings) = parse_torznab_xml(&body, &indexer_name);
-                    all_results.append(&mut results);
-                    warnings.append(&mut parse_warnings);
+                    match parse_torznab_xml(&body) {
+                        Ok(TorznabParseResult::Items(items)) => {
+                            for item in &items {
+                                if item.guid.is_empty() {
+                                    warnings.push(format!(
+                                        "indexer {indexer_name}: skipped item missing guid (title: {})",
+                                        if item.title.is_empty() { "<unknown>" } else { &item.title }
+                                    ));
+                                } else if item.download_url.is_empty() {
+                                    warnings.push(format!(
+                                        "indexer {indexer_name}: skipped item missing downloadUrl (guid: {})",
+                                        item.guid
+                                    ));
+                                }
+                            }
+                            let results: Vec<ReleaseResult> = items
+                                .into_iter()
+                                .filter(|item| {
+                                    !item.guid.is_empty() && !item.download_url.is_empty()
+                                })
+                                .map(|item| {
+                                    let protocol = if item
+                                        .enclosure_type
+                                        .as_deref()
+                                        .is_some_and(|t| t.contains("nzb"))
+                                    {
+                                        DownloadProtocol::Usenet
+                                    } else {
+                                        DownloadProtocol::Torrent
+                                    };
+                                    ReleaseResult {
+                                        title: item.title,
+                                        indexer: indexer_name.to_string(),
+                                        size: item.size,
+                                        guid: item.guid,
+                                        download_url: item.download_url,
+                                        seeders: item.seeders,
+                                        leechers: item.leechers,
+                                        publish_date: item.publish_date,
+                                        protocol,
+                                        categories: item.categories,
+                                    }
+                                })
+                                .collect();
+                            all_results.extend(results);
+                        }
+                        Ok(TorznabParseResult::Error { code, description }) => {
+                            warnings.push(format!(
+                                "indexer {indexer_name}: error {code}: {description}"
+                            ));
+                        }
+                        Err(e) => {
+                            warnings.push(format!("indexer {indexer_name}: {e}"));
+                        }
+                    }
                 }
                 Ok((indexer_name, Err(err_msg))) => {
                     // Don't expose API keys in warnings
@@ -524,12 +401,58 @@ where
     }
 }
 
+/// Best-effort torrent info_hash extraction before sending to qBit.
+/// Handles: direct magnet URIs, body-text magnets, .torrent file bytes.
+async fn fetch_and_extract_hash<H: HttpFetcher>(http: &H, download_url: &str) -> Option<String> {
+    use crate::{extract_torrent_hash, TorrentSource};
+
+    if download_url.starts_with("magnet:") {
+        return extract_torrent_hash(&TorrentSource::Magnet(download_url.to_string())).ok();
+    }
+
+    let resp = http
+        .fetch(FetchRequest {
+            url: download_url.to_string(),
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(60),
+            rate_bucket: RateBucket::None,
+            max_body_bytes: 4 * 1024 * 1024,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+        })
+        .await
+        .ok()?;
+
+    if !(200..300).contains(&resp.status) {
+        return None;
+    }
+
+    if let Ok(text) = std::str::from_utf8(&resp.body) {
+        let trimmed = text.trim();
+        if trimmed.starts_with("magnet:") {
+            return extract_torrent_hash(&TorrentSource::Magnet(trimmed.to_string())).ok();
+        }
+    }
+
+    extract_torrent_hash(&TorrentSource::TorrentFile {
+        filename: "download.torrent".to_string(),
+        data: resp.body,
+    })
+    .ok()
+}
+
 /// Dispatch torrent to qBittorrent via HTTP API.
 async fn dispatch_torrent<H: HttpFetcher>(
     http: &H,
     client: &DownloadClient,
     download_url: &str,
 ) -> Result<String, String> {
+    let download_id = fetch_and_extract_hash(http, download_url)
+        .await
+        .unwrap_or_else(|| "pending".to_string());
+
     let scheme = if client.use_ssl { "https" } else { "http" };
     let url_base = client.url_base.as_deref().unwrap_or("");
     let base = format!("{}://{}:{}{}", scheme, client.host, client.port, url_base);
@@ -607,9 +530,7 @@ async fn dispatch_torrent<H: HttpFetcher>(
         .map_err(|e| format!("qBit add torrent failed: {e}"))?;
 
     if add_resp.status == 200 {
-        // qBit doesn't return a download ID on add; use a placeholder
-        // The actual torrent hash is resolved later by the poller
-        Ok("pending".to_string())
+        Ok(download_id)
     } else if add_resp.status == 403 {
         Err("qBit auth expired".to_string())
     } else {
@@ -617,34 +538,70 @@ async fn dispatch_torrent<H: HttpFetcher>(
     }
 }
 
-/// Dispatch NZB to SABnzbd via HTTP API.
+/// Dispatch NZB to SABnzbd: download NZB from indexer, push via multipart addfile.
 async fn dispatch_usenet<H: HttpFetcher>(
     http: &H,
     client: &DownloadClient,
     download_url: &str,
     title: &str,
 ) -> Result<String, String> {
-    let scheme = if client.use_ssl { "https" } else { "http" };
-    let url_base = client.url_base.as_deref().unwrap_or("");
-    let api_key = client.api_key.as_deref().unwrap_or("");
-    let url = format!(
-        "{}://{}:{}{}/api?mode=addurl&name={}&nzbname={}&cat={}&apikey={}&output=json",
-        scheme,
-        client.host,
-        client.port,
-        url_base,
-        urlencoded(download_url),
-        urlencoded(title),
-        urlencoded(&client.category),
-        api_key,
-    );
-
-    let resp = http
+    // Step 1: Download NZB from indexer.
+    let nzb_resp = http
         .fetch(FetchRequest {
-            url,
+            url: download_url.to_string(),
             method: HttpMethod::Get,
             headers: vec![],
             body: None,
+            timeout: Duration::from_secs(60),
+            rate_bucket: RateBucket::None,
+            max_body_bytes: 16 * 1024 * 1024,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+        })
+        .await
+        .map_err(|e| format!("failed to download NZB from indexer: {e}"))?;
+
+    if !(200..300).contains(&nzb_resp.status) {
+        return Err(format!(
+            "indexer returned HTTP {} when fetching NZB",
+            nzb_resp.status
+        ));
+    }
+
+    let nzb_bytes = nzb_resp.body;
+
+    // Step 2: Build multipart addfile request for SABnzbd.
+    let scheme = if client.use_ssl { "https" } else { "http" };
+    let url_base = client.url_base.as_deref().unwrap_or("");
+    let api_key = client.api_key.as_deref().unwrap_or("");
+    let sab_url = format!(
+        "{}://{}:{}{}/api",
+        scheme, client.host, client.port, url_base
+    );
+
+    let filename = format!("{}.nzb", title.replace('/', "_"));
+    let boundary = "----livrarr-sab-boundary";
+    let (content_type, body) = build_multipart_addfile(
+        boundary,
+        &[
+            ("mode", "addfile"),
+            ("cat", &client.category),
+            ("apikey", api_key),
+            ("output", "json"),
+        ],
+        "name",
+        &filename,
+        "application/x-nzb",
+        &nzb_bytes,
+    );
+
+    // Step 3: POST to SABnzbd.
+    let resp = http
+        .fetch(FetchRequest {
+            url: sab_url,
+            method: HttpMethod::Post,
+            headers: vec![("Content-Type".into(), content_type)],
+            body: Some(body),
             timeout: Duration::from_secs(30),
             rate_bucket: RateBucket::None,
             max_body_bytes: 4096,
@@ -654,20 +611,68 @@ async fn dispatch_usenet<H: HttpFetcher>(
         .await
         .map_err(|e| format!("SABnzbd unreachable: {e}"))?;
 
-    if resp.status == 200 {
-        // Parse SABnzbd JSON response for nzo_id
-        let body = String::from_utf8_lossy(&resp.body);
-        if let Some(nzo_start) = body.find("nzo_") {
-            let nzo_end = body[nzo_start..]
-                .find('"')
-                .unwrap_or(body[nzo_start..].len());
-            Ok(body[nzo_start..nzo_start + nzo_end].to_string())
-        } else {
-            Ok("pending".to_string())
-        }
-    } else {
-        Err(format!("SABnzbd rejected NZB: HTTP {}", resp.status))
+    if !(200..300).contains(&resp.status) {
+        return Err(format!("SABnzbd returned HTTP {}", resp.status));
     }
+
+    // Step 4: Parse JSON response properly.
+    let body_json: serde_json::Value = serde_json::from_slice(&resp.body)
+        .map_err(|e| format!("SABnzbd response parse error: {e}"))?;
+
+    if body_json.get("status").and_then(|s| s.as_bool()) == Some(false) {
+        let error = body_json
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("SABnzbd rejected NZB: {error}"));
+    }
+
+    let nzo_id = body_json
+        .get("nzo_ids")
+        .and_then(|ids| ids.as_array())
+        .and_then(|ids| ids.first())
+        .and_then(|id| id.as_str())
+        .map(str::to_owned);
+
+    match nzo_id {
+        Some(id) => Ok(id),
+        None => Ok("pending".to_string()),
+    }
+}
+
+fn build_multipart_addfile(
+    boundary: &str,
+    fields: &[(&str, &str)],
+    file_field: &str,
+    file_name: &str,
+    mime: &str,
+    file_bytes: &[u8],
+) -> (String, Vec<u8>) {
+    let mut body = Vec::new();
+
+    for (name, value) in fields {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"{file_field}\"; filename=\"{file_name}\"\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {mime}\r\n\r\n").as_bytes());
+    body.extend_from_slice(file_bytes);
+    body.extend_from_slice(b"\r\n");
+
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
 /// Minimal URL encoding for query parameters.

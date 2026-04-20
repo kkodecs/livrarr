@@ -154,7 +154,7 @@ export function SetupPage() {
         <div className="text-center">
           <h1 className="text-3xl font-bold">Livrarr Setup</h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Step {stepIndex + 1} of {STEPS.length}
+            {step === "account" ? "Create your admin account" : step === "summary" ? "Review your settings" : "Configure your setup"}
           </p>
         </div>
 

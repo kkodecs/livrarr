@@ -844,7 +844,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         series_name: get_str(WorkField::SeriesName),
         series_position: get_float(WorkField::SeriesPosition),
         genres: get_strings(WorkField::Genres),
-        language: get_str(WorkField::Language),
+        language: get_str(WorkField::Language).map(|s| livrarr_domain::normalize_language(&s)),
         page_count: get_int(WorkField::PageCount),
         duration_seconds: get_int(WorkField::DurationSeconds),
         publisher: get_str(WorkField::Publisher),

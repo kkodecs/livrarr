@@ -126,24 +126,12 @@ where
             });
         }
 
-        let will_be_monitored = req.monitored.unwrap_or(author.monitored);
-        if req.monitor_new_items == Some(true) && !will_be_monitored {
-            return Err(AuthorServiceError::Validation {
-                field: "monitor_new_items".into(),
-                message: "monitor_new_items requires monitored=true".into(),
-            });
-        }
-
         let monitored = req.monitored;
-        let mut monitor_new_items = req.monitor_new_items;
+        let monitor_new_items = req.monitor_new_items;
         let mut monitor_since = None;
 
         if req.monitored == Some(true) && !author.monitored {
             monitor_since = Some(Utc::now());
-        }
-
-        if req.monitored == Some(false) && author.monitor_new_items {
-            monitor_new_items = Some(false);
         }
 
         let db_req = UpdateAuthorDbRequest {
@@ -313,9 +301,7 @@ where
                 .save_bibliography(author_id, &cleaned)
                 .await
                 .map_err(AuthorServiceError::Db)?;
-            return Ok(self
-                .enrich_bibliography(user_id, author_id, cleaned)
-                .await);
+            return Ok(self.enrich_bibliography(user_id, author_id, cleaned).await);
         }
 
         // OL returned nothing — try LLM from scratch as fallback.

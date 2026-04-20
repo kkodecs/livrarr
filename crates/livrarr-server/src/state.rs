@@ -177,6 +177,7 @@ pub struct AppState {
     pub matching_svc: crate::matching_service::LiveMatchingService,
     pub manual_import_scan_svc: crate::manual_import_scan_service::LiveManualImportScanService,
     pub readarr_import_wf: Arc<crate::readarr_import_workflow::LiveReadarrImportWorkflow>,
+    pub enrichment_notify: Arc<tokio::sync::Notify>,
 }
 
 // =============================================================================
@@ -400,6 +401,9 @@ impl livrarr_handlers::context::AppContext for AppState {
     }
     fn cover_proxy_cache(&self) -> &Self::CoverCache {
         &self.cover_proxy_cache_accessor
+    }
+    fn enrichment_notify(&self) -> &tokio::sync::Notify {
+        &self.enrichment_notify
     }
 }
 

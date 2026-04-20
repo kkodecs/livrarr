@@ -12,3 +12,4 @@ thiserror = { workspace = true }
 trait-variant = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+quick-xml = "0.37"

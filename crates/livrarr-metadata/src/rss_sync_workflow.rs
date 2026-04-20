@@ -622,111 +622,31 @@ fn build_rss_url(indexer: &Indexer) -> String {
 }
 
 fn parse_rss_feed(body: &[u8]) -> Vec<RssFeedItem> {
-    let text = match std::str::from_utf8(body) {
-        Ok(t) => t,
+    use livrarr_domain::torznab::{parse_torznab_xml, TorznabParseResult};
+
+    let parse_result = match parse_torznab_xml(body) {
+        Ok(r) => r,
         Err(_) => return vec![],
     };
-
-    let mut items = Vec::new();
-    let mut in_item = false;
-    let mut title = String::new();
-    let mut guid = String::new();
-    let mut link = String::new();
-    let mut size: i64 = 0;
-    let mut seeders: Option<i32> = None;
-    let mut pub_date = String::new();
-    let mut categories: Vec<i32> = Vec::new();
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("<item") {
-            in_item = true;
-            title.clear();
-            guid.clear();
-            link.clear();
-            size = 0;
-            seeders = None;
-            pub_date.clear();
-            categories.clear();
-        } else if trimmed == "</item>" && in_item {
-            in_item = false;
-            if !title.is_empty() && !guid.is_empty() {
-                items.push(RssFeedItem {
-                    title: title.clone(),
-                    guid: guid.clone(),
-                    download_url: if link.is_empty() {
-                        guid.clone()
-                    } else {
-                        link.clone()
-                    },
-                    size,
-                    seeders,
-                    publish_date: if pub_date.is_empty() {
-                        None
-                    } else {
-                        Some(pub_date.clone())
-                    },
-                    categories: categories.clone(),
-                });
-            }
-        } else if in_item {
-            if let Some(content) = extract_xml_text(trimmed, "title") {
-                title = content;
-            } else if let Some(content) = extract_xml_text(trimmed, "guid") {
-                guid = content;
-            } else if let Some(content) = extract_xml_text(trimmed, "link") {
-                link = content;
-            } else if let Some(content) = extract_xml_text(trimmed, "pubDate") {
-                pub_date = content;
-            } else if trimmed.contains("length=") {
-                if let Some(len_str) = extract_attr(trimmed, "length") {
-                    size = len_str.parse().unwrap_or(0);
-                }
-            } else if let Some(content) = extract_xml_text(trimmed, "size") {
-                size = content.parse().unwrap_or(0);
-            } else if trimmed.contains("name=\"category\"") {
-                if let Some(val) = extract_attr(trimmed, "value") {
-                    if let Ok(cat) = val.parse::<i32>() {
-                        categories.push(cat);
-                    }
-                }
-            } else if let Some(content) = extract_xml_text(trimmed, "category") {
-                if let Ok(cat) = content.parse::<i32>() {
-                    categories.push(cat);
-                }
-            } else if trimmed.contains("name=\"seeders\"") {
-                if let Some(val) = extract_attr(trimmed, "value") {
-                    seeders = val.parse().ok();
-                }
-            }
-        }
-    }
-
+    let items = match parse_result {
+        TorznabParseResult::Items(items) => items,
+        TorznabParseResult::Error { .. } => return vec![],
+    };
     items
-}
-
-fn extract_xml_text(line: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
-    if let Some(start) = line.find(&open) {
-        if let Some(end) = line.find(&close) {
-            let content_start = start + open.len();
-            if content_start < end {
-                return Some(line[content_start..end].to_string());
-            }
-        }
-    }
-    None
-}
-
-fn extract_attr(line: &str, attr: &str) -> Option<String> {
-    let pattern = format!("{}=\"", attr);
-    if let Some(start) = line.find(&pattern) {
-        let val_start = start + pattern.len();
-        if let Some(end) = line[val_start..].find('"') {
-            return Some(line[val_start..val_start + end].to_string());
-        }
-    }
-    None
+        .into_iter()
+        .filter(|item| !item.title.is_empty() && !item.guid.is_empty())
+        .map(|item| RssFeedItem {
+            title: item.title,
+            guid: item.guid.clone(),
+            download_url: if item.download_url.is_empty() {
+                item.guid
+            } else {
+                item.download_url
+            },
+            size: item.size,
+            seeders: item.seeders,
+            publish_date: item.publish_date,
+            categories: item.categories,
+        })
+        .collect()
 }

@@ -675,6 +675,7 @@ function ReleasesTab({ workId }: { workId: number }) {
     onSuccess: (_data, release) => {
       setGrabbedGuids((prev) => new Set(prev).add(release.guid));
       setGrabbingGuid(null);
+      queryClient.invalidateQueries({ queryKey: ["queue"] });
       toast.success("Release grabbed");
     },
     onError: (e: Error) => {
@@ -1231,6 +1232,7 @@ function EditModal({
     onSuccess: () => {
       toast.success("Work updated");
       queryClient.invalidateQueries({ queryKey: ["work", String(work.id)] });
+      queryClient.invalidateQueries({ queryKey: ["works"] });
       onOpenChange(false);
     },
     onError: () => toast.error("Failed to update work"),

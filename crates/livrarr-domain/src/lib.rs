@@ -1,6 +1,7 @@
 pub mod readarr;
 pub mod services;
 pub mod settings;
+pub mod torznab;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -775,6 +776,45 @@ pub fn normalize_for_matching(s: &str) -> String {
         result.pop();
     }
     result.to_lowercase()
+}
+
+/// Normalize a language value to ISO 639-1 two-letter code.
+/// Handles full English names (from Goodreads JSON-LD), three-letter codes,
+/// and passes through already-correct two-letter codes.
+pub fn normalize_language(lang: &str) -> String {
+    let lower = lang.trim().to_lowercase();
+    match lower.as_str() {
+        "english" | "eng" => "en",
+        "french" | "français" | "fra" | "fre" => "fr",
+        "german" | "deutsch" | "deu" | "ger" => "de",
+        "spanish" | "español" | "spa" => "es",
+        "polish" | "polski" | "pol" => "pl",
+        "dutch" | "nederlands" | "nld" | "dut" => "nl",
+        "italian" | "italiano" | "ita" => "it",
+        "portuguese" | "português" | "por" => "pt",
+        "japanese" | "日本語" | "jpn" => "ja",
+        "korean" | "한국어" | "kor" => "ko",
+        "chinese" | "中文" | "zho" | "chi" => "zh",
+        "russian" | "русский" | "rus" => "ru",
+        "swedish" | "svenska" | "swe" => "sv",
+        "norwegian" | "norsk" | "nor" => "no",
+        "danish" | "dansk" | "dan" => "da",
+        "finnish" | "suomi" | "fin" => "fi",
+        "czech" | "čeština" | "ces" | "cze" => "cs",
+        "turkish" | "türkçe" | "tur" => "tr",
+        "arabic" | "العربية" | "ara" => "ar",
+        "hindi" | "हिन्दी" | "hin" => "hi",
+        "romanian" | "română" | "ron" | "rum" => "ro",
+        "hungarian" | "magyar" | "hun" => "hu",
+        other => return other.to_string(),
+    }
+    .to_string()
+}
+
+/// Normalize an optional language value.
+pub fn normalize_language_opt(lang: Option<&str>) -> Option<String> {
+    lang.filter(|s| !s.is_empty())
+        .map(|s| normalize_language(s))
 }
 
 /// Classifies a file path into a MediaType based on extension.

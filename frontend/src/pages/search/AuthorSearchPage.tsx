@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Search, Plus, Loader2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { lookupAuthors, addAuthor } from "@/api";
@@ -12,6 +12,7 @@ import { ApiError } from "@/api/client";
 
 export default function AuthorSearchPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [term, setTerm] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -32,6 +33,7 @@ export default function AuthorSearchPage() {
         olKey: author.olKey,
       }),
     onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["authors"] });
       toast.success(`Added ${data.name}`);
       navigate(`/author/${data.id}`);
     },

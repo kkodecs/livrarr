@@ -61,6 +61,7 @@ pub async fn confirm<S: AppContext>(
             &req.row_indices,
         )
         .await?;
+    state.enrichment_notify().notify_one();
     Ok(Json(result))
 }
 
