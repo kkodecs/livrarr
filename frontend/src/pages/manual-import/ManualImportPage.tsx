@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Link } from "react-router";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { FolderSearch, Upload, Search, AlertTriangle, Check, X } from "lucide-react";
 import { scanManualImport, scanManualImportProgress, executeManualImport, searchManualImport } from "@/api";
@@ -19,6 +19,7 @@ type FileState = ScannedFile & {
 };
 
 export default function ManualImportPage() {
+  const queryClient = useQueryClient();
   const [path, setPath] = useState("");
   const [pathError, setPathError] = useState("");
   const [showPicker, setShowPicker] = useState(false);
@@ -30,6 +31,9 @@ export default function ManualImportPage() {
   const [olTotal, setOlTotal] = useState(0);
   const [olCompleted, setOlCompleted] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const [importTotal, setImportTotal] = useState(0);
+  const [importCompleted, setImportCompleted] = useState(0);
+  const [importing, setImporting] = useState(false);
 
   // Inline search state
   const [searchingIdx, setSearchingIdx] = useState<number | null>(null);
@@ -129,43 +133,56 @@ export default function ManualImportPage() {
     };
   }, []);
 
-  const importMutation = useMutation({
-    mutationFn: (items: ManualImportItem[]) => executeManualImport(items),
-    onSuccess: (data) => {
-      setFiles((prev) =>
-        prev.map((f) => {
-          // For grouped files, match if ANY grouped path has a result.
-          const paths = f.groupedPaths ?? [f.path];
-          const result = data.results.find((r) => paths.includes(r.path));
-          // Mark as imported if all files in the group succeeded.
-          if (f.groupedPaths) {
-            const allResults = data.results.filter((r) => paths.includes(r.path));
-            const allImported = allResults.length === paths.length && allResults.every((r) => r.status === "imported");
-            const anyFailed = allResults.some((r) => r.status === "failed");
-            const failedMsg = allResults.find((r) => r.status === "failed")?.error;
-            return {
-              ...f,
-              importResult: {
-                path: f.path,
-                status: anyFailed ? "failed" : allImported ? "imported" : "skipped",
-                workId: result?.workId ?? null,
-                error: failedMsg ?? null,
-              } as ManualImportResult,
-            };
-          }
-          return result ? { ...f, importResult: result } : f;
-        }),
-      );
-      const imported = data.results.filter((r) => r.status === "imported").length;
-      const failed = data.results.filter((r) => r.status === "failed").length;
-      if (failed > 0) {
-        toast.warning(`${imported} imported, ${failed} failed`);
-      } else {
-        toast.success(`${imported} file${imported !== 1 ? "s" : ""} imported`);
+  const runSequentialImport = async (groups: ManualImportItem[][]) => {
+    setImporting(true);
+    setImportTotal(groups.length);
+    setImportCompleted(0);
+    let totalImported = 0;
+    let totalFailed = 0;
+
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i]!;
+      const groupPaths = new Set(group.map((g) => g.path));
+      try {
+        const data = await executeManualImport(group);
+        const imported = data.results.filter((r) => r.status === "imported").length;
+        const failed = data.results.filter((r) => r.status === "failed").length;
+        totalImported += imported;
+        totalFailed += failed;
+        setFiles((prev) =>
+          prev.map((f) => {
+            const paths = f.groupedPaths ?? [f.path];
+            if (paths.some((p) => groupPaths.has(p))) {
+              const allResults = data.results.filter((r) => paths.includes(r.path));
+              const allOk = allResults.length > 0 && allResults.every((r) => r.status === "imported");
+              const anyFail = allResults.some((r) => r.status === "failed");
+              return {
+                ...f,
+                importResult: {
+                  path: f.path,
+                  status: anyFail ? "failed" : allOk ? "imported" : "skipped",
+                  workId: allResults[0]?.workId ?? null,
+                  error: allResults.find((r) => r.status === "failed")?.error ?? null,
+                } as ManualImportResult,
+              };
+            }
+            return f;
+          }),
+        );
+      } catch {
+        totalFailed += group.length;
       }
-    },
-    onError: (e: Error) => toast.error(e.message || "Import failed"),
-  });
+      setImportCompleted(i + 1);
+    }
+
+    setImporting(false);
+    queryClient.invalidateQueries({ queryKey: ["works"] });
+    if (totalFailed > 0) {
+      toast.warning(`${totalImported} imported, ${totalFailed} failed`);
+    } else {
+      toast.success(`${totalImported} file${totalImported !== 1 ? "s" : ""} imported`);
+    }
+  };
 
   const confirmAndScan = (scanPath: string) => {
     if (hasCorrections && files.length > 0) {
@@ -212,27 +229,25 @@ export default function ManualImportPage() {
 
   const handleImport = () => {
     const selected = files.filter((f) => f.selected && hasMatch(f));
-    const items: ManualImportItem[] = [];
+    const groups: ManualImportItem[][] = [];
     for (const f of selected) {
-      // Use OL match if available, fall back to parsed metadata.
       const m = f.correctedMatch || f.match;
       const title = m?.title ?? f.parsed?.title ?? f.filename;
       const author = m?.author ?? f.parsed?.author ?? "";
       const olKey = m?.olKey ?? "";
       const language = f.parsed?.language || undefined;
       const paths = f.groupedPaths ?? [f.path];
-      for (const p of paths) {
-        items.push({
-          path: p,
-          olKey,
-          title,
-          author,
-          deleteExisting: f.deleteExisting,
-          language,
-        });
-      }
+      const group: ManualImportItem[] = paths.map((p) => ({
+        path: p,
+        olKey,
+        title,
+        author,
+        deleteExisting: f.deleteExisting,
+        language,
+      }));
+      groups.push(group);
     }
-    importMutation.mutate(items);
+    runSequentialImport(groups);
   };
 
   const handleInlineSearch = (idx: number) => {
@@ -302,7 +317,7 @@ export default function ManualImportPage() {
 
   const selectedCount = files.filter((f) => f.selected).length;
   const selectableCount = files.filter((f) => hasMatch(f) && !isImported(f)).length;
-  const canImport = selectedCount > 0 && !importMutation.isPending;
+  const canImport = selectedCount > 0 && !importing;
 
   return (
     <>
@@ -402,7 +417,7 @@ export default function ManualImportPage() {
                 disabled={!canImport}
                 className="btn-primary inline-flex items-center gap-1.5 text-sm"
               >
-                {importMutation.isPending ? (
+                {importing ? (
                   <LoadingSpinner size={14} />
                 ) : (
                   <Upload size={14} />
@@ -410,6 +425,21 @@ export default function ManualImportPage() {
                 Import Selected
               </button>
             </div>
+
+            {importing && importTotal > 0 && (
+              <div className="mb-3 space-y-1">
+                <div className="flex items-center justify-between text-xs text-muted">
+                  <span>Importing and enriching...</span>
+                  <span>{importCompleted}/{importTotal}</span>
+                </div>
+                <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-brand transition-all duration-300"
+                    style={{ width: `${(importCompleted / importTotal) * 100}%` }}
+                  />
+                </div>
+              </div>
+            )}
 
             <div className="overflow-x-auto rounded border border-border">
               <table className="w-full text-sm">

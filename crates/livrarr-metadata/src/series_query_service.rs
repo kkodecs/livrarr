@@ -17,7 +17,13 @@ pub struct SeriesQueryServiceImpl<D, F, E, L = crate::llm_caller_service::LlmCal
 }
 
 impl<D, F, E, L> SeriesQueryServiceImpl<D, F, E, L> {
-    pub fn new(db: D, fetcher: F, enrichment: Arc<E>, data_dir: std::path::PathBuf, llm: L) -> Self {
+    pub fn new(
+        db: D,
+        fetcher: F,
+        enrichment: Arc<E>,
+        data_dir: std::path::PathBuf,
+        llm: L,
+    ) -> Self {
         Self {
             db,
             fetcher,

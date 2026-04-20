@@ -161,7 +161,7 @@ where
                 cover_url: req.cover_url,
                 metadata_source: req.metadata_source,
                 detail_url: req.detail_url,
-                language: req.language,
+                language: livrarr_domain::normalize_language_opt(req.language.as_deref()),
                 series_name: req.series_name,
                 series_position: req.series_position,
                 monitor_ebook: true,
@@ -225,21 +225,16 @@ where
             Err(_) => work,
         };
 
-        // Post-enrichment cover download (enrichment may have found a better cover URL).
         if let Some(ref cover_url) = enriched_work.cover_url {
             let covers_dir = self.data_dir.join("covers");
             let work_id = enriched_work.id;
-            let url = cover_url.clone();
-            let http = self.http.clone();
-            tokio::spawn(async move {
-                if let Err(e) = download_cover_to_disk(&http, &url, &covers_dir, work_id, "").await
-                {
-                    tracing::warn!(work_id, "post-enrich cover download failed: {e}");
-                }
-                // Delete stale thumbnail.
-                let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
-                let _ = tokio::fs::remove_file(&thumb).await;
-            });
+            if let Err(e) =
+                download_cover_to_disk(&self.http, cover_url, &covers_dir, work_id, "").await
+            {
+                tracing::warn!(work_id, "cover download failed: {e}");
+            }
+            let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
+            let _ = tokio::fs::remove_file(&thumb).await;
         }
 
         Ok(AddWorkResult {
@@ -815,7 +810,7 @@ where
                     series_position: None,
                     source: None,
                     source_type: None,
-                    language: None,
+                    language: Some("en".to_string()),
                     detail_url: None,
                     rating: None,
                 })

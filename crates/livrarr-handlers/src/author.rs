@@ -10,7 +10,8 @@ use crate::types::author::{
 };
 use crate::types::work::WorkDetailResponse;
 use livrarr_domain::services::{
-    AddAuthorRequest, AuthorService, UpdateAuthorRequest, WorkFilter, WorkService,
+    AddAuthorRequest, AuthorService, SeriesQueryService, UpdateAuthorRequest, WorkFilter,
+    WorkService,
 };
 use livrarr_domain::{Author, Work};
 
@@ -137,6 +138,18 @@ pub async fn add<S: AppContext>(
                 Err(e) => {
                     tracing::debug!(author_id, "background bibliography fetch skipped: {e}");
                 }
+            }
+        });
+
+        let gr_state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if let Err(e) = gr_state
+                .series_query_service()
+                .resolve_gr_candidates(user_id, author_id)
+                .await
+            {
+                tracing::debug!(author_id, "background GR resolve skipped: {e}");
             }
         });
     }

@@ -477,6 +477,7 @@ async fn main() {
         readarr_import_wf: Arc::new(
             livrarr_server::readarr_import_workflow::LiveReadarrImportWorkflow::new(),
         ),
+        enrichment_notify: Arc::new(tokio::sync::Notify::new()),
     };
 
     // Late-init: wire services that need AppState (breaks circular dep via OnceLock<Box<AppState>>).

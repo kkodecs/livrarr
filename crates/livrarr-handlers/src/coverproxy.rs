@@ -33,7 +33,7 @@ pub async fn proxy_cover<S: AppContext>(
                 ),
                 (
                     header::CACHE_CONTROL,
-                    HeaderValue::from_static("public, max-age=300"),
+                    HeaderValue::from_static("public, max-age=604800"),
                 ),
             ],
             data,
@@ -81,7 +81,7 @@ pub async fn proxy_cover<S: AppContext>(
             ),
             (
                 header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=300"),
+                HeaderValue::from_static("public, max-age=604800"),
             ),
         ],
         data,

@@ -640,9 +640,7 @@ pub async fn import_from_prowlarr<S: AppContext>(
         let api_key_field = pc
             .field_str("apiKey")
             .filter(|s| !s.is_empty() && !is_masked(s));
-        let category = pc
-            .field_str("category")
-            .unwrap_or_else(|| "livrarr".to_string());
+        let category = "livrarr".to_string();
 
         let has_creds = match impl_enum {
             DownloadClientImplementation::QBittorrent => password.is_some(),

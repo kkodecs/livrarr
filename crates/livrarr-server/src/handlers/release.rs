@@ -1,10 +1,8 @@
 use std::time::Duration;
 
-use quick_xml::events::Event;
-use quick_xml::Reader;
-
 use crate::state::AppState;
 use crate::{ApiError, ReleaseResponse};
+use livrarr_domain::torznab::{parse_torznab_xml, TorznabParseResult};
 use livrarr_domain::Indexer;
 use livrarr_http::HttpClient;
 
@@ -251,186 +249,43 @@ pub(crate) async fn fetch_and_parse(
         buf.extend_from_slice(&chunk);
     }
     let xml = String::from_utf8(buf).map_err(|e| format!("invalid UTF-8 in response: {e}"))?;
-    parse_torznab_xml(&xml, indexer_name)
-}
 
-fn parse_torznab_xml(xml: &str, indexer_name: &str) -> Result<Vec<ReleaseResponse>, String> {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-
-    let mut results = Vec::new();
-
-    let mut in_item = false;
-    let mut current_title = String::new();
-    let mut current_guid = String::new();
-    let mut current_download_url = String::new();
-    let mut current_size: i64 = 0;
-    let mut current_seeders: Option<i32> = None;
-    let mut current_leechers: Option<i32> = None;
-    let mut current_pub_date: Option<String> = None;
-    let mut current_categories: Vec<i32> = Vec::new();
-    let mut current_tag: Vec<u8> = Vec::new();
-    let mut current_enclosure_type = String::new();
-
-    loop {
-        match reader.read_event() {
-            Ok(ref event @ (Event::Start(_) | Event::Empty(_))) => {
-                let e = match event {
-                    Event::Start(e) | Event::Empty(e) => e,
-                    _ => unreachable!(),
-                };
-                let local = e.local_name();
-                let is_start = matches!(event, Event::Start(_));
-
-                match local.as_ref() {
-                    b"error" => {
-                        let code = e
-                            .attributes()
-                            .flatten()
-                            .find(|a| a.key.local_name().as_ref() == b"code")
-                            .and_then(|a| a.unescape_value().ok()?.parse::<i32>().ok())
-                            .unwrap_or(0);
-                        let desc = e
-                            .attributes()
-                            .flatten()
-                            .find(|a| a.key.local_name().as_ref() == b"description")
-                            .and_then(|a| a.unescape_value().ok().map(|v| v.to_string()))
-                            .unwrap_or_default();
-                        return Err(format!("Torznab error {code}: {desc}"));
-                    }
-                    b"item" if is_start => {
-                        in_item = true;
-                        current_title.clear();
-                        current_guid.clear();
-                        current_download_url.clear();
-                        current_size = 0;
-                        current_seeders = None;
-                        current_leechers = None;
-                        current_pub_date = None;
-                        current_categories.clear();
-                        current_enclosure_type.clear();
-                    }
-                    b"enclosure" if in_item => {
-                        for attr in e.attributes().flatten() {
-                            match attr.key.local_name().as_ref() {
-                                b"url" => {
-                                    if let Ok(val) = attr.unescape_value() {
-                                        current_download_url = val.to_string();
-                                    }
-                                }
-                                b"length" if current_size == 0 => {
-                                    if let Ok(val) = attr.unescape_value() {
-                                        current_size = val.parse().unwrap_or(0);
-                                    }
-                                }
-                                b"type" => {
-                                    if let Ok(val) = attr.unescape_value() {
-                                        current_enclosure_type = val.to_string();
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    b"attr" if in_item => {
-                        let mut attr_name = String::new();
-                        let mut attr_value = String::new();
-                        for attr in e.attributes().flatten() {
-                            match attr.key.local_name().as_ref() {
-                                b"name" => {
-                                    if let Ok(v) = attr.unescape_value() {
-                                        attr_name = v.to_string();
-                                    }
-                                }
-                                b"value" => {
-                                    if let Ok(v) = attr.unescape_value() {
-                                        attr_value = v.to_string();
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        match attr_name.as_str() {
-                            "seeders" => current_seeders = attr_value.parse().ok(),
-                            "peers" | "leechers" => {
-                                if current_leechers.is_none() {
-                                    current_leechers = attr_value.parse().ok();
-                                }
-                            }
-                            "size" if current_size == 0 => {
-                                current_size = attr_value.parse().unwrap_or(0);
-                            }
-                            "category" => {
-                                if let Ok(cat) = attr_value.parse::<i32>() {
-                                    current_categories.push(cat);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ if in_item && is_start => {
-                        current_tag = local.as_ref().to_vec();
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Event::Text(ref e)) if in_item => {
-                if let Ok(text) = e.unescape() {
-                    match current_tag.as_slice() {
-                        b"title" => current_title.push_str(&text),
-                        b"guid" => current_guid.push_str(&text),
-                        b"size" if current_size == 0 => {
-                            current_size = text.parse().unwrap_or(0);
-                        }
-                        b"pubDate" => {
-                            current_pub_date
-                                .get_or_insert_with(String::new)
-                                .push_str(&text);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Ok(Event::End(ref e)) => {
-                if e.local_name().as_ref() == b"item" && in_item {
-                    in_item = false;
-                    if current_guid.is_empty() || current_download_url.is_empty() {
-                        tracing::warn!(
-                            indexer = %indexer_name,
-                            title = %current_title,
-                            "skipping item missing guid or downloadUrl"
-                        );
-                        continue;
-                    }
-                    let protocol = if current_enclosure_type.contains("nzb") {
+    match parse_torznab_xml(xml.as_bytes())? {
+        TorznabParseResult::Items(items) => {
+            let results = items
+                .into_iter()
+                .filter(|item| !item.guid.is_empty() && !item.download_url.is_empty())
+                .map(|item| {
+                    let protocol = if item
+                        .enclosure_type
+                        .as_deref()
+                        .is_some_and(|t| t.contains("nzb"))
+                    {
                         "usenet"
                     } else {
                         "torrent"
                     }
                     .to_string();
-
-                    results.push(ReleaseResponse {
-                        title: std::mem::take(&mut current_title),
+                    ReleaseResponse {
+                        title: item.title,
                         indexer: indexer_name.to_string(),
-                        size: current_size,
-                        guid: std::mem::take(&mut current_guid),
-                        download_url: std::mem::take(&mut current_download_url),
-                        seeders: current_seeders,
-                        leechers: current_leechers,
-                        publish_date: current_pub_date.take(),
+                        size: item.size,
+                        guid: item.guid,
+                        download_url: item.download_url,
+                        seeders: item.seeders,
+                        leechers: item.leechers,
+                        publish_date: item.publish_date,
                         protocol,
-                        categories: std::mem::take(&mut current_categories),
-                    });
-                }
-                current_tag.clear();
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("XML parse error: {e}")),
-            _ => {}
+                        categories: item.categories,
+                    }
+                })
+                .collect();
+            Ok(results)
+        }
+        TorznabParseResult::Error { code, description } => {
+            Err(format!("Torznab error {code}: {description}"))
         }
     }
-
-    Ok(results)
 }
 
 pub(crate) fn qbit_base_url(client: &livrarr_domain::DownloadClient) -> String {

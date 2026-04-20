@@ -257,7 +257,7 @@ pub fn parse_detail_html(html: &str) -> Option<GoodreadsDetailResult> {
         let language = book
             .get("inLanguage")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(livrarr_domain::normalize_language);
 
         let cover_url = book
             .get("image")

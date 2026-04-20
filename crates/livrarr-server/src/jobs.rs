@@ -84,13 +84,78 @@ impl JobRunner {
             author_monitor_tick,
         )
         .await;
-        self.spawn_job(
-            "enrichment_retry",
-            Duration::from_secs(300),
-            state.clone(),
-            enrichment_retry_tick,
-        )
-        .await;
+        {
+            let status = self.status.clone();
+            let cancel = self.cancel.clone();
+            status.write().await.push(JobStatus {
+                name: "enrichment_retry".to_string(),
+                interval: Duration::from_secs(300),
+                last_run: None,
+                running: false,
+                panic_notified: false,
+            });
+            let s = state.clone();
+            let handle = tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+                    _ = cancel.cancelled() => return,
+                }
+                if let Err(e) = enrichment_retry_tick(s.clone(), cancel.clone()).await {
+                    error!("enrichment_retry initial tick: {e}");
+                }
+                set_job_running(&status, "enrichment_retry", false).await;
+                if let Some(st) = status
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|s| s.name == "enrichment_retry")
+                {
+                    st.last_run = Some(chrono::Utc::now());
+                }
+                debug!("job 'enrichment_retry' tick completed");
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+                        _ = s.enrichment_notify.notified() => {}
+                        _ = cancel.cancelled() => {
+                            debug!("job 'enrichment_retry' cancelled");
+                            break;
+                        }
+                    }
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    set_job_running(&status, "enrichment_retry", true).await;
+                    match tokio::spawn({
+                        let s2 = s.clone();
+                        let c2 = cancel.clone();
+                        async move { enrichment_retry_tick(s2, c2).await }
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            let mut statuses = status.write().await;
+                            if let Some(st) =
+                                statuses.iter_mut().find(|s| s.name == "enrichment_retry")
+                            {
+                                st.last_run = Some(chrono::Utc::now());
+                                st.running = false;
+                            }
+                            debug!("job 'enrichment_retry' tick completed");
+                        }
+                        Ok(Err(e)) => {
+                            error!("job 'enrichment_retry' error: {e}");
+                            set_job_running(&status, "enrichment_retry", false).await;
+                        }
+                        Err(join_err) => {
+                            error!("job 'enrichment_retry' panicked: {join_err}");
+                            set_job_running(&status, "enrichment_retry", false).await;
+                        }
+                    }
+                }
+            });
+            self.handles.lock().await.push(handle);
+        }
         self.spawn_job(
             "state_map_cleanup",
             Duration::from_secs(1800),
@@ -532,34 +597,36 @@ async fn poll_qbittorrent(
                     "poller: source not yet available for <grab {}>, will retry",
                     grab.id
                 );
-                // Notify user once — file may need a remote path mapping.
-                let _ = state
-                    .db
-                    .create_notification(CreateNotificationDbRequest {
-                        user_id: grab.user_id,
-                        notification_type: NotificationType::PathNotFound,
-                        ref_key: Some(format!("path_not_found:{}", grab.id)),
-                        message: format!(
-                            "{} reports that {} (grab {}) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.",
-                            client.name, grab.title, grab.id
-                        ),
-                        data: {
-                            let content_dir = std::path::Path::new(&content_path)
-                                .parent()
-                                .map(|d| d.display().to_string())
-                                .unwrap_or_default();
-                            serde_json::json!({
-                                "grabId": grab.id,
-                                "title": grab.title,
-                                "clientName": client.name,
-                                "clientHost": client.host,
-                                "contentDir": content_dir,
-                                "configuredRemotePath": mapping_result.configured_remote_path,
-                                "configuredLocalPath": mapping_result.configured_local_path,
-                            })
-                        },
-                    })
-                    .await;
+                let age = chrono::Utc::now() - grab.grabbed_at;
+                if age > chrono::Duration::minutes(5) {
+                    let _ = state
+                        .db
+                        .create_notification(CreateNotificationDbRequest {
+                            user_id: grab.user_id,
+                            notification_type: NotificationType::PathNotFound,
+                            ref_key: Some(format!("path_not_found:{}", grab.id)),
+                            message: format!(
+                                "{} reports that {} (grab {}) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.",
+                                client.name, grab.title, grab.id
+                            ),
+                            data: {
+                                let content_dir = std::path::Path::new(&content_path)
+                                    .parent()
+                                    .map(|d| d.display().to_string())
+                                    .unwrap_or_default();
+                                serde_json::json!({
+                                    "grabId": grab.id,
+                                    "title": grab.title,
+                                    "clientName": client.name,
+                                    "clientHost": client.host,
+                                    "contentDir": content_dir,
+                                    "configuredRemotePath": mapping_result.configured_remote_path,
+                                    "configuredLocalPath": mapping_result.configured_local_path,
+                                })
+                            },
+                        })
+                        .await;
+                }
                 continue;
             }
 
@@ -734,33 +801,36 @@ async fn poll_sabnzbd(
                             "poller: source not yet available for <grab {}>, will retry",
                             grab.id
                         );
-                        let _ = state
-                            .db
-                            .create_notification(CreateNotificationDbRequest {
-                                user_id: grab.user_id,
-                                notification_type: NotificationType::PathNotFound,
-                                ref_key: Some(format!("path_not_found:{}", grab.id)),
-                                message: format!(
-                                    "{} reports that {} (grab {}) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.",
-                                    client.name, grab.title, grab.id
-                                ),
-                                data: {
-                                    let content_dir = std::path::Path::new(storage)
-                                        .parent()
-                                        .map(|d| d.display().to_string())
-                                        .unwrap_or_default();
-                                    serde_json::json!({
-                                        "grabId": grab.id,
-                                        "title": grab.title,
-                                        "clientName": client.name,
-                                        "clientHost": client.host,
-                                        "contentDir": content_dir,
-                                        "configuredRemotePath": mapping_result.configured_remote_path,
-                                        "configuredLocalPath": mapping_result.configured_local_path,
-                                    })
-                                },
-                            })
-                            .await;
+                        let age = chrono::Utc::now() - grab.grabbed_at;
+                        if age > chrono::Duration::minutes(5) {
+                            let _ = state
+                                .db
+                                .create_notification(CreateNotificationDbRequest {
+                                    user_id: grab.user_id,
+                                    notification_type: NotificationType::PathNotFound,
+                                    ref_key: Some(format!("path_not_found:{}", grab.id)),
+                                    message: format!(
+                                        "{} reports that {} (grab {}) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.",
+                                        client.name, grab.title, grab.id
+                                    ),
+                                    data: {
+                                        let content_dir = std::path::Path::new(storage)
+                                            .parent()
+                                            .map(|d| d.display().to_string())
+                                            .unwrap_or_default();
+                                        serde_json::json!({
+                                            "grabId": grab.id,
+                                            "title": grab.title,
+                                            "clientName": client.name,
+                                            "clientHost": client.host,
+                                            "contentDir": content_dir,
+                                            "configuredRemotePath": mapping_result.configured_remote_path,
+                                            "configuredLocalPath": mapping_result.configured_local_path,
+                                        })
+                                    },
+                                })
+                                .await;
+                        }
                         continue;
                     }
 

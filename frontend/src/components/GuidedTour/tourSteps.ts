@@ -5,7 +5,7 @@ export const TOUR_STEPS: Step[] = [
   {
     target: "body",
     content:
-      "Welcome to Livrarr! (Livre is the French word for book.) Let's walk through the key settings to get you up and running. You can exit this tour at any time.",
+      "Welcome to Livrarr! (Livre is the French word for book.) Let's walk through the key settings to get you up and running. You can exit this tour at any time. Click Next to continue.",
     placement: "center",
     skipBeacon: true,
     data: { route: "/" },
@@ -13,7 +13,7 @@ export const TOUR_STEPS: Step[] = [
   {
     target: "[data-tour='hardcover-section']",
     content:
-      "Hardcover is a free metadata source for books. Go to https://hardcover.app, create an account, and obtain an API token at Settings → API. (Do not delete \"Bearer\" from the token.)",
+      "Hardcover is a free metadata source for books. Go to https://hardcover.app, create an account, and obtain an API token at Settings → API. Enter the API Token (do not delete \"Bearer\"), click Save Changes, and click Next.",
     placement: "right",
     skipBeacon: true,
     data: { route: "/settings/metadata" },
@@ -21,8 +21,17 @@ export const TOUR_STEPS: Step[] = [
   {
     target: "[data-tour='llm-section']",
     content:
-      "Optional but recommended: connect an LLM to disambiguate search results and clean bibliographies. Both Groq and Google Gemini offer free tiers that work well — just pick a provider from the dropdown, grab a free API key, and paste it in. Livrarr only sends publicly available information (book titles and author names) — no file names, paths, or personal data. Model names change frequently; if a preset stops working, check the provider's docs.",
+      "Optional and Recommended: Add an LLM to assist with search results and metadata. Livrarr only sends publicly available information to LLMs; file names, system information, and personal data are not sent. Google Gemini offers a free tier that is recommended and has been tested. Please follow the instructions to obtain an API key, click Save Changes, and click Next to continue.",
     placement: "right",
+    skipBeacon: true,
+    data: { route: "/settings/metadata" },
+  },
+
+  {
+    target: "[data-tour='languages-section']",
+    content:
+      "Livrarr has experimental support for some Foreign Languages. This functionality requires LLM configuration. You may select Foreign Languages here, then click Next to continue.",
+    placement: "bottom" as const,
     skipBeacon: true,
     data: { route: "/settings/metadata" },
   },
@@ -31,7 +40,7 @@ export const TOUR_STEPS: Step[] = [
   {
     target: "body",
     content:
-      "Next up: indexers. These are the search engines Livrarr uses to find ebook and audiobook releases.",
+      "Next up: indexers. These are the search engines Livrarr uses to find ebook and audiobook releases. Click Next to continue.",
     placement: "center",
     skipBeacon: true,
     data: { route: "/settings/indexers" },
@@ -57,7 +66,7 @@ export const TOUR_STEPS: Step[] = [
   {
     target: "body",
     content:
-      "Now let's set up a download client so Livrarr can actually grab releases.",
+      "Now let's set up a download client so Livrarr can actually grab releases. Click Next to continue.",
     placement: "center",
     skipBeacon: true,
     data: { route: "/settings/downloadclients" },

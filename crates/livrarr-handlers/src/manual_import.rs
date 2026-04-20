@@ -860,7 +860,7 @@ async fn find_or_create_work<S: AppContext>(
         detail_url: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: true,
+        defer_enrichment: false,
         provenance_setter: None,
     };
 

@@ -42,7 +42,6 @@ tower-http = { version = "0.6", features = ["fs", "cors", "limit", "trace", "set
 clap = { version = "4", features = ["derive"] }
 tokio-util = "0.7"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
-quick-xml = "0.37"
 urlencoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
