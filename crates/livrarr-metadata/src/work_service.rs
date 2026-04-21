@@ -2,33 +2,66 @@ use livrarr_db::{
     AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, EnrichmentRetryDb,
     LibraryItemDb, ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
 };
+use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::{Duration, Instant};
 
-type RefreshLockMap = Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>;
+pub struct StubNoLlm;
 
-pub struct WorkServiceImpl<D, E, H> {
+impl LlmCaller for StubNoLlm {
+    async fn call(&self, _req: LlmCallRequest) -> Result<LlmCallResponse, LlmError> {
+        Err(LlmError::NotConfigured)
+    }
+}
+
+struct CachedLookup {
+    filtered: Vec<LookupResult>,
+    raw: Vec<LookupResult>,
+    raw_available: bool,
+    created_at: Instant,
+}
+
+pub struct WorkServiceImpl<D, E, H, L = StubNoLlm> {
     db: D,
     enrichment: E,
     http: H,
+    llm: L,
     data_dir: PathBuf,
-    refresh_locks: RefreshLockMap,
+    refresh_locks: KeyedMutex<(UserId, WorkId)>,
     bulk_refresh_users: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
+    lookup_cache: Arc<std::sync::Mutex<HashMap<(String, String), CachedLookup>>>,
 }
 
-impl<D, E, H> WorkServiceImpl<D, E, H> {
+impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm> {
     pub fn new(db: D, enrichment: E, http: H, data_dir: PathBuf) -> Self {
         Self {
             db,
             enrichment,
             http,
+            llm: StubNoLlm,
             data_dir,
-            refresh_locks: Arc::new(Mutex::new(HashMap::new())),
+            refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<D, E, H, L> WorkServiceImpl<D, E, H, L> {
+    pub fn new_with_llm(db: D, enrichment: E, http: H, llm: L, data_dir: PathBuf) -> Self {
+        Self {
+            db,
+            enrichment,
+            http,
+            llm,
+            data_dir,
+            refresh_locks: KeyedMutex::new(),
+            bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -38,14 +71,16 @@ impl<D, H> WorkServiceImpl<D, (), H> {
         db: D,
         http: H,
         data_dir: PathBuf,
-    ) -> WorkServiceImpl<D, StubNoEnrichment, H> {
+    ) -> WorkServiceImpl<D, StubNoEnrichment, H, StubNoLlm> {
         WorkServiceImpl {
             db,
             enrichment: StubNoEnrichment,
             http,
+            llm: StubNoLlm,
             data_dir,
-            refresh_locks: Arc::new(Mutex::new(HashMap::new())),
+            refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -77,7 +112,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
     }
 }
 
-impl<D, E, H> WorkService for WorkServiceImpl<D, E, H>
+impl<D, E, H, L> WorkService for WorkServiceImpl<D, E, H, L>
 where
     D: WorkDb
         + AuthorDb
@@ -89,6 +124,7 @@ where
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
+    L: LlmCaller + Send + Sync,
 {
     async fn add(
         &self,
@@ -296,10 +332,22 @@ where
         user_id: UserId,
         page: u32,
         page_size: u32,
+        sort_by: WorkSortField,
+        sort_dir: SortDirection,
     ) -> Result<PaginatedWorksView, WorkServiceError> {
+        let sort_col = match sort_by {
+            WorkSortField::Title => "title",
+            WorkSortField::DateAdded => "date_added",
+            WorkSortField::Year => "year",
+            WorkSortField::Author => "author",
+        };
+        let dir = match sort_dir {
+            SortDirection::Asc => "asc",
+            SortDirection::Desc => "desc",
+        };
         let (works, total) = self
             .db
-            .list_works_paginated(user_id, page, page_size)
+            .list_works_paginated(user_id, page, page_size, sort_col, dir)
             .await
             .map_err(WorkServiceError::Db)?;
 
@@ -310,14 +358,17 @@ where
             .await
             .map_err(WorkServiceError::Db)?;
 
+        // Pre-index items by work_id to avoid O(works×items) filtering.
+        let mut items_by_work: HashMap<WorkId, Vec<LibraryItem>> =
+            HashMap::with_capacity(work_ids.len());
+        for item in items {
+            items_by_work.entry(item.work_id).or_default().push(item);
+        }
+
         let work_views = works
             .into_iter()
             .map(|w| {
-                let work_items: Vec<LibraryItem> = items
-                    .iter()
-                    .filter(|li| li.work_id == w.id)
-                    .cloned()
-                    .collect();
+                let work_items = items_by_work.remove(&w.id).unwrap_or_default();
                 WorkDetailView {
                     work: w,
                     library_items: work_items,
@@ -426,14 +477,7 @@ where
     ) -> Result<RefreshWorkResult, WorkServiceError> {
         let work = self.get(user_id, work_id).await?;
 
-        let lock = {
-            let mut locks = self.refresh_locks.lock().await;
-            locks
-                .entry((user_id, work_id))
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        let _guard = lock.lock().await;
+        let _guard = self.refresh_locks.lock((user_id, work_id)).await;
 
         if let Err(e) = self.db.reset_enrichment_for_refresh(user_id, work_id).await {
             tracing::warn!("reset_enrichment_for_refresh failed: {e}");
@@ -494,6 +538,12 @@ where
 
         let total_works = works.len();
 
+        if !self.try_start_bulk_refresh(user_id) {
+            return Err(WorkServiceError::Enrichment(
+                "bulk refresh already in progress".into(),
+            ));
+        }
+
         Ok(RefreshAllHandle { total_works })
     }
 
@@ -518,7 +568,7 @@ where
 
         let _work = self.get(user_id, work_id).await?;
 
-        let covers_dir = self.data_dir.join("covers");
+        let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
         tokio::fs::create_dir_all(&covers_dir)
             .await
             .map_err(|e| WorkServiceError::Enrichment(format!("create covers dir: {e}")))?;
@@ -562,7 +612,17 @@ where
     ) -> Result<Vec<u8>, WorkServiceError> {
         let _work = self.get(user_id, work_id).await?;
 
-        let cover_path = self.data_dir.join("covers").join(format!("{work_id}.jpg"));
+        // Try new tenant-aware path first, fall back to old flat layout.
+        let new_path = self
+            .data_dir
+            .join("covers")
+            .join(user_id.to_string())
+            .join(format!("{work_id}.jpg"));
+        let cover_path = if new_path.exists() {
+            new_path
+        } else {
+            self.data_dir.join("covers").join(format!("{work_id}.jpg"))
+        };
         let bytes = tokio::fs::read(&cover_path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 WorkServiceError::NotFound
@@ -606,8 +666,117 @@ where
         Ok(vec![])
     }
 
-    async fn download_cover_from_url(&self, work_id: i64, cover_url: &str) {
-        let covers_dir = self.data_dir.join("covers");
+    async fn lookup_filtered(
+        &self,
+        req: LookupRequest,
+        raw: bool,
+    ) -> Result<LookupResponse, WorkServiceError> {
+        let term = req.term.trim().to_lowercase();
+        if term.is_empty() {
+            return Ok(LookupResponse {
+                results: vec![],
+                filtered_count: 0,
+                raw_count: 0,
+                raw_available: false,
+            });
+        }
+
+        let lang = req
+            .lang_override
+            .clone()
+            .unwrap_or_else(|| "en".to_string());
+        let cache_key = (term.clone(), lang.clone());
+
+        // Check cache (15 min TTL)
+        {
+            let cache = self.lookup_cache.lock().unwrap();
+            if let Some(cached) = cache.get(&cache_key) {
+                if cached.created_at.elapsed() < Duration::from_secs(900) {
+                    let results = if raw || !cached.raw_available {
+                        cached.raw.clone()
+                    } else {
+                        cached.filtered.clone()
+                    };
+                    return Ok(LookupResponse {
+                        filtered_count: cached.filtered.len(),
+                        raw_count: cached.raw.len(),
+                        raw_available: cached.raw_available,
+                        results,
+                    });
+                }
+            }
+        }
+
+        let raw_results = self.lookup(req).await?;
+        if raw_results.is_empty() {
+            return Ok(LookupResponse {
+                results: vec![],
+                filtered_count: 0,
+                raw_count: 0,
+                raw_available: false,
+            });
+        }
+
+        let raw_count = raw_results.len();
+
+        // Attempt LLM filtering
+        let (filtered, raw_available) = match self.llm_filter_search(&raw_results).await {
+            Some(indices) if indices.len() < raw_count => {
+                let filtered: Vec<LookupResult> = indices
+                    .into_iter()
+                    .filter_map(|i| raw_results.get(i).cloned())
+                    .collect();
+                (filtered, true)
+            }
+            _ => (raw_results.clone(), false),
+        };
+
+        let filtered_count = filtered.len();
+
+        // Cache both
+        {
+            let mut cache = self.lookup_cache.lock().unwrap();
+            // Evict stale entries
+            cache.retain(|_, v| v.created_at.elapsed() < Duration::from_secs(900));
+            cache.insert(
+                cache_key,
+                CachedLookup {
+                    filtered: filtered.clone(),
+                    raw: raw_results.clone(),
+                    raw_available,
+                    created_at: Instant::now(),
+                },
+            );
+        }
+
+        let results = if raw || !raw_available {
+            raw_results
+        } else {
+            filtered
+        };
+
+        Ok(LookupResponse {
+            results,
+            filtered_count,
+            raw_count,
+            raw_available,
+        })
+    }
+
+    async fn search_works(
+        &self,
+        user_id: UserId,
+        query: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<(Vec<Work>, i64), WorkServiceError> {
+        WorkDb::search_works(&self.db, user_id, query, page, page_size)
+            .await
+            .map_err(WorkServiceError::Db)
+    }
+
+    async fn download_cover_from_url(&self, user_id: i64, work_id: i64, cover_url: &str) {
+        let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
         if let Err(e) =
             download_cover_to_disk(&self.http, cover_url, &covers_dir, work_id, "").await
         {
@@ -628,11 +797,73 @@ where
     }
 }
 
-impl<D, E, H> WorkServiceImpl<D, E, H>
+impl<D, E, H, L> WorkServiceImpl<D, E, H, L>
 where
-    D: ConfigDb + Send + Sync,
+    D: WorkDb + ConfigDb + Send + Sync,
     H: HttpFetcher + Send + Sync,
+    L: LlmCaller + Send + Sync,
 {
+    async fn llm_filter_search(&self, results: &[LookupResult]) -> Option<Vec<usize>> {
+        let mut listing = String::new();
+        for (i, r) in results.iter().enumerate() {
+            listing.push_str(&format!(
+                "{}: \"{}\" by {} ({})\n",
+                i,
+                r.title,
+                r.author_name,
+                r.year.map(|y| y.to_string()).unwrap_or_default(),
+            ));
+        }
+
+        let system = "You are a librarian assistant. Clean up book search results.";
+        let user_prompt = format!(
+            "These are search results from a book database:\n\n\
+             {listing}\n\
+             Clean up this list:\n\
+             1. Remove non-book items (study guides, journals, blank notebooks, merchandise, board games)\n\
+             2. Remove duplicate editions of the same work — keep the one with the best metadata\n\
+             3. Remove comic/manga adaptations, movie tie-in editions, and abridged versions\n\
+             4. Remove anthologies and compilations unless they are a well-known standalone work\n\
+             5. Keep results that are legitimate different works even if titles are similar\n\n\
+             Return a JSON array of the original indices to keep, e.g. [0, 2, 5].\n\
+             Return ONLY the JSON array, no other text."
+        );
+
+        let mut context = HashMap::new();
+        context.insert(LlmField::BibliographyHtml, LlmValue::Text(listing));
+
+        let req = LlmCallRequest {
+            system_template: Box::leak(system.to_string().into_boxed_str()),
+            user_template: Box::leak(user_prompt.into_boxed_str()),
+            context,
+            allowed_fields: &[LlmField::BibliographyHtml],
+            timeout: Duration::from_secs(30),
+            purpose: LlmPurpose::SearchResultCleanup,
+        };
+
+        let resp = self.llm.call(req).await.ok()?;
+
+        let json_str = resp
+            .content
+            .trim()
+            .strip_prefix("```json")
+            .or_else(|| resp.content.trim().strip_prefix("```"))
+            .unwrap_or(resp.content.trim())
+            .strip_suffix("```")
+            .unwrap_or(resp.content.trim())
+            .trim();
+
+        let indices: Vec<usize> = serde_json::from_str(json_str).ok()?;
+        let max_idx = results.len();
+        let valid: Vec<usize> = indices.into_iter().filter(|&i| i < max_idx).collect();
+
+        if valid.is_empty() {
+            return None;
+        }
+
+        Some(valid)
+    }
+
     async fn lookup_goodreads(
         &self,
         term: &str,
@@ -827,51 +1058,7 @@ async fn write_addtime_provenance<D: ProvenanceDb>(
     work: &Work,
     setter: ProvenanceSetter,
 ) {
-    let mut reqs: Vec<SetFieldProvenanceRequest> = Vec::new();
-    let push = |reqs: &mut Vec<SetFieldProvenanceRequest>, field: WorkField| {
-        reqs.push(SetFieldProvenanceRequest {
-            user_id,
-            work_id: work.id,
-            field,
-            source: None,
-            setter,
-            cleared: false,
-        });
-    };
-    if !work.title.is_empty() {
-        push(&mut reqs, WorkField::Title);
-    }
-    if !work.author_name.is_empty() {
-        push(&mut reqs, WorkField::AuthorName);
-    }
-    if work.ol_key.is_some() {
-        push(&mut reqs, WorkField::OlKey);
-    }
-    if work.gr_key.is_some() {
-        push(&mut reqs, WorkField::GrKey);
-    }
-    if work.language.is_some() {
-        push(&mut reqs, WorkField::Language);
-    }
-    if work.year.is_some() {
-        push(&mut reqs, WorkField::Year);
-    }
-    if work.series_name.is_some() {
-        push(&mut reqs, WorkField::SeriesName);
-    }
-    if work.series_position.is_some() {
-        push(&mut reqs, WorkField::SeriesPosition);
-    }
-    if reqs.is_empty() {
-        return;
-    }
-    if let Err(e) = db.set_field_provenance_batch(reqs).await {
-        tracing::warn!(
-            work_id = work.id,
-            ?setter,
-            "write_addtime_provenance failed: {e}"
-        );
-    }
+    crate::provenance::write_addtime_provenance(db, user_id, work, setter).await;
 }
 
 fn unproxy_cover_url(url: &str) -> String {

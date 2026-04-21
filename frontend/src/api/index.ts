@@ -1,4 +1,4 @@
-import { apiFetch, apiUpload } from "./client";
+import { apiFetch, apiUpload, ApiError } from "./client";
 import type {
   SetupStatusResponse,
   SetupRequest,
@@ -11,7 +11,7 @@ import type {
   UserResponse,
   AdminCreateUserRequest,
   AdminUpdateUserRequest,
-  WorkSearchResult,
+  LookupResponse,
   AddWorkRequest,
   AddWorkResponse,
   WorkDetailResponse,
@@ -125,17 +125,28 @@ export const regenerateUserApiKey = (id: number) =>
   apiFetch<ApiKeyResponse>(`/user/${id}/apikey`, { method: "POST" });
 
 // Works
-export const lookupWorks = (term: string, lang?: string) =>
-  apiFetch<WorkSearchResult[]>(
-    `/work/lookup?term=${encodeURIComponent(term)}${lang ? `&lang=${encodeURIComponent(lang)}` : ""}`,
+export const lookupWorks = (term: string, lang?: string, raw?: boolean) =>
+  apiFetch<LookupResponse>(
+    `/work/lookup?term=${encodeURIComponent(term)}${lang ? `&lang=${encodeURIComponent(lang)}` : ""}${raw ? "&raw=true" : ""}`,
   );
 export const addWork = (req: AddWorkRequest) =>
   apiFetch<AddWorkResponse>("/work", {
     method: "POST",
     body: JSON.stringify(req),
   });
-export const listWorks = () =>
-  apiFetch<PaginatedResponse<WorkDetailResponse>>("/work?page_size=500");
+export const listWorks = (params?: {
+  page?: number;
+  pageSize?: number;
+  sortBy?: string;
+  sortDir?: string;
+}) => {
+  const sp = new URLSearchParams();
+  sp.set("page", String(params?.page ?? 1));
+  sp.set("page_size", String(params?.pageSize ?? 1000));
+  sp.set("sort_by", String(params?.sortBy ?? "date_added"));
+  sp.set("sort_dir", String(params?.sortDir ?? "desc"));
+  return apiFetch<PaginatedResponse<WorkDetailResponse>>(`/work?${sp}`);
+};
 export const getWork = (id: number) =>
   apiFetch<WorkDetailResponse>(`/work/${id}`);
 export const updateWork = (id: number, req: UpdateWorkRequest) =>
@@ -176,8 +187,8 @@ export const deleteAuthor = (id: number) =>
   apiFetch<void>(`/author/${id}`, { method: "DELETE" });
 export const searchAuthors = () =>
   apiFetch<void>("/author/search", { method: "POST" });
-export const getAuthorBibliography = (id: number) =>
-  apiFetch<AuthorBibliography>(`/author/${id}/bibliography`);
+export const getAuthorBibliography = (id: number, raw = false) =>
+  apiFetch<AuthorBibliography>(`/author/${id}/bibliography${raw ? "?raw=true" : ""}`);
 export const refreshAuthorBibliography = (id: number) =>
   apiFetch<AuthorBibliography>(`/author/${id}/bibliography/refresh`, {
     method: "POST",
@@ -230,38 +241,14 @@ export const retryImport = (grabId: number) =>
   apiFetch<void>(`/grab/${grabId}/retry`, { method: "POST" });
 
 // Releases
-// The backend returns 502 with a valid ReleaseSearchResponse body when all
-// indexers fail. We parse the body as warnings in that case instead of throwing.
-export const searchReleases = async (
+export const searchReleases = (
   workId: number,
   opts?: { refresh?: boolean; cacheOnly?: boolean },
 ): Promise<ReleaseSearchResponse> => {
-  const token = (await import("./client")).getToken();
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   const params = new URLSearchParams({ workId: String(workId) });
   if (opts?.refresh) params.set("refresh", "true");
   if (opts?.cacheOnly) params.set("cacheOnly", "true");
-  const res = await fetch(`/api/v1/release?${params}`, { headers });
-  if (res.status === 502) {
-    try {
-      return (await res.json()) as ReleaseSearchResponse;
-    } catch {
-      return { results: [], warnings: [{ indexer: "unknown", error: "All indexers failed" }] };
-    }
-  }
-  if (!res.ok) {
-    const { ApiError } = await import("./client");
-    if (res.status === 401) {
-      // Dynamically import to avoid circular dep; clearAuth handles both
-      // localStorage removal and Zustand state reset.
-      const { useAuthStore } = await import("@/stores/auth");
-      useAuthStore.getState().clearAuth();
-      throw new ApiError({ status: 401, error: "unauthorized", message: "Session expired" });
-    }
-    throw new ApiError({ status: res.status, error: "error", message: "Search failed" });
-  }
-  return res.json() as Promise<ReleaseSearchResponse>;
+  return apiFetch<ReleaseSearchResponse>(`/release?${params}`);
 };
 export const grabRelease = (req: GrabRequest) =>
   apiFetch<void>("/release/grab", {
@@ -551,14 +538,34 @@ export const listImportPreview = async (file: File): Promise<ListImportPreviewRe
   const token = (await import("./client")).getToken();
   const formData = new FormData();
   formData.append("file", file);
-  const res = await fetch("/api/v1/listimport/preview", {
-    method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    body: formData,
-  });
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  let res: Response;
+  try {
+    res = await fetch("/api/v1/listimport/preview", {
+      method: "POST",
+      headers,
+      body: formData,
+    });
+  } catch {
+    throw new ApiError({
+      status: 0,
+      error: "network_error",
+      message: "Unable to reach Livrarr",
+    });
+  }
+  if (res.status === 401) {
+    const { clearToken, registerAuthClearedListener: _ } = await import("./client");
+    clearToken();
+    throw new ApiError({ status: 401, error: "unauthorized", message: "Session expired" });
+  }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(err.message || res.statusText);
+    const body = await res.json().catch(() => ({ message: res.statusText }));
+    throw new ApiError({
+      status: res.status,
+      error: body.error || "error",
+      message: body.message || res.statusText,
+    });
   }
   return res.json();
 };

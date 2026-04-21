@@ -1,7 +1,18 @@
-use livrarr_domain::{AuthorId, EnrichmentStatus, LibraryItemId, MediaType, NarrationType, WorkId};
+use livrarr_domain::{
+    AuthorId, EnrichmentStatus, LibraryItemId, MediaType, NarrationType, Work, WorkId,
+};
 use serde::{Deserialize, Serialize};
 
 use super::api_error::ApiError;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LookupApiResponse {
+    pub results: Vec<WorkSearchResult>,
+    pub filtered_count: usize,
+    pub raw_count: usize,
+    pub raw_available: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +173,50 @@ pub struct WorkDetailResponse {
     pub library_items: Vec<LibraryItemResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_source: Option<String>,
+}
+
+/// Convert a domain `Work` into a `WorkDetailResponse` (with empty `library_items`).
+/// Use this shared mapper instead of duplicating the field-by-field conversion.
+pub fn work_to_detail(w: &Work) -> WorkDetailResponse {
+    WorkDetailResponse {
+        id: w.id,
+        title: w.title.clone(),
+        sort_title: w.sort_title.clone(),
+        subtitle: w.subtitle.clone(),
+        original_title: w.original_title.clone(),
+        author_name: w.author_name.clone(),
+        author_id: w.author_id,
+        description: w.description.clone(),
+        year: w.year,
+        series_id: w.series_id,
+        series_name: w.series_name.clone(),
+        series_position: w.series_position,
+        genres: w.genres.clone(),
+        language: w.language.clone(),
+        page_count: w.page_count,
+        duration_seconds: w.duration_seconds,
+        publisher: w.publisher.clone(),
+        publish_date: w.publish_date.clone(),
+        ol_key: w.ol_key.clone(),
+        hc_key: w.hc_key.clone(),
+        gr_key: w.gr_key.clone(),
+        isbn_13: w.isbn_13.clone(),
+        asin: w.asin.clone(),
+        narrator: w.narrator.clone(),
+        narration_type: w.narration_type,
+        abridged: w.abridged,
+        rating: w.rating,
+        rating_count: w.rating_count,
+        enrichment_status: w.enrichment_status,
+        enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
+        enrichment_source: w.enrichment_source.clone(),
+        cover_manual: w.cover_manual,
+        monitor_ebook: w.monitor_ebook,
+        monitor_audiobook: w.monitor_audiobook,
+        added_at: w.added_at.to_rfc3339(),
+        library_items: vec![],
+        metadata_source: w.metadata_source.clone(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

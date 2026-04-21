@@ -6,6 +6,7 @@ use livrarr_db::sqlite::SqliteDb;
 use livrarr_http::HttpClient;
 use tokio::sync::RwLock;
 
+use crate::auth_crypto::RealAuthCrypto;
 use crate::auth_service::ServerAuthService;
 use crate::config::AppConfig;
 
@@ -54,6 +55,7 @@ pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     SqliteDb,
     LiveEnrichmentWorkflow,
     livrarr_http::fetcher::HttpFetcherImpl,
+    livrarr_metadata::llm_caller_service::LlmCallerImpl,
 >;
 pub type LiveGrabService = livrarr_download::grab_service::GrabServiceImpl<SqliteDb>;
 pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceImpl<
@@ -95,7 +97,7 @@ pub type LiveManualImportDbService =
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqliteDb,
-    pub auth_service: Arc<ServerAuthService>,
+    pub auth_service: Arc<ServerAuthService<RealAuthCrypto>>,
     pub http_client: HttpClient,
     /// SSRF-safe HTTP client — uses DNS resolver that rejects private IPs.
     /// Use for all user-supplied URLs (grab, fetch_and_extract_hash).
@@ -119,8 +121,6 @@ pub struct AppState {
     pub refresh_in_progress: Arc<std::sync::Mutex<HashSet<livrarr_db::UserId>>>,
     /// Limits concurrent imports to avoid blocking poller and exhausting I/O.
     pub import_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Per-(user, work) import locks to prevent concurrent imports of the same work.
-    pub import_locks: Arc<ImportLockMap>,
     pub grab_search_cache: Arc<GrabSearchCache>,
     /// Last RSS sync completion timestamp (unix seconds, 0 = never).
     pub rss_last_run: Arc<std::sync::atomic::AtomicI64>,
@@ -284,7 +284,7 @@ impl livrarr_handlers::context::AppContext for AppState {
     type ImportIoSvc = LiveImportIoService;
     type ManualImportSvc = LiveManualImportDbService;
     type HistorySvc = LiveHistoryService;
-    type AuthSvc = ServerAuthService;
+    type AuthSvc = ServerAuthService<RealAuthCrypto>;
     type ImportWf = LiveImportWorkflow;
     type EnrichmentWf = LiveEnrichmentWorkflow;
     type RssSyncWf = LiveRssSyncWorkflow;
@@ -381,6 +381,9 @@ impl livrarr_handlers::context::AppContext for AppState {
     fn http_client(&self) -> &livrarr_http::HttpClient {
         &self.http_client
     }
+    fn http_client_safe(&self) -> &livrarr_http::HttpClient {
+        &self.http_client_safe
+    }
     fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
     }
@@ -469,24 +472,7 @@ pub struct ManualImportScanState {
 
 pub type ManualImportScanMap = dashmap::DashMap<String, ManualImportScanState>;
 
-/// Per-(user, work) mutex map for serializing concurrent imports of the same work.
-/// Value is `(mutex, insertion_time)` — the insertion time is used by TTL cleanup.
-pub type ImportLockMap = dashmap::DashMap<
-    (livrarr_db::UserId, livrarr_db::WorkId),
-    (Arc<tokio::sync::Mutex<()>>, std::time::Instant),
->;
-
 const STATE_MAP_TTL: Duration = Duration::from_secs(30 * 60); // 30 minutes
-
-/// Remove entries from `import_locks` that were inserted more than 30 minutes ago.
-/// Safe to call from any context — entries still held by an active guard are still
-/// referenced via Arc, so the mutex itself is not dropped until the guard releases.
-pub fn cleanup_import_locks(map: &ImportLockMap) {
-    let cutoff = std::time::Instant::now()
-        .checked_sub(STATE_MAP_TTL)
-        .unwrap_or(std::time::Instant::now());
-    map.retain(|_, (_, ts)| *ts > cutoff);
-}
 
 /// Remove entries from `manual_import_scans` that were created more than 30 minutes ago.
 pub fn cleanup_manual_import_scans(map: &ManualImportScanMap) {

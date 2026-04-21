@@ -9,6 +9,26 @@ use livrarr_server::config::{AppConfig, LogFormat, LogLevel};
 use livrarr_server::router::build_router;
 use livrarr_server::state::{AppState, ProviderHealthState};
 
+/// Validate an LLM endpoint URL at startup (best-effort, non-fatal).
+fn validate_llm_endpoint_startup(endpoint: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(endpoint).map_err(|e| format!("invalid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("unsupported scheme: {other}")),
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("URL contains embedded credentials".into());
+    }
+    if let Some(host) = parsed.host_str() {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if livrarr_http::ssrf::is_private_ip(ip) {
+                return Err("URL points to a private IP address".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Livrarr — self-hosted ebook and audiobook library manager.
 #[derive(Parser)]
 #[command(name = "livrarr", version)]
@@ -76,7 +96,8 @@ async fn main() {
 
     // Step 7: Pre-migration backup (only if DB file already exists).
     let db_path = data_dir.join("livrarr.db");
-    if db_path.exists() {
+    let db_exists = tokio::fs::try_exists(&db_path).await.unwrap_or(false);
+    if db_exists {
         match livrarr_db::pool::create_backup(&pool, &data_dir).await {
             Ok(_) => {}
             Err(e) => {
@@ -103,12 +124,20 @@ async fn main() {
     }
 
     // Step 10: Clean up old backups (keep 3).
-    livrarr_db::pool::cleanup_old_backups(&data_dir, 3);
+    {
+        let data_dir_clone = data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            livrarr_db::pool::cleanup_old_backups(&data_dir_clone, 3);
+        })
+        .await
+        .ok();
+    }
 
     // Construct AppState.
     let db = livrarr_db::sqlite::SqliteDb::new(pool);
     let auth_service = Arc::new(livrarr_server::auth_service::ServerAuthService::new(
         db.clone(),
+        livrarr_server::auth_crypto::RealAuthCrypto,
     ));
     let http_client = livrarr_http::HttpClient::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -149,6 +178,18 @@ async fn main() {
         });
         livrarr_metadata::live_config::LiveMetadataConfig::new(initial)
     };
+
+    // Warn at startup if the configured LLM endpoint is invalid (but don't fail).
+    {
+        let cfg = live_metadata_config.snapshot();
+        if let Some(ref endpoint) = cfg.llm_endpoint {
+            if !endpoint.is_empty() {
+                if let Err(reason) = validate_llm_endpoint_startup(endpoint) {
+                    warn!("LLM endpoint validation: {reason} — LLM features may not work");
+                }
+            }
+        }
+    }
 
     let (provider_queue, enrichment_service) = {
         use livrarr_domain::MetadataProvider as P;
@@ -252,6 +293,8 @@ async fn main() {
     let import_io_arc = Arc::new(livrarr_server::import_io_service::ImportIoServiceImpl::new(
         svc_db.clone(),
     ));
+    let ol_rate_limiter_shared = Arc::new(livrarr_server::state::OlRateLimiter::new());
+    let manual_import_scans_shared = Arc::new(dashmap::DashMap::new());
     let state = AppState {
         db,
         auth_service,
@@ -269,15 +312,14 @@ async fn main() {
         log_level_handle: log_level_handle.clone(),
         refresh_in_progress: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         import_semaphore: import_semaphore.clone(),
-        import_locks: Arc::new(dashmap::DashMap::new()),
         grab_search_cache: Arc::new(livrarr_server::state::GrabSearchCache::new()),
         rss_last_run: rss_last_run.clone(),
         rss_sync_running: rss_sync_running.clone(),
         readarr_import_progress: Arc::new(tokio::sync::Mutex::new(
             livrarr_server::readarr_import_service::ReadarrImportProgress::default(),
         )),
-        ol_rate_limiter: Arc::new(livrarr_server::state::OlRateLimiter::new()),
-        manual_import_scans: Arc::new(dashmap::DashMap::new()),
+        ol_rate_limiter: ol_rate_limiter_shared.clone(),
+        manual_import_scans: manual_import_scans_shared.clone(),
         provider_queue,
         enrichment_service: enrichment_service.clone(),
 
@@ -286,17 +328,12 @@ async fn main() {
             svc_db.clone(),
             livrarr_http::fetcher::HttpFetcherImpl::new()
                 .expect("HttpFetcherImpl construction for author service"),
-            {
-                let cfg = live_metadata_config.snapshot();
-                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
-                    cfg.llm_endpoint.clone(),
-                    cfg.llm_api_key.clone(),
-                    cfg.llm_model.clone(),
-                    livrarr_http::HttpClient::builder()
-                        .build()
-                        .expect("LLM HttpClient"),
-                )
-            },
+            livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                live_metadata_config.clone(),
+                livrarr_http::HttpClient::builder()
+                    .build()
+                    .expect("LLM HttpClient"),
+            ),
         )),
         series_service: Arc::new(livrarr_metadata::series_service::SeriesServiceImpl::new(
             svc_db.clone(),
@@ -315,17 +352,12 @@ async fn main() {
                     Arc::new(ew)
                 },
                 data_dir.clone(),
-                {
-                    let cfg = live_metadata_config.snapshot();
-                    livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
-                        cfg.llm_endpoint.clone(),
-                        cfg.llm_api_key.clone(),
-                        cfg.llm_model.clone(),
-                        livrarr_http::HttpClient::builder()
-                            .build()
-                            .expect("LLM HttpClient for series query"),
-                    )
-                },
+                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    livrarr_http::HttpClient::builder()
+                        .build()
+                        .expect("LLM HttpClient for series query"),
+                ),
             ),
         ),
         work_service: {
@@ -333,11 +365,17 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
-            Arc::new(livrarr_metadata::work_service::WorkServiceImpl::new(
+            Arc::new(livrarr_metadata::work_service::WorkServiceImpl::new_with_llm(
                 svc_db.clone(),
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for work service"),
+                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    livrarr_http::HttpClient::builder()
+                        .build()
+                        .expect("LLM HttpClient for work service"),
+                ),
                 data_dir.clone(),
             ))
         },
@@ -378,11 +416,17 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
-            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new_with_llm(
                 svc_db.clone(),
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for list work service"),
+                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    livrarr_http::HttpClient::builder()
+                        .build()
+                        .expect("LLM HttpClient for list service"),
+                ),
                 data_dir.clone(),
             );
             Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
@@ -404,11 +448,17 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
-            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new_with_llm(
                 svc_db.clone(),
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for author monitor work service"),
+                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    livrarr_http::HttpClient::builder()
+                        .build()
+                        .expect("LLM HttpClient for author monitor"),
+                ),
                 data_dir.clone(),
             );
             Arc::new(
@@ -470,8 +520,8 @@ async fn main() {
         matching_svc: livrarr_server::matching_service::LiveMatchingService,
         manual_import_scan_svc:
             livrarr_server::manual_import_scan_service::LiveManualImportScanService {
-                scans: Arc::new(dashmap::DashMap::new()),
-                ol_rate_limiter: Arc::new(livrarr_server::state::OlRateLimiter::new()),
+                scans: manual_import_scans_shared.clone(),
+                ol_rate_limiter: ol_rate_limiter_shared.clone(),
                 http_client: http_client_for_scan,
             },
         readarr_import_wf: Arc::new(
@@ -486,6 +536,14 @@ async fn main() {
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
     livrarr_server::jobs::recover_interrupted_state(&state).await;
+
+    // Pre-warm SQLite page cache so first request isn't slow.
+    let _ = sqlx::query("SELECT COUNT(*) FROM works")
+        .fetch_one(state.db.pool())
+        .await;
+    let _ = sqlx::query("SELECT COUNT(*) FROM library_items")
+        .fetch_one(state.db.pool())
+        .await;
 
     // Step 8: Start background jobs (JOBS-001).
     job_runner.start(state.clone()).await;
@@ -591,7 +649,7 @@ fn init_tracing(
     // File output: {data_dir}/logs/livrarr.txt (Servarr convention)
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir).ok();
-    let file_appender = tracing_appender::rolling::never(&log_dir, "livrarr.txt");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "livrarr.log");
     let file_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = if use_json {
         Box::new(
             tracing_subscriber::fmt::layer()

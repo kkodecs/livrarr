@@ -10,54 +10,14 @@ use crate::services::settings_service::SettingsService;
 use crate::state::AppState;
 use crate::{
     AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse,
-    RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
+    LookupApiResponse, RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse,
+    WorkSearchResult,
 };
 use livrarr_domain::services::{
     CreateNotificationRequest, NotificationService, WorkDetailView, WorkService,
 };
-use livrarr_domain::Work;
 
-fn work_to_detail(w: &Work) -> WorkDetailResponse {
-    WorkDetailResponse {
-        id: w.id,
-        title: w.title.clone(),
-        sort_title: w.sort_title.clone(),
-        subtitle: w.subtitle.clone(),
-        original_title: w.original_title.clone(),
-        author_name: w.author_name.clone(),
-        author_id: w.author_id,
-        description: w.description.clone(),
-        year: w.year,
-        series_id: w.series_id,
-        series_name: w.series_name.clone(),
-        series_position: w.series_position,
-        genres: w.genres.clone(),
-        language: w.language.clone(),
-        page_count: w.page_count,
-        duration_seconds: w.duration_seconds,
-        publisher: w.publisher.clone(),
-        publish_date: w.publish_date.clone(),
-        ol_key: w.ol_key.clone(),
-        hc_key: w.hc_key.clone(),
-        gr_key: w.gr_key.clone(),
-        isbn_13: w.isbn_13.clone(),
-        asin: w.asin.clone(),
-        narrator: w.narrator.clone(),
-        narration_type: w.narration_type,
-        abridged: w.abridged,
-        rating: w.rating,
-        rating_count: w.rating_count,
-        enrichment_status: w.enrichment_status,
-        enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
-        enrichment_source: w.enrichment_source.clone(),
-        cover_manual: w.cover_manual,
-        monitor_ebook: w.monitor_ebook,
-        monitor_audiobook: w.monitor_audiobook,
-        added_at: w.added_at.to_rfc3339(),
-        library_items: vec![],
-        metadata_source: w.metadata_source.clone(),
-    }
-}
+use livrarr_handlers::types::work::work_to_detail;
 
 fn detail_from_view(view: WorkDetailView) -> WorkDetailResponse {
     let mut detail = work_to_detail(&view.work);
@@ -79,6 +39,7 @@ fn detail_from_view(view: WorkDetailView) -> WorkDetailResponse {
 pub struct LookupQuery {
     pub term: Option<String>,
     pub lang: Option<String>,
+    pub raw: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -87,22 +48,24 @@ pub struct DeleteQuery {
     pub delete_files: Option<bool>,
 }
 
-/// GET /api/v1/work/lookup?term=...&lang=...  — searches metadata providers by language.
+/// GET /api/v1/work/lookup?term=...&lang=...&raw=...  — searches metadata providers by language.
 pub async fn lookup(
     State(state): State<AppState>,
     _ctx: AuthContext,
     Query(q): Query<LookupQuery>,
-) -> Result<Json<Vec<WorkSearchResult>>, ApiError> {
+) -> Result<Json<LookupApiResponse>, ApiError> {
     use livrarr_domain::services::WorkService;
 
     let req = livrarr_domain::services::LookupRequest {
         term: q.term.unwrap_or_default(),
         lang_override: q.lang,
     };
+    let raw = q.raw.unwrap_or(false);
 
-    let results = state.work_service.lookup(req).await?;
+    let resp = state.work_service.lookup_filtered(req, raw).await?;
 
-    let api_results = results
+    let results = resp
+        .results
         .into_iter()
         .map(|r| WorkSearchResult {
             ol_key: r.ol_key,
@@ -122,7 +85,12 @@ pub async fn lookup(
         })
         .collect();
 
-    Ok(Json(api_results))
+    Ok(Json(LookupApiResponse {
+        results,
+        filtered_count: resp.filtered_count,
+        raw_count: resp.raw_count,
+        raw_available: resp.raw_available,
+    }))
 }
 
 /// Internal work creation — shared by the HTTP handler and manual import.
@@ -166,73 +134,23 @@ pub async fn add_work_internal(
 }
 
 /// Fetch the merge-resolved cover URL and write it atomically to
-/// `covers/{work_id}.jpg`. Best-effort — every failure is logged but
-/// returns `()` so callers don't have to handle errors. Uses the
-/// SSRF-safe HTTP client.
-pub(crate) async fn download_post_enrich_cover(state: &AppState, work_id: i64, cover_url: &str) {
-    let covers_dir = state.data_dir.join("covers");
-    if let Err(e) = tokio::fs::create_dir_all(&covers_dir).await {
-        tracing::warn!(work_id, "create_dir_all for covers failed: {e}");
-        return;
-    }
-    let resp = match state.http_client_safe.get(cover_url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(work_id, cover_url, "cover download request failed: {e}");
-            return;
-        }
-    };
-    if !resp.status().is_success() {
-        tracing::warn!(
-            work_id,
-            cover_url,
-            status = %resp.status(),
-            "cover download returned non-success status"
-        );
-        return;
-    }
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(work_id, "cover body read failed: {e}");
-            return;
-        }
-    };
-    let path = covers_dir.join(format!("{work_id}.jpg"));
-    if let Err(e) = atomic_write_cover_handler(&path, &bytes).await {
-        tracing::warn!(work_id, "cover atomic write failed: {e}");
-        return;
-    }
-    let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
-    let _ = tokio::fs::remove_file(&thumb).await;
-}
-
-/// Atomically write a cover file: `path.tmp` → fsync → rename.
-async fn atomic_write_cover_handler(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("jpg.tmp");
-    let tmp_for_blocking = tmp.clone();
-    let bytes = bytes.to_vec();
-    let target = path.to_path_buf();
-    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp_for_blocking)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp_for_blocking, &target)
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            Err(e)
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            Err(std::io::Error::other(format!("spawn error: {e}")))
-        }
-    }
+/// `covers/{user_id}/{work_id}.jpg`. Best-effort — every failure is logged
+/// but returns `()` so callers don't have to handle errors.
+///
+/// Delegates to `WorkService::download_cover_from_url` which uses the
+/// SSRF-safe HTTP fetcher and atomic write. Single implementation for
+/// all cover download paths (refresh, refresh_all, enrichment_retry).
+pub(crate) async fn download_post_enrich_cover(
+    state: &AppState,
+    user_id: i64,
+    work_id: i64,
+    cover_url: &str,
+) {
+    use livrarr_domain::services::WorkService;
+    state
+        .work_service
+        .download_cover_from_url(user_id, work_id, cover_url)
+        .await;
 }
 
 /// POST /api/v1/work
@@ -253,7 +171,13 @@ pub async fn list(
 ) -> Result<Json<crate::PaginatedResponse<WorkDetailResponse>>, ApiError> {
     let view = state
         .work_service
-        .list_paginated(ctx.user.id, pq.page(), pq.page_size())
+        .list_paginated(
+            ctx.user.id,
+            pq.page(),
+            pq.page_size(),
+            pq.sort_by(),
+            pq.sort_dir(),
+        )
         .await?;
 
     let items = view.works.into_iter().map(detail_from_view).collect();
@@ -320,6 +244,7 @@ pub async fn upload_cover(
     body: Bytes,
 ) -> Result<(), ApiError> {
     use livrarr_domain::services::WorkService;
+    livrarr_handlers::work::validate_image_magic_bytes(&body)?;
     state
         .work_service
         .upload_cover(ctx.user.id, id, &body)
@@ -348,7 +273,7 @@ pub async fn refresh(
     let result = state.work_service.refresh(ctx.user.id, id).await?;
 
     if let Some(ref cover_url) = result.work.cover_url {
-        download_post_enrich_cover(&state, id, cover_url).await;
+        download_post_enrich_cover(&state, ctx.user.id, id, cover_url).await;
     }
 
     let mut messages = result.messages;
@@ -357,8 +282,11 @@ pub async fn refresh(
     }
 
     if !result.taggable_items.is_empty() {
-        let tag_warnings =
-            super::import::retag_library_items(&state, &result.work, &result.taggable_items).await;
+        use livrarr_domain::services::TagService;
+        let tag_warnings = state
+            .tag_service
+            .retag_library_items(&result.work, &result.taggable_items)
+            .await;
         for w in &tag_warnings {
             messages.push(format!("tag rewrite warning: {w}"));
         }
@@ -460,17 +388,16 @@ pub async fn refresh_all(
             };
 
             if let Some(ref cover_url) = result.work.cover_url {
-                download_post_enrich_cover(&state, work.id, cover_url).await;
+                download_post_enrich_cover(&state, user_id, work.id, cover_url).await;
             }
 
             enriched += 1;
             if !result.taggable_items.is_empty() {
-                let _ = super::import::retag_library_items(
-                    &state,
-                    &result.work,
-                    &result.taggable_items,
-                )
-                .await;
+                use livrarr_domain::services::TagService;
+                let _ = state
+                    .tag_service
+                    .retag_library_items(&result.work, &result.taggable_items)
+                    .await;
             }
         }
 

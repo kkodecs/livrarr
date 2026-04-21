@@ -8,6 +8,7 @@ import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { EmptyState } from "@/components/Page/EmptyState";
 import { BookCover } from "@/components/BookCover";
+import { cn } from "@/utils/cn";
 import type {
   WorkSearchResult,
   AddWorkResponse,
@@ -62,7 +63,7 @@ export default function SearchPage() {
   // Local library data
   const { data: allWorks } = useQuery({
     queryKey: ["works"],
-    queryFn: listWorks,
+    queryFn: () => listWorks(),
     select: (res) => res.items,
   });
 
@@ -76,14 +77,17 @@ export default function SearchPage() {
       )
     : [];
 
-  // Work search — pass language
+  const [showRaw, setShowRaw] = useState(false);
+
+  // Work search — pass language and raw toggle
   const searchQuery = useQuery({
-    queryKey: ["work-search", query, selectedLang],
-    queryFn: () => lookupWorks(query, selectedLang),
+    queryKey: ["work-search", query, selectedLang, showRaw],
+    queryFn: () => lookupWorks(query, selectedLang, showRaw),
     enabled: !!query,
   });
 
-  const olResults = searchQuery.data ?? null;
+  const lookupResp = searchQuery.data ?? null;
+  const olResults = lookupResp?.results ?? null;
 
   const [addingKey, setAddingKey] = useState<string | null>(null);
   const addMutation = useMutation({
@@ -281,9 +285,33 @@ export default function SearchPage() {
           {/* ── Add to Your Library ── */}
           {!isSearching && hasOlResults && (
             <section>
-              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted">
-                Add to Your Library
-              </h2>
+              <div className="flex items-center gap-3 mb-3">
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">
+                  Add to Your Library
+                </h2>
+                {lookupResp?.rawAvailable && (
+                  <div className="flex items-center rounded border border-border text-xs">
+                    <button
+                      onClick={() => setShowRaw(false)}
+                      className={cn(
+                        "px-2 py-0.5 rounded-l",
+                        !showRaw ? "bg-brand text-white" : "text-muted hover:text-zinc-100",
+                      )}
+                    >
+                      Filtered {lookupResp.filteredCount}
+                    </button>
+                    <button
+                      onClick={() => setShowRaw(true)}
+                      className={cn(
+                        "px-2 py-0.5 rounded-r",
+                        showRaw ? "bg-brand text-white" : "text-muted hover:text-zinc-100",
+                      )}
+                    >
+                      Raw {lookupResp.rawCount}
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="rounded border border-border">
                 {filteredOlResults!.map((work, idx) => (
                   <OlResult
