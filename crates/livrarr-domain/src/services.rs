@@ -293,6 +293,14 @@ pub struct LookupResult {
     pub rating: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LookupResponse {
+    pub results: Vec<LookupResult>,
+    pub filtered_count: usize,
+    pub raw_count: usize,
+    pub raw_available: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorkServiceError {
     #[error("work not found")]
@@ -361,7 +369,19 @@ pub struct BibliographyEntry {
     pub title: String,
     pub year: Option<i32>,
     pub ol_key: Option<String>,
+    pub series_name: Option<String>,
+    pub series_position: Option<f64>,
     pub already_in_library: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BibliographyResult {
+    pub entries: Vec<BibliographyEntry>,
+    pub filtered_count: usize,
+    pub raw_count: usize,
+    pub raw_available: bool,
+    pub fetched_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -784,6 +804,10 @@ pub enum EnrichmentWorkflowError {
     WorkNotFound,
     #[error("merge superseded after CAS retries")]
     MergeSuperseded,
+    #[error("merge error: {0}")]
+    Merge(String),
+    #[error("all providers exhausted for work {work_id}")]
+    ProviderExhausted { work_id: WorkId },
     #[error("corrupt retry payload for {provider:?} on work {work_id}")]
     CorruptRetryPayload {
         work_id: WorkId,
@@ -904,6 +928,8 @@ pub trait WorkService: Send + Sync {
         user_id: UserId,
         page: u32,
         page_size: u32,
+        sort_by: WorkSortField,
+        sort_dir: SortDirection,
     ) -> Result<PaginatedWorksView, WorkServiceError>;
     async fn update(
         &self,
@@ -930,7 +956,20 @@ pub trait WorkService: Send + Sync {
         work_id: WorkId,
     ) -> Result<Vec<u8>, WorkServiceError>;
     async fn lookup(&self, req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError>;
-    async fn download_cover_from_url(&self, work_id: i64, cover_url: &str);
+    async fn lookup_filtered(
+        &self,
+        req: LookupRequest,
+        raw: bool,
+    ) -> Result<LookupResponse, WorkServiceError>;
+    /// Search works by title or author name (LIKE match). Used by OPDS search.
+    async fn search_works(
+        &self,
+        user_id: UserId,
+        query: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<(Vec<Work>, i64), WorkServiceError>;
+    async fn download_cover_from_url(&self, user_id: i64, work_id: i64, cover_url: &str);
     fn try_start_bulk_refresh(&self, user_id: i64) -> bool;
     fn finish_bulk_refresh(&self, user_id: i64);
 }
@@ -963,12 +1002,13 @@ pub trait AuthorService: Send + Sync {
         &self,
         user_id: UserId,
         author_id: AuthorId,
-    ) -> Result<Vec<BibliographyEntry>, AuthorServiceError>;
+        raw: bool,
+    ) -> Result<BibliographyResult, AuthorServiceError>;
     async fn refresh_bibliography(
         &self,
         user_id: UserId,
         author_id: AuthorId,
-    ) -> Result<Vec<BibliographyEntry>, AuthorServiceError>;
+    ) -> Result<BibliographyResult, AuthorServiceError>;
     fn spawn_bibliography_refresh(&self, author_id: i64, user_id: i64);
     async fn lookup_authors(
         &self,
@@ -1667,22 +1707,18 @@ pub async fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let bytes = bytes.to_vec();
     tokio::task::spawn_blocking(move || {
         use std::io::Write;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let tmp_path = parent.join(format!(".livrarr-tmp-{}", std::process::id()));
-        let result = (|| {
-            let mut f = std::fs::File::create(&tmp_path)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-            std::fs::rename(&tmp_path, &path)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-        result
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path has no parent directory",
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.write_all(&bytes)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&path).map_err(|e| e.error)?;
+        Ok(())
     })
     .await
     .expect("spawn_blocking panicked")
@@ -1692,23 +1728,21 @@ pub async fn atomic_copy(src: &Path, dst: &Path) -> std::io::Result<u64> {
     let src = src.to_path_buf();
     let dst = dst.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let parent = dst.parent().unwrap_or_else(|| Path::new("."));
-        let tmp_path = parent.join(format!(".livrarr-tmp-{}", std::process::id()));
-        let result = (|| {
-            let mut src_file = std::fs::File::open(&src)?;
-            let mut dst_file = std::fs::File::create(&tmp_path)?;
-            let copied = std::io::copy(&mut src_file, &mut dst_file)?;
-            dst_file.sync_all()?;
-            std::fs::rename(&tmp_path, &dst)?;
-            Ok(copied)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-        result
+        let parent = dst.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path has no parent directory",
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let mut src_file = std::fs::File::open(&src)?;
+        let tmp = tempfile::NamedTempFile::new_in(parent)?;
+        let mut dst_file = tmp.as_file().try_clone()?;
+        let copied = std::io::copy(&mut src_file, &mut dst_file)?;
+        dst_file.sync_all()?;
+        drop(dst_file);
+        tmp.persist(&dst).map_err(|e| e.error)?;
+        Ok(copied)
     })
     .await
     .expect("spawn_blocking panicked")
@@ -1718,13 +1752,20 @@ pub async fn cwa_copy(src: &Path, dst: &Path) -> CwaResult {
     let src = src.to_path_buf();
     let dst = dst.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        if let Some(parent) = dst.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+        let parent = match dst.parent() {
+            Some(p) => p.to_path_buf(),
+            None => {
                 return CwaResult {
                     success: false,
-                    warning: Some(format!("failed to create parent directory: {e}")),
+                    warning: Some("destination path has no parent directory".into()),
                 };
             }
+        };
+        if let Err(e) = std::fs::create_dir_all(&parent) {
+            return CwaResult {
+                success: false,
+                warning: Some(format!("failed to create parent directory: {e}")),
+            };
         }
         match std::fs::hard_link(&src, &dst) {
             Ok(()) => CwaResult {
@@ -1734,19 +1775,13 @@ pub async fn cwa_copy(src: &Path, dst: &Path) -> CwaResult {
             Err(link_err) => {
                 let result = (|| -> std::io::Result<()> {
                     let mut src_file = std::fs::File::open(&src)?;
-                    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
-                    let tmp_path = parent.join(format!(".livrarr-cwa-tmp-{}", std::process::id()));
-                    let copy_result = (|| {
-                        let mut dst_file = std::fs::File::create(&tmp_path)?;
-                        std::io::copy(&mut src_file, &mut dst_file)?;
-                        dst_file.sync_all()?;
-                        std::fs::rename(&tmp_path, &dst)?;
-                        Ok::<(), std::io::Error>(())
-                    })();
-                    if copy_result.is_err() {
-                        let _ = std::fs::remove_file(&tmp_path);
-                    }
-                    copy_result
+                    let tmp = tempfile::NamedTempFile::new_in(&parent)?;
+                    let mut dst_file = tmp.as_file().try_clone()?;
+                    std::io::copy(&mut src_file, &mut dst_file)?;
+                    dst_file.sync_all()?;
+                    drop(dst_file);
+                    tmp.persist(&dst).map_err(|e| e.error)?;
+                    Ok(())
                 })();
                 match result {
                     Ok(()) => CwaResult {
@@ -1834,6 +1869,7 @@ pub trait ImportService: Send + Sync {
 
     async fn import_single_file(&self, req: ImportSingleFileRequest) -> ImportFileResult;
 
+    #[allow(clippy::too_many_arguments)]
     fn build_target_path(
         &self,
         root_folder_path: &str,
@@ -1919,6 +1955,7 @@ pub trait ReadarrImportWorkflow: Send + Sync {
 
     async fn preview(
         &self,
+        user_id: i64,
         req: crate::readarr::ReadarrImportRequest,
     ) -> Result<crate::readarr::ReadarrPreviewResponse, ServiceError>;
 

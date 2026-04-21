@@ -2,9 +2,8 @@ use livrarr_domain::services::*;
 use livrarr_domain::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 // =============================================================================
 // StubHttpFetcher — returns canned responses
@@ -32,11 +31,7 @@ impl StubHttpFetcher {
 
     pub fn with_response(response: Result<FetchResponse, FetchError>) -> Self {
         let s = Self::new();
-        let responses = Arc::clone(&s.responses);
-        tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async { responses.lock().await.push(response) });
-        });
+        s.responses.lock().unwrap().push(response);
         s
     }
 
@@ -54,20 +49,16 @@ impl StubHttpFetcher {
 
     /// Push an additional canned response to the queue.
     pub fn push_response(&self, response: Result<FetchResponse, FetchError>) {
-        let responses = Arc::clone(&self.responses);
-        tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async { responses.lock().await.push(response) });
-        });
+        self.responses.lock().unwrap().push(response);
     }
 
     pub fn call_count(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
     }
 
-    async fn next_response(&self) -> Result<FetchResponse, FetchError> {
+    fn next_response(&self) -> Result<FetchResponse, FetchError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        let mut responses = self.responses.lock().await;
+        let mut responses = self.responses.lock().unwrap();
         if responses.is_empty() {
             Ok(FetchResponse {
                 status: 200,
@@ -107,11 +98,11 @@ impl StubHttpFetcher {
 
 impl HttpFetcher for StubHttpFetcher {
     async fn fetch(&self, _req: FetchRequest) -> Result<FetchResponse, FetchError> {
-        self.next_response().await
+        self.next_response()
     }
 
     async fn fetch_ssrf_safe(&self, _req: FetchRequest) -> Result<FetchResponse, FetchError> {
-        self.next_response().await
+        self.next_response()
     }
 }
 

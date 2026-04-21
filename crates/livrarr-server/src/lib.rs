@@ -39,6 +39,7 @@ pub use livrarr_handlers::LibraryItemResponse;
 pub use livrarr_handlers::RefreshWorkResponse;
 pub use livrarr_handlers::WorkApi;
 pub use livrarr_handlers::WorkDetailResponse;
+pub use livrarr_handlers::LookupApiResponse;
 pub use livrarr_handlers::WorkSearchResult;
 
 pub use livrarr_handlers::AddAuthorApiRequest;
@@ -155,11 +156,11 @@ impl From<crate::readarr_import_service::ReadarrImportError> for ApiError {
 #[cfg(test)]
 pub mod api_secondary_impl;
 pub mod auth_crypto;
-pub mod auth_impl;
 pub mod auth_service;
 pub mod config;
 pub mod handlers;
 pub mod jobs;
+pub mod rate_limit;
 pub use livrarr_matching as matching;
 pub mod email_service;
 pub mod history_service;

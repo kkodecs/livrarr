@@ -97,6 +97,8 @@ impl WorkService for StubWorkService {
         _user_id: UserId,
         _page: u32,
         _page_size: u32,
+        _sort_by: WorkSortField,
+        _sort_dir: SortDirection,
     ) -> Result<PaginatedWorksView, WorkServiceError> {
         Ok(PaginatedWorksView {
             works: vec![],
@@ -157,7 +159,32 @@ impl WorkService for StubWorkService {
         Ok(vec![])
     }
 
-    async fn download_cover_from_url(&self, _work_id: i64, _cover_url: &str) {}
+    async fn lookup_filtered(
+        &self,
+        req: LookupRequest,
+        _raw: bool,
+    ) -> Result<LookupResponse, WorkServiceError> {
+        let results = self.lookup(req).await?;
+        let count = results.len();
+        Ok(LookupResponse {
+            results,
+            filtered_count: count,
+            raw_count: count,
+            raw_available: false,
+        })
+    }
+
+    async fn search_works(
+        &self,
+        _user_id: UserId,
+        _query: &str,
+        _page: u32,
+        _page_size: u32,
+    ) -> Result<(Vec<Work>, i64), WorkServiceError> {
+        Ok((vec![], 0))
+    }
+
+    async fn download_cover_from_url(&self, _user_id: i64, _work_id: i64, _cover_url: &str) {}
     fn try_start_bulk_refresh(&self, _user_id: i64) -> bool {
         true
     }

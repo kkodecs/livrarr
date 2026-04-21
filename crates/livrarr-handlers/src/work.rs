@@ -6,15 +6,16 @@ use axum::response::{IntoResponse, Response};
 
 use crate::context::AppContext;
 use crate::middleware::RequireAdmin;
+use crate::types::work::work_to_detail;
 use crate::{
     AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse,
-    RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
+    LookupApiResponse, RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse,
+    WorkSearchResult,
 };
 use livrarr_domain::services::{
     AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
     SeriesQueryService, TagService, WorkDetailView, WorkService,
 };
-use livrarr_domain::Work;
 
 fn proxy_cover_url(url: String) -> String {
     if url.starts_with('/') {
@@ -23,46 +24,27 @@ fn proxy_cover_url(url: String) -> String {
     format!("/api/v1/coverproxy?url={}", urlencoding::encode(&url))
 }
 
-fn work_to_detail(w: &Work) -> WorkDetailResponse {
-    WorkDetailResponse {
-        id: w.id,
-        title: w.title.clone(),
-        sort_title: w.sort_title.clone(),
-        subtitle: w.subtitle.clone(),
-        original_title: w.original_title.clone(),
-        author_name: w.author_name.clone(),
-        author_id: w.author_id,
-        description: w.description.clone(),
-        year: w.year,
-        series_id: w.series_id,
-        series_name: w.series_name.clone(),
-        series_position: w.series_position,
-        genres: w.genres.clone(),
-        language: w.language.clone(),
-        page_count: w.page_count,
-        duration_seconds: w.duration_seconds,
-        publisher: w.publisher.clone(),
-        publish_date: w.publish_date.clone(),
-        ol_key: w.ol_key.clone(),
-        hc_key: w.hc_key.clone(),
-        gr_key: w.gr_key.clone(),
-        isbn_13: w.isbn_13.clone(),
-        asin: w.asin.clone(),
-        narrator: w.narrator.clone(),
-        narration_type: w.narration_type,
-        abridged: w.abridged,
-        rating: w.rating,
-        rating_count: w.rating_count,
-        enrichment_status: w.enrichment_status,
-        enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
-        enrichment_source: w.enrichment_source.clone(),
-        cover_manual: w.cover_manual,
-        monitor_ebook: w.monitor_ebook,
-        monitor_audiobook: w.monitor_audiobook,
-        added_at: w.added_at.to_rfc3339(),
-        library_items: vec![],
-        metadata_source: w.metadata_source.clone(),
+/// Validate that image data begins with a recognized magic byte signature.
+pub fn validate_image_magic_bytes(data: &[u8]) -> Result<(), ApiError> {
+    const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF];
+    const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47];
+    const WEBP_RIFF: &[u8] = b"RIFF";
+    const WEBP_WEBP: &[u8] = b"WEBP";
+
+    if data.len() < 12 {
+        return Err(ApiError::BadRequest(
+            "image data too small to identify format".into(),
+        ));
     }
+    if data.starts_with(JPEG_MAGIC) || data.starts_with(PNG_MAGIC) {
+        return Ok(());
+    }
+    if data.starts_with(WEBP_RIFF) && data[8..12] == *WEBP_WEBP {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest(
+        "unsupported image format: expected JPEG, PNG, or WebP".into(),
+    ))
 }
 
 fn detail_from_view(view: WorkDetailView) -> WorkDetailResponse {
@@ -99,6 +81,7 @@ fn mime_for_ext(ext: &str) -> &'static str {
 pub struct LookupQuery {
     pub term: Option<String>,
     pub lang: Option<String>,
+    pub raw: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -116,15 +99,17 @@ pub async fn lookup<S: AppContext>(
     State(state): State<S>,
     _ctx: AuthContext,
     Query(q): Query<LookupQuery>,
-) -> Result<Json<Vec<WorkSearchResult>>, ApiError> {
+) -> Result<Json<LookupApiResponse>, ApiError> {
     let req = livrarr_domain::services::LookupRequest {
         term: q.term.unwrap_or_default(),
         lang_override: q.lang,
     };
+    let raw = q.raw.unwrap_or(false);
 
-    let results = state.work_service().lookup(req).await?;
+    let resp = state.work_service().lookup_filtered(req, raw).await?;
 
-    let api_results = results
+    let results = resp
+        .results
         .into_iter()
         .map(|r| WorkSearchResult {
             ol_key: r.ol_key,
@@ -144,7 +129,12 @@ pub async fn lookup<S: AppContext>(
         })
         .collect();
 
-    Ok(Json(api_results))
+    Ok(Json(LookupApiResponse {
+        results,
+        filtered_count: resp.filtered_count,
+        raw_count: resp.raw_count,
+        raw_available: resp.raw_available,
+    }))
 }
 
 pub async fn add<S: AppContext>(
@@ -217,7 +207,13 @@ pub async fn list<S: AppContext>(
 ) -> Result<Json<crate::PaginatedResponse<WorkDetailResponse>>, ApiError> {
     let view = state
         .work_service()
-        .list_paginated(ctx.user.id, pq.page(), pq.page_size())
+        .list_paginated(
+            ctx.user.id,
+            pq.page(),
+            pq.page_size(),
+            pq.sort_by(),
+            pq.sort_dir(),
+        )
         .await?;
 
     let items = view.works.into_iter().map(detail_from_view).collect();
@@ -288,6 +284,7 @@ pub async fn upload_cover<S: AppContext>(
         }
     }
     let data = image_data.ok_or_else(|| ApiError::BadRequest("missing image_data field".into()))?;
+    validate_image_magic_bytes(&data)?;
     state
         .work_service()
         .upload_cover(ctx.user.id, id, &data)
@@ -315,7 +312,7 @@ pub async fn refresh<S: AppContext>(
     if let Some(ref cover_url) = result.work.cover_url {
         state
             .work_service()
-            .download_cover_from_url(id, cover_url)
+            .download_cover_from_url(ctx.user.id, id, cover_url)
             .await;
     }
 
@@ -407,7 +404,7 @@ pub async fn refresh_all<S: AppContext>(
 
             if let Some(ref cover_url) = result.work.cover_url {
                 s.work_service()
-                    .download_cover_from_url(work.id, cover_url)
+                    .download_cover_from_url(user_id, work.id, cover_url)
                     .await;
             }
 

@@ -123,6 +123,13 @@ export interface AdminUpdateUserRequest {
 }
 
 // Works
+export interface LookupResponse {
+  results: WorkSearchResult[];
+  filteredCount: number;
+  rawCount: number;
+  rawAvailable: boolean;
+}
+
 export interface WorkSearchResult {
   olKey: string | null;
   title: string;
@@ -272,6 +279,10 @@ export interface BibliographyEntry {
 export interface AuthorBibliography {
   authorId: number;
   entries: BibliographyEntry[];
+  llmFiltered: boolean;
+  rawAvailable: boolean;
+  filteredCount: number;
+  rawCount: number;
   fetchedAt: string;
 }
 
