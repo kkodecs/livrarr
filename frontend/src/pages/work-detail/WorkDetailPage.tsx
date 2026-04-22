@@ -64,32 +64,6 @@ import type {
   HistoryResponse,
 } from "@/types/api";
 
-// Module-level regex cache for format detection — avoids recompilation per render
-const FORMAT_REGEX_CACHE = new Map<string, RegExp>();
-
-function getFormatRegex(fmt: string): RegExp {
-  let re = FORMAT_REGEX_CACHE.get(fmt);
-  if (!re) {
-    re = new RegExp(`\\b${fmt}\\b`, "i");
-    FORMAT_REGEX_CACHE.set(fmt, re);
-  }
-  return re;
-}
-
-function detectFormat(title: string, allFormats: string[]): string | null {
-  const lower = title.toLowerCase();
-  for (const fmt of allFormats) {
-    if (
-      lower.includes(`.${fmt}`) ||
-      lower.includes(`[${fmt}]`) ||
-      lower.includes(`(${fmt})`) ||
-      getFormatRegex(fmt).test(lower)
-    ) {
-      return fmt;
-    }
-  }
-  return null;
-}
 
 interface EditForm {
   title: string;
@@ -704,7 +678,7 @@ function ReleasesTab({ workId }: { workId: number }) {
 
   // Only show format chips for formats that have at least one release.
   const detectFormatsInReleases = (items: ReleaseResponse[], formats: string[]) =>
-    formats.filter((fmt) => items.some((r) => detectFormat(r.title, formats) === fmt));
+    formats.filter((fmt) => items.some((r) => r.format === fmt));
   orderedEbookFormats = (() => {
     const present = detectFormatsInReleases([...ebookReleases, ...uncategorized], allEbookFormats);
     return [...ebookPrefs.filter((f) => present.includes(f)), ...present.filter((f) => !ebookPrefs.includes(f))];
@@ -730,13 +704,11 @@ function ReleasesTab({ workId }: { workId: number }) {
   const filterByFormat = (
     items: ReleaseResponse[],
     formats: Set<string>,
-    allFormats: string[],
   ) => {
     if (formats.size === 0) return [];
     return items.filter((r) => {
-      const detected = detectFormat(r.title, allFormats);
-      if (!detected) return true; // No format detected — always show.
-      return formats.has(detected);
+      if (!r.format) return true;
+      return formats.has(r.format);
     });
   };
 
@@ -752,8 +724,8 @@ function ReleasesTab({ workId }: { workId: number }) {
     }
   };
 
-  const filteredEbooks = filterByFormat([...ebookReleases, ...uncategorized], activeEbookFormats, allEbookFormats);
-  const filteredAudiobooks = filterByFormat(audiobookReleases, activeAudiobookFormats, allAudiobookFormats);
+  const filteredEbooks = filterByFormat([...ebookReleases, ...uncategorized], activeEbookFormats);
+  const filteredAudiobooks = filterByFormat(audiobookReleases, activeAudiobookFormats);
   const sortedEbooks = sorting.sort(filteredEbooks, sortFn);
   const sortedAudiobooks = sorting.sort(filteredAudiobooks, sortFn);
 

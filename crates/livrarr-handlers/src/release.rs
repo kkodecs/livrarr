@@ -66,17 +66,23 @@ pub async fn search<S: AppContext>(
     let results = svc_response
         .results
         .into_iter()
-        .map(|r| ReleaseResponse {
-            title: r.title,
-            indexer: r.indexer,
-            size: r.size,
-            guid: r.guid,
-            download_url: r.download_url,
-            seeders: r.seeders,
-            leechers: r.leechers,
-            publish_date: r.publish_date,
-            protocol: r.protocol.to_string(),
-            categories: r.categories,
+        .map(|r| {
+            let format = livrarr_matching::parse_release_title(&r.title)
+                .format
+                .map(|f| f.to_lowercase());
+            ReleaseResponse {
+                title: r.title,
+                indexer: r.indexer,
+                size: r.size,
+                guid: r.guid,
+                download_url: r.download_url,
+                seeders: r.seeders,
+                leechers: r.leechers,
+                publish_date: r.publish_date,
+                protocol: r.protocol.to_string(),
+                categories: r.categories,
+                format,
+            }
         })
         .collect();
 

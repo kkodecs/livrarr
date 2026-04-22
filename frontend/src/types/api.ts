@@ -412,6 +412,7 @@ export interface ReleaseResponse {
   publishDate: string | null;
   protocol: "torrent" | "usenet";
   categories: number[];
+  format: string | null;
 }
 
 export interface GrabRequest {
