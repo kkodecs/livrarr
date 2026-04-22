@@ -283,7 +283,7 @@ async fn main() {
     let import_semaphore = Arc::new(tokio::sync::Semaphore::new(2));
     let data_dir_arc = Arc::new(data_dir.clone());
     let provider_health = Arc::new(ProviderHealthState::new());
-    let cover_proxy_cache = Arc::new(livrarr_server::handlers::coverproxy::CoverProxyCache::new());
+    let cover_proxy_cache = Arc::new(livrarr_server::infra::cover_cache::CoverProxyCache::new());
     let rss_last_run = Arc::new(std::sync::atomic::AtomicI64::new(0));
     let rss_sync_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let http_client_for_scan = http_client.clone();

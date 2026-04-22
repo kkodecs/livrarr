@@ -1,21 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use crate::infra::email;
 use crate::services::settings_service::SettingsService;
 use crate::state::AppState;
-use crate::{ApiError, GrabStatus, MediaType};
+use crate::{ApiError, MediaType};
 use livrarr_domain::sanitize_path_component;
-use livrarr_domain::services::{ImportIoService, ImportWorkflow};
+use livrarr_domain::services::{ImportGrabResult, ImportIoService, ImportWorkflow};
 use livrarr_tagwrite::TagWriteStatus;
-
-/// Result of an import attempt, returned to the caller (retry handler).
-pub struct ImportGrabResult {
-    pub final_status: GrabStatus,
-    pub imported_count: usize,
-    pub failed_count: usize,
-    pub skipped_count: usize,
-    pub warnings: Vec<String>,
-    pub error: Option<String>,
-}
 
 /// Run the import pipeline for a grab. Called by the retry handler
 /// and by the download poller via spawn_import.
@@ -152,8 +143,8 @@ pub async fn import_grab(
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    if super::email::ACCEPTED_EXTENSIONS.contains(&ext.as_str())
-                        && (imp.file_size as i64) <= super::email::MAX_EMAIL_SIZE
+                    if email::ACCEPTED_EXTENSIONS.contains(&ext.as_str())
+                        && (imp.file_size as i64) <= email::MAX_EMAIL_SIZE
                     {
                         match tokio::fs::read(&abs_path).await {
                             Ok(bytes) => {
@@ -162,7 +153,7 @@ pub async fn import_grab(
                                     .and_then(|f| f.to_str())
                                     .unwrap_or("book");
                                 if let Err(e) =
-                                    super::email::send_file(&email_cfg, bytes, filename, &ext).await
+                                    email::send_file(&email_cfg, bytes, filename, &ext).await
                                 {
                                     tracing::warn!(file = %abs_path, "Auto-send email failed: {e}");
                                 } else {
@@ -378,8 +369,8 @@ pub async fn import_single_file(
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
-                if super::email::ACCEPTED_EXTENSIONS.contains(&ext.as_str())
-                    && file_size <= super::email::MAX_EMAIL_SIZE
+                if email::ACCEPTED_EXTENSIONS.contains(&ext.as_str())
+                    && file_size <= email::MAX_EMAIL_SIZE
                 {
                     let target_str = target_path.to_string();
                     match tokio::fs::read(&target_str).await {
@@ -389,7 +380,7 @@ pub async fn import_single_file(
                                 .and_then(|f| f.to_str())
                                 .unwrap_or("book");
                             if let Err(e) =
-                                super::email::send_file(&email_cfg, bytes, filename, &ext).await
+                                email::send_file(&email_cfg, bytes, filename, &ext).await
                             {
                                 tracing::warn!(file = %target_str, "Auto-send email failed: {e}");
                             } else {
@@ -457,8 +448,8 @@ pub async fn fetch_qbit_content_path(
     client: &livrarr_domain::DownloadClient,
     hash: &str,
 ) -> Result<String, ApiError> {
-    let base_url = super::release::qbit_base_url(client);
-    let sid = super::release::qbit_login(state, &base_url, client).await?;
+    let base_url = crate::infra::release_helpers::qbit_base_url(client);
+    let sid = crate::infra::release_helpers::qbit_login(state, &base_url, client).await?;
 
     let info_url = format!("{base_url}/api/v2/torrents/info");
     // Admin-configured endpoint — use SSRF-safe client for redirect protection.

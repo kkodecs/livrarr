@@ -32,7 +32,7 @@ where
             .get_email_config()
             .await
             .map_err(|e| EmailServiceError::Config(e.to_string()))?;
-        crate::handlers::email::send_test(&cfg)
+        crate::infra::email::send_test(&cfg)
             .await
             .map_err(EmailServiceError::Send)
     }
@@ -48,7 +48,7 @@ where
             .get_email_config()
             .await
             .map_err(|e| EmailServiceError::Config(e.to_string()))?;
-        crate::handlers::email::send_file(&cfg, file_bytes, filename, extension)
+        crate::infra::email::send_file(&cfg, file_bytes, filename, extension)
             .await
             .map_err(EmailServiceError::Send)
     }
