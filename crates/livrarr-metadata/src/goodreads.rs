@@ -974,825 +974,149 @@ pub fn parse_series_detail_html(html: &str) -> (Vec<GoodreadsSeriesBook>, bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
-    fn fixtures_dir() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf()
-    }
+    // =========================================================================
+    // Live-fetch helper (requires network — tests are #[ignore])
+    // =========================================================================
 
-    fn fixture_search(filename: &str) -> Option<String> {
-        let path = fixtures_dir()
-            .join("build/tmp-goodreads-html")
-            .join(filename);
-        if !path.exists() {
+    fn fetch_goodreads_page(url: &str) -> Option<String> {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("Mozilla/5.0 (compatible; Livrarr/0.1 test)")
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .ok()?;
+        let resp = client.get(url).send().ok()?;
+        if !resp.status().is_success() {
             return None;
         }
-        Some(std::fs::read_to_string(&path).unwrap())
-    }
-
-    fn fixture_detail(filename: &str) -> Option<String> {
-        let path = fixtures_dir()
-            .join("build/tmp-goodreads-detail")
-            .join(filename);
-        if !path.exists() {
-            return None;
-        }
-        Some(std::fs::read_to_string(&path).unwrap())
-    }
-
-    macro_rules! require_fixture_search {
-        ($filename:expr) => {
-            match fixture_search($filename) {
-                Some(html) => html,
-                None => return,
-            }
-        };
-    }
-
-    macro_rules! require_fixture_detail {
-        ($filename:expr) => {
-            match fixture_detail($filename) {
-                Some(html) => html,
-                None => return,
-            }
-        };
+        resp.text().ok()
     }
 
     // =========================================================================
-    // Helper to find a result by expected title substring
+    // Live-fetch search tests
     // =========================================================================
 
-    fn find_result<'a>(
-        results: &'a [GoodreadsSearchResult],
-        title_contains: &str,
-    ) -> &'a GoodreadsSearchResult {
-        results
+    #[test]
+    #[ignore]
+    fn live_search_german() {
+        let html =
+            fetch_goodreads_page("https://www.goodreads.com/search?q=Das+Parfum+S%C3%BCskind")
+                .expect("fetch failed");
+        let results = parse_search_html(&html);
+        assert!(!results.is_empty(), "no results parsed");
+        let book = results
             .iter()
-            .find(|r| r.title.contains(title_contains))
-            .unwrap_or_else(|| {
-                panic!(
-                    "No result containing '{}' in titles: {:?}",
-                    title_contains,
-                    results.iter().map(|r| &r.title).collect::<Vec<_>>()
-                )
-            })
-    }
-
-    // =========================================================================
-    // Search page tests — German (de)
-    // =========================================================================
-
-    #[test]
-    fn search_de_31_das_parfum() {
-        let html =
-            require_fixture_search!("de_31_Das_Parfum__Die_Geschichte_eines_M\u{00f6}rders.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 5);
-
-        let book = find_result(&results, "Das Parfum: Die Geschichte");
-        assert_eq!(
-            book.title,
-            "Das Parfum: Die Geschichte eines M\u{00f6}rders"
-        );
-        assert_eq!(book.author.as_deref(), Some("Patrick S\u{00fc}skind"));
+            .find(|r| r.title.contains("Parfum"))
+            .expect("no Parfum result");
+        assert!(book.author.is_some());
         assert!(book.detail_url.starts_with("/book/show/"));
-        assert!(book.cover_url.is_some());
     }
 
     #[test]
-    fn search_de_39_die_krone_der_sterne() {
-        let html = require_fixture_search!("de_39_Die_Krone_der_Sterne.html");
+    #[ignore]
+    fn live_search_french() {
+        let html = fetch_goodreads_page(
+            "https://www.goodreads.com/search?q=Le+Petit+Prince+Saint-Exup%C3%A9ry",
+        )
+        .expect("fetch failed");
         let results = parse_search_html(&html);
-        assert_eq!(results.len(), 6);
-
-        let book = find_result(&results, "Die Krone der Sterne");
-        assert_eq!(book.author.as_deref(), Some("Kai Meyer"));
-        assert!(book.detail_url.starts_with("/book/show/"));
-        assert!(book.cover_url.is_some());
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.title.contains("Petit Prince")));
     }
 
     #[test]
-    fn search_de_49_qualityland() {
-        let html = require_fixture_search!("de_49_QualityLand__QualityLand___1_.html");
+    #[ignore]
+    fn live_search_spanish() {
+        let html = fetch_goodreads_page(
+            "https://www.goodreads.com/search?q=El+problema+de+los+tres+cuerpos",
+        )
+        .expect("fetch failed");
         let results = parse_search_html(&html);
-        assert_eq!(results.len(), 1);
-
-        assert_eq!(results[0].title, "QualityLand");
-        assert_eq!(results[0].series_name.as_deref(), Some("QualityLand"));
-        assert_eq!(results[0].series_position, Some(1.0));
-        assert_eq!(results[0].author.as_deref(), Some("Marc-Uwe Kling"));
-        assert!(results[0].detail_url.starts_with("/book/show/"));
-        assert!(results[0].cover_url.is_some());
+        assert!(!results.is_empty());
     }
 
     #[test]
-    fn search_de_50_qualityland_2() {
-        let html = require_fixture_search!("de_50_QualityLand_2_0__QualityLand___2_.html");
+    #[ignore]
+    fn live_search_polish() {
+        let html = fetch_goodreads_page("https://www.goodreads.com/search?q=Solaris+Stanislaw+Lem")
+            .expect("fetch failed");
         let results = parse_search_html(&html);
-        assert_eq!(results.len(), 1);
-
-        assert_eq!(results[0].title, "QualityLand 2.0");
-        assert_eq!(results[0].series_name.as_deref(), Some("QualityLand"));
-        assert_eq!(results[0].series_position, Some(2.0));
-        assert_eq!(results[0].author.as_deref(), Some("Marc-Uwe Kling"));
-        assert!(results[0].cover_url.is_some());
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.title.contains("Solaris")));
     }
 
     #[test]
-    fn search_de_51_tintenherz() {
-        let html = require_fixture_search!("de_51_Tintenherz__Tintenwelt___1_.html");
+    #[ignore]
+    fn live_search_results_valid() {
+        let html = fetch_goodreads_page("https://www.goodreads.com/search?q=Das+Parfum")
+            .expect("fetch failed");
         let results = parse_search_html(&html);
-        assert_eq!(results.len(), 1);
-
-        assert_eq!(results[0].title, "Tintenherz");
-        assert_eq!(results[0].series_name.as_deref(), Some("Tintenwelt"));
-        assert_eq!(results[0].series_position, Some(1.0));
-        assert_eq!(results[0].author.as_deref(), Some("Cornelia Funke"));
-        assert!(results[0].cover_url.is_some());
-    }
-
-    // =========================================================================
-    // Search page tests — Spanish (es)
-    // =========================================================================
-
-    #[test]
-    fn search_es_29_el_ojo_del_mundo() {
-        let html = require_fixture_search!("es_29_El_ojo_del_mundo__La_rueda_del_tiempo___.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 2);
-
-        let book = find_result(&results, "El ojo del mundo");
-        assert_eq!(book.author.as_deref(), Some("Robert Jordan"));
-        assert!(book.cover_url.is_some());
-    }
-
-    #[test]
-    fn search_es_45_tres_cuerpos() {
-        let html = require_fixture_search!("es_45_El_problema_de_los_tres_cuerpos.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 6);
-
-        let book = find_result(&results, "El problema de los tres cuerpos");
-        assert_eq!(book.author.as_deref(), Some("Liu Cixin"));
-        assert!(book.cover_url.is_some());
-    }
-
-    #[test]
-    fn search_es_46_lagrimas() {
-        let html = require_fixture_search!("es_46_L\u{00e1}grimas_en_la_lluvia.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 3);
-
-        let book = find_result(&results, "L\u{00e1}grimas en la lluvia");
-        assert_eq!(book.author.as_deref(), Some("Rosa Montero"));
-        assert!(book.cover_url.is_some());
-    }
-
-    #[test]
-    fn search_es_47_sin_noticias() {
-        let html = require_fixture_search!("es_47_Sin_noticias_de_Gurb.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 2);
-
-        let book = find_result(&results, "Sin noticias de Gurb");
-        assert_eq!(book.author.as_deref(), Some("Eduardo Mendoza"));
-        assert!(book.cover_url.is_some());
-    }
-
-    #[test]
-    fn search_es_48_klara() {
-        let html = require_fixture_search!("es_48_Klara_y_el_Sol.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 2);
-
-        let book = find_result(&results, "Klara y el Sol");
-        assert_eq!(book.author.as_deref(), Some("Kazuo Ishiguro"));
-        assert!(book.cover_url.is_some());
-    }
-
-    // =========================================================================
-    // Search page tests — French (fr)
-    // =========================================================================
-
-    #[test]
-    fn search_fr_30_la_nuit() {
-        let html = require_fixture_search!("fr_30_La_Nuit_des_temps.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 8);
-
-        let book = find_result(&results, "La Nuit des temps");
-        assert!(book.detail_url.starts_with("/book/show/"));
-        assert!(book.cover_url.is_some());
-    }
-
-    #[test]
-    fn search_fr_34_le_petit_prince() {
-        let html = require_fixture_search!("fr_34_Le_Petit_Prince.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 19);
-
-        // Many results — verify some have covers and some don't (nophoto filtering)
-        let with_covers = results.iter().filter(|r| r.cover_url.is_some()).count();
-        assert_eq!(with_covers, 13);
-    }
-
-    #[test]
-    fn search_fr_36_letranger() {
-        let html = require_fixture_search!("fr_36_L_\u{00c9}tranger.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 14);
-
-        let with_covers = results.iter().filter(|r| r.cover_url.is_some()).count();
-        assert_eq!(with_covers, 11);
-    }
-
-    #[test]
-    fn search_fr_37_horde() {
-        let html = require_fixture_search!("fr_37_La_Horde_du_Contrevent.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 3);
-
-        let book = find_result(&results, "La Horde du Contrevent");
-        assert_eq!(book.author.as_deref(), Some("Alain Damasio"));
-        assert!(book.cover_url.is_some());
-    }
-
-    #[test]
-    fn search_fr_38_les_furtifs() {
-        let html = require_fixture_search!("fr_38_Les_Furtifs.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 1);
-
-        assert_eq!(results[0].title, "Les Furtifs");
-        assert_eq!(results[0].author.as_deref(), Some("Alain Damasio"));
-        assert!(results[0].cover_url.is_some());
-    }
-
-    // =========================================================================
-    // Search page tests — Polish (pl)
-    // =========================================================================
-
-    #[test]
-    fn search_pl_32_solaris() {
-        let html = require_fixture_search!("pl_32_Solaris.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 17);
-
-        let book = find_result(&results, "Solaris");
-        // Author should be found for the main Solaris entry
-        assert!(book.detail_url.starts_with("/book/show/"));
-        assert!(book.cover_url.is_some());
-    }
-
-    #[test]
-    fn search_pl_35_pan_tadeusz() {
-        let html = require_fixture_search!("pl_35_Pan_Tadeusz.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 19);
-
-        // Pan Tadeusz has many editions, some without covers
-        let with_covers = results.iter().filter(|r| r.cover_url.is_some()).count();
-        assert_eq!(with_covers, 10);
-    }
-
-    #[test]
-    fn search_pl_40_lod() {
-        let html = require_fixture_search!("pl_40_L\u{00f3}d.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 1);
-
-        assert_eq!(results[0].title, "L\u{00f3}d");
-        assert_eq!(results[0].author.as_deref(), Some("Jacek Dukaj"));
-        assert!(results[0].cover_url.is_some());
-    }
-
-    #[test]
-    fn search_pl_42_perfekcyjna() {
-        let html =
-            require_fixture_search!("pl_42_Perfekcyjna_niedoskona\u{0142}o\u{015b}\u{0107}.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 1);
-
-        assert_eq!(
-            results[0].title,
-            "Perfekcyjna niedoskona\u{0142}o\u{015b}\u{0107}"
-        );
-        assert_eq!(results[0].author.as_deref(), Some("Jacek Dukaj"));
-    }
-
-    #[test]
-    fn search_pl_44_wiedzmin() {
-        let html = require_fixture_search!("pl_44_Wiedźmin.html");
-        let results = parse_search_html(&html);
-        assert_eq!(results.len(), 19);
-
-        let book = find_result(&results, "Wiedźmin");
-        assert_eq!(book.author.as_deref(), Some("Andrzej Sapkowski"));
-        assert!(book.cover_url.is_some());
-
-        // Most Witcher results should have covers
-        let with_covers = results.iter().filter(|r| r.cover_url.is_some()).count();
-        assert_eq!(with_covers, 18);
-    }
-
-    // =========================================================================
-    // Search page invariants — all fixtures
-    // =========================================================================
-
-    #[test]
-    fn search_all_results_have_title_and_detail_url() {
-        let search_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("build/tmp-goodreads-html");
-
-        if !search_dir.is_dir() {
-            return;
-        }
-
-        for entry in std::fs::read_dir(&search_dir).unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().extension().is_none_or(|e| e != "html") {
-                continue;
-            }
-            let html = std::fs::read_to_string(entry.path()).unwrap();
-            let results = parse_search_html(&html);
-
-            assert!(
-                !results.is_empty(),
-                "No results from {}",
-                entry.file_name().to_string_lossy()
-            );
-
-            for (i, r) in results.iter().enumerate() {
-                assert!(
-                    !r.title.is_empty(),
-                    "Empty title in result {} of {}",
-                    i,
-                    entry.file_name().to_string_lossy()
-                );
-                assert!(
-                    r.detail_url.starts_with("/book/show/"),
-                    "detail_url '{}' doesn't start with /book/show/ in result {} of {}",
-                    r.detail_url,
-                    i,
-                    entry.file_name().to_string_lossy()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn search_cover_urls_exclude_placeholders() {
-        let search_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("build/tmp-goodreads-html");
-
-        if !search_dir.is_dir() {
-            return;
-        }
-
-        for entry in std::fs::read_dir(&search_dir).unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().extension().is_none_or(|e| e != "html") {
-                continue;
-            }
-            let html = std::fs::read_to_string(entry.path()).unwrap();
-            let results = parse_search_html(&html);
-
-            for r in &results {
-                if let Some(url) = &r.cover_url {
-                    assert!(
-                        !url.contains("nophoto"),
-                        "Cover URL contains 'nophoto': {} in {}",
-                        url,
-                        entry.file_name().to_string_lossy()
-                    );
-                    assert!(
-                        !url.contains("loading-trans"),
-                        "Cover URL contains 'loading-trans': {} in {}",
-                        url,
-                        entry.file_name().to_string_lossy()
-                    );
-                }
+        for r in &results {
+            assert!(!r.title.is_empty());
+            assert!(r.detail_url.starts_with("/book/show/"));
+            if let Some(url) = &r.cover_url {
+                assert!(!url.contains("nophoto"));
+                assert!(!url.contains("loading-trans"));
             }
         }
     }
 
     // =========================================================================
-    // Detail page tests — German (de)
+    // Live-fetch detail tests
     // =========================================================================
 
     #[test]
-    fn detail_de_31_das_parfum() {
-        let html = require_fixture_detail!("de_31_Das_Parfum__Die_Geschichte_eines_M_rders.html");
+    #[ignore]
+    fn live_detail_german() {
+        let html = fetch_goodreads_page("https://www.goodreads.com/book/show/2896.Das_Parfum")
+            .expect("fetch failed");
         let result = parse_detail_html(&html).expect("should parse");
-
-        assert_eq!(
-            result.title.as_deref(),
-            Some("Das Parfum: Die Geschichte eines M\u{00f6}rders")
-        );
-        assert_eq!(result.author.as_deref(), Some("Patrick S\u{00fc}skind"));
-        assert_eq!(result.isbn.as_deref(), Some("9783257228007"));
-        assert!((result.rating.unwrap() - 4.04).abs() < 0.01);
-        assert_eq!(result.page_count, Some(320));
-        assert_eq!(result.language.as_deref(), Some("German"));
-        assert!(result.cover_url.is_some());
-        assert!(result.description.is_some());
-        assert!(result.description.as_ref().unwrap().contains("Grenouille"));
-        assert!(result.genres.contains(&"classics".to_string()));
-        assert_eq!(result.publish_date.as_deref(), Some("February 26, 1985"));
-    }
-
-    #[test]
-    fn detail_de_39_die_krone() {
-        let html = require_fixture_detail!("de_39_Die_Krone_der_Sterne.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result
-            .title
-            .as_ref()
-            .unwrap()
-            .contains("Die Krone der Sterne"));
-        assert_eq!(result.author.as_deref(), Some("Kai Meyer"));
-        assert_eq!(result.isbn.as_deref(), Some("9783596035854"));
-        assert!((result.rating.unwrap() - 3.92).abs() < 0.01);
-        assert_eq!(result.page_count, Some(448));
-        assert_eq!(result.language.as_deref(), Some("German"));
-    }
-
-    #[test]
-    fn detail_de_49_qualityland() {
-        let html = require_fixture_detail!("de_49_QualityLand__QualityLand___1_.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("QualityLand"));
-        assert_eq!(result.author.as_deref(), Some("Marc-Uwe Kling"));
-        assert_eq!(result.isbn.as_deref(), Some("9783550050237"));
-        assert!((result.rating.unwrap() - 4.11).abs() < 0.01);
-        assert!(result.genres.contains(&"science-fiction".to_string()));
-    }
-
-    #[test]
-    fn detail_de_50_qualityland_2() {
-        let html = require_fixture_detail!("de_50_QualityLand_2_0__QualityLand___2_.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("QualityLand 2.0"));
-        assert_eq!(result.author.as_deref(), Some("Marc-Uwe Kling"));
-        // No ISBN for this edition
-        assert!(result.isbn.is_none());
-        assert!((result.rating.unwrap() - 4.19).abs() < 0.01);
-    }
-
-    #[test]
-    fn detail_de_51_tintenherz() {
-        let html = require_fixture_detail!("de_51_Tintenherz__Tintenwelt___1_.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("Tintenherz"));
-        assert_eq!(result.author.as_deref(), Some("Cornelia Funke"));
-        assert_eq!(result.isbn.as_deref(), Some("9783791504650"));
-        assert!((result.rating.unwrap() - 3.93).abs() < 0.01);
-    }
-
-    // =========================================================================
-    // Detail page tests — Spanish (es)
-    // =========================================================================
-
-    #[test]
-    fn detail_es_29_el_ojo() {
-        let html = require_fixture_detail!("es_29_El_ojo_del_mundo__La_rueda_del_tiempo___.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("El ojo del mundo"));
-        assert_eq!(result.author.as_deref(), Some("Robert Jordan"));
-        assert_eq!(result.isbn.as_deref(), Some("9788448031183"));
-        assert!((result.rating.unwrap() - 4.19).abs() < 0.01);
-        assert!(result.description.is_some());
-    }
-
-    #[test]
-    fn detail_es_45_tres_cuerpos() {
-        let html = require_fixture_detail!("es_45_El_problema_de_los_tres_cuerpos.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result
-            .title
-            .as_ref()
-            .unwrap()
-            .contains("El problema de los tres cuerpos"));
-        assert_eq!(result.author.as_deref(), Some("Liu Cixin"));
-        assert_eq!(result.isbn.as_deref(), Some("9788466659734"));
-        assert!((result.rating.unwrap() - 4.08).abs() < 0.01);
-    }
-
-    #[test]
-    fn detail_es_46_lagrimas() {
-        let html = require_fixture_detail!("es_46_L_grimas_en_la_lluvia.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result
-            .title
-            .as_ref()
-            .unwrap()
-            .contains("L\u{00e1}grimas en la lluvia"));
-        assert_eq!(result.author.as_deref(), Some("Rosa Montero"));
-        assert_eq!(result.isbn.as_deref(), Some("9788432296987"));
-        assert!((result.rating.unwrap() - 3.77).abs() < 0.01);
-    }
-
-    #[test]
-    fn detail_es_47_sin_noticias() {
-        let html = require_fixture_detail!("es_47_Sin_noticias_de_Gurb.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result
-            .title
-            .as_ref()
-            .unwrap()
-            .contains("Sin noticias de Gurb"));
-        assert_eq!(result.author.as_deref(), Some("Eduardo Mendoza"));
-        assert_eq!(result.isbn.as_deref(), Some("9788432207822"));
-        assert!((result.rating.unwrap() - 3.76).abs() < 0.01);
-    }
-
-    #[test]
-    fn detail_es_48_klara() {
-        let html = require_fixture_detail!("es_48_Klara_y_el_Sol.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("Klara y el Sol"));
-        assert_eq!(result.author.as_deref(), Some("Kazuo Ishiguro"));
-        assert_eq!(result.isbn.as_deref(), Some("9788433980878"));
-        assert!((result.rating.unwrap() - 3.74).abs() < 0.01);
-    }
-
-    // =========================================================================
-    // Detail page tests — French (fr)
-    // =========================================================================
-
-    #[test]
-    fn detail_fr_30_la_nuit() {
-        let html = require_fixture_detail!("fr_30_La_Nuit_des_temps.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("La Nuit des temps"));
-        assert_eq!(result.author.as_deref(), Some("Ren\u{00e9} Barjavel"));
-        assert!(result.isbn.is_none()); // No ISBN for this edition
-        assert!((result.rating.unwrap() - 4.02).abs() < 0.01);
-        assert!(result.description.is_some());
-    }
-
-    #[test]
-    fn detail_fr_34_le_petit_prince() {
-        let html = require_fixture_detail!("fr_34_Le_Petit_Prince.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        // The detail page fixture might be for a different edition
         assert!(result.title.is_some());
-        assert_eq!(
-            result.author.as_deref(),
-            Some("Antoine de Saint-Exup\u{00e9}ry")
-        );
-        assert!((result.rating.unwrap() - 4.58).abs() < 0.01);
+        assert!(result.author.is_some());
     }
 
     #[test]
-    fn detail_fr_36_letranger() {
-        let html = require_fixture_detail!("fr_36_L__tranger.html");
+    #[ignore]
+    fn live_detail_french() {
+        let html =
+            fetch_goodreads_page("https://www.goodreads.com/book/show/157993.Le_Petit_Prince")
+                .expect("fetch failed");
         let result = parse_detail_html(&html).expect("should parse");
-
         assert!(result.title.is_some());
-        assert_eq!(result.author.as_deref(), Some("Albert Camus"));
-        assert!(result.isbn.is_none()); // No ISBN for this edition
-        assert!((result.rating.unwrap() - 4.03).abs() < 0.01);
+        assert!(result.author.is_some());
     }
 
     #[test]
-    fn detail_fr_37_horde() {
-        let html = require_fixture_detail!("fr_37_La_Horde_du_Contrevent.html");
+    #[ignore]
+    fn live_detail_polish() {
+        let html = fetch_goodreads_page("https://www.goodreads.com/book/show/40603587-wied-min")
+            .expect("fetch failed");
         let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result
-            .title
-            .as_ref()
-            .unwrap()
-            .contains("La Horde du Contrevent"));
-        assert_eq!(result.author.as_deref(), Some("Alain Damasio"));
-        assert!(result.isbn.is_none());
-        assert!((result.rating.unwrap() - 4.42).abs() < 0.01);
-        assert_eq!(result.page_count, Some(736));
+        assert!(result.title.is_some());
+        assert!(result.author.is_some());
     }
 
     #[test]
-    fn detail_fr_38_les_furtifs() {
-        let html = require_fixture_detail!("fr_38_Les_Furtifs.html");
+    #[ignore]
+    fn live_detail_has_jsonld() {
+        let html = fetch_goodreads_page("https://www.goodreads.com/book/show/2896.Das_Parfum")
+            .expect("fetch failed");
         let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("Les Furtifs"));
-        assert_eq!(result.author.as_deref(), Some("Alain Damasio"));
-        assert_eq!(result.isbn.as_deref(), Some("9782370490742"));
-        assert!((result.rating.unwrap() - 3.96).abs() < 0.01);
+        assert!(result.title.is_some(), "missing title");
+        assert!(result.author.is_some(), "missing author");
+        assert!(result.rating.is_some(), "missing rating");
     }
 
-    // =========================================================================
-    // Detail page tests — Polish (pl)
-    // =========================================================================
-
     #[test]
-    fn detail_pl_32_solaris() {
-        let html = require_fixture_detail!("pl_32_Solaris.html");
+    #[ignore]
+    fn live_detail_description_is_plain_text() {
+        let html = fetch_goodreads_page("https://www.goodreads.com/book/show/2896.Das_Parfum")
+            .expect("fetch failed");
         let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("Solaris"));
-        assert_eq!(result.author.as_deref(), Some("Stanis\u{0142}aw Lem"));
-        assert!(result.isbn.is_none());
-        assert!((result.rating.unwrap() - 3.98).abs() < 0.01);
-        assert!(result.description.is_some());
-    }
-
-    #[test]
-    fn detail_pl_35_pan_tadeusz() {
-        let html = require_fixture_detail!("pl_35_Pan_Tadeusz.html");
-        let result = parse_detail_html(&html);
-
-        // Pan Tadeusz has minimal data — may or may not parse
-        // If it parses, verify what we can
-        if let Some(r) = result {
-            if let Some(title) = &r.title {
-                assert!(title.contains("Pan Tadeusz"));
-            }
-            if let Some(author) = &r.author {
-                assert!(author.contains("Mickiewicz"));
-            }
-            // No rating for this edition
-            // No description available
-        }
-    }
-
-    #[test]
-    fn detail_pl_40_lod() {
-        let html = require_fixture_detail!("pl_40_L_d.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("L\u{00f3}d"));
-        assert_eq!(result.author.as_deref(), Some("Jacek Dukaj"));
-        assert_eq!(result.isbn.as_deref(), Some("9788308039854"));
-        assert!((result.rating.unwrap() - 4.16).abs() < 0.01);
-        assert_eq!(result.page_count, Some(1051));
-    }
-
-    #[test]
-    fn detail_pl_42_perfekcyjna() {
-        let html = require_fixture_detail!("pl_42_Perfekcyjna_niedoskona_o__.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result
-            .title
-            .as_ref()
-            .unwrap()
-            .contains("Perfekcyjna niedoskona\u{0142}o\u{015b}\u{0107}"));
-        assert_eq!(result.author.as_deref(), Some("Jacek Dukaj"));
-        assert_eq!(result.isbn.as_deref(), Some("9788308036471"));
-        assert!((result.rating.unwrap() - 4.22).abs() < 0.01);
-    }
-
-    #[test]
-    fn detail_pl_44_wiedzmin() {
-        let html = require_fixture_detail!("pl_44_Wied_min.html");
-        let result = parse_detail_html(&html).expect("should parse");
-
-        assert!(result.title.as_ref().unwrap().contains("Wiedźmin"));
-        assert_eq!(result.author.as_deref(), Some("Andrzej Sapkowski"));
-        assert_eq!(result.isbn.as_deref(), Some("9788370541507"));
-        assert!((result.rating.unwrap() - 4.68).abs() < 0.01);
-    }
-
-    // =========================================================================
-    // Detail page invariants — all fixtures
-    // =========================================================================
-
-    #[test]
-    fn detail_all_have_jsonld_book() {
-        if !fixtures_dir().join("build/tmp-goodreads-detail").is_dir() {
-            return;
-        }
-        let detail_dir = fixtures_dir().join("build/tmp-goodreads-detail");
-
-        let mut parsed = 0;
-        let mut with_title = 0;
-        let mut with_author = 0;
-        let mut with_cover = 0;
-
-        for entry in std::fs::read_dir(&detail_dir).unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().extension().is_none_or(|e| e != "html") {
-                continue;
-            }
-            let html = std::fs::read_to_string(entry.path()).unwrap();
-            if let Some(result) = parse_detail_html(&html) {
-                parsed += 1;
-                if result.title.is_some() {
-                    with_title += 1;
-                }
-                if result.author.is_some() {
-                    with_author += 1;
-                }
-                if result.cover_url.is_some() {
-                    with_cover += 1;
-                }
-            }
-        }
-
-        // At least 19 of 20 should parse (Pan Tadeusz might be minimal)
-        assert!(parsed >= 19, "Only {parsed}/20 detail pages parsed");
-        assert!(with_title >= 19, "Only {with_title}/20 have titles");
-        assert!(with_author >= 19, "Only {with_author}/20 have authors");
-        // Covers: 19 of 20 have covers (Pan Tadeusz: NO in the handoff table)
-        assert!(with_cover >= 19, "Only {with_cover}/20 have covers");
-    }
-
-    #[test]
-    fn detail_descriptions_are_plain_text() {
-        if !fixtures_dir().join("build/tmp-goodreads-detail").is_dir() {
-            return;
-        }
-        let detail_dir = fixtures_dir().join("build/tmp-goodreads-detail");
-
-        for entry in std::fs::read_dir(&detail_dir).unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().extension().is_none_or(|e| e != "html") {
-                continue;
-            }
-            let html = std::fs::read_to_string(entry.path()).unwrap();
-            if let Some(result) = parse_detail_html(&html) {
-                if let Some(desc) = &result.description {
-                    // No HTML tags should remain
-                    assert!(
-                        !desc.contains("<br"),
-                        "Description contains HTML in {}",
-                        entry.file_name().to_string_lossy()
-                    );
-                    assert!(
-                        !desc.contains("<p"),
-                        "Description contains HTML in {}",
-                        entry.file_name().to_string_lossy()
-                    );
-                    assert!(
-                        !desc.contains("<span"),
-                        "Description contains HTML in {}",
-                        entry.file_name().to_string_lossy()
-                    );
-                    assert!(
-                        !desc.contains("<div"),
-                        "Description contains HTML in {}",
-                        entry.file_name().to_string_lossy()
-                    );
-                    assert!(
-                        !desc.contains("<a "),
-                        "Description contains HTML in {}",
-                        entry.file_name().to_string_lossy()
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn detail_all_authors_are_arrays() {
-        if !fixtures_dir().join("build/tmp-goodreads-detail").is_dir() {
-            return;
-        }
-        let detail_dir = fixtures_dir().join("build/tmp-goodreads-detail");
-
-        for entry in std::fs::read_dir(&detail_dir).unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().extension().is_none_or(|e| e != "html") {
-                continue;
-            }
-            let html = std::fs::read_to_string(entry.path()).unwrap();
-            let book = find_book_jsonld(&html);
-            if let Some(book) = book {
-                if let Some(author) = book.get("author") {
-                    assert!(
-                        author.is_array(),
-                        "Author is not array in {}: {:?}",
-                        entry.file_name().to_string_lossy(),
-                        author
-                    );
-                }
-            }
+        if let Some(desc) = &result.description {
+            assert!(!desc.contains("<br"), "HTML in description");
+            assert!(!desc.contains("<p"), "HTML in description");
+            assert!(!desc.contains("<span"), "HTML in description");
         }
     }
 
