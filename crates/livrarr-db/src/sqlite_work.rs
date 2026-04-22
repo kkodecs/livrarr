@@ -6,7 +6,7 @@ use crate::sqlite_common::{map_db_err, parse_dt};
 use crate::{
     ApplyEnrichmentMergeRequest, ApplyMergeOutcome, AuthorId, CreateWorkDbRequest, DbError,
     EnrichmentStatus, NarrationType, ProvenanceSetter, UpdateWorkEnrichmentDbRequest,
-    UpdateWorkUserFieldsDbRequest, Work, WorkDb, WorkId,
+    UpdateWorkUserFieldsDbRequest, UserId, Work, WorkDb, WorkId,
 };
 
 fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
@@ -185,7 +185,12 @@ fn parse_narration_type(s: &str) -> Result<NarrationType, DbError> {
         "human" => Ok(NarrationType::Human),
         "ai" => Ok(NarrationType::Ai),
         "ai_authorized_replica" => Ok(NarrationType::AiAuthorizedReplica),
-        _ => Err(DbError::IncompatibleData {
+        "abridged" => Ok(NarrationType::Abridged),
+        "unabridged" => Ok(NarrationType::Unabridged),
+        _ => Err(DbError::DataCorruption {
+            table: "works",
+            column: "narration_type",
+            row_id: 0,
             detail: format!("unknown narration type: {s}"),
         }),
     }
@@ -214,8 +219,6 @@ fn to_str<T: serde::Serialize>(v: T) -> String {
         .to_string()
 }
 
-type UserId = i64;
-
 impl WorkDb for SqliteDb {
     async fn get_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError> {
         let row = sqlx::query("SELECT * FROM works WHERE id = ? AND user_id = ?")
@@ -233,7 +236,16 @@ impl WorkDb for SqliteDb {
             .fetch_all(self.pool())
             .await
             .map_err(map_db_err)?;
-        rows.into_iter().map(row_to_work).collect()
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row_to_work(row) {
+                Ok(w) => results.push(w),
+                Err(e) => {
+                    tracing::warn!("works: skipping corrupt row: {e}");
+                }
+            }
+        }
+        Ok(results)
     }
 
     async fn list_works_by_author(
@@ -248,7 +260,16 @@ impl WorkDb for SqliteDb {
                 .fetch_all(self.pool())
                 .await
                 .map_err(map_db_err)?;
-        rows.into_iter().map(row_to_work).collect()
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row_to_work(row) {
+                Ok(w) => results.push(w),
+                Err(e) => {
+                    tracing::warn!("works: skipping corrupt row in list_by_author: {e}");
+                }
+            }
+        }
+        Ok(results)
     }
 
     async fn list_works_paginated(
@@ -256,6 +277,8 @@ impl WorkDb for SqliteDb {
         user_id: UserId,
         page: u32,
         per_page: u32,
+        sort_by: &str,
+        sort_dir: &str,
     ) -> Result<(Vec<Work>, i64), DbError> {
         let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE user_id = ?")
             .bind(user_id)
@@ -263,15 +286,26 @@ impl WorkDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
 
+        let order_col = match sort_by {
+            "title" => "title",
+            "date_added" => "added_at",
+            "year" => "year",
+            "author" => "author_name",
+            _ => "id",
+        };
+        let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
+        let sql = format!(
+            "SELECT * FROM works WHERE user_id = ? ORDER BY {order_col} {dir} LIMIT ? OFFSET ?"
+        );
+
         let offset = (page.saturating_sub(1) * per_page) as i64;
-        let rows =
-            sqlx::query("SELECT * FROM works WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?")
-                .bind(user_id)
-                .bind(per_page as i64)
-                .bind(offset)
-                .fetch_all(self.pool())
-                .await
-                .map_err(map_db_err)?;
+        let rows = sqlx::query(&sql)
+            .bind(user_id)
+            .bind(per_page as i64)
+            .bind(offset)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         let works = rows
             .into_iter()
@@ -525,6 +559,30 @@ impl WorkDb for SqliteDb {
             .map(|r| {
                 r.try_get::<String, _>("ol_key")
                     .map_err(|e| DbError::Io(Box::new(e)))
+            })
+            .collect()
+    }
+
+    async fn list_work_provider_keys_by_author(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<Vec<(Option<String>, Option<String>)>, DbError> {
+        let rows =
+            sqlx::query("SELECT ol_key, gr_key FROM works WHERE user_id = ? AND author_id = ?")
+                .bind(user_id)
+                .bind(author_id)
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_db_err)?;
+
+        rows.into_iter()
+            .map(|r| {
+                let ol: Option<String> =
+                    r.try_get("ol_key").map_err(|e| DbError::Io(Box::new(e)))?;
+                let gr: Option<String> =
+                    r.try_get("gr_key").map_err(|e| DbError::Io(Box::new(e)))?;
+                Ok((ol, gr))
             })
             .collect()
     }
@@ -818,6 +876,44 @@ impl WorkDb for SqliteDb {
                 .map_err(map_db_err)?;
 
         Ok(gen)
+    }
+
+    async fn search_works(
+        &self,
+        user_id: UserId,
+        query: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<Work>, i64), DbError> {
+        let escaped = query.replace('%', "\\%").replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        let offset = ((page.max(1) - 1) * per_page) as i64;
+        let limit = per_page as i64;
+
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM works WHERE user_id = ? AND (title LIKE ? ESCAPE '\\' OR author_name LIKE ? ESCAPE '\\')",
+        )
+        .bind(user_id)
+        .bind(&pattern)
+        .bind(&pattern)
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        let rows = sqlx::query(
+            "SELECT * FROM works WHERE user_id = ? AND (title LIKE ? ESCAPE '\\' OR author_name LIKE ? ESCAPE '\\') ORDER BY title ASC LIMIT ? OFFSET ?",
+        )
+        .bind(user_id)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        let works: Result<Vec<Work>, DbError> = rows.into_iter().map(row_to_work).collect();
+        Ok((works?, total))
     }
 }
 

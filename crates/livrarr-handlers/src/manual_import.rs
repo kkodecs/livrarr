@@ -47,7 +47,7 @@ pub struct ScannedFile {
     pub path: String,
     pub filename: String,
     pub media_type: MediaType,
-    pub size: u64,
+    pub size: i64,
     pub parsed: Option<ParsedFile>,
     #[serde(rename = "match")]
     pub ol_match: Option<OlMatch>,
@@ -334,19 +334,30 @@ pub async fn scan<S: AppContext>(
     let existing_works = state.manual_import_service().list_works(user_id).await?;
     let root_folders = state.manual_import_service().list_root_folders().await?;
 
+    // Pre-compute normalized lookup HashMap to avoid O(N×M) comparisons.
+    let work_lookup: std::collections::HashMap<(String, String), i64> = existing_works
+        .iter()
+        .map(|w| {
+            (
+                (
+                    normalize_for_matching(&w.title),
+                    normalize_for_matching(&w.author_name),
+                ),
+                w.id,
+            )
+        })
+        .collect();
+
     let pre_existing_work_ids: Vec<Option<i64>> = sort_indices
         .iter()
         .map(|&i| {
             let parsed = parsed_files.get(i).and_then(|p| p.as_ref());
             parsed.and_then(|p| {
-                existing_works
-                    .iter()
-                    .find(|w| {
-                        normalize_for_matching(&w.title) == normalize_for_matching(&p.title)
-                            && normalize_for_matching(&w.author_name)
-                                == normalize_for_matching(&p.author)
-                    })
-                    .map(|w| w.id)
+                let key = (
+                    normalize_for_matching(&p.title),
+                    normalize_for_matching(&p.author),
+                );
+                work_lookup.get(&key).copied()
             })
         })
         .collect();
@@ -381,17 +392,17 @@ pub async fn scan<S: AppContext>(
         let filename = si.display_name.clone();
         let parsed = parsed_files.get(i).cloned().flatten();
 
-        let size = if let Some(ref paths) = si.grouped_paths {
+        let size: i64 = if let Some(ref paths) = si.grouped_paths {
             let mut total = 0u64;
             for p in paths {
                 total += tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0);
             }
-            total
+            total.try_into().unwrap_or(i64::MAX)
         } else {
             tokio::fs::metadata(&si.primary_path)
                 .await
                 .map(|m| m.len())
-                .unwrap_or(0)
+                .unwrap_or(0) as i64
         };
 
         let routable = root_folders.iter().any(|rf| rf.media_type == si.media_type);
@@ -586,7 +597,7 @@ pub async fn scan<S: AppContext>(
 
 pub async fn scan_progress<S: AppContext>(
     State(state): State<S>,
-    RequireAdmin(_auth): RequireAdmin,
+    RequireAdmin(auth): RequireAdmin,
     axum::extract::Path(scan_id): axum::extract::Path<String>,
 ) -> Result<Json<ScanProgressResponse>, ApiError> {
     use crate::accessors::ManualImportScanAccessor;
@@ -595,6 +606,11 @@ pub async fn scan_progress<S: AppContext>(
         .manual_import_scan()
         .get_scan(&scan_id)
         .ok_or(ApiError::NotFound)?;
+
+    // Verify the requesting user owns this scan.
+    if scan.user_id != auth.user.id {
+        return Err(ApiError::NotFound);
+    }
 
     Ok(Json(ScanProgressResponse {
         files: scan.files,

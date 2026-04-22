@@ -9,9 +9,8 @@ use crate::middleware::RequireAdmin;
 use crate::services::settings_service::SettingsService;
 use crate::state::AppState;
 use crate::{
-    AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse,
-    LookupApiResponse, RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse,
-    WorkSearchResult,
+    AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse, LookupApiResponse,
+    RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
 use livrarr_domain::services::{
     CreateNotificationRequest, NotificationService, WorkDetailView, WorkService,
@@ -147,10 +146,13 @@ pub(crate) async fn download_post_enrich_cover(
     cover_url: &str,
 ) {
     use livrarr_domain::services::WorkService;
-    state
+    if let Err(e) = state
         .work_service
         .download_cover_from_url(user_id, work_id, cover_url)
-        .await;
+        .await
+    {
+        tracing::warn!(work_id, %e, "cover download failed");
+    }
 }
 
 /// POST /api/v1/work

@@ -1,3 +1,4 @@
+pub mod keyed_mutex;
 pub mod readarr;
 pub mod services;
 pub mod settings;
@@ -193,11 +194,10 @@ impl DownloadClientImplementation {
         }
     }
 
-    /// Protocol name for API responses and routing.
-    pub fn protocol(&self) -> &'static str {
+    pub fn protocol(&self) -> crate::services::DownloadProtocol {
         match self {
-            Self::QBittorrent => "torrent",
-            Self::SABnzbd => "usenet",
+            Self::QBittorrent => crate::services::DownloadProtocol::Torrent,
+            Self::SABnzbd => crate::services::DownloadProtocol::Usenet,
         }
     }
 }
@@ -813,8 +813,7 @@ pub fn normalize_language(lang: &str) -> String {
 
 /// Normalize an optional language value.
 pub fn normalize_language_opt(lang: Option<&str>) -> Option<String> {
-    lang.filter(|s| !s.is_empty())
-        .map(|s| normalize_language(s))
+    lang.filter(|s| !s.is_empty()).map(normalize_language)
 }
 
 /// Classifies a file path into a MediaType based on extension.
@@ -824,6 +823,80 @@ pub fn classify_file(path: &std::path::Path) -> Option<MediaType> {
         "epub" | "mobi" | "azw3" | "pdf" => Some(MediaType::Ebook),
         "mp3" | "m4a" | "m4b" | "flac" | "ogg" | "wma" => Some(MediaType::Audiobook),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SourceKind — centralized metadata source representation
+// ---------------------------------------------------------------------------
+
+/// Canonical metadata source. Replaces string-based `is_foreign_source()` checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    OpenLibrary,
+    Hardcover,
+    Goodreads,
+    Audnexus,
+    CasaDelLibro,
+    SruDnb,
+    LubimyCzytac,
+    WebSearch,
+    Readarr,
+    /// Catch-all for unrecognized sources that are treated as foreign.
+    Other,
+}
+
+impl SourceKind {
+    /// Returns true if this source represents a foreign-language provider.
+    pub fn is_foreign(&self) -> bool {
+        !matches!(self, Self::OpenLibrary | Self::Readarr)
+    }
+}
+
+impl std::fmt::Display for SourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::OpenLibrary => "OpenLibrary",
+            Self::Hardcover => "Hardcover",
+            Self::Goodreads => "Goodreads",
+            Self::Audnexus => "Audnexus",
+            Self::CasaDelLibro => "CasaDelLibro",
+            Self::SruDnb => "SruDnb",
+            Self::LubimyCzytac => "lubimyczytac.pl",
+            Self::WebSearch => "WebSearch",
+            Self::Readarr => "readarr",
+            Self::Other => "other",
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::str::FromStr for SourceKind {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
+            "openlibrary" => Self::OpenLibrary,
+            "hardcover" => Self::Hardcover,
+            "goodreads" => Self::Goodreads,
+            "audnexus" => Self::Audnexus,
+            "casadellibro" => Self::CasaDelLibro,
+            "srudnb" => Self::SruDnb,
+            "lubimyczytac.pl" | "lubimyczytac" => Self::LubimyCzytac,
+            "websearch" | "web search" => Self::WebSearch,
+            "readarr" => Self::Readarr,
+            _ => Self::Other,
+        })
+    }
+}
+
+/// Check if a metadata_source string represents a foreign source.
+/// Convenience function wrapping SourceKind parsing.
+pub fn is_foreign_source(metadata_source: Option<&str>) -> bool {
+    match metadata_source {
+        None => false,
+        Some(s) => s.parse::<SourceKind>().unwrap().is_foreign(),
     }
 }
 
@@ -964,6 +1037,8 @@ pub enum OutcomeClass {
     Success,
     /// Provider returned no match for this work.
     NotFound,
+    /// Provider is not configured — retriable when config changes.
+    NotConfigured,
     /// Provider returned data that will be retried.
     WillRetry,
     /// Provider returned an error that will not resolve on retry.
@@ -982,6 +1057,7 @@ impl OutcomeClass {
                 | OutcomeClass::NotFound
                 | OutcomeClass::PermanentFailure
                 | OutcomeClass::Conflict
+                | OutcomeClass::NotConfigured
         )
     }
 

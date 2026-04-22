@@ -42,7 +42,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::Migr
 // ── Startup checks ──────────────────────────────────────────────────────────
 
 /// Maximum schema_version this binary understands.
-const MAX_SCHEMA_VERSION: i64 = 30;
+const MAX_SCHEMA_VERSION: i64 = 33;
 /// Maximum data_version this binary understands.
 const MAX_DATA_VERSION: i64 = 1;
 
@@ -86,12 +86,16 @@ pub async fn check_version_gate(pool: &SqlitePool) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify the data directory is writable (write+delete a healthcheck file).
+/// Verify the data directory is writable (write+delete a tempfile).
 pub fn check_data_dir_permissions(data_dir: &Path) -> Result<(), String> {
-    let probe = data_dir.join(".healthcheck");
-    std::fs::write(&probe, b"ok")
+    use std::io::Write;
+    let mut probe = tempfile::Builder::new()
+        .prefix(".livrarr_probe_")
+        .tempfile_in(data_dir)
         .map_err(|e| format!("cannot write to data directory {}: {e}", data_dir.display()))?;
-    std::fs::remove_file(&probe).map_err(|e| format!("cannot delete healthcheck file: {e}"))?;
+    probe
+        .write_all(b"ok")
+        .map_err(|e| format!("cannot write to data directory {}: {e}", data_dir.display()))?;
     Ok(())
 }
 

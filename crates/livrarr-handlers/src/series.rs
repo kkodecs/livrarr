@@ -9,53 +9,12 @@ use crate::types::series::{
     GrAuthorCandidate, MonitorSeriesRequest, ResolveGrResponse, SeriesDetailResponse,
     SeriesListResponse, SeriesResponse, SeriesWithAuthorResponse, UpdateSeriesRequest,
 };
-use crate::types::work::WorkDetailResponse;
+use crate::types::work::work_to_detail;
 use crate::LibraryItemResponse;
 use livrarr_domain::services::{
     AuthorService, MonitorSeriesServiceRequest, SeriesMonitorWorkerParams, SeriesQueryService,
+    UpdateAuthorRequest,
 };
-
-fn work_to_detail(w: &livrarr_domain::Work) -> WorkDetailResponse {
-    WorkDetailResponse {
-        id: w.id,
-        title: w.title.clone(),
-        sort_title: w.sort_title.clone(),
-        subtitle: w.subtitle.clone(),
-        original_title: w.original_title.clone(),
-        author_name: w.author_name.clone(),
-        author_id: w.author_id,
-        description: w.description.clone(),
-        year: w.year,
-        series_id: w.series_id,
-        series_name: w.series_name.clone(),
-        series_position: w.series_position,
-        genres: w.genres.clone(),
-        language: w.language.clone(),
-        page_count: w.page_count,
-        duration_seconds: w.duration_seconds,
-        publisher: w.publisher.clone(),
-        publish_date: w.publish_date.clone(),
-        ol_key: w.ol_key.clone(),
-        hc_key: w.hc_key.clone(),
-        gr_key: w.gr_key.clone(),
-        isbn_13: w.isbn_13.clone(),
-        asin: w.asin.clone(),
-        narrator: w.narrator.clone(),
-        narration_type: w.narration_type,
-        abridged: w.abridged,
-        rating: w.rating,
-        rating_count: w.rating_count,
-        enrichment_status: w.enrichment_status,
-        enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
-        enrichment_source: w.enrichment_source.clone(),
-        cover_manual: w.cover_manual,
-        monitor_ebook: w.monitor_ebook,
-        monitor_audiobook: w.monitor_audiobook,
-        added_at: w.added_at.to_rfc3339(),
-        library_items: vec![],
-        metadata_source: w.metadata_source.clone(),
-    }
-}
 
 pub async fn list_all<S: AppContext>(
     State(state): State<S>,
@@ -131,28 +90,45 @@ pub async fn resolve_gr<S: AppContext>(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<ResolveGrResponse>, ApiError> {
-    let had_gr_key = state
-        .author_service()
-        .get(ctx.user.id, id)
-        .await
-        .map(|a| a.gr_key.is_some())
-        .unwrap_or(false);
+    let author = state.author_service().get(ctx.user.id, id).await?;
+    let had_gr_key = author.gr_key.is_some();
 
     let views = state
         .series_query_service()
         .resolve_gr_candidates(ctx.user.id, id)
         .await?;
 
-    let auto_linked = if !had_gr_key {
-        state
-            .author_service()
-            .get(ctx.user.id, id)
-            .await
-            .map(|a| a.gr_key.is_some())
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    // Auto-link if the first candidate is a strong name match (handler-level side effect).
+    let mut auto_linked = false;
+    if !had_gr_key {
+        if let Some(first) = views.first() {
+            let sim = livrarr_matching::author_similarity(&author.name, &first.name);
+            if sim >= 0.90 {
+                tracing::info!(
+                    author = %author.name,
+                    gr_candidate = %first.name,
+                    similarity = %sim,
+                    "auto-linking Goodreads author"
+                );
+                state
+                    .author_service()
+                    .update(
+                        ctx.user.id,
+                        id,
+                        UpdateAuthorRequest {
+                            name: None,
+                            sort_name: None,
+                            ol_key: None,
+                            gr_key: Some(first.gr_key.clone()),
+                            monitored: None,
+                            monitor_new_items: None,
+                        },
+                    )
+                    .await?;
+                auto_linked = true;
+            }
+        }
+    }
 
     let candidates = views
         .into_iter()

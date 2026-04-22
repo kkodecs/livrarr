@@ -42,6 +42,9 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub url_base: String,
+
+    #[serde(default = "default_trusted_proxies")]
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -50,8 +53,13 @@ impl Default for ServerConfig {
             bind_address: default_bind_address(),
             port: default_port(),
             url_base: String::new(),
+            trusted_proxies: default_trusted_proxies(),
         }
     }
+}
+
+fn default_trusted_proxies() -> Vec<String> {
+    Vec::new()
 }
 
 fn default_bind_address() -> String {

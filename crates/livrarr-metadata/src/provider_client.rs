@@ -264,7 +264,7 @@ impl HardcoverClient {
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let cfg = self.live_config.snapshot();
         if !cfg.hardcover_enabled {
-            return ProviderOutcome::NotFound;
+            return ProviderOutcome::NotConfigured;
         }
         let token = match cfg
             .hardcover_api_token
@@ -277,7 +277,7 @@ impl HardcoverClient {
             .filter(|t| !t.is_empty())
         {
             Some(t) => t.to_string(),
-            None => return ProviderOutcome::NotFound,
+            None => return ProviderOutcome::NotConfigured,
         };
 
         let result = query_hardcover(
@@ -352,18 +352,14 @@ impl HardcoverClient {
             //
             // Proper fix is typed errors out of query_hardcover; until then,
             // string matching keeps the breaker honest.
-            Err(msg) => {
-                let benign = msg.starts_with("no results") || msg.starts_with("no exact match");
-                if benign {
-                    ProviderOutcome::NotFound
-                } else {
-                    ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    }
-                }
-            }
+            Err(
+                crate::hardcover::HardcoverError::NoResults
+                | crate::hardcover::HardcoverError::NoMatch(_),
+            ) => ProviderOutcome::NotFound,
+            Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
+            },
         }
     }
 }

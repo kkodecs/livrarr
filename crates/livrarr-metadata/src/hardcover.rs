@@ -8,6 +8,23 @@ use livrarr_db::MetadataConfig;
 use livrarr_http::HttpClient;
 use serde_json::Value;
 
+#[derive(Debug)]
+pub enum HardcoverError {
+    NoResults,
+    NoMatch(String),
+    Http(String),
+}
+
+impl std::fmt::Display for HardcoverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoResults => write!(f, "no results"),
+            Self::NoMatch(detail) => write!(f, "no match: {detail}"),
+            Self::Http(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 /// Hardcover GraphQL API endpoint.
 pub const HARDCOVER_API_URL: &str = "https://api.hardcover.app/v1/graphql";
 
@@ -40,7 +57,7 @@ pub async fn query_hardcover(
     author: &str,
     token: &str,
     metadata_cfg: &MetadataConfig,
-) -> Result<HardcoverResult, String> {
+) -> Result<HardcoverResult, HardcoverError> {
     // Search by title only — gets the best results for short/common titles.
     let query = r#"query SearchBooks($query: String!) {
         search(query: $query, query_type: "books", per_page: 25) {
@@ -71,13 +88,16 @@ pub async fn query_hardcover(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| HardcoverError::Http(format!("request failed: {e}")))?;
 
     if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+        return Err(HardcoverError::Http(format!("HTTP {}", resp.status())));
     }
 
-    let data: Value = resp.json().await.map_err(|e| format!("parse error: {e}"))?;
+    let data: Value = resp
+        .json()
+        .await
+        .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))?;
 
     let hits = data
         .pointer("/data/search/results/hits")
@@ -86,7 +106,7 @@ pub async fn query_hardcover(
         .unwrap_or_default();
 
     if hits.is_empty() {
-        return Err("no results".into());
+        return Err(HardcoverError::NoResults);
     }
 
     // Tier 1: exact title + author match (case-insensitive), highest users_read_count wins.
@@ -145,17 +165,17 @@ pub async fn query_hardcover(
                 tracing::info!(title = %title, chosen_idx = idx, "LLM selected Hardcover result");
                 idx
             }
-            Ok(None) => return Err("no exact match and LLM returned no selection".into()),
+            Ok(None) => return Err(HardcoverError::NoMatch("LLM returned no selection".into())),
             Err(e) => {
                 tracing::warn!(title = %title, error = %e, "LLM disambiguation failed");
-                return Err(format!("no exact match (LLM: {e})"));
+                return Err(HardcoverError::NoMatch(format!("LLM: {e}")));
             }
         },
     };
 
-    let doc = hits[doc_idx]
-        .get("document")
-        .ok_or("selected result has no document")?;
+    let doc = hits[doc_idx].get("document").ok_or(HardcoverError::Http(
+        "selected result has no document".into(),
+    ))?;
 
     let hc_title = doc
         .get("title")

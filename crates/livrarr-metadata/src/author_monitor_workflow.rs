@@ -161,13 +161,13 @@ where
                     retries
                 );
 
-                // Rate-limit notification on first 429 per run
+                // Rate-limit notification on first 429 per run — notify the affected author's owner.
                 if !rate_limit_notified {
                     rate_limit_notified = true;
                     if let Err(e) = self
                         .db
                         .create_notification(CreateNotificationDbRequest {
-                            user_id: 1, // legacy system pseudo-user
+                            user_id: author.user_id,
                             notification_type: NotificationType::RateLimitHit,
                             ref_key: Some("author_monitor".into()),
                             message: "Open Library rate limit hit during author monitoring".into(),
@@ -218,12 +218,14 @@ where
             // Determine monitor_since year
             let monitor_since_year = author.monitor_since.map(|dt| dt.year()).unwrap_or(0);
 
-            // Get existing work OL keys for dedup
-            let existing_ol_keys = self
+            // Get existing work provider keys for dedup (checks both OL and GR keys)
+            let existing_keys = self
                 .db
-                .list_works_by_author_ol_keys(author.user_id, &ol_key)
+                .list_work_provider_keys_by_author(author.user_id, author.id)
                 .await
                 .unwrap_or_default();
+
+            let cleaned_author = crate::title_cleanup::clean_author(&author.name);
 
             // Process each work entry
             for entry in &works_response.entries {
@@ -232,9 +234,13 @@ where
                     None => continue,
                 };
 
-                // Dedup against existing works (compare stripped keys — WorkService
-                // stores the stripped form, so existing_ol_keys are stripped too)
-                if existing_ol_keys.contains(&stripped_ol_key) {
+                // Dedup against existing works — match on OL key.
+                // OL entries don't carry GR keys; when non-OL monitors are added,
+                // extend this to cross-check gr_key as well.
+                if existing_keys
+                    .iter()
+                    .any(|(ol, _gr)| ol.as_deref() == Some(stripped_ol_key.as_str()))
+                {
                     continue;
                 }
 
@@ -257,7 +263,6 @@ where
 
                 let raw_title = entry.title.as_deref().unwrap_or("Unknown").to_string();
                 let work_title = crate::title_cleanup::clean_title(&raw_title);
-                let cleaned_author = crate::title_cleanup::clean_author(&author.name);
 
                 tracing::info!(
                     author_id = author.id,
@@ -289,6 +294,31 @@ where
                     match self.work_service.add(author.user_id, add_req).await {
                         Ok(_work) => {
                             report.works_added += 1;
+
+                            // WorkAutoAdded notification — only on successful add
+                            if let Err(e) = self
+                                .db
+                                .create_notification(CreateNotificationDbRequest {
+                                    user_id: author.user_id,
+                                    notification_type: NotificationType::WorkAutoAdded,
+                                    ref_key: Some(stripped_ol_key.clone()),
+                                    message: format!(
+                                        "New work '{}' by {} auto-added to your library",
+                                        work_title, author.name
+                                    ),
+                                    data: serde_json::json!({
+                                        "title": work_title,
+                                        "author": author.name,
+                                        "year": year,
+                                        "ol_key": stripped_ol_key,
+                                    }),
+                                })
+                                .await
+                            {
+                                tracing::warn!("create_notification failed: {e}");
+                            } else {
+                                report.notifications_created += 1;
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -298,31 +328,6 @@ where
                                 "author monitor: failed to auto-add work"
                             );
                         }
-                    }
-
-                    // WorkAutoAdded notification
-                    if let Err(e) = self
-                        .db
-                        .create_notification(CreateNotificationDbRequest {
-                            user_id: author.user_id,
-                            notification_type: NotificationType::WorkAutoAdded,
-                            ref_key: Some(stripped_ol_key.clone()),
-                            message: format!(
-                                "New work '{}' by {} auto-added to your library",
-                                work_title, author.name
-                            ),
-                            data: serde_json::json!({
-                                "title": work_title,
-                                "author": author.name,
-                                "year": year,
-                                "ol_key": stripped_ol_key,
-                            }),
-                        })
-                        .await
-                    {
-                        tracing::warn!("create_notification failed: {e}");
-                    } else {
-                        report.notifications_created += 1;
                     }
                 } else {
                     // Notification only — NewWorkDetected

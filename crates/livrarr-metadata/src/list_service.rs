@@ -245,7 +245,22 @@ where
             .ok_or_else(|| "no results from OpenLibrary".to_string())?;
 
         let doc = docs
-            .first()
+            .iter()
+            .map(|d| {
+                let d_title = d.get("title").and_then(|t| t.as_str()).unwrap_or("");
+                let d_author = d
+                    .get("author_name")
+                    .and_then(|a| a.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("");
+                let title_sim = livrarr_matching::string_similarity(d_title, title);
+                let author_sim = livrarr_matching::string_similarity(d_author, author);
+                (title_sim * 0.7 + author_sim * 0.3, d)
+            })
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .filter(|(score, _)| *score >= 0.4)
+            .map(|(_, d)| d)
             .ok_or_else(|| format!("no OpenLibrary results for '{title}' by '{author}'"))?;
 
         let key = doc
@@ -328,32 +343,38 @@ where
             return Err(ListServiceError::Parse("file too large (max 20MB)".into()));
         }
 
-        // Auto-detect source and parse.
-        let stripped = parsers::strip_bom_pub(&bytes);
-        let mut rdr = csv::ReaderBuilder::new()
-            .flexible(true)
-            .from_reader(stripped);
+        // CSV parsing can be CPU-intensive for large files — run off async executor.
+        let (source, rows) = tokio::task::spawn_blocking(move || -> Result<_, ListServiceError> {
+            let stripped = parsers::strip_bom_pub(&bytes);
+            let mut rdr = csv::ReaderBuilder::new()
+                .flexible(true)
+                .from_reader(stripped);
 
-        let headers = rdr
-            .headers()
-            .map_err(|e| ListServiceError::Parse(format!("invalid CSV: {e}")))?
-            .clone();
+            let headers = rdr
+                .headers()
+                .map_err(|e| ListServiceError::Parse(format!("invalid CSV: {e}")))?
+                .clone();
 
-        let source = parsers::detect_csv_source(&headers).map_err(|e| match e {
-            ParseError::UnknownFormat {
-                detected_headers, ..
-            } => ListServiceError::Parse(format!(
-                "unrecognized CSV format. Detected headers: {}",
-                detected_headers.join(", ")
-            )),
-            other => ListServiceError::Parse(other.to_string()),
-        })?;
+            let source = parsers::detect_csv_source(&headers).map_err(|e| match e {
+                ParseError::UnknownFormat {
+                    detected_headers, ..
+                } => ListServiceError::Parse(format!(
+                    "unrecognized CSV format. Detected headers: {}",
+                    detected_headers.join(", ")
+                )),
+                other => ListServiceError::Parse(other.to_string()),
+            })?;
 
-        let rows = match source {
-            CsvSource::Goodreads => parsers::parse_goodreads_csv(&bytes),
-            CsvSource::Hardcover => parsers::parse_hardcover_csv(&bytes),
-        }
-        .map_err(|e| ListServiceError::Parse(e.to_string()))?;
+            let rows = match source {
+                CsvSource::Goodreads => parsers::parse_goodreads_csv(&bytes),
+                CsvSource::Hardcover => parsers::parse_hardcover_csv(&bytes),
+            }
+            .map_err(|e| ListServiceError::Parse(e.to_string()))?;
+
+            Ok((source, rows))
+        })
+        .await
+        .map_err(|e| ListServiceError::Parse(format!("CSV parse task failed: {e}")))??;
 
         let source_str = match source {
             CsvSource::Goodreads => "goodreads",

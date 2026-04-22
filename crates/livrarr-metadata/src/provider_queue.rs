@@ -439,12 +439,13 @@ where
                 let _permit = concurrency.acquire_owned().await;
                 // Then rate-limit token (token bucket pacing).
                 if rate_limiter.acquire().await.is_err() {
-                    return (provider, DispatchedOutcome::Returned(
-                        ProviderOutcome::WillRetry {
+                    return (
+                        provider,
+                        DispatchedOutcome::Returned(ProviderOutcome::WillRetry {
                             reason: WillRetryReason::RateLimit,
                             next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(60),
-                        }
-                    ));
+                        }),
+                    );
                 }
                 let outcome = client.fetch(&work_arc, &ctx_arc).await;
                 (provider, DispatchedOutcome::Returned(outcome))
@@ -511,9 +512,11 @@ where
                 ProviderOutcome::WillRetry { .. } | ProviderOutcome::PermanentFailure { .. } => {
                     bs.record_failure()
                 }
-                // Conflict and Suppressed neither count as a clean success nor a
-                // straightforward provider failure for breaker arithmetic.
-                ProviderOutcome::Conflict { .. } | ProviderOutcome::Suppressed { .. } => {}
+                // NotConfigured, Conflict, and Suppressed neither count as a clean
+                // success nor a straightforward provider failure for breaker arithmetic.
+                ProviderOutcome::NotConfigured
+                | ProviderOutcome::Conflict { .. }
+                | ProviderOutcome::Suppressed { .. } => {}
             }
 
             outcomes.insert(provider, final_outcome);
@@ -653,6 +656,17 @@ where
                         work.id,
                         provider,
                         OutcomeClass::NotFound,
+                        None,
+                    )
+                    .await?;
+            }
+            ProviderOutcome::NotConfigured => {
+                self.retry_db
+                    .record_terminal_outcome(
+                        work.user_id,
+                        work.id,
+                        provider,
+                        OutcomeClass::NotConfigured,
                         None,
                     )
                     .await?;

@@ -313,7 +313,7 @@ where
         user_id: UserId,
         filter: WorkFilter,
     ) -> Result<Vec<Work>, WorkServiceError> {
-        let works = if let Some(author_id) = filter.author_id {
+        let mut works = if let Some(author_id) = filter.author_id {
             self.db
                 .list_works_by_author(user_id, author_id)
                 .await
@@ -324,6 +324,35 @@ where
                 .await
                 .map_err(WorkServiceError::Db)?
         };
+
+        if let Some(monitored) = filter.monitored {
+            works.retain(|w| (w.monitor_ebook || w.monitor_audiobook) == monitored);
+        }
+        if let Some(ref status) = filter.enrichment_status {
+            works.retain(|w| w.enrichment_status == *status);
+        }
+        if let Some(media_type) = filter.media_type {
+            works.retain(|w| match media_type {
+                MediaType::Ebook => w.monitor_ebook,
+                MediaType::Audiobook => w.monitor_audiobook,
+            });
+        }
+        if let Some(sort_by) = filter.sort_by {
+            let dir = filter.sort_dir.unwrap_or(SortDirection::Asc);
+            works.sort_by(|a, b| {
+                let cmp = match sort_by {
+                    WorkSortField::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+                    WorkSortField::DateAdded => a.added_at.cmp(&b.added_at),
+                    WorkSortField::Year => a.year.cmp(&b.year),
+                    WorkSortField::Author => a.author_name.cmp(&b.author_name),
+                };
+                match dir {
+                    SortDirection::Asc => cmp,
+                    SortDirection::Desc => cmp.reverse(),
+                }
+            });
+        }
+
         Ok(works)
     }
 
@@ -775,15 +804,19 @@ where
             .map_err(WorkServiceError::Db)
     }
 
-    async fn download_cover_from_url(&self, user_id: i64, work_id: i64, cover_url: &str) {
+    async fn download_cover_from_url(
+        &self,
+        user_id: i64,
+        work_id: i64,
+        cover_url: &str,
+    ) -> Result<(), WorkServiceError> {
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-        if let Err(e) =
-            download_cover_to_disk(&self.http, cover_url, &covers_dir, work_id, "").await
-        {
-            tracing::warn!(work_id, cover_url, "download_cover_from_url failed: {e}");
-        }
+        download_cover_to_disk(&self.http, cover_url, &covers_dir, work_id, "")
+            .await
+            .map_err(|e| WorkServiceError::Cover(e.to_string()))?;
         let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
         let _ = tokio::fs::remove_file(&thumb).await;
+        Ok(())
     }
 
     fn try_start_bulk_refresh(&self, user_id: i64) -> bool {

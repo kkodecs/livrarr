@@ -173,12 +173,14 @@ pub trait WorkDb: Send + Sync {
         author_id: AuthorId,
     ) -> Result<Vec<Work>, DbError>;
 
-    /// List works for a user, paginated.
+    /// List works for a user, paginated with server-side sort.
     async fn list_works_paginated(
         &self,
         user_id: UserId,
         page: u32,
         per_page: u32,
+        sort_by: &str,
+        sort_dir: &str,
     ) -> Result<(Vec<Work>, i64), DbError>;
 
     /// Create work. Returns created work with generated ID.
@@ -236,6 +238,12 @@ pub trait WorkDb: Send + Sync {
         author_ol_key: &str,
     ) -> Result<Vec<String>, DbError>;
 
+    async fn list_work_provider_keys_by_author(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<Vec<(Option<String>, Option<String>)>, DbError>;
+
     /// Find works by normalized title + author match (for manual scan matching).
     ///
     /// Satisfies: IMPORT-017
@@ -275,6 +283,15 @@ pub trait WorkDb: Send + Sync {
 
     /// TEMP(pk-tdd): compile-only scaffold — get current merge generation counter.
     async fn get_merge_generation(&self, user_id: UserId, work_id: WorkId) -> Result<i64, DbError>;
+
+    /// Search works by title or author_name LIKE match, paginated.
+    async fn search_works(
+        &self,
+        user_id: UserId,
+        query: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<Work>, i64), DbError>;
 }
 
 #[derive(Default)]
@@ -1221,6 +1238,7 @@ pub struct BibliographyEntry {
 pub struct AuthorBibliography {
     pub author_id: i64,
     pub entries: Vec<BibliographyEntry>,
+    pub raw_entries: Option<Vec<BibliographyEntry>>,
     pub fetched_at: String,
 }
 
@@ -1232,9 +1250,9 @@ pub trait AuthorBibliographyDb: Send + Sync {
         &self,
         author_id: i64,
         entries: &[BibliographyEntry],
+        raw_entries: Option<&[BibliographyEntry]>,
     ) -> Result<AuthorBibliography, DbError>;
 
-    /// Delete cached bibliography for an author (forces re-fetch on next request).
     async fn delete_bibliography(&self, author_id: i64) -> Result<(), DbError>;
 }
 
@@ -1257,6 +1275,7 @@ pub struct SeriesCacheEntry {
 pub struct AuthorSeriesCache {
     pub author_id: i64,
     pub entries: Vec<SeriesCacheEntry>,
+    pub raw_entries: Option<Vec<SeriesCacheEntry>>,
     pub fetched_at: String,
 }
 
@@ -1282,8 +1301,8 @@ pub struct CreateSeriesDbRequest {
 
 #[trait_variant::make(Send)]
 pub trait SeriesDb: Send + Sync {
-    /// Get a series by ID (user-scoped through author ownership check at handler level).
-    async fn get_series(&self, id: i64) -> Result<Option<Series>, DbError>;
+    /// Get a series by ID, scoped to user.
+    async fn get_series(&self, user_id: UserId, id: i64) -> Result<Option<Series>, DbError>;
 
     /// List all series for a user.
     async fn list_all_series(&self, user_id: UserId) -> Result<Vec<Series>, DbError>;
@@ -1301,21 +1320,32 @@ pub trait SeriesDb: Send + Sync {
     /// Update monitoring flags on a series and propagate to linked works.
     async fn update_series_flags(
         &self,
+        user_id: UserId,
         id: i64,
         monitor_ebook: bool,
         monitor_audiobook: bool,
     ) -> Result<Series, DbError>;
 
     /// Update work_count for a series.
-    async fn update_series_work_count(&self, id: i64, work_count: i32) -> Result<(), DbError>;
+    async fn update_series_work_count(
+        &self,
+        user_id: UserId,
+        id: i64,
+        work_count: i32,
+    ) -> Result<(), DbError>;
 
     /// Link a work to a series (with assignment guard: only if current series_id is NULL
-    /// or new series has smaller work_count).
-    async fn link_work_to_series(&self, req: LinkWorkToSeriesRequest) -> Result<(), DbError>;
+    /// or new series has smaller work_count). Validates work ownership.
+    async fn link_work_to_series(
+        &self,
+        user_id: UserId,
+        req: LinkWorkToSeriesRequest,
+    ) -> Result<(), DbError>;
 
-    /// List monitored series (either flag true) for a list of author IDs.
+    /// List monitored series (either flag true) for a list of author IDs, scoped to user.
     async fn list_monitored_series_for_authors(
         &self,
+        user_id: UserId,
         author_ids: &[AuthorId],
     ) -> Result<Vec<Series>, DbError>;
 }
@@ -1328,6 +1358,7 @@ pub trait SeriesCacheDb: Send + Sync {
         &self,
         author_id: i64,
         entries: &[SeriesCacheEntry],
+        raw_entries: Option<&[SeriesCacheEntry]>,
     ) -> Result<AuthorSeriesCache, DbError>;
 
     async fn delete_series_cache(&self, author_id: i64) -> Result<(), DbError>;
@@ -1748,6 +1779,11 @@ pub trait ProviderRetryStateDb: Send + Sync {
         &self,
         user_id: UserId,
     ) -> Result<Vec<(WorkId, Vec<MetadataProvider>)>, DbError>;
+
+    async fn reset_not_configured_outcomes(
+        &self,
+        provider: MetadataProvider,
+    ) -> Result<u64, DbError>;
 }
 
 /// TEMP(pk-tdd): DB trait for typed external identifiers.

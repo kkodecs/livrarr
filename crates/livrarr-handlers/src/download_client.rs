@@ -43,10 +43,10 @@ pub fn normalize_host(host: &str) -> (String, Option<bool>) {
     }
 }
 
-pub fn client_base_url(client: &DownloadClient) -> String {
-    let scheme = if client.use_ssl { "https" } else { "http" };
-    let raw = client.url_base.as_deref().unwrap_or("");
-    let url_base = if raw.is_empty() {
+pub fn build_base_url(host: &str, port: u16, use_ssl: bool, url_base: Option<&str>) -> String {
+    let scheme = if use_ssl { "https" } else { "http" };
+    let raw = url_base.unwrap_or("");
+    let url_base_part = if raw.is_empty() {
         String::new()
     } else {
         let trimmed = raw.trim_end_matches('/');
@@ -56,35 +56,26 @@ pub fn client_base_url(client: &DownloadClient) -> String {
             format!("/{trimmed}")
         }
     };
-    if client.host.starts_with("http://") || client.host.starts_with("https://") {
-        format!("{}{url_base}", client.host.trim_end_matches('/'))
-    } else if client.port == 80 || client.port == 443 {
-        format!("{scheme}://{}{url_base}", client.host)
+    if host.starts_with("http://") || host.starts_with("https://") {
+        format!("{}{url_base_part}", host.trim_end_matches('/'))
+    } else if port == 80 || port == 443 {
+        format!("{scheme}://{host}{url_base_part}")
     } else {
-        format!("{scheme}://{}:{}{url_base}", client.host, client.port)
+        format!("{scheme}://{host}:{port}{url_base_part}")
     }
 }
 
+pub fn client_base_url(client: &DownloadClient) -> String {
+    build_base_url(
+        &client.host,
+        client.port,
+        client.use_ssl,
+        client.url_base.as_deref(),
+    )
+}
+
 fn request_base_url(req: &CreateDownloadClientApiRequest) -> String {
-    let scheme = if req.use_ssl { "https" } else { "http" };
-    let raw = req.url_base.as_deref().unwrap_or("");
-    let url_base = if raw.is_empty() {
-        String::new()
-    } else {
-        let trimmed = raw.trim_end_matches('/');
-        if trimmed.starts_with('/') {
-            trimmed.to_string()
-        } else {
-            format!("/{trimmed}")
-        }
-    };
-    if req.host.starts_with("http://") || req.host.starts_with("https://") {
-        format!("{}{url_base}", req.host.trim_end_matches('/'))
-    } else if req.port == 80 || req.port == 443 {
-        format!("{scheme}://{}{url_base}", req.host)
-    } else {
-        format!("{scheme}://{}:{}{url_base}", req.host, req.port)
-    }
+    build_base_url(&req.host, req.port, req.use_ssl, req.url_base.as_deref())
 }
 
 pub async fn list<S: AppContext>(
@@ -112,6 +103,11 @@ pub async fn create<S: AppContext>(
     }
     if req.host.is_empty() {
         return Err(ApiError::BadRequest("host is required".into()));
+    }
+    if req.category.contains('/') || req.category.contains('\\') {
+        return Err(ApiError::BadRequest(
+            "category must not contain path separators".into(),
+        ));
     }
 
     let (host, ssl_override) = normalize_host(&req.host);
@@ -144,6 +140,13 @@ pub async fn update<S: AppContext>(
     Path(id): Path<i64>,
     Json(req): Json<UpdateDownloadClientApiRequest>,
 ) -> Result<Json<DownloadClientResponse>, ApiError> {
+    if let Some(ref cat) = req.category {
+        if cat.contains('/') || cat.contains('\\') {
+            return Err(ApiError::BadRequest(
+                "category must not contain path separators".into(),
+            ));
+        }
+    }
     if let Some(Some(ref k)) = req.api_key {
         if k.is_empty() {
             return Err(ApiError::BadRequest(
@@ -306,7 +309,7 @@ async fn test_sabnzbd<S: AppContext>(
 
     let version_url = format!("{base_url}/api?mode=version&apikey={api_key}&output=json");
     let resp = state
-        .http_client()
+        .http_client_safe()
         .get(&version_url)
         .send()
         .await
@@ -336,7 +339,7 @@ async fn test_sabnzbd<S: AppContext>(
     let cat_url =
         format!("{base_url}/api?mode=get_config&section=categories&apikey={api_key}&output=json");
     let resp = state
-        .http_client()
+        .http_client_safe()
         .get(&cat_url)
         .send()
         .await
@@ -399,12 +402,12 @@ async fn test_qbittorrent<S: AppContext>(
     if !username.is_empty() || !password.is_empty() {
         let login_url = format!("{base_url}/api/v2/auth/login");
         let resp = state
-            .http_client()
+            .http_client_safe()
             .post(&login_url)
             .form(&[("username", username), ("password", password)])
             .send()
             .await
-            .map_err(|e| ApiError::BadGateway(format!("Connection failed: {e}")))?;
+            .map_err(|e| ApiError::BadGateway(format!("Connection failed: {}", e.without_url())))?;
         if let Some(cookie) = resp
             .headers()
             .get("set-cookie")
@@ -427,14 +430,16 @@ async fn test_qbittorrent<S: AppContext>(
     }
 
     let version_url = format!("{base_url}/api/v2/app/webapiVersion");
-    let mut version_req = state.http_client().get(&version_url);
+    let mut version_req = state.http_client_safe().get(&version_url);
     if let Some(ref s) = sid {
         version_req = version_req.header("Cookie", format!("SID={s}"));
     }
-    let resp = version_req
-        .send()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("Failed to reach qBittorrent API: {e}")))?;
+    let resp = version_req.send().await.map_err(|e| {
+        ApiError::BadGateway(format!(
+            "Failed to reach qBittorrent API: {}",
+            e.without_url()
+        ))
+    })?;
     if !resp.status().is_success() {
         return Err(ApiError::BadGateway(format!(
             "qBittorrent API returned {}",
@@ -527,8 +532,7 @@ pub async fn import_from_prowlarr<S: AppContext>(
     let fetch_url = format!("{base}/api/v1/downloadclient");
 
     let resp = state
-        .http_client()
-        .inner()
+        .http_client_safe()
         .get(&fetch_url)
         .header("X-Api-Key", &api_key)
         .timeout(Duration::from_secs(15))

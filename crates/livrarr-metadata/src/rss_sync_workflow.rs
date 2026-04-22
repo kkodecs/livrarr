@@ -313,6 +313,12 @@ where
                     continue;
                 }
 
+                let item_pub_dt = item.publish_date.as_deref().and_then(|s| {
+                    chrono::DateTime::parse_from_rfc2822(s)
+                        .or_else(|_| chrono::DateTime::parse_from_rfc3339(s))
+                        .ok()
+                });
+
                 // For each media type, find best work per user.
                 for mt in &format_eligible_types {
                     let mut best_per_user: HashMap<i64, (i64, f64)> = HashMap::new();
@@ -327,13 +333,9 @@ where
                         }
 
                         // RSS-FILTER-004: skip releases published before work was added.
-                        if let Some(ref pub_date_str) = item.publish_date {
-                            let published = chrono::DateTime::parse_from_rfc2822(pub_date_str)
-                                .or_else(|_| chrono::DateTime::parse_from_rfc3339(pub_date_str));
-                            if let Ok(pub_dt) = published {
-                                if pub_dt < work.added_at {
-                                    continue;
-                                }
+                        if let Some(pub_dt) = &item_pub_dt {
+                            if *pub_dt < work.added_at {
+                                continue;
                             }
                         }
 

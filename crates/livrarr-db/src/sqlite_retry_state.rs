@@ -357,4 +357,18 @@ impl crate::ProviderRetryStateDb for SqliteDb {
 
         Ok(result)
     }
+
+    async fn reset_not_configured_outcomes(
+        &self,
+        provider: MetadataProvider,
+    ) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "DELETE FROM provider_retry_state WHERE provider = ? AND last_outcome = 'not_configured'",
+        )
+        .bind(to_str(provider))
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(result.rows_affected())
+    }
 }

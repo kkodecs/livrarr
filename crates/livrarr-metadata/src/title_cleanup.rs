@@ -369,19 +369,17 @@ fn strip_colon_novel_marker(s: &str) -> String {
 
 /// "Last, First" → "First Last". Preserves suffixes like "Jr.", "III".
 fn normalize_last_first(s: &str) -> String {
-    // Only fire on a single comma — "Last, First Middle" form.
-    // Multi-comma forms ("Last, First, Jr.") are not safely invertible.
-    let parts: Vec<&str> = s.splitn(2, ',').collect();
-    if parts.len() != 2 {
+    // Only fire on exactly one comma — multi-comma forms are ambiguous.
+    if s.matches(',').count() != 1 {
         return s.to_string();
     }
-    let last = parts[0].trim();
-    let first_etc = parts[1].trim();
+    let (last, first_etc) = s.split_once(',').unwrap();
+    let last = last.trim();
+    let first_etc = first_etc.trim();
     if last.is_empty() || first_etc.is_empty() {
         return s.to_string();
     }
-    // Don't re-arrange if `first_etc` looks like a name suffix
-    // ("Jr.", "Sr.", "II", "III", "IV").
+    // Don't re-arrange if `first_etc` looks like a name suffix.
     let first_lower = first_etc.to_ascii_lowercase();
     if matches!(
         first_lower.as_str(),

@@ -317,7 +317,7 @@ pub(crate) async fn qbit_login(
 
     let login_url = format!("{base_url}/api/v2/auth/login");
     let resp = state
-        .http_client
+        .http_client_safe
         .post(&login_url)
         .form(&[("username", username), ("password", password)])
         .send()
@@ -336,10 +336,15 @@ pub(crate) async fn qbit_login(
         })
         .unwrap_or_default();
 
-    let body = resp.text().await.unwrap_or_default();
-    if body.contains("Fails") {
+    if sid.is_empty() {
+        let body = resp.text().await.unwrap_or_default();
+        if body.contains("Fails") {
+            return Err(ApiError::BadGateway(
+                "qBittorrent authentication failed".into(),
+            ));
+        }
         return Err(ApiError::BadGateway(
-            "qBittorrent authentication failed".into(),
+            "qBittorrent login failed: empty session ID".into(),
         ));
     }
 
