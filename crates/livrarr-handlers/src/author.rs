@@ -8,12 +8,12 @@ use crate::types::author::{
     AddAuthorApiRequest, AuthorDetailResponse, AuthorResponse, AuthorSearchResult,
     UpdateAuthorApiRequest,
 };
-use crate::types::work::WorkDetailResponse;
+use crate::types::work::{work_to_detail, WorkDetailResponse};
 use livrarr_domain::services::{
     AddAuthorRequest, AuthorService, SeriesQueryService, UpdateAuthorRequest, WorkFilter,
     WorkService,
 };
-use livrarr_domain::{Author, Work};
+use livrarr_domain::Author;
 
 fn author_to_response(a: &Author) -> AuthorResponse {
     AuthorResponse {
@@ -25,48 +25,6 @@ fn author_to_response(a: &Author) -> AuthorResponse {
         monitored: a.monitored,
         monitor_new_items: a.monitor_new_items,
         added_at: a.added_at.to_rfc3339(),
-    }
-}
-
-fn work_to_detail(w: &Work) -> WorkDetailResponse {
-    WorkDetailResponse {
-        id: w.id,
-        title: w.title.clone(),
-        sort_title: w.sort_title.clone(),
-        subtitle: w.subtitle.clone(),
-        original_title: w.original_title.clone(),
-        author_name: w.author_name.clone(),
-        author_id: w.author_id,
-        description: w.description.clone(),
-        year: w.year,
-        series_id: w.series_id,
-        series_name: w.series_name.clone(),
-        series_position: w.series_position,
-        genres: w.genres.clone(),
-        language: w.language.clone(),
-        page_count: w.page_count,
-        duration_seconds: w.duration_seconds,
-        publisher: w.publisher.clone(),
-        publish_date: w.publish_date.clone(),
-        ol_key: w.ol_key.clone(),
-        hc_key: w.hc_key.clone(),
-        gr_key: w.gr_key.clone(),
-        isbn_13: w.isbn_13.clone(),
-        asin: w.asin.clone(),
-        narrator: w.narrator.clone(),
-        narration_type: w.narration_type,
-        abridged: w.abridged,
-        rating: w.rating,
-        rating_count: w.rating_count,
-        enrichment_status: w.enrichment_status,
-        enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
-        enrichment_source: w.enrichment_source.clone(),
-        cover_manual: w.cover_manual,
-        monitor_ebook: w.monitor_ebook,
-        monitor_audiobook: w.monitor_audiobook,
-        added_at: w.added_at.to_rfc3339(),
-        library_items: vec![],
-        metadata_source: w.metadata_source.clone(),
     }
 }
 
@@ -128,10 +86,10 @@ pub async fn add<S: AppContext>(
                 .refresh_bibliography(user_id, author_id)
                 .await
             {
-                Ok(entries) => {
+                Ok(result) => {
                     tracing::info!(
                         author_id,
-                        entries = entries.len(),
+                        entries = result.entries.len(),
                         "background bibliography fetch complete"
                     );
                 }
@@ -142,14 +100,50 @@ pub async fn add<S: AppContext>(
         });
 
         let gr_state = state.clone();
+        let author_name = result.author().name.clone();
+        let author_has_gr_key = result.author().gr_key.is_some();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            if let Err(e) = gr_state
+            match gr_state
                 .series_query_service()
                 .resolve_gr_candidates(user_id, author_id)
                 .await
             {
-                tracing::debug!(author_id, "background GR resolve skipped: {e}");
+                Ok(candidates) => {
+                    // Auto-link if the first candidate is a strong name match.
+                    if !author_has_gr_key {
+                        if let Some(first) = candidates.first() {
+                            let sim =
+                                livrarr_matching::author_similarity(&author_name, &first.name);
+                            if sim >= 0.90 {
+                                tracing::info!(
+                                    author = %author_name,
+                                    gr_candidate = %first.name,
+                                    similarity = %sim,
+                                    "auto-linking Goodreads author (background)"
+                                );
+                                let _ = gr_state
+                                    .author_service()
+                                    .update(
+                                        user_id,
+                                        author_id,
+                                        livrarr_domain::services::UpdateAuthorRequest {
+                                            name: None,
+                                            sort_name: None,
+                                            ol_key: None,
+                                            gr_key: Some(Some(first.gr_key.clone())),
+                                            monitored: None,
+                                            monitor_new_items: None,
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(author_id, "background GR resolve skipped: {e}");
+                }
             }
         });
     }
@@ -201,6 +195,25 @@ pub async fn update<S: AppContext>(
     Path(id): Path<i64>,
     Json(req): Json<UpdateAuthorApiRequest>,
 ) -> Result<Json<AuthorResponse>, ApiError> {
+    use crate::types::api_error::FieldError;
+
+    let mut errors = Vec::new();
+    if matches!(req.monitored, Some(None)) {
+        errors.push(FieldError {
+            field: "monitored".into(),
+            message: "cannot be null".into(),
+        });
+    }
+    if matches!(req.monitor_new_items, Some(None)) {
+        errors.push(FieldError {
+            field: "monitorNewItems".into(),
+            message: "cannot be null".into(),
+        });
+    }
+    if !errors.is_empty() {
+        return Err(ApiError::Validation { errors });
+    }
+
     let updated = state
         .author_service()
         .update(
@@ -211,8 +224,8 @@ pub async fn update<S: AppContext>(
                 sort_name: None,
                 ol_key: None,
                 gr_key: req.gr_key,
-                monitored: req.monitored,
-                monitor_new_items: req.monitor_new_items,
+                monitored: req.monitored.flatten(),
+                monitor_new_items: req.monitor_new_items.flatten(),
             },
         )
         .await?;
@@ -229,23 +242,22 @@ pub async fn delete<S: AppContext>(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+pub struct BibliographyQuery {
+    pub raw: Option<bool>,
+}
+
 pub async fn bibliography<S: AppContext>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
+    Query(q): Query<BibliographyQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let entries = state.author_service().bibliography(ctx.user.id, id).await?;
-    Ok(Json(serde_json::json!({
-        "authorId": id,
-        "entries": entries.into_iter().map(|e| serde_json::json!({
-            "olKey": e.ol_key.unwrap_or_default(),
-            "title": e.title,
-            "year": e.year,
-            "seriesName": null,
-            "seriesPosition": null,
-        })).collect::<Vec<_>>(),
-        "fetchedAt": chrono::Utc::now().to_rfc3339(),
-    })))
+    let result = state
+        .author_service()
+        .bibliography(ctx.user.id, id, q.raw.unwrap_or(false))
+        .await?;
+    Ok(Json(bibliography_to_json(id, result)))
 }
 
 pub async fn refresh_bibliography<S: AppContext>(
@@ -253,19 +265,30 @@ pub async fn refresh_bibliography<S: AppContext>(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let entries = state
+    let result = state
         .author_service()
         .refresh_bibliography(ctx.user.id, id)
         .await?;
-    Ok(Json(serde_json::json!({
-        "authorId": id,
-        "entries": entries.into_iter().map(|e| serde_json::json!({
+    Ok(Json(bibliography_to_json(id, result)))
+}
+
+fn bibliography_to_json(
+    author_id: i64,
+    result: livrarr_domain::services::BibliographyResult,
+) -> serde_json::Value {
+    serde_json::json!({
+        "authorId": author_id,
+        "entries": result.entries.into_iter().map(|e| serde_json::json!({
             "olKey": e.ol_key.unwrap_or_default(),
             "title": e.title,
             "year": e.year,
-            "seriesName": null,
-            "seriesPosition": null,
+            "seriesName": e.series_name,
+            "seriesPosition": e.series_position,
         })).collect::<Vec<_>>(),
-        "fetchedAt": chrono::Utc::now().to_rfc3339(),
-    })))
+        "llmFiltered": !result.raw_available || result.filtered_count != result.raw_count,
+        "rawAvailable": result.raw_available,
+        "filteredCount": result.filtered_count,
+        "rawCount": result.raw_count,
+        "fetchedAt": result.fetched_at,
+    })
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link, useParams, useNavigate } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -246,10 +246,11 @@ function BibliographySection({
   const queryClient = useQueryClient();
   const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
   const [addingKey, setAddingKey] = useState<string | null>(null);
+  const [showRaw, setShowRaw] = useState(false);
 
   const { data: bib, isLoading } = useQuery({
-    queryKey: ["bibliography", authorId],
-    queryFn: () => getAuthorBibliography(authorId),
+    queryKey: ["bibliography", authorId, showRaw],
+    queryFn: () => getAuthorBibliography(authorId, showRaw),
     retry: 2,
     retryDelay: 3000,
   });
@@ -299,6 +300,28 @@ function BibliographySection({
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">
           Bibliography
         </h2>
+        {bib?.rawAvailable && (
+          <div className="flex items-center rounded border border-border text-xs">
+            <button
+              onClick={() => setShowRaw(false)}
+              className={cn(
+                "px-2 py-0.5 rounded-l",
+                !showRaw ? "bg-brand text-white" : "text-muted hover:text-zinc-100",
+              )}
+            >
+              LLM Filtered {bib.filteredCount}
+            </button>
+            <button
+              onClick={() => setShowRaw(true)}
+              className={cn(
+                "px-2 py-0.5 rounded-r",
+                showRaw ? "bg-brand text-white" : "text-muted hover:text-zinc-100",
+              )}
+            >
+              Raw {bib.rawCount}
+            </button>
+          </div>
+        )}
         {hasBib && (
           <span className="text-xs text-zinc-500">
             fetched {formatRelativeDate(bib.fetchedAt)}
@@ -652,9 +675,10 @@ function ResolveGrModal({
   };
 
   // Fetch on first open.
-  useState(() => {
+  useEffect(() => {
     if (open) handleOpen();
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <FormModal open={open} onOpenChange={onOpenChange} title="Link Goodreads Author">

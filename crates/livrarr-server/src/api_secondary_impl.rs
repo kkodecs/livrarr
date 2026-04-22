@@ -13,6 +13,7 @@ use livrarr_db::{
     UpdateEmailConfigRequest, UpdateMediaManagementConfigRequest, UpdateMetadataConfigRequest,
     UpdateProwlarrConfigRequest, UserDb, WorkDb,
 };
+use livrarr_handlers::types::work::work_to_detail;
 
 /// Map DbError to the semantically correct ApiError.
 fn db_err(e: DbError) -> ApiError {
@@ -64,8 +65,8 @@ impl AuthorApi for SecondaryApiImpl {
                     existing.id,
                     UpdateAuthorDbRequest {
                         name: None,
-                        sort_name: req.sort_name.clone(),
-                        ol_key: Some(req.ol_key.clone()),
+                        sort_name: req.sort_name.clone().map(Some),
+                        ol_key: Some(Some(req.ol_key.clone())),
                         gr_key: None,
                         monitored: None,
                         monitor_new_items: None,
@@ -118,8 +119,28 @@ impl AuthorApi for SecondaryApiImpl {
         req: UpdateAuthorApiRequest,
     ) -> Result<AuthorResponse, ApiError> {
         let author = self.db.get_author(uid, id).await.map_err(db_err)?;
-        // Validate: monitored=true requires ol_key
-        if req.monitored == Some(true) && author.ol_key.is_none() {
+
+        let mut errors = Vec::new();
+        if matches!(req.monitored, Some(None)) {
+            errors.push(FieldError {
+                field: "monitored".into(),
+                message: "cannot be null".into(),
+            });
+        }
+        if matches!(req.monitor_new_items, Some(None)) {
+            errors.push(FieldError {
+                field: "monitorNewItems".into(),
+                message: "cannot be null".into(),
+            });
+        }
+        if !errors.is_empty() {
+            return Err(ApiError::Validation { errors });
+        }
+
+        let monitored = req.monitored.flatten();
+        let monitor_new_items = req.monitor_new_items.flatten();
+
+        if monitored == Some(true) && author.ol_key.is_none() {
             return Err(ApiError::Validation {
                 errors: vec![FieldError {
                     field: "monitored".into(),
@@ -127,9 +148,8 @@ impl AuthorApi for SecondaryApiImpl {
                 }],
             });
         }
-        // Validate: monitor_new_items=true requires monitored=true
-        if req.monitor_new_items == Some(true) {
-            let will_be_monitored = req.monitored.unwrap_or(author.monitored);
+        if monitor_new_items == Some(true) {
+            let will_be_monitored = monitored.unwrap_or(author.monitored);
             if !will_be_monitored {
                 return Err(ApiError::Validation {
                     errors: vec![FieldError {
@@ -144,11 +164,11 @@ impl AuthorApi for SecondaryApiImpl {
             sort_name: None,
             ol_key: None,
             gr_key: req.gr_key,
-            monitored: req.monitored,
-            monitor_new_items: req.monitor_new_items,
+            monitored,
+            monitor_new_items,
             monitor_since: None,
         };
-        if req.monitored == Some(true) && !author.monitored {
+        if monitored == Some(true) && !author.monitored {
             db_req.monitor_since = Some(Utc::now());
         }
         let updated = self
@@ -696,48 +716,6 @@ fn author_to_response(a: &Author) -> AuthorResponse {
         monitored: a.monitored,
         monitor_new_items: a.monitor_new_items,
         added_at: a.added_at.to_rfc3339(),
-    }
-}
-
-fn work_to_detail(w: &Work) -> WorkDetailResponse {
-    WorkDetailResponse {
-        id: w.id,
-        title: w.title.clone(),
-        sort_title: w.sort_title.clone(),
-        subtitle: w.subtitle.clone(),
-        original_title: w.original_title.clone(),
-        author_name: w.author_name.clone(),
-        author_id: w.author_id,
-        description: w.description.clone(),
-        year: w.year,
-        series_id: w.series_id,
-        series_name: w.series_name.clone(),
-        series_position: w.series_position,
-        genres: w.genres.clone(),
-        language: w.language.clone(),
-        page_count: w.page_count,
-        duration_seconds: w.duration_seconds,
-        publisher: w.publisher.clone(),
-        publish_date: w.publish_date.clone(),
-        ol_key: w.ol_key.clone(),
-        hc_key: w.hc_key.clone(),
-        gr_key: w.gr_key.clone(),
-        isbn_13: w.isbn_13.clone(),
-        asin: w.asin.clone(),
-        narrator: w.narrator.clone(),
-        narration_type: w.narration_type,
-        abridged: w.abridged,
-        rating: w.rating,
-        rating_count: w.rating_count,
-        enrichment_status: w.enrichment_status,
-        enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
-        enrichment_source: w.enrichment_source.clone(),
-        cover_manual: w.cover_manual,
-        monitor_ebook: w.monitor_ebook,
-        monitor_audiobook: w.monitor_audiobook,
-        added_at: w.added_at.to_rfc3339(),
-        library_items: vec![],
-        metadata_source: w.metadata_source.clone(),
     }
 }
 

@@ -305,6 +305,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         // Queue
         .route("/queue", get(livrarr_handlers::queue::list::<AppState>))
         .route(
+            "/queue/summary",
+            get(livrarr_handlers::queue::summary::<AppState>),
+        )
+        .route(
             "/queue/{id}",
             delete(livrarr_handlers::queue::remove::<AppState>),
         )

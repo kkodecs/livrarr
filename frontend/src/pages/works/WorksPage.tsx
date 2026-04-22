@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -18,7 +18,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { listWorks, refreshAllWorks, deleteWork, refreshWork, triggerRssSync, getQueue } from "@/api";
-import { sortWorks } from "@/utils/works";
+import { computeTotalPages } from "@/utils/pagination";
 import type { WorkSortField } from "@/utils/works";
 import { useUIStore } from "@/stores/ui";
 import { PageToolbar } from "@/components/Page/PageToolbar";
@@ -26,8 +26,8 @@ import { PageContent } from "@/components/Page/PageContent";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
 import { EmptyState } from "@/components/Page/EmptyState";
-// EnrichmentBadge removed — metadata moved to work detail Metadata tab.
 import { ConfirmModal } from "@/components/Page/ConfirmModal";
+import { Pagination } from "@/components/Page/Pagination";
 import { cn } from "@/utils/cn";
 import { SortHeader } from "@/components/Page/SortHeader";
 import { formatRelativeDate } from "@/utils/format";
@@ -38,22 +38,59 @@ import type {
   MediaType,
 } from "@/types/api";
 
-const ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ#".split("");
+const PAGE_SIZE = 50;
+
+const SORT_FIELD_MAP: Record<WorkSortField, string> = {
+  title: "title",
+  authorName: "author",
+  year: "year",
+  addedAt: "date_added",
+};
 
 export function WorksPage() {
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+  const setPage = (p: number) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (p <= 1) next.delete("page");
+      else next.set("page", String(p));
+      return next;
+    });
+  };
+
+  const worksView = useUIStore((s) => s.worksView);
+  const setWorksView = useUIStore((s) => s.setWorksView);
+  const worksSort = useUIStore((s) => s.worksSort) as WorkSortField;
+  const worksSortDir = useUIStore((s) => s.worksSortDir);
+  const setWorksSort = useUIStore((s) => s.setWorksSort);
+  const posterZoom = useUIStore((s) => s.posterZoom);
+  const setPosterZoom = useUIStore((s) => s.setPosterZoom);
 
   const {
-    data: works,
+    data: worksData,
     isLoading,
     error,
     refetch,
+    isFetching,
   } = useQuery({
-    queryKey: ["works"],
-    queryFn: listWorks,
-    select: (res) => res.items,
+    queryKey: ["works", page, worksSort, worksSortDir],
+    queryFn: () =>
+      listWorks({
+        page,
+        pageSize: PAGE_SIZE,
+        sortBy: SORT_FIELD_MAP[worksSort] ?? "date_added",
+        sortDir: worksSortDir,
+      }),
     refetchInterval: 60_000,
+    placeholderData: (prev) => prev,
   });
+
+  const works = worksData?.items;
+  const total = worksData?.total ?? 0;
+  const totalPages = computeTotalPages(total, PAGE_SIZE);
 
   const refreshMutation = useMutation({
     mutationFn: refreshAllWorks,
@@ -84,19 +121,10 @@ export function WorksPage() {
     return set;
   }, [queueItems]);
 
-  const worksView = useUIStore((s) => s.worksView);
-  const setWorksView = useUIStore((s) => s.setWorksView);
-  const worksSort = useUIStore((s) => s.worksSort) as WorkSortField;
-  const worksSortDir = useUIStore((s) => s.worksSortDir);
-  const setWorksSort = useUIStore((s) => s.setWorksSort);
-  const posterZoom = useUIStore((s) => s.posterZoom);
-  const setPosterZoom = useUIStore((s) => s.setPosterZoom);
-
   const mediaTypeFilter = useUIStore((s) => s.worksMediaFilter) as MediaType | "";
   const setMediaTypeFilter = useUIStore((s) => s.setWorksMediaFilter);
   const [searchQuery, setSearchQuery] = useState("");
 
-  // Editor mode state
   const [editorMode, setEditorMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -105,7 +133,6 @@ export function WorksPage() {
   const toggleEditorMode = useCallback(() => {
     setEditorMode((prev) => {
       if (prev) {
-        // Turning off — clear selection
         setSelectedIds(new Set());
       }
       return !prev;
@@ -140,14 +167,8 @@ export function WorksPage() {
           w.authorName.toLowerCase().includes(q),
       );
     }
-    return sortWorks(result, worksSort, worksSortDir);
-  }, [
-    works,
-    mediaTypeFilter,
-    searchQuery,
-    worksSort,
-    worksSortDir,
-  ]);
+    return result;
+  }, [works, mediaTypeFilter, searchQuery]);
 
   const allSelected =
     filtered.length > 0 && filtered.every((w) => selectedIds.has(w.id));
@@ -214,14 +235,10 @@ export function WorksPage() {
     } else {
       setWorksSort(field, "asc");
     }
+    setPage(1);
   };
 
-  const jumpTo = (letter: string) => {
-    const el = document.getElementById(`jump-${letter}`);
-    el?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-
-  if (isLoading) return <PageLoading />;
+  if (isLoading && !worksData) return <PageLoading />;
   if (error) return <ErrorState error={error} onRetry={() => refetch()} />;
 
   return (
@@ -278,7 +295,7 @@ export function WorksPage() {
             />
             <input
               type="text"
-              placeholder="Filter..."
+              placeholder="Filter this page..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="h-8 w-full sm:w-auto rounded border border-border bg-zinc-800 pl-8 pr-3 text-sm text-zinc-100 placeholder:text-muted focus:border-brand focus:outline-none"
@@ -356,19 +373,32 @@ export function WorksPage() {
             dir={worksSortDir}
             onChange={handleSort}
           />
+          <div className="ml-auto">
+            <Pagination
+              page={page}
+              totalPages={totalPages}
+              total={total}
+              pageSize={PAGE_SIZE}
+              onPageChange={setPage}
+            />
+          </div>
         </div>
+
+        {isFetching && !isLoading && (
+          <div className="mb-2 text-xs text-muted">Loading...</div>
+        )}
 
         {filtered.length === 0 ? (
           <EmptyState
             icon={<Book size={32} />}
             title="No works found"
             description={
-              works?.length
+              total > 0
                 ? "Try adjusting your filters."
                 : "Add your first work to get started."
             }
             action={
-              !works?.length ? (
+              total === 0 ? (
                 <Link
                   to="/work/add"
                   className="btn-primary inline-flex items-center gap-1.5"
@@ -381,21 +411,6 @@ export function WorksPage() {
           />
         ) : (
           <>
-            {/* Jump bar (title sort only) */}
-            {worksSort === "title" && (
-              <div className="mb-3 flex flex-wrap gap-1">
-                {ALPHA.map((letter) => (
-                  <button
-                    key={letter}
-                    onClick={() => jumpTo(letter)}
-                    className="h-6 w-6 rounded text-xs text-muted hover:bg-zinc-700 hover:text-zinc-100"
-                  >
-                    {letter}
-                  </button>
-                ))}
-              </div>
-            )}
-
             {worksView === "table" && (
               <TableView
                 works={filtered}
@@ -429,6 +444,16 @@ export function WorksPage() {
                 activeGrabs={activeGrabs}
               />
             )}
+
+            <div className="mt-4">
+              <Pagination
+                page={page}
+                totalPages={totalPages}
+                total={total}
+                pageSize={PAGE_SIZE}
+                onPageChange={setPage}
+              />
+            </div>
           </>
         )}
       </PageContent>
@@ -533,13 +558,6 @@ function SortDropdown({
   );
 }
 
-// --- Jump anchor helper ---
-
-function jumpLetter(title: string): string {
-  const first = (title[0] ?? "").toUpperCase();
-  return /[A-Z]/.test(first) ? first : "#";
-}
-
 // --- Checkbox component ---
 
 function SelectCheckbox({
@@ -596,8 +614,6 @@ function TableView({
   onToggleAll: () => void;
   activeGrabs: Set<string>;
 }) {
-  let lastLetter = "";
-
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -619,18 +635,13 @@ function TableView({
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {works.map((work) => {
-            const letter = jumpLetter(work.sortTitle ?? work.title);
-            const showAnchor = letter !== lastLetter;
-            if (showAnchor) lastLetter = letter;
-            return (
+          {works.map((work) => (
               <tr
                 key={work.id}
                 className={cn(
                   "hover:bg-zinc-800/50",
                   editorMode && selectedIds.has(work.id) && "bg-brand/10",
                 )}
-                id={showAnchor ? `jump-${letter}` : undefined}
               >
                 {editorMode && (
                   <td className="px-3 py-2">
@@ -675,8 +686,7 @@ function TableView({
                   {formatRelativeDate(work.addedAt)}
                 </td>
               </tr>
-            );
-          })}
+          ))}
         </tbody>
       </table>
     </div>

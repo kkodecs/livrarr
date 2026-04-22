@@ -350,8 +350,8 @@ pub struct UpdateWorkEnrichmentDbRequest {
 pub struct UpdateWorkUserFieldsDbRequest {
     pub title: Option<String>,
     pub author_name: Option<String>,
-    pub series_name: Option<String>,
-    pub series_position: Option<f64>,
+    pub series_name: Option<Option<String>>,
+    pub series_position: Option<Option<f64>>,
     pub monitor_ebook: Option<bool>,
     pub monitor_audiobook: Option<bool>,
 }
@@ -412,9 +412,9 @@ pub struct CreateAuthorDbRequest {
 
 pub struct UpdateAuthorDbRequest {
     pub name: Option<String>,
-    pub sort_name: Option<String>,
-    pub ol_key: Option<String>,
-    pub gr_key: Option<String>,
+    pub sort_name: Option<Option<String>>,
+    pub ol_key: Option<Option<String>>,
+    pub gr_key: Option<Option<String>>,
     pub monitored: Option<bool>,
     pub monitor_new_items: Option<bool>,
     pub monitor_since: Option<chrono::DateTime<chrono::Utc>>,
@@ -638,6 +638,9 @@ pub trait GrabDb: Send + Sync {
 
     /// Increment retry count and set import_failed_at timestamp on a grab.
     async fn increment_import_retry(&self, user_id: UserId, id: GrabId) -> Result<(), DbError>;
+
+    async fn queue_summary(&self, user_id: UserId)
+        -> Result<livrarr_domain::QueueSummary, DbError>;
 }
 
 pub struct CreateGrabDbRequest {

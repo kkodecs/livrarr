@@ -100,21 +100,27 @@ impl crate::ExternalIdDb for SqliteDb {
             return Ok(());
         }
 
-        // Collect unique work IDs and verify all belong to user.
+        // Collect unique work IDs and verify all belong to user with single IN clause.
         let mut work_ids: Vec<WorkId> = reqs.iter().map(|r| r.work_id).collect();
         work_ids.sort_unstable();
         work_ids.dedup();
 
-        for work_id in &work_ids {
-            let exists: Option<i64> =
-                sqlx::query_scalar("SELECT id FROM works WHERE id = ? AND user_id = ?")
-                    .bind(*work_id)
-                    .bind(user_id)
-                    .fetch_optional(self.pool())
-                    .await
-                    .map_err(map_db_err)?;
-
-            if exists.is_none() {
+        // Batch ownership check with IN clause (chunked at 500 for SQLite limits).
+        for chunk in work_ids.chunks(500) {
+            let mut qb = sqlx::QueryBuilder::new("SELECT id FROM works WHERE user_id = ");
+            qb.push_bind(user_id);
+            qb.push(" AND id IN (");
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(*id);
+            }
+            qb.push(")");
+            let found: Vec<(i64,)> = qb
+                .build_query_as()
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_db_err)?;
+            if found.len() != chunk.len() {
                 return Err(DbError::NotFound { entity: "work" });
             }
         }

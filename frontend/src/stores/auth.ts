@@ -13,7 +13,8 @@ export type AuthStatus =
   | "loading"
   | "unauthenticated"
   | "setup_required"
-  | "authenticated";
+  | "authenticated"
+  | "auth_unknown";
 
 interface AuthState {
   status: AuthStatus;
@@ -58,10 +59,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         if (err instanceof ApiError && err.status === 401) {
           clearToken();
         } else {
-          // Network or unexpected error — keep token, let user retry on
-          // next page load.
+          // Network or unexpected error — keep token, show retry state
+          // instead of bouncing to login.
           set({
-            status: "unauthenticated",
+            status: "auth_unknown",
             user: null,
             token,
             isAdmin: false,

@@ -69,7 +69,7 @@ pub async fn import_grab(
                 .list_library_items_by_work(user_id, work.id)
                 .await
                 .unwrap_or_default();
-            let imported_ids: Vec<i64> = result
+            let imported_ids: std::collections::HashSet<i64> = result
                 .imported_files
                 .iter()
                 .map(|f| f.library_item_id)
@@ -80,7 +80,11 @@ pub async fn import_grab(
                 .cloned()
                 .collect();
             if !matching.is_empty() {
-                let tag_warnings = retag_library_items(state, &work, &matching).await;
+                use livrarr_domain::services::TagService;
+                let tag_warnings = state
+                    .tag_service
+                    .retag_library_items(&work, &matching)
+                    .await;
                 warnings.extend(tag_warnings);
             }
         }
@@ -691,212 +695,20 @@ pub fn build_tag_metadata(work: &livrarr_domain::Work) -> livrarr_tagwrite::TagM
     }
 }
 
-/// Read cover image bytes from covers/{work_id}.jpg.
+/// Read cover image bytes for tag embedding.
+/// Checks new tenant-aware path first, falls back to old flat layout.
 /// Returns None if the file doesn't exist (not an error per TAG-V21-003).
-pub async fn read_cover_bytes(state: &AppState, work_id: i64) -> Option<Vec<u8>> {
-    let cover_path = state.data_dir.join("covers").join(format!("{work_id}.jpg"));
-    tokio::fs::read(&cover_path).await.ok()
-}
-
-/// Re-tag existing library items after re-enrichment (TAG-V21-004, TAG-007).
-/// Uses .tmp lifecycle: copy item → .tmp, tag .tmp, rename over original.
-/// Returns warnings for any failures (non-fatal).
-pub async fn retag_library_items(
-    state: &AppState,
-    work: &livrarr_domain::Work,
-    items: &[livrarr_domain::LibraryItem],
-) -> Vec<String> {
-    let tag_metadata = build_tag_metadata(work);
-    let cover_data = read_cover_bytes(state, work.id).await;
-
-    let mut warnings = Vec::new();
-
-    // Separate MP3 items from non-MP3 for batch handling.
-    let mut mp3_items = Vec::new();
-    let mut other_items = Vec::new();
-    for item in items {
-        let ext = Path::new(&item.path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
-            .unwrap_or_default();
-        if ext == "mp3" {
-            mp3_items.push(item);
-        } else {
-            other_items.push(item);
-        }
+pub async fn read_cover_bytes(state: &AppState, user_id: i64, work_id: i64) -> Option<Vec<u8>> {
+    // Try new tenant-aware path: covers/{user_id}/{work_id}.jpg
+    let new_path = state
+        .data_dir
+        .join("covers")
+        .join(user_id.to_string())
+        .join(format!("{work_id}.jpg"));
+    if let Ok(bytes) = tokio::fs::read(&new_path).await {
+        return Some(bytes);
     }
-
-    // Non-MP3: per-file .tmp lifecycle.
-    for item in &other_items {
-        let root = match state
-            .import_io_service
-            .get_root_folder(item.root_folder_id)
-            .await
-        {
-            Ok(rf) => rf,
-            Err(e) => {
-                warnings.push(format!(
-                    "root folder lookup failed for item {}: {e}",
-                    item.id
-                ));
-                continue;
-            }
-        };
-        let abs_path = format!("{}/{}", root.path, item.path);
-        if !Path::new(&abs_path).exists() {
-            warnings.push(format!("file not found, skipping: {abs_path}"));
-            continue;
-        }
-
-        let tmp_path = format!("{abs_path}.tmp");
-
-        // Copy original → .tmp.
-        if let Err(e) = tokio::task::spawn_blocking({
-            let src = abs_path.clone();
-            let dst = tmp_path.clone();
-            move || std::fs::copy(&src, &dst)
-        })
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r.map_err(|e| e.to_string()))
-        {
-            warnings.push(format!("copy to .tmp failed for {abs_path}: {e}"));
-            continue;
-        }
-
-        // Tag the .tmp.
-        match livrarr_tagwrite::write_tags(
-            tmp_path.clone(),
-            tag_metadata.clone(),
-            cover_data.clone(),
-        )
-        .await
-        {
-            Ok(TagWriteStatus::Written) => {
-                // fsync tagged .tmp before atomic rename over the original.
-                if let Ok(f) = std::fs::File::open(&tmp_path) {
-                    let _ = f.sync_all();
-                }
-                // Rename .tmp over original.
-                if let Err(e) = std::fs::rename(&tmp_path, &abs_path) {
-                    warnings.push(format!("rename failed for {abs_path}: {e}"));
-                    let _ = std::fs::remove_file(&tmp_path);
-                } else {
-                    // Update file_size in DB after tag write changed it (TAG-V21-004).
-                    let new_size = Path::new(&abs_path)
-                        .metadata()
-                        .map(|m| m.len() as i64)
-                        .unwrap_or(0);
-                    if let Err(e) = state
-                        .import_io_service
-                        .update_library_item_size(item.user_id, item.id, new_size)
-                        .await
-                    {
-                        tracing::warn!("update_library_item_size failed: {e}");
-                    }
-                }
-            }
-            Ok(_) => {
-                // Unsupported or NoData — remove .tmp, leave original.
-                let _ = std::fs::remove_file(&tmp_path);
-            }
-            Err(e) => {
-                warnings.push(format!("tag write failed for {abs_path}: {e}"));
-                let _ = std::fs::remove_file(&tmp_path);
-            }
-        }
-    }
-
-    // MP3 batch: .tmp lifecycle for all MP3 items.
-    if !mp3_items.is_empty() {
-        let root = match state
-            .import_io_service
-            .get_root_folder(mp3_items[0].root_folder_id)
-            .await
-        {
-            Ok(rf) => rf,
-            Err(e) => {
-                warnings.push(format!("root folder lookup failed: {e}"));
-                return warnings;
-            }
-        };
-
-        let mut abs_paths = Vec::new();
-        let mut tmp_paths = Vec::new();
-        for item in &mp3_items {
-            let abs = format!("{}/{}", root.path, item.path);
-            let tmp = format!("{abs}.tmp");
-            abs_paths.push(abs);
-            tmp_paths.push(tmp);
-        }
-
-        // Copy all originals → .tmp files.
-        let mut copy_ok = true;
-        for (abs, tmp) in abs_paths.iter().zip(tmp_paths.iter()) {
-            let src = abs.clone();
-            let dst = tmp.clone();
-            let result = tokio::task::spawn_blocking(move || std::fs::copy(&src, &dst)).await;
-            if result.is_err() || result.unwrap().is_err() {
-                warnings.push(format!("MP3 batch: copy to .tmp failed for {abs}"));
-                copy_ok = false;
-                break;
-            }
-        }
-
-        if !copy_ok {
-            // Clean up any .tmp files created so far.
-            for tmp in &tmp_paths {
-                let _ = std::fs::remove_file(tmp);
-            }
-        } else {
-            // Tag all .tmp files as a batch.
-            match livrarr_tagwrite::write_tags_batch(
-                tmp_paths.clone(),
-                tag_metadata.clone(),
-                cover_data.clone(),
-            )
-            .await
-            {
-                Ok(_) => {
-                    // Rename all .tmps over originals and update file_sizes.
-                    for (i, (tmp, abs)) in tmp_paths.iter().zip(abs_paths.iter()).enumerate() {
-                        // fsync tagged .tmp before atomic rename.
-                        if let Ok(f) = std::fs::File::open(tmp) {
-                            let _ = f.sync_all();
-                        }
-                        if let Err(e) = std::fs::rename(tmp, abs) {
-                            warnings.push(format!("MP3 batch rename failed for {abs}: {e}"));
-                            let _ = std::fs::remove_file(tmp);
-                        } else {
-                            // Update file_size in DB (TAG-V21-004).
-                            let new_size = Path::new(abs)
-                                .metadata()
-                                .map(|m| m.len() as i64)
-                                .unwrap_or(0);
-                            if let Err(e) = state
-                                .import_io_service
-                                .update_library_item_size(
-                                    mp3_items[i].user_id,
-                                    mp3_items[i].id,
-                                    new_size,
-                                )
-                                .await
-                            {
-                                tracing::warn!("update_library_item_size failed: {e}");
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warnings.push(format!("MP3 batch tag write failed: {e}"));
-                    for tmp in &tmp_paths {
-                        let _ = std::fs::remove_file(tmp);
-                    }
-                }
-            }
-        }
-    }
-
-    warnings
+    // Fallback to old flat layout: covers/{work_id}.jpg
+    let old_path = state.data_dir.join("covers").join(format!("{work_id}.jpg"));
+    tokio::fs::read(&old_path).await.ok()
 }

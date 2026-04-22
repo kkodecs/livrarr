@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Link } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -27,7 +27,6 @@ export default function ManualImportPage() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [hasCorrections, setHasCorrections] = useState(false);
   const [hasScanned, setHasScanned] = useState(false);
-  const [scanId, setScanId] = useState<string | null>(null);
   const [olTotal, setOlTotal] = useState(0);
   const [olCompleted, setOlCompleted] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
@@ -53,12 +52,6 @@ export default function ManualImportPage() {
   }, []);
 
   // Helper: file is importable if it has parsed title+author OR an OL match.
-  const isImportable = useCallback(
-    (f: ScannedFile) =>
-      !!(f.correctedMatch || f.match || (f.parsed?.title && f.parsed?.author)),
-    [],
-  );
-
   const scanMutation = useMutation({
     mutationFn: (p: string) => scanManualImport(p),
     onSuccess: (data) => {
@@ -79,7 +72,6 @@ export default function ManualImportPage() {
 
       // Start polling for OL progress if there are lookups to do.
       if (data.scanId && data.olTotal > 0) {
-        setScanId(data.scanId);
         if (pollRef.current) clearInterval(pollRef.current);
         pollRef.current = setInterval(async () => {
           try {
@@ -104,13 +96,12 @@ export default function ManualImportPage() {
             if (progress.olCompleted >= progress.olTotal) {
               clearInterval(pollRef.current);
               pollRef.current = undefined;
-              setScanId(null);
+
             }
           } catch {
             // Scan expired or server restarted — stop polling.
             clearInterval(pollRef.current);
             pollRef.current = undefined;
-            setScanId(null);
           }
         }, 2000);
       }
@@ -120,7 +111,6 @@ export default function ManualImportPage() {
       setFiles([]);
       setWarnings([]);
       setHasScanned(false);
-      setScanId(null);
       setOlTotal(0);
       setOlCompleted(0);
     },
@@ -463,7 +453,6 @@ export default function ManualImportPage() {
                   {files.map((f, idx) => {
                     const match = effectiveMatch(f);
                     const workId = f.existingWorkId || match?.existingWorkId;
-                    const hasWork = !!workId;
                     const hasSameMedia = f.hasExistingMediaType;
                     const result = f.importResult;
                     const imported = isImported(f);

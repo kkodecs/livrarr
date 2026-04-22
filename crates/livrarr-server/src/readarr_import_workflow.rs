@@ -89,6 +89,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
 
     async fn preview(
         &self,
+        user_id: i64,
         req: ReadarrImportRequest,
     ) -> Result<ReadarrPreviewResponse, ServiceError> {
         let state = self.state();
@@ -109,15 +110,15 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
-        let planner = ImportPlanner::new(&data, &livrarr_root.path, req.files_only);
+        let planner = ImportPlanner::new(&data, &livrarr_root.path, req.files_only, user_id);
         let existing_authors = state
             .readarr_import_service
-            .list_authors(1) // preview doesn't have user_id; use placeholder
+            .list_authors(user_id)
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
         let existing_works = state
             .readarr_import_service
-            .list_works(1)
+            .list_works(user_id)
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
@@ -404,7 +405,13 @@ fn extract_cover_url(images: &Option<Vec<readarr_client::RdImage>>) -> Option<St
     None
 }
 
-fn build_dest_path(root: &str, author_name: &str, title: &str, source_path: &str) -> PathBuf {
+fn build_dest_path(
+    root: &str,
+    user_id: i64,
+    author_name: &str,
+    title: &str,
+    source_path: &str,
+) -> PathBuf {
     let ext = Path::new(source_path)
         .extension()
         .and_then(|e| e.to_str())
@@ -412,6 +419,7 @@ fn build_dest_path(root: &str, author_name: &str, title: &str, source_path: &str
     let author_dir = sanitize_path_component(author_name, "Unknown Author");
     let file_stem = sanitize_path_component(title, "Unknown Title");
     PathBuf::from(root)
+        .join(user_id.to_string())
         .join(author_dir)
         .join(format!("{file_stem}.{ext}"))
 }
@@ -511,14 +519,17 @@ async fn fetch_all_readarr_data(client: &ReadarrClient) -> Result<ReadarrData, S
         .await
         .map_err(|e| ServiceError::Internal(format!("Readarr books: {e}")))?;
     let author_ids: Vec<i64> = authors.iter().map(|a| a.id).collect();
-    let file_results = futures::future::join_all(
+    use futures::stream::{self, StreamExt};
+    let file_results: Vec<(i64, Result<Vec<RdBookFile>, _>)> = stream::iter(
         author_ids
-            .iter()
-            .map(|&aid| client.book_files_by_author(aid)),
+            .into_iter()
+            .map(|aid| async move { (aid, client.book_files_by_author(aid).await) }),
     )
+    .buffer_unordered(10)
+    .collect()
     .await;
     let mut book_files: Vec<RdBookFile> = Vec::new();
-    for (aid, res) in author_ids.iter().zip(file_results) {
+    for (aid, res) in file_results {
         match res {
             Ok(files) => book_files.extend(files),
             Err(e) => {
@@ -546,10 +557,16 @@ struct ImportPlanner<'a> {
     livrarr_root_path: &'a str,
     books: &'a [RdBook],
     files_only: bool,
+    user_id: i64,
 }
 
 impl<'a> ImportPlanner<'a> {
-    fn new(data: &'a ReadarrData, livrarr_root_path: &'a str, files_only: bool) -> Self {
+    fn new(
+        data: &'a ReadarrData,
+        livrarr_root_path: &'a str,
+        files_only: bool,
+        user_id: i64,
+    ) -> Self {
         let author_map: HashMap<i64, &RdAuthor> = data.authors.iter().map(|a| (a.id, a)).collect();
         let mut book_files_by_book: HashMap<i64, Vec<&RdBookFile>> = HashMap::new();
         for bf in &data.book_files {
@@ -561,6 +578,7 @@ impl<'a> ImportPlanner<'a> {
             livrarr_root_path,
             books: &data.books,
             files_only,
+            user_id,
         }
     }
 
@@ -763,7 +781,13 @@ impl<'a> ImportPlanner<'a> {
                 });
             }
             Some(mt) => {
-                let dest = build_dest_path(self.livrarr_root_path, author_name, title, &f.path);
+                let dest = build_dest_path(
+                    self.livrarr_root_path,
+                    self.user_id,
+                    author_name,
+                    title,
+                    &f.path,
+                );
                 if dest.exists() {
                     *files_to_skip += 1;
                     skipped_items.push(ReadarrSkippedItem {
@@ -1376,7 +1400,13 @@ impl ImportRunner {
                 }
             };
 
-            let dest = build_dest_path(livrarr_root_path, author_name, title, &rd_file.path);
+            let dest = build_dest_path(
+                livrarr_root_path,
+                self.user_id,
+                author_name,
+                title,
+                &rd_file.path,
+            );
 
             if dest.exists() {
                 self.files_skipped += 1;

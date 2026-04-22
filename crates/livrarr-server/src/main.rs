@@ -365,19 +365,21 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
-            Arc::new(livrarr_metadata::work_service::WorkServiceImpl::new_with_llm(
-                svc_db.clone(),
-                ew,
-                livrarr_http::fetcher::HttpFetcherImpl::new()
-                    .expect("HttpFetcherImpl construction for work service"),
-                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
-                    live_metadata_config.clone(),
-                    livrarr_http::HttpClient::builder()
-                        .build()
-                        .expect("LLM HttpClient for work service"),
+            Arc::new(
+                livrarr_metadata::work_service::WorkServiceImpl::new_with_llm(
+                    svc_db.clone(),
+                    ew,
+                    livrarr_http::fetcher::HttpFetcherImpl::new()
+                        .expect("HttpFetcherImpl construction for work service"),
+                    livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                        live_metadata_config.clone(),
+                        livrarr_http::HttpClient::builder()
+                            .build()
+                            .expect("LLM HttpClient for work service"),
+                    ),
+                    data_dir.clone(),
                 ),
-                data_dir.clone(),
-            ))
+            )
         },
         grab_service: Arc::new(livrarr_download::grab_service::GrabServiceImpl::new(
             svc_db.clone(),

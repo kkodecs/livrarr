@@ -2,11 +2,13 @@ import { useState } from "react";
 import { Link } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { RefreshCw, RotateCcw, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
+import { RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import { getQueue, removeQueueItem, retryImport, listWorks } from "@/api";
+import { computeTotalPages } from "@/utils/pagination";
 import { workName } from "@/utils/works";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
+import { Pagination } from "@/components/Page/Pagination";
 import { ConfirmModal } from "@/components/Page/ConfirmModal";
 import { EmptyState } from "@/components/Page/EmptyState";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
@@ -46,7 +48,7 @@ export default function QueuePage() {
 
   const { data: works } = useQuery({
     queryKey: ["works"],
-    queryFn: listWorks,
+    queryFn: () => listWorks(),
     select: (res) => res.items,
   });
 
@@ -73,7 +75,7 @@ export default function QueuePage() {
 
   const items = data?.items ?? [];
   const total = data?.total ?? 0;
-  const totalPages = Math.ceil(total / (data?.perPage ?? 25));
+  const totalPages = computeTotalPages(total, data?.perPage ?? 25);
 
   return (
     <>
@@ -93,6 +95,15 @@ export default function QueuePage() {
           <EmptyState title="No grabs yet" />
         ) : (
           <>
+            <div className="mb-3">
+              <Pagination
+                page={page}
+                totalPages={totalPages}
+                total={total}
+                pageSize={data?.perPage ?? 25}
+                onPageChange={setPage}
+              />
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -204,28 +215,15 @@ export default function QueuePage() {
               </table>
             </div>
 
-            {/* Pagination */}
-            {totalPages > 1 && (
-              <div className="mt-4 flex items-center justify-center gap-4 text-sm text-muted">
-                <button
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page <= 1}
-                  className="rounded p-1 hover:text-zinc-100 disabled:opacity-30"
-                >
-                  <ChevronLeft size={16} />
-                </button>
-                <span>
-                  Page {page} of {totalPages}
-                </span>
-                <button
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={page >= totalPages}
-                  className="rounded p-1 hover:text-zinc-100 disabled:opacity-30"
-                >
-                  <ChevronRight size={16} />
-                </button>
-              </div>
-            )}
+            <div className="mt-4">
+              <Pagination
+                page={page}
+                totalPages={totalPages}
+                total={total}
+                pageSize={data?.perPage ?? 25}
+                onPageChange={setPage}
+              />
+            </div>
           </>
         )}
       </PageContent>

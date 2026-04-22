@@ -1,6 +1,8 @@
 use livrarr_db::{DownloadClientDb, GrabDb};
 use livrarr_domain::services::{QueueService, QueueServiceError};
-use livrarr_domain::{DownloadClient, Grab, GrabId, GrabStatus, QueueProgress, UserId};
+use livrarr_domain::{
+    DownloadClient, Grab, GrabId, GrabStatus, QueueProgress, QueueSummary, UserId,
+};
 use livrarr_http::HttpClient;
 
 pub struct QueueServiceImpl<D> {
@@ -74,6 +76,10 @@ where
             "sabnzbd" => fetch_sab_progress(&self.http, client, download_id).await,
             _ => fetch_qbit_progress(&self.http, client, download_id).await,
         }
+    }
+
+    async fn summary(&self, user_id: UserId) -> Result<QueueSummary, QueueServiceError> {
+        self.db.queue_summary(user_id).await.map_err(map_db_err)
     }
 }
 

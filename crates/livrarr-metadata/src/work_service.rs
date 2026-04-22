@@ -429,6 +429,10 @@ where
 
         let has_title = req.title.is_some();
         let has_author = req.author_name.is_some();
+        let series_name_cleared = matches!(req.series_name, Some(None));
+        let series_position_cleared = matches!(req.series_position, Some(None));
+        let has_series_name = req.series_name.is_some();
+        let has_series_position = req.series_position.is_some();
         let db_req = UpdateWorkUserFieldsDbRequest {
             title: req.title.map(|t| crate::title_cleanup::clean_title(&t)),
             author_name: req
@@ -449,7 +453,6 @@ where
                 other => WorkServiceError::Db(other),
             })?;
 
-        // Write provenance for edited fields (re-lock as setter=User).
         let mut prov_reqs: Vec<SetFieldProvenanceRequest> = Vec::new();
         if has_title {
             prov_reqs.push(SetFieldProvenanceRequest {
@@ -469,6 +472,26 @@ where
                 source: None,
                 setter: ProvenanceSetter::User,
                 cleared: false,
+            });
+        }
+        if has_series_name {
+            prov_reqs.push(SetFieldProvenanceRequest {
+                user_id,
+                work_id,
+                field: WorkField::SeriesName,
+                source: None,
+                setter: ProvenanceSetter::User,
+                cleared: series_name_cleared,
+            });
+        }
+        if has_series_position {
+            prov_reqs.push(SetFieldProvenanceRequest {
+                user_id,
+                work_id,
+                field: WorkField::SeriesPosition,
+                source: None,
+                setter: ProvenanceSetter::User,
+                cleared: series_position_cleared,
             });
         }
         if !prov_reqs.is_empty() {

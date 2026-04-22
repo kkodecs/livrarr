@@ -39,7 +39,7 @@ export default function MissingPage() {
     refetch,
   } = useQuery({
     queryKey: ["works"],
-    queryFn: listWorks,
+    queryFn: () => listWorks(),
     select: (res) => res.items,
   });
 

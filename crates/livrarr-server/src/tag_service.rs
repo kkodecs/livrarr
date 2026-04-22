@@ -21,7 +21,7 @@ impl<I> LiveTagService<I> {
 impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
     async fn retag_library_items(&self, work: &Work, items: &[LibraryItem]) -> Vec<String> {
         let tag_metadata = build_tag_metadata(work);
-        let cover_data = read_cover_bytes(&self.data_dir, work.id).await;
+        let cover_data = read_cover_bytes(&self.data_dir, work.user_id, work.id).await;
 
         let mut warnings = Vec::new();
 
@@ -211,7 +211,16 @@ fn build_tag_metadata(work: &Work) -> livrarr_tagwrite::TagMetadata {
     }
 }
 
-async fn read_cover_bytes(data_dir: &Path, work_id: i64) -> Option<Vec<u8>> {
-    let cover_path = data_dir.join("covers").join(format!("{work_id}.jpg"));
-    tokio::fs::read(&cover_path).await.ok()
+async fn read_cover_bytes(data_dir: &Path, user_id: i64, work_id: i64) -> Option<Vec<u8>> {
+    // Try new tenant-aware path: covers/{user_id}/{work_id}.jpg
+    let new_path = data_dir
+        .join("covers")
+        .join(user_id.to_string())
+        .join(format!("{work_id}.jpg"));
+    if let Ok(bytes) = tokio::fs::read(&new_path).await {
+        return Some(bytes);
+    }
+    // Fallback to old flat layout: covers/{work_id}.jpg
+    let old_path = data_dir.join("covers").join(format!("{work_id}.jpg"));
+    tokio::fs::read(&old_path).await.ok()
 }

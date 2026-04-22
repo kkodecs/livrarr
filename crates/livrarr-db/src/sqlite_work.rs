@@ -454,8 +454,14 @@ impl WorkDb for SqliteDb {
 
         let title = req.title.unwrap_or(current.title);
         let author_name = req.author_name.unwrap_or(current.author_name);
-        let series_name = req.series_name.or(current.series_name);
-        let series_position = req.series_position.or(current.series_position);
+        let series_name = match req.series_name {
+            None => current.series_name,
+            Some(v) => v,
+        };
+        let series_position = match req.series_position {
+            None => current.series_position,
+            Some(v) => v,
+        };
         let monitor_ebook = req.monitor_ebook.unwrap_or(current.monitor_ebook);
         let monitor_audiobook = req.monitor_audiobook.unwrap_or(current.monitor_audiobook);
 

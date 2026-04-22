@@ -89,3 +89,31 @@ impl AuthCryptoService for RealAuthCrypto {
         Ok(a.ct_eq(b).into())
     }
 }
+
+/// Deterministic crypto for tests — fast, predictable, no real hashing.
+#[cfg(test)]
+pub struct TestAuthCrypto;
+
+#[cfg(test)]
+impl AuthCryptoService for TestAuthCrypto {
+    async fn hash_password(&self, password: &str) -> Result<String, AuthCryptoError> {
+        Ok(format!("testhash:{password}"))
+    }
+    async fn verify_password(&self, password: &str, hash: &str) -> Result<bool, AuthCryptoError> {
+        Ok(hash == format!("testhash:{password}"))
+    }
+    async fn generate_token(&self) -> Result<String, AuthCryptoError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        Ok(format!(
+            "testtoken{:016x}",
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+    async fn hash_token(&self, token: &str) -> Result<String, AuthCryptoError> {
+        Ok(format!("tokenhash:{token}"))
+    }
+    async fn constant_time_eq(&self, a: &[u8], b: &[u8]) -> Result<bool, AuthCryptoError> {
+        Ok(a == b)
+    }
+}

@@ -124,12 +124,18 @@ pub struct RefreshWorkResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateWorkRequest {
-    pub title: Option<String>,
-    pub author_name: Option<String>,
-    pub series_name: Option<String>,
-    pub series_position: Option<f64>,
-    pub monitor_ebook: Option<bool>,
-    pub monitor_audiobook: Option<bool>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub title: Option<Option<String>>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub author_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub series_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub series_position: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub monitor_ebook: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub monitor_audiobook: Option<Option<bool>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

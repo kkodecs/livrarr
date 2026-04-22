@@ -371,4 +371,26 @@ impl GrabDb for SqliteDb {
         .map_err(map_db_err)?;
         Ok(())
     }
+
+    async fn queue_summary(
+        &self,
+        user_id: UserId,
+    ) -> Result<livrarr_domain::QueueSummary, DbError> {
+        let row = sqlx::query(
+            "SELECT \
+             COUNT(*) AS total, \
+             SUM(CASE WHEN status IN ('sent', 'confirmed') THEN 1 ELSE 0 END) AS downloading, \
+             SUM(CASE WHEN status = 'importing' THEN 1 ELSE 0 END) AS importing \
+             FROM grabs WHERE user_id = ? AND status NOT IN ('imported', 'removed')",
+        )
+        .bind(user_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(livrarr_domain::QueueSummary {
+            total: row.get::<i64, _>("total"),
+            downloading: row.get::<i64, _>("downloading"),
+            importing: row.get::<i64, _>("importing"),
+        })
+    }
 }

@@ -9,7 +9,7 @@ pub async fn get_cover<S: AppContext>(
     Path(id): Path<i64>,
     req_headers: HeaderMap,
 ) -> Response {
-    let cover_path = state.data_dir().join("covers").join(format!("{id}.jpg"));
+    let cover_path = resolve_cover_path(state.data_dir(), id, "");
     serve_image(&cover_path, id, &req_headers).await
 }
 
@@ -18,9 +18,8 @@ pub async fn get_thumb<S: AppContext>(
     Path(id): Path<i64>,
     req_headers: HeaderMap,
 ) -> Response {
-    let covers_dir = state.data_dir().join("covers");
-    let thumb_path = covers_dir.join(format!("{id}_thumb.jpg"));
-    let full_path = covers_dir.join(format!("{id}.jpg"));
+    let full_path = resolve_cover_path(state.data_dir(), id, "");
+    let thumb_path = resolve_cover_path(state.data_dir(), id, "_thumb");
 
     if !thumb_path.exists() {
         if !full_path.exists() {
@@ -50,6 +49,34 @@ pub async fn get_thumb<S: AppContext>(
     }
 
     serve_image(&thumb_path, id, &req_headers).await
+}
+
+/// Resolve the on-disk path for a cover image. Checks the new tenant-aware
+/// layout `covers/{user_id}/{work_id}{suffix}.jpg` first (scanning user
+/// subdirectories), then falls back to the old flat layout
+/// `covers/{work_id}{suffix}.jpg`.
+pub fn resolve_cover_path(
+    data_dir: &std::path::Path,
+    work_id: i64,
+    suffix: &str,
+) -> std::path::PathBuf {
+    let covers_dir = data_dir.join("covers");
+    let filename = format!("{work_id}{suffix}.jpg");
+
+    // Check user subdirectories (new layout: covers/{user_id}/{work_id}.jpg)
+    if let Ok(entries) = std::fs::read_dir(&covers_dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                let candidate = entry.path().join(&filename);
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    // Fallback to old flat layout (covers/{work_id}.jpg)
+    covers_dir.join(&filename)
 }
 
 fn generate_thumbnail_jpeg(bytes: &[u8], max_width: u32) -> Result<Vec<u8>, String> {

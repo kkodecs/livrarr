@@ -36,10 +36,10 @@ pub use livrarr_handlers::types::work::UpdateWorkRequest;
 pub use livrarr_handlers::AddWorkResponse;
 pub use livrarr_handlers::DeleteWorkResponse;
 pub use livrarr_handlers::LibraryItemResponse;
+pub use livrarr_handlers::LookupApiResponse;
 pub use livrarr_handlers::RefreshWorkResponse;
 pub use livrarr_handlers::WorkApi;
 pub use livrarr_handlers::WorkDetailResponse;
-pub use livrarr_handlers::LookupApiResponse;
 pub use livrarr_handlers::WorkSearchResult;
 
 pub use livrarr_handlers::AddAuthorApiRequest;

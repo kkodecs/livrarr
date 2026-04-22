@@ -5,7 +5,8 @@ use axum::response::{IntoResponse, Response};
 use crate::context::AppContext;
 use crate::ApiError;
 use livrarr_domain::services::{
-    AuthorService, FileService, ManualImportService, WorkFilter, WorkService,
+    AuthorService, FileService, ManualImportService, SortDirection, WorkFilter, WorkService,
+    WorkSortField,
 };
 use livrarr_domain::{LibraryItem, User, Work};
 
@@ -241,7 +242,13 @@ pub async fn recent<S: AppContext>(
 
     let view = state
         .work_service()
-        .list_paginated(user.id, page as u32, PAGE_SIZE as u32)
+        .list_paginated(
+            user.id,
+            page as u32,
+            PAGE_SIZE as u32,
+            WorkSortField::Title,
+            SortDirection::Asc,
+        )
         .await
         .map_err(api_err_to_response)?;
 
@@ -361,34 +368,13 @@ pub async fn search<S: AppContext>(
         return Ok(xml_response(body));
     }
 
-    let all_works = state
+    let (page_works, total_i64) = state
         .work_service()
-        .list(
-            user.id,
-            WorkFilter {
-                author_id: None,
-                monitored: None,
-                enrichment_status: None,
-                media_type: None,
-                sort_by: None,
-                sort_dir: None,
-            },
-        )
+        .search_works(user.id, &query, page as u32, PAGE_SIZE as u32)
         .await
         .map_err(api_err_to_response)?;
 
-    let query_lower = query.to_lowercase();
-    let matching: Vec<_> = all_works
-        .into_iter()
-        .filter(|w| {
-            w.title.to_lowercase().contains(&query_lower)
-                || w.author_name.to_lowercase().contains(&query_lower)
-        })
-        .collect();
-
-    let total = matching.len();
-    let start = (page - 1) * PAGE_SIZE;
-    let page_works: Vec<_> = matching.into_iter().skip(start).take(PAGE_SIZE).collect();
+    let total = total_i64 as usize;
 
     let work_ids: Vec<_> = page_works.iter().map(|w| w.id).collect();
     let items = state
@@ -451,10 +437,7 @@ pub async fn cover<S: AppContext>(
 ) -> Result<Response, Response> {
     let _user = basic_auth(&state, &headers).await?;
 
-    let cover_path = state
-        .data_dir()
-        .join("covers")
-        .join(format!("{}.jpg", work_id));
+    let cover_path = crate::mediacover::resolve_cover_path(state.data_dir(), work_id, "");
 
     if !cover_path.exists() {
         return Err(StatusCode::NOT_FOUND.into_response());
@@ -505,9 +488,9 @@ pub async fn download<S: AppContext>(
     })?;
 
     let (mut parts, body) = resp.into_response().into_parts();
-    parts
-        .headers
-        .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    if let Ok(val) = content_type.parse() {
+        parts.headers.insert(header::CONTENT_TYPE, val);
+    }
     Ok(Response::from_parts(parts, body))
 }
 

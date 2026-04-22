@@ -419,7 +419,7 @@ export default function ReadarrImportPage() {
                               value={mode}
                               checked={importMode === mode}
                               onChange={() => { setImportMode(mode); setPreview(null); }}
-                              disabled={phase === "previewing" || phase === "importing"}
+                              disabled={phase !== "connected" && phase !== "previewed" && phase !== "failed"}
                               className="mt-0.5 accent-brand"
                             />
                             <span className="text-sm">

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use livrarr_db::{
     AuthorDb, CreateSeriesDbRequest, CreateWorkDbRequest, LibraryItemDb, LinkWorkToSeriesRequest,
-    ProvenanceDb, SeriesCacheDb, SeriesCacheEntry, SeriesDb, SetFieldProvenanceRequest, WorkDb,
+    ProvenanceDb, SeriesCacheDb, SeriesCacheEntry, SeriesDb, WorkDb,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
@@ -70,26 +70,34 @@ where
             .await
             .map_err(SeriesServiceError::Db)?;
 
+        // Pre-index authors by id and works by series_id to avoid O(series×works).
+        let author_map: std::collections::HashMap<i64, &str> =
+            authors.iter().map(|a| (a.id, a.name.as_str())).collect();
+
+        let mut works_by_series: std::collections::HashMap<i64, Vec<&Work>> =
+            std::collections::HashMap::new();
+        for w in &works {
+            if let Some(sid) = w.series_id {
+                works_by_series.entry(sid).or_default().push(w);
+            }
+        }
+
         let views = all_series
             .iter()
             .map(|s| {
-                let author_name = authors
-                    .iter()
-                    .find(|a| a.id == s.author_id)
-                    .map(|a| a.name.clone())
-                    .unwrap_or_default();
-                let works_in_library =
-                    works.iter().filter(|w| w.series_id == Some(s.id)).count() as i64;
-                let first_work_id = works
-                    .iter()
-                    .filter(|w| w.series_id == Some(s.id))
-                    .min_by(|a, b| {
-                        a.series_position
-                            .unwrap_or(f64::MAX)
-                            .partial_cmp(&b.series_position.unwrap_or(f64::MAX))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|w| w.id);
+                let author_name = author_map.get(&s.author_id).unwrap_or(&"").to_string();
+                let series_works = works_by_series.get(&s.id);
+                let works_in_library = series_works.map(|ws| ws.len() as i64).unwrap_or(0);
+                let first_work_id = series_works.and_then(|ws| {
+                    ws.iter()
+                        .min_by(|a, b| {
+                            a.series_position
+                                .unwrap_or(f64::MAX)
+                                .partial_cmp(&b.series_position.unwrap_or(f64::MAX))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|w| w.id)
+                });
                 SeriesListView {
                     id: s.id,
                     name: s.name.clone(),
@@ -115,7 +123,7 @@ where
     ) -> Result<SeriesDetailView, SeriesServiceError> {
         let series = self
             .db
-            .get_series(series_id)
+            .get_series(user_id, series_id)
             .await
             .map_err(SeriesServiceError::Db)?
             .ok_or(SeriesServiceError::NotFound)?;
@@ -153,14 +161,17 @@ where
             .await
             .map_err(SeriesServiceError::Db)?;
 
+        // Pre-index items by work_id to avoid O(works×items) filtering.
+        let mut items_by_work: std::collections::HashMap<i64, Vec<LibraryItem>> =
+            std::collections::HashMap::with_capacity(work_ids.len());
+        for item in items {
+            items_by_work.entry(item.work_id).or_default().push(item);
+        }
+
         let works = series_works
             .iter()
             .map(|w| {
-                let work_items: Vec<LibraryItem> = items
-                    .iter()
-                    .filter(|li| li.work_id == w.id)
-                    .cloned()
-                    .collect();
+                let work_items = items_by_work.remove(&w.id).unwrap_or_default();
                 SeriesWorkView {
                     work: (*w).clone(),
                     library_items: work_items,
@@ -190,7 +201,7 @@ where
     ) -> Result<UpdateSeriesView, SeriesServiceError> {
         let series = self
             .db
-            .get_series(series_id)
+            .get_series(user_id, series_id)
             .await
             .map_err(SeriesServiceError::Db)?
             .ok_or(SeriesServiceError::NotFound)?;
@@ -205,7 +216,7 @@ where
 
         let updated = self
             .db
-            .update_series_flags(series_id, monitor_ebook, monitor_audiobook)
+            .update_series_flags(user_id, series_id, monitor_ebook, monitor_audiobook)
             .await
             .map_err(SeriesServiceError::Db)?;
 
@@ -261,36 +272,6 @@ where
                 })
                 .collect();
 
-        // Auto-link if the first candidate is a strong name match.
-        const AUTO_LINK_THRESHOLD: f64 = 0.90;
-        if let Some(first) = candidates.first() {
-            let sim = livrarr_matching::author_similarity(&author.name, &first.name);
-            if sim >= AUTO_LINK_THRESHOLD && author.gr_key.is_none() {
-                tracing::info!(
-                    author = %author.name,
-                    gr_candidate = %first.name,
-                    similarity = %sim,
-                    "auto-linking Goodreads author"
-                );
-                let _ = self
-                    .db
-                    .update_author(
-                        user_id,
-                        author_id,
-                        livrarr_db::UpdateAuthorDbRequest {
-                            gr_key: Some(first.gr_key.clone()),
-                            name: None,
-                            sort_name: None,
-                            ol_key: None,
-                            monitored: None,
-                            monitor_new_items: None,
-                            monitor_since: None,
-                        },
-                    )
-                    .await;
-            }
-        }
-
         Ok(candidates)
     }
 
@@ -323,10 +304,19 @@ where
             let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
             let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
                 .await
-                .unwrap_or(raw_entries);
+                .unwrap_or_else(|| raw_entries.clone());
+            let llm_changed = entries.len() != raw_entries.len();
             let saved = self
                 .db
-                .save_series_cache(author_id, &entries)
+                .save_series_cache(
+                    author_id,
+                    &entries,
+                    if llm_changed {
+                        Some(&raw_entries)
+                    } else {
+                        None
+                    },
+                )
                 .await
                 .map_err(SeriesServiceError::Db)?;
             (saved.entries, Some(saved.fetched_at))
@@ -371,10 +361,22 @@ where
             })?;
 
         let _ = self.db.delete_series_cache(author_id).await;
-        let entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+        let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+        let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
+            .await
+            .unwrap_or_else(|| raw_entries.clone());
+        let llm_changed = entries.len() != raw_entries.len();
         let saved = self
             .db
-            .save_series_cache(author_id, &entries)
+            .save_series_cache(
+                author_id,
+                &entries,
+                if llm_changed {
+                    Some(&raw_entries)
+                } else {
+                    None
+                },
+            )
             .await
             .map_err(SeriesServiceError::Db)?;
 
@@ -539,7 +541,7 @@ where
         // Re-read current series flags (cancellation guard).
         let series = self
             .db
-            .get_series(series_id)
+            .get_series(user_id, series_id)
             .await
             .map_err(SeriesServiceError::Db)?
             .ok_or(SeriesServiceError::NotFound)?;
@@ -551,7 +553,7 @@ where
 
         let _ = self
             .db
-            .update_series_work_count(series_id, all_books.len() as i32)
+            .update_series_work_count(user_id, series_id, all_books.len() as i32)
             .await;
 
         let existing_works = self
@@ -573,7 +575,7 @@ where
             // Cancellation guard: re-read flags per work.
             let current = self
                 .db
-                .get_series(series_id)
+                .get_series(user_id, series_id)
                 .await
                 .map_err(SeriesServiceError::Db)?;
             if let Some(s) = &current {
@@ -591,15 +593,18 @@ where
             if let Some(existing) = matched {
                 let _ = self
                     .db
-                    .link_work_to_series(LinkWorkToSeriesRequest {
-                        work_id: existing.id,
-                        series_id,
-                        series_work_count: series.work_count,
-                        series_name: series_name.clone(),
-                        series_position: book.position,
-                        monitor_ebook,
-                        monitor_audiobook,
-                    })
+                    .link_work_to_series(
+                        user_id,
+                        LinkWorkToSeriesRequest {
+                            work_id: existing.id,
+                            series_id,
+                            series_work_count: series.work_count,
+                            series_name: series_name.clone(),
+                            series_position: book.position,
+                            monitor_ebook,
+                            monitor_audiobook,
+                        },
+                    )
                     .await;
                 linked += 1;
                 continue;
@@ -614,15 +619,18 @@ where
             if let Some(existing) = title_matched {
                 let _ = self
                     .db
-                    .link_work_to_series(LinkWorkToSeriesRequest {
-                        work_id: existing.id,
-                        series_id,
-                        series_work_count: series.work_count,
-                        series_name: series_name.clone(),
-                        series_position: book.position,
-                        monitor_ebook,
-                        monitor_audiobook,
-                    })
+                    .link_work_to_series(
+                        user_id,
+                        LinkWorkToSeriesRequest {
+                            work_id: existing.id,
+                            series_id,
+                            series_work_count: series.work_count,
+                            series_name: series_name.clone(),
+                            series_position: book.position,
+                            monitor_ebook,
+                            monitor_audiobook,
+                        },
+                    )
                     .await;
                 linked += 1;
                 continue;
@@ -898,50 +906,6 @@ fn normalize_for_match(s: &str) -> String {
 }
 
 async fn write_addtime_provenance<D: ProvenanceDb>(db: &D, user_id: i64, work: &Work) {
-    let setter = ProvenanceSetter::AutoAdded;
-    let mut reqs: Vec<SetFieldProvenanceRequest> = Vec::new();
-    let push = |reqs: &mut Vec<SetFieldProvenanceRequest>, field: WorkField| {
-        reqs.push(SetFieldProvenanceRequest {
-            user_id,
-            work_id: work.id,
-            field,
-            source: None,
-            setter,
-            cleared: false,
-        });
-    };
-    if !work.title.is_empty() {
-        push(&mut reqs, WorkField::Title);
-    }
-    if !work.author_name.is_empty() {
-        push(&mut reqs, WorkField::AuthorName);
-    }
-    if work.ol_key.is_some() {
-        push(&mut reqs, WorkField::OlKey);
-    }
-    if work.gr_key.is_some() {
-        push(&mut reqs, WorkField::GrKey);
-    }
-    if work.language.is_some() {
-        push(&mut reqs, WorkField::Language);
-    }
-    if work.year.is_some() {
-        push(&mut reqs, WorkField::Year);
-    }
-    if work.series_name.is_some() {
-        push(&mut reqs, WorkField::SeriesName);
-    }
-    if work.series_position.is_some() {
-        push(&mut reqs, WorkField::SeriesPosition);
-    }
-    if reqs.is_empty() {
-        return;
-    }
-    if let Err(e) = db.set_field_provenance_batch(reqs).await {
-        tracing::warn!(
-            work_id = work.id,
-            ?setter,
-            "write_addtime_provenance failed: {e}"
-        );
-    }
+    crate::provenance::write_addtime_provenance(db, user_id, work, ProvenanceSetter::AutoAdded)
+        .await;
 }

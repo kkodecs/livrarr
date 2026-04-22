@@ -24,18 +24,11 @@ where
     }
 
     async fn get(&self, user_id: UserId, series_id: i64) -> Result<Series, SeriesServiceError> {
-        let series = self
-            .db
-            .get_series(series_id)
+        self.db
+            .get_series(user_id, series_id)
             .await
             .map_err(SeriesServiceError::Db)?
-            .ok_or(SeriesServiceError::NotFound)?;
-
-        if series.user_id != user_id {
-            return Err(SeriesServiceError::NotFound);
-        }
-
-        Ok(series)
+            .ok_or(SeriesServiceError::NotFound)
     }
 
     async fn refresh(
@@ -43,8 +36,7 @@ where
         _user_id: UserId,
         _series_id: i64,
     ) -> Result<Series, SeriesServiceError> {
-        // Requires Goodreads provider integration
-        todo!("series refresh via Goodreads")
+        Err(SeriesServiceError::GoodreadsUnavailable)
     }
 
     async fn monitor(
@@ -56,7 +48,7 @@ where
         let series = self.get(user_id, series_id).await?;
 
         self.db
-            .update_series_flags(series.id, monitored, monitored)
+            .update_series_flags(user_id, series.id, monitored, monitored)
             .await
             .map_err(SeriesServiceError::Db)
     }

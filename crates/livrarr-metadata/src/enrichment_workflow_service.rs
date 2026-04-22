@@ -13,6 +13,7 @@ use std::sync::Arc;
 /// and domain-crate types.
 pub struct EnrichmentWorkflowImpl<S, D> {
     inner: Arc<S>,
+    #[allow(dead_code)]
     db: D,
 }
 
@@ -38,7 +39,7 @@ fn convert_error(e: EnrichmentError) -> EnrichmentWorkflowError {
             EnrichmentWorkflowError::CorruptRetryPayload { work_id, provider }
         }
         EnrichmentError::Queue(e) => EnrichmentWorkflowError::Queue(e.to_string()),
-        EnrichmentError::Merge(e) => EnrichmentWorkflowError::Queue(e.to_string()),
+        EnrichmentError::Merge(e) => EnrichmentWorkflowError::Merge(e.to_string()),
         EnrichmentError::Db(e) => EnrichmentWorkflowError::Db(e),
         EnrichmentError::AllProvidersFailed => {
             EnrichmentWorkflowError::Queue("all providers failed".into())
@@ -79,20 +80,10 @@ where
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<(), EnrichmentWorkflowError> {
-        self.db
-            .get_work(user_id, work_id)
-            .await
-            .map_err(|e| match e {
-                DbError::NotFound { .. } => EnrichmentWorkflowError::WorkNotFound,
-                other => EnrichmentWorkflowError::Db(other),
-            })?;
-
-        self.db
+        self.inner
             .reset_for_manual_refresh(user_id, work_id)
             .await
-            .map_err(EnrichmentWorkflowError::Db)?;
-
-        Ok(())
+            .map_err(convert_error)
     }
 }
 

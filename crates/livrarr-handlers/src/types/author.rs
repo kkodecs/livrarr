@@ -46,9 +46,12 @@ pub struct AddAuthorApiRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAuthorApiRequest {
-    pub monitored: Option<bool>,
-    pub monitor_new_items: Option<bool>,
-    pub gr_key: Option<String>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub monitored: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub monitor_new_items: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub gr_key: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -1,9 +1,12 @@
+use livrarr_domain::services::{SortDirection, WorkSortField};
 use serde::Serialize;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct PaginationQuery {
     pub page: Option<u32>,
     pub page_size: Option<u32>,
+    pub sort_by: Option<WorkSortField>,
+    pub sort_dir: Option<SortDirection>,
 }
 
 impl PaginationQuery {
@@ -11,7 +14,13 @@ impl PaginationQuery {
         self.page.unwrap_or(1).max(1)
     }
     pub fn page_size(&self) -> u32 {
-        self.page_size.unwrap_or(50).clamp(1, 500)
+        self.page_size.unwrap_or(100).clamp(1, 1000)
+    }
+    pub fn sort_by(&self) -> WorkSortField {
+        self.sort_by.unwrap_or(WorkSortField::DateAdded)
+    }
+    pub fn sort_dir(&self) -> SortDirection {
+        self.sort_dir.unwrap_or(SortDirection::Desc)
     }
 }
 

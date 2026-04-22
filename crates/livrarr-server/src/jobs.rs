@@ -147,8 +147,40 @@ impl JobRunner {
                             error!("job 'enrichment_retry' error: {e}");
                             set_job_running(&status, "enrichment_retry", false).await;
                         }
+                        Err(join_err) if join_err.is_panic() => {
+                            let payload = join_err.into_panic();
+                            let msg = payload
+                                .downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown panic".to_string());
+                            error!("job 'enrichment_retry' panicked: {msg}");
+                            let mut statuses = status.write().await;
+                            if let Some(st) =
+                                statuses.iter_mut().find(|st| st.name == "enrichment_retry")
+                            {
+                                st.running = false;
+                                if !st.panic_notified {
+                                    st.panic_notified = true;
+                                    if let Err(e) =
+                                        s.db.create_notification(CreateNotificationDbRequest {
+                                            user_id: 1,
+                                            notification_type: NotificationType::JobPanicked,
+                                            ref_key: Some("enrichment_retry".to_string()),
+                                            message: format!(
+                                                "Job 'enrichment_retry' panicked: {msg}"
+                                            ),
+                                            data: serde_json::Value::Null,
+                                        })
+                                        .await
+                                    {
+                                        tracing::warn!("create_notification failed: {e}");
+                                    }
+                                }
+                            }
+                        }
                         Err(join_err) => {
-                            error!("job 'enrichment_retry' panicked: {join_err}");
+                            warn!("job 'enrichment_retry' task cancelled: {join_err}");
                             set_job_running(&status, "enrichment_retry", false).await;
                         }
                     }
@@ -690,7 +722,10 @@ async fn poll_sabnzbd(
     let api_key = client.api_key.as_deref().unwrap_or("");
 
     // Fetch queue (active downloads).
-    let queue_url = format!("{base_url}/api?mode=queue&apikey={}&output=json", urlencoding::encode(api_key));
+    let queue_url = format!(
+        "{base_url}/api?mode=queue&apikey={}&output=json",
+        urlencoding::encode(api_key)
+    );
     let queue_resp = state
         .http_client
         .get(&queue_url)
@@ -741,8 +776,10 @@ async fn poll_sabnzbd(
             .as_ref()
             .is_some_and(|id| !queue_nzo_ids.contains(id))
     }) {
-        let history_url =
-            format!("{base_url}/api?mode=history&apikey={}&output=json&limit=200", urlencoding::encode(api_key));
+        let history_url = format!(
+            "{base_url}/api?mode=history&apikey={}&output=json&limit=200",
+            urlencoding::encode(api_key)
+        );
         match state
             .http_client
             .get(&history_url)

@@ -119,7 +119,7 @@ pub async fn resolve_gr<S: AppContext>(
                             name: None,
                             sort_name: None,
                             ol_key: None,
-                            gr_key: Some(first.gr_key.clone()),
+                            gr_key: Some(Some(first.gr_key.clone())),
                             monitored: None,
                             monitor_new_items: None,
                         },

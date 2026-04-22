@@ -234,7 +234,6 @@ impl LlmValidator for LiveLlmValidator {
         .await?;
 
         let mut rejections: HashMap<MetadataProvider, String> = HashMap::new();
-        let mut surviving_success = 0usize;
 
         for (provider_str, verdict) in &response.providers {
             let Some(provider) = parse_provider(provider_str) else {
@@ -256,18 +255,22 @@ impl LlmValidator for LiveLlmValidator {
                     entry.payload = None;
                 }
                 "accept" => {
-                    surviving_success += 1;
                     if let (Some(payload), Some(per_field)) =
                         (entry.payload.as_mut(), verdict.dropped_fields.as_ref())
                     {
                         apply_dropped_fields(payload, per_field);
                     }
                 }
-                _ => {
-                    surviving_success += 1;
-                }
+                _ => {}
             }
         }
+
+        // Compute surviving_success from the FINAL reconstructed state (after
+        // all LLM verdicts have been applied), not from an intermediate count.
+        let surviving_success = reconstructed
+            .values()
+            .filter(|o| o.class == OutcomeClass::Success && o.payload.is_some())
+            .count();
 
         let all_success_rejected = success_provider_count > 0 && surviving_success == 0;
 

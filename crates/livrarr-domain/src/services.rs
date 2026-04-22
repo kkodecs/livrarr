@@ -3,7 +3,6 @@
 /// Service layer consolidation types and traits. All defined in livrarr-domain
 /// per architecture spec. Implementations live in capability crates.
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::Duration;
 
 use crate::settings::{
@@ -15,8 +14,8 @@ use crate::{
     Author, AuthorId, DbError, DownloadClient, DownloadClientId, EnrichmentStatus, Grab, GrabId,
     GrabStatus, HistoryEvent, HistoryFilter, Indexer, IndexerConfig, IndexerId, LibraryItem,
     LibraryItemId, MediaType, MetadataProvider, Notification, NotificationId, NotificationType,
-    OutcomeClass, PlaybackProgress, ProvenanceSetter, QueueProgress, RemotePathMapping,
-    RemotePathMappingId, RootFolder, RootFolderId, Series, UserId, Work, WorkId,
+    OutcomeClass, PlaybackProgress, ProvenanceSetter, QueueProgress, QueueSummary,
+    RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Series, UserId, Work, WorkId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -202,8 +201,8 @@ pub struct AddWorkResult {
 pub struct UpdateWorkRequest {
     pub title: Option<String>,
     pub author_name: Option<String>,
-    pub series_name: Option<String>,
-    pub series_position: Option<f64>,
+    pub series_name: Option<Option<String>>,
+    pub series_position: Option<Option<f64>>,
     pub monitor_ebook: Option<bool>,
     pub monitor_audiobook: Option<bool>,
 }
@@ -358,9 +357,9 @@ impl AddAuthorResult {
 #[derive(Debug)]
 pub struct UpdateAuthorRequest {
     pub name: Option<String>,
-    pub sort_name: Option<String>,
-    pub ol_key: Option<String>,
-    pub gr_key: Option<String>,
+    pub sort_name: Option<Option<String>>,
+    pub ol_key: Option<Option<String>>,
+    pub gr_key: Option<Option<String>>,
     pub monitored: Option<bool>,
     pub monitor_new_items: Option<bool>,
 }
@@ -880,16 +879,6 @@ pub enum MonitorError {
     WorkAdd(#[from] WorkServiceError),
     #[error("database error: {0}")]
     Db(#[from] DbError),
-}
-
-// =============================================================================
-// CWA Copy result
-// =============================================================================
-
-#[derive(Debug)]
-pub struct CwaResult {
-    pub success: bool,
-    pub warning: Option<String>,
 }
 
 // =============================================================================
@@ -1456,6 +1445,8 @@ pub trait QueueService: Send + Sync {
         client: &DownloadClient,
         download_id: &str,
     ) -> Option<QueueProgress>;
+
+    async fn summary(&self, user_id: UserId) -> Result<QueueSummary, QueueServiceError>;
 }
 
 // =============================================================================
@@ -1703,110 +1694,6 @@ pub trait SettingsService: Send + Sync {
         local_path: &str,
     ) -> Result<RemotePathMapping, DbError>;
     async fn delete_remote_path_mapping(&self, id: RemotePathMappingId) -> Result<(), DbError>;
-}
-
-// =============================================================================
-// Free functions — TEMP(pk-tdd): compile-only scaffolds
-// =============================================================================
-
-pub async fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let path = path.to_path_buf();
-    let bytes = bytes.to_vec();
-    tokio::task::spawn_blocking(move || {
-        use std::io::Write;
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path has no parent directory",
-            )
-        })?;
-        std::fs::create_dir_all(parent)?;
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-        tmp.write_all(&bytes)?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(&path).map_err(|e| e.error)?;
-        Ok(())
-    })
-    .await
-    .expect("spawn_blocking panicked")
-}
-
-pub async fn atomic_copy(src: &Path, dst: &Path) -> std::io::Result<u64> {
-    let src = src.to_path_buf();
-    let dst = dst.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let parent = dst.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path has no parent directory",
-            )
-        })?;
-        std::fs::create_dir_all(parent)?;
-        let mut src_file = std::fs::File::open(&src)?;
-        let tmp = tempfile::NamedTempFile::new_in(parent)?;
-        let mut dst_file = tmp.as_file().try_clone()?;
-        let copied = std::io::copy(&mut src_file, &mut dst_file)?;
-        dst_file.sync_all()?;
-        drop(dst_file);
-        tmp.persist(&dst).map_err(|e| e.error)?;
-        Ok(copied)
-    })
-    .await
-    .expect("spawn_blocking panicked")
-}
-
-pub async fn cwa_copy(src: &Path, dst: &Path) -> CwaResult {
-    let src = src.to_path_buf();
-    let dst = dst.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let parent = match dst.parent() {
-            Some(p) => p.to_path_buf(),
-            None => {
-                return CwaResult {
-                    success: false,
-                    warning: Some("destination path has no parent directory".into()),
-                };
-            }
-        };
-        if let Err(e) = std::fs::create_dir_all(&parent) {
-            return CwaResult {
-                success: false,
-                warning: Some(format!("failed to create parent directory: {e}")),
-            };
-        }
-        match std::fs::hard_link(&src, &dst) {
-            Ok(()) => CwaResult {
-                success: true,
-                warning: None,
-            },
-            Err(link_err) => {
-                let result = (|| -> std::io::Result<()> {
-                    let mut src_file = std::fs::File::open(&src)?;
-                    let tmp = tempfile::NamedTempFile::new_in(&parent)?;
-                    let mut dst_file = tmp.as_file().try_clone()?;
-                    std::io::copy(&mut src_file, &mut dst_file)?;
-                    dst_file.sync_all()?;
-                    drop(dst_file);
-                    tmp.persist(&dst).map_err(|e| e.error)?;
-                    Ok(())
-                })();
-                match result {
-                    Ok(()) => CwaResult {
-                        success: true,
-                        warning: Some(format!("hardlink failed ({link_err}), fell back to copy")),
-                    },
-                    Err(copy_err) => CwaResult {
-                        success: false,
-                        warning: Some(format!(
-                            "hardlink failed ({link_err}), copy also failed ({copy_err})"
-                        )),
-                    },
-                }
-            }
-        }
-    })
-    .await
-    .expect("spawn_blocking panicked")
 }
 
 // =============================================================================

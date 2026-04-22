@@ -47,6 +47,8 @@ pub async fn list<S: AppContext>(
     let pq = PaginationQuery {
         page: q.page,
         page_size: q.page_size,
+        sort_by: None,
+        sort_dir: None,
     };
     let page = pq.page();
     let page_size = pq.page_size();

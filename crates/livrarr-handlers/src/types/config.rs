@@ -44,18 +44,38 @@ pub struct MetadataConfigResponse {
     pub provider_status: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestProwlarrRequest {
     pub url: String,
+    #[serde(skip_serializing)]
     pub api_key: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for TestProwlarrRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestProwlarrRequest")
+            .field("url", &self.url)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProwlarrImportRequest {
     pub url: String,
+    #[serde(skip_serializing)]
     pub api_key: String,
+}
+
+impl std::fmt::Debug for ProwlarrImportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProwlarrImportRequest")
+            .field("url", &self.url)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,13 +96,24 @@ pub struct UpdateMediaManagementApiRequest {
     pub preferred_audiobook_formats: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProwlarrApiRequest {
     pub url: Option<String>,
     #[serde(default, deserialize_with = "crate::deserialize_optional_secret")]
+    #[serde(skip_serializing)]
     pub api_key: Option<Option<String>>,
     pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for UpdateProwlarrApiRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateProwlarrApiRequest")
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,7 +130,7 @@ pub struct EmailConfigResponse {
     pub send_on_import: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateEmailApiRequest {
     pub enabled: Option<bool>,
@@ -108,10 +139,27 @@ pub struct UpdateEmailApiRequest {
     pub encryption: Option<String>,
     pub username: Option<String>,
     #[serde(default, deserialize_with = "crate::deserialize_optional_secret")]
+    #[serde(skip_serializing)]
     pub password: Option<Option<String>>,
     pub from_address: Option<String>,
     pub recipient_email: Option<String>,
     pub send_on_import: Option<bool>,
+}
+
+impl std::fmt::Debug for UpdateEmailApiRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateEmailApiRequest")
+            .field("enabled", &self.enabled)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("encryption", &self.encryption)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("from_address", &self.from_address)
+            .field("recipient_email", &self.recipient_email)
+            .field("send_on_import", &self.send_on_import)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -120,20 +168,44 @@ pub struct SendEmailRequest {
     pub library_item_id: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateMetadataApiRequest {
     pub hardcover_enabled: Option<bool>,
     #[serde(default, deserialize_with = "crate::deserialize_optional_secret")]
+    #[serde(skip_serializing)]
     pub hardcover_api_token: Option<Option<String>>,
     pub llm_enabled: Option<bool>,
     pub llm_provider: Option<LlmProvider>,
     pub llm_endpoint: Option<String>,
     #[serde(default, deserialize_with = "crate::deserialize_optional_secret")]
+    #[serde(skip_serializing)]
     pub llm_api_key: Option<Option<String>>,
     pub llm_model: Option<String>,
     pub audnexus_url: Option<String>,
     pub languages: Option<Vec<String>>,
+}
+
+impl std::fmt::Debug for UpdateMetadataApiRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateMetadataApiRequest")
+            .field("hardcover_enabled", &self.hardcover_enabled)
+            .field(
+                "hardcover_api_token",
+                &self.hardcover_api_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("llm_enabled", &self.llm_enabled)
+            .field("llm_provider", &self.llm_provider)
+            .field("llm_endpoint", &self.llm_endpoint)
+            .field(
+                "llm_api_key",
+                &self.llm_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("llm_model", &self.llm_model)
+            .field("audnexus_url", &self.audnexus_url)
+            .field("languages", &self.languages)
+            .finish()
+    }
 }
 
 #[trait_variant::make(Send)]
