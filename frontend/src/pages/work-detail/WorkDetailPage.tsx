@@ -705,7 +705,7 @@ function ReleasesTab({ workId }: { workId: number }) {
     items: ReleaseResponse[],
     formats: Set<string>,
   ) => {
-    if (formats.size === 0) return [];
+    if (formats.size === 0) return items;
     return items.filter((r) => {
       if (!r.format) return true;
       return formats.has(r.format);
