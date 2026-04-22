@@ -83,34 +83,53 @@ pub async fn write_tags(
 
 /// Write tags to multiple media files. Returns per-file results.
 /// If any file fails, returns BatchAborted identifying which file failed.
+/// Uses concurrent processing with buffer_unordered(4) for parallelism.
+/// Each tag write runs inside spawn_blocking (file I/O is blocking).
 pub async fn write_tags_batch(
     paths: Vec<String>,
     metadata: TagMetadata,
     cover: Option<Vec<u8>>,
 ) -> Result<Vec<TagWriteStatus>, TagWriteError> {
-    let mut results = Vec::with_capacity(paths.len());
-    let cover_ref = cover.as_deref();
-    let metadata_ref = &metadata;
+    use futures::stream::{self, StreamExt};
 
-    for path in &paths {
-        let p = path.clone();
-        let m = metadata_ref.clone();
-        let c = cover_ref.map(|b| b.to_vec());
+    let metadata = std::sync::Arc::new(metadata);
+    let cover = std::sync::Arc::new(cover);
+    let len = paths.len();
 
-        let status = tokio::task::spawn_blocking(move || write_tags_sync(&p, &m, c.as_deref()))
-            .await
-            .map_err(|e| TagWriteError::Io {
-                message: format!("spawn_blocking join error: {e}"),
-            })?
-            .map_err(|e| TagWriteError::BatchAborted {
-                path: path.clone(),
-                source: Box::new(e),
-            })?;
+    let futs: Vec<_> = paths
+        .into_iter()
+        .enumerate()
+        .map(|(idx, path)| {
+            let m = metadata.clone();
+            let c = cover.clone();
+            let path_for_err = path.clone();
+            async move {
+                let status =
+                    tokio::task::spawn_blocking(move || write_tags_sync(&path, &m, c.as_deref()))
+                        .await
+                        .map_err(|e| TagWriteError::Io {
+                            message: format!("spawn_blocking join error: {e}"),
+                        })?
+                        .map_err(|e| TagWriteError::BatchAborted {
+                            path: path_for_err,
+                            source: Box::new(e),
+                        })?;
+                Ok::<(usize, TagWriteStatus), TagWriteError>((idx, status))
+            }
+        })
+        .collect();
 
-        results.push(status);
+    let results: Vec<Result<(usize, TagWriteStatus), TagWriteError>> =
+        stream::iter(futs).buffer_unordered(4).collect().await;
+
+    // Reconstruct results in original order.
+    let mut ordered = vec![TagWriteStatus::Unsupported; len];
+    for result in results {
+        let (idx, status) = result?;
+        ordered[idx] = status;
     }
 
-    Ok(results)
+    Ok(ordered)
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +231,24 @@ fn write_epub(
         if opf_parent.is_empty() {
             href
         } else {
-            format!("{}/{}", opf_parent, href)
+            // Resolve href relative to the OPF parent directory using Path
+            // operations, then normalize back to forward slashes for EPUB.
+            let resolved = Path::new(&opf_parent).join(&href);
+            // Normalize away ".." and "." components.
+            let mut components = Vec::new();
+            for comp in resolved.components() {
+                match comp {
+                    std::path::Component::ParentDir => {
+                        components.pop();
+                    }
+                    std::path::Component::CurDir => {}
+                    other => {
+                        components.push(other.as_os_str().to_string_lossy().to_string());
+                    }
+                }
+            }
+            // EPUB uses forward slashes regardless of platform.
+            components.join("/")
         }
     });
 
@@ -247,20 +283,14 @@ fn write_epub(
     let need_cover_manifest = should_replace_cover && existing_cover_path.is_none();
     let new_opf = update_opf_metadata(&opf_content, metadata, need_cover_manifest)?;
 
-    // Unique temp file to avoid TOCTOU collisions.
-    let tmp_path = path.with_extension(format!(
-        "epub.tagwrite.{}.{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    // Atomic temp file in the same directory for safe rename.
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| TagWriteError::EpubFailed {
+        message: format!("temp create failed: {e}"),
+    })?;
+    let (tmp_file, tmp_path) = tmp.into_parts();
 
     let write_result = (|| -> Result<(), TagWriteError> {
-        let tmp_file = std::fs::File::create(&tmp_path).map_err(|e| TagWriteError::EpubFailed {
-            message: format!("temp create failed: {e}"),
-        })?;
         let mut writer = zip::ZipWriter::new(tmp_file);
 
         // Cumulative byte counter — aborts rewrite if total extracted bytes
@@ -268,10 +298,17 @@ fn write_epub(
         let mut total_extracted_bytes: u64 = 0;
 
         for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).map_err(|e| TagWriteError::EpubFailed {
+            let entry = archive.by_index(i).map_err(|e| TagWriteError::EpubFailed {
                 message: format!("ZIP entry error: {e}"),
             })?;
-            let name = entry.name().to_string();
+            let name = match entry.enclosed_name() {
+                Some(safe) => safe.to_string_lossy().to_string(),
+                None => {
+                    return Err(TagWriteError::EpubFailed {
+                        message: format!("unsafe ZIP entry name rejected: {:?}", entry.name()),
+                    });
+                }
+            };
 
             // Preserve directory entries.
             if entry.is_dir() {
@@ -306,19 +343,6 @@ fn write_epub(
                 continue;
             } else {
                 // Copy entry with original compression method.
-                if entry.size() > MAX_EPUB_ENTRY_BYTES as u64 {
-                    return Err(TagWriteError::EpubFailed {
-                        message: format!("entry too large: {} ({} bytes)", name, entry.size()),
-                    });
-                }
-                total_extracted_bytes = total_extracted_bytes.saturating_add(entry.size());
-                if total_extracted_bytes > MAX_EPUB_EXTRACTED_BYTES {
-                    return Err(TagWriteError::EpubFailed {
-                        message: format!(
-                            "cumulative extracted bytes exceeded {MAX_EPUB_EXTRACTED_BYTES}"
-                        ),
-                    });
-                }
                 let options = zip::write::SimpleFileOptions::default()
                     .compression_method(entry.compression());
                 writer
@@ -326,10 +350,34 @@ fn write_epub(
                     .map_err(|e| TagWriteError::EpubFailed {
                         message: format!("ZIP write error: {e}"),
                     })?;
-                let mut buf = Vec::with_capacity(entry.size() as usize);
-                entry.read_to_end(&mut buf).map_err(|e| TagWriteError::Io {
-                    message: e.to_string(),
-                })?;
+                // Read with a size limit to defend against ZIP bombs.
+                // Do not trust entry.size() for pre-allocation — the
+                // declared size can be spoofed. Instead, read through a
+                // Take adapter and check the actual bytes read.
+                let limit = (MAX_EPUB_ENTRY_BYTES as u64) + 1;
+                let mut limited = entry.take(limit);
+                let mut buf = Vec::new();
+                limited
+                    .read_to_end(&mut buf)
+                    .map_err(|e| TagWriteError::Io {
+                        message: e.to_string(),
+                    })?;
+                if buf.len() > MAX_EPUB_ENTRY_BYTES {
+                    return Err(TagWriteError::EpubFailed {
+                        message: format!(
+                            "entry too large: {} (>{MAX_EPUB_ENTRY_BYTES} bytes)",
+                            name
+                        ),
+                    });
+                }
+                total_extracted_bytes = total_extracted_bytes.saturating_add(buf.len() as u64);
+                if total_extracted_bytes > MAX_EPUB_EXTRACTED_BYTES {
+                    return Err(TagWriteError::EpubFailed {
+                        message: format!(
+                            "cumulative extracted bytes exceeded {MAX_EPUB_EXTRACTED_BYTES}"
+                        ),
+                    });
+                }
                 writer.write_all(&buf).map_err(|e| TagWriteError::Io {
                     message: e.to_string(),
                 })?;
@@ -366,15 +414,12 @@ fn write_epub(
     match write_result {
         Ok(()) => {
             // Flush temp file to disk before rename for crash safety.
-            if let Ok(f) = std::fs::File::open(&tmp_path) {
+            if let Ok(f) = std::fs::File::open(&*tmp_path) {
                 let _ = f.sync_all();
             }
 
-            std::fs::rename(&tmp_path, path).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp_path);
-                TagWriteError::Io {
-                    message: format!("EPUB rename failed: {e}"),
-                }
+            tmp_path.persist(path).map_err(|e| TagWriteError::Io {
+                message: format!("EPUB rename failed: {e}"),
             })?;
 
             // Sync parent directory to persist the rename entry.
@@ -394,7 +439,6 @@ fn write_epub(
             {
                 Ok(_report) => {}
                 Err(e) => {
-                    // Log but don't fail — our tag writing already succeeded.
                     tracing::warn!("repub repair warning: {e}");
                 }
             }
@@ -402,7 +446,8 @@ fn write_epub(
             Ok(())
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp_path);
+            // TempPath auto-deletes on drop
+            drop(tmp_path);
             Err(e)
         }
     }

@@ -66,7 +66,16 @@ impl AuthorDb for SqliteDb {
             .fetch_all(self.pool())
             .await
             .map_err(map_db_err)?;
-        rows.into_iter().map(row_to_author).collect()
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row_to_author(row) {
+                Ok(a) => results.push(a),
+                Err(e) => {
+                    tracing::warn!("authors: skipping corrupt row: {e}");
+                }
+            }
+        }
+        Ok(results)
     }
 
     async fn create_author(&self, req: CreateAuthorDbRequest) -> Result<Author, DbError> {
@@ -100,9 +109,18 @@ impl AuthorDb for SqliteDb {
         let current = self.get_author(user_id, id).await?;
 
         let name = req.name.unwrap_or(current.name);
-        let sort_name = req.sort_name.or(current.sort_name);
-        let ol_key = req.ol_key.or(current.ol_key);
-        let gr_key = req.gr_key.or(current.gr_key);
+        let sort_name = match req.sort_name {
+            None => current.sort_name,
+            Some(v) => v,
+        };
+        let ol_key = match req.ol_key {
+            None => current.ol_key,
+            Some(v) => v,
+        };
+        let gr_key = match req.gr_key {
+            None => current.gr_key,
+            Some(v) => v,
+        };
         let monitored = req.monitored.unwrap_or(current.monitored);
         let monitor_new_items = req.monitor_new_items.unwrap_or(current.monitor_new_items);
         let monitor_since = req.monitor_since.or(current.monitor_since);

@@ -5,38 +5,43 @@ use livrarr_domain::services::{
 };
 use livrarr_http::HttpClient;
 
+use crate::live_config::LiveMetadataConfig;
+
 /// Concrete implementation of the domain `LlmCaller` trait.
 ///
 /// Calls an OpenAI-compatible chat/completions endpoint, rendering
 /// caller-supplied templates with context values before sending.
+///
+/// Reads credentials from `LiveMetadataConfig` per-call so UI config
+/// changes propagate immediately without a server restart.
 pub struct LlmCallerImpl {
-    endpoint: Option<String>,
-    api_key: Option<String>,
-    model: Option<String>,
+    live_config: LiveMetadataConfig,
     client: HttpClient,
 }
 
 impl LlmCallerImpl {
-    pub fn new(
-        endpoint: Option<String>,
-        api_key: Option<String>,
-        model: Option<String>,
-        client: HttpClient,
-    ) -> Self {
+    pub fn new(live_config: LiveMetadataConfig, client: HttpClient) -> Self {
         Self {
-            endpoint,
-            api_key,
-            model,
+            live_config,
             client,
         }
     }
 
-    /// Convenience constructor for no-LLM mode.
+    /// Convenience constructor for no-LLM mode (tests / unconfigured).
     pub fn not_configured() -> Self {
+        use livrarr_db::MetadataConfig;
         Self {
-            endpoint: None,
-            api_key: None,
-            model: None,
+            live_config: LiveMetadataConfig::new(MetadataConfig {
+                hardcover_enabled: false,
+                hardcover_api_token: None,
+                llm_enabled: false,
+                llm_provider: None,
+                llm_endpoint: None,
+                llm_api_key: None,
+                llm_model: None,
+                audnexus_url: String::new(),
+                languages: vec![],
+            }),
             client: HttpClient::builder()
                 .build()
                 .expect("default HttpClient build"),
@@ -53,16 +58,23 @@ impl LlmCaller for LlmCallerImpl {
             }
         }
 
-        // 2. Check configuration.
-        let endpoint = self
-            .endpoint
+        // 2. Read credentials from live config (per-call resolution).
+        let cfg = self.live_config.snapshot();
+        let endpoint = cfg
+            .llm_endpoint
             .as_deref()
+            .filter(|s| !s.trim().is_empty())
             .ok_or(DomainLlmError::NotConfigured)?;
-        let api_key = self
-            .api_key
+        let api_key = cfg
+            .llm_api_key
             .as_deref()
+            .filter(|s| !s.trim().is_empty())
             .ok_or(DomainLlmError::NotConfigured)?;
-        let model = self.model.as_deref().unwrap_or("gpt-4o");
+        let model = cfg
+            .llm_model
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("gpt-4o");
 
         // 3. Render templates.
         let system_prompt = render_template(req.system_template, &req.context);

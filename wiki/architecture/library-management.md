@@ -1,6 +1,6 @@
 # Library Management
 
-File organization, import, and library item tracking. Primarily `livrarr-organize` with `livrarr-tagwrite`.
+File organization, import, and library item tracking. Primarily `livrarr-library` with `livrarr-tagwrite`.
 
 ## Filesystem Layout (Opinionated, Enforced)
 

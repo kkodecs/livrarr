@@ -21,6 +21,7 @@ interface UIState {
   theme: Theme;
   tourRunning: boolean;
   rpmHighlight: boolean;
+  checkForUpdates: boolean;
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   setMobileSidebarOpen: (open: boolean) => void;
@@ -36,6 +37,7 @@ interface UIState {
   setTheme: (theme: Theme) => void;
   setTourRunning: (running: boolean) => void;
   setRpmHighlight: (highlight: boolean) => void;
+  setCheckForUpdates: (value: boolean) => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -57,6 +59,7 @@ export const useUIStore = create<UIState>()(
       theme: "dark",
       tourRunning: false,
       rpmHighlight: false,
+      checkForUpdates: false,
       toggleSidebar: () =>
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
@@ -75,6 +78,7 @@ export const useUIStore = create<UIState>()(
       setTheme: (theme) => set({ theme }),
       setTourRunning: (running) => set({ tourRunning: running }),
       setRpmHighlight: (highlight) => set({ rpmHighlight: highlight }),
+      setCheckForUpdates: (value) => set({ checkForUpdates: value }),
     }),
     {
       name: "livrarr_ui",

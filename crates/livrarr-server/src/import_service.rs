@@ -76,7 +76,8 @@ impl ImportService for LiveImportService {
         };
 
         let tag_metadata = crate::handlers::import::build_tag_metadata(&work);
-        let cover_data = crate::handlers::import::read_cover_bytes(state, req.work_id).await;
+        let cover_data =
+            crate::handlers::import::read_cover_bytes(state, req.user_id, req.work_id).await;
 
         let media_mgmt = match state.settings_service.get_media_management_config().await {
             Ok(cfg) => cfg,

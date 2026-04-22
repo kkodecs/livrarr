@@ -222,9 +222,7 @@ function SidebarGroup({
   const collapsed = useUIStore((s) => s.sidebarCollapsed);
 
   const isActive = group.children.some(
-    (item) =>
-      location.pathname === item.path ||
-      (item.path !== "/" && location.pathname.startsWith(item.path)),
+    (item) => location.pathname === item.path,
   );
   const [open, setOpen] = useState(isActive);
 
@@ -314,7 +312,7 @@ function SidebarItem({
   return (
     <NavLink
       to={item.path}
-      end={item.path === "/"}
+      end
       onClick={onNavigate}
       className={({ isActive }) =>
         cn(
@@ -336,13 +334,17 @@ const REPO_URL = "https://github.com/kkodecs/livrarr";
 const RELEASES_API = "https://api.github.com/repos/kkodecs/livrarr/releases/latest";
 
 function useVersionCheck() {
+  const checkForUpdates = useUIStore((s) => s.checkForUpdates);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [latestUrl, setLatestUrl] = useState<string | null>(null);
 
   useEffect(() => {
     getSystemStatus().then((s) => setCurrentVersion(s.version)).catch(() => {});
+  }, []);
 
+  useEffect(() => {
+    if (!checkForUpdates) return;
     fetch(RELEASES_API)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -353,10 +355,10 @@ function useVersionCheck() {
         }
       })
       .catch(() => {});
-  }, []);
+  }, [checkForUpdates]);
 
   const hasUpdate =
-    currentVersion && latestVersion && latestVersion !== currentVersion;
+    checkForUpdates && currentVersion && latestVersion && latestVersion !== currentVersion;
 
   return { currentVersion, latestVersion, latestUrl, hasUpdate };
 }

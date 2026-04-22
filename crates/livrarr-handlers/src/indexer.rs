@@ -72,7 +72,7 @@ async fn test_indexer_caps<S: AppContext>(
     }
 
     let resp = state
-        .http_client()
+        .http_client_safe()
         .inner()
         .get(&caps_url)
         .timeout(Duration::from_secs(10))
@@ -409,8 +409,7 @@ pub async fn import_from_prowlarr<S: AppContext>(
     let fetch_url = format!("{base}/api/v1/indexer");
 
     let resp = state
-        .http_client()
-        .inner()
+        .http_client_safe()
         .get(&fetch_url)
         .header("X-Api-Key", &api_key)
         .timeout(Duration::from_secs(15))

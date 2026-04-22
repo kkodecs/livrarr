@@ -41,7 +41,7 @@ pub async fn proxy_cover<S: AppContext>(
             .into_response();
     }
 
-    let resp = match state.http_client().get(url).send().await {
+    let resp = match state.http_client_safe().get(url).send().await {
         Ok(r) => r,
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };

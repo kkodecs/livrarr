@@ -77,6 +77,7 @@ pub trait AppContext: Clone + Send + Sync + 'static {
 
     // --- Infrastructure accessors ---
     fn http_client(&self) -> &HttpClient;
+    fn http_client_safe(&self) -> &HttpClient;
     fn data_dir(&self) -> &std::path::Path;
     fn startup_time(&self) -> chrono::DateTime<chrono::Utc>;
     fn provider_health(&self) -> &Self::ProviderHealth;

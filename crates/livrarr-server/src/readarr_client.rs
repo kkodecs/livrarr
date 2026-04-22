@@ -32,7 +32,7 @@ impl ReadarrClient {
             .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
-            .map_err(|e| ReadarrError::Network(e.to_string()))?;
+            .map_err(|e| ReadarrError::Network(e.without_url().to_string()))?;
 
         let status = resp.status();
         if !status.is_success() {

@@ -59,32 +59,70 @@ pub trait AuthService: Send + Sync {
     async fn verify_token(&self, token: &str) -> Result<i64, AuthError>;
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginRequest {
     pub username: String,
+    #[serde(skip_serializing)]
     pub password: String,
     pub remember_me: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for LoginRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginRequest")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("remember_me", &self.remember_me)
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginResponse {
     pub token: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for LoginResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginResponse")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetupRequest {
     pub username: String,
+    #[serde(skip_serializing)]
     pub password: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for SetupRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetupRequest")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetupResponse {
     pub api_key: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for SetupResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetupResponse")
+            .field("api_key", &"[REDACTED]")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,33 +131,73 @@ pub struct SetupStatusResponse {
     pub setup_required: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProfileRequest {
     pub username: Option<String>,
+    #[serde(skip_serializing)]
     pub password: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for UpdateProfileRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateProfileRequest")
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKeyResponse {
     pub api_key: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for ApiKeyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyResponse")
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminCreateUserRequest {
     pub username: String,
+    #[serde(skip_serializing)]
     pub password: String,
     pub role: UserRole,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for AdminCreateUserRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminCreateUserRequest")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("role", &self.role)
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminUpdateUserRequest {
     pub username: Option<String>,
+    #[serde(skip_serializing)]
     pub password: Option<String>,
     pub role: Option<UserRole>,
+}
+
+impl std::fmt::Debug for AdminUpdateUserRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminUpdateUserRequest")
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("role", &self.role)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -13,14 +13,20 @@ fn row_to_root_folder(row: sqlx::sqlite::SqliteRow) -> Result<RootFolder, DbErro
         media_type: parse_media_type(
             &row.try_get::<String, _>("media_type")
                 .map_err(|e| DbError::Io(Box::new(e)))?,
-        ),
+        )?,
     })
 }
 
-fn parse_media_type(s: &str) -> MediaType {
+fn parse_media_type(s: &str) -> Result<MediaType, DbError> {
     match s {
-        "audiobook" => MediaType::Audiobook,
-        _ => MediaType::Ebook,
+        "ebook" => Ok(MediaType::Ebook),
+        "audiobook" => Ok(MediaType::Audiobook),
+        other => Err(DbError::DataCorruption {
+            table: "root_folders",
+            column: "media_type",
+            row_id: 0,
+            detail: format!("unknown value: {other:?}"),
+        }),
     }
 }
 

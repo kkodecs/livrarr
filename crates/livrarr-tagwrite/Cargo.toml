@@ -7,7 +7,9 @@ license = "GPL-3.0-only"
 [dependencies]
 thiserror = { workspace = true }
 tokio = { workspace = true }
+futures = "0.3"
 tracing = "0.1"
+tempfile = "3"
 livrarr-domain = { workspace = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.37"

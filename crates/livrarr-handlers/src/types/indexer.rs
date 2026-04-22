@@ -21,7 +21,7 @@ fn default_torrent_protocol() -> String {
     "torrent".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateIndexerApiRequest {
     pub name: String,
@@ -45,7 +45,22 @@ pub struct CreateIndexerApiRequest {
     pub enabled: bool,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for CreateIndexerApiRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateIndexerApiRequest")
+            .field("name", &self.name)
+            .field("protocol", &self.protocol)
+            .field("url", &self.url)
+            .field("api_path", &self.api_path)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("categories", &self.categories)
+            .field("priority", &self.priority)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateIndexerApiRequest {
     pub name: Option<String>,
@@ -59,6 +74,20 @@ pub struct UpdateIndexerApiRequest {
     pub enable_interactive_search: Option<bool>,
     pub enable_rss: Option<bool>,
     pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for UpdateIndexerApiRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateIndexerApiRequest")
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("api_path", &self.api_path)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("categories", &self.categories)
+            .field("priority", &self.priority)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -80,12 +109,22 @@ pub struct IndexerResponse {
     pub added_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestIndexerApiRequest {
     pub url: String,
     pub api_path: String,
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for TestIndexerApiRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestIndexerApiRequest")
+            .field("url", &self.url)
+            .field("api_path", &self.api_path)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]

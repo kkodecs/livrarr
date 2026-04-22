@@ -1143,3 +1143,11 @@ pub struct QueueProgress {
     pub eta: Option<i64>,
     pub download_status: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSummary {
+    pub total: i64,
+    pub downloading: i64,
+    pub importing: i64,
+}

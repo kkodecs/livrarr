@@ -209,13 +209,61 @@ pub async fn update(
     Json(req): Json<UpdateWorkRequest>,
 ) -> Result<Json<WorkDetailResponse>, ApiError> {
     use livrarr_domain::services::{UpdateWorkRequest as DomainUpdateWorkRequest, WorkService};
+    use livrarr_handlers::types::api_error::FieldError;
+
+    let mut errors = Vec::new();
+    if matches!(req.title, Some(None)) {
+        errors.push(FieldError {
+            field: "title".into(),
+            message: "cannot be null".into(),
+        });
+    }
+    if matches!(req.author_name, Some(None)) {
+        errors.push(FieldError {
+            field: "authorName".into(),
+            message: "cannot be null".into(),
+        });
+    }
+    if matches!(req.monitor_ebook, Some(None)) {
+        errors.push(FieldError {
+            field: "monitorEbook".into(),
+            message: "cannot be null".into(),
+        });
+    }
+    if matches!(req.monitor_audiobook, Some(None)) {
+        errors.push(FieldError {
+            field: "monitorAudiobook".into(),
+            message: "cannot be null".into(),
+        });
+    }
+    if let Some(Some(ref t)) = req.title {
+        if t.trim().is_empty() {
+            errors.push(FieldError {
+                field: "title".into(),
+                message: "cannot be empty".into(),
+            });
+        }
+    }
+    if let Some(Some(ref a)) = req.author_name {
+        if a.trim().is_empty() {
+            errors.push(FieldError {
+                field: "authorName".into(),
+                message: "cannot be empty".into(),
+            });
+        }
+    }
+    if !errors.is_empty() {
+        return Err(ApiError::Validation { errors });
+    }
 
     let cleaned_title = req
         .title
+        .flatten()
         .as_deref()
         .map(livrarr_metadata::title_cleanup::clean_title);
     let cleaned_author = req
         .author_name
+        .flatten()
         .as_deref()
         .map(livrarr_metadata::title_cleanup::clean_author);
 
@@ -229,8 +277,8 @@ pub async fn update(
                 author_name: cleaned_author,
                 series_name: req.series_name,
                 series_position: req.series_position,
-                monitor_ebook: req.monitor_ebook,
-                monitor_audiobook: req.monitor_audiobook,
+                monitor_ebook: req.monitor_ebook.flatten(),
+                monitor_audiobook: req.monitor_audiobook.flatten(),
             },
         )
         .await?;

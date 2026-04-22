@@ -24,7 +24,17 @@ pub struct ProwlarrConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for ProwlarrConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProwlarrConfig")
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct MetadataConfig {
     pub hardcover_enabled: bool,
     pub hardcover_api_token: Option<String>,
@@ -35,6 +45,28 @@ pub struct MetadataConfig {
     pub llm_model: Option<String>,
     pub audnexus_url: String,
     pub languages: Vec<String>,
+}
+
+impl std::fmt::Debug for MetadataConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetadataConfig")
+            .field("hardcover_enabled", &self.hardcover_enabled)
+            .field(
+                "hardcover_api_token",
+                &self.hardcover_api_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("llm_enabled", &self.llm_enabled)
+            .field("llm_provider", &self.llm_provider)
+            .field("llm_endpoint", &self.llm_endpoint)
+            .field(
+                "llm_api_key",
+                &self.llm_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("llm_model", &self.llm_model)
+            .field("audnexus_url", &self.audnexus_url)
+            .field("languages", &self.languages)
+            .finish()
+    }
 }
 
 #[derive(Default)]
@@ -48,6 +80,22 @@ pub struct EmailConfig {
     pub from_address: Option<String>,
     pub recipient_email: Option<String>,
     pub send_on_import: bool,
+}
+
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailConfig")
+            .field("enabled", &self.enabled)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("encryption", &self.encryption)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("from_address", &self.from_address)
+            .field("recipient_email", &self.recipient_email)
+            .field("send_on_import", &self.send_on_import)
+            .finish()
+    }
 }
 
 // =============================================================================

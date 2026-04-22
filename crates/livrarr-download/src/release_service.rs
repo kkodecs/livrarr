@@ -35,49 +35,24 @@ pub fn derive_media_type_from_categories(categories: &[i32]) -> Option<MediaType
     None
 }
 
-/// Simple SSRF check — reject private/loopback IPs in download URLs.
+/// Reject download URLs with private/loopback IP literals.
+/// Hostname-based URLs are validated at connection time by the SSRF-safe DNS resolver.
 fn is_ssrf_url(url: &str) -> bool {
-    // Parse out the host from the URL
-    let host = if let Some(rest) = url.strip_prefix("http://") {
-        rest
-    } else if let Some(rest) = url.strip_prefix("https://") {
-        rest
-    } else {
-        // Non-HTTP URLs (magnet, etc.) are not subject to SSRF
-        return false;
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return false,
     };
-
-    // Extract host portion (before port/path)
-    let host = host.split('/').next().unwrap_or(host);
-    let host = host.split(':').next().unwrap_or(host);
-    let host = host.to_lowercase();
-
-    // Check for private/loopback addresses
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
-        return true;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
     }
-
-    // Check for private IP ranges
-    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
-        let octets = ip.octets();
-        // 10.x.x.x
-        if octets[0] == 10 {
-            return true;
+    if let Some(host) = parsed.host_str() {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return livrarr_http::ssrf::is_private_ip(ip);
         }
-        // 172.16.0.0 - 172.31.255.255
-        if octets[0] == 172 && (16..=31).contains(&octets[1]) {
-            return true;
-        }
-        // 192.168.x.x
-        if octets[0] == 192 && octets[1] == 168 {
-            return true;
-        }
-        // 169.254.x.x (link-local)
-        if octets[0] == 169 && octets[1] == 254 {
+        if host == "localhost" {
             return true;
         }
     }
-
     false
 }
 
@@ -503,9 +478,10 @@ async fn dispatch_torrent<H: HttpFetcher>(
     // Add torrent via URL
     let add_url = format!("{base}/api/v2/torrents/add");
     let boundary = "----livrarr-boundary";
+    let safe_url = sanitize_multipart_value(download_url);
+    let safe_category = sanitize_multipart_value(&client.category);
     let body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"urls\"\r\n\r\n{download_url}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\n{}\r\n--{boundary}--\r\n",
-        client.category
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"urls\"\r\n\r\n{safe_url}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\n{safe_category}\r\n--{boundary}--\r\n",
     );
 
     let add_resp = http
@@ -640,6 +616,11 @@ async fn dispatch_usenet<H: HttpFetcher>(
     }
 }
 
+/// Strip CR and LF from a string to prevent CRLF injection in multipart headers/values.
+fn sanitize_multipart_value(s: &str) -> String {
+    s.chars().filter(|&c| c != '\r' && c != '\n').collect()
+}
+
 fn build_multipart_addfile(
     boundary: &str,
     fields: &[(&str, &str)],
@@ -651,22 +632,27 @@ fn build_multipart_addfile(
     let mut body = Vec::new();
 
     for (name, value) in fields {
+        let safe_name = sanitize_multipart_value(name);
+        let safe_value = sanitize_multipart_value(value);
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            format!("Content-Disposition: form-data; name=\"{safe_name}\"\r\n\r\n").as_bytes(),
         );
-        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(safe_value.as_bytes());
         body.extend_from_slice(b"\r\n");
     }
 
+    let safe_file_field = sanitize_multipart_value(file_field);
+    let safe_file_name = sanitize_multipart_value(file_name);
+    let safe_mime = sanitize_multipart_value(mime);
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     body.extend_from_slice(
         format!(
-            "Content-Disposition: form-data; name=\"{file_field}\"; filename=\"{file_name}\"\r\n"
+            "Content-Disposition: form-data; name=\"{safe_file_field}\"; filename=\"{safe_file_name}\"\r\n"
         )
         .as_bytes(),
     );
-    body.extend_from_slice(format!("Content-Type: {mime}\r\n\r\n").as_bytes());
+    body.extend_from_slice(format!("Content-Type: {safe_mime}\r\n\r\n").as_bytes());
     body.extend_from_slice(file_bytes);
     body.extend_from_slice(b"\r\n");
 

@@ -149,10 +149,5 @@ pub fn is_llm_configured(
 }
 
 pub fn is_foreign_source(metadata_source: Option<&str>) -> bool {
-    match metadata_source {
-        None => false,
-        Some("OpenLibrary") => false,
-        Some("readarr") => false,
-        Some(_) => true,
-    }
+    livrarr_domain::is_foreign_source(metadata_source)
 }

@@ -87,7 +87,16 @@ impl NotificationDb for SqliteDb {
             .fetch_all(self.pool())
             .await
             .map_err(map_db_err)?;
-        rows.into_iter().map(row_to_notification).collect()
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row_to_notification(row) {
+                Ok(n) => results.push(n),
+                Err(e) => {
+                    tracing::warn!("notifications: skipping corrupt row: {e}");
+                }
+            }
+        }
+        Ok(results)
     }
 
     async fn list_notifications_paginated(
@@ -122,10 +131,15 @@ impl NotificationDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
 
-        let items = rows
-            .into_iter()
-            .map(row_to_notification)
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row_to_notification(row) {
+                Ok(n) => items.push(n),
+                Err(e) => {
+                    tracing::warn!("notifications: skipping corrupt row in paginated list: {e}");
+                }
+            }
+        }
         Ok((items, total))
     }
 
@@ -137,9 +151,7 @@ impl NotificationDb for SqliteDb {
         let type_str = notification_type_str(req.notification_type);
         let data_str = serde_json::to_string(&req.data).map_err(|e| DbError::Io(Box::new(e)))?;
 
-        // Dedup: use explicit `= ?` for non-NULL ref_key and `IS NULL` for NULL.
-        // `ref_key IS ?` is wrong for non-NULL because SQLite's IS operator is
-        // meant for NULL-safe comparison and behaves unexpectedly with bound params.
+        // Dedup check: use explicit `= ?` for non-NULL ref_key and `IS NULL` for NULL.
         let existing = if req.ref_key.is_some() {
             sqlx::query(
                 "SELECT id FROM notifications WHERE user_id = ? AND type = ? AND ref_key = ?",
@@ -171,11 +183,9 @@ impl NotificationDb for SqliteDb {
             return row_to_notification(row);
         }
 
-        // For non-NULL ref_key, INSERT OR IGNORE leverages the unique index
-        // (user_id, type, ref_key) to atomically prevent duplicates from a
-        // concurrent INSERT that slipped past the SELECT above.
-        // For NULL ref_key, SQLite unique indexes treat NULLs as distinct,
-        // so duplicates are allowed — the SELECT dedup above is best-effort.
+        // INSERT OR IGNORE leverages the expression unique index
+        // idx_notifications_dedup(user_id, type, COALESCE(ref_key, '__null__'))
+        // to atomically prevent duplicates even for NULL ref_key values.
         let result = sqlx::query(
             "INSERT OR IGNORE INTO notifications (user_id, type, ref_key, message, data, created_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -204,8 +214,6 @@ impl NotificationDb for SqliteDb {
                 .await
                 .map_err(map_db_err)?
             } else {
-                // NULL ref_key: shouldn't reach here since unique index doesn't
-                // conflict on NULLs, but handle gracefully.
                 sqlx::query(
                     "SELECT id FROM notifications WHERE user_id = ? AND type = ? AND ref_key IS NULL ORDER BY id DESC LIMIT 1",
                 )

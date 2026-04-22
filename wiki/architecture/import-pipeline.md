@@ -1,6 +1,6 @@
 # Import Pipeline
 
-How files get from download directory to organized library. Spans `livrarr-organize` and `livrarr-tagwrite`.
+How files get from download directory to organized library. Spans `livrarr-library` and `livrarr-tagwrite`.
 
 ## Auto-Import Flow
 

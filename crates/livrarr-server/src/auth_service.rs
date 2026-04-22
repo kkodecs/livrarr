@@ -1,12 +1,13 @@
-//! Production AuthService using real crypto and SqliteDb.
+//! Production AuthService, generic over crypto backend.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use tokio::sync::RwLock;
+use tracing::{info, warn};
 
-use crate::auth_crypto::{AuthCryptoService, RealAuthCrypto};
+use crate::auth_crypto::AuthCryptoService;
 use crate::*;
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::{
@@ -18,9 +19,9 @@ const MAX_LOCKOUT_ENTRIES: usize = 10_000;
 /// Number of entries to evict when the map exceeds the maximum.
 const EVICT_COUNT: usize = 1_000;
 
-pub struct ServerAuthService {
+pub struct ServerAuthService<C: AuthCryptoService> {
     db: SqliteDb,
-    crypto: RealAuthCrypto,
+    crypto: C,
     lockouts: Arc<RwLock<HashMap<String, LockoutState>>>,
 }
 
@@ -29,11 +30,11 @@ struct LockoutState {
     locked_until: Option<chrono::DateTime<Utc>>,
 }
 
-impl ServerAuthService {
-    pub fn new(db: SqliteDb) -> Self {
+impl<C: AuthCryptoService> ServerAuthService<C> {
+    pub fn new(db: SqliteDb, crypto: C) -> Self {
         Self {
             db,
-            crypto: RealAuthCrypto,
+            crypto,
             lockouts: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -100,13 +101,14 @@ impl ServerAuthService {
                 locked_until: None,
             });
         state.failures += 1;
-        if state.failures >= 5 {
+        if state.failures >= 5 && state.locked_until.is_none() {
             state.locked_until = Some(Utc::now() + Duration::minutes(15));
+            warn!(username = %username, "account locked out after 5 failed attempts");
         }
     }
 }
 
-impl AuthService for ServerAuthService {
+impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
     async fn login(&self, req: LoginRequest) -> Result<LoginResponse, AuthError> {
         let username_lower = req.username.to_lowercase();
 
@@ -131,6 +133,7 @@ impl AuthService for ServerAuthService {
                 // Dummy hash to mask timing
                 let _ = self.crypto.hash_password("dummy").await;
                 self.record_failure(&username_lower).await;
+                warn!(username = %req.username, "login failed: user not found");
                 return Err(AuthError::InvalidCredentials);
             }
             Err(e) => return Err(AuthError::Db(e)),
@@ -145,6 +148,7 @@ impl AuthService for ServerAuthService {
 
         if !valid {
             self.record_failure(&username_lower).await;
+            warn!(username = %req.username, "login failed: invalid password");
             return Err(AuthError::InvalidCredentials);
         }
 
@@ -184,6 +188,7 @@ impl AuthService for ServerAuthService {
             .await
             .map_err(AuthError::Db)?;
 
+        info!(username = %req.username, user_id = user.id, "login successful");
         Ok(LoginResponse { token })
     }
 
@@ -192,6 +197,7 @@ impl AuthService for ServerAuthService {
             .delete_session(token_hash)
             .await
             .map_err(AuthError::Db)?;
+        info!("session deleted (logout)");
         Ok(())
     }
 
@@ -293,6 +299,7 @@ impl AuthService for ServerAuthService {
                 .delete_user_sessions(user_id)
                 .await
                 .map_err(AuthError::Db)?;
+            info!(user_id = user_id, "password changed via profile update");
         }
         let user = self
             .db

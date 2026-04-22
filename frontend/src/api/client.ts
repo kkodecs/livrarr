@@ -88,6 +88,45 @@ async function normalizeError(res: Response): Promise<ApiErrorResponse> {
   return { status: res.status, ...fallback };
 }
 
+async function handleResponse<T>(res: Response): Promise<T> {
+  if (res.status === 401) {
+    clearAuth();
+    throw new ApiError({
+      status: 401,
+      error: "unauthorized",
+      message: "Session expired",
+    });
+  }
+
+  if (!res.ok) {
+    throw new ApiError(await normalizeError(res));
+  }
+
+  if (res.status === 204 || res.headers.get("content-length") === "0") {
+    return undefined as T;
+  }
+
+  const text = await res.text();
+  if (!text) {
+    return undefined as T;
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return undefined as T;
+  }
+}
+
+function doFetch(url: string, options: RequestInit): Promise<Response> {
+  return fetch(url, options).catch(() => {
+    throw new ApiError({
+      status: 0,
+      error: "network_error",
+      message: "Unable to reach Livrarr",
+    });
+  });
+}
+
 export async function apiFetch<T>(
   path: string,
   options: RequestInit = {},
@@ -105,45 +144,8 @@ export async function apiFetch<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  let res: Response;
-  try {
-    res = await fetch(`/api/v1${path}`, { ...options, headers });
-  } catch {
-    throw new ApiError({
-      status: 0,
-      error: "network_error",
-      message: "Unable to reach Livrarr",
-    });
-  }
-
-  if (res.status === 401) {
-    clearAuth();
-    throw new ApiError({
-      status: 401,
-      error: "unauthorized",
-      message: "Session expired",
-    });
-  }
-
-  if (!res.ok) {
-    throw new ApiError(await normalizeError(res));
-  }
-
-  if (res.status === 204 || res.headers.get("content-length") === "0") {
-    return undefined as T;
-  }
-
-  // HTTP/2 and some proxies omit content-length even on empty bodies.
-  // Read as text first so we never throw on an empty/non-JSON 2xx body.
-  const text = await res.text();
-  if (!text) {
-    return undefined as T;
-  }
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return undefined as T;
-  }
+  const res = await doFetch(`/api/v1${path}`, { ...options, headers });
+  return handleResponse<T>(res);
 }
 
 export async function apiUpload<T>(path: string, file: Blob): Promise<T> {
@@ -156,47 +158,10 @@ export async function apiUpload<T>(path: string, file: Blob): Promise<T> {
   const formData = new FormData();
   formData.append("image_data", file);
 
-  let res: Response;
-  try {
-    res = await fetch(`/api/v1${path}`, {
-      method: "POST",
-      headers,
-      body: formData,
-    });
-  } catch {
-    throw new ApiError({
-      status: 0,
-      error: "network_error",
-      message: "Unable to reach Livrarr",
-    });
-  }
-
-  if (res.status === 401) {
-    clearAuth();
-    throw new ApiError({
-      status: 401,
-      error: "unauthorized",
-      message: "Session expired",
-    });
-  }
-
-  if (!res.ok) {
-    throw new ApiError(await normalizeError(res));
-  }
-
-  if (res.status === 204 || res.headers.get("content-length") === "0") {
-    return undefined as T;
-  }
-
-  // Mirror the safe JSON parsing from apiFetch — read as text first so we
-  // never throw on an empty/non-JSON 2xx body.
-  const text = await res.text();
-  if (!text) {
-    return undefined as T;
-  }
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return undefined as T;
-  }
+  const res = await doFetch(`/api/v1${path}`, {
+    method: "POST",
+    headers,
+    body: formData,
+  });
+  return handleResponse<T>(res);
 }

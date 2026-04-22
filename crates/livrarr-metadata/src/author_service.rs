@@ -51,8 +51,8 @@ where
                     existing.id,
                     UpdateAuthorDbRequest {
                         name: None,
-                        sort_name: req.sort_name,
-                        ol_key: req.ol_key,
+                        sort_name: req.sort_name.map(Some),
+                        ol_key: req.ol_key.map(Some),
                         gr_key: None,
                         monitored: None,
                         monitor_new_items: None,
@@ -393,7 +393,7 @@ where
                 UpdateAuthorDbRequest {
                     name: None,
                     sort_name: None,
-                    ol_key: Some(ol_key.clone()),
+                    ol_key: Some(Some(ol_key.clone())),
                     gr_key: None,
                     monitored: None,
                     monitor_new_items: None,

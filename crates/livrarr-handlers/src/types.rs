@@ -1,6 +1,18 @@
 pub mod api_error;
 pub mod auth;
 pub mod author;
+
+pub mod double_option {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Ok(Some(Option::deserialize(deserializer)?))
+    }
+}
 pub mod config;
 pub mod download_client;
 pub mod history;

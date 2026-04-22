@@ -10,6 +10,14 @@ export function AuthGuard({ children }: { children: ReactNode }) {
     return null;
   }
 
+  if (status === "auth_unknown") {
+    return (
+      <div style={{ padding: "2rem", textAlign: "center" }}>
+        <p>Unable to reach the server. Retrying on next page load...</p>
+      </div>
+    );
+  }
+
   if (status === "setup_required") {
     return <Navigate to="/setup" replace />;
   }

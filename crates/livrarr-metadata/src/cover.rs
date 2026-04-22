@@ -1,10 +1,22 @@
 use livrarr_http::HttpClient;
 
+/// Validate that an ISBN string contains only digits and an optional trailing X.
+/// Rejects any input that could be used for URL injection.
+fn is_valid_isbn(isbn: &str) -> bool {
+    if isbn.is_empty() {
+        return false;
+    }
+    let bytes = isbn.as_bytes();
+    let (body, last) = bytes.split_at(bytes.len() - 1);
+    body.iter().all(|b| b.is_ascii_digit())
+        && (last[0].is_ascii_digit() || last[0] == b'X' || last[0] == b'x')
+}
+
 /// Attempt to resolve a cover image URL from an ISBN using OpenLibrary.
 /// Used for English works only.
 pub async fn resolve_cover_by_isbn_ol(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
     let isbn = isbn?;
-    if isbn.is_empty() {
+    if !is_valid_isbn(isbn) {
         return None;
     }
 
@@ -26,7 +38,7 @@ pub async fn resolve_cover_by_isbn_ol(http: &HttpClient, isbn: Option<&str>) -> 
 /// or a 1x1 pixel for missing ones — we check Content-Length to filter).
 pub async fn resolve_cover_by_isbn_amazon(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
     let isbn = isbn?;
-    if isbn.is_empty() {
+    if !is_valid_isbn(isbn) {
         return None;
     }
 
@@ -87,6 +99,9 @@ pub async fn resolve_cover_by_isbn_casadellibro(
     isbn: Option<&str>,
 ) -> Option<String> {
     let isbn = isbn?;
+    if !is_valid_isbn(isbn) {
+        return None;
+    }
     let clean: String = isbn.chars().filter(|c| c.is_ascii_digit()).collect();
     if clean.len() != 13 {
         return None;
@@ -130,6 +145,18 @@ pub async fn resolve_cover_english(http: &HttpClient, isbn: Option<&str>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isbn_validation() {
+        assert!(is_valid_isbn("9780306406157"));
+        assert!(is_valid_isbn("012000030X"));
+        assert!(is_valid_isbn("012000030x"));
+        assert!(!is_valid_isbn(""));
+        assert!(!is_valid_isbn("978-0-306-40615-7")); // hyphens rejected
+        assert!(!is_valid_isbn("978030640615X7")); // X not at end
+        assert!(!is_valid_isbn("../../../etc/passwd"));
+        assert!(!is_valid_isbn("9780306406157&extra=inject"));
+    }
 
     #[test]
     fn isbn13_to_isbn10_valid() {

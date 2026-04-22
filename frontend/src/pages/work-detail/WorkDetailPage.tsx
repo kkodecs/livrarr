@@ -38,6 +38,7 @@ import {
   sendFileEmail,
   getQueue,
 } from "@/api";
+import { computeTotalPages } from "@/utils/pagination";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
@@ -589,6 +590,7 @@ function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
 // --- Releases Tab ---
 
 function ReleasesTab({ workId }: { workId: number }) {
+  const queryClient = useQueryClient();
   const [ebookFormatFilter, setEbookFormatFilter] = useState<Set<string> | null>(null);
   const [audiobookFormatFilter, setAudiobookFormatFilter] = useState<Set<string> | null>(null);
 
@@ -1369,7 +1371,7 @@ function PaginatedReleaseTable({
   grabMutation: { mutate: (r: ReleaseResponse) => void; isPending: boolean };
 }) {
   const [page, setPage] = useState(0);
-  const totalPages = Math.ceil(items.length / PAGE_SIZE);
+  const totalPages = computeTotalPages(items.length, PAGE_SIZE);
   const pageItems = items.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   // Reset to page 0 when items change (sort, filter).

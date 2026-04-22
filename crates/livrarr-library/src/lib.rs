@@ -217,3 +217,31 @@ pub struct CwaResult {
     pub success: bool,
     pub warning: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Atomic File Operations
+// ---------------------------------------------------------------------------
+
+pub async fn atomic_copy(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<u64> {
+    let src = src.to_path_buf();
+    let dst = dst.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let parent = dst.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path has no parent directory",
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let mut src_file = std::fs::File::open(&src)?;
+        let tmp = tempfile::NamedTempFile::new_in(parent)?;
+        let mut dst_file = tmp.as_file().try_clone()?;
+        let copied = std::io::copy(&mut src_file, &mut dst_file)?;
+        dst_file.sync_all()?;
+        drop(dst_file);
+        tmp.persist(&dst).map_err(|e| e.error)?;
+        Ok(copied)
+    })
+    .await
+    .expect("spawn_blocking panicked")
+}

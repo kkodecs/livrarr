@@ -87,7 +87,7 @@ export default function HistoryPage() {
 
   const { data: works } = useQuery({
     queryKey: ["works"],
-    queryFn: listWorks,
+    queryFn: () => listWorks(),
     select: (res) => res.items,
   });
 

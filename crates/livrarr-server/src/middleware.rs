@@ -26,19 +26,33 @@ pub async fn auth_middleware(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if let Ok(Some(session)) = state.db.get_session(&token_hash).await {
-            if let Ok(user) = state.db.get_user(session.user_id).await {
-                let ctx = AuthContext {
-                    user,
-                    auth_type: AuthType::Session,
-                    session_token_hash: Some(token_hash),
-                };
-                req.extensions_mut().insert(ctx);
-                return Ok(next.run(req).await);
+        match state.db.get_session(&token_hash).await {
+            Ok(Some(session)) => match state.db.get_user(session.user_id).await {
+                Ok(user) => {
+                    let ctx = AuthContext {
+                        user,
+                        auth_type: AuthType::Session,
+                        session_token_hash: Some(token_hash),
+                    };
+                    req.extensions_mut().insert(ctx);
+                    return Ok(next.run(req).await);
+                }
+                Err(livrarr_db::DbError::NotFound { .. }) => {
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+                Err(e) => {
+                    tracing::error!("auth middleware: DB error fetching user: {e}");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            },
+            Ok(None) => {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            Err(e) => {
+                tracing::error!("auth middleware: DB error fetching session: {e}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
         }
-
-        return Err(StatusCode::UNAUTHORIZED);
     }
 
     // Try X-Api-Key
@@ -48,17 +62,24 @@ pub async fn auth_middleware(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if let Ok(user) = state.db.get_user_by_api_key_hash(&key_hash).await {
-            let ctx = AuthContext {
-                user,
-                auth_type: AuthType::ApiKey,
-                session_token_hash: None,
-            };
-            req.extensions_mut().insert(ctx);
-            return Ok(next.run(req).await);
+        match state.db.get_user_by_api_key_hash(&key_hash).await {
+            Ok(user) => {
+                let ctx = AuthContext {
+                    user,
+                    auth_type: AuthType::ApiKey,
+                    session_token_hash: None,
+                };
+                req.extensions_mut().insert(ctx);
+                return Ok(next.run(req).await);
+            }
+            Err(livrarr_db::DbError::NotFound { .. }) => {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            Err(e) => {
+                tracing::error!("auth middleware: DB error looking up API key: {e}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
         }
-
-        return Err(StatusCode::UNAUTHORIZED);
     }
 
     Err(StatusCode::UNAUTHORIZED)

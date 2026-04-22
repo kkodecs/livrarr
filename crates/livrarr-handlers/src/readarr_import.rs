@@ -21,12 +21,12 @@ pub async fn connect<S: AppContext>(
 
 pub async fn preview<S: AppContext>(
     State(state): State<S>,
-    _ctx: crate::AuthContext,
+    ctx: crate::AuthContext,
     Json(req): Json<ReadarrImportRequest>,
 ) -> Result<Json<ReadarrPreviewResponse>, ApiError> {
     state
         .readarr_import_workflow()
-        .preview(req)
+        .preview(ctx.user.id, req)
         .await
         .map(Json)
         .map_err(|e| ApiError::Internal(e.to_string()))

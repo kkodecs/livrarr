@@ -1,4 +1,4 @@
-import { Moon, Sun, Calendar, Clock } from "lucide-react";
+import { Moon, Sun, Calendar, Clock, ArrowUpCircle } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
@@ -15,6 +15,8 @@ export default function UISettingsPage() {
   const setRelativeDates = useUIStore((s) => s.setRelativeDates);
   const dateFormat = useUIStore((s) => s.dateFormat);
   const setDateFormat = useUIStore((s) => s.setDateFormat);
+  const checkForUpdates = useUIStore((s) => s.checkForUpdates);
+  const setCheckForUpdates = useUIStore((s) => s.setCheckForUpdates);
 
   return (
     <>
@@ -80,6 +82,24 @@ export default function UISettingsPage() {
               className="rounded border-border"
             />
             Show relative dates (e.g. "2 hours ago") instead of absolute dates
+          </label>
+        </section>
+        {/* ── Update Check ── */}
+        <section>
+          <div className="flex items-center gap-2 mb-4">
+            <ArrowUpCircle size={18} className="text-muted" />
+            <h2 className="text-base font-semibold text-zinc-100">
+              Update Check
+            </h2>
+          </div>
+          <label className="flex items-center gap-3 text-sm text-zinc-200 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={checkForUpdates}
+              onChange={(e) => setCheckForUpdates(e.target.checked)}
+              className="rounded border-border"
+            />
+            Check GitHub for new releases (fetches from api.github.com)
           </label>
         </section>
       </PageContent>

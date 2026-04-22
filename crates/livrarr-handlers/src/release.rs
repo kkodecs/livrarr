@@ -37,7 +37,7 @@ pub async fn search<S: AppContext>(
         }
     };
 
-    let svc_response = state
+    let svc_response = match state
         .release_service()
         .search(
             ctx.user.id,
@@ -47,7 +47,21 @@ pub async fn search<S: AppContext>(
                 cache_only: q.cache_only,
             },
         )
-        .await?;
+        .await
+    {
+        Ok(resp) => resp,
+        Err(livrarr_domain::services::ReleaseServiceError::AllIndexersFailed) => {
+            return Ok(Json(ReleaseSearchResponse {
+                results: vec![],
+                warnings: vec![SearchWarning {
+                    indexer: String::new(),
+                    error: "All indexers failed".to_string(),
+                }],
+                cache_age_seconds: None,
+            }));
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     let results = svc_response
         .results

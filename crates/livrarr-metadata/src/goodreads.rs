@@ -666,7 +666,10 @@ pub async fn extract_with_llm(
         genres: result
             .genres
             .map(|g| g.into_iter().map(|s| nfc(&s)).collect()),
-        language: result.language,
+        language: result
+            .language
+            .as_deref()
+            .map(livrarr_domain::normalize_language),
         page_count: result.page_count.filter(|&p| p > 0),
         duration_seconds: None,
         publisher: result.publisher.map(|s| nfc(&s)),
@@ -692,8 +695,26 @@ pub async fn extract_with_llm(
 // =============================================================================
 
 /// Validate that a detail URL points to Goodreads (SSRF protection).
+/// Accepts relative paths (`/book/show/...`) and absolute Goodreads URLs.
 pub fn validate_detail_url(url: &str) -> bool {
-    url.starts_with("https://www.goodreads.com/") || url.starts_with("/book/show/")
+    // Allow relative paths for internal use
+    if url.starts_with("/book/show/") {
+        return true;
+    }
+
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+
+    if parsed.scheme() != "https" {
+        return false;
+    }
+
+    match parsed.host_str() {
+        Some(host) => host == "www.goodreads.com" || host == "goodreads.com",
+        None => false,
+    }
 }
 
 /// Validate that a cover URL is from an allowed host (SSRF protection).
@@ -955,28 +976,45 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    fn fixtures_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
     fn fixture_search(filename: &str) -> String {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
+        let path = fixtures_dir()
             .join("build/tmp-goodreads-html")
             .join(filename);
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("Failed to read fixture {}: {}", path.display(), e))
+        if !path.exists() {
+            panic!(
+                "Fixture not found: {}. Goodreads HTML fixtures are local test data \
+                 (not committed to git). Run scripts/fetch-goodreads-fixtures.sh to populate.",
+                path.display()
+            );
+        }
+        std::fs::read_to_string(&path).unwrap()
     }
 
     fn fixture_detail(filename: &str) -> String {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
+        let path = fixtures_dir()
             .join("build/tmp-goodreads-detail")
             .join(filename);
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("Failed to read fixture {}: {}", path.display(), e))
+        if !path.exists() {
+            panic!(
+                "Fixture not found: {}. Goodreads HTML fixtures are local test data \
+                 (not committed to git). Run scripts/fetch-goodreads-fixtures.sh to populate.",
+                path.display()
+            );
+        }
+        std::fs::read_to_string(&path).unwrap()
+    }
+
+    fn has_fixtures() -> bool {
+        fixtures_dir().join("build/tmp-goodreads-detail").is_dir()
     }
 
     // =========================================================================
@@ -1631,12 +1669,10 @@ mod tests {
 
     #[test]
     fn detail_all_have_jsonld_book() {
-        let detail_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("build/tmp-goodreads-detail");
+        if !has_fixtures() {
+            return;
+        }
+        let detail_dir = fixtures_dir().join("build/tmp-goodreads-detail");
 
         let mut parsed = 0;
         let mut with_title = 0;
@@ -1673,12 +1709,10 @@ mod tests {
 
     #[test]
     fn detail_descriptions_are_plain_text() {
-        let detail_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("build/tmp-goodreads-detail");
+        if !has_fixtures() {
+            return;
+        }
+        let detail_dir = fixtures_dir().join("build/tmp-goodreads-detail");
 
         for entry in std::fs::read_dir(&detail_dir).unwrap() {
             let entry = entry.unwrap();
@@ -1721,13 +1755,10 @@ mod tests {
 
     #[test]
     fn detail_all_authors_are_arrays() {
-        // Based on fixture analysis, all authors in our fixtures use array form
-        let detail_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("build/tmp-goodreads-detail");
+        if !has_fixtures() {
+            return;
+        }
+        let detail_dir = fixtures_dir().join("build/tmp-goodreads-detail");
 
         for entry in std::fs::read_dir(&detail_dir).unwrap() {
             let entry = entry.unwrap();

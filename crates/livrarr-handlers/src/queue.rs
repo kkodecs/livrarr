@@ -153,3 +153,11 @@ pub struct ImportRetryResponse {
     pub warnings: Vec<String>,
     pub error: Option<String>,
 }
+
+pub async fn summary<S: AppContext>(
+    State(state): State<S>,
+    ctx: AuthContext,
+) -> Result<Json<livrarr_domain::QueueSummary>, ApiError> {
+    let summary = state.queue_service().summary(ctx.user.id).await?;
+    Ok(Json(summary))
+}

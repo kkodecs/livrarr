@@ -55,10 +55,10 @@ pub fn spawn_bibliography_fetch(state: AppState, author_id: i64, user_id: i64) {
             .refresh_bibliography(user_id, author_id)
             .await
         {
-            Ok(entries) => {
+            Ok(result) => {
                 tracing::info!(
                     author_id,
-                    entries = entries.len(),
+                    entries = result.entries.len(),
                     "background bibliography fetch complete"
                 );
             }

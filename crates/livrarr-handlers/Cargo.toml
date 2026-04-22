@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 livrarr-domain = { workspace = true }
 livrarr-http = { path = "../livrarr-http" }
+livrarr-matching = { path = "../livrarr-matching" }
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "fs"] }
 chrono = { workspace = true }
