@@ -14,6 +14,7 @@ pub struct ReleaseResponse {
     pub publish_date: Option<String>,
     pub protocol: String,
     pub categories: Vec<i32>,
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

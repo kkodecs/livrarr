@@ -266,6 +266,9 @@ pub(crate) async fn fetch_and_parse(
                         "torrent"
                     }
                     .to_string();
+                    let format = livrarr_matching::parse_release_title(&item.title)
+                        .format
+                        .map(|f| f.to_lowercase());
                     ReleaseResponse {
                         title: item.title,
                         indexer: indexer_name.to_string(),
@@ -277,6 +280,7 @@ pub(crate) async fn fetch_and_parse(
                         publish_date: item.publish_date,
                         protocol,
                         categories: item.categories,
+                        format,
                     }
                 })
                 .collect();
