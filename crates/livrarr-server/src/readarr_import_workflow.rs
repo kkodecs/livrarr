@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -16,47 +16,37 @@ use livrarr_domain::{
     MediaType,
 };
 
+use livrarr_http::HttpClient;
+
 use crate::readarr_client::{self, RdAuthor, RdBook, RdBookFile, RdRootFolder, ReadarrClient};
 use crate::readarr_import_service::ReadarrImportService;
-use crate::state::AppState;
+use crate::state::ReadarrImportServiceImpl;
 
 // =============================================================================
 // LiveReadarrImportWorkflow
 // =============================================================================
 
+#[derive(Clone)]
 pub struct LiveReadarrImportWorkflow {
-    state: OnceLock<Box<AppState>>,
-}
-
-impl Clone for LiveReadarrImportWorkflow {
-    fn clone(&self) -> Self {
-        Self {
-            state: OnceLock::new(),
-        }
-    }
-}
-
-impl Default for LiveReadarrImportWorkflow {
-    fn default() -> Self {
-        Self::new()
-    }
+    http_client: HttpClient,
+    readarr_import_service: Arc<ReadarrImportServiceImpl>,
+    readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
+    data_dir: Arc<std::path::PathBuf>,
 }
 
 impl LiveReadarrImportWorkflow {
-    pub fn new() -> Self {
+    pub fn new(
+        http_client: HttpClient,
+        readarr_import_service: Arc<ReadarrImportServiceImpl>,
+        readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
+        data_dir: Arc<std::path::PathBuf>,
+    ) -> Self {
         Self {
-            state: OnceLock::new(),
+            http_client,
+            readarr_import_service,
+            readarr_import_progress,
+            data_dir,
         }
-    }
-
-    pub fn init(&self, state: AppState) {
-        let _ = self.state.set(Box::new(state));
-    }
-
-    fn state(&self) -> &AppState {
-        self.state
-            .get()
-            .expect("LiveReadarrImportWorkflow not initialized")
     }
 }
 
@@ -65,8 +55,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         &self,
         req: ReadarrConnectRequest,
     ) -> Result<ReadarrConnectResponse, ServiceError> {
-        let state = self.state();
-        let client = ReadarrClient::new(&req.url, &req.api_key, state.http_client.inner().clone());
+        let client = ReadarrClient::new(&req.url, &req.api_key, self.http_client.inner().clone());
         let folders = client
             .root_folders()
             .await
@@ -92,8 +81,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         user_id: i64,
         req: ReadarrImportRequest,
     ) -> Result<ReadarrPreviewResponse, ServiceError> {
-        let state = self.state();
-        let client = ReadarrClient::new(&req.url, &req.api_key, state.http_client.inner().clone());
+        let client = ReadarrClient::new(&req.url, &req.api_key, self.http_client.inner().clone());
 
         let data = fetch_all_readarr_data(&client).await?;
 
@@ -104,19 +92,19 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             .map(|f| f.path.clone())
             .ok_or_else(|| ServiceError::Internal("Invalid Readarr root folder ID".into()))?;
 
-        let livrarr_root = state
+        let livrarr_root = self
             .readarr_import_service
             .get_root_folder(req.livrarr_root_folder_id)
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
         let planner = ImportPlanner::new(&data, &livrarr_root.path, req.files_only, user_id);
-        let existing_authors = state
+        let existing_authors = self
             .readarr_import_service
             .list_authors(user_id)
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
-        let existing_works = state
+        let existing_works = self
             .readarr_import_service
             .list_works(user_id)
             .await
@@ -130,11 +118,9 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         user_id: i64,
         req: ReadarrImportRequest,
     ) -> Result<ReadarrStartResponse, ServiceError> {
-        let state = self.state();
         let import_id = uuid::Uuid::new_v4().to_string();
 
-        state
-            .readarr_import_service
+        self.readarr_import_service
             .create_import(CreateImportDbRequest {
                 id: import_id.clone(),
                 user_id,
@@ -146,7 +132,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
         {
-            let mut prog = state.readarr_import_progress.lock().await;
+            let mut prog = self.readarr_import_progress.lock().await;
             *prog = ReadarrImportProgress {
                 running: true,
                 import_id: Some(import_id.clone()),
@@ -155,20 +141,30 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             };
         }
 
-        let app = self.state().clone();
+        let http_client = self.http_client.clone();
+        let readarr_import_service = self.readarr_import_service.clone();
+        let readarr_import_progress = self.readarr_import_progress.clone();
+        let data_dir = self.data_dir.clone();
         let id = import_id.clone();
 
         tokio::spawn(async move {
-            let runner = ImportRunner::new(&app, &id, user_id, req);
+            let runner = ImportRunner::new(
+                http_client,
+                readarr_import_service.clone(),
+                readarr_import_progress.clone(),
+                data_dir,
+                &id,
+                user_id,
+                req,
+            );
             if let Err(e) = runner.run().await {
                 error!(import_id = %id, "Readarr import failed: {e}");
-                let _ = app
-                    .readarr_import_service
+                let _ = readarr_import_service
                     .update_import_status(&id, "failed")
                     .await;
             }
 
-            let mut prog = app.readarr_import_progress.lock().await;
+            let mut prog = readarr_import_progress.lock().await;
             prog.running = false;
             prog.phase = "done".to_string();
         });
@@ -177,13 +173,11 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
     }
 
     async fn progress(&self) -> ReadarrImportProgress {
-        let state = self.state();
-        state.readarr_import_progress.lock().await.clone()
+        self.readarr_import_progress.lock().await.clone()
     }
 
     async fn history(&self, user_id: i64) -> Result<ReadarrHistoryResponse, ServiceError> {
-        let state = self.state();
-        let imports = state
+        let imports = self
             .readarr_import_service
             .list_imports(user_id)
             .await
@@ -197,9 +191,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         user_id: i64,
         import_id: String,
     ) -> Result<ReadarrUndoResponse, ServiceError> {
-        let state = self.state();
-
-        let imp = state
+        let imp = self
             .readarr_import_service
             .get_import(&import_id)
             .await
@@ -215,15 +207,14 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             ));
         }
 
-        let items = state
+        let items = self
             .readarr_import_service
             .list_library_items_by_import(&import_id)
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
         let root_folder_path: Option<String> = if let Some(rf_id) = imp.target_root_folder_id {
-            state
-                .readarr_import_service
+            self.readarr_import_service
                 .get_root_folder(rf_id)
                 .await
                 .ok()
@@ -271,7 +262,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
                 }
             }
 
-            if let Err(e) = state
+            if let Err(e) = self
                 .readarr_import_service
                 .delete_library_item_by_id(item.id)
                 .await
@@ -280,20 +271,19 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             }
         }
 
-        let works_deleted = state
+        let works_deleted = self
             .readarr_import_service
             .delete_orphan_works_by_import(&import_id)
             .await
             .unwrap_or(0);
 
-        let authors_deleted = state
+        let authors_deleted = self
             .readarr_import_service
             .delete_orphan_authors_by_import(&import_id)
             .await
             .unwrap_or(0);
 
-        state
-            .readarr_import_service
+        self.readarr_import_service
             .update_import_status(&import_id, "undone")
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
@@ -814,7 +804,10 @@ impl<'a> ImportPlanner<'a> {
 // =============================================================================
 
 struct ImportRunner {
-    state: AppState,
+    http_client: HttpClient,
+    readarr_import_service: Arc<ReadarrImportServiceImpl>,
+    readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
+    data_dir: Arc<std::path::PathBuf>,
     import_id: String,
     user_id: i64,
     req: ReadarrImportRequest,
@@ -827,9 +820,21 @@ struct ImportRunner {
 }
 
 impl ImportRunner {
-    fn new(state: &AppState, import_id: &str, user_id: i64, req: ReadarrImportRequest) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        http_client: HttpClient,
+        readarr_import_service: Arc<ReadarrImportServiceImpl>,
+        readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
+        data_dir: Arc<std::path::PathBuf>,
+        import_id: &str,
+        user_id: i64,
+        req: ReadarrImportRequest,
+    ) -> Self {
         Self {
-            state: state.clone(),
+            http_client,
+            readarr_import_service,
+            readarr_import_progress,
+            data_dir,
             import_id: import_id.to_string(),
             user_id,
             req,
@@ -843,14 +848,14 @@ impl ImportRunner {
     }
 
     fn progress(&self) -> &Arc<Mutex<ReadarrImportProgress>> {
-        &self.state.readarr_import_progress
+        &self.readarr_import_progress
     }
 
     async fn run(mut self) -> Result<(), String> {
         let client = ReadarrClient::new(
             &self.req.url,
             &self.req.api_key,
-            self.state.http_client.inner().clone(),
+            self.http_client.inner().clone(),
         );
         let data = fetch_all_readarr_data(&client)
             .await
@@ -869,7 +874,6 @@ impl ImportRunner {
         );
 
         let livrarr_root = self
-            .state
             .readarr_import_service
             .get_root_folder(self.req.livrarr_root_folder_id)
             .await
@@ -926,7 +930,6 @@ impl ImportRunner {
         .await?;
 
         let _ = self
-            .state
             .readarr_import_service
             .update_import_counts(
                 &self.import_id,
@@ -937,8 +940,7 @@ impl ImportRunner {
             )
             .await;
 
-        self.state
-            .readarr_import_service
+        self.readarr_import_service
             .set_import_completed(&self.import_id)
             .await
             .map_err(|e| format!("set completed: {e}"))?;
@@ -962,7 +964,6 @@ impl ImportRunner {
         active_book_ids: &HashSet<i64>,
     ) -> Result<(), String> {
         let existing_authors = self
-            .state
             .readarr_import_service
             .list_authors(self.user_id)
             .await
@@ -1002,7 +1003,6 @@ impl ImportRunner {
                     .unwrap_or_else(|| derive_sort_name(name));
 
                 match self
-                    .state
                     .readarr_import_service
                     .create_author(CreateAuthorDbRequest {
                         user_id: self.user_id,
@@ -1046,7 +1046,6 @@ impl ImportRunner {
         livrarr_root_path: &str,
     ) -> Result<(), String> {
         let all_works = self
-            .state
             .readarr_import_service
             .list_works(self.user_id)
             .await
@@ -1206,7 +1205,6 @@ impl ImportRunner {
         let monitor_audiobook = has_audiobook_file;
 
         match self
-            .state
             .readarr_import_service
             .create_work(CreateWorkDbRequest {
                 user_id: self.user_id,
@@ -1233,7 +1231,6 @@ impl ImportRunner {
                 self.works_created += 1;
 
                 let _ = self
-                    .state
                     .readarr_import_service
                     .update_work_enrichment(
                         self.user_id,
@@ -1271,7 +1268,6 @@ impl ImportRunner {
                     .await;
 
                 let _ = self
-                    .state
                     .readarr_import_service
                     .update_work_user_fields(
                         self.user_id,
@@ -1288,9 +1284,9 @@ impl ImportRunner {
                     .await;
 
                 if let Some(ref url) = w.cover_url {
-                    let covers_dir = self.state.data_dir.join("covers");
+                    let covers_dir = self.data_dir.join("covers");
                     let _ = tokio::fs::create_dir_all(&covers_dir).await;
-                    if let Ok(resp) = self.state.http_client.get(url).send().await {
+                    if let Ok(resp) = self.http_client.get(url).send().await {
                         if resp.status().is_success() {
                             if let Ok(bytes) = resp.bytes().await {
                                 let path = covers_dir.join(format!("{}.jpg", w.id));
@@ -1432,7 +1428,6 @@ impl ImportRunner {
                 .unwrap_or_else(|_| dest.to_string_lossy().to_string());
 
             match self
-                .state
                 .readarr_import_service
                 .create_library_item(CreateLibraryItemDbRequest {
                     user_id: self.user_id,
