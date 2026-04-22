@@ -125,7 +125,12 @@ where
                 }
                 Ok(resp) => {
                     report.feeds_checked += 1;
-                    let items = parse_rss_feed(&resp.body);
+                    let (items, parse_warnings) = parse_rss_feed(&resp.body);
+                    for pw in parse_warnings {
+                        report
+                            .warnings
+                            .push(format!("Indexer '{}': {}", indexer.name, pw));
+                    }
                     debug!(
                         "RSS sync: fetched {} releases from {}",
                         items.len(),
@@ -602,10 +607,11 @@ fn build_rss_url(indexer: &Indexer) -> String {
     let mut url = format!("{}/{}", base, api_path);
 
     if let Some(ref key) = indexer.api_key {
+        let encoded_key = urlencoding::encode(key);
         if url.contains('?') {
-            url.push_str(&format!("&apikey={}", key));
+            url.push_str(&format!("&apikey={encoded_key}"));
         } else {
-            url.push_str(&format!("?apikey={}", key));
+            url.push_str(&format!("?apikey={encoded_key}"));
         }
     }
 
@@ -621,18 +627,28 @@ fn build_rss_url(indexer: &Indexer) -> String {
     url
 }
 
-fn parse_rss_feed(body: &[u8]) -> Vec<RssFeedItem> {
+fn parse_rss_feed(body: &[u8]) -> (Vec<RssFeedItem>, Vec<String>) {
     use livrarr_domain::torznab::{parse_torznab_xml, TorznabParseResult};
+
+    let mut warnings = Vec::new();
 
     let parse_result = match parse_torznab_xml(body) {
         Ok(r) => r,
-        Err(_) => return vec![],
+        Err(e) => {
+            warn!("RSS feed XML parse error: {e}");
+            warnings.push(format!("RSS feed XML parse error: {e}"));
+            return (vec![], warnings);
+        }
     };
     let items = match parse_result {
         TorznabParseResult::Items(items) => items,
-        TorznabParseResult::Error { .. } => return vec![],
+        TorznabParseResult::Error { code, description } => {
+            warn!("RSS feed returned Torznab error {code}: {description}");
+            warnings.push(format!("Torznab error {code}: {description}"));
+            return (vec![], warnings);
+        }
     };
-    items
+    let feed_items = items
         .into_iter()
         .filter(|item| !item.title.is_empty() && !item.guid.is_empty())
         .map(|item| RssFeedItem {
@@ -648,5 +664,6 @@ fn parse_rss_feed(body: &[u8]) -> Vec<RssFeedItem> {
             publish_date: item.publish_date,
             categories: item.categories,
         })
-        .collect()
+        .collect();
+    (feed_items, warnings)
 }

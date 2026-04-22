@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use livrarr_db::{DbError, ProviderRetryStateDb};
 use livrarr_domain::{MetadataProvider, OutcomeClass, PermanentFailureReason, Work, WorkId};
-use tokio::sync::{Mutex as TokioMutex, RwLock, Semaphore};
+use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use tokio::task::JoinSet;
 use tracing::warn;
 
@@ -40,6 +40,7 @@ use crate::provider_client::ProviderClient;
 use crate::{
     CircuitBreakerConfig, CircuitState, EnrichmentContext, EnrichmentMode, NormalizedWorkDetail,
     ProviderOutcome, ProviderQueue, ProviderQueueConfig, ProviderQueueError, ScatterGatherResult,
+    WillRetryReason,
 };
 
 /// Initial circuit state for a provider. Used by `DefaultProviderQueueBuilder` to
@@ -163,56 +164,73 @@ impl BreakerState {
     }
 }
 
-/// Async token bucket — used per-provider to enforce `requests_per_second`.
+/// GCRA-based rate limiter — used per-provider to enforce `requests_per_second`.
 ///
-/// Pattern matches `livrarr_server::state::OlRateLimiter` /
-/// `GoodreadsRateLimiter` (which the legacy direct-call path used). When
-/// `rate_per_sec <= 0.0`, `acquire()` is a no-op — no enforcement.
+/// Pure scheduling: each caller gets a unique send time. Supports burst capacity
+/// and rejects requests that would queue beyond max_queue_time (prevents sleep bombs).
 #[derive(Debug)]
 struct TokenBucket {
-    inner: TokioMutex<TokenBucketInner>,
-    rate_per_sec: f64,
-    burst: f64,
+    inner: TokioMutex<GcraInner>,
+    interval: Duration,
+    max_burst_time: Duration,
+    max_queue_time: Duration,
 }
 
 #[derive(Debug)]
-struct TokenBucketInner {
-    tokens: f64,
-    last_refill: Instant,
+struct GcraInner {
+    tat: Instant,
 }
 
 impl TokenBucket {
     fn new(rate_per_sec: f64, burst: f64) -> Self {
+        let interval = if rate_per_sec > 0.0 {
+            Duration::from_secs_f64(1.0 / rate_per_sec)
+        } else {
+            Duration::ZERO
+        };
         Self {
-            inner: TokioMutex::new(TokenBucketInner {
-                tokens: burst,
-                last_refill: Instant::now(),
+            inner: TokioMutex::new(GcraInner {
+                tat: Instant::now(),
             }),
-            rate_per_sec,
-            burst,
+            interval,
+            max_burst_time: interval.saturating_mul(burst as u32),
+            max_queue_time: Duration::from_secs(30),
         }
     }
 
-    async fn acquire(&self) {
-        if self.rate_per_sec <= 0.0 {
-            return;
+    async fn acquire(&self) -> Result<(), ()> {
+        if self.interval.is_zero() {
+            return Ok(());
         }
-        loop {
+        let wait = {
             let mut inner = self.inner.lock().await;
             let now = Instant::now();
-            let elapsed = now.duration_since(inner.last_refill).as_secs_f64();
-            inner.tokens = (inner.tokens + elapsed * self.rate_per_sec).min(self.burst);
-            inner.last_refill = now;
 
-            if inner.tokens >= 1.0 {
-                inner.tokens -= 1.0;
-                return;
+            // Decay TAT: allow burst by clamping how far in the past TAT can be.
+            let tat = if inner.tat < now - self.max_burst_time {
+                now - self.max_burst_time
+            } else {
+                inner.tat
+            };
+
+            let send_at = tat + self.interval;
+            let wait_time = send_at.saturating_duration_since(now);
+
+            if wait_time > self.max_queue_time {
+                tracing::debug!(
+                    "rate limiter: rejecting request (queue time {wait_time:?} exceeds max)"
+                );
+                inner.tat = tat;
+                return Err(());
             }
 
-            let wait = (1.0 - inner.tokens) / self.rate_per_sec;
-            drop(inner);
-            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+            inner.tat = send_at;
+            wait_time
+        };
+        if wait > Duration::ZERO {
+            tokio::time::sleep(wait).await;
         }
+        Ok(())
     }
 }
 
@@ -220,7 +238,7 @@ impl TokenBucket {
 struct ProviderEntry {
     client: ProviderClient,
     config: ProviderQueueConfig,
-    breaker: Arc<RwLock<BreakerState>>,
+    breaker: Arc<std::sync::RwLock<BreakerState>>,
     /// Token bucket throttle. Allows `config.requests_per_second` calls per second
     /// with a burst of one second's worth (minimum 1). When `requests_per_second`
     /// is 0 or negative, acquire is a no-op (no throttling).
@@ -272,7 +290,7 @@ impl DefaultProviderQueueBuilder {
             ProviderEntry {
                 client,
                 config,
-                breaker: Arc::new(RwLock::new(breaker)),
+                breaker: Arc::new(std::sync::RwLock::new(breaker)),
                 rate_limiter,
                 concurrency,
             },
@@ -290,7 +308,7 @@ impl DefaultProviderQueueBuilder {
     ) -> Self {
         if let Some(entry) = self.providers.get_mut(&provider) {
             let breaker = BreakerState::new(state.into(), entry.config.circuit_breaker.clone());
-            entry.breaker = Arc::new(RwLock::new(breaker));
+            entry.breaker = Arc::new(std::sync::RwLock::new(breaker));
         }
         self
     }
@@ -388,7 +406,7 @@ where
                 continue;
             }
 
-            let breaker_state = entry.breaker.write().await.current();
+            let breaker_state = entry.breaker.write().unwrap().current();
             if breaker_state == CircuitState::Open {
                 suppressed_open.push((provider, entry.config.clone()));
                 continue;
@@ -420,7 +438,14 @@ where
                 // Concurrency permit first (held for the full call duration).
                 let _permit = concurrency.acquire_owned().await;
                 // Then rate-limit token (token bucket pacing).
-                rate_limiter.acquire().await;
+                if rate_limiter.acquire().await.is_err() {
+                    return (provider, DispatchedOutcome::Returned(
+                        ProviderOutcome::WillRetry {
+                            reason: WillRetryReason::RateLimit,
+                            next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+                        }
+                    ));
+                }
                 let outcome = client.fetch(&work_arc, &ctx_arc).await;
                 (provider, DispatchedOutcome::Returned(outcome))
             });
@@ -480,7 +505,7 @@ where
 
             // Update circuit breaker.
             let breaker = self.providers.get(&provider).unwrap().breaker.clone();
-            let mut bs = breaker.write().await;
+            let mut bs = breaker.write().unwrap();
             match &final_outcome {
                 ProviderOutcome::Success(_) | ProviderOutcome::NotFound => bs.record_success(),
                 ProviderOutcome::WillRetry { .. } | ProviderOutcome::PermanentFailure { .. } => {
@@ -531,15 +556,7 @@ where
             Some(e) => e,
             None => return CircuitState::Closed,
         };
-        // We hold a sync reference to an async RwLock; for read purposes use
-        // try_read in a blocking fashion. The caller is sync (not on a tokio
-        // runtime path that contests the lock), so this is acceptable for the
-        // snapshot-read use case the test exercises. Fall back to Closed if
-        // contention is observed.
-        match entry.breaker.try_read() {
-            Ok(bs) => bs.state,
-            Err(_) => CircuitState::Closed,
-        }
+        entry.breaker.read().unwrap().state
     }
 }
 

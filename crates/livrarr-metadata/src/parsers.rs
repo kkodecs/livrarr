@@ -300,7 +300,7 @@ fn get_field(record: &csv::StringRecord, idx: usize) -> Option<String> {
 /// Strip Goodreads Excel-safe ISBN wrapping: `="0060590297"` -> `0060590297`.
 fn strip_excel_wrapper(val: &str) -> String {
     let trimmed = val.trim();
-    if trimmed.starts_with("=\"") && trimmed.ends_with('"') {
+    if trimmed.len() > 3 && trimmed.starts_with("=\"") && trimmed.ends_with('"') {
         trimmed[2..trimmed.len() - 1].to_string()
     } else {
         trimmed.to_string()

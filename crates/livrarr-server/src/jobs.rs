@@ -511,6 +511,29 @@ async fn poll_qbittorrent(
         .await
         .map_err(|e| format!("list grabs: {e}"))?;
 
+    // Filter grabs to this download client only, then pre-index.
+    let client_grabs: Vec<_> = active_grabs
+        .iter()
+        .filter(|g| g.download_client_id == client.id)
+        .collect();
+
+    let grabs_by_download_id: std::collections::HashMap<String, usize> = client_grabs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, g)| {
+            g.download_id
+                .as_deref()
+                .filter(|id| *id != "pending" && !id.is_empty())
+                .map(|id| (id.to_ascii_lowercase(), idx))
+        })
+        .collect();
+
+    let grabs_by_title: std::collections::HashMap<String, usize> = client_grabs
+        .iter()
+        .enumerate()
+        .map(|(idx, g)| (g.title.to_ascii_lowercase(), idx))
+        .collect();
+
     for torrent in &torrents {
         let hash = torrent
             .get("hash")
@@ -530,22 +553,16 @@ async fn poll_qbittorrent(
             .and_then(|n| n.as_str())
             .unwrap_or_default();
 
-        let grab = active_grabs
-            .iter()
-            .find(|g| {
-                g.download_id
-                    .as_deref()
-                    .is_some_and(|id| id != "pending" && id.eq_ignore_ascii_case(hash))
+        let grab = grabs_by_download_id
+            .get(&hash.to_ascii_lowercase())
+            .map(|&idx| client_grabs[idx])
+            .or_else(|| {
+                grabs_by_title
+                    .get(&name.to_ascii_lowercase())
+                    .map(|&idx| client_grabs[idx])
             })
             .or_else(|| {
-                active_grabs
-                    .iter()
-                    .find(|g| g.title.eq_ignore_ascii_case(name))
-            })
-            .or_else(|| {
-                // Fuzzy match for grabs with pending download_id — the torrent
-                // name often differs from the grab title (indexer vs tracker).
-                active_grabs.iter().find(|g| {
+                client_grabs.iter().copied().find(|g| {
                     g.download_id.as_deref() == Some("pending")
                         && livrarr_matching::string_similarity(&g.title, name) >= 0.6
                 })
@@ -592,7 +609,10 @@ async fn poll_qbittorrent(
                     continue;
                 }
             };
-            if !std::path::Path::new(&mapping_result.local_path).exists() {
+            if !tokio::fs::try_exists(&mapping_result.local_path)
+                .await
+                .unwrap_or(false)
+            {
                 tracing::debug!(
                     "poller: source not yet available for <grab {}>, will retry",
                     grab.id
@@ -670,7 +690,7 @@ async fn poll_sabnzbd(
     let api_key = client.api_key.as_deref().unwrap_or("");
 
     // Fetch queue (active downloads).
-    let queue_url = format!("{base_url}/api?mode=queue&apikey={api_key}&output=json");
+    let queue_url = format!("{base_url}/api?mode=queue&apikey={}&output=json", urlencoding::encode(api_key));
     let queue_resp = state
         .http_client
         .get(&queue_url)
@@ -698,7 +718,7 @@ async fn poll_sabnzbd(
             return Err(format!("SABnzbd queue returned {}", resp.status()));
         }
         Err(e) => {
-            return Err(format!("SABnzbd unreachable: {e}"));
+            return Err(format!("SABnzbd unreachable: {}", e.without_url()));
         }
     };
 
@@ -722,7 +742,7 @@ async fn poll_sabnzbd(
             .is_some_and(|id| !queue_nzo_ids.contains(id))
     }) {
         let history_url =
-            format!("{base_url}/api?mode=history&apikey={api_key}&output=json&limit=200");
+            format!("{base_url}/api?mode=history&apikey={}&output=json&limit=200", urlencoding::encode(api_key));
         match state
             .http_client
             .get(&history_url)
@@ -743,7 +763,10 @@ async fn poll_sabnzbd(
                 vec![]
             }
             Err(e) => {
-                warn!("poller: SABnzbd history request failed: {e}");
+                warn!(
+                    "poller: SABnzbd history request failed: {}",
+                    e.without_url()
+                );
                 vec![]
             }
         }
@@ -796,7 +819,10 @@ async fn poll_sabnzbd(
                             continue;
                         }
                     };
-                    if !std::path::Path::new(&mapping_result.local_path).exists() {
+                    if !tokio::fs::try_exists(&mapping_result.local_path)
+                        .await
+                        .unwrap_or(false)
+                    {
                         tracing::debug!(
                             "poller: source not yet available for <grab {}>, will retry",
                             grab.id
@@ -1113,7 +1139,7 @@ pub async fn enrichment_retry_tick(
                     total_dispatched += 1;
                     if let Some(ref cover_url) = result.work.cover_url {
                         crate::handlers::work::download_post_enrich_cover(
-                            &state, work_id, cover_url,
+                            &state, user.id, work_id, cover_url,
                         )
                         .await;
                     }
@@ -1212,10 +1238,9 @@ pub async fn rss_sync_run(state: AppState) -> Result<(), String> {
 // State Map TTL Cleanup Tick
 // ---------------------------------------------------------------------------
 
-/// Remove stale entries from `import_locks` and `manual_import_scans`.
+/// Remove stale entries from `manual_import_scans`.
 /// Runs every 30 minutes — evicts entries abandoned without explicit cleanup.
 async fn state_map_cleanup_tick(state: AppState, _cancel: CancellationToken) -> Result<(), String> {
-    crate::state::cleanup_import_locks(&state.import_locks);
     crate::state::cleanup_manual_import_scans(&state.manual_import_scans);
     trace!("state_map_cleanup: stale entries evicted");
     Ok(())
