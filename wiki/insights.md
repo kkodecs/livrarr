@@ -55,3 +55,7 @@ Top learnings a fresh CC session needs to know. For deeper coverage see linked w
 29. **URL-encode all API keys in query strings.** String concatenation without encoding breaks keys containing `&`, `=`, or spaces. Use `urlencoding::encode()`.
 30. **Rate limiter must reject, not silently proceed.** If the token bucket rejects a request, return `WillRetry` — do not fall through to the provider call. Silent fallthrough bypasses pacing and risks IP bans.
 31. **Filter grabs by download_client_id before matching.** The download poller must scope grab matching to the specific client being polled. Without this, grabs from one client can be adopted by another.
+32. **NotConfigured is terminal but resettable.** `OutcomeClass::NotConfigured` is in `is_phase2_terminal()` (won't auto-retry), but `reset_not_configured_outcomes()` deletes those rows when config changes. Called from `update_metadata_config`.
+33. **Per-provider error enums, not shared ProviderError.** Each provider (Hardcover, etc.) has its own error type mapped to `ProviderOutcome` at the call site. Don't create a generic shared error taxonomy prematurely.
+34. **RSS sync tests were masked.** `cargo test` stops at the first failing binary. The author_monitor 429 test was hiding 3 pre-existing RSS sync test failures. Always run `cargo test` with `--no-fail-fast` to see all failures.
+35. **Path mapping needs boundary check.** `starts_with` on strings matches `/data/downloads2` against prefix `/data/downloads`. Use `path_starts_with()` which requires `/` separator or exact match.
