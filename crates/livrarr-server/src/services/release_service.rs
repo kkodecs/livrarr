@@ -86,7 +86,7 @@ impl ReleaseService {
                 }
 
                 let result =
-                    crate::handlers::release::search_indexer(&http, &indexer, &t, &a).await;
+                    crate::infra::release_helpers::search_indexer(&http, &indexer, &t, &a).await;
                 if let Ok(ref items) = result {
                     cache.put(&ct, &ca, indexer.id, items.clone()).await;
                 }

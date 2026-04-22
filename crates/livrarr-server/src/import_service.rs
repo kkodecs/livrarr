@@ -49,17 +49,9 @@ impl ImportService for LiveImportService {
         grab_id: i64,
     ) -> Result<ImportGrabResult, ServiceError> {
         let state = self.state();
-        let result = crate::handlers::import::import_grab(state, user_id, grab_id)
+        crate::infra::import_pipeline::import_grab(state, user_id, grab_id)
             .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
-        Ok(ImportGrabResult {
-            final_status: result.final_status,
-            imported_count: result.imported_count,
-            failed_count: result.failed_count,
-            skipped_count: result.skipped_count,
-            warnings: result.warnings,
-            error: result.error,
-        })
+            .map_err(|e| ServiceError::Internal(e.to_string()))
     }
 
     async fn import_single_file(&self, req: ImportSingleFileRequest) -> ImportFileResult {
@@ -75,16 +67,16 @@ impl ImportService for LiveImportService {
             Err(e) => return ImportFileResult::Failed(format!("failed to load work: {e}")),
         };
 
-        let tag_metadata = crate::handlers::import::build_tag_metadata(&work);
+        let tag_metadata = crate::infra::import_pipeline::build_tag_metadata(&work);
         let cover_data =
-            crate::handlers::import::read_cover_bytes(state, req.user_id, req.work_id).await;
+            crate::infra::import_pipeline::read_cover_bytes(state, req.user_id, req.work_id).await;
 
         let media_mgmt = match state.settings_service.get_media_management_config().await {
             Ok(cfg) => cfg,
             Err(e) => return ImportFileResult::Failed(format!("failed to load media config: {e}")),
         };
 
-        match crate::handlers::import::import_single_file(
+        match crate::infra::import_pipeline::import_single_file(
             state,
             &req.source,
             &req.target_path,
@@ -102,10 +94,12 @@ impl ImportService for LiveImportService {
         .await
         {
             Ok(()) => ImportFileResult::Ok,
-            Err(crate::handlers::import::ImportFileError::Warning(w)) => {
+            Err(crate::infra::import_pipeline::ImportFileError::Warning(w)) => {
                 ImportFileResult::Warning(w)
             }
-            Err(crate::handlers::import::ImportFileError::Failed(e)) => ImportFileResult::Failed(e),
+            Err(crate::infra::import_pipeline::ImportFileError::Failed(e)) => {
+                ImportFileResult::Failed(e)
+            }
         }
     }
 
@@ -119,7 +113,7 @@ impl ImportService for LiveImportService {
         source: &std::path::Path,
         source_root: &std::path::Path,
     ) -> String {
-        crate::handlers::import::build_target_path(
+        crate::infra::import_pipeline::build_target_path(
             root_folder_path,
             user_id,
             author,

@@ -154,7 +154,7 @@ pub async fn add<S: AppContext>(
         detail_url: req.detail_url,
         series_name: None,
         series_position: None,
-        defer_enrichment: req.defer_enrichment,
+        defer_enrichment: true,
         provenance_setter: None,
     };
 

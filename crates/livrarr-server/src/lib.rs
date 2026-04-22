@@ -158,7 +158,7 @@ pub mod api_secondary_impl;
 pub mod auth_crypto;
 pub mod auth_service;
 pub mod config;
-pub mod handlers;
+pub mod infra;
 pub mod jobs;
 pub mod rate_limit;
 pub use livrarr_matching as matching;

@@ -1,6 +1,15 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+pub use crate::infra::cache::{
+    cleanup_manual_import_scans, GrabSearchCache, ManualImportScanMap, ManualImportScanState,
+    GRAB_CACHE_CLEANUP_INTERVAL_SECS, GRAB_CACHE_TTL_SECS, STATE_MAP_TTL,
+};
+pub use crate::infra::log_buffer::{LogBuffer, LogLevelHandle, MAX_LOG_LINES};
+pub use crate::infra::rate_limiter::{
+    GoodreadsRateLimiter, OlRateLimiter, GR_BURST, GR_RATE, OL_BURST, OL_RATE,
+};
 
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_http::HttpClient;
@@ -107,7 +116,7 @@ pub struct AppState {
     pub startup_time: chrono::DateTime<chrono::Utc>,
     pub job_runner: Option<crate::jobs::JobRunner>,
     pub provider_health: Arc<ProviderHealthState>,
-    pub cover_proxy_cache: Arc<crate::handlers::coverproxy::CoverProxyCache>,
+    pub cover_proxy_cache: Arc<crate::infra::cover_cache::CoverProxyCache>,
     pub goodreads_rate_limiter: Arc<GoodreadsRateLimiter>,
     /// Shared, mutable snapshot of `MetadataConfig`. The
     /// `update_metadata_config` handlers call `.replace()` after persisting
@@ -181,10 +190,6 @@ pub struct AppState {
 }
 
 // =============================================================================
-// AppContext impl
-// =============================================================================
-
-// =============================================================================
 // Accessor trait impls for AppContext infrastructure
 // =============================================================================
 
@@ -253,7 +258,7 @@ impl livrarr_handlers::accessors::SystemAccessor for SystemState {
 
 /// Wrapper for cover proxy cache — satisfies orphan rule.
 #[derive(Clone)]
-pub struct CoverProxyCacheAccessorImpl(pub Arc<crate::handlers::coverproxy::CoverProxyCache>);
+pub struct CoverProxyCacheAccessorImpl(pub Arc<crate::infra::cover_cache::CoverProxyCache>);
 
 impl livrarr_handlers::accessors::CoverProxyCacheAccessor for CoverProxyCacheAccessorImpl {
     async fn get(&self, url: &str) -> Option<(Vec<u8>, String)> {
@@ -410,117 +415,6 @@ impl livrarr_handlers::context::AppContext for AppState {
     }
 }
 
-// =============================================================================
-// OpenLibrary Rate Limiter — 3 req/sec, burst of 10
-// =============================================================================
-
-pub struct OlRateLimiter {
-    state: tokio::sync::Mutex<RateLimiterInner>,
-}
-
-const OL_RATE: f64 = 3.0; // 3 tokens per second
-const OL_BURST: f64 = 10.0;
-
-impl Default for OlRateLimiter {
-    fn default() -> Self {
-        Self {
-            state: tokio::sync::Mutex::new(RateLimiterInner {
-                tokens: OL_BURST,
-                last_refill: std::time::Instant::now(),
-            }),
-        }
-    }
-}
-
-impl OlRateLimiter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub async fn acquire(&self) {
-        loop {
-            let mut inner = self.state.lock().await;
-            let now = std::time::Instant::now();
-            let elapsed = now.duration_since(inner.last_refill).as_secs_f64();
-            inner.tokens = (inner.tokens + elapsed * OL_RATE).min(OL_BURST);
-            inner.last_refill = now;
-
-            if inner.tokens >= 1.0 {
-                inner.tokens -= 1.0;
-                return;
-            }
-
-            let wait = (1.0 - inner.tokens) / OL_RATE;
-            drop(inner);
-            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-        }
-    }
-}
-
-// =============================================================================
-// Manual Import Scan State — progressive OL lookup results
-// =============================================================================
-
-pub struct ManualImportScanState {
-    pub files: std::sync::RwLock<Vec<livrarr_handlers::manual_import::ScannedFile>>,
-    pub warnings: Vec<String>,
-    pub ol_total: usize,
-    pub ol_completed: std::sync::atomic::AtomicUsize,
-    pub user_id: i64,
-    pub created_at: std::time::Instant,
-}
-
-pub type ManualImportScanMap = dashmap::DashMap<String, ManualImportScanState>;
-
-const STATE_MAP_TTL: Duration = Duration::from_secs(30 * 60); // 30 minutes
-
-/// Remove entries from `manual_import_scans` that were created more than 30 minutes ago.
-pub fn cleanup_manual_import_scans(map: &ManualImportScanMap) {
-    let cutoff = std::time::Instant::now()
-        .checked_sub(STATE_MAP_TTL)
-        .unwrap_or_else(std::time::Instant::now);
-    map.retain(|_, scan| scan.created_at > cutoff);
-}
-
-/// Handle for dynamically reloading the tracing EnvFilter at runtime.
-pub struct LogLevelHandle {
-    inner: tracing_subscriber::reload::Handle<
-        tracing_subscriber::EnvFilter,
-        tracing_subscriber::Registry,
-    >,
-    current_level: std::sync::Mutex<String>,
-}
-
-impl LogLevelHandle {
-    pub fn new(
-        handle: tracing_subscriber::reload::Handle<
-            tracing_subscriber::EnvFilter,
-            tracing_subscriber::Registry,
-        >,
-        initial_level: &str,
-    ) -> Self {
-        Self {
-            inner: handle,
-            current_level: std::sync::Mutex::new(initial_level.to_string()),
-        }
-    }
-
-    pub fn set_level(&self, level: &str) -> Result<(), String> {
-        let filter =
-            tracing_subscriber::EnvFilter::try_new(format!("livrarr={level},tower_http={level}"))
-                .map_err(|e| format!("invalid log level: {e}"))?;
-        self.inner
-            .reload(filter)
-            .map_err(|e| format!("reload failed: {e}"))?;
-        *self.current_level.lock().unwrap() = level.to_string();
-        Ok(())
-    }
-
-    pub fn current_level(&self) -> String {
-        self.current_level.lock().unwrap().clone()
-    }
-}
-
 /// In-memory provider error tracking with 1-hour TTL.
 /// "Not Responding" status for providers that had HTTP/network failures.
 pub struct ProviderHealthState {
@@ -572,176 +466,6 @@ impl ProviderHealthState {
             .iter()
             .map(|(k, (msg, _))| (k.clone(), msg.clone()))
             .collect()
-    }
-}
-
-// =============================================================================
-// Goodreads Rate Limiter — async-safe token bucket for outbound requests
-// =============================================================================
-
-/// Outbound rate limiter for Goodreads requests.
-/// Token bucket: 1 token/second, burst of 5.
-pub struct GoodreadsRateLimiter {
-    state: tokio::sync::Mutex<RateLimiterInner>,
-}
-
-struct RateLimiterInner {
-    tokens: f64,
-    last_refill: std::time::Instant,
-}
-
-const GR_RATE: f64 = 1.0; // 1 token per second
-const GR_BURST: f64 = 5.0; // max burst of 5
-
-impl Default for GoodreadsRateLimiter {
-    fn default() -> Self {
-        Self {
-            state: tokio::sync::Mutex::new(RateLimiterInner {
-                tokens: GR_BURST,
-                last_refill: std::time::Instant::now(),
-            }),
-        }
-    }
-}
-
-impl GoodreadsRateLimiter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Acquire a token, waiting if necessary. Never blocks the tokio runtime.
-    pub async fn acquire(&self) {
-        loop {
-            let mut inner = self.state.lock().await;
-            let now = std::time::Instant::now();
-            let elapsed = now.duration_since(inner.last_refill).as_secs_f64();
-            inner.tokens = (inner.tokens + elapsed * GR_RATE).min(GR_BURST);
-            inner.last_refill = now;
-
-            if inner.tokens >= 1.0 {
-                inner.tokens -= 1.0;
-                return;
-            }
-
-            let wait = (1.0 - inner.tokens) / GR_RATE;
-            drop(inner);
-            tracing::debug!(wait_secs = %format!("{wait:.2}"), "Goodreads rate limiter: waiting");
-            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-        }
-    }
-}
-
-// =============================================================================
-// Log Buffer — in-memory ring buffer for recent log lines
-// =============================================================================
-
-const MAX_LOG_LINES: usize = 200;
-
-/// Thread-safe ring buffer that stores recent log lines for the help page.
-pub struct LogBuffer {
-    lines: std::sync::Mutex<VecDeque<String>>,
-}
-
-impl Default for LogBuffer {
-    fn default() -> Self {
-        Self {
-            lines: std::sync::Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)),
-        }
-    }
-}
-
-impl LogBuffer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Append a log line. Drops oldest if at capacity.
-    pub fn push(&self, line: String) {
-        let mut buf = self.lines.lock().unwrap();
-        if buf.len() >= MAX_LOG_LINES {
-            buf.pop_front();
-        }
-        buf.push_back(line);
-    }
-
-    /// Get the last `n` log lines.
-    pub fn tail(&self, n: usize) -> Vec<String> {
-        let buf = self.lines.lock().unwrap();
-        buf.iter().rev().take(n).rev().cloned().collect()
-    }
-}
-
-// =============================================================================
-// Grab Search Cache — avoids hammering indexers for repeated searches
-// =============================================================================
-
-const GRAB_CACHE_TTL_SECS: u64 = 86400; // 24 hours
-
-type GrabCacheMap = HashMap<(String, String, i64), (Instant, Vec<crate::ReleaseResponse>)>;
-
-/// Evict expired entries at most once per this interval.
-const GRAB_CACHE_CLEANUP_INTERVAL_SECS: u64 = 300; // 5 minutes
-
-/// In-memory cache for grab search results, keyed by (title, author, indexer_id).
-pub struct GrabSearchCache {
-    entries: RwLock<GrabCacheMap>,
-    last_cleanup: RwLock<Instant>,
-}
-
-impl Default for GrabSearchCache {
-    fn default() -> Self {
-        Self {
-            entries: RwLock::new(HashMap::new()),
-            last_cleanup: RwLock::new(Instant::now()),
-        }
-    }
-}
-
-impl GrabSearchCache {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Look up cached results. Returns None if missing or expired.
-    /// On hit, returns (results, age_in_seconds).
-    pub async fn get(
-        &self,
-        title: &str,
-        author: &str,
-        indexer_id: i64,
-    ) -> Option<(Vec<crate::ReleaseResponse>, u64)> {
-        let entries = self.entries.read().await;
-        let key = (title.to_string(), author.to_string(), indexer_id);
-        let (ts, results) = entries.get(&key)?;
-        let age = ts.elapsed().as_secs();
-        if age < GRAB_CACHE_TTL_SECS {
-            Some((results.clone(), age))
-        } else {
-            None
-        }
-    }
-
-    /// Store results for a (title, author, indexer_id) tuple.
-    /// Periodically evicts expired entries (at most once per 5 minutes).
-    pub async fn put(
-        &self,
-        title: &str,
-        author: &str,
-        indexer_id: i64,
-        results: Vec<crate::ReleaseResponse>,
-    ) {
-        let mut entries = self.entries.write().await;
-        // Throttled cleanup: only scan the full map every 5 minutes.
-        let should_cleanup =
-            self.last_cleanup.read().await.elapsed().as_secs() >= GRAB_CACHE_CLEANUP_INTERVAL_SECS;
-        if should_cleanup {
-            entries.retain(|_, (ts, _)| ts.elapsed().as_secs() < GRAB_CACHE_TTL_SECS);
-            *self.last_cleanup.write().await = Instant::now();
-        }
-        entries.insert(
-            (title.to_string(), author.to_string(), indexer_id),
-            (Instant::now(), results),
-        );
     }
 }
 
