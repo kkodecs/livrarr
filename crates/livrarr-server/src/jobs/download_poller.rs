@@ -89,7 +89,7 @@ async fn poll_qbittorrent(
 
     let info_url = format!("{base_url}/api/v2/torrents/info");
     let resp = state
-        .http_client
+        .http_client_safe
         .get(&info_url)
         .query(&[("filter", "all"), ("category", client.category.as_str())])
         .header("Cookie", format!("SID={sid}"))
