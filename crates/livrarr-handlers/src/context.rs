@@ -1,10 +1,10 @@
 use livrarr_domain::services::{
-    AppConfigService, AuthorMonitorWorkflow, AuthorService, DownloadClientSettingsService,
-    EmailService, EnrichmentWorkflow, FileService, GrabService, HistoryService, ImportIoService,
-    ImportService, ImportWorkflow, IndexerSettingsService, ListService, ManualImportService,
-    MatchingService, NotificationService, QueueService, ReadarrImportWorkflow, ReleaseService,
-    RemotePathMappingService, RootFolderService, RssSyncWorkflow, SeriesQueryService,
-    SeriesService, TagService, WorkService,
+    AppConfigService, AuthorMonitorWorkflow, AuthorService, DownloadClientCredentialService,
+    DownloadClientSettingsService, EmailService, EnrichmentWorkflow, FileService, GrabService,
+    HistoryService, ImportIoService, ImportService, ImportWorkflow, IndexerCredentialService,
+    IndexerSettingsService, ListService, ManualImportService, MatchingService, NotificationService,
+    QueueService, ReadarrImportWorkflow, ReleaseService, RemotePathMappingService,
+    RootFolderService, RssSyncWorkflow, SeriesQueryService, SeriesService, TagService, WorkService,
 };
 use livrarr_http::HttpClient;
 
@@ -70,9 +70,19 @@ pub trait HasDownloadClientSettingsService: Clone + Send + Sync + 'static {
     fn download_client_settings_service(&self) -> &Self::DownloadClientSettingsSvc;
 }
 
+pub trait HasDownloadClientCredentialService: Clone + Send + Sync + 'static {
+    type DownloadClientCredentialSvc: DownloadClientCredentialService + Send + Sync + 'static;
+    fn download_client_credential_service(&self) -> &Self::DownloadClientCredentialSvc;
+}
+
 pub trait HasIndexerSettingsService: Clone + Send + Sync + 'static {
     type IndexerSettingsSvc: IndexerSettingsService + Send + Sync + 'static;
     fn indexer_settings_service(&self) -> &Self::IndexerSettingsSvc;
+}
+
+pub trait HasIndexerCredentialService: Clone + Send + Sync + 'static {
+    type IndexerCredentialSvc: IndexerCredentialService + Send + Sync + 'static;
+    fn indexer_credential_service(&self) -> &Self::IndexerCredentialSvc;
 }
 
 pub trait HasRootFolderService: Clone + Send + Sync + 'static {
@@ -224,7 +234,9 @@ pub trait AppContext:
     + HasListService
     + HasAppConfigService
     + HasDownloadClientSettingsService
+    + HasDownloadClientCredentialService
     + HasIndexerSettingsService
+    + HasIndexerCredentialService
     + HasRootFolderService
     + HasRemotePathMappingService
     + HasNotificationService
@@ -266,7 +278,9 @@ impl<T> AppContext for T where
         + HasListService
         + HasAppConfigService
         + HasDownloadClientSettingsService
+        + HasDownloadClientCredentialService
         + HasIndexerSettingsService
+        + HasIndexerCredentialService
         + HasRootFolderService
         + HasRemotePathMappingService
         + HasNotificationService

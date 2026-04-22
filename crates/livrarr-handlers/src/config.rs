@@ -3,8 +3,8 @@ use axum::Json;
 
 use crate::accessors::{LiveMetadataConfigAccessor, ProviderHealthAccessor, RssSyncAccessor};
 use crate::context::{
-    HasAppConfigService, HasEmailService, HasHttpClient, HasLiveConfig, HasProviderHealth,
-    HasRssSync, HasRssSyncWorkflow,
+    HasAppConfigService, HasEmailService, HasHttpClient, HasIndexerSettingsService, HasLiveConfig,
+    HasProviderHealth, HasRssSync, HasRssSyncWorkflow,
 };
 
 use crate::middleware::RequireAdmin;
@@ -13,7 +13,7 @@ use crate::{
     MetadataConfigResponse, NamingConfigResponse, UpdateEmailApiRequest,
     UpdateMediaManagementApiRequest, UpdateMetadataApiRequest,
 };
-use livrarr_domain::services::{AppConfigService, RssSyncWorkflow};
+use livrarr_domain::services::{AppConfigService, IndexerSettingsService, RssSyncWorkflow};
 
 struct RssSyncGuard<'a, R: RssSyncAccessor>(&'a R);
 impl<R: RssSyncAccessor> Drop for RssSyncGuard<'_, R> {
@@ -318,11 +318,14 @@ pub async fn test_llm<S: HasAppConfigService + HasHttpClient>(
     Ok(())
 }
 
-pub async fn get_prowlarr<S: HasAppConfigService>(
+pub async fn get_prowlarr<S: HasIndexerSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<crate::ProwlarrConfigResponse>, ApiError> {
-    let c = state.app_config_service().get_prowlarr_config().await?;
+    let c = state
+        .indexer_settings_service()
+        .get_prowlarr_config()
+        .await?;
     Ok(Json(crate::ProwlarrConfigResponse {
         url: c.url,
         api_key_set: c.api_key.is_some(),
@@ -330,7 +333,7 @@ pub async fn get_prowlarr<S: HasAppConfigService>(
     }))
 }
 
-pub async fn update_prowlarr<S: HasAppConfigService>(
+pub async fn update_prowlarr<S: HasIndexerSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<crate::UpdateProwlarrApiRequest>,
@@ -343,7 +346,7 @@ pub async fn update_prowlarr<S: HasAppConfigService>(
         }
     }
     let c = state
-        .app_config_service()
+        .indexer_settings_service()
         .update_prowlarr_config(UpdateProwlarrParams {
             url: req.url,
             api_key: req.api_key,
@@ -414,15 +417,18 @@ pub async fn update_email<S: HasAppConfigService>(
     }))
 }
 
-pub async fn get_indexer_config<S: HasAppConfigService>(
+pub async fn get_indexer_config<S: HasIndexerSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<livrarr_domain::IndexerConfig>, ApiError> {
-    let c = state.app_config_service().get_indexer_config().await?;
+    let c = state
+        .indexer_settings_service()
+        .get_indexer_config()
+        .await?;
     Ok(Json(c))
 }
 
-pub async fn update_indexer_config<S: HasAppConfigService>(
+pub async fn update_indexer_config<S: HasIndexerSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<livrarr_domain::settings::UpdateIndexerConfigParams>,
@@ -442,7 +448,7 @@ pub async fn update_indexer_config<S: HasAppConfigService>(
         }
     }
     let c = state
-        .app_config_service()
+        .indexer_settings_service()
         .update_indexer_config(req)
         .await?;
     Ok(Json(c))

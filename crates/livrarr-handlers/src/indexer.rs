@@ -5,13 +5,13 @@ use axum::Json;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-use crate::context::{HasAppConfigService, HasHttpClient, HasIndexerSettingsService};
+use crate::context::{HasHttpClient, HasIndexerCredentialService, HasIndexerSettingsService};
 use crate::middleware::RequireAdmin;
 use crate::{
     ApiError, CreateIndexerApiRequest, IndexerResponse, TestIndexerApiRequest,
     TestIndexerApiResponse, UpdateIndexerApiRequest,
 };
-use livrarr_domain::services::{AppConfigService, IndexerSettingsService};
+use livrarr_domain::services::{IndexerCredentialService, IndexerSettingsService};
 use livrarr_domain::settings::{CreateIndexerParams, UpdateIndexerParams, UpdateProwlarrParams};
 use livrarr_domain::{Indexer, IndexerId};
 
@@ -321,13 +321,15 @@ pub async fn test<S: HasHttpClient>(
     Ok(Json(result))
 }
 
-pub async fn test_saved<S: HasIndexerSettingsService + HasHttpClient>(
+pub async fn test_saved<
+    S: HasIndexerCredentialService + HasIndexerSettingsService + HasHttpClient,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
 ) -> Result<Json<TestIndexerApiResponse>, ApiError> {
     let indexer = state
-        .indexer_settings_service()
+        .indexer_credential_service()
         .get_indexer_with_credentials(id)
         .await?;
 
@@ -380,15 +382,13 @@ fn default_priority() -> i32 {
     25
 }
 
-pub async fn import_from_prowlarr<
-    S: HasIndexerSettingsService + HasAppConfigService + HasHttpClient,
->(
+pub async fn import_from_prowlarr<S: HasIndexerSettingsService + HasHttpClient>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<crate::ProwlarrImportRequest>,
 ) -> Result<Json<crate::ProwlarrImportResponse>, ApiError> {
     let saved = state
-        .app_config_service()
+        .indexer_settings_service()
         .get_prowlarr_config()
         .await
         .unwrap_or_default();
@@ -489,7 +489,7 @@ pub async fn import_from_prowlarr<
 
     if imported > 0 || skipped > 0 {
         let _ = state
-            .app_config_service()
+            .indexer_settings_service()
             .update_prowlarr_config(UpdateProwlarrParams {
                 url: Some(url),
                 api_key: Some(Some(api_key)),

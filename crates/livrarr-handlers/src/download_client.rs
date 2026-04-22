@@ -1,13 +1,18 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::context::{HasAppConfigService, HasDownloadClientSettingsService, HasHttpClient};
+use crate::context::{
+    HasDownloadClientCredentialService, HasDownloadClientSettingsService, HasHttpClient,
+    HasIndexerSettingsService,
+};
 use crate::middleware::RequireAdmin;
 use crate::{
     ApiError, CreateDownloadClientApiRequest, DownloadClientResponse,
     UpdateDownloadClientApiRequest,
 };
-use livrarr_domain::services::{AppConfigService, DownloadClientSettingsService};
+use livrarr_domain::services::{
+    DownloadClientCredentialService, DownloadClientSettingsService, IndexerSettingsService,
+};
 use livrarr_domain::settings::{
     CreateDownloadClientParams, UpdateDownloadClientParams, UpdateProwlarrParams,
 };
@@ -290,13 +295,13 @@ pub async fn test<S: HasDownloadClientSettingsService + HasHttpClient>(
     run_connection_test(&state, &req).await
 }
 
-pub async fn test_saved<S: HasDownloadClientSettingsService + HasHttpClient>(
+pub async fn test_saved<S: HasDownloadClientCredentialService + HasHttpClient>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<(), ApiError> {
     let dc = state
-        .download_client_settings_service()
+        .download_client_credential_service()
         .get_download_client_with_credentials(id)
         .await?;
     let req = CreateDownloadClientApiRequest {
@@ -528,7 +533,7 @@ impl ProwlarrDownloadClient {
 }
 
 pub async fn import_from_prowlarr<
-    S: HasDownloadClientSettingsService + HasAppConfigService + HasHttpClient,
+    S: HasDownloadClientSettingsService + HasIndexerSettingsService + HasHttpClient,
 >(
     State(state): State<S>,
     _admin: RequireAdmin,
@@ -537,7 +542,7 @@ pub async fn import_from_prowlarr<
     use std::time::Duration;
 
     let saved = state
-        .app_config_service()
+        .indexer_settings_service()
         .get_prowlarr_config()
         .await
         .unwrap_or_default();
@@ -730,7 +735,7 @@ pub async fn import_from_prowlarr<
 
     if imported > 0 || skipped > 0 {
         let _ = state
-            .app_config_service()
+            .indexer_settings_service()
             .update_prowlarr_config(UpdateProwlarrParams {
                 url: Some(url),
                 api_key: Some(Some(api_key)),
