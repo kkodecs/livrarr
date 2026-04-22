@@ -52,3 +52,6 @@ Top learnings a fresh CC session needs to know. For deeper coverage see linked w
 26. **Add duplication check after implementation.** AI will reimplement existing logic.
 27. **No build commentary in code comments.** Comments describe what code IS, not how it got there.
 28. **SABnzbd `search` parameter searches by name, not nzo_id.** See [usenet-pipeline](architecture/usenet-pipeline.md).
+29. **URL-encode all API keys in query strings.** String concatenation without encoding breaks keys containing `&`, `=`, or spaces. Use `urlencoding::encode()`.
+30. **Rate limiter must reject, not silently proceed.** If the token bucket rejects a request, return `WillRetry` — do not fall through to the provider call. Silent fallthrough bypasses pacing and risks IP bans.
+31. **Filter grabs by download_client_id before matching.** The download poller must scope grab matching to the specific client being polled. Without this, grabs from one client can be adopted by another.
