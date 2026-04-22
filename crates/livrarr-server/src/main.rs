@@ -312,6 +312,14 @@ async fn main() {
         http_client_safe.clone(),
         data_dir_arc.clone(),
     ));
+    // Pre-construct shared Arcs for fields referenced by both AppState and readarr_import_wf.
+    let readarr_import_service_arc = Arc::new(
+        livrarr_server::readarr_import_service::LiveReadarrImportService::new(svc_db.clone()),
+    );
+    let readarr_import_progress_arc = Arc::new(tokio::sync::Mutex::new(
+        livrarr_server::readarr_import_service::ReadarrImportProgress::default(),
+    ));
+    let http_client_for_readarr = http_client.clone();
     let state = AppState {
         db,
         auth_service,
@@ -332,9 +340,7 @@ async fn main() {
         grab_search_cache: Arc::new(livrarr_server::state::GrabSearchCache::new()),
         rss_last_run: rss_last_run.clone(),
         rss_sync_running: rss_sync_running.clone(),
-        readarr_import_progress: Arc::new(tokio::sync::Mutex::new(
-            livrarr_server::readarr_import_service::ReadarrImportProgress::default(),
-        )),
+        readarr_import_progress: readarr_import_progress_arc.clone(),
         ol_rate_limiter: ol_rate_limiter_shared.clone(),
         manual_import_scans: manual_import_scans_shared.clone(),
         provider_queue,
@@ -487,9 +493,7 @@ async fn main() {
                 ),
             )
         },
-        readarr_import_service: Arc::new(
-            livrarr_server::readarr_import_service::LiveReadarrImportService::new(svc_db.clone()),
-        ),
+        readarr_import_service: readarr_import_service_arc.clone(),
         settings_service: settings_service_arc.clone(),
         notification_service: Arc::new(
             livrarr_server::notification_service::NotificationServiceImpl::new(svc_db.clone()),
@@ -537,13 +541,15 @@ async fn main() {
                 http_client: http_client_for_scan,
             },
         readarr_import_wf: Arc::new(
-            livrarr_server::readarr_import_workflow::LiveReadarrImportWorkflow::new(),
+            livrarr_server::readarr_import_workflow::LiveReadarrImportWorkflow::new(
+                http_client_for_readarr,
+                readarr_import_service_arc,
+                readarr_import_progress_arc,
+                data_dir_arc.clone(),
+            ),
         ),
         enrichment_notify: Arc::new(tokio::sync::Notify::new()),
     };
-
-    // Late-init: wire services that need AppState (breaks circular dep via OnceLock<Box<AppState>>).
-    state.readarr_import_wf.init(state.clone());
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
     livrarr_server::jobs::recover_interrupted_state(&state).await;
