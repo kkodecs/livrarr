@@ -17,7 +17,7 @@ pub struct SideChannel {
 
 /// Index of the ambiguous "Title - Author (reversed)" pattern in `PATTERNS`.
 /// Must stay in sync with the final entry in the `PATTERNS` vec.
-const TITLE_DASH_AUTHOR_AMBIGUOUS_IDX: usize = 21;
+const TITLE_DASH_AUTHOR_AMBIGUOUS_IDX: usize = 22;
 
 /// Parse a release title / filename / torrent name into extraction(s).
 /// Returns one extraction normally, or two if pattern 16 (ambiguous Title-Author) matches.
@@ -81,6 +81,68 @@ pub fn parse_string(input: &str) -> (Vec<Extraction>, SideChannel) {
         }],
         side,
     )
+}
+
+/// Candidate-aware parsing. Tries regex patterns first, then falls back to
+/// scanning for known titles/authors in the cleaned input.
+pub fn parse_string_with_candidates(
+    input: &str,
+    candidates: &[(&str, &str)],
+) -> (Vec<Extraction>, SideChannel) {
+    let (extractions, side) = parse_string(input);
+
+    if extractions.iter().any(|e| e.author.is_some()) {
+        return (extractions, side);
+    }
+
+    let (cleaned, _) = clean_input(input);
+    let cleaned_lower = cleaned.to_lowercase();
+
+    let mut best: Option<Extraction> = None;
+    let mut best_coverage = 0usize;
+
+    for &(title, author) in candidates {
+        let title_lower = title.to_lowercase();
+        if let Some(pos) = cleaned_lower.find(&title_lower) {
+            let remainder =
+                cleaned[..pos].trim().to_string() + " " + cleaned[pos + title.len()..].trim();
+            let remainder = remainder.trim();
+
+            let author_lower = author.to_lowercase();
+            let author_found =
+                !author.is_empty() && remainder.to_lowercase().contains(&author_lower);
+
+            let coverage = title.len() + if author_found { author.len() } else { 0 };
+            if coverage > best_coverage {
+                best_coverage = coverage;
+                best = Some(Extraction {
+                    title: Some(title.to_string()),
+                    author: if author_found {
+                        Some(author.to_string())
+                    } else {
+                        None
+                    },
+                    year: side.year,
+                    isbn: None,
+                    language: side.language.clone(),
+                    series: None,
+                    series_position: None,
+                    narrator: side.narrator.clone(),
+                    asin: None,
+                    confidence: Confidence::Medium,
+                    source: ExtractionSource::String,
+                });
+            }
+        }
+    }
+
+    if let Some(candidate_ext) = best {
+        let mut result = extractions;
+        result.insert(0, candidate_ext);
+        return (result, side);
+    }
+
+    (extractions, side)
 }
 
 fn make_extraction(title: Option<&str>, author: Option<&str>, year: Option<i32>) -> Extraction {
@@ -209,6 +271,7 @@ static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
         Pattern { regex: Regex::new(r"^(?P<author>.+?)\s+-\s+(?P<book>.+?)\s+\((?:Narrated|Read) by .+?\)$").unwrap() },
         Pattern { regex: Regex::new(r"^(?P<book>.+?)\s+\((?P<author>[^)]+)\)\s*$").unwrap() },
         Pattern { regex: Regex::new(r"^\[(?P<author>[^\]]+)\]\s*(?P<book>.+)$").unwrap() },
+        Pattern { regex: Regex::new(r"^(?P<book>.+)\s+by\s+(?P<author>.+)$").unwrap() },
         Pattern { regex: Regex::new(r"^(?P<book>.+?)\s+-\s+(?P<author>.+)$").unwrap() },
     ]
 });

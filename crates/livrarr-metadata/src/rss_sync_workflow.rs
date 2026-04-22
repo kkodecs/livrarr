@@ -230,6 +230,11 @@ where
             .map(|w| (w.clone(), work_to_candidate(w)))
             .collect();
 
+        let m3_hints: Vec<(&str, &str)> = candidates
+            .iter()
+            .map(|(w, _)| (w.title.as_str(), w.author_name.as_str()))
+            .collect();
+
         // Pre-check protocol availability (RSS-GRAB-003).
         let has_torrent_client = self
             .db
@@ -285,8 +290,9 @@ where
                     continue;
                 }
 
-                // Parse release title via M3.
-                let parsed = livrarr_matching::parse_release_title(&item.title);
+                // Parse release title via M3 (candidate-aware).
+                let parsed =
+                    livrarr_matching::parse_release_title_with_candidates(&item.title, &m3_hints);
                 if parsed.extractions.is_empty() {
                     n_unparsed += 1;
                     continue;
