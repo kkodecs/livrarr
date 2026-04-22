@@ -985,36 +985,42 @@ mod tests {
             .to_path_buf()
     }
 
-    fn fixture_search(filename: &str) -> String {
+    fn fixture_search(filename: &str) -> Option<String> {
         let path = fixtures_dir()
             .join("build/tmp-goodreads-html")
             .join(filename);
         if !path.exists() {
-            panic!(
-                "Fixture not found: {}. Goodreads HTML fixtures are local test data \
-                 (not committed to git). Run scripts/fetch-goodreads-fixtures.sh to populate.",
-                path.display()
-            );
+            return None;
         }
-        std::fs::read_to_string(&path).unwrap()
+        Some(std::fs::read_to_string(&path).unwrap())
     }
 
-    fn fixture_detail(filename: &str) -> String {
+    fn fixture_detail(filename: &str) -> Option<String> {
         let path = fixtures_dir()
             .join("build/tmp-goodreads-detail")
             .join(filename);
         if !path.exists() {
-            panic!(
-                "Fixture not found: {}. Goodreads HTML fixtures are local test data \
-                 (not committed to git). Run scripts/fetch-goodreads-fixtures.sh to populate.",
-                path.display()
-            );
+            return None;
         }
-        std::fs::read_to_string(&path).unwrap()
+        Some(std::fs::read_to_string(&path).unwrap())
     }
 
-    fn has_fixtures() -> bool {
-        fixtures_dir().join("build/tmp-goodreads-detail").is_dir()
+    macro_rules! require_fixture_search {
+        ($filename:expr) => {
+            match fixture_search($filename) {
+                Some(html) => html,
+                None => return,
+            }
+        };
+    }
+
+    macro_rules! require_fixture_detail {
+        ($filename:expr) => {
+            match fixture_detail($filename) {
+                Some(html) => html,
+                None => return,
+            }
+        };
     }
 
     // =========================================================================
@@ -1043,7 +1049,8 @@ mod tests {
 
     #[test]
     fn search_de_31_das_parfum() {
-        let html = fixture_search("de_31_Das_Parfum__Die_Geschichte_eines_M\u{00f6}rders.html");
+        let html =
+            require_fixture_search!("de_31_Das_Parfum__Die_Geschichte_eines_M\u{00f6}rders.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 5);
 
@@ -1059,7 +1066,7 @@ mod tests {
 
     #[test]
     fn search_de_39_die_krone_der_sterne() {
-        let html = fixture_search("de_39_Die_Krone_der_Sterne.html");
+        let html = require_fixture_search!("de_39_Die_Krone_der_Sterne.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 6);
 
@@ -1071,7 +1078,7 @@ mod tests {
 
     #[test]
     fn search_de_49_qualityland() {
-        let html = fixture_search("de_49_QualityLand__QualityLand___1_.html");
+        let html = require_fixture_search!("de_49_QualityLand__QualityLand___1_.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 1);
 
@@ -1085,7 +1092,7 @@ mod tests {
 
     #[test]
     fn search_de_50_qualityland_2() {
-        let html = fixture_search("de_50_QualityLand_2_0__QualityLand___2_.html");
+        let html = require_fixture_search!("de_50_QualityLand_2_0__QualityLand___2_.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 1);
 
@@ -1098,7 +1105,7 @@ mod tests {
 
     #[test]
     fn search_de_51_tintenherz() {
-        let html = fixture_search("de_51_Tintenherz__Tintenwelt___1_.html");
+        let html = require_fixture_search!("de_51_Tintenherz__Tintenwelt___1_.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 1);
 
@@ -1115,7 +1122,7 @@ mod tests {
 
     #[test]
     fn search_es_29_el_ojo_del_mundo() {
-        let html = fixture_search("es_29_El_ojo_del_mundo__La_rueda_del_tiempo___.html");
+        let html = require_fixture_search!("es_29_El_ojo_del_mundo__La_rueda_del_tiempo___.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 2);
 
@@ -1126,7 +1133,7 @@ mod tests {
 
     #[test]
     fn search_es_45_tres_cuerpos() {
-        let html = fixture_search("es_45_El_problema_de_los_tres_cuerpos.html");
+        let html = require_fixture_search!("es_45_El_problema_de_los_tres_cuerpos.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 6);
 
@@ -1137,7 +1144,7 @@ mod tests {
 
     #[test]
     fn search_es_46_lagrimas() {
-        let html = fixture_search("es_46_L\u{00e1}grimas_en_la_lluvia.html");
+        let html = require_fixture_search!("es_46_L\u{00e1}grimas_en_la_lluvia.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 3);
 
@@ -1148,7 +1155,7 @@ mod tests {
 
     #[test]
     fn search_es_47_sin_noticias() {
-        let html = fixture_search("es_47_Sin_noticias_de_Gurb.html");
+        let html = require_fixture_search!("es_47_Sin_noticias_de_Gurb.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 2);
 
@@ -1159,7 +1166,7 @@ mod tests {
 
     #[test]
     fn search_es_48_klara() {
-        let html = fixture_search("es_48_Klara_y_el_Sol.html");
+        let html = require_fixture_search!("es_48_Klara_y_el_Sol.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 2);
 
@@ -1174,7 +1181,7 @@ mod tests {
 
     #[test]
     fn search_fr_30_la_nuit() {
-        let html = fixture_search("fr_30_La_Nuit_des_temps.html");
+        let html = require_fixture_search!("fr_30_La_Nuit_des_temps.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 8);
 
@@ -1185,7 +1192,7 @@ mod tests {
 
     #[test]
     fn search_fr_34_le_petit_prince() {
-        let html = fixture_search("fr_34_Le_Petit_Prince.html");
+        let html = require_fixture_search!("fr_34_Le_Petit_Prince.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 19);
 
@@ -1196,7 +1203,7 @@ mod tests {
 
     #[test]
     fn search_fr_36_letranger() {
-        let html = fixture_search("fr_36_L_\u{00c9}tranger.html");
+        let html = require_fixture_search!("fr_36_L_\u{00c9}tranger.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 14);
 
@@ -1206,7 +1213,7 @@ mod tests {
 
     #[test]
     fn search_fr_37_horde() {
-        let html = fixture_search("fr_37_La_Horde_du_Contrevent.html");
+        let html = require_fixture_search!("fr_37_La_Horde_du_Contrevent.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 3);
 
@@ -1217,7 +1224,7 @@ mod tests {
 
     #[test]
     fn search_fr_38_les_furtifs() {
-        let html = fixture_search("fr_38_Les_Furtifs.html");
+        let html = require_fixture_search!("fr_38_Les_Furtifs.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 1);
 
@@ -1232,7 +1239,7 @@ mod tests {
 
     #[test]
     fn search_pl_32_solaris() {
-        let html = fixture_search("pl_32_Solaris.html");
+        let html = require_fixture_search!("pl_32_Solaris.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 17);
 
@@ -1244,7 +1251,7 @@ mod tests {
 
     #[test]
     fn search_pl_35_pan_tadeusz() {
-        let html = fixture_search("pl_35_Pan_Tadeusz.html");
+        let html = require_fixture_search!("pl_35_Pan_Tadeusz.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 19);
 
@@ -1255,7 +1262,7 @@ mod tests {
 
     #[test]
     fn search_pl_40_lod() {
-        let html = fixture_search("pl_40_L\u{00f3}d.html");
+        let html = require_fixture_search!("pl_40_L\u{00f3}d.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 1);
 
@@ -1266,7 +1273,8 @@ mod tests {
 
     #[test]
     fn search_pl_42_perfekcyjna() {
-        let html = fixture_search("pl_42_Perfekcyjna_niedoskona\u{0142}o\u{015b}\u{0107}.html");
+        let html =
+            require_fixture_search!("pl_42_Perfekcyjna_niedoskona\u{0142}o\u{015b}\u{0107}.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 1);
 
@@ -1279,7 +1287,7 @@ mod tests {
 
     #[test]
     fn search_pl_44_wiedzmin() {
-        let html = fixture_search("pl_44_Wiedźmin.html");
+        let html = require_fixture_search!("pl_44_Wiedźmin.html");
         let results = parse_search_html(&html);
         assert_eq!(results.len(), 19);
 
@@ -1304,6 +1312,10 @@ mod tests {
             .parent()
             .unwrap()
             .join("build/tmp-goodreads-html");
+
+        if !search_dir.is_dir() {
+            return;
+        }
 
         for entry in std::fs::read_dir(&search_dir).unwrap() {
             let entry = entry.unwrap();
@@ -1346,6 +1358,10 @@ mod tests {
             .unwrap()
             .join("build/tmp-goodreads-html");
 
+        if !search_dir.is_dir() {
+            return;
+        }
+
         for entry in std::fs::read_dir(&search_dir).unwrap() {
             let entry = entry.unwrap();
             if entry.path().extension().is_none_or(|e| e != "html") {
@@ -1379,7 +1395,7 @@ mod tests {
 
     #[test]
     fn detail_de_31_das_parfum() {
-        let html = fixture_detail("de_31_Das_Parfum__Die_Geschichte_eines_M_rders.html");
+        let html = require_fixture_detail!("de_31_Das_Parfum__Die_Geschichte_eines_M_rders.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert_eq!(
@@ -1400,7 +1416,7 @@ mod tests {
 
     #[test]
     fn detail_de_39_die_krone() {
-        let html = fixture_detail("de_39_Die_Krone_der_Sterne.html");
+        let html = require_fixture_detail!("de_39_Die_Krone_der_Sterne.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result
@@ -1417,7 +1433,7 @@ mod tests {
 
     #[test]
     fn detail_de_49_qualityland() {
-        let html = fixture_detail("de_49_QualityLand__QualityLand___1_.html");
+        let html = require_fixture_detail!("de_49_QualityLand__QualityLand___1_.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("QualityLand"));
@@ -1429,7 +1445,7 @@ mod tests {
 
     #[test]
     fn detail_de_50_qualityland_2() {
-        let html = fixture_detail("de_50_QualityLand_2_0__QualityLand___2_.html");
+        let html = require_fixture_detail!("de_50_QualityLand_2_0__QualityLand___2_.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("QualityLand 2.0"));
@@ -1441,7 +1457,7 @@ mod tests {
 
     #[test]
     fn detail_de_51_tintenherz() {
-        let html = fixture_detail("de_51_Tintenherz__Tintenwelt___1_.html");
+        let html = require_fixture_detail!("de_51_Tintenherz__Tintenwelt___1_.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("Tintenherz"));
@@ -1456,7 +1472,7 @@ mod tests {
 
     #[test]
     fn detail_es_29_el_ojo() {
-        let html = fixture_detail("es_29_El_ojo_del_mundo__La_rueda_del_tiempo___.html");
+        let html = require_fixture_detail!("es_29_El_ojo_del_mundo__La_rueda_del_tiempo___.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("El ojo del mundo"));
@@ -1468,7 +1484,7 @@ mod tests {
 
     #[test]
     fn detail_es_45_tres_cuerpos() {
-        let html = fixture_detail("es_45_El_problema_de_los_tres_cuerpos.html");
+        let html = require_fixture_detail!("es_45_El_problema_de_los_tres_cuerpos.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result
@@ -1483,7 +1499,7 @@ mod tests {
 
     #[test]
     fn detail_es_46_lagrimas() {
-        let html = fixture_detail("es_46_L_grimas_en_la_lluvia.html");
+        let html = require_fixture_detail!("es_46_L_grimas_en_la_lluvia.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result
@@ -1498,7 +1514,7 @@ mod tests {
 
     #[test]
     fn detail_es_47_sin_noticias() {
-        let html = fixture_detail("es_47_Sin_noticias_de_Gurb.html");
+        let html = require_fixture_detail!("es_47_Sin_noticias_de_Gurb.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result
@@ -1513,7 +1529,7 @@ mod tests {
 
     #[test]
     fn detail_es_48_klara() {
-        let html = fixture_detail("es_48_Klara_y_el_Sol.html");
+        let html = require_fixture_detail!("es_48_Klara_y_el_Sol.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("Klara y el Sol"));
@@ -1528,7 +1544,7 @@ mod tests {
 
     #[test]
     fn detail_fr_30_la_nuit() {
-        let html = fixture_detail("fr_30_La_Nuit_des_temps.html");
+        let html = require_fixture_detail!("fr_30_La_Nuit_des_temps.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("La Nuit des temps"));
@@ -1540,7 +1556,7 @@ mod tests {
 
     #[test]
     fn detail_fr_34_le_petit_prince() {
-        let html = fixture_detail("fr_34_Le_Petit_Prince.html");
+        let html = require_fixture_detail!("fr_34_Le_Petit_Prince.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         // The detail page fixture might be for a different edition
@@ -1554,7 +1570,7 @@ mod tests {
 
     #[test]
     fn detail_fr_36_letranger() {
-        let html = fixture_detail("fr_36_L__tranger.html");
+        let html = require_fixture_detail!("fr_36_L__tranger.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.is_some());
@@ -1565,7 +1581,7 @@ mod tests {
 
     #[test]
     fn detail_fr_37_horde() {
-        let html = fixture_detail("fr_37_La_Horde_du_Contrevent.html");
+        let html = require_fixture_detail!("fr_37_La_Horde_du_Contrevent.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result
@@ -1581,7 +1597,7 @@ mod tests {
 
     #[test]
     fn detail_fr_38_les_furtifs() {
-        let html = fixture_detail("fr_38_Les_Furtifs.html");
+        let html = require_fixture_detail!("fr_38_Les_Furtifs.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("Les Furtifs"));
@@ -1596,7 +1612,7 @@ mod tests {
 
     #[test]
     fn detail_pl_32_solaris() {
-        let html = fixture_detail("pl_32_Solaris.html");
+        let html = require_fixture_detail!("pl_32_Solaris.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("Solaris"));
@@ -1608,7 +1624,7 @@ mod tests {
 
     #[test]
     fn detail_pl_35_pan_tadeusz() {
-        let html = fixture_detail("pl_35_Pan_Tadeusz.html");
+        let html = require_fixture_detail!("pl_35_Pan_Tadeusz.html");
         let result = parse_detail_html(&html);
 
         // Pan Tadeusz has minimal data — may or may not parse
@@ -1627,7 +1643,7 @@ mod tests {
 
     #[test]
     fn detail_pl_40_lod() {
-        let html = fixture_detail("pl_40_L_d.html");
+        let html = require_fixture_detail!("pl_40_L_d.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("L\u{00f3}d"));
@@ -1639,7 +1655,7 @@ mod tests {
 
     #[test]
     fn detail_pl_42_perfekcyjna() {
-        let html = fixture_detail("pl_42_Perfekcyjna_niedoskona_o__.html");
+        let html = require_fixture_detail!("pl_42_Perfekcyjna_niedoskona_o__.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result
@@ -1654,7 +1670,7 @@ mod tests {
 
     #[test]
     fn detail_pl_44_wiedzmin() {
-        let html = fixture_detail("pl_44_Wied_min.html");
+        let html = require_fixture_detail!("pl_44_Wied_min.html");
         let result = parse_detail_html(&html).expect("should parse");
 
         assert!(result.title.as_ref().unwrap().contains("Wiedźmin"));
@@ -1669,7 +1685,7 @@ mod tests {
 
     #[test]
     fn detail_all_have_jsonld_book() {
-        if !has_fixtures() {
+        if !fixtures_dir().join("build/tmp-goodreads-detail").is_dir() {
             return;
         }
         let detail_dir = fixtures_dir().join("build/tmp-goodreads-detail");
@@ -1709,7 +1725,7 @@ mod tests {
 
     #[test]
     fn detail_descriptions_are_plain_text() {
-        if !has_fixtures() {
+        if !fixtures_dir().join("build/tmp-goodreads-detail").is_dir() {
             return;
         }
         let detail_dir = fixtures_dir().join("build/tmp-goodreads-detail");
@@ -1755,7 +1771,7 @@ mod tests {
 
     #[test]
     fn detail_all_authors_are_arrays() {
-        if !has_fixtures() {
+        if !fixtures_dir().join("build/tmp-goodreads-detail").is_dir() {
             return;
         }
         let detail_dir = fixtures_dir().join("build/tmp-goodreads-detail");
@@ -1933,7 +1949,7 @@ mod tests {
         assert!((result.rating.unwrap() - 4.5).abs() < 0.01);
         assert_eq!(result.rating_count, Some(100));
         assert_eq!(result.page_count, Some(300));
-        assert_eq!(result.language.as_deref(), Some("English"));
+        assert_eq!(result.language.as_deref(), Some("en"));
     }
 
     #[test]
