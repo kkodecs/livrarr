@@ -1,10 +1,13 @@
 use std::time::Duration;
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, StatusCode};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::GovernorLayer;
+
+use crate::rate_limit::SmartIpKeyExtractor;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -15,17 +18,27 @@ use crate::state::AppState;
 ///
 /// Satisfies: RUNTIME-SERVER-005, RUNTIME-COMPOSE-003, RUNTIME-COMPOSE-004
 pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
+    // Parse trusted_proxies from config (empty = direct exposure, peer IP only).
+    let trusted_proxies: Vec<crate::rate_limit::IpNet> = state
+        .config
+        .server
+        .trusted_proxies
+        .iter()
+        .filter_map(|s| crate::rate_limit::IpNet::parse(s))
+        .collect();
+    let extractor = SmartIpKeyExtractor::new(trusted_proxies);
+
     // Rate limiter for login: 5 requests per 60 seconds per IP.
     let login_governor = GovernorConfigBuilder::default()
+        .key_extractor(extractor.clone())
         .period(Duration::from_secs(12)) // 1 token per 12s = 5 per 60s
         .burst_size(5)
         .finish()
         .expect("login rate limiter config");
 
     // Global rate limiter: 100 requests per second sustained per peer IP.
-    // PeerIpKeyExtractor is the default — safe for direct exposure.
-    // If behind a reverse proxy, configure trusted_proxies in the app config.
     let global_governor = GovernorConfigBuilder::default()
+        .key_extractor(extractor)
         .per_millisecond(10) // 1 token per 10ms = 100/sec sustained
         .burst_size(50)
         .finish()
@@ -228,7 +241,8 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         )
         .route(
             "/work/{id}/cover",
-            post(livrarr_handlers::work::upload_cover::<AppState>),
+            post(livrarr_handlers::work::upload_cover::<AppState>)
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .route(
             "/work/{id}/refresh",
@@ -446,11 +460,13 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .route(
             "/mediacover/{id}/thumb.jpg",
             get(livrarr_handlers::mediacover::get_thumb::<AppState>),
-        )
-        .route(
-            "/coverproxy",
-            get(livrarr_handlers::coverproxy::proxy_cover::<AppState>),
         );
+
+    // Cover proxy requires auth (user-supplied URLs → SSRF surface).
+    let protected = protected.route(
+        "/coverproxy",
+        get(livrarr_handlers::coverproxy::proxy_cover::<AppState>),
+    );
 
     // Combine API routes. Unmatched API paths return 404.
     let api = Router::new()

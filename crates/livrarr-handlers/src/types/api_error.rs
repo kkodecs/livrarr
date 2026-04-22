@@ -150,6 +150,7 @@ impl From<livrarr_domain::services::WorkServiceError> for ApiError {
             },
             WorkServiceError::CoverTooLarge => ApiError::BadRequest("cover too large".into()),
             WorkServiceError::Enrichment(msg) => ApiError::Internal(msg),
+            WorkServiceError::Cover(msg) => ApiError::Internal(msg),
             WorkServiceError::Db(db_err) => ApiError::Db(db_err),
         }
     }
@@ -476,23 +477,32 @@ fn db_error_to_http(
         DbError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", msg, None),
         DbError::Constraint { .. } => (StatusCode::CONFLICT, "conflict", msg, None),
         DbError::Conflict { .. } => (StatusCode::CONFLICT, "conflict", msg, None),
-        DbError::DataCorruption { .. } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "data_corruption",
-            "Internal data inconsistency detected — check server logs".into(),
-            None,
-        ),
-        DbError::IncompatibleData { .. } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "incompatible_data",
-            "Database contains data from a newer version — upgrade Livrarr".into(),
-            None,
-        ),
-        DbError::Io(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            "Something went wrong".into(),
-            None,
-        ),
+        DbError::DataCorruption { .. } => {
+            tracing::error!("DB data corruption: {msg}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "data_corruption",
+                "Internal data inconsistency detected — check server logs".into(),
+                None,
+            )
+        }
+        DbError::IncompatibleData { .. } => {
+            tracing::error!("DB incompatible data: {msg}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "incompatible_data",
+                "Database contains data from a newer version — upgrade Livrarr".into(),
+                None,
+            )
+        }
+        DbError::Io(ref source) => {
+            tracing::error!("DB I/O error: {source}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "Something went wrong".into(),
+                None,
+            )
+        }
     }
 }

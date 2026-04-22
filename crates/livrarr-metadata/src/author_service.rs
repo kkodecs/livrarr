@@ -266,7 +266,8 @@ where
         &self,
         user_id: UserId,
         author_id: AuthorId,
-    ) -> Result<Vec<BibliographyEntry>, AuthorServiceError> {
+        raw: bool,
+    ) -> Result<BibliographyResult, AuthorServiceError> {
         let author = self
             .db
             .get_author(user_id, author_id)
@@ -276,52 +277,62 @@ where
                 other => AuthorServiceError::Db(other),
             })?;
 
-        if let Ok(Some(cached)) = self.db.get_bibliography(author.id).await {
-            if !cached.entries.is_empty() {
-                return Ok(self
-                    .enrich_bibliography(user_id, author_id, cached.entries)
-                    .await);
+        let cached = self.db.get_bibliography(author.id).await.ok().flatten();
+
+        if cached.as_ref().is_none_or(|c| c.entries.is_empty()) {
+            let ol_key = match author.ol_key.as_deref() {
+                Some(k) => k.to_string(),
+                None => {
+                    let resolved = self.resolve_ol_key(user_id, &author).await?;
+                    resolved
+                }
+            };
+
+            let raw_entries = self.fetch_ol_bibliography(&ol_key).await?;
+            if !raw_entries.is_empty() {
+                let cleaned = self
+                    .llm_clean_bibliography(&author.name, &raw_entries)
+                    .await
+                    .unwrap_or_else(|| raw_entries.clone());
+                let llm_changed = cleaned.len() != raw_entries.len();
+                let saved = self
+                    .db
+                    .save_bibliography(
+                        author_id,
+                        &cleaned,
+                        if llm_changed {
+                            Some(&raw_entries)
+                        } else {
+                            None
+                        },
+                    )
+                    .await
+                    .map_err(AuthorServiceError::Db)?;
+                return self
+                    .build_bibliography_result(user_id, author_id, &saved, raw)
+                    .await;
             }
-        }
 
-        let ol_key = author
-            .ol_key
-            .as_deref()
-            .ok_or_else(|| AuthorServiceError::Provider("Author has no Open Library key".into()))?;
-
-        let raw_entries = self.fetch_ol_bibliography(ol_key).await?;
-
-        if !raw_entries.is_empty() {
-            let cleaned = self
-                .llm_clean_bibliography(&author.name, &raw_entries)
-                .await
-                .unwrap_or(raw_entries);
-            let _ = self
+            let saved = self
                 .db
-                .save_bibliography(author_id, &cleaned)
+                .save_bibliography(author_id, &[], None)
                 .await
                 .map_err(AuthorServiceError::Db)?;
-            return Ok(self.enrich_bibliography(user_id, author_id, cleaned).await);
+            return self
+                .build_bibliography_result(user_id, author_id, &saved, raw)
+                .await;
         }
 
-        // OL returned nothing — try LLM from scratch as fallback.
-        let llm_entries = self.llm_clean_bibliography(&author.name, &[]).await;
-        let final_entries = llm_entries.unwrap_or_default();
-        let _ = self
-            .db
-            .save_bibliography(author_id, &final_entries)
+        let cached = cached.unwrap();
+        self.build_bibliography_result(user_id, author_id, &cached, raw)
             .await
-            .map_err(AuthorServiceError::Db)?;
-        Ok(self
-            .enrich_bibliography(user_id, author_id, final_entries)
-            .await)
     }
 
     async fn refresh_bibliography(
         &self,
         user_id: UserId,
         author_id: AuthorId,
-    ) -> Result<Vec<BibliographyEntry>, AuthorServiceError> {
+    ) -> Result<BibliographyResult, AuthorServiceError> {
         let _author = self
             .db
             .get_author(user_id, author_id)
@@ -335,7 +346,7 @@ where
             tracing::warn!("delete_bibliography failed: {e}");
         }
 
-        self.bibliography(user_id, author_id).await
+        self.bibliography(user_id, author_id, false).await
     }
 
     fn spawn_bibliography_refresh(&self, _author_id: i64, _user_id: i64) {
@@ -361,6 +372,43 @@ where
     F: HttpFetcher + Send + Sync,
     L: LlmCaller + Send + Sync,
 {
+    async fn resolve_ol_key(
+        &self,
+        user_id: UserId,
+        author: &Author,
+    ) -> Result<String, AuthorServiceError> {
+        let results = self.lookup(&author.name, 5).await?;
+        let best = results.first().ok_or_else(|| {
+            AuthorServiceError::Provider(format!(
+                "No OpenLibrary match for author '{}'",
+                author.name
+            ))
+        })?;
+        let ol_key = best.ol_key.clone();
+        let _ = self
+            .db
+            .update_author(
+                user_id,
+                author.id,
+                UpdateAuthorDbRequest {
+                    name: None,
+                    sort_name: None,
+                    ol_key: Some(ol_key.clone()),
+                    gr_key: None,
+                    monitored: None,
+                    monitor_new_items: None,
+                    monitor_since: None,
+                },
+            )
+            .await;
+        tracing::info!(
+            author_id = author.id,
+            %ol_key,
+            "auto-resolved OL key for '{}'", author.name
+        );
+        Ok(ol_key)
+    }
+
     async fn fetch_ol_bibliography(
         &self,
         ol_key: &str,
@@ -423,6 +471,33 @@ where
         Ok(entries)
     }
 
+    async fn build_bibliography_result(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        cached: &livrarr_db::AuthorBibliography,
+        raw: bool,
+    ) -> Result<BibliographyResult, AuthorServiceError> {
+        let source = if raw {
+            cached.raw_entries.as_deref().unwrap_or(&cached.entries)
+        } else {
+            &cached.entries
+        };
+        let entries = self
+            .enrich_bibliography(user_id, author_id, source.to_vec())
+            .await;
+        Ok(BibliographyResult {
+            filtered_count: cached.entries.len(),
+            raw_count: cached
+                .raw_entries
+                .as_ref()
+                .map_or(cached.entries.len(), |r| r.len()),
+            raw_available: cached.raw_entries.is_some(),
+            fetched_at: cached.fetched_at.clone(),
+            entries,
+        })
+    }
+
     async fn enrich_bibliography(
         &self,
         user_id: UserId,
@@ -451,6 +526,8 @@ where
                     title: b.title,
                     year: b.year,
                     ol_key: ol,
+                    series_name: b.series_name,
+                    series_position: b.series_position,
                     already_in_library,
                 }
             })

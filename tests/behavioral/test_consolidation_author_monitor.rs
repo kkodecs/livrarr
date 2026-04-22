@@ -184,7 +184,14 @@ impl WorkService for StubWorkService {
         Ok((vec![], 0))
     }
 
-    async fn download_cover_from_url(&self, _user_id: i64, _work_id: i64, _cover_url: &str) {}
+    async fn download_cover_from_url(
+        &self,
+        _user_id: i64,
+        _work_id: i64,
+        _cover_url: &str,
+    ) -> Result<(), WorkServiceError> {
+        Ok(())
+    }
     fn try_start_bulk_refresh(&self, _user_id: i64) -> bool {
         true
     }
@@ -716,8 +723,7 @@ async fn test_monitor_429_uses_60s_backoff_max_3_retries_and_creates_rate_limit_
     // 4 HTTP calls: initial + 3 retries, then skip
     assert_eq!(http_ref.call_count(), 4);
 
-    // Rate-limit notification created (user_id=1, system pseudo-user)
-    let notifs = db_arc.list_notifications(1, false).await.unwrap();
+    let notifs = db_arc.list_notifications(user_id, false).await.unwrap();
     assert!(
         notifs
             .iter()

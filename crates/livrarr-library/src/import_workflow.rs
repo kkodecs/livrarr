@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -6,6 +5,7 @@ use livrarr_db::{
     ConfigDb, CreateHistoryEventDbRequest, CreateLibraryItemDbRequest, GrabDb, HistoryDb,
     LibraryItemDb, RemotePathMappingDb, RootFolderDb, WorkDb,
 };
+use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::{
     atomic_copy, FailedFile, ImportResult, ImportWorkflow, ImportWorkflowError, ImportedFile,
     ScanConfirmation, SkippedFile,
@@ -14,13 +14,6 @@ use livrarr_domain::{
     classify_file, sanitize_path_component, DbError, EventType, GrabId, GrabStatus, MediaType,
     UserId, WorkId,
 };
-use tokio::sync::Mutex;
-
-// ---------------------------------------------------------------------------
-// Import lock map type
-// ---------------------------------------------------------------------------
-
-pub type ImportLockMap = Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>;
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -28,7 +21,7 @@ pub type ImportLockMap = Arc<Mutex<HashMap<(UserId, WorkId), Arc<Mutex<()>>>>>;
 
 pub struct ImportWorkflowImpl<D> {
     db: D,
-    import_locks: ImportLockMap,
+    import_locks: KeyedMutex<(UserId, WorkId)>,
     _import_semaphore: Arc<tokio::sync::Semaphore>,
     _data_dir: Arc<PathBuf>,
 }
@@ -41,14 +34,10 @@ impl<D> ImportWorkflowImpl<D> {
     ) -> Self {
         Self {
             db,
-            import_locks: Arc::new(Mutex::new(HashMap::new())),
+            import_locks: KeyedMutex::new(),
             _import_semaphore: import_semaphore,
             _data_dir: data_dir,
         }
-    }
-
-    pub fn import_locks(&self) -> &ImportLockMap {
-        &self.import_locks
     }
 }
 
@@ -82,17 +71,33 @@ fn enumerate_source_files(source: &Path) -> Result<Vec<SourceFile>, String> {
 }
 
 fn walk_dir(dir: &Path, files: &mut Vec<SourceFile>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("skipping unreadable directory {}: {e}", dir.display());
+            return Ok(());
+        }
+    };
     for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry error: {e}"))?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("skipping unreadable dir entry in {}: {e}", dir.display());
+                continue;
+            }
+        };
         let path = entry.path();
         let name = entry.file_name();
         if name.to_string_lossy().starts_with('.') {
             continue;
         }
-        let ft = entry
-            .file_type()
-            .map_err(|e| format!("file_type error: {e}"))?;
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                tracing::warn!("skipping {}: {e}", path.display());
+                continue;
+            }
+        };
         if ft.is_symlink() {
             continue;
         }
@@ -267,14 +272,7 @@ where
             .map_err(ImportWorkflowError::Db)?;
 
         // Acquire per-work lock
-        let lock = {
-            let mut locks = self.import_locks.lock().await;
-            locks
-                .entry((user_id, work.id))
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        let _guard = lock.lock().await;
+        let _guard = self.import_locks.lock((user_id, work.id)).await;
 
         // Resolve source path from grab.content_path
         let source_path = match &grab.content_path {
@@ -401,6 +399,15 @@ where
         let mut skipped_files = Vec::new();
         let mut warnings = Vec::new();
 
+        // Pre-load existing library items for this work to avoid N+1 dedup queries.
+        let existing_items = self
+            .db
+            .list_library_items_by_work(user_id, work_id)
+            .await
+            .unwrap_or_default();
+        let existing_paths: std::collections::HashSet<&str> =
+            existing_items.iter().map(|li| li.path.as_str()).collect();
+
         // Process each file
         for sf in &source_files {
             let media_type = sf.media_type;
@@ -463,14 +470,8 @@ where
                 .unwrap_or(false);
 
             if target_exists {
-                // Check for existing library item (dedup)
-                let existing_items = self
-                    .db
-                    .list_library_items_by_work(user_id, work_id)
-                    .await
-                    .unwrap_or_default();
-
-                if existing_items.iter().any(|li| li.path == relative) {
+                // Check for existing library item (dedup) using pre-loaded set.
+                if existing_paths.contains(relative.as_str()) {
                     // Already imported — skip
                     skipped_files.push(SkippedFile {
                         source_name: sf
@@ -688,6 +689,11 @@ where
 // Remote path mapping helper
 // ---------------------------------------------------------------------------
 
+fn path_starts_with(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+    path == prefix || path.starts_with(&format!("{}/", prefix))
+}
+
 fn apply_path_mapping(
     content_path: &str,
     mappings: &[livrarr_domain::RemotePathMapping],
@@ -698,7 +704,7 @@ fn apply_path_mapping(
         .iter()
         .filter(|m| {
             let rp = m.remote_path.replace('\\', "/");
-            content_path.starts_with(&rp)
+            path_starts_with(content_path, &rp)
         })
         .max_by_key(|m| m.remote_path.len());
 

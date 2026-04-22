@@ -120,17 +120,24 @@ impl LibraryItemDb for SqliteDb {
         if work_ids.is_empty() {
             return Ok(vec![]);
         }
-        let placeholders: Vec<&str> = work_ids.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT * FROM library_items WHERE user_id = ? AND work_id IN ({}) ORDER BY id",
-            placeholders.join(",")
-        );
-        let mut q = sqlx::query(&sql).bind(user_id);
-        for id in work_ids {
-            q = q.bind(*id);
+        const CHUNK_SIZE: usize = 500;
+        let mut results = Vec::new();
+        for chunk in work_ids.chunks(CHUNK_SIZE) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let sql = format!(
+                "SELECT * FROM library_items WHERE user_id = ? AND work_id IN ({}) ORDER BY id",
+                placeholders.join(",")
+            );
+            let mut q = sqlx::query(&sql).bind(user_id);
+            for id in chunk {
+                q = q.bind(*id);
+            }
+            let rows = q.fetch_all(self.pool()).await.map_err(map_db_err)?;
+            for row in rows {
+                results.push(row_to_library_item(row)?);
+            }
         }
-        let rows = q.fetch_all(self.pool()).await.map_err(map_db_err)?;
-        rows.into_iter().map(row_to_library_item).collect()
+        Ok(results)
     }
 
     async fn list_library_items_by_work(

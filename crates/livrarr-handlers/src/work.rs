@@ -8,9 +8,8 @@ use crate::context::AppContext;
 use crate::middleware::RequireAdmin;
 use crate::types::work::work_to_detail;
 use crate::{
-    AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse,
-    LookupApiResponse, RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse,
-    WorkSearchResult,
+    AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse, LookupApiResponse,
+    RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
 use livrarr_domain::services::{
     AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
@@ -310,10 +309,13 @@ pub async fn refresh<S: AppContext>(
     let result = state.work_service().refresh(ctx.user.id, id).await?;
 
     if let Some(ref cover_url) = result.work.cover_url {
-        state
+        if let Err(e) = state
             .work_service()
             .download_cover_from_url(ctx.user.id, id, cover_url)
-            .await;
+            .await
+        {
+            tracing::warn!(work_id = id, %e, "cover download failed after refresh");
+        }
     }
 
     let mut messages = result.messages;
@@ -383,27 +385,18 @@ pub async fn refresh_all<S: AppContext>(
         let mut failed = 0usize;
 
         for work in &works {
-            let result = match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                s.work_service().refresh(user_id, work.id),
-            )
-            .await
-            {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
+            let result = match s.work_service().refresh(user_id, work.id).await {
+                Ok(r) => r,
+                Err(e) => {
                     tracing::warn!(work_id = work.id, "refresh_all: refresh failed: {e}");
-                    failed += 1;
-                    continue;
-                }
-                Err(_) => {
-                    tracing::warn!(work_id = work.id, "refresh_all: refresh timed out");
                     failed += 1;
                     continue;
                 }
             };
 
             if let Some(ref cover_url) = result.work.cover_url {
-                s.work_service()
+                let _ = s
+                    .work_service()
                     .download_cover_from_url(user_id, work.id, cover_url)
                     .await;
             }

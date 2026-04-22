@@ -39,6 +39,7 @@ pub mod title_cleanup;
 pub mod work_service;
 
 pub mod author_monitor_workflow;
+pub mod provenance;
 pub mod rss_sync_workflow;
 
 pub use provider_client::{
@@ -247,6 +248,7 @@ pub struct NormalizedWorkDetail {
 pub enum ProviderOutcome<T> {
     Success(Box<T>),
     NotFound,
+    NotConfigured,
     WillRetry {
         reason: WillRetryReason,
         next_attempt_at: DateTime<Utc>,
@@ -267,6 +269,7 @@ impl<T> ProviderOutcome<T> {
         match self {
             Self::Success(_) => livrarr_domain::OutcomeClass::Success,
             Self::NotFound => livrarr_domain::OutcomeClass::NotFound,
+            Self::NotConfigured => livrarr_domain::OutcomeClass::NotConfigured,
             Self::WillRetry { .. } => livrarr_domain::OutcomeClass::WillRetry,
             Self::PermanentFailure { .. } => livrarr_domain::OutcomeClass::PermanentFailure,
             Self::Conflict { .. } => livrarr_domain::OutcomeClass::Conflict,
@@ -1063,6 +1066,15 @@ where
                         *provider,
                         ReconstructedOutcome {
                             class: livrarr_domain::OutcomeClass::NotFound,
+                            payload: None,
+                        },
+                    );
+                }
+                ProviderOutcome::NotConfigured => {
+                    reconstructed.insert(
+                        *provider,
+                        ReconstructedOutcome {
+                            class: livrarr_domain::OutcomeClass::NotConfigured,
                             payload: None,
                         },
                     );

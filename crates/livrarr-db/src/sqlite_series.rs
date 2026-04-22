@@ -48,9 +48,10 @@ impl SeriesDb for SqliteDb {
         rows.into_iter().map(row_to_series).collect()
     }
 
-    async fn get_series(&self, id: i64) -> Result<Option<Series>, DbError> {
-        let row = sqlx::query("SELECT * FROM series WHERE id = ?")
+    async fn get_series(&self, user_id: UserId, id: i64) -> Result<Option<Series>, DbError> {
+        let row = sqlx::query("SELECT * FROM series WHERE id = ? AND user_id = ?")
             .bind(id)
+            .bind(user_id)
             .fetch_optional(self.pool())
             .await
             .map_err(map_db_err)?;
@@ -98,59 +99,74 @@ impl SeriesDb for SqliteDb {
         .try_get::<i64, _>("id")
         .map_err(|e| DbError::Io(Box::new(e)))?;
 
-        self.get_series(id)
+        self.get_series(req.user_id, id)
             .await?
             .ok_or(DbError::NotFound { entity: "series" })
     }
 
     async fn update_series_flags(
         &self,
+        user_id: UserId,
         id: i64,
         monitor_ebook: bool,
         monitor_audiobook: bool,
     ) -> Result<Series, DbError> {
-        sqlx::query("UPDATE series SET monitor_ebook = ?, monitor_audiobook = ? WHERE id = ?")
-            .bind(monitor_ebook)
-            .bind(monitor_audiobook)
-            .bind(id)
-            .execute(self.pool())
-            .await
-            .map_err(map_db_err)?;
-
-        // Propagate flags to linked works.
         sqlx::query(
-            "UPDATE works SET monitor_ebook = ?, monitor_audiobook = ? WHERE series_id = ?",
+            "UPDATE series SET monitor_ebook = ?, monitor_audiobook = ? WHERE id = ? AND user_id = ?",
         )
         .bind(monitor_ebook)
         .bind(monitor_audiobook)
         .bind(id)
+        .bind(user_id)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?;
 
-        self.get_series(id)
+        // Propagate flags to linked works owned by the same user.
+        sqlx::query(
+            "UPDATE works SET monitor_ebook = ?, monitor_audiobook = ? WHERE series_id = ? AND user_id = ?",
+        )
+        .bind(monitor_ebook)
+        .bind(monitor_audiobook)
+        .bind(id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        self.get_series(user_id, id)
             .await?
             .ok_or(DbError::NotFound { entity: "series" })
     }
 
-    async fn update_series_work_count(&self, id: i64, work_count: i32) -> Result<(), DbError> {
-        sqlx::query("UPDATE series SET work_count = ? WHERE id = ?")
+    async fn update_series_work_count(
+        &self,
+        user_id: UserId,
+        id: i64,
+        work_count: i32,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE series SET work_count = ? WHERE id = ? AND user_id = ?")
             .bind(work_count)
             .bind(id)
+            .bind(user_id)
             .execute(self.pool())
             .await
             .map_err(map_db_err)?;
         Ok(())
     }
 
-    async fn link_work_to_series(&self, req: LinkWorkToSeriesRequest) -> Result<(), DbError> {
+    async fn link_work_to_series(
+        &self,
+        user_id: UserId,
+        req: LinkWorkToSeriesRequest,
+    ) -> Result<(), DbError> {
         // Assignment guard: only update if current series_id is NULL or new series
-        // has fewer books (more specific).
+        // has fewer books (more specific). Also validates work ownership.
         sqlx::query(
             "UPDATE works SET \
              series_id = ?, series_name = ?, series_position = ?, \
              monitor_ebook = ?, monitor_audiobook = ? \
-             WHERE id = ? AND (\
+             WHERE id = ? AND user_id = ? AND (\
                series_id IS NULL \
                OR (SELECT work_count FROM series WHERE id = works.series_id) > ? \
              )",
@@ -161,6 +177,7 @@ impl SeriesDb for SqliteDb {
         .bind(req.monitor_ebook)
         .bind(req.monitor_audiobook)
         .bind(req.work_id)
+        .bind(user_id)
         .bind(req.series_work_count)
         .execute(self.pool())
         .await
@@ -170,21 +187,30 @@ impl SeriesDb for SqliteDb {
 
     async fn list_monitored_series_for_authors(
         &self,
+        user_id: UserId,
         author_ids: &[AuthorId],
     ) -> Result<Vec<Series>, DbError> {
         if author_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let placeholders: Vec<&str> = author_ids.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT * FROM series WHERE author_id IN ({}) AND (monitor_ebook = 1 OR monitor_audiobook = 1)",
-            placeholders.join(", ")
-        );
-        let mut query = sqlx::query(&sql);
-        for id in author_ids {
-            query = query.bind(id);
+        const CHUNK_SIZE: usize = 500;
+        let mut results = Vec::new();
+        for chunk in author_ids.chunks(CHUNK_SIZE) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let sql = format!(
+                "SELECT * FROM series WHERE user_id = ? AND author_id IN ({}) AND (monitor_ebook = 1 OR monitor_audiobook = 1)",
+                placeholders.join(", ")
+            );
+            let mut query = sqlx::query(&sql);
+            query = query.bind(user_id);
+            for id in chunk {
+                query = query.bind(id);
+            }
+            let rows = query.fetch_all(self.pool()).await.map_err(map_db_err)?;
+            for row in rows {
+                results.push(row_to_series(row)?);
+            }
         }
-        let rows = query.fetch_all(self.pool()).await.map_err(map_db_err)?;
-        rows.into_iter().map(row_to_series).collect()
+        Ok(results)
     }
 }

@@ -318,18 +318,19 @@ impl HttpFetcher for HttpFetcherImpl {
             }
         }
 
-        // Use the SSRF-safe client (has SsrfSafeResolver for redirect protection)
-        // Redirects are disabled (Policy::none) — we handle them manually
+        // Manual redirect loop with full SSRF validation per hop.
         let mut current_url = req.url.clone();
-        let mut current_host = host.to_string();
+        let mut current_method = req.method;
+        let mut current_headers = req.headers.clone();
+        let mut current_body = req.body.clone();
         let max_redirects = 5;
 
         for _ in 0..=max_redirects {
             let follow_req = FetchRequest {
                 url: current_url.clone(),
-                method: req.method,
-                headers: req.headers.clone(),
-                body: req.body.clone(),
+                method: current_method,
+                headers: current_headers.clone(),
+                body: current_body.clone(),
                 timeout: req.timeout,
                 rate_bucket: req.rate_bucket.clone(),
                 max_body_bytes: req.max_body_bytes,
@@ -343,7 +344,6 @@ impl HttpFetcher for HttpFetcherImpl {
                 return Ok(result);
             }
 
-            // Handle redirect
             let location = result
                 .headers
                 .iter()
@@ -355,19 +355,76 @@ impl HttpFetcher for HttpFetcherImpl {
                 None => return Ok(result),
             };
 
+            // Resolve relative redirects against current hop (not original URL).
+            let current_parsed = url::Url::parse(&current_url)
+                .map_err(|e| FetchError::Ssrf(format!("invalid current URL: {e}")))?;
             let redirect_url = url::Url::parse(&location)
-                .or_else(|_| parsed.join(&location))
+                .or_else(|_| current_parsed.join(&location))
                 .map_err(|e| FetchError::Ssrf(format!("invalid redirect URL: {e}")))?;
 
-            let redirect_host = redirect_url.host_str().unwrap_or("");
-            if redirect_host != current_host {
-                return Err(FetchError::Ssrf(format!(
-                    "cross-domain redirect from {current_host} to {redirect_host}"
-                )));
+            // Validate redirect target: scheme, credentials, IP.
+            match redirect_url.scheme() {
+                "http" | "https" => {}
+                scheme => {
+                    return Err(FetchError::Ssrf(format!(
+                        "redirect to scheme '{scheme}' not allowed"
+                    )));
+                }
+            }
+            if !redirect_url.username().is_empty() || redirect_url.password().is_some() {
+                return Err(FetchError::Ssrf(
+                    "redirect to URL with embedded credentials".to_string(),
+                ));
+            }
+            let redirect_host = redirect_url
+                .host_str()
+                .ok_or_else(|| FetchError::Ssrf("redirect URL has no host".to_string()))?;
+            if let Ok(ip) = redirect_host.parse::<std::net::IpAddr>() {
+                if ssrf::is_private_ip(ip) {
+                    return Err(FetchError::Ssrf(format!(
+                        "redirect to private address {ip}"
+                    )));
+                }
+            }
+
+            // Cross-origin detection.
+            let is_cross_origin = current_parsed.origin() != redirect_url.origin();
+
+            // Method downgrade: 301/302/303 → GET (per RFC 7231).
+            // Block cross-origin 307/308 (preserves method+body — exfil risk).
+            match result.status {
+                301..=303 => {
+                    current_method = HttpMethod::Get;
+                    current_body = None;
+                    // Strip body-related headers on method downgrade.
+                    current_headers.retain(|(k, _)| {
+                        let lower = k.to_lowercase();
+                        lower != "content-length"
+                            && lower != "content-type"
+                            && lower != "transfer-encoding"
+                    });
+                }
+                307 | 308 if is_cross_origin => {
+                    return Err(FetchError::Ssrf(
+                        "cross-origin 307/308 redirect blocked".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+
+            // Strip credentials on cross-origin redirect.
+            if is_cross_origin {
+                current_headers.retain(|(k, _)| {
+                    let lower = k.to_lowercase();
+                    lower != "authorization"
+                        && lower != "cookie"
+                        && lower != "proxy-authorization"
+                        && lower != "x-api-key"
+                        && lower != "host"
+                });
             }
 
             current_url = redirect_url.to_string();
-            current_host = redirect_host.to_string();
         }
 
         Err(FetchError::Connection("too many redirects".to_string()))

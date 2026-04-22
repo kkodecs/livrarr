@@ -22,6 +22,7 @@ where
         + livrarr_db::IndexerDb
         + livrarr_db::RootFolderDb
         + livrarr_db::RemotePathMappingDb
+        + livrarr_db::ProviderRetryStateDb
         + Send
         + Sync,
 {

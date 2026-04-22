@@ -490,55 +490,26 @@ impl<L: LlmClient + 'static> MetadataProvider for LlmScraperProvider<L> {
 /// OPAC SBN (Italian) removed — site is client-rendered (Liferay CSR), not SSR.
 /// Deferred until render proxy is available (same as Skoob/Brazil).
 pub fn build_llm_scraper_configs() -> Vec<LlmScraperConfig> {
-    vec![
-        // Goodreads — universal cover+metadata source for most languages
-        LlmScraperConfig {
+    let goodreads_url = "https://www.goodreads.com/search?q={query}";
+    let goodreads_languages = ["fr", "de", "es", "nl", "it", "ja", "ko"];
+
+    let mut configs: Vec<LlmScraperConfig> = goodreads_languages
+        .iter()
+        .map(|lang| LlmScraperConfig {
             name: "Web Search".to_string(),
-            search_url_template: "https://www.goodreads.com/search?q={query}".to_string(),
-            language: "fr".to_string(),
-        },
-        LlmScraperConfig {
-            name: "Web Search".to_string(),
-            search_url_template: "https://www.goodreads.com/search?q={query}".to_string(),
-            language: "de".to_string(),
-        },
-        LlmScraperConfig {
-            name: "Web Search".to_string(),
-            search_url_template: "https://www.goodreads.com/search?q={query}".to_string(),
-            language: "es".to_string(),
-        },
-        LlmScraperConfig {
-            name: "Web Search".to_string(),
-            search_url_template: "https://www.goodreads.com/search?q={query}".to_string(),
-            language: "nl".to_string(),
-        },
-        LlmScraperConfig {
-            name: "Web Search".to_string(),
-            search_url_template: "https://www.goodreads.com/search?q={query}".to_string(),
-            language: "it".to_string(),
-        },
-        LlmScraperConfig {
-            name: "Web Search".to_string(),
-            search_url_template: "https://www.goodreads.com/search?q={query}".to_string(),
-            language: "ja".to_string(),
-        },
-        LlmScraperConfig {
-            name: "Web Search".to_string(),
-            search_url_template: "https://www.goodreads.com/search?q={query}".to_string(),
-            language: "ko".to_string(),
-        },
-        // Native-language sites
-        LlmScraperConfig {
-            name: "lubimyczytac.pl".to_string(),
-            search_url_template: "https://lubimyczytac.pl/szukaj/ksiazki?phrase={query}"
-                .to_string(),
-            language: "pl".to_string(),
-        },
-        // Commented out — blocked or CSR from this server
-        // LlmScraperConfig { name: "Amazon.nl", search_url_template: "https://www.amazon.nl/s?k={query}&i=stripbooks", language: "nl" },
-        // LlmScraperConfig { name: "Amazon.it", search_url_template: "https://www.amazon.it/s?k={query}&i=stripbooks", language: "it" },
-        // LlmScraperConfig { name: "Aladin", search_url_template: "https://www.aladin.co.kr/search/wsearchresult.aspx?SearchWord={query}", language: "ko" },
-    ]
+            search_url_template: goodreads_url.to_string(),
+            language: lang.to_string(),
+        })
+        .collect();
+
+    // Native-language sites with distinct routing
+    configs.push(LlmScraperConfig {
+        name: "lubimyczytac.pl".to_string(),
+        search_url_template: "https://lubimyczytac.pl/szukaj/ksiazki?phrase={query}".to_string(),
+        language: "pl".to_string(),
+    });
+
+    configs
 }
 
 #[cfg(test)]

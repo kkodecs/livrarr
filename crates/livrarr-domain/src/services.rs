@@ -313,6 +313,8 @@ pub enum WorkServiceError {
     CoverTooLarge,
     #[error("enrichment failed: {0}")]
     Enrichment(String),
+    #[error("cover download failed: {0}")]
+    Cover(String),
     #[error("database error: {0}")]
     Db(#[from] DbError),
 }
@@ -576,7 +578,7 @@ pub struct ScannedFile {
     pub relative_path: String,
     pub filename: String,
     pub media_type: MediaType,
-    pub size: u64,
+    pub size: i64,
     pub matched_work_id: Option<WorkId>,
     pub has_existing_item: bool,
 }
@@ -969,7 +971,12 @@ pub trait WorkService: Send + Sync {
         page: u32,
         page_size: u32,
     ) -> Result<(Vec<Work>, i64), WorkServiceError>;
-    async fn download_cover_from_url(&self, user_id: i64, work_id: i64, cover_url: &str);
+    async fn download_cover_from_url(
+        &self,
+        user_id: i64,
+        work_id: i64,
+        cover_url: &str,
+    ) -> Result<(), WorkServiceError>;
     fn try_start_bulk_refresh(&self, user_id: i64) -> bool;
     fn finish_bulk_refresh(&self, user_id: i64);
 }

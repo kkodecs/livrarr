@@ -1,6 +1,6 @@
 use livrarr_db::{
-    ConfigDb, DownloadClientDb, DownloadClientId, IndexerDb, IndexerId, RemotePathMappingDb,
-    RemotePathMappingId, RootFolderDb, RootFolderId,
+    ConfigDb, DownloadClientDb, DownloadClientId, IndexerDb, IndexerId, ProviderRetryStateDb,
+    RemotePathMappingDb, RemotePathMappingId, RootFolderDb, RootFolderId,
 };
 use livrarr_domain::settings::{
     CreateDownloadClientParams, CreateIndexerParams, EmailConfig, MediaManagementConfig,
@@ -30,7 +30,12 @@ impl<DB> LiveSettingsService<DB> {
 
 impl<DB> SettingsService for LiveSettingsService<DB>
 where
-    DB: ConfigDb + DownloadClientDb + IndexerDb + RootFolderDb + RemotePathMappingDb,
+    DB: ConfigDb
+        + DownloadClientDb
+        + IndexerDb
+        + RootFolderDb
+        + RemotePathMappingDb
+        + ProviderRetryStateDb,
 {
     async fn get_naming_config(&self) -> Result<NamingConfig, DbError> {
         self.db.get_naming_config().await
@@ -55,7 +60,20 @@ where
         &self,
         params: UpdateMetadataParams,
     ) -> Result<MetadataConfig, DbError> {
-        self.db.update_metadata_config(params.into()).await
+        let cfg = self.db.update_metadata_config(params.into()).await?;
+
+        // Reset NotConfigured retry states for providers whose config may have changed.
+        // Cheap no-op DELETE if no rows match.
+        use livrarr_domain::MetadataProvider;
+        if let Err(e) = self
+            .db
+            .reset_not_configured_outcomes(MetadataProvider::Hardcover)
+            .await
+        {
+            tracing::warn!("failed to reset NotConfigured outcomes for Hardcover: {e}");
+        }
+
+        Ok(cfg)
     }
 
     async fn validate_metadata_languages(
@@ -238,5 +256,79 @@ where
 
     async fn delete_remote_path_mapping(&self, id: RemotePathMappingId) -> Result<(), DbError> {
         self.db.delete_remote_path_mapping(id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use livrarr_db::{ProviderRetryStateDb, UserDb, WorkDb};
+    use livrarr_domain::{MetadataProvider, OutcomeClass};
+
+    #[tokio::test]
+    async fn update_metadata_config_resets_not_configured_outcomes() {
+        let db = livrarr_db::create_test_db().await;
+
+        let user = db
+            .create_user(livrarr_db::CreateUserDbRequest {
+                username: "test".into(),
+                password_hash: "hash".into(),
+                api_key_hash: "keyhash".into(),
+                role: livrarr_domain::UserRole::Admin,
+            })
+            .await
+            .unwrap();
+        let work = db
+            .create_work(livrarr_db::CreateWorkDbRequest {
+                user_id: user.id,
+                title: "Test Work".into(),
+                author_name: "Test Author".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        // Record NotConfigured for Hardcover.
+        db.record_terminal_outcome(
+            user.id,
+            work.id,
+            MetadataProvider::Hardcover,
+            OutcomeClass::NotConfigured,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(db
+            .get_retry_state(user.id, work.id, MetadataProvider::Hardcover)
+            .await
+            .unwrap()
+            .is_some());
+
+        // Call update_metadata_config through LiveSettingsService — all None = no-op
+        // config change, but the reset side-effect should still fire.
+        let svc = LiveSettingsService::new(db.clone());
+        svc.update_metadata_config(UpdateMetadataParams {
+            hardcover_enabled: None,
+            hardcover_api_token: None,
+            llm_enabled: None,
+            llm_provider: None,
+            llm_endpoint: None,
+            llm_api_key: None,
+            llm_model: None,
+            audnexus_url: None,
+            languages: None,
+        })
+        .await
+        .unwrap();
+
+        // NotConfigured row should be gone.
+        assert!(
+            db.get_retry_state(user.id, work.id, MetadataProvider::Hardcover)
+                .await
+                .unwrap()
+                .is_none(),
+            "NotConfigured row should be deleted after config save"
+        );
     }
 }

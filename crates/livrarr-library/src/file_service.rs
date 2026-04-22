@@ -119,7 +119,29 @@ where
                     other => FileServiceError::Db(other),
                 })?;
 
-        let abs_path = Path::new(&root_folder.path).join(&item.path);
+        let root = Path::new(&root_folder.path);
+        let abs_path = root.join(&item.path);
+
+        // Fast pre-check against DB-stored size (avoids filesystem round-trip for obvious rejects).
+        if item.file_size > MAX_EMAIL_SIZE {
+            return Err(FileServiceError::BadRequest(format!(
+                "File exceeds the 50 MB email limit ({})",
+                format_bytes(item.file_size)
+            )));
+        }
+
+        // Path traversal protection — canonicalize and verify containment.
+        let abs_path = abs_path
+            .canonicalize()
+            .map_err(|_| FileServiceError::NotFound)?;
+        let canonical_root = root.canonicalize().map_err(|e| {
+            FileServiceError::Io(std::io::Error::other(format!(
+                "Root folder not accessible: {e}"
+            )))
+        })?;
+        if !abs_path.starts_with(&canonical_root) {
+            return Err(FileServiceError::Forbidden);
+        }
 
         // Validate extension against allowlist.
         let ext = abs_path
@@ -133,11 +155,23 @@ where
             )));
         }
 
-        // Validate size (50 MB limit).
-        if item.file_size > MAX_EMAIL_SIZE {
+        // Validate actual file size on disk (DB value may be stale).
+        let size_check_path = abs_path.clone();
+        let actual_size = tokio::task::spawn_blocking(move || {
+            std::fs::metadata(&size_check_path).map(|m| m.len() as i64)
+        })
+        .await
+        .expect("spawn_blocking panicked")
+        .map_err(|e| {
+            FileServiceError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to stat file: {e}"),
+            ))
+        })?;
+        if actual_size > MAX_EMAIL_SIZE {
             return Err(FileServiceError::BadRequest(format!(
                 "File exceeds the 50 MB email limit ({})",
-                format_bytes(item.file_size)
+                format_bytes(actual_size)
             )));
         }
 

@@ -10,6 +10,13 @@ use crate::{
     UpdateMediaManagementApiRequest, UpdateMetadataApiRequest,
 };
 use livrarr_domain::services::{RssSyncWorkflow, SettingsService};
+
+struct RssSyncGuard<'a, R: RssSyncAccessor>(&'a R);
+impl<R: RssSyncAccessor> Drop for RssSyncGuard<'_, R> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
 use livrarr_domain::settings::{
     UpdateEmailParams, UpdateMediaManagementParams, UpdateMetadataParams, UpdateProwlarrParams,
 };
@@ -99,6 +106,42 @@ pub async fn get_metadata<S: AppContext>(
     Ok(Json(metadata_to_response(cfg, provider_status)))
 }
 
+/// Validate an LLM endpoint URL: must be http/https, no embedded credentials,
+/// no private IP addresses.
+fn validate_llm_endpoint(endpoint: &str) -> Result<(), ApiError> {
+    let parsed = reqwest::Url::parse(endpoint)
+        .map_err(|e| ApiError::BadRequest(format!("invalid LLM endpoint URL: {e}")))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "LLM endpoint must use http or https scheme, got: {other}"
+            )));
+        }
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ApiError::BadRequest(
+            "LLM endpoint must not contain embedded credentials".into(),
+        ));
+    }
+
+    if let Some(host) = parsed.host_str() {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if livrarr_http::ssrf::is_private_ip(ip) {
+                return Err(ApiError::BadRequest(
+                    "LLM endpoint must not point to a private IP address".into(),
+                ));
+            }
+        }
+    } else {
+        return Err(ApiError::BadRequest("LLM endpoint must have a host".into()));
+    }
+
+    Ok(())
+}
+
 pub async fn update_metadata<S: AppContext>(
     State(state): State<S>,
     _admin: RequireAdmin,
@@ -116,6 +159,13 @@ pub async fn update_metadata<S: AppContext>(
             return Err(ApiError::BadRequest(
                 "llmApiKey must not be empty string; use null to clear".into(),
             ));
+        }
+    }
+
+    // Validate LLM endpoint URL if provided
+    if let Some(ref endpoint) = req.llm_endpoint {
+        if !endpoint.is_empty() {
+            validate_llm_endpoint(endpoint)?;
         }
     }
 
@@ -186,7 +236,9 @@ pub async fn test_hardcover<S: AppContext>(
         .body(r#"{"query":"{ me { id } }"}"#)
         .send()
         .await
-        .map_err(|e| ApiError::BadGateway(format!("Hardcover connection failed: {e}")))?;
+        .map_err(|e| {
+            ApiError::BadGateway(format!("Hardcover connection failed: {}", e.without_url()))
+        })?;
 
     if !resp.status().is_success() {
         return Err(ApiError::BadGateway(format!(
@@ -207,12 +259,9 @@ pub async fn test_audnexus<S: AppContext>(
         cfg.audnexus_url.trim_end_matches('/')
     );
 
-    let resp = state
-        .http_client()
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| ApiError::BadGateway(format!("Audnexus connection failed: {e}")))?;
+    let resp = state.http_client().get(&url).send().await.map_err(|e| {
+        ApiError::BadGateway(format!("Audnexus connection failed: {}", e.without_url()))
+    })?;
 
     if !resp.status().is_success() {
         return Err(ApiError::BadGateway(format!(
@@ -253,7 +302,7 @@ pub async fn test_llm<S: AppContext>(
         .body(body.to_string())
         .send()
         .await
-        .map_err(|e| ApiError::BadGateway(format!("LLM connection failed: {e}")))?;
+        .map_err(|e| ApiError::BadGateway(format!("LLM connection failed: {}", e.without_url())))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -305,6 +354,7 @@ pub async fn update_prowlarr<S: AppContext>(
 }
 
 pub async fn get_email<S: AppContext>(
+    _admin: RequireAdmin,
     State(state): State<S>,
 ) -> Result<Json<EmailConfigResponse>, ApiError> {
     let c = state.settings_service().get_email_config().await?;
@@ -403,6 +453,8 @@ pub async fn trigger_rss_sync<S: AppContext>(
 
     let s = state.clone();
     tokio::spawn(async move {
+        let _guard = RssSyncGuard(s.rss_sync());
+
         match s.rss_sync_workflow().run_sync().await {
             Ok(report) => {
                 s.rss_sync().set_last_run(chrono::Utc::now().timestamp());
@@ -414,7 +466,6 @@ pub async fn trigger_rss_sync<S: AppContext>(
                 tracing::warn!("trigger rss_sync failed: {e}");
             }
         }
-        s.rss_sync().release();
     });
 
     Ok(axum::http::StatusCode::OK)
