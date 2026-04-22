@@ -275,14 +275,15 @@ impl livrarr_handlers::accessors::CoverProxyCacheAccessor for CoverProxyCacheAcc
 
 use livrarr_handlers::context::{
     HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasCoverCache,
-    HasDataDir, HasDownloadClientSettingsService, HasEmailService, HasEnrichmentNotify,
-    HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService, HasHttpClient,
-    HasImportIoService, HasImportService, HasImportWorkflow, HasIndexerSettingsService,
-    HasListService, HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
-    HasNotificationService, HasProviderHealth, HasQueueService, HasReadarrImportWorkflow,
-    HasReleaseService, HasRemotePathMappingService, HasRootFolderService, HasRssSync,
-    HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem,
-    HasTagService, HasWorkService,
+    HasDataDir, HasDownloadClientCredentialService, HasDownloadClientSettingsService,
+    HasEmailService, HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasGrabService,
+    HasHistoryService, HasHttpClient, HasImportIoService, HasImportService, HasImportWorkflow,
+    HasIndexerCredentialService, HasIndexerSettingsService, HasListService, HasLiveConfig,
+    HasManualImportScan, HasManualImportService, HasMatchingService, HasNotificationService,
+    HasProviderHealth, HasQueueService, HasReadarrImportWorkflow, HasReleaseService,
+    HasRemotePathMappingService, HasRootFolderService, HasRssSync, HasRssSyncWorkflow,
+    HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem, HasTagService,
+    HasWorkService,
 };
 
 impl HasWorkService for AppState {
@@ -355,9 +356,23 @@ impl HasDownloadClientSettingsService for AppState {
     }
 }
 
+impl HasDownloadClientCredentialService for AppState {
+    type DownloadClientCredentialSvc = LiveSettingsService;
+    fn download_client_credential_service(&self) -> &Self::DownloadClientCredentialSvc {
+        &self.settings_service
+    }
+}
+
 impl HasIndexerSettingsService for AppState {
     type IndexerSettingsSvc = LiveSettingsService;
     fn indexer_settings_service(&self) -> &Self::IndexerSettingsSvc {
+        &self.settings_service
+    }
+}
+
+impl HasIndexerCredentialService for AppState {
+    type IndexerCredentialSvc = LiveSettingsService;
+    fn indexer_credential_service(&self) -> &Self::IndexerCredentialSvc {
         &self.settings_service
     }
 }

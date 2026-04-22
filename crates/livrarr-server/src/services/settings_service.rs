@@ -13,7 +13,9 @@ use livrarr_domain::{
 };
 
 pub use livrarr_domain::services::AppConfigService;
+pub use livrarr_domain::services::DownloadClientCredentialService;
 pub use livrarr_domain::services::DownloadClientSettingsService;
+pub use livrarr_domain::services::IndexerCredentialService;
 pub use livrarr_domain::services::IndexerSettingsService;
 pub use livrarr_domain::services::RemotePathMappingService;
 pub use livrarr_domain::services::RootFolderService;
@@ -112,34 +114,12 @@ where
         livrarr_metadata::language::validate_languages(languages, llm_configured)
     }
 
-    async fn get_prowlarr_config(&self) -> Result<ProwlarrConfig, DbError> {
-        self.db.get_prowlarr_config().await
-    }
-
-    async fn update_prowlarr_config(
-        &self,
-        params: UpdateProwlarrParams,
-    ) -> Result<ProwlarrConfig, DbError> {
-        self.db.update_prowlarr_config(params.into()).await
-    }
-
     async fn get_email_config(&self) -> Result<EmailConfig, DbError> {
         self.db.get_email_config().await
     }
 
     async fn update_email_config(&self, params: UpdateEmailParams) -> Result<EmailConfig, DbError> {
         self.db.update_email_config(params.into()).await
-    }
-
-    async fn get_indexer_config(&self) -> Result<IndexerConfig, DbError> {
-        self.db.get_indexer_config().await
-    }
-
-    async fn update_indexer_config(
-        &self,
-        params: UpdateIndexerConfigParams,
-    ) -> Result<IndexerConfig, DbError> {
-        self.db.update_indexer_config(params.into()).await
     }
 }
 
@@ -158,13 +138,6 @@ where
 {
     async fn get_download_client(&self, id: DownloadClientId) -> Result<DownloadClient, DbError> {
         self.db.get_download_client(id).await
-    }
-
-    async fn get_download_client_with_credentials(
-        &self,
-        id: DownloadClientId,
-    ) -> Result<DownloadClient, DbError> {
-        self.db.get_download_client_with_credentials(id).await
     }
 
     async fn list_download_clients(&self) -> Result<Vec<DownloadClient>, DbError> {
@@ -208,10 +181,6 @@ where
         self.db.get_indexer(id).await
     }
 
-    async fn get_indexer_with_credentials(&self, id: IndexerId) -> Result<Indexer, DbError> {
-        self.db.get_indexer_with_credentials(id).await
-    }
-
     async fn list_indexers(&self) -> Result<Vec<Indexer>, DbError> {
         self.db.list_indexers().await
     }
@@ -234,6 +203,67 @@ where
 
     async fn set_supports_book_search(&self, id: IndexerId, supports: bool) -> Result<(), DbError> {
         self.db.set_supports_book_search(id, supports).await
+    }
+
+    async fn get_prowlarr_config(&self) -> Result<ProwlarrConfig, DbError> {
+        self.db.get_prowlarr_config().await
+    }
+
+    async fn update_prowlarr_config(
+        &self,
+        params: UpdateProwlarrParams,
+    ) -> Result<ProwlarrConfig, DbError> {
+        self.db.update_prowlarr_config(params.into()).await
+    }
+
+    async fn get_indexer_config(&self) -> Result<IndexerConfig, DbError> {
+        self.db.get_indexer_config().await
+    }
+
+    async fn update_indexer_config(
+        &self,
+        params: UpdateIndexerConfigParams,
+    ) -> Result<IndexerConfig, DbError> {
+        self.db.update_indexer_config(params.into()).await
+    }
+}
+
+// =============================================================================
+// DownloadClientCredentialService impl
+// =============================================================================
+
+impl<DB> DownloadClientCredentialService for LiveSettingsService<DB>
+where
+    DB: ConfigDb
+        + DownloadClientDb
+        + IndexerDb
+        + RootFolderDb
+        + RemotePathMappingDb
+        + ProviderRetryStateDb,
+{
+    async fn get_download_client_with_credentials(
+        &self,
+        id: DownloadClientId,
+    ) -> Result<DownloadClient, DbError> {
+        self.db.get_download_client_with_credentials(id).await
+    }
+}
+
+// =============================================================================
+// IndexerCredentialService impl
+// =============================================================================
+
+impl<DB> IndexerCredentialService for LiveSettingsService<DB>
+where
+    DB: ConfigDb
+        + DownloadClientDb
+        + IndexerDb
+        + RootFolderDb
+        + RemotePathMappingDb
+        + ProviderRetryStateDb,
+{
+    async fn get_indexer_with_credentials(&self, id: IndexerId) -> Result<Indexer, DbError> {
+        self.db.get_indexer_with_credentials(id).await
     }
 }
 
