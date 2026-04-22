@@ -49,6 +49,23 @@ pub fn parse_release_title(title: &str) -> ParsedRelease {
     }
 }
 
+/// Parse a release title with candidate-aware fallback.
+/// When regex patterns fail, scans for known title/author substrings in the input.
+pub fn parse_release_title_with_candidates(
+    title: &str,
+    candidates: &[(&str, &str)],
+) -> ParsedRelease {
+    let (extractions, side) = m3_string::parse_string_with_candidates(title, candidates);
+    ParsedRelease {
+        extractions,
+        format: side.format,
+        year: side.year,
+        narrator: side.narrator,
+        unabridged: side.unabridged,
+        language: side.language,
+    }
+}
+
 /// Score parsed extractions against a single candidate.
 /// Returns the best (highest) score across all extractions. Range: 0.0–1.0.
 pub fn best_match_score(parsed: &ParsedRelease, candidate: &MatchCandidate) -> f64 {
