@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use livrarr_domain::services::{EmailService, EmailServiceError, SettingsService};
+use livrarr_domain::services::{AppConfigService, EmailService, EmailServiceError};
 
 use crate::services::settings_service::LiveSettingsService;
 

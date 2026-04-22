@@ -3,7 +3,7 @@ use axum::Json;
 
 use futures::stream::{self, StreamExt};
 
-use crate::context::AppContext;
+use crate::context::{HasGrabService, HasImportService, HasQueueService};
 use crate::{ApiError, AuthContext, QueueItemResponse, QueueListResponse};
 use livrarr_domain::services::{GrabService, ImportService, QueueService};
 use livrarr_domain::{GrabStatus, QueueProgress};
@@ -15,7 +15,7 @@ pub struct QueueQuery {
     pub page: Option<u32>,
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasQueueService>(
     State(state): State<S>,
     ctx: AuthContext,
     Query(q): Query<QueueQuery>,
@@ -90,7 +90,7 @@ pub async fn list<S: AppContext>(
     }))
 }
 
-pub async fn remove<S: AppContext>(
+pub async fn remove<S: HasGrabService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -99,7 +99,7 @@ pub async fn remove<S: AppContext>(
     Ok(())
 }
 
-pub async fn retry_import<S: AppContext>(
+pub async fn retry_import<S: HasQueueService + HasImportService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -154,7 +154,7 @@ pub struct ImportRetryResponse {
     pub error: Option<String>,
 }
 
-pub async fn summary<S: AppContext>(
+pub async fn summary<S: HasQueueService>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<Json<livrarr_domain::QueueSummary>, ApiError> {

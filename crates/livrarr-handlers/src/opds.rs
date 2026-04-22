@@ -2,7 +2,38 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
-use crate::context::AppContext;
+use crate::context::{
+    HasAuthService, HasAuthorService, HasDataDir, HasFileService, HasManualImportService,
+    HasWorkService,
+};
+
+pub trait OpdsHandlerContext:
+    HasAuthService
+    + HasAuthorService
+    + HasDataDir
+    + HasFileService
+    + HasManualImportService
+    + HasWorkService
+    + Clone
+    + Send
+    + Sync
+    + 'static
+{
+}
+
+impl<T> OpdsHandlerContext for T where
+    T: HasAuthService
+        + HasAuthorService
+        + HasDataDir
+        + HasFileService
+        + HasManualImportService
+        + HasWorkService
+        + Clone
+        + Send
+        + Sync
+        + 'static
+{
+}
 use crate::ApiError;
 use livrarr_domain::services::{
     AuthorService, FileService, ManualImportService, SortDirection, WorkFilter, WorkService,
@@ -14,7 +45,7 @@ use livrarr_domain::{LibraryItem, User, Work};
 // OPDS Basic Auth
 // ---------------------------------------------------------------------------
 
-async fn basic_auth<S: AppContext>(state: &S, headers: &HeaderMap) -> Result<User, Response> {
+async fn basic_auth<S: HasAuthService>(state: &S, headers: &HeaderMap) -> Result<User, Response> {
     let unauthorized = || {
         (
             StatusCode::UNAUTHORIZED,
@@ -213,7 +244,7 @@ pub struct SearchQuery {
     pub page: Option<usize>,
 }
 
-pub async fn root<S: AppContext>(
+pub async fn root<S: OpdsHandlerContext>(
     State(state): State<S>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
@@ -232,7 +263,7 @@ pub async fn root<S: AppContext>(
     Ok(xml_response(body))
 }
 
-pub async fn recent<S: AppContext>(
+pub async fn recent<S: OpdsHandlerContext>(
     State(state): State<S>,
     headers: HeaderMap,
     Query(pq): Query<PageQuery>,
@@ -269,7 +300,7 @@ pub async fn recent<S: AppContext>(
     Ok(xml_response(body))
 }
 
-pub async fn author_list<S: AppContext>(
+pub async fn author_list<S: OpdsHandlerContext>(
     State(state): State<S>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
@@ -295,7 +326,7 @@ pub async fn author_list<S: AppContext>(
     Ok(xml_response(body))
 }
 
-pub async fn author_works<S: AppContext>(
+pub async fn author_works<S: OpdsHandlerContext>(
     State(state): State<S>,
     headers: HeaderMap,
     Path(author_id): Path<i64>,
@@ -353,7 +384,7 @@ pub async fn author_works<S: AppContext>(
     Ok(xml_response(body))
 }
 
-pub async fn search<S: AppContext>(
+pub async fn search<S: OpdsHandlerContext>(
     State(state): State<S>,
     headers: HeaderMap,
     Query(sq): Query<SearchQuery>,
@@ -406,7 +437,7 @@ pub async fn search<S: AppContext>(
     Ok(xml_response(body))
 }
 
-pub async fn opensearch<S: AppContext>(
+pub async fn opensearch<S: Clone + Send + Sync + 'static>(
     State(_state): State<S>,
     _headers: HeaderMap,
 ) -> Result<Response, Response> {
@@ -430,7 +461,7 @@ pub async fn opensearch<S: AppContext>(
         .into_response())
 }
 
-pub async fn cover<S: AppContext>(
+pub async fn cover<S: HasAuthService + HasDataDir>(
     State(state): State<S>,
     headers: HeaderMap,
     Path(work_id): Path<i64>,
@@ -455,7 +486,7 @@ pub async fn cover<S: AppContext>(
         .into_response())
 }
 
-pub async fn download<S: AppContext>(
+pub async fn download<S: HasAuthService + HasFileService>(
     State(state): State<S>,
     headers: HeaderMap,
     Path(item_id): Path<i64>,

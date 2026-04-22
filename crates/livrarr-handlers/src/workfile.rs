@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasFileService;
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::pagination::{PaginatedResponse, PaginationQuery};
@@ -18,7 +18,7 @@ fn to_response(li: &livrarr_domain::LibraryItem) -> LibraryItemResponse {
     }
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasFileService>(
     State(state): State<S>,
     ctx: AuthContext,
     Query(pq): Query<PaginationQuery>,
@@ -37,7 +37,7 @@ pub async fn list<S: AppContext>(
     }))
 }
 
-pub async fn get<S: AppContext>(
+pub async fn get<S: HasFileService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -46,7 +46,7 @@ pub async fn get<S: AppContext>(
     Ok(Json(to_response(&item)))
 }
 
-pub async fn delete<S: AppContext>(
+pub async fn delete<S: HasFileService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -55,7 +55,7 @@ pub async fn delete<S: AppContext>(
     Ok(())
 }
 
-pub async fn get_progress<S: AppContext>(
+pub async fn get_progress<S: HasFileService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -78,7 +78,7 @@ pub struct UpdateProgressRequest {
     pub progress_pct: f64,
 }
 
-pub async fn update_progress<S: AppContext>(
+pub async fn update_progress<S: HasFileService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,

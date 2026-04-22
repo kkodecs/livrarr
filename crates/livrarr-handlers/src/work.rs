@@ -4,7 +4,12 @@ use axum::Json;
 
 use axum::response::{IntoResponse, Response};
 
-use crate::context::AppContext;
+use crate::context::{
+    HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasEmailService,
+    HasEnrichmentNotify, HasFileService, HasNotificationService, HasSeriesQueryService,
+    HasTagService, HasWorkService,
+};
+
 use crate::middleware::RequireAdmin;
 use crate::types::work::work_to_detail;
 use crate::{
@@ -94,7 +99,7 @@ pub struct StreamQuery {
     pub token: Option<String>,
 }
 
-pub async fn lookup<S: AppContext>(
+pub async fn lookup<S: HasWorkService>(
     State(state): State<S>,
     _ctx: AuthContext,
     Query(q): Query<LookupQuery>,
@@ -136,7 +141,9 @@ pub async fn lookup<S: AppContext>(
     }))
 }
 
-pub async fn add<S: AppContext>(
+pub async fn add<
+    S: HasWorkService + HasAuthorService + HasSeriesQueryService + HasEnrichmentNotify,
+>(
     State(state): State<S>,
     ctx: AuthContext,
     Json(req): Json<AddWorkRequest>,
@@ -199,7 +206,7 @@ pub async fn add<S: AppContext>(
     }))
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
     Query(pq): Query<crate::PaginationQuery>,
@@ -224,7 +231,7 @@ pub async fn list<S: AppContext>(
     }))
 }
 
-pub async fn get<S: AppContext>(
+pub async fn get<S: HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -233,7 +240,7 @@ pub async fn get<S: AppContext>(
     Ok(Json(detail_from_view(view)))
 }
 
-pub async fn update<S: AppContext>(
+pub async fn update<S: HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -306,7 +313,7 @@ pub async fn update<S: AppContext>(
     Ok(Json(work_to_detail(&work)))
 }
 
-pub async fn upload_cover<S: AppContext>(
+pub async fn upload_cover<S: HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -337,7 +344,7 @@ pub async fn upload_cover<S: AppContext>(
     Ok(())
 }
 
-pub async fn delete<S: AppContext>(
+pub async fn delete<S: HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -347,7 +354,7 @@ pub async fn delete<S: AppContext>(
     Ok(Json(DeleteWorkResponse { warnings: vec![] }))
 }
 
-pub async fn refresh<S: AppContext>(
+pub async fn refresh<S: HasWorkService + HasTagService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -391,7 +398,7 @@ pub async fn refresh<S: AppContext>(
     }))
 }
 
-pub async fn refresh_all<S: AppContext>(
+pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationService>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<axum::http::StatusCode, ApiError> {
@@ -482,7 +489,7 @@ pub async fn refresh_all<S: AppContext>(
     Ok(axum::http::StatusCode::ACCEPTED)
 }
 
-pub async fn send_email<S: AppContext>(
+pub async fn send_email<S: HasFileService + HasEmailService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -502,7 +509,7 @@ pub async fn send_email<S: AppContext>(
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
-pub async fn download<S: AppContext>(
+pub async fn download<S: HasFileService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -533,7 +540,7 @@ pub async fn download<S: AppContext>(
     Ok(Response::from_parts(parts, body))
 }
 
-pub async fn stream<S: AppContext>(
+pub async fn stream<S: HasAuthService + HasFileService>(
     State(state): State<S>,
     Path(id): Path<i64>,
     Query(params): Query<StreamQuery>,
@@ -573,16 +580,24 @@ pub async fn stream<S: AppContext>(
     Ok(Response::from_parts(parts, body))
 }
 
-pub async fn author_search<S: AppContext>(
+pub async fn author_search<S: HasAuthorMonitorWorkflow>(
     State(state): State<S>,
+    ctx: AuthContext,
     _admin: RequireAdmin,
 ) -> axum::http::StatusCode {
     let s = state.clone();
+    let user_id = ctx.user.id;
     tokio::spawn(async move {
-        use livrarr_domain::services::AuthorMonitorWorkflow;
+        use livrarr_domain::services::{AuthorMonitorWorkflow, MonitorError};
         let cancel = tokio_util::sync::CancellationToken::new();
-        if let Err(e) = s.author_monitor_workflow().run_monitor(cancel).await {
-            tracing::error!("manual author search failed: {e}");
+        match s
+            .author_monitor_workflow()
+            .run_monitor(user_id, cancel)
+            .await
+        {
+            Ok(_) => {}
+            Err(MonitorError::AlreadyRunning) => {}
+            Err(e) => tracing::error!("manual author search failed for user {user_id}: {e}"),
         }
     });
     axum::http::StatusCode::ACCEPTED

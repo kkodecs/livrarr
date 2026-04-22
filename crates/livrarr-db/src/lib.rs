@@ -394,10 +394,10 @@ pub trait AuthorDb: Send + Sync {
         normalized_name: &str,
     ) -> Result<Option<Author>, DbError>;
 
-    /// List monitored authors with ol_key (for author monitoring job).
+    /// List monitored authors with ol_key for a specific user (for author monitoring job).
     ///
     /// Satisfies: AUTHOR-002
-    async fn list_monitored_authors(&self) -> Result<Vec<Author>, DbError>;
+    async fn list_monitored_authors(&self, user_id: UserId) -> Result<Vec<Author>, DbError>;
 }
 
 pub struct CreateAuthorDbRequest {

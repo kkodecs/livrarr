@@ -180,10 +180,11 @@ impl AuthorDb for SqliteDb {
         }
     }
 
-    async fn list_monitored_authors(&self) -> Result<Vec<Author>, DbError> {
+    async fn list_monitored_authors(&self, user_id: UserId) -> Result<Vec<Author>, DbError> {
         let rows = sqlx::query(
-            "SELECT * FROM authors WHERE monitored = 1 AND ol_key IS NOT NULL ORDER BY id",
+            "SELECT * FROM authors WHERE user_id = ? AND monitored = 1 AND ol_key IS NOT NULL ORDER BY id",
         )
+        .bind(user_id)
         .fetch_all(self.pool())
         .await
         .map_err(map_db_err)?;

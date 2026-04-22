@@ -270,146 +270,281 @@ impl livrarr_handlers::accessors::CoverProxyCacheAccessor for CoverProxyCacheAcc
 }
 
 // =============================================================================
-// AppContext impl
+// AppContext impl — one Has* trait per capability
 // =============================================================================
 
-impl livrarr_handlers::context::AppContext for AppState {
-    // --- Domain services ---
+use livrarr_handlers::context::{
+    HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasCoverCache,
+    HasDataDir, HasDownloadClientSettingsService, HasEmailService, HasEnrichmentNotify,
+    HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService, HasHttpClient,
+    HasImportIoService, HasImportService, HasImportWorkflow, HasIndexerSettingsService,
+    HasListService, HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
+    HasNotificationService, HasProviderHealth, HasQueueService, HasReadarrImportWorkflow,
+    HasReleaseService, HasRemotePathMappingService, HasRootFolderService, HasRssSync,
+    HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem,
+    HasTagService, HasWorkService,
+};
+
+impl HasWorkService for AppState {
     type WorkSvc = LiveWorkService;
-    type FileSvc = LiveFileService;
-    type AuthorSvc = LiveAuthorService;
-    type SeriesSvc = LiveSeriesService;
-    type SeriesQuerySvc = LiveSeriesQueryService;
-    type GrabSvc = LiveGrabService;
-    type ReleaseSvc = LiveReleaseService;
-    type ListSvc = LiveListService;
-    type SettingsSvc = LiveSettingsService;
-    type NotificationSvc = LiveNotificationService;
-    type QueueSvc = LiveQueueService;
-    type ImportIoSvc = LiveImportIoService;
-    type ManualImportSvc = LiveManualImportDbService;
-    type HistorySvc = LiveHistoryService;
-    type AuthSvc = ServerAuthService<RealAuthCrypto>;
-    type ImportWf = LiveImportWorkflow;
-    type EnrichmentWf = LiveEnrichmentWorkflow;
-    type RssSyncWf = LiveRssSyncWorkflow;
-    type TagSvc = crate::tag_service::LiveTagService<LiveImportIoService>;
-    type EmailSvc = crate::email_service::LiveEmailService<livrarr_db::sqlite::SqliteDb>;
-    type AuthorMonitorWf = LiveAuthorMonitorWorkflow;
-    type ImportSvc = crate::import_service::LiveImportService;
-    type MatchingSvc = crate::matching_service::LiveMatchingService;
-    type ManualImportScan = crate::manual_import_scan_service::LiveManualImportScanService;
-    type ReadarrImportWf = crate::readarr_import_workflow::LiveReadarrImportWorkflow;
-
-    // --- Infrastructure ---
-    type ProviderHealth = ProviderHealthAccessorImpl;
-    type LiveConfig = LiveMetadataConfigAccessorImpl;
-    type RssSync = RssSyncState;
-    type System = SystemState;
-    type CoverCache = CoverProxyCacheAccessorImpl;
-
     fn work_service(&self) -> &Self::WorkSvc {
         &self.work_service
     }
+}
+
+impl HasFileService for AppState {
+    type FileSvc = LiveFileService;
     fn file_service(&self) -> &Self::FileSvc {
         &self.file_service
     }
+}
+
+impl HasAuthorService for AppState {
+    type AuthorSvc = LiveAuthorService;
     fn author_service(&self) -> &Self::AuthorSvc {
         &self.author_service
     }
+}
+
+impl HasSeriesService for AppState {
+    type SeriesSvc = LiveSeriesService;
     fn series_service(&self) -> &Self::SeriesSvc {
         &self.series_service
     }
+}
+
+impl HasSeriesQueryService for AppState {
+    type SeriesQuerySvc = LiveSeriesQueryService;
     fn series_query_service(&self) -> &Self::SeriesQuerySvc {
         &self.series_query_service
     }
+}
+
+impl HasGrabService for AppState {
+    type GrabSvc = LiveGrabService;
     fn grab_service(&self) -> &Self::GrabSvc {
         &self.grab_service
     }
+}
+
+impl HasReleaseService for AppState {
+    type ReleaseSvc = LiveReleaseService;
     fn release_service(&self) -> &Self::ReleaseSvc {
         &self.release_service
     }
+}
+
+impl HasListService for AppState {
+    type ListSvc = LiveListService;
     fn list_service(&self) -> &Self::ListSvc {
         &self.list_service
     }
-    fn settings_service(&self) -> &Self::SettingsSvc {
+}
+
+impl HasAppConfigService for AppState {
+    type AppConfigSvc = LiveSettingsService;
+    fn app_config_service(&self) -> &Self::AppConfigSvc {
         &self.settings_service
     }
+}
+
+impl HasDownloadClientSettingsService for AppState {
+    type DownloadClientSettingsSvc = LiveSettingsService;
+    fn download_client_settings_service(&self) -> &Self::DownloadClientSettingsSvc {
+        &self.settings_service
+    }
+}
+
+impl HasIndexerSettingsService for AppState {
+    type IndexerSettingsSvc = LiveSettingsService;
+    fn indexer_settings_service(&self) -> &Self::IndexerSettingsSvc {
+        &self.settings_service
+    }
+}
+
+impl HasRootFolderService for AppState {
+    type RootFolderSvc = LiveSettingsService;
+    fn root_folder_service(&self) -> &Self::RootFolderSvc {
+        &self.settings_service
+    }
+}
+
+impl HasRemotePathMappingService for AppState {
+    type RemotePathMappingSvc = LiveSettingsService;
+    fn remote_path_mapping_service(&self) -> &Self::RemotePathMappingSvc {
+        &self.settings_service
+    }
+}
+
+impl HasNotificationService for AppState {
+    type NotificationSvc = LiveNotificationService;
     fn notification_service(&self) -> &Self::NotificationSvc {
         &self.notification_service
     }
+}
+
+impl HasQueueService for AppState {
+    type QueueSvc = LiveQueueService;
     fn queue_service(&self) -> &Self::QueueSvc {
         &self.queue_service
     }
+}
+
+impl HasImportIoService for AppState {
+    type ImportIoSvc = LiveImportIoService;
     fn import_io_service(&self) -> &Self::ImportIoSvc {
         &self.import_io_service
     }
+}
+
+impl HasManualImportService for AppState {
+    type ManualImportSvc = LiveManualImportDbService;
     fn manual_import_service(&self) -> &Self::ManualImportSvc {
         &self.manual_import_db_service
     }
+}
+
+impl HasHistoryService for AppState {
+    type HistorySvc = LiveHistoryService;
     fn history_service(&self) -> &Self::HistorySvc {
         &self.history_service
     }
+}
+
+impl HasAuthService for AppState {
+    type AuthSvc = ServerAuthService<RealAuthCrypto>;
     fn auth_service(&self) -> &Self::AuthSvc {
         &self.auth_service
     }
+}
+
+impl HasImportWorkflow for AppState {
+    type ImportWf = LiveImportWorkflow;
     fn import_workflow(&self) -> &Self::ImportWf {
         &self.import_workflow
     }
+}
+
+impl HasEnrichmentWorkflow for AppState {
+    type EnrichmentWf = LiveEnrichmentWorkflow;
     fn enrichment_workflow(&self) -> &Self::EnrichmentWf {
         &self.enrichment_workflow
     }
+}
+
+impl HasRssSyncWorkflow for AppState {
+    type RssSyncWf = LiveRssSyncWorkflow;
     fn rss_sync_workflow(&self) -> &Self::RssSyncWf {
         &self.rss_sync_workflow
     }
+}
+
+impl HasTagService for AppState {
+    type TagSvc = crate::tag_service::LiveTagService<LiveImportIoService>;
     fn tag_service(&self) -> &Self::TagSvc {
         &self.tag_service
     }
+}
+
+impl HasEmailService for AppState {
+    type EmailSvc = crate::email_service::LiveEmailService<livrarr_db::sqlite::SqliteDb>;
     fn email_service(&self) -> &Self::EmailSvc {
         &self.email_svc
     }
+}
+
+impl HasAuthorMonitorWorkflow for AppState {
+    type AuthorMonitorWf = LiveAuthorMonitorWorkflow;
     fn author_monitor_workflow(&self) -> &Self::AuthorMonitorWf {
         &self.author_monitor_workflow
     }
+}
+
+impl HasImportService for AppState {
+    type ImportSvc = crate::import_service::LiveImportService;
     fn import_service(&self) -> &Self::ImportSvc {
         &self.import_svc
     }
+}
+
+impl HasMatchingService for AppState {
+    type MatchingSvc = crate::matching_service::LiveMatchingService;
     fn matching_service(&self) -> &Self::MatchingSvc {
         &self.matching_svc
     }
+}
+
+impl HasManualImportScan for AppState {
+    type ManualImportScan = crate::manual_import_scan_service::LiveManualImportScanService;
     fn manual_import_scan(&self) -> &Self::ManualImportScan {
         &self.manual_import_scan_svc
     }
+}
+
+impl HasReadarrImportWorkflow for AppState {
+    type ReadarrImportWf = crate::readarr_import_workflow::LiveReadarrImportWorkflow;
     fn readarr_import_workflow(&self) -> &Self::ReadarrImportWf {
         &self.readarr_import_wf
     }
+}
+
+impl HasHttpClient for AppState {
     fn http_client(&self) -> &livrarr_http::HttpClient {
         &self.http_client
     }
     fn http_client_safe(&self) -> &livrarr_http::HttpClient {
         &self.http_client_safe
     }
+}
+
+impl HasDataDir for AppState {
     fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
     }
+}
+
+impl HasStartupTime for AppState {
     fn startup_time(&self) -> chrono::DateTime<chrono::Utc> {
         self.startup_time
     }
+}
+
+impl HasProviderHealth for AppState {
+    type ProviderHealth = ProviderHealthAccessorImpl;
     fn provider_health(&self) -> &Self::ProviderHealth {
         &self.provider_health_accessor
     }
+}
+
+impl HasLiveConfig for AppState {
+    type LiveConfig = LiveMetadataConfigAccessorImpl;
     fn live_metadata_config(&self) -> &Self::LiveConfig {
         &self.live_metadata_config_accessor
     }
+}
+
+impl HasRssSync for AppState {
+    type RssSync = RssSyncState;
     fn rss_sync(&self) -> &Self::RssSync {
         &self.rss_sync_state
     }
+}
+
+impl HasSystem for AppState {
+    type System = SystemState;
     fn system(&self) -> &Self::System {
         &self.system_state
     }
+}
+
+impl HasCoverCache for AppState {
+    type CoverCache = CoverProxyCacheAccessorImpl;
     fn cover_proxy_cache(&self) -> &Self::CoverCache {
         &self.cover_proxy_cache_accessor
     }
+}
+
+impl HasEnrichmentNotify for AppState {
     fn enrichment_notify(&self) -> &tokio::sync::Notify {
         &self.enrichment_notify
     }

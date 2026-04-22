@@ -275,7 +275,7 @@ async fn test_monitor_auto_adds_new_work() {
     let workflow = AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http));
 
     let report = workflow
-        .run_monitor(CancellationToken::new())
+        .run_monitor(user_id, CancellationToken::new())
         .await
         .unwrap();
 
@@ -312,7 +312,7 @@ async fn test_monitor_notification_only_when_disabled() {
     let workflow = AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http));
 
     let report = workflow
-        .run_monitor(CancellationToken::new())
+        .run_monitor(user_id, CancellationToken::new())
         .await
         .unwrap();
 
@@ -368,7 +368,7 @@ async fn test_monitor_skips_existing_work() {
     let workflow = AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http));
 
     let report = workflow
-        .run_monitor(CancellationToken::new())
+        .run_monitor(user_id, CancellationToken::new())
         .await
         .unwrap();
 
@@ -411,7 +411,7 @@ async fn test_monitor_ol_429_backs_off_and_retries() {
         .with_backoff(Duration::from_millis(10), Duration::from_millis(10));
 
     let report = workflow
-        .run_monitor(CancellationToken::new())
+        .run_monitor(user_id, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(
@@ -454,7 +454,7 @@ async fn test_monitor_ol_error_continues_to_next_author() {
     let workflow = AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http));
 
     let report = workflow
-        .run_monitor(CancellationToken::new())
+        .run_monitor(user_id, CancellationToken::new())
         .await
         .unwrap();
 
@@ -502,7 +502,7 @@ async fn test_monitor_publish_year_filter() {
     let workflow = AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http));
 
     let report = workflow
-        .run_monitor(CancellationToken::new())
+        .run_monitor(user_id, CancellationToken::new())
         .await
         .unwrap();
 
@@ -528,7 +528,7 @@ async fn test_monitor_auto_add_passes_auto_added_provenance_setter() {
     let workflow = AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http));
 
     let report = workflow
-        .run_monitor(CancellationToken::new())
+        .run_monitor(user_id, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(report.works_added, 1);
@@ -560,7 +560,7 @@ async fn test_monitor_disabled_does_not_call_work_service_add() {
     let workflow = AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http));
 
     let report = workflow
-        .run_monitor(CancellationToken::new())
+        .run_monitor(user_id, CancellationToken::new())
         .await
         .unwrap();
 
@@ -583,7 +583,9 @@ use chrono::Datelike;
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_monitor_run_globally_across_all_users() {
+async fn test_monitor_run_per_user_processes_only_that_users_authors() {
+    // run_monitor is now user-scoped. The scheduled job iterates users and
+    // calls once per user. This test verifies each call only sees its user's authors.
     let db = create_test_db().await;
     let user1 = create_test_user(&db).await;
     let user2 = create_second_test_user(&db).await;
@@ -593,13 +595,13 @@ async fn test_monitor_run_globally_across_all_users() {
     let _author2 = seed_monitored_author(&db, user2, "Author Two", "OL_USER2_A", true, None).await;
 
     let http = StubHttpFetcher::new();
-    // User1's author returns a work
+    // user1 call returns a work for author1
     http.push_response(Ok(FetchResponse {
         status: 200,
         headers: vec![],
         body: ol_works_json(&[("OL_W1", "Book One", "2025")]),
     }));
-    // User2's author returns a work
+    // user2 call returns a work for author2
     http.push_response(Ok(FetchResponse {
         status: 200,
         headers: vec![],
@@ -608,18 +610,29 @@ async fn test_monitor_run_globally_across_all_users() {
 
     let work_svc = Arc::new(StubWorkService::succeeding());
     let db_arc = Arc::new(db);
-    let workflow = AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http))
-        .with_backoff(Duration::from_millis(10), Duration::from_millis(10));
+    // Use a non-atomic workflow: each call sees only that user's authors.
+    // We need two separate workflow instances since the AtomicBool is per-instance.
+    let workflow1 =
+        AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http))
+            .with_backoff(Duration::from_millis(10), Duration::from_millis(10));
 
-    let report = workflow
-        .run_monitor(CancellationToken::new())
+    // Process user1
+    let report1 = workflow1
+        .run_monitor(user1, CancellationToken::new())
         .await
         .unwrap();
+    assert_eq!(report1.authors_checked, 1, "user1 has 1 monitored author");
+    assert_eq!(report1.new_works_found, 1);
+    assert_eq!(report1.works_added, 1);
 
-    // Both users' authors processed
-    assert_eq!(report.authors_checked, 2);
-    assert_eq!(report.new_works_found, 2);
-    assert_eq!(report.works_added, 2);
+    // Process user2 (same workflow instance is now unlocked)
+    let report2 = workflow1
+        .run_monitor(user2, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(report2.authors_checked, 1, "user2 has 1 monitored author");
+    assert_eq!(report2.new_works_found, 1);
+    assert_eq!(report2.works_added, 1);
 
     // Verify add() was called with correct user_ids
     let calls = work_svc.add_calls_snapshot().await;
@@ -637,11 +650,12 @@ async fn test_monitor_run_globally_across_all_users() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_monitor_every_db_mutation_carries_owning_user_id() {
+    // Verifies that run_monitor(user_id, ..) only touches that user's data.
     let db = create_test_db().await;
     let user1 = create_test_user(&db).await;
     let user2 = create_second_test_user(&db).await;
 
-    // User1 monitors, user2 notification-only
+    // User1 monitors (auto-add), user2 notification-only
     let _author1 = seed_monitored_author(&db, user1, "Author One", "OL_A1", true, None).await;
     let _author2 = seed_monitored_author(&db, user2, "Author Two", "OL_A2", false, None).await;
 
@@ -662,8 +676,13 @@ async fn test_monitor_every_db_mutation_carries_owning_user_id() {
     let workflow = AuthorMonitorWorkflowImpl::new(db_arc.clone(), work_svc.clone(), Arc::new(http))
         .with_backoff(Duration::from_millis(10), Duration::from_millis(10));
 
-    let _report = workflow
-        .run_monitor(CancellationToken::new())
+    // Simulate what the scheduled job does: call once per user
+    let _r1 = workflow
+        .run_monitor(user1, CancellationToken::new())
+        .await
+        .unwrap();
+    let _r2 = workflow
+        .run_monitor(user2, CancellationToken::new())
         .await
         .unwrap();
 
@@ -712,7 +731,7 @@ async fn test_monitor_429_uses_60s_backoff_max_3_retries_and_creates_rate_limit_
         .with_backoff(Duration::from_millis(10), Duration::from_millis(10));
 
     let report = workflow
-        .run_monitor(CancellationToken::new())
+        .run_monitor(user_id, CancellationToken::new())
         .await
         .unwrap();
 
@@ -767,7 +786,7 @@ async fn test_monitor_honors_cancellation_token() {
         cancel_clone.cancel();
     });
 
-    let report = workflow.run_monitor(cancel).await.unwrap();
+    let report = workflow.run_monitor(user_id, cancel).await.unwrap();
 
     // Should have stopped early — not all 3 authors processed
     assert!(

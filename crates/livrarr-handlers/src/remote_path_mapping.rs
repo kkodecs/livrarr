@@ -1,13 +1,13 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasRemotePathMappingService;
 use crate::middleware::RequireAdmin;
 use crate::types::api_error::ApiError;
 use crate::types::remote_path_mapping::{
     CreateRemotePathMappingApiRequest, RemotePathMappingResponse, UpdateRemotePathMappingRequest,
 };
-use livrarr_domain::services::SettingsService;
+use livrarr_domain::services::RemotePathMappingService;
 use livrarr_domain::RemotePathMapping;
 
 fn to_response(m: RemotePathMapping) -> RemotePathMappingResponse {
@@ -19,24 +19,30 @@ fn to_response(m: RemotePathMapping) -> RemotePathMappingResponse {
     }
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasRemotePathMappingService>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<Vec<RemotePathMappingResponse>>, ApiError> {
-    let mappings = state.settings_service().list_remote_path_mappings().await?;
+    let mappings = state
+        .remote_path_mapping_service()
+        .list_remote_path_mappings()
+        .await?;
     Ok(Json(mappings.into_iter().map(to_response).collect()))
 }
 
-pub async fn get<S: AppContext>(
+pub async fn get<S: HasRemotePathMappingService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<Json<RemotePathMappingResponse>, ApiError> {
-    let m = state.settings_service().get_remote_path_mapping(id).await?;
+    let m = state
+        .remote_path_mapping_service()
+        .get_remote_path_mapping(id)
+        .await?;
     Ok(Json(to_response(m)))
 }
 
-pub async fn create<S: AppContext>(
+pub async fn create<S: HasRemotePathMappingService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<CreateRemotePathMappingApiRequest>,
@@ -49,40 +55,43 @@ pub async fn create<S: AppContext>(
     }
 
     let m = state
-        .settings_service()
+        .remote_path_mapping_service()
         .create_remote_path_mapping(&req.host, &req.remote_path, &req.local_path)
         .await?;
 
     Ok(Json(to_response(m)))
 }
 
-pub async fn update<S: AppContext>(
+pub async fn update<S: HasRemotePathMappingService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
     Json(req): Json<UpdateRemotePathMappingRequest>,
 ) -> Result<Json<RemotePathMappingResponse>, ApiError> {
-    let existing = state.settings_service().get_remote_path_mapping(id).await?;
+    let existing = state
+        .remote_path_mapping_service()
+        .get_remote_path_mapping(id)
+        .await?;
 
     let host = req.host.unwrap_or(existing.host);
     let remote_path = req.remote_path.unwrap_or(existing.remote_path);
     let local_path = req.local_path.unwrap_or(existing.local_path);
 
     let m = state
-        .settings_service()
+        .remote_path_mapping_service()
         .update_remote_path_mapping(id, &host, &remote_path, &local_path)
         .await?;
 
     Ok(Json(to_response(m)))
 }
 
-pub async fn delete<S: AppContext>(
+pub async fn delete<S: HasRemotePathMappingService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<(), ApiError> {
     state
-        .settings_service()
+        .remote_path_mapping_service()
         .delete_remote_path_mapping(id)
         .await?;
     Ok(())

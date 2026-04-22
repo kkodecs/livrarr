@@ -2,6 +2,7 @@ use livrarr_db::{CreateNotificationDbRequest, NotificationDb, WorkDb};
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -45,6 +46,7 @@ pub struct AuthorMonitorWorkflowImpl<D, W, H> {
     http: Arc<H>,
     backoff_duration: Duration,
     inter_author_delay: Duration,
+    running: AtomicBool,
 }
 
 impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H> {
@@ -55,6 +57,7 @@ impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H> {
             http,
             backoff_duration: Duration::from_secs(60),
             inter_author_delay: Duration::from_secs(1),
+            running: AtomicBool::new(false),
         }
     }
 
@@ -71,10 +74,39 @@ where
     W: WorkService + Send + Sync + 'static,
     H: HttpFetcher + Send + Sync + 'static,
 {
-    async fn run_monitor(&self, cancel: CancellationToken) -> Result<MonitorReport, MonitorError> {
+    async fn run_monitor(
+        &self,
+        user_id: UserId,
+        cancel: CancellationToken,
+    ) -> Result<MonitorReport, MonitorError> {
+        if self.running.swap(true, Ordering::AcqRel) {
+            tracing::info!("author monitor already running, skipping");
+            return Err(MonitorError::AlreadyRunning);
+        }
+        let result = self.run_monitor_inner(user_id, cancel).await;
+        self.running.store(false, Ordering::Release);
+        result
+    }
+
+    fn trigger_monitor(&self) {
+        // Stub — server wires this up to spawn(author_monitor_tick).
+    }
+}
+
+impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H>
+where
+    D: WorkDb + livrarr_db::AuthorDb + NotificationDb + Send + Sync + 'static,
+    W: WorkService + Send + Sync + 'static,
+    H: HttpFetcher + Send + Sync + 'static,
+{
+    async fn run_monitor_inner(
+        &self,
+        user_id: UserId,
+        cancel: CancellationToken,
+    ) -> Result<MonitorReport, MonitorError> {
         let authors = self
             .db
-            .list_monitored_authors()
+            .list_monitored_authors(user_id)
             .await
             .map_err(MonitorError::Db)?;
 
@@ -366,9 +398,5 @@ where
         }
 
         Ok(report)
-    }
-
-    fn trigger_monitor(&self) {
-        // Stub — server wires this up to spawn(author_monitor_tick).
     }
 }

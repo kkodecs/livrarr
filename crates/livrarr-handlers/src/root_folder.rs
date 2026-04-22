@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::{HasFileService, HasImportIoService, HasRootFolderService, HasWorkService};
 use crate::middleware::RequireAdmin;
 use crate::{
     ApiError, CreateRootFolderRequest, RootFolderResponse, ScanErrorEntry, ScanResult,
     ScanUnmatchedFile,
 };
-use livrarr_domain::services::{FileService, ImportIoService, SettingsService, WorkService};
+use livrarr_domain::services::{FileService, ImportIoService, RootFolderService, WorkService};
 use livrarr_domain::{classify_file, normalize_for_matching, MediaType};
 
 fn disk_space(path: &str) -> (Option<i64>, Option<i64>) {
@@ -49,11 +49,11 @@ fn to_response_sync(rf: livrarr_domain::RootFolder) -> RootFolderResponse {
     }
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasRootFolderService>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<Vec<RootFolderResponse>>, ApiError> {
-    let folders = state.settings_service().list_root_folders().await?;
+    let folders = state.root_folder_service().list_root_folders().await?;
     let responses = tokio::task::spawn_blocking(move || {
         folders
             .into_iter()
@@ -65,7 +65,7 @@ pub async fn list<S: AppContext>(
     Ok(Json(responses))
 }
 
-pub async fn create<S: AppContext>(
+pub async fn create<S: HasRootFolderService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<CreateRootFolderRequest>,
@@ -74,7 +74,7 @@ pub async fn create<S: AppContext>(
         return Err(ApiError::BadRequest("path is required".into()));
     }
     let rf = state
-        .settings_service()
+        .root_folder_service()
         .create_root_folder(&req.path, req.media_type)
         .await?;
     let response = tokio::task::spawn_blocking(move || to_response_sync(rf))
@@ -83,21 +83,23 @@ pub async fn create<S: AppContext>(
     Ok(Json(response))
 }
 
-pub async fn delete<S: AppContext>(
+pub async fn delete<S: HasRootFolderService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<(), ApiError> {
-    state.settings_service().delete_root_folder(id).await?;
+    state.root_folder_service().delete_root_folder(id).await?;
     Ok(())
 }
 
-pub async fn scan<S: AppContext>(
+pub async fn scan<
+    S: HasRootFolderService + HasWorkService + HasFileService + HasImportIoService,
+>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<Json<ScanResult>, ApiError> {
-    let rf = state.settings_service().get_root_folder(id).await?;
+    let rf = state.root_folder_service().get_root_folder(id).await?;
     let user_id = auth.user.id;
 
     let root_path = PathBuf::from(&rf.path);
@@ -306,7 +308,7 @@ pub struct ScanPathRequest {
     pub path: String,
 }
 
-pub async fn scan_path<S: AppContext>(
+pub async fn scan_path<S: HasWorkService>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Json(req): Json<ScanPathRequest>,

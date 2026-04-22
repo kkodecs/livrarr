@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasNotificationService;
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::notification::NotificationResponse;
@@ -16,7 +16,7 @@ pub struct ListQuery {
     pub page_size: Option<u32>,
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasNotificationService>(
     State(state): State<S>,
     ctx: AuthContext,
     Query(q): Query<ListQuery>,
@@ -55,7 +55,7 @@ pub async fn list<S: AppContext>(
     }))
 }
 
-pub async fn mark_read<S: AppContext>(
+pub async fn mark_read<S: HasNotificationService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -67,7 +67,7 @@ pub async fn mark_read<S: AppContext>(
     Ok(())
 }
 
-pub async fn dismiss<S: AppContext>(
+pub async fn dismiss<S: HasNotificationService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -79,7 +79,7 @@ pub async fn dismiss<S: AppContext>(
     Ok(())
 }
 
-pub async fn dismiss_all<S: AppContext>(
+pub async fn dismiss_all<S: HasNotificationService>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<(), ApiError> {

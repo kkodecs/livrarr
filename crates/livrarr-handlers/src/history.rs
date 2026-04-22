@@ -1,7 +1,7 @@
 use axum::extract::{Query, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasHistoryService;
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::history::HistoryResponse;
@@ -23,7 +23,7 @@ pub struct HistoryQuery {
     pub page_size: Option<u32>,
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasHistoryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Query(q): Query<HistoryQuery>,

@@ -2,7 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::{HasAuthorService, HasSeriesQueryService};
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::series::{
@@ -16,7 +16,7 @@ use livrarr_domain::services::{
     UpdateAuthorRequest,
 };
 
-pub async fn list_all<S: AppContext>(
+pub async fn list_all<S: HasSeriesQueryService>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<Json<Vec<SeriesWithAuthorResponse>>, ApiError> {
@@ -42,7 +42,7 @@ pub async fn list_all<S: AppContext>(
     Ok(Json(results))
 }
 
-pub async fn get_detail<S: AppContext>(
+pub async fn get_detail<S: HasSeriesQueryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -85,7 +85,7 @@ pub async fn get_detail<S: AppContext>(
     }))
 }
 
-pub async fn resolve_gr<S: AppContext>(
+pub async fn resolve_gr<S: HasSeriesQueryService + HasAuthorService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -145,7 +145,7 @@ pub async fn resolve_gr<S: AppContext>(
     }))
 }
 
-pub async fn list_series<S: AppContext>(
+pub async fn list_series<S: HasSeriesQueryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -175,7 +175,7 @@ pub async fn list_series<S: AppContext>(
     }))
 }
 
-pub async fn refresh_series<S: AppContext>(
+pub async fn refresh_series<S: HasSeriesQueryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -205,7 +205,7 @@ pub async fn refresh_series<S: AppContext>(
     }))
 }
 
-pub async fn monitor_series<S: AppContext>(
+pub async fn monitor_series<S: HasSeriesQueryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -267,7 +267,7 @@ pub async fn monitor_series<S: AppContext>(
     ))
 }
 
-pub async fn update_series<S: AppContext>(
+pub async fn update_series<S: HasSeriesQueryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,

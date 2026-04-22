@@ -6,6 +6,7 @@ use livrarr_db::{
     CreateHistoryEventDbRequest, CreateNotificationDbRequest, DownloadClientDb, GrabDb, HistoryDb,
     NotificationDb,
 };
+use livrarr_domain::services::{ImportIoService, ImportService};
 use livrarr_domain::{EventType, GrabStatus, NotificationType};
 
 // ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ async fn poll_qbittorrent(
     client: &livrarr_domain::DownloadClient,
 ) -> Result<(), String> {
     let base_url = crate::infra::release_helpers::qbit_base_url(client);
-    let sid = crate::infra::release_helpers::qbit_login(state, &base_url, client)
+    let sid = crate::infra::release_helpers::qbit_login(&state.http_client_safe, &base_url, client)
         .await
         .map_err(|e| format!("qBit login: {e}"))?;
 
@@ -183,26 +184,34 @@ async fn poll_qbittorrent(
 
             // Resolve source path and verify it exists before attempting import.
             // If files aren't available yet (rsync delay), skip and retry next tick.
-            let content_path =
-                match crate::infra::import_pipeline::fetch_qbit_content_path(state, client, hash)
-                    .await
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!(
-                            "poller: could not get content_path for grab {}: {e}",
-                            grab.id
-                        );
-                        continue;
-                    }
-                };
-            let mapping_result = match crate::infra::import_pipeline::apply_remote_path_mapping(
-                state,
-                &client.host,
-                &content_path,
+            let content_path = match crate::infra::import_pipeline::fetch_qbit_content_path(
+                &state.http_client_safe,
+                client,
+                hash,
             )
             .await
             {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(
+                        "poller: could not get content_path for grab {}: {e}",
+                        grab.id
+                    );
+                    continue;
+                }
+            };
+            let mappings = match state.import_io_service.list_remote_path_mappings().await {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("poller: list_remote_path_mappings failed: {e}");
+                    continue;
+                }
+            };
+            let mapping_result = match crate::infra::import_pipeline::apply_remote_path_mapping(
+                &mappings,
+                &client.host,
+                &content_path,
+            ) {
                 Ok(r) => r,
                 Err(e) => {
                     warn!("poller: path mapping failed for grab {}: {e}", grab.id);
@@ -411,14 +420,19 @@ async fn poll_sabnzbd(
                         .unwrap_or_default();
 
                     // Resolve local path and verify it exists before attempting import.
+                    let mappings = match state.import_io_service.list_remote_path_mappings().await {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!("poller: list_remote_path_mappings failed: {e}");
+                            continue;
+                        }
+                    };
                     let mapping_result =
                         match crate::infra::import_pipeline::apply_remote_path_mapping(
-                            state,
+                            &mappings,
                             &client.host,
                             storage,
-                        )
-                        .await
-                        {
+                        ) {
                             Ok(r) => r,
                             Err(e) => {
                                 warn!("poller: path mapping failed for grab {}: {e}", grab.id);
@@ -581,7 +595,7 @@ fn spawn_import(state: &AppState, user_id: i64, grab_id: i64) {
                 return;
             }
         };
-        match crate::infra::import_pipeline::import_grab(&state, user_id, grab_id).await {
+        match state.import_svc.import_grab(user_id, grab_id).await {
             Ok(result) => {
                 info!(
                     "import: grab {} — {} files imported",
