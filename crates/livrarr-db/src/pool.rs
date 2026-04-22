@@ -97,47 +97,76 @@ pub fn check_data_dir_permissions(data_dir: &Path) -> Result<(), String> {
 
 /// Write a PID lock file. Returns Err if a live instance is detected.
 ///
-/// Uses O_EXCL (create_new) to atomically detect an existing lock file,
-/// eliminating the TOCTOU race between checking and creating.
+/// Uses O_EXCL (create_new) in a loop to atomically create the lock file.
+/// If the file exists and the owning PID is dead, removes and retries.
+/// If the file exists and the owning PID is alive, rejects.
+/// Handles concurrent removal (NotFound) gracefully.
 pub fn acquire_pid_lock(data_dir: &Path) -> Result<(), String> {
     use std::io::Write;
     let lock_path = data_dir.join("livrarr.pid");
 
-    // Try atomic creation first — fails if file already exists.
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-    {
-        Ok(mut f) => {
-            write!(f, "{}", std::process::id())
-                .map_err(|e| format!("failed to write PID lock: {e}"))?;
-            return Ok(());
+    // Up to 2 attempts: first try, then retry after stale removal.
+    for attempt in 0..2 {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(mut f) => {
+                write!(f, "{}", std::process::id())
+                    .map_err(|e| format!("failed to write PID lock: {e}"))?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // File exists — check if the owning process is still alive.
+            }
+            Err(e) => {
+                return Err(format!("failed to create PID lock: {e}"));
+            }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // File exists — check if the owning process is still alive.
-        }
-        Err(e) => {
-            return Err(format!("failed to create PID lock: {e}"));
-        }
-    }
 
-    // Lock file exists — check if stale.
-    if let Ok(contents) = std::fs::read_to_string(&lock_path) {
-        if let Ok(pid) = contents.trim().parse::<u32>() {
-            let proc_path = format!("/proc/{pid}");
-            if Path::new(&proc_path).exists() {
-                return Err(format!(
-                    "another Livrarr instance (PID {pid}) is running. Remove {lock_path:?} if this is stale."
-                ));
+        // Only check staleness on first attempt to avoid infinite loop.
+        if attempt > 0 {
+            return Err(
+                "failed to acquire PID lock after stale removal (concurrent startup?)".to_string(),
+            );
+        }
+
+        // Lock file exists — read and check if stale.
+        match std::fs::read_to_string(&lock_path) {
+            Ok(contents) => {
+                if let Ok(pid) = contents.trim().parse::<u32>() {
+                    let proc_path = format!("/proc/{pid}");
+                    if Path::new(&proc_path).exists() {
+                        return Err(format!(
+                            "another Livrarr instance (PID {pid}) is running. Remove {lock_path:?} if this is stale."
+                        ));
+                    }
+                }
+                // PID is dead or unreadable — remove and retry.
+                tracing::warn!("stale PID lock file detected, removing");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Concurrent removal — loop back and retry create_new.
+                continue;
+            }
+            Err(_) => {
+                // Unreadable/corrupt — warn and attempt removal.
+                tracing::warn!("PID lock file unreadable, attempting removal");
+            }
+        }
+
+        // Remove stale lock. Handle NotFound from concurrent remove gracefully.
+        match std::fs::remove_file(&lock_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!("failed to remove stale PID lock: {e}"));
             }
         }
     }
 
-    tracing::warn!("stale PID lock file detected, overwriting");
-    std::fs::write(&lock_path, std::process::id().to_string())
-        .map_err(|e| format!("failed to write PID lock: {e}"))?;
-    Ok(())
+    Err("failed to acquire PID lock after retries".to_string())
 }
 
 /// Remove the PID lock file on shutdown.
@@ -155,11 +184,25 @@ pub async fn create_backup(
     let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let backup_name = format!("livrarr.db.pre-migrate-{timestamp}");
     let backup_path = data_dir.join(&backup_name);
-    let backup_str = backup_path.display().to_string();
 
-    // Escape single quotes to prevent SQL injection via path.
-    let escaped = backup_str.replace('\'', "''");
-    sqlx::query(&format!("VACUUM INTO '{escaped}'"))
+    let canonical_parent = backup_path
+        .parent()
+        .ok_or("backup path has no parent")?
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve backup parent dir: {e}"))?;
+    let canonical_data = data_dir
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve data dir: {e}"))?;
+    if !canonical_parent.starts_with(&canonical_data) {
+        return Err("backup path escapes data directory".into());
+    }
+
+    let backup_str = backup_path.display().to_string();
+    if backup_str.contains('\'') {
+        return Err("backup path contains invalid characters".into());
+    }
+
+    sqlx::query(&format!("VACUUM INTO '{backup_str}'"))
         .execute(pool)
         .await
         .map_err(|e| format!("VACUUM INTO backup failed: {e}"))?;
