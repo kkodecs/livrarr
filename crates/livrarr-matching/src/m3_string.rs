@@ -179,7 +179,7 @@ static WEBSITE_POSTFIX: Lazy<Regex> = Lazy::new(|| {
 });
 static GROUP_SUFFIX: Lazy<Regex> = Lazy::new(|| Regex::new(r"-[A-Za-z0-9]{2,15}$").unwrap());
 static QUALITY_TAG: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)[\[\(]\s*(epub|mobi|azw3?|pdf|flac|mp3|m4[ab]|ogg|wma|320kbps|192kbps|vbr|cbr|cbz)\s*[\]\)]").unwrap()
+    Regex::new(r"(?i)(?:[\[\(]\s*(epub|mobi|azw3?|pdf|flac|mp3|m4[ab]|ogg|wma|320kbps|192kbps|vbr|cbr|cbz)\s*[\]\)]|\b(epub|mobi|azw3?|pdf|flac|mp3|m4[ab]|ogg|wma|cbr|cbz)\b)").unwrap()
 });
 static YEAR_EXTRACT: Lazy<Regex> = Lazy::new(|| Regex::new(r"[\(\[]?(\d{4})[\)\]]?").unwrap());
 static NARRATOR_EXTRACT: Lazy<Regex> =
@@ -213,7 +213,10 @@ fn clean_input(input: &str) -> (String, SideChannel) {
         }
     }
     if let Some(cap) = QUALITY_TAG.captures(&s) {
-        side.format = Some(cap[1].to_uppercase());
+        let fmt = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str());
+        if let Some(f) = fmt {
+            side.format = Some(f.to_uppercase());
+        }
     }
 
     s = FILE_EXT.replace(&s, "").to_string();

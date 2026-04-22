@@ -315,14 +315,6 @@ where
                     ImportWorkflowError::SourceNotResolved(format!("enumeration failed: {e}"))
                 })?;
 
-        // Filter to preferred formats (e.g., epub over mobi when both exist)
-        let media_mgmt = self
-            .db
-            .get_media_management_config()
-            .await
-            .map_err(ImportWorkflowError::Db)?;
-        let source_files = filter_preferred_formats(source_files, &media_mgmt);
-
         if source_files.is_empty() {
             self.db
                 .update_grab_status(
@@ -343,7 +335,8 @@ where
             });
         }
 
-        // File size pre-check: local files must be >= 90% of grab.size
+        // File size pre-check BEFORE format filtering — sum all recognized files
+        // against grab.size (which includes all formats in the torrent).
         if let Some(expected_size) = grab.size {
             if expected_size > 0 {
                 let paths: Vec<PathBuf> = source_files.iter().map(|f| f.path.clone()).collect();
@@ -383,6 +376,14 @@ where
                 }
             }
         }
+
+        // Filter to preferred formats AFTER size check
+        let media_mgmt = self
+            .db
+            .get_media_management_config()
+            .await
+            .map_err(ImportWorkflowError::Db)?;
+        let source_files = filter_preferred_formats(source_files, &media_mgmt);
 
         // Get root folders
         let root_folders = self
