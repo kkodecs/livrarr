@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use livrarr_domain::services::{
@@ -7,8 +7,16 @@ use livrarr_domain::services::{
 };
 use livrarr_domain::MediaType;
 use livrarr_http::HttpClient;
+use livrarr_tagwrite::TagWriteStatus;
 
+use crate::infra::email;
+use crate::infra::import_pipeline::cwa_copy;
 use crate::state::{LiveImportIoService, LiveImportWorkflow, LiveSettingsService};
+
+enum ImportFileError {
+    Warning(String), // file imported but tag failed
+    Failed(String),  // file not imported
+}
 
 #[derive(Clone)]
 pub struct LiveImportService {
@@ -36,6 +44,210 @@ impl LiveImportService {
             settings_service,
             http_client_safe,
             data_dir,
+        }
+    }
+}
+
+impl LiveImportService {
+    #[allow(clippy::too_many_arguments)]
+    async fn do_import_single_file(
+        &self,
+        source: &Path,
+        target_path: &str,
+        root_folder_path: &str,
+        root_folder_id: i64,
+        media_type: MediaType,
+        user_id: i64,
+        work_id: i64,
+        tag_metadata: Option<&livrarr_tagwrite::TagMetadata>,
+        cover: Option<&[u8]>,
+        media_mgmt: &livrarr_db::MediaManagementConfig,
+        author_name: &str,
+        title: &str,
+    ) -> Result<(), ImportFileError> {
+        let tmp_path = format!("{target_path}.tmp");
+        let tmp_target = PathBuf::from(&tmp_path);
+        let target = PathBuf::from(target_path);
+
+        // Copy source → .tmp.
+        let src = source.to_path_buf();
+        let tmp_clone = tmp_target.clone();
+        let copy_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            if let Some(parent) = tmp_clone.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create_dir_all failed: {e}"))?;
+            }
+            std::fs::copy(&src, &tmp_clone).map_err(|e| format!("copy failed: {e}"))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| ImportFileError::Failed(format!("spawn error: {e}")))?;
+
+        if let Err(e) = copy_result {
+            let _ = std::fs::remove_file(&tmp_target); // clean partial .tmp
+            return Err(ImportFileError::Failed(format!(
+                "{}: {e}",
+                source.display()
+            )));
+        }
+
+        // Tag the .tmp if enrichment data available.
+        let mut tag_warning = None;
+        if let Some(metadata) = tag_metadata {
+            tracing::debug!(path = %tmp_path, "writing tags");
+            match livrarr_tagwrite::write_tags(
+                tmp_path.clone(),
+                metadata.clone(),
+                cover.map(|c| c.to_vec()),
+            )
+            .await
+            {
+                Ok(TagWriteStatus::Written) => {
+                    tracing::info!(path = %tmp_path, "tags written successfully");
+                }
+                Ok(_) => {
+                    tracing::info!(path = %tmp_path, "tag write skipped (unsupported/no data)");
+                }
+                Err(e) => {
+                    tracing::warn!(path = %tmp_path, error = %e, "tag write failed, using original file");
+                    tag_warning = Some(format!("tag write failed for {}: {e}", source.display()));
+                }
+            }
+        }
+
+        // Finalize: rename .tmp → final, or re-copy untagged on tag failure.
+        let src2 = source.to_path_buf();
+        let tmp_fin = tmp_target.clone();
+        let final_t = target.clone();
+        let tw = tag_warning.is_some();
+        let fin_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            if tw {
+                // Tag failed — re-copy source to a temp file, fsync, then rename atomically.
+                let _ = std::fs::remove_file(&tmp_fin);
+                let fallback = tmp_fin.with_extension("fallback.tmp");
+                std::fs::copy(&src2, &fallback).map_err(|e| {
+                    let _ = std::fs::remove_file(&fallback);
+                    format!("fallback copy failed: {e}")
+                })?;
+                if let Ok(f) = std::fs::File::open(&fallback) {
+                    let _ = f.sync_all();
+                }
+                std::fs::rename(&fallback, &final_t).map_err(|e| {
+                    let _ = std::fs::remove_file(&fallback);
+                    format!("fallback rename failed: {e}")
+                })?;
+            } else {
+                // Fsync the tagged .tmp to disk before atomic rename so partial writes
+                // (e.g., tag crate buffered data) can't be lost on power failure.
+                if let Ok(f) = std::fs::File::open(&tmp_fin) {
+                    let _ = f.sync_all();
+                }
+                std::fs::rename(&tmp_fin, &final_t).map_err(|e| format!("rename failed: {e}"))?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| ImportFileError::Failed(format!("spawn error: {e}")))?;
+
+        if let Err(e) = fin_result {
+            let _ = std::fs::remove_file(&tmp_target);
+            return Err(ImportFileError::Failed(format!(
+                "{}: {e}",
+                source.display()
+            )));
+        }
+
+        // Measure file size post-tag.
+        let file_size = target.metadata().map(|m| m.len() as i64).unwrap_or(0);
+
+        // Create library item.
+        let relative = target_path
+            .strip_prefix(root_folder_path)
+            .unwrap_or(target_path)
+            .trim_start_matches('/')
+            .to_string();
+
+        use livrarr_domain::services::ImportIoService;
+        self.import_io
+            .create_library_item(livrarr_domain::services::CreateLibraryItemRequest {
+                user_id,
+                work_id,
+                root_folder_id,
+                path: relative,
+                media_type,
+                file_size,
+                import_id: None,
+            })
+            .await
+            .map_err(|e| {
+                // Do NOT delete the file — leave on disk for retry recovery.
+                ImportFileError::Failed(format!("DB error: {e}"))
+            })?;
+
+        // CWA integration (ebooks only, non-fatal).
+        if media_type == MediaType::Ebook {
+            if let Some(ref cwa_path) = media_mgmt.cwa_ingest_path {
+                let ext = source
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("epub")
+                    .to_string();
+                let tp = target_path.to_string();
+                let cwa = cwa_path.clone();
+                let auth = author_name.to_string();
+                let t = title.to_string();
+                let cwa_result = tokio::task::spawn_blocking(move || {
+                    cwa_copy(&tp, &cwa, user_id, &auth, &t, &ext)
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(warn) = cwa_result {
+                    // CWA warning doesn't fail the import.
+                    return Err(ImportFileError::Warning(warn));
+                }
+            }
+        }
+
+        // Auto-send to email/Kindle on import (ebooks only, non-fatal).
+        if media_type == MediaType::Ebook {
+            if let Ok(email_cfg) = self.settings_service.get_email_config().await {
+                if email_cfg.send_on_import && email_cfg.enabled {
+                    let ext = source
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if email::ACCEPTED_EXTENSIONS.contains(&ext.as_str())
+                        && file_size <= email::MAX_EMAIL_SIZE
+                    {
+                        let target_str = target_path.to_string();
+                        match tokio::fs::read(&target_str).await {
+                            Ok(bytes) => {
+                                let filename = std::path::Path::new(&target_str)
+                                    .file_name()
+                                    .and_then(|f| f.to_str())
+                                    .unwrap_or("book");
+                                if let Err(e) =
+                                    email::send_file(&email_cfg, bytes, filename, &ext).await
+                                {
+                                    tracing::warn!(file = %target_str, "Auto-send email failed: {e}");
+                                } else {
+                                    tracing::info!(file = %target_str, "Auto-sent to email on import");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(file = %target_str, "Auto-send: failed to read file: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        match tag_warning {
+            Some(w) => Err(ImportFileError::Warning(w)),
+            None => Ok(()),
         }
     }
 }
@@ -260,31 +472,26 @@ impl ImportService for LiveImportService {
             Err(e) => return ImportFileResult::Failed(format!("failed to load media config: {e}")),
         };
 
-        match crate::infra::import_pipeline::import_single_file(
-            &*self.import_io,
-            &*self.settings_service,
-            &req.source,
-            &req.target_path,
-            &req.root_folder_path,
-            req.root_folder_id,
-            req.media_type,
-            req.user_id,
-            req.work_id,
-            Some(&tag_metadata),
-            cover_data.as_deref(),
-            &media_mgmt,
-            &req.author_name,
-            &req.title,
-        )
-        .await
+        match self
+            .do_import_single_file(
+                &req.source,
+                &req.target_path,
+                &req.root_folder_path,
+                req.root_folder_id,
+                req.media_type,
+                req.user_id,
+                req.work_id,
+                Some(&tag_metadata),
+                cover_data.as_deref(),
+                &media_mgmt,
+                &req.author_name,
+                &req.title,
+            )
+            .await
         {
             Ok(()) => ImportFileResult::Ok,
-            Err(crate::infra::import_pipeline::ImportFileError::Warning(w)) => {
-                ImportFileResult::Warning(w)
-            }
-            Err(crate::infra::import_pipeline::ImportFileError::Failed(e)) => {
-                ImportFileResult::Failed(e)
-            }
+            Err(ImportFileError::Warning(w)) => ImportFileResult::Warning(w),
+            Err(ImportFileError::Failed(e)) => ImportFileResult::Failed(e),
         }
     }
 
