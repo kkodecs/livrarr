@@ -12,7 +12,11 @@ use livrarr_domain::{
     DbError, DownloadClient, Indexer, IndexerConfig, MediaType, RemotePathMapping, RootFolder,
 };
 
-pub use livrarr_domain::services::SettingsService;
+pub use livrarr_domain::services::AppConfigService;
+pub use livrarr_domain::services::DownloadClientSettingsService;
+pub use livrarr_domain::services::IndexerSettingsService;
+pub use livrarr_domain::services::RemotePathMappingService;
+pub use livrarr_domain::services::RootFolderService;
 
 // =============================================================================
 // LiveSettingsService
@@ -28,7 +32,11 @@ impl<DB> LiveSettingsService<DB> {
     }
 }
 
-impl<DB> SettingsService for LiveSettingsService<DB>
+// =============================================================================
+// AppConfigService impl
+// =============================================================================
+
+impl<DB> AppConfigService for LiveSettingsService<DB>
 where
     DB: ConfigDb
         + DownloadClientDb
@@ -133,7 +141,21 @@ where
     ) -> Result<IndexerConfig, DbError> {
         self.db.update_indexer_config(params.into()).await
     }
+}
 
+// =============================================================================
+// DownloadClientSettingsService impl
+// =============================================================================
+
+impl<DB> DownloadClientSettingsService for LiveSettingsService<DB>
+where
+    DB: ConfigDb
+        + DownloadClientDb
+        + IndexerDb
+        + RootFolderDb
+        + RemotePathMappingDb
+        + ProviderRetryStateDb,
+{
     async fn get_download_client(&self, id: DownloadClientId) -> Result<DownloadClient, DbError> {
         self.db.get_download_client(id).await
     }
@@ -167,7 +189,21 @@ where
     async fn delete_download_client(&self, id: DownloadClientId) -> Result<(), DbError> {
         self.db.delete_download_client(id).await
     }
+}
 
+// =============================================================================
+// IndexerSettingsService impl
+// =============================================================================
+
+impl<DB> IndexerSettingsService for LiveSettingsService<DB>
+where
+    DB: ConfigDb
+        + DownloadClientDb
+        + IndexerDb
+        + RootFolderDb
+        + RemotePathMappingDb
+        + ProviderRetryStateDb,
+{
     async fn get_indexer(&self, id: IndexerId) -> Result<Indexer, DbError> {
         self.db.get_indexer(id).await
     }
@@ -199,7 +235,21 @@ where
     async fn set_supports_book_search(&self, id: IndexerId, supports: bool) -> Result<(), DbError> {
         self.db.set_supports_book_search(id, supports).await
     }
+}
 
+// =============================================================================
+// RootFolderService impl
+// =============================================================================
+
+impl<DB> RootFolderService for LiveSettingsService<DB>
+where
+    DB: ConfigDb
+        + DownloadClientDb
+        + IndexerDb
+        + RootFolderDb
+        + RemotePathMappingDb
+        + ProviderRetryStateDb,
+{
     async fn get_root_folder(&self, id: RootFolderId) -> Result<RootFolder, DbError> {
         self.db.get_root_folder(id).await
     }
@@ -219,7 +269,21 @@ where
     async fn delete_root_folder(&self, id: RootFolderId) -> Result<(), DbError> {
         self.db.delete_root_folder(id).await
     }
+}
 
+// =============================================================================
+// RemotePathMappingService impl
+// =============================================================================
+
+impl<DB> RemotePathMappingService for LiveSettingsService<DB>
+where
+    DB: ConfigDb
+        + DownloadClientDb
+        + IndexerDb
+        + RootFolderDb
+        + RemotePathMappingDb
+        + ProviderRetryStateDb,
+{
     async fn get_remote_path_mapping(
         &self,
         id: RemotePathMappingId,

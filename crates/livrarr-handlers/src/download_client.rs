@@ -1,13 +1,13 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::{HasAppConfigService, HasDownloadClientSettingsService, HasHttpClient};
 use crate::middleware::RequireAdmin;
 use crate::{
     ApiError, CreateDownloadClientApiRequest, DownloadClientResponse,
     UpdateDownloadClientApiRequest,
 };
-use livrarr_domain::services::SettingsService;
+use livrarr_domain::services::{AppConfigService, DownloadClientSettingsService};
 use livrarr_domain::settings::{
     CreateDownloadClientParams, UpdateDownloadClientParams, UpdateProwlarrParams,
 };
@@ -78,22 +78,28 @@ fn request_base_url(req: &CreateDownloadClientApiRequest) -> String {
     build_base_url(&req.host, req.port, req.use_ssl, req.url_base.as_deref())
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasDownloadClientSettingsService>(
     State(state): State<S>,
 ) -> Result<Json<Vec<DownloadClientResponse>>, ApiError> {
-    let clients = state.settings_service().list_download_clients().await?;
+    let clients = state
+        .download_client_settings_service()
+        .list_download_clients()
+        .await?;
     Ok(Json(clients.into_iter().map(to_response).collect()))
 }
 
-pub async fn get<S: AppContext>(
+pub async fn get<S: HasDownloadClientSettingsService>(
     State(state): State<S>,
     Path(id): Path<i64>,
 ) -> Result<Json<DownloadClientResponse>, ApiError> {
-    let dc = state.settings_service().get_download_client(id).await?;
+    let dc = state
+        .download_client_settings_service()
+        .get_download_client(id)
+        .await?;
     Ok(Json(to_response(dc)))
 }
 
-pub async fn create<S: AppContext>(
+pub async fn create<S: HasDownloadClientSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<CreateDownloadClientApiRequest>,
@@ -114,7 +120,7 @@ pub async fn create<S: AppContext>(
     let use_ssl = ssl_override.unwrap_or(req.use_ssl);
 
     let dc = state
-        .settings_service()
+        .download_client_settings_service()
         .create_download_client(CreateDownloadClientParams {
             name: req.name,
             implementation: req.implementation,
@@ -134,7 +140,7 @@ pub async fn create<S: AppContext>(
     Ok(Json(to_response(dc)))
 }
 
-pub async fn update<S: AppContext>(
+pub async fn update<S: HasDownloadClientSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
@@ -164,9 +170,15 @@ pub async fn update<S: AppContext>(
     let api_key = req.api_key;
 
     if req.is_default_for_protocol == Some(false) {
-        let existing = state.settings_service().get_download_client(id).await?;
+        let existing = state
+            .download_client_settings_service()
+            .get_download_client(id)
+            .await?;
         if existing.is_default_for_protocol {
-            let clients = state.settings_service().list_download_clients().await?;
+            let clients = state
+                .download_client_settings_service()
+                .list_download_clients()
+                .await?;
             let other_defaults = clients.iter().any(|c| {
                 c.id != id
                     && c.client_type() == existing.client_type()
@@ -191,7 +203,7 @@ pub async fn update<S: AppContext>(
     let use_ssl = ssl_override.or(req.use_ssl);
 
     let dc = state
-        .settings_service()
+        .download_client_settings_service()
         .update_download_client(
             id,
             UpdateDownloadClientParams {
@@ -218,13 +230,19 @@ pub async fn update<S: AppContext>(
     Ok(Json(to_response(dc)))
 }
 
-pub async fn delete<S: AppContext>(
+pub async fn delete<S: HasDownloadClientSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<(), ApiError> {
-    let existing = state.settings_service().get_download_client(id).await?;
-    state.settings_service().delete_download_client(id).await?;
+    let existing = state
+        .download_client_settings_service()
+        .get_download_client(id)
+        .await?;
+    state
+        .download_client_settings_service()
+        .delete_download_client(id)
+        .await?;
 
     if existing.is_default_for_protocol {
         auto_promote_default(&state, existing.client_type(), existing.id).await;
@@ -233,14 +251,22 @@ pub async fn delete<S: AppContext>(
     Ok(())
 }
 
-async fn auto_promote_default<S: AppContext>(state: &S, client_type: &str, exclude_id: i64) {
-    if let Ok(clients) = state.settings_service().list_download_clients().await {
+async fn auto_promote_default<S: HasDownloadClientSettingsService>(
+    state: &S,
+    client_type: &str,
+    exclude_id: i64,
+) {
+    if let Ok(clients) = state
+        .download_client_settings_service()
+        .list_download_clients()
+        .await
+    {
         if let Some(candidate) = clients
             .iter()
             .find(|c| c.client_type() == client_type && c.enabled && c.id != exclude_id)
         {
             if let Err(e) = state
-                .settings_service()
+                .download_client_settings_service()
                 .update_download_client(
                     candidate.id,
                     UpdateDownloadClientParams {
@@ -256,7 +282,7 @@ async fn auto_promote_default<S: AppContext>(state: &S, client_type: &str, exclu
     }
 }
 
-pub async fn test<S: AppContext>(
+pub async fn test<S: HasDownloadClientSettingsService + HasHttpClient>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<CreateDownloadClientApiRequest>,
@@ -264,13 +290,13 @@ pub async fn test<S: AppContext>(
     run_connection_test(&state, &req).await
 }
 
-pub async fn test_saved<S: AppContext>(
+pub async fn test_saved<S: HasDownloadClientSettingsService + HasHttpClient>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
 ) -> Result<(), ApiError> {
     let dc = state
-        .settings_service()
+        .download_client_settings_service()
         .get_download_client_with_credentials(id)
         .await?;
     let req = CreateDownloadClientApiRequest {
@@ -290,7 +316,7 @@ pub async fn test_saved<S: AppContext>(
     run_connection_test(&state, &req).await
 }
 
-async fn run_connection_test<S: AppContext>(
+async fn run_connection_test<S: HasHttpClient>(
     state: &S,
     req: &CreateDownloadClientApiRequest,
 ) -> Result<(), ApiError> {
@@ -300,7 +326,7 @@ async fn run_connection_test<S: AppContext>(
     }
 }
 
-async fn test_sabnzbd<S: AppContext>(
+async fn test_sabnzbd<S: HasHttpClient>(
     state: &S,
     req: &CreateDownloadClientApiRequest,
 ) -> Result<(), ApiError> {
@@ -390,7 +416,7 @@ async fn test_sabnzbd<S: AppContext>(
     Ok(())
 }
 
-async fn test_qbittorrent<S: AppContext>(
+async fn test_qbittorrent<S: HasHttpClient>(
     state: &S,
     req: &CreateDownloadClientApiRequest,
 ) -> Result<(), ApiError> {
@@ -501,7 +527,9 @@ impl ProwlarrDownloadClient {
     }
 }
 
-pub async fn import_from_prowlarr<S: AppContext>(
+pub async fn import_from_prowlarr<
+    S: HasDownloadClientSettingsService + HasAppConfigService + HasHttpClient,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<crate::ProwlarrImportRequest>,
@@ -509,7 +537,7 @@ pub async fn import_from_prowlarr<S: AppContext>(
     use std::time::Duration;
 
     let saved = state
-        .settings_service()
+        .app_config_service()
         .get_prowlarr_config()
         .await
         .unwrap_or_default();
@@ -573,7 +601,10 @@ pub async fn import_from_prowlarr<S: AppContext>(
         "Parsed Prowlarr download clients"
     );
 
-    let existing = state.settings_service().list_download_clients().await?;
+    let existing = state
+        .download_client_settings_service()
+        .list_download_clients()
+        .await?;
     let existing_keys: std::collections::HashSet<(String, u16, String)> = existing
         .iter()
         .map(|c| (c.host.to_lowercase(), c.port, c.client_type().to_string()))
@@ -662,7 +693,7 @@ pub async fn import_from_prowlarr<S: AppContext>(
         );
 
         match state
-            .settings_service()
+            .download_client_settings_service()
             .create_download_client(CreateDownloadClientParams {
                 name: pc.name.clone(),
                 implementation: impl_enum,
@@ -699,7 +730,7 @@ pub async fn import_from_prowlarr<S: AppContext>(
 
     if imported > 0 || skipped > 0 {
         let _ = state
-            .settings_service()
+            .app_config_service()
             .update_prowlarr_config(UpdateProwlarrParams {
                 url: Some(url),
                 api_key: Some(Some(api_key)),

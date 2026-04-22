@@ -1,11 +1,11 @@
 use axum::extract::State;
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasAuthService;
 use crate::types::api_error::ApiError;
 use crate::types::auth::{AuthContext, AuthMeResponse, AuthService, LoginRequest, LoginResponse};
 
-pub async fn login<S: AppContext>(
+pub async fn login<S: HasAuthService>(
     State(state): State<S>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
@@ -13,7 +13,7 @@ pub async fn login<S: AppContext>(
     Ok(Json(resp))
 }
 
-pub async fn logout<S: AppContext>(
+pub async fn logout<S: HasAuthService>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<(), ApiError> {
@@ -23,7 +23,7 @@ pub async fn logout<S: AppContext>(
     Ok(())
 }
 
-pub async fn me<S: AppContext>(
+pub async fn me<S: HasAuthService>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<Json<AuthMeResponse>, ApiError> {

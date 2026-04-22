@@ -5,13 +5,13 @@ use axum::Json;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-use crate::context::AppContext;
+use crate::context::{HasAppConfigService, HasHttpClient, HasIndexerSettingsService};
 use crate::middleware::RequireAdmin;
 use crate::{
     ApiError, CreateIndexerApiRequest, IndexerResponse, TestIndexerApiRequest,
     TestIndexerApiResponse, UpdateIndexerApiRequest,
 };
-use livrarr_domain::services::SettingsService;
+use livrarr_domain::services::{AppConfigService, IndexerSettingsService};
 use livrarr_domain::settings::{CreateIndexerParams, UpdateIndexerParams, UpdateProwlarrParams};
 use livrarr_domain::{Indexer, IndexerId};
 
@@ -46,7 +46,7 @@ fn normalize_api_path(path: &str) -> String {
     }
 }
 
-async fn test_indexer_caps<S: AppContext>(
+async fn test_indexer_caps<S: HasHttpClient>(
     state: &S,
     url: &str,
     api_path: &str,
@@ -195,22 +195,22 @@ async fn test_indexer_caps<S: AppContext>(
     })
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasIndexerSettingsService>(
     State(state): State<S>,
 ) -> Result<Json<Vec<IndexerResponse>>, ApiError> {
-    let indexers = state.settings_service().list_indexers().await?;
+    let indexers = state.indexer_settings_service().list_indexers().await?;
     Ok(Json(indexers.iter().map(indexer_to_response).collect()))
 }
 
-pub async fn get<S: AppContext>(
+pub async fn get<S: HasIndexerSettingsService>(
     State(state): State<S>,
     Path(id): Path<IndexerId>,
 ) -> Result<Json<IndexerResponse>, ApiError> {
-    let indexer = state.settings_service().get_indexer(id).await?;
+    let indexer = state.indexer_settings_service().get_indexer(id).await?;
     Ok(Json(indexer_to_response(&indexer)))
 }
 
-pub async fn create<S: AppContext>(
+pub async fn create<S: HasIndexerSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<CreateIndexerApiRequest>,
@@ -229,7 +229,7 @@ pub async fn create<S: AppContext>(
     let api_path = normalize_api_path(&req.api_path);
 
     let indexer = state
-        .settings_service()
+        .indexer_settings_service()
         .create_indexer(CreateIndexerParams {
             name: req.name,
             protocol: req.protocol,
@@ -248,7 +248,7 @@ pub async fn create<S: AppContext>(
     Ok(Json(indexer_to_response(&indexer)))
 }
 
-pub async fn update<S: AppContext>(
+pub async fn update<S: HasIndexerSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
@@ -282,7 +282,7 @@ pub async fn update<S: AppContext>(
     let api_path = req.api_path.map(|p| normalize_api_path(&p));
 
     let indexer = state
-        .settings_service()
+        .indexer_settings_service()
         .update_indexer(
             id,
             UpdateIndexerParams {
@@ -303,16 +303,16 @@ pub async fn update<S: AppContext>(
     Ok(Json(indexer_to_response(&indexer)))
 }
 
-pub async fn delete<S: AppContext>(
+pub async fn delete<S: HasIndexerSettingsService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
 ) -> Result<(), ApiError> {
-    state.settings_service().delete_indexer(id).await?;
+    state.indexer_settings_service().delete_indexer(id).await?;
     Ok(())
 }
 
-pub async fn test<S: AppContext>(
+pub async fn test<S: HasHttpClient>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<TestIndexerApiRequest>,
@@ -321,13 +321,13 @@ pub async fn test<S: AppContext>(
     Ok(Json(result))
 }
 
-pub async fn test_saved<S: AppContext>(
+pub async fn test_saved<S: HasIndexerSettingsService + HasHttpClient>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
 ) -> Result<Json<TestIndexerApiResponse>, ApiError> {
     let indexer = state
-        .settings_service()
+        .indexer_settings_service()
         .get_indexer_with_credentials(id)
         .await?;
 
@@ -341,7 +341,7 @@ pub async fn test_saved<S: AppContext>(
 
     if result.ok {
         state
-            .settings_service()
+            .indexer_settings_service()
             .set_supports_book_search(id, result.supports_book_search)
             .await?;
     }
@@ -380,13 +380,15 @@ fn default_priority() -> i32 {
     25
 }
 
-pub async fn import_from_prowlarr<S: AppContext>(
+pub async fn import_from_prowlarr<
+    S: HasIndexerSettingsService + HasAppConfigService + HasHttpClient,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<crate::ProwlarrImportRequest>,
 ) -> Result<Json<crate::ProwlarrImportResponse>, ApiError> {
     let saved = state
-        .settings_service()
+        .app_config_service()
         .get_prowlarr_config()
         .await
         .unwrap_or_default();
@@ -436,7 +438,7 @@ pub async fn import_from_prowlarr<S: AppContext>(
         ))
     })?;
 
-    let existing = state.settings_service().list_indexers().await?;
+    let existing = state.indexer_settings_service().list_indexers().await?;
     let existing_urls: std::collections::HashSet<String> = existing
         .iter()
         .map(|i| i.url.trim_end_matches('/').to_lowercase())
@@ -464,7 +466,7 @@ pub async fn import_from_prowlarr<S: AppContext>(
         let priority = pi.priority.max(1);
 
         match state
-            .settings_service()
+            .indexer_settings_service()
             .create_indexer(CreateIndexerParams {
                 name: pi.name.clone(),
                 protocol,
@@ -487,7 +489,7 @@ pub async fn import_from_prowlarr<S: AppContext>(
 
     if imported > 0 || skipped > 0 {
         let _ = state
-            .settings_service()
+            .app_config_service()
             .update_prowlarr_config(UpdateProwlarrParams {
                 url: Some(url),
                 api_key: Some(Some(api_key)),

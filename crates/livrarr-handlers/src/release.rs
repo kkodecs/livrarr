@@ -1,7 +1,7 @@
 use axum::extract::{Query, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasReleaseService;
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::release::{
@@ -19,7 +19,7 @@ pub struct SearchQuery {
     pub cache_only: bool,
 }
 
-pub async fn search<S: AppContext>(
+pub async fn search<S: HasReleaseService>(
     State(state): State<S>,
     ctx: AuthContext,
     Query(q): Query<SearchQuery>,
@@ -106,7 +106,7 @@ pub async fn search<S: AppContext>(
     }))
 }
 
-pub async fn grab<S: AppContext>(
+pub async fn grab<S: HasReleaseService>(
     State(state): State<S>,
     ctx: AuthContext,
     Json(req): Json<GrabApiRequest>,

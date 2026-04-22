@@ -3,7 +3,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use crate::accessors::CoverProxyCacheAccessor;
-use crate::context::AppContext;
+use crate::context::{HasCoverCache, HasHttpClient};
 
 const MAX_IMAGE_SIZE: usize = 500_000;
 
@@ -12,7 +12,7 @@ pub struct CoverProxyQuery {
     pub url: String,
 }
 
-pub async fn proxy_cover<S: AppContext>(
+pub async fn proxy_cover<S: HasCoverCache + HasHttpClient>(
     State(state): State<S>,
     Query(q): Query<CoverProxyQuery>,
 ) -> Response {

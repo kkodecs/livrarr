@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use crate::state::AppState;
 use crate::{ApiError, ReleaseResponse};
 use livrarr_domain::torznab::{parse_torznab_xml, TorznabParseResult};
 use livrarr_domain::Indexer;
@@ -308,7 +307,7 @@ pub(crate) fn qbit_base_url(client: &livrarr_domain::DownloadClient) -> String {
 }
 
 pub(crate) async fn qbit_login(
-    state: &AppState,
+    http_client: &livrarr_http::HttpClient,
     base_url: &str,
     client: &livrarr_domain::DownloadClient,
 ) -> Result<String, ApiError> {
@@ -320,8 +319,7 @@ pub(crate) async fn qbit_login(
     }
 
     let login_url = format!("{base_url}/api/v2/auth/login");
-    let resp = state
-        .http_client_safe
+    let resp = http_client
         .post(&login_url)
         .form(&[("username", username), ("password", password)])
         .send()

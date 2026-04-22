@@ -2,14 +2,18 @@ use axum::extract::State;
 use axum::Json;
 
 use crate::accessors::{LiveMetadataConfigAccessor, ProviderHealthAccessor, RssSyncAccessor};
-use crate::context::AppContext;
+use crate::context::{
+    HasAppConfigService, HasEmailService, HasHttpClient, HasLiveConfig, HasProviderHealth,
+    HasRssSync, HasRssSyncWorkflow,
+};
+
 use crate::middleware::RequireAdmin;
 use crate::{
     ApiError, AuthContext, EmailConfigResponse, MediaManagementConfigResponse,
     MetadataConfigResponse, NamingConfigResponse, UpdateEmailApiRequest,
     UpdateMediaManagementApiRequest, UpdateMetadataApiRequest,
 };
-use livrarr_domain::services::{RssSyncWorkflow, SettingsService};
+use livrarr_domain::services::{AppConfigService, RssSyncWorkflow};
 
 struct RssSyncGuard<'a, R: RssSyncAccessor>(&'a R);
 impl<R: RssSyncAccessor> Drop for RssSyncGuard<'_, R> {
@@ -49,11 +53,11 @@ fn metadata_to_response(
     }
 }
 
-pub async fn get_naming<S: AppContext>(
+pub async fn get_naming<S: HasAppConfigService>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<NamingConfigResponse>, ApiError> {
-    let cfg = state.settings_service().get_naming_config().await?;
+    let cfg = state.app_config_service().get_naming_config().await?;
     Ok(Json(NamingConfigResponse {
         author_folder_format: cfg.author_folder_format,
         book_folder_format: cfg.book_folder_format,
@@ -62,12 +66,12 @@ pub async fn get_naming<S: AppContext>(
     }))
 }
 
-pub async fn get_media_management<S: AppContext>(
+pub async fn get_media_management<S: HasAppConfigService>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<MediaManagementConfigResponse>, ApiError> {
     let cfg = state
-        .settings_service()
+        .app_config_service()
         .get_media_management_config()
         .await?;
     Ok(Json(MediaManagementConfigResponse {
@@ -77,13 +81,13 @@ pub async fn get_media_management<S: AppContext>(
     }))
 }
 
-pub async fn update_media_management<S: AppContext>(
+pub async fn update_media_management<S: HasAppConfigService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<UpdateMediaManagementApiRequest>,
 ) -> Result<Json<MediaManagementConfigResponse>, ApiError> {
     let cfg = state
-        .settings_service()
+        .app_config_service()
         .update_media_management_config(UpdateMediaManagementParams {
             cwa_ingest_path: req.cwa_ingest_path,
             preferred_ebook_formats: req.preferred_ebook_formats,
@@ -97,11 +101,11 @@ pub async fn update_media_management<S: AppContext>(
     }))
 }
 
-pub async fn get_metadata<S: AppContext>(
+pub async fn get_metadata<S: HasAppConfigService + HasProviderHealth>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<MetadataConfigResponse>, ApiError> {
-    let cfg = state.settings_service().get_metadata_config().await?;
+    let cfg = state.app_config_service().get_metadata_config().await?;
     let provider_status = state.provider_health().statuses().await;
     Ok(Json(metadata_to_response(cfg, provider_status)))
 }
@@ -142,7 +146,7 @@ fn validate_llm_endpoint(endpoint: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub async fn update_metadata<S: AppContext>(
+pub async fn update_metadata<S: HasAppConfigService + HasProviderHealth + HasLiveConfig>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<UpdateMetadataApiRequest>,
@@ -182,7 +186,7 @@ pub async fn update_metadata<S: AppContext>(
         };
         Some(
             state
-                .settings_service()
+                .app_config_service()
                 .validate_metadata_languages(
                     &langs,
                     req.llm_enabled,
@@ -198,7 +202,7 @@ pub async fn update_metadata<S: AppContext>(
     };
 
     let cfg = state
-        .settings_service()
+        .app_config_service()
         .update_metadata_config(UpdateMetadataParams {
             hardcover_enabled: req.hardcover_enabled,
             hardcover_api_token,
@@ -218,11 +222,11 @@ pub async fn update_metadata<S: AppContext>(
     Ok(Json(metadata_to_response(cfg, provider_status)))
 }
 
-pub async fn test_hardcover<S: AppContext>(
+pub async fn test_hardcover<S: HasAppConfigService + HasHttpClient>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<(), ApiError> {
-    let cfg = state.settings_service().get_metadata_config().await?;
+    let cfg = state.app_config_service().get_metadata_config().await?;
     let token = cfg
         .hardcover_api_token
         .ok_or_else(|| ApiError::BadRequest("Hardcover API token not configured".into()))?;
@@ -249,11 +253,11 @@ pub async fn test_hardcover<S: AppContext>(
     Ok(())
 }
 
-pub async fn test_audnexus<S: AppContext>(
+pub async fn test_audnexus<S: HasAppConfigService + HasHttpClient>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<(), ApiError> {
-    let cfg = state.settings_service().get_metadata_config().await?;
+    let cfg = state.app_config_service().get_metadata_config().await?;
     let url = format!(
         "{}/authors/B000AQ0842",
         cfg.audnexus_url.trim_end_matches('/')
@@ -272,11 +276,11 @@ pub async fn test_audnexus<S: AppContext>(
     Ok(())
 }
 
-pub async fn test_llm<S: AppContext>(
+pub async fn test_llm<S: HasAppConfigService + HasHttpClient>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<(), ApiError> {
-    let cfg = state.settings_service().get_metadata_config().await?;
+    let cfg = state.app_config_service().get_metadata_config().await?;
     let endpoint = cfg
         .llm_endpoint
         .ok_or_else(|| ApiError::BadRequest("LLM endpoint not configured".into()))?;
@@ -314,11 +318,11 @@ pub async fn test_llm<S: AppContext>(
     Ok(())
 }
 
-pub async fn get_prowlarr<S: AppContext>(
+pub async fn get_prowlarr<S: HasAppConfigService>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<crate::ProwlarrConfigResponse>, ApiError> {
-    let c = state.settings_service().get_prowlarr_config().await?;
+    let c = state.app_config_service().get_prowlarr_config().await?;
     Ok(Json(crate::ProwlarrConfigResponse {
         url: c.url,
         api_key_set: c.api_key.is_some(),
@@ -326,7 +330,7 @@ pub async fn get_prowlarr<S: AppContext>(
     }))
 }
 
-pub async fn update_prowlarr<S: AppContext>(
+pub async fn update_prowlarr<S: HasAppConfigService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<crate::UpdateProwlarrApiRequest>,
@@ -339,7 +343,7 @@ pub async fn update_prowlarr<S: AppContext>(
         }
     }
     let c = state
-        .settings_service()
+        .app_config_service()
         .update_prowlarr_config(UpdateProwlarrParams {
             url: req.url,
             api_key: req.api_key,
@@ -353,11 +357,11 @@ pub async fn update_prowlarr<S: AppContext>(
     }))
 }
 
-pub async fn get_email<S: AppContext>(
+pub async fn get_email<S: HasAppConfigService>(
     _admin: RequireAdmin,
     State(state): State<S>,
 ) -> Result<Json<EmailConfigResponse>, ApiError> {
-    let c = state.settings_service().get_email_config().await?;
+    let c = state.app_config_service().get_email_config().await?;
     Ok(Json(EmailConfigResponse {
         enabled: c.enabled,
         smtp_host: c.smtp_host,
@@ -371,7 +375,7 @@ pub async fn get_email<S: AppContext>(
     }))
 }
 
-pub async fn update_email<S: AppContext>(
+pub async fn update_email<S: HasAppConfigService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<UpdateEmailApiRequest>,
@@ -384,7 +388,7 @@ pub async fn update_email<S: AppContext>(
         }
     }
     let c = state
-        .settings_service()
+        .app_config_service()
         .update_email_config(UpdateEmailParams {
             enabled: req.enabled,
             smtp_host: req.smtp_host,
@@ -410,15 +414,15 @@ pub async fn update_email<S: AppContext>(
     }))
 }
 
-pub async fn get_indexer_config<S: AppContext>(
+pub async fn get_indexer_config<S: HasAppConfigService>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<livrarr_domain::IndexerConfig>, ApiError> {
-    let c = state.settings_service().get_indexer_config().await?;
+    let c = state.app_config_service().get_indexer_config().await?;
     Ok(Json(c))
 }
 
-pub async fn update_indexer_config<S: AppContext>(
+pub async fn update_indexer_config<S: HasAppConfigService>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<livrarr_domain::settings::UpdateIndexerConfigParams>,
@@ -437,11 +441,14 @@ pub async fn update_indexer_config<S: AppContext>(
             ));
         }
     }
-    let c = state.settings_service().update_indexer_config(req).await?;
+    let c = state
+        .app_config_service()
+        .update_indexer_config(req)
+        .await?;
     Ok(Json(c))
 }
 
-pub async fn trigger_rss_sync<S: AppContext>(
+pub async fn trigger_rss_sync<S: HasRssSync + HasRssSyncWorkflow>(
     State(state): State<S>,
     _auth: AuthContext,
 ) -> Result<axum::http::StatusCode, ApiError> {
@@ -471,7 +478,7 @@ pub async fn trigger_rss_sync<S: AppContext>(
     Ok(axum::http::StatusCode::OK)
 }
 
-pub async fn test_email<S: AppContext>(
+pub async fn test_email<S: HasEmailService>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<serde_json::Value>, ApiError> {

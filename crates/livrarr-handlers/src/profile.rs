@@ -1,13 +1,13 @@
 use axum::extract::State;
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasAuthService;
 use crate::types::api_error::ApiError;
 use crate::types::auth::{
     ApiKeyResponse, AuthContext, AuthService, UpdateProfileRequest, UserResponse,
 };
 
-pub async fn update_profile<S: AppContext>(
+pub async fn update_profile<S: HasAuthService>(
     State(state): State<S>,
     ctx: AuthContext,
     Json(req): Json<UpdateProfileRequest>,
@@ -19,7 +19,7 @@ pub async fn update_profile<S: AppContext>(
     Ok(Json(user))
 }
 
-pub async fn regenerate_api_key<S: AppContext>(
+pub async fn regenerate_api_key<S: HasAuthService>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<Json<ApiKeyResponse>, ApiError> {

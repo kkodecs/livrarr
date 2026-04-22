@@ -1,14 +1,14 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasAuthService;
 use crate::middleware::RequireAdmin;
 use crate::types::api_error::ApiError;
 use crate::types::auth::{
     AdminCreateUserRequest, AdminUpdateUserRequest, ApiKeyResponse, AuthService, UserResponse,
 };
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasAuthService>(
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
 ) -> Result<Json<Vec<UserResponse>>, ApiError> {
@@ -16,7 +16,7 @@ pub async fn list<S: AppContext>(
     Ok(Json(users))
 }
 
-pub async fn get<S: AppContext>(
+pub async fn get<S: HasAuthService>(
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
     Path(id): Path<i64>,
@@ -25,7 +25,7 @@ pub async fn get<S: AppContext>(
     Ok(Json(user))
 }
 
-pub async fn create<S: AppContext>(
+pub async fn create<S: HasAuthService>(
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
     Json(req): Json<AdminCreateUserRequest>,
@@ -34,7 +34,7 @@ pub async fn create<S: AppContext>(
     Ok(Json(user))
 }
 
-pub async fn update<S: AppContext>(
+pub async fn update<S: HasAuthService>(
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
     Path(id): Path<i64>,
@@ -44,7 +44,7 @@ pub async fn update<S: AppContext>(
     Ok(Json(user))
 }
 
-pub async fn delete<S: AppContext>(
+pub async fn delete<S: HasAuthService>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Path(id): Path<i64>,
@@ -53,7 +53,7 @@ pub async fn delete<S: AppContext>(
     Ok(())
 }
 
-pub async fn regenerate_user_api_key<S: AppContext>(
+pub async fn regenerate_user_api_key<S: HasAuthService>(
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
     Path(id): Path<i64>,

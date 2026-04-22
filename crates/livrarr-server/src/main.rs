@@ -295,6 +295,23 @@ async fn main() {
     ));
     let ol_rate_limiter_shared = Arc::new(livrarr_server::state::OlRateLimiter::new());
     let manual_import_scans_shared = Arc::new(dashmap::DashMap::new());
+    let import_workflow_arc = Arc::new(livrarr_library::import_workflow::ImportWorkflowImpl::new(
+        svc_db.clone(),
+        import_semaphore.clone(),
+        data_dir_arc.clone(),
+    ));
+    let tag_service_arc = Arc::new(livrarr_server::tag_service::LiveTagService::new(
+        import_io_arc.clone(),
+        data_dir_arc.clone(),
+    ));
+    let import_svc_arc = Arc::new(livrarr_server::import_service::LiveImportService::new(
+        import_io_arc.clone(),
+        import_workflow_arc.clone(),
+        tag_service_arc.clone(),
+        settings_service_arc.clone(),
+        http_client_safe.clone(),
+        data_dir_arc.clone(),
+    ));
     let state = AppState {
         db,
         auth_service,
@@ -391,11 +408,7 @@ async fn main() {
         file_service: Arc::new(livrarr_library::file_service::FileServiceImpl::new(
             svc_db.clone(),
         )),
-        import_workflow: Arc::new(livrarr_library::import_workflow::ImportWorkflowImpl::new(
-            svc_db.clone(),
-            import_semaphore.clone(),
-            data_dir_arc.clone(),
-        )),
+        import_workflow: import_workflow_arc.clone(),
         rss_sync_workflow: {
             let rs = Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
                 svc_db.clone(),
@@ -511,14 +524,11 @@ async fn main() {
         cover_proxy_cache_accessor: livrarr_server::state::CoverProxyCacheAccessorImpl(
             cover_proxy_cache.clone(),
         ),
-        tag_service: Arc::new(livrarr_server::tag_service::LiveTagService::new(
-            import_io_arc.clone(),
-            data_dir_arc.clone(),
-        )),
+        tag_service: tag_service_arc.clone(),
         email_svc: Arc::new(livrarr_server::email_service::LiveEmailService::new(
             settings_service_arc.clone(),
         )),
-        import_svc: Arc::new(livrarr_server::import_service::LiveImportService::new()),
+        import_svc: import_svc_arc,
         matching_svc: livrarr_server::matching_service::LiveMatchingService,
         manual_import_scan_svc:
             livrarr_server::manual_import_scan_service::LiveManualImportScanService {
@@ -533,7 +543,6 @@ async fn main() {
     };
 
     // Late-init: wire services that need AppState (breaks circular dep via OnceLock<Box<AppState>>).
-    state.import_svc.init(state.clone());
     state.readarr_import_wf.init(state.clone());
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).

@@ -1,197 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::infra::email;
-use crate::services::settings_service::SettingsService;
-use crate::state::AppState;
 use crate::{ApiError, MediaType};
 use livrarr_domain::sanitize_path_component;
-use livrarr_domain::services::{ImportGrabResult, ImportIoService, ImportWorkflow};
 use livrarr_tagwrite::TagWriteStatus;
-
-/// Run the import pipeline for a grab. Called by the retry handler
-/// and by the download poller via spawn_import.
-///
-/// Precondition: grab status already atomically set to `importing` by caller.
-pub async fn import_grab(
-    state: &AppState,
-    user_id: i64,
-    grab_id: i64,
-) -> Result<ImportGrabResult, ApiError> {
-    // Pre-service: ensure content_path is populated.
-    // The download poller persists content_path when confirming a download.
-    // For manual retries, content_path may be missing — resolve from the
-    // download client.
-    let grab = state.import_io_service.get_grab(user_id, grab_id).await?;
-    if grab.content_path.is_none() {
-        if let Some(ref download_id) = grab.download_id {
-            let client = state
-                .import_io_service
-                .get_download_client(grab.download_client_id)
-                .await?;
-            let content_path = if client.client_type() == "sabnzbd" {
-                fetch_sabnzbd_storage_path(state, &client, download_id).await?
-            } else {
-                fetch_qbit_content_path(state, &client, download_id).await?
-            };
-            state
-                .import_io_service
-                .set_grab_content_path(user_id, grab_id, &content_path)
-                .await?;
-        }
-    }
-
-    // Service handles: source resolution, enumeration, format filtering,
-    // file copy, library item creation, status update, history event.
-    let result = state.import_workflow.import_grab(user_id, grab_id).await?;
-
-    let mut warnings = result.warnings;
-
-    // Post-service I/O: tag imported files + CWA copy + email.
-    if !result.imported_files.is_empty() {
-        let work = state
-            .import_io_service
-            .get_work(user_id, grab.work_id)
-            .await?;
-
-        // Tag writing — retag the just-imported files if enrichment data available.
-        if work.enrichment_status != livrarr_domain::EnrichmentStatus::Pending {
-            let items = state
-                .import_io_service
-                .list_library_items_by_work(user_id, work.id)
-                .await
-                .unwrap_or_default();
-            let imported_ids: std::collections::HashSet<i64> = result
-                .imported_files
-                .iter()
-                .map(|f| f.library_item_id)
-                .collect();
-            let matching: Vec<_> = items
-                .iter()
-                .filter(|i| imported_ids.contains(&i.id))
-                .cloned()
-                .collect();
-            if !matching.is_empty() {
-                use livrarr_domain::services::TagService;
-                let tag_warnings = state
-                    .tag_service
-                    .retag_library_items(&work, &matching)
-                    .await;
-                warnings.extend(tag_warnings);
-            }
-        }
-
-        // CWA copy + email — fire-and-forget for ebooks.
-        let media_mgmt = state
-            .settings_service
-            .get_media_management_config()
-            .await
-            .ok();
-        let root_folders = state
-            .import_io_service
-            .list_root_folders()
-            .await
-            .unwrap_or_default();
-        for imp in &result.imported_files {
-            if imp.media_type != MediaType::Ebook {
-                continue;
-            }
-            let rf = match root_folders
-                .iter()
-                .find(|rf| rf.media_type == MediaType::Ebook)
-            {
-                Some(rf) => rf,
-                None => continue,
-            };
-            let abs_path = format!("{}/{}", rf.path, imp.target_relative_path);
-
-            // CWA
-            if let Some(ref mgmt) = media_mgmt {
-                if let Some(ref cwa_path) = mgmt.cwa_ingest_path {
-                    let ext = Path::new(&imp.target_relative_path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("epub")
-                        .to_string();
-                    let work = state
-                        .import_io_service
-                        .get_work(user_id, grab.work_id)
-                        .await
-                        .ok();
-                    if let Some(work) = work {
-                        let tp = abs_path.clone();
-                        let cwa = cwa_path.clone();
-                        let auth = work.author_name.clone();
-                        let t = work.title.clone();
-                        let cwa_result = tokio::task::spawn_blocking(move || {
-                            cwa_copy(&tp, &cwa, user_id, &auth, &t, &ext)
-                        })
-                        .await
-                        .ok()
-                        .flatten();
-                        if let Some(warn) = cwa_result {
-                            warnings.push(warn);
-                        }
-                    }
-                }
-            }
-
-            // Auto-send to email/Kindle
-            if let Ok(email_cfg) = state.settings_service.get_email_config().await {
-                if email_cfg.send_on_import && email_cfg.enabled {
-                    let ext = Path::new(&imp.target_relative_path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    if email::ACCEPTED_EXTENSIONS.contains(&ext.as_str())
-                        && (imp.file_size as i64) <= email::MAX_EMAIL_SIZE
-                    {
-                        match tokio::fs::read(&abs_path).await {
-                            Ok(bytes) => {
-                                let filename = Path::new(&abs_path)
-                                    .file_name()
-                                    .and_then(|f| f.to_str())
-                                    .unwrap_or("book");
-                                if let Err(e) =
-                                    email::send_file(&email_cfg, bytes, filename, &ext).await
-                                {
-                                    tracing::warn!(file = %abs_path, "Auto-send email failed: {e}");
-                                } else {
-                                    tracing::info!(file = %abs_path, "Auto-sent to email on import");
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(file = %abs_path, "Auto-send: failed to read file: {e}");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let error_msg = if result.failed_files.is_empty() {
-        None
-    } else {
-        Some(
-            result
-                .failed_files
-                .iter()
-                .map(|f| f.error.as_str())
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-    };
-
-    Ok(ImportGrabResult {
-        final_status: result.final_status,
-        imported_count: result.imported_files.len(),
-        failed_count: result.failed_files.len(),
-        skipped_count: result.skipped_files.len(),
-        warnings,
-        error: error_msg,
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Per-file import (non-MP3)
@@ -204,7 +16,8 @@ pub enum ImportFileError {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn import_single_file(
-    state: &AppState,
+    import_io: &impl livrarr_domain::services::ImportIoService,
+    settings_service: &impl crate::services::settings_service::AppConfigService,
     source: &Path,
     target_path: &str,
     root_folder_path: &str,
@@ -319,8 +132,7 @@ pub async fn import_single_file(
         .trim_start_matches('/')
         .to_string();
 
-    state
-        .import_io_service
+    import_io
         .create_library_item(livrarr_domain::services::CreateLibraryItemRequest {
             user_id,
             work_id,
@@ -362,7 +174,7 @@ pub async fn import_single_file(
 
     // Auto-send to email/Kindle on import (ebooks only, non-fatal).
     if media_type == MediaType::Ebook {
-        if let Ok(email_cfg) = state.settings_service.get_email_config().await {
+        if let Ok(email_cfg) = settings_service.get_email_config().await {
             if email_cfg.send_on_import && email_cfg.enabled {
                 let ext = source
                     .extension()
@@ -444,17 +256,16 @@ pub fn build_target_path(
 
 /// Fetch torrent content_path from qBittorrent by hash.
 pub async fn fetch_qbit_content_path(
-    state: &AppState,
+    http_client: &livrarr_http::HttpClient,
     client: &livrarr_domain::DownloadClient,
     hash: &str,
 ) -> Result<String, ApiError> {
     let base_url = crate::infra::release_helpers::qbit_base_url(client);
-    let sid = crate::infra::release_helpers::qbit_login(state, &base_url, client).await?;
+    let sid = crate::infra::release_helpers::qbit_login(http_client, &base_url, client).await?;
 
     let info_url = format!("{base_url}/api/v2/torrents/info");
     // Admin-configured endpoint — use SSRF-safe client for redirect protection.
-    let resp = state
-        .http_client_safe
+    let resp = http_client
         .get(&info_url)
         .query(&[("hashes", hash)])
         .header("Cookie", format!("SID={sid}"))
@@ -484,8 +295,8 @@ pub async fn fetch_qbit_content_path(
 }
 
 /// Fetch SABnzbd storage path from history by nzo_id.
-async fn fetch_sabnzbd_storage_path(
-    state: &AppState,
+pub(crate) async fn fetch_sabnzbd_storage_path(
+    http_client: &livrarr_http::HttpClient,
     client: &livrarr_domain::DownloadClient,
     nzo_id: &str,
 ) -> Result<String, ApiError> {
@@ -496,7 +307,7 @@ async fn fetch_sabnzbd_storage_path(
     let url = format!("{base_url}/api?mode=history&apikey={api_key}&output=json&limit=200");
     // Admin-configured endpoint — use SSRF-safe client so a redirect to an
     // internal address is blocked.
-    let resp = state.http_client_safe.get(&url).send().await.map_err(|e| {
+    let resp = http_client.get(&url).send().await.map_err(|e| {
         ApiError::BadGateway(format!(
             "SABnzbd history request failed: {}",
             e.without_url()
@@ -548,16 +359,14 @@ pub struct PathMappingResult {
     pub configured_local_path: Option<String>,
 }
 
-pub async fn apply_remote_path_mapping(
-    state: &AppState,
+pub fn apply_remote_path_mapping(
+    mappings: &[livrarr_domain::RemotePathMapping],
     client_host: &str,
     content_path: &str,
 ) -> Result<PathMappingResult, ApiError> {
     // Normalize Windows backslashes — download clients on Windows report paths
     // like C:\Downloads\book.epub that need to match Linux forward-slash mappings.
     let content_path = &content_path.replace('\\', "/");
-
-    let mappings = state.import_io_service.list_remote_path_mappings().await?;
 
     // Extract hostname from client_host URL (strip scheme, port, path).
     let client_hostname = client_host
@@ -625,7 +434,7 @@ pub async fn apply_remote_path_mapping(
 /// CWA downstream integration: hardlink first, copy fallback, then touch to trigger inotify.
 /// CWA expects flat files in the ingest root, no subdirectories.
 /// Returns Some(warning) on failure, None on success.
-fn cwa_copy(
+pub(crate) fn cwa_copy(
     source_path: &str,
     cwa_ingest_path: &str,
     _user_id: i64,
@@ -689,10 +498,13 @@ pub fn build_tag_metadata(work: &livrarr_domain::Work) -> livrarr_tagwrite::TagM
 /// Read cover image bytes for tag embedding.
 /// Checks new tenant-aware path first, falls back to old flat layout.
 /// Returns None if the file doesn't exist (not an error per TAG-V21-003).
-pub async fn read_cover_bytes(state: &AppState, user_id: i64, work_id: i64) -> Option<Vec<u8>> {
+pub async fn read_cover_bytes(
+    data_dir: &std::path::Path,
+    user_id: i64,
+    work_id: i64,
+) -> Option<Vec<u8>> {
     // Try new tenant-aware path: covers/{user_id}/{work_id}.jpg
-    let new_path = state
-        .data_dir
+    let new_path = data_dir
         .join("covers")
         .join(user_id.to_string())
         .join(format!("{work_id}.jpg"));
@@ -700,6 +512,6 @@ pub async fn read_cover_bytes(state: &AppState, user_id: i64, work_id: i64) -> O
         return Some(bytes);
     }
     // Fallback to old flat layout: covers/{work_id}.jpg
-    let old_path = state.data_dir.join("covers").join(format!("{work_id}.jpg"));
+    let old_path = data_dir.join("covers").join(format!("{work_id}.jpg"));
     tokio::fs::read(&old_path).await.ok()
 }

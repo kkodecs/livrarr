@@ -3,7 +3,6 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::context::AppContext;
 use crate::middleware::RequireAdmin;
 use crate::types::api_error::ApiError;
 
@@ -26,7 +25,7 @@ pub struct DirEntry {
     pub path: String,
 }
 
-pub async fn browse<S: AppContext>(
+pub async fn browse<S: Clone + Send + Sync + 'static>(
     State(_state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
     Query(query): Query<BrowseQuery>,

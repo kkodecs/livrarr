@@ -1,12 +1,12 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasReadarrImportWorkflow;
 use crate::ApiError;
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::ReadarrImportWorkflow;
 
-pub async fn connect<S: AppContext>(
+pub async fn connect<S: HasReadarrImportWorkflow>(
     State(state): State<S>,
     _ctx: crate::AuthContext,
     Json(req): Json<ReadarrConnectRequest>,
@@ -19,7 +19,7 @@ pub async fn connect<S: AppContext>(
         .map_err(|e| ApiError::Internal(e.to_string()))
 }
 
-pub async fn preview<S: AppContext>(
+pub async fn preview<S: HasReadarrImportWorkflow>(
     State(state): State<S>,
     ctx: crate::AuthContext,
     Json(req): Json<ReadarrImportRequest>,
@@ -32,7 +32,7 @@ pub async fn preview<S: AppContext>(
         .map_err(|e| ApiError::Internal(e.to_string()))
 }
 
-pub async fn start<S: AppContext>(
+pub async fn start<S: HasReadarrImportWorkflow>(
     State(state): State<S>,
     ctx: crate::AuthContext,
     Json(req): Json<ReadarrImportRequest>,
@@ -45,14 +45,14 @@ pub async fn start<S: AppContext>(
         .map_err(|e| ApiError::Internal(e.to_string()))
 }
 
-pub async fn progress<S: AppContext>(
+pub async fn progress<S: HasReadarrImportWorkflow>(
     State(state): State<S>,
     _ctx: crate::AuthContext,
 ) -> Json<ReadarrImportProgress> {
     Json(state.readarr_import_workflow().progress().await)
 }
 
-pub async fn history<S: AppContext>(
+pub async fn history<S: HasReadarrImportWorkflow>(
     State(state): State<S>,
     ctx: crate::AuthContext,
 ) -> Result<Json<ReadarrHistoryResponse>, ApiError> {
@@ -64,7 +64,7 @@ pub async fn history<S: AppContext>(
         .map_err(|e| ApiError::Internal(e.to_string()))
 }
 
-pub async fn undo<S: AppContext>(
+pub async fn undo<S: HasReadarrImportWorkflow>(
     State(state): State<S>,
     ctx: crate::AuthContext,
     Path(import_id): Path<String>,

@@ -4,12 +4,45 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
-use crate::context::AppContext;
+use crate::context::{
+    HasAppConfigService, HasAuthorService, HasImportService, HasManualImportScan,
+    HasManualImportService, HasMatchingService, HasWorkService,
+};
+
+pub trait ManualImportHandlerContext:
+    HasMatchingService
+    + HasManualImportService
+    + HasManualImportScan
+    + HasAppConfigService
+    + HasAuthorService
+    + HasWorkService
+    + HasImportService
+    + Clone
+    + Send
+    + Sync
+    + 'static
+{
+}
+
+impl<T> ManualImportHandlerContext for T where
+    T: HasMatchingService
+        + HasManualImportService
+        + HasManualImportScan
+        + HasAppConfigService
+        + HasAuthorService
+        + HasWorkService
+        + HasImportService
+        + Clone
+        + Send
+        + Sync
+        + 'static
+{
+}
 use crate::middleware::RequireAdmin;
 use crate::ApiError;
 use livrarr_domain::services::{
-    AuthorService, ImportFileResult, ImportService, ImportSingleFileRequest, ManualImportService,
-    MatchingService, SettingsService, WorkService,
+    AppConfigService, AuthorService, ImportFileResult, ImportService, ImportSingleFileRequest,
+    ManualImportService, MatchingService, WorkService,
 };
 use livrarr_domain::{classify_file, normalize_for_matching, MediaType};
 
@@ -156,7 +189,7 @@ const MAX_ENTRIES_TRAVERSED: usize = 50_000;
 // Handlers
 // ---------------------------------------------------------------------------
 
-pub async fn scan<S: AppContext>(
+pub async fn scan<S: ManualImportHandlerContext>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Json(req): Json<ScanRequest>,
@@ -595,7 +628,7 @@ pub async fn scan<S: AppContext>(
     }))
 }
 
-pub async fn scan_progress<S: AppContext>(
+pub async fn scan_progress<S: HasManualImportScan>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     axum::extract::Path(scan_id): axum::extract::Path<String>,
@@ -620,7 +653,7 @@ pub async fn scan_progress<S: AppContext>(
     }))
 }
 
-pub async fn search<S: AppContext>(
+pub async fn search<S: HasManualImportScan + HasManualImportService>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Json(req): Json<SearchRequest>,
@@ -668,7 +701,7 @@ pub async fn search<S: AppContext>(
     Ok(Json(SearchResponse { results }))
 }
 
-pub async fn import<S: AppContext>(
+pub async fn import<S: ManualImportHandlerContext>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Json(req): Json<ImportRequest>,
@@ -677,7 +710,7 @@ pub async fn import<S: AppContext>(
     let existing_works = state.manual_import_service().list_works(user_id).await?;
     let root_folders = state.manual_import_service().list_root_folders().await?;
     let media_mgmt = state
-        .settings_service()
+        .app_config_service()
         .get_media_management_config()
         .await?;
 
@@ -706,7 +739,7 @@ pub async fn import<S: AppContext>(
 // Import helpers
 // ---------------------------------------------------------------------------
 
-async fn import_single_item<S: AppContext>(
+async fn import_single_item<S: ManualImportHandlerContext>(
     state: &S,
     user_id: i64,
     item: &ImportItem,
@@ -831,7 +864,7 @@ fn find_existing_work<'a>(
         })
 }
 
-async fn find_or_create_work<S: AppContext>(
+async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImportService>(
     state: &S,
     user_id: i64,
     item: &ImportItem,

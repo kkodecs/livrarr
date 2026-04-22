@@ -2,9 +2,9 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
-use crate::context::AppContext;
+use crate::context::HasDataDir;
 
-pub async fn get_cover<S: AppContext>(
+pub async fn get_cover<S: HasDataDir>(
     State(state): State<S>,
     Path(id): Path<i64>,
     req_headers: HeaderMap,
@@ -13,7 +13,7 @@ pub async fn get_cover<S: AppContext>(
     serve_image(&cover_path, id, &req_headers).await
 }
 
-pub async fn get_thumb<S: AppContext>(
+pub async fn get_thumb<S: HasDataDir>(
     State(state): State<S>,
     Path(id): Path<i64>,
     req_headers: HeaderMap,

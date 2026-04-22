@@ -16,6 +16,8 @@ pub enum MonitorError {
     ProviderFailed(String),
     #[error("OpenLibrary rate limited")]
     RateLimited,
+    #[error("monitor already running")]
+    AlreadyRunning,
     #[error("work add failed: {0}")]
     WorkAdd(#[from] WorkServiceError),
     #[error("database error: {0}")]
@@ -26,6 +28,7 @@ pub enum MonitorError {
 pub trait AuthorMonitorWorkflow: Send + Sync {
     async fn run_monitor(
         &self,
+        user_id: crate::UserId,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<MonitorReport, MonitorError>;
     fn trigger_monitor(&self);

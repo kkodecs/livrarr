@@ -1,11 +1,11 @@
 use axum::extract::State;
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::HasAuthService;
 use crate::types::api_error::ApiError;
 use crate::types::auth::{AuthService, SetupRequest, SetupResponse, SetupStatusResponse};
 
-pub async fn setup_status<S: AppContext>(
+pub async fn setup_status<S: HasAuthService>(
     State(state): State<S>,
 ) -> Result<Json<SetupStatusResponse>, ApiError> {
     let complete = state
@@ -18,7 +18,7 @@ pub async fn setup_status<S: AppContext>(
     }))
 }
 
-pub async fn setup<S: AppContext>(
+pub async fn setup<S: HasAuthService>(
     State(state): State<S>,
     Json(req): Json<SetupRequest>,
 ) -> Result<Json<SetupResponse>, ApiError> {

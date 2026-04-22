@@ -4,14 +4,14 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use crate::accessors::SystemAccessor;
-use crate::context::AppContext;
+use crate::context::{AppContext, HasDataDir, HasStartupTime, HasSystem};
 use crate::middleware::RequireAdmin;
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::system::{HealthCheckResult, SystemStatus};
 use livrarr_domain::HealthCheckType;
 
-pub async fn health<S: AppContext>(
+pub async fn health<S: Clone + Send + Sync + 'static>(
     State(_state): State<S>,
     _ctx: AuthContext,
 ) -> Result<Json<Vec<HealthCheckResult>>, ApiError> {
@@ -22,7 +22,7 @@ pub async fn health<S: AppContext>(
     }]))
 }
 
-pub async fn status<S: AppContext>(
+pub async fn status<S: HasDataDir + HasStartupTime + HasSystem>(
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
 ) -> Result<Json<SystemStatus>, ApiError> {
@@ -49,7 +49,7 @@ fn default_log_lines() -> usize {
     30
 }
 
-pub async fn log_tail<S: AppContext>(
+pub async fn log_tail<S: HasSystem>(
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
     Query(q): Query<LogTailQuery>,
@@ -63,7 +63,7 @@ pub struct SetLogLevelRequest {
     pub level: String,
 }
 
-pub async fn set_log_level<S: AppContext>(
+pub async fn set_log_level<S: HasSystem>(
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
     Json(req): Json<SetLogLevelRequest>,

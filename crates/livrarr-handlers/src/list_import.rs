@@ -2,7 +2,7 @@ use axum::extract::{Multipart, Path, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::context::AppContext;
+use crate::context::{HasEnrichmentNotify, HasListService};
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use livrarr_domain::services::{
@@ -17,7 +17,7 @@ pub struct ConfirmRequest {
     pub import_id: Option<String>,
 }
 
-pub async fn preview<S: AppContext>(
+pub async fn preview<S: HasListService>(
     State(state): State<S>,
     ctx: AuthContext,
     mut multipart: Multipart,
@@ -47,7 +47,7 @@ pub async fn preview<S: AppContext>(
     Ok(Json(result))
 }
 
-pub async fn confirm<S: AppContext>(
+pub async fn confirm<S: HasListService + HasEnrichmentNotify>(
     State(state): State<S>,
     ctx: AuthContext,
     Json(req): Json<ConfirmRequest>,
@@ -65,7 +65,7 @@ pub async fn confirm<S: AppContext>(
     Ok(Json(result))
 }
 
-pub async fn complete<S: AppContext>(
+pub async fn complete<S: HasListService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(import_id): Path<String>,
@@ -77,7 +77,7 @@ pub async fn complete<S: AppContext>(
     Ok(Json(serde_json::json!({ "status": "completed" })))
 }
 
-pub async fn undo<S: AppContext>(
+pub async fn undo<S: HasListService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(import_id): Path<String>,
@@ -86,7 +86,7 @@ pub async fn undo<S: AppContext>(
     Ok(Json(result))
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasListService>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<Json<Vec<ListImportSummary>>, ApiError> {

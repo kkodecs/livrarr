@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 
-use crate::context::AppContext;
+use crate::context::{HasAuthorService, HasSeriesQueryService, HasWorkService};
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::author::{
@@ -33,7 +33,7 @@ pub struct LookupQuery {
     pub term: Option<String>,
 }
 
-pub async fn lookup<S: AppContext>(
+pub async fn lookup<S: HasAuthorService>(
     State(state): State<S>,
     _ctx: AuthContext,
     Query(q): Query<LookupQuery>,
@@ -56,7 +56,7 @@ pub async fn lookup<S: AppContext>(
     ))
 }
 
-pub async fn add<S: AppContext>(
+pub async fn add<S: HasAuthorService + HasSeriesQueryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Json(req): Json<AddAuthorApiRequest>,
@@ -151,7 +151,7 @@ pub async fn add<S: AppContext>(
     Ok(Json(author_to_response(result.author())))
 }
 
-pub async fn list<S: AppContext>(
+pub async fn list<S: HasAuthorService>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<Json<Vec<AuthorResponse>>, ApiError> {
@@ -159,7 +159,7 @@ pub async fn list<S: AppContext>(
     Ok(Json(authors.iter().map(author_to_response).collect()))
 }
 
-pub async fn get<S: AppContext>(
+pub async fn get<S: HasAuthorService + HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -189,7 +189,7 @@ pub async fn get<S: AppContext>(
     }))
 }
 
-pub async fn update<S: AppContext>(
+pub async fn update<S: HasAuthorService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -233,7 +233,7 @@ pub async fn update<S: AppContext>(
     Ok(Json(author_to_response(&updated)))
 }
 
-pub async fn delete<S: AppContext>(
+pub async fn delete<S: HasAuthorService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -247,7 +247,7 @@ pub struct BibliographyQuery {
     pub raw: Option<bool>,
 }
 
-pub async fn bibliography<S: AppContext>(
+pub async fn bibliography<S: HasAuthorService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -260,7 +260,7 @@ pub async fn bibliography<S: AppContext>(
     Ok(Json(bibliography_to_json(id, result)))
 }
 
-pub async fn refresh_bibliography<S: AppContext>(
+pub async fn refresh_bibliography<S: HasAuthorService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
