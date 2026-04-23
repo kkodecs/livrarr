@@ -86,6 +86,9 @@ pub struct GrAuthorCandidateView {
 pub struct AuthorSeriesListView {
     pub series: Vec<AuthorSeriesItemView>,
     pub fetched_at: Option<String>,
+    pub raw_available: bool,
+    pub filtered_count: usize,
+    pub raw_count: usize,
 }
 
 #[derive(Debug)]
@@ -155,6 +158,7 @@ pub trait SeriesQueryService: Send + Sync {
         &self,
         user_id: UserId,
         author_id: AuthorId,
+        raw: bool,
     ) -> Result<AuthorSeriesListView, SeriesServiceError>;
     async fn refresh_author_series(
         &self,

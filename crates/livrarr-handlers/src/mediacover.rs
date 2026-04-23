@@ -92,22 +92,10 @@ fn generate_thumbnail_jpeg(bytes: &[u8], max_width: u32) -> Result<Vec<u8>, Stri
     Ok(out)
 }
 
-const PLACEHOLDER_SVG: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 180'><rect width='120' height='180' rx='4' fill='rgb(39,39,42)'/></svg>";
-
 fn placeholder_response() -> Response {
     (
-        StatusCode::OK,
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("image/svg+xml"),
-            ),
-            (
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=30"),
-            ),
-        ],
-        PLACEHOLDER_SVG.to_owned().into_bytes(),
+        StatusCode::NOT_FOUND,
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
     )
         .into_response()
 }

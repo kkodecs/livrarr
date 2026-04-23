@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Response};
 
 use crate::context::{
     HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasEmailService,
-    HasEnrichmentNotify, HasFileService, HasNotificationService, HasSeriesQueryService,
-    HasTagService, HasWorkService,
+    HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasNotificationService,
+    HasSeriesQueryService, HasTagService, HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
@@ -17,8 +17,8 @@ use crate::{
     RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
 use livrarr_domain::services::{
-    AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
-    SeriesQueryService, TagService, WorkDetailView, WorkService,
+    AuthorService, CreateNotificationRequest, EmailService, EnrichmentWorkflow, FileService,
+    NotificationService, SeriesQueryService, TagService, WorkDetailView, WorkService,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -142,12 +142,17 @@ pub async fn lookup<S: HasWorkService>(
 }
 
 pub async fn add<
-    S: HasWorkService + HasAuthorService + HasSeriesQueryService + HasEnrichmentNotify,
+    S: HasWorkService
+        + HasAuthorService
+        + HasSeriesQueryService
+        + HasEnrichmentNotify
+        + HasEnrichmentWorkflow,
 >(
     State(state): State<S>,
     ctx: AuthContext,
     Json(req): Json<AddWorkRequest>,
 ) -> Result<Json<AddWorkResponse>, ApiError> {
+    let author_name_for_gr = req.author_name.clone();
     let svc_req = livrarr_domain::services::AddWorkRequest {
         title: req.title,
         author_name: req.author_name,
@@ -184,23 +189,91 @@ pub async fn add<
 
             let s_gr = state.clone();
             let uid = ctx.user.id;
+            let author_name = author_name_for_gr;
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if let Err(e) = s_gr
+                match s_gr
                     .series_query_service()
                     .resolve_gr_candidates(uid, author_id)
                     .await
                 {
-                    tracing::debug!(author_id, "background GR resolve skipped: {e}");
+                    Ok(candidates) => {
+                        if let Some(first) = candidates.first() {
+                            let sim =
+                                livrarr_matching::author_similarity(&author_name, &first.name);
+                            if sim >= 0.90 {
+                                tracing::info!(
+                                    author = %author_name,
+                                    gr_candidate = %first.name,
+                                    similarity = %sim,
+                                    "auto-linking Goodreads author (work add)"
+                                );
+                                let _ = s_gr
+                                    .author_service()
+                                    .update(
+                                        uid,
+                                        author_id,
+                                        livrarr_domain::services::UpdateAuthorRequest {
+                                            name: None,
+                                            sort_name: None,
+                                            ol_key: None,
+                                            gr_key: Some(Some(first.gr_key.clone())),
+                                            monitored: None,
+                                            monitor_new_items: None,
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(author_id, "background GR resolve skipped: {e}");
+                    }
                 }
             });
         }
     }
 
-    state.enrichment_notify().notify_one();
+    // Phase 2: background enrichment for metadata + potential cover upgrade
+    {
+        let s = state.clone();
+        let user_id = ctx.user.id;
+        let work_id = result.work.id;
+        let phase1_had_cover = result.cover_mtime.is_some();
+        tokio::spawn(async move {
+            if !phase1_had_cover {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            match s
+                .enrichment_workflow()
+                .enrich_work(
+                    user_id,
+                    work_id,
+                    livrarr_domain::services::EnrichmentMode::Background,
+                )
+                .await
+            {
+                Ok(r) => {
+                    if let Some(ref url) = r.work.cover_url {
+                        let _ = s
+                            .work_service()
+                            .download_cover_from_url(user_id, work_id, url)
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(work_id, "background enrichment failed: {e}");
+                }
+            }
+        });
+    }
 
+    let mut detail = work_to_detail(&result.work);
+    detail.cover_mtime = result.cover_mtime;
     Ok(Json(AddWorkResponse {
-        work: work_to_detail(&result.work),
+        work: detail,
         author_created: result.author_created,
         messages: result.messages,
     }))

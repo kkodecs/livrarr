@@ -33,6 +33,7 @@ pub async fn search<S: HasReleaseService>(
                 results: vec![],
                 warnings: vec![],
                 cache_age_seconds: None,
+                search_query: String::new(),
             }))
         }
     };
@@ -58,6 +59,7 @@ pub async fn search<S: HasReleaseService>(
                     error: "All indexers failed".to_string(),
                 }],
                 cache_age_seconds: None,
+                search_query: String::new(),
             }));
         }
         Err(e) => return Err(e.into()),
@@ -103,6 +105,7 @@ pub async fn search<S: HasReleaseService>(
         results,
         warnings,
         cache_age_seconds: svc_response.cache_age_seconds,
+        search_query: svc_response.search_query,
     }))
 }
 

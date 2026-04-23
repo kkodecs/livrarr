@@ -30,6 +30,7 @@ pub struct WorkServiceImpl<D, E, H, L = StubNoLlm> {
     enrichment: E,
     http: H,
     llm: L,
+    hc_client: livrarr_http::HttpClient,
     data_dir: PathBuf,
     refresh_locks: KeyedMutex<(UserId, WorkId)>,
     bulk_refresh_users: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
@@ -43,6 +44,9 @@ impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm> {
             enrichment,
             http,
             llm: StubNoLlm,
+            hc_client: livrarr_http::HttpClient::builder()
+                .build()
+                .expect("HC HttpClient"),
             data_dir,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -58,6 +62,9 @@ impl<D, E, H, L> WorkServiceImpl<D, E, H, L> {
             enrichment,
             http,
             llm,
+            hc_client: livrarr_http::HttpClient::builder()
+                .build()
+                .expect("HC HttpClient"),
             data_dir,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -77,6 +84,9 @@ impl<D, H> WorkServiceImpl<D, (), H> {
             enrichment: StubNoEnrichment,
             http,
             llm: StubNoLlm,
+            hc_client: livrarr_http::HttpClient::builder()
+                .build()
+                .expect("HC HttpClient"),
             data_dir,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -210,32 +220,42 @@ where
         let setter = req.provenance_setter.unwrap_or(ProvenanceSetter::User);
         write_addtime_provenance(&self.db, user_id, &work, setter).await;
 
-        let is_foreign = crate::language::is_foreign_source(work.metadata_source.as_deref());
+        let _is_foreign = crate::language::is_foreign_source(work.metadata_source.as_deref());
         let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
 
         if req.defer_enrichment {
-            // Download cover now since enrichment won't run to provide a better one.
-            if let Some(ref url) = cover_url {
-                if crate::llm_scraper::validate_cover_url(url, "").is_some() {
-                    let covers_dir = self.data_dir.join("covers");
-                    let work_id = work.id;
-                    let suffix = if is_foreign { "_thumb" } else { "" };
-                    let url = url.clone();
-                    let http = self.http.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            download_cover_to_disk(&http, &url, &covers_dir, work_id, suffix).await
-                        {
-                            tracing::warn!(work_id, %url, "background cover download failed: {e}");
-                        }
-                    });
-                }
+            let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
+            let hc_token = self
+                .db
+                .get_metadata_config()
+                .await
+                .ok()
+                .and_then(|c| c.hardcover_api_token);
+
+            let cover_mtime = crate::cover::fetch_phase1_cover(
+                &self.http,
+                &self.hc_client,
+                &work.title,
+                &work.author_name,
+                cover_url.as_deref(),
+                hc_token.as_deref(),
+                &covers_dir,
+                work.id,
+            )
+            .await;
+
+            // Delete stale thumbnail if cover was written
+            if cover_mtime.is_some() {
+                let thumb = covers_dir.join(format!("{}_thumb.jpg", work.id));
+                let _ = tokio::fs::remove_file(&thumb).await;
             }
+
             return Ok(AddWorkResult {
                 work,
                 author_created,
                 author_id,
                 messages: vec![],
+                cover_mtime,
             });
         }
 
@@ -273,11 +293,18 @@ where
             let _ = tokio::fs::remove_file(&thumb).await;
         }
 
+        let covers_dir_for_mtime = self.data_dir.join("covers").join(user_id.to_string());
+        let cover_mtime = crate::cover::cover_file_mtime(&covers_dir_for_mtime, enriched_work.id)
+            .or_else(|| {
+                crate::cover::cover_file_mtime(&self.data_dir.join("covers"), enriched_work.id)
+            });
+
         Ok(AddWorkResult {
             work: enriched_work,
             author_created,
             author_id,
             messages,
+            cover_mtime,
         })
     }
 
@@ -1117,7 +1144,7 @@ async fn write_addtime_provenance<D: ProvenanceDb>(
     crate::provenance::write_addtime_provenance(db, user_id, work, setter).await;
 }
 
-fn unproxy_cover_url(url: &str) -> String {
+pub fn unproxy_cover_url(url: &str) -> String {
     if let Some(rest) = url.strip_prefix("/api/v1/coverproxy?url=") {
         urlencoding::decode(rest)
             .map(|s| s.into_owned())

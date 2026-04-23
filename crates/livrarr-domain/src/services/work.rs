@@ -29,6 +29,7 @@ pub struct AddWorkResult {
     pub author_created: bool,
     pub author_id: Option<i64>,
     pub messages: Vec<String>,
+    pub cover_mtime: Option<i64>,
 }
 
 #[derive(Debug)]

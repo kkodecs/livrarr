@@ -218,6 +218,7 @@ export interface WorkDetailResponse {
   libraryItems: LibraryItemResponse[];
   metadataSource?: string | null;
   detailUrl?: string | null;
+  coverMtime?: number | null;
 }
 
 export interface LibraryItemResponse {
@@ -300,6 +301,9 @@ export interface SeriesResponse {
 export interface SeriesListResponse {
   series: SeriesResponse[];
   fetchedAt: string | null;
+  rawAvailable: boolean;
+  filteredCount: number;
+  rawCount: number;
 }
 
 export interface MonitorSeriesRequest {
@@ -394,6 +398,7 @@ export interface ReleaseSearchResponse {
   results: ReleaseResponse[];
   warnings?: SearchWarning[];
   cacheAgeSeconds?: number;
+  searchQuery: string;
 }
 
 export interface SearchWarning {

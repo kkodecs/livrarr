@@ -179,6 +179,8 @@ pub struct WorkDetailResponse {
     pub library_items: Vec<LibraryItemResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_mtime: Option<i64>,
 }
 
 /// Convert a domain `Work` into a `WorkDetailResponse` (with empty `library_items`).
@@ -222,6 +224,7 @@ pub fn work_to_detail(w: &Work) -> WorkDetailResponse {
         added_at: w.added_at.to_rfc3339(),
         library_items: vec![],
         metadata_source: w.metadata_source.clone(),
+        cover_mtime: None,
     }
 }
 

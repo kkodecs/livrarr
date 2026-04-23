@@ -198,6 +198,7 @@ export default function AuthorDetailPage() {
                 <BookCover
                   workId={work.id}
                   title={work.title}
+                  authorName={work.authorName}
                   className="h-12 w-8 sm:h-16 sm:w-11"
                   iconSize={14}
                 />
@@ -404,13 +405,14 @@ function SeriesSection({
   const queryClient = useQueryClient();
   const [monitoringKey, setMonitoringKey] = useState<string | null>(null);
   const [resolveOpen, setResolveOpen] = useState(false);
+  const [showRaw, setShowRaw] = useState(false);
 
   // Only show if author has grKey.
   const hasGrKey = !!author.grKey;
 
   const { data, isLoading } = useQuery({
-    queryKey: ["series", authorId],
-    queryFn: () => getAuthorSeries(authorId),
+    queryKey: ["series", authorId, showRaw],
+    queryFn: () => getAuthorSeries(authorId, showRaw),
     enabled: hasGrKey,
     retry: 2,
     retryDelay: 3000,
@@ -495,6 +497,28 @@ function SeriesSection({
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">
           Series
         </h2>
+        {data?.rawAvailable && (
+          <div className="flex items-center rounded border border-border text-xs">
+            <button
+              onClick={() => setShowRaw(false)}
+              className={cn(
+                "px-2 py-0.5 rounded-l",
+                !showRaw ? "bg-brand text-white" : "text-muted hover:text-zinc-100",
+              )}
+            >
+              LLM Filtered {data.filteredCount}
+            </button>
+            <button
+              onClick={() => setShowRaw(true)}
+              className={cn(
+                "px-2 py-0.5 rounded-r",
+                showRaw ? "bg-brand text-white" : "text-muted hover:text-zinc-100",
+              )}
+            >
+              Raw {data.rawCount}
+            </button>
+          </div>
+        )}
         {data?.fetchedAt && (
           <span className="text-xs text-zinc-500">
             fetched {new Date(data.fetchedAt).toLocaleDateString()}

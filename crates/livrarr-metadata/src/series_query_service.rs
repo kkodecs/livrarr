@@ -279,6 +279,7 @@ where
         &self,
         user_id: UserId,
         author_id: AuthorId,
+        raw: bool,
     ) -> Result<AuthorSeriesListView, SeriesServiceError> {
         let author = self
             .db
@@ -298,8 +299,8 @@ where
             })?;
 
         let cache = self.db.get_series_cache(author_id).await.unwrap_or(None);
-        let (cache_entries, fetched_at) = if let Some(cached) = cache {
-            (cached.entries, Some(cached.fetched_at))
+        let (filtered_entries, raw_entries_opt, fetched_at) = if let Some(cached) = cache {
+            (cached.entries, cached.raw_entries, Some(cached.fetched_at))
         } else {
             let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
             let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
@@ -312,14 +313,27 @@ where
                     author_id,
                     &entries,
                     if llm_changed {
-                        Some(&raw_entries)
+                        Some(raw_entries.as_slice())
                     } else {
                         None
                     },
                 )
                 .await
                 .map_err(SeriesServiceError::Db)?;
-            (saved.entries, Some(saved.fetched_at))
+            (saved.entries, saved.raw_entries, Some(saved.fetched_at))
+        };
+
+        let raw_available = raw_entries_opt.is_some();
+        let filtered_count = filtered_entries.len();
+        let raw_count = raw_entries_opt
+            .as_ref()
+            .map(|r| r.len())
+            .unwrap_or(filtered_count);
+
+        let display_entries = if raw {
+            raw_entries_opt.unwrap_or(filtered_entries)
+        } else {
+            filtered_entries
         };
 
         let db_series = self
@@ -334,8 +348,14 @@ where
             .await
             .unwrap_or_default();
 
-        let series = build_merged_series_list(&cache_entries, &db_series, &works);
-        Ok(AuthorSeriesListView { series, fetched_at })
+        let series = build_merged_series_list(&display_entries, &db_series, &works);
+        Ok(AuthorSeriesListView {
+            series,
+            fetched_at,
+            raw_available,
+            filtered_count,
+            raw_count,
+        })
     }
 
     async fn refresh_author_series(
@@ -372,7 +392,7 @@ where
                 author_id,
                 &entries,
                 if llm_changed {
-                    Some(&raw_entries)
+                    Some(raw_entries.as_slice())
                 } else {
                     None
                 },
@@ -392,10 +412,21 @@ where
             .await
             .unwrap_or_default();
 
+        let raw_available = llm_changed;
+        let filtered_count = saved.entries.len();
+        let raw_count = if llm_changed {
+            raw_entries.len()
+        } else {
+            filtered_count
+        };
+
         let series = build_merged_series_list(&saved.entries, &db_series, &works);
         Ok(AuthorSeriesListView {
             series,
             fetched_at: Some(saved.fetched_at),
+            raw_available,
+            filtered_count,
+            raw_count,
         })
     }
 
@@ -850,8 +881,10 @@ async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
          1. REMOVE series by a different person who shares the same name\n\
          2. REMOVE anthologies, compilations, box sets, and omnibus editions\n\
          3. REMOVE series where this author only contributed a foreword, introduction, or single story\n\
-         4. Keep the author's own original series\n\n\
-         Return a JSON array of indices to KEEP: [0, 2, 5, ...]\n\
+         4. Keep the author's own original series\n\
+         5. Fix capitalization: use standard Title Case (e.g. \"night angel\" → \"Night Angel\")\n\n\
+         Return a JSON array of objects for series to KEEP: [{{\"i\": 0, \"name\": \"Corrected Name\"}}, ...]\n\
+         If the name is already correct, use the original name.\n\
          Return ONLY the JSON array, no other text."
     );
 
@@ -884,12 +917,32 @@ async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
         .unwrap_or(resp.content.trim())
         .trim();
 
-    let indices: Vec<usize> = serde_json::from_str(json_str).ok()?;
+    #[derive(serde::Deserialize)]
+    struct KeepEntry {
+        i: usize,
+        name: Option<String>,
+    }
 
-    let cleaned: Vec<SeriesCacheEntry> = indices
-        .into_iter()
-        .filter_map(|i| entries.get(i).cloned())
-        .collect();
+    let cleaned: Vec<SeriesCacheEntry> =
+        if let Ok(entries_with_names) = serde_json::from_str::<Vec<KeepEntry>>(json_str) {
+            entries_with_names
+                .into_iter()
+                .filter_map(|ke| {
+                    entries.get(ke.i).map(|orig| SeriesCacheEntry {
+                        name: ke.name.unwrap_or_else(|| orig.name.clone()),
+                        gr_key: orig.gr_key.clone(),
+                        book_count: orig.book_count,
+                    })
+                })
+                .collect()
+        } else if let Ok(indices) = serde_json::from_str::<Vec<usize>>(json_str) {
+            indices
+                .into_iter()
+                .filter_map(|i| entries.get(i).cloned())
+                .collect()
+        } else {
+            return None;
+        };
 
     if cleaned.is_empty() {
         return None;

@@ -25,6 +25,7 @@ pub struct ReleaseSearchResponse {
     pub warnings: Vec<SearchWarning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_age_seconds: Option<u64>,
+    pub search_query: String,
 }
 
 #[derive(Debug, Serialize)]

@@ -270,6 +270,7 @@ function WorkHeader({
       <BookCover
         workId={work.id}
         title={work.title}
+        authorName={work.authorName}
         coverVersion={coverVersion}
         className="h-[200px] w-[133px] sm:h-[300px] sm:w-[200px] flex-shrink-0 rounded-lg shadow-lg"
         iconSize={32}
@@ -834,8 +835,11 @@ function ReleasesTab({ workId }: { workId: number }) {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-end gap-3">
-        {cacheAgeSecs != null && (
-          <span className="text-xs text-muted">Cached {formatCacheAge(cacheAgeSecs)}</span>
+        {searchResponse?.searchQuery && (
+          <span className="text-xs text-muted">
+            Results for &lsquo;{searchResponse.searchQuery}&rsquo;
+            {cacheAgeSecs != null && <> &middot; cached {formatCacheAge(cacheAgeSecs)}</>}
+          </span>
         )}
         <button
           onClick={handleRefresh}

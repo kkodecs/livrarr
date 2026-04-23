@@ -89,11 +89,16 @@ where
             return Err(ReleaseServiceError::AllIndexersFailed);
         }
 
-        // Build search query from work title + author
-        let query = if work.author_name.is_empty() {
+        let last_name = work
+            .author_name
+            .split_whitespace()
+            .last()
+            .unwrap_or("")
+            .to_string();
+        let query = if last_name.is_empty() {
             work.title.clone()
         } else {
-            format!("{} {}", work.title, work.author_name)
+            format!("{} {}", work.title, last_name)
         };
 
         // Fan-out parallel requests with per-indexer 30s timeout
@@ -267,6 +272,7 @@ where
             results: all_results,
             warnings,
             cache_age_seconds: None,
+            search_query: query,
         })
     }
 

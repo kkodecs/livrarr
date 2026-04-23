@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 
@@ -145,14 +145,20 @@ pub async fn resolve_gr<S: HasSeriesQueryService + HasAuthorService>(
     }))
 }
 
+#[derive(serde::Deserialize)]
+pub struct SeriesListQuery {
+    pub raw: Option<bool>,
+}
+
 pub async fn list_series<S: HasSeriesQueryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
+    Query(q): Query<SeriesListQuery>,
 ) -> Result<Json<SeriesListResponse>, ApiError> {
     let view = state
         .series_query_service()
-        .list_author_series(ctx.user.id, id)
+        .list_author_series(ctx.user.id, id, q.raw.unwrap_or(false))
         .await?;
 
     let series = view
@@ -172,6 +178,9 @@ pub async fn list_series<S: HasSeriesQueryService>(
     Ok(Json(SeriesListResponse {
         series,
         fetched_at: view.fetched_at,
+        raw_available: view.raw_available,
+        filtered_count: view.filtered_count,
+        raw_count: view.raw_count,
     }))
 }
 
@@ -202,6 +211,9 @@ pub async fn refresh_series<S: HasSeriesQueryService>(
     Ok(Json(SeriesListResponse {
         series,
         fetched_at: view.fetched_at,
+        raw_available: view.raw_available,
+        filtered_count: view.filtered_count,
+        raw_count: view.raw_count,
     }))
 }
 

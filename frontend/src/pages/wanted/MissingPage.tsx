@@ -226,6 +226,7 @@ export default function MissingPage() {
                       <BookCover
                         workId={work.id}
                         title={work.title}
+                        authorName={work.authorName}
                         className="h-8 w-8"
                         iconSize={12}
                       />

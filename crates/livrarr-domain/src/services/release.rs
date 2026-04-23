@@ -14,6 +14,7 @@ pub struct ReleaseSearchResponse {
     pub results: Vec<ReleaseResult>,
     pub warnings: Vec<String>,
     pub cache_age_seconds: Option<u64>,
+    pub search_query: String,
 }
 
 #[derive(Debug)]

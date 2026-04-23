@@ -54,6 +54,7 @@ impl ReleaseService for StubReleaseService {
             results: vec![],
             warnings: vec![],
             cache_age_seconds: None,
+            search_query: String::new(),
         })
     }
 
