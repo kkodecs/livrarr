@@ -385,26 +385,25 @@ where
         let preview_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
-        // Check local DB for existing works by ISBN and persist preview rows.
+        let existing_works = self
+            .db
+            .list_works(user_id)
+            .await
+            .map_err(ListServiceError::Db)?;
+        let existing_keys: std::collections::HashSet<String> = existing_works
+            .iter()
+            .map(|w| normalize_for_dedup(&w.title, &w.author_name))
+            .collect();
+
         let mut preview_rows = Vec::with_capacity(rows.len());
 
         for row in &rows {
             let status = if row.title.is_empty() {
                 "parse_error"
+            } else if existing_keys.contains(&normalize_for_dedup(&row.title, &row.author)) {
+                "already_exists"
             } else {
-                // Check if work already exists by ISBN.
-                let exists = check_work_exists_by_isbn(
-                    &self.db,
-                    user_id,
-                    row.isbn_13.as_deref(),
-                    row.isbn_10.as_deref(),
-                )
-                .await;
-                if exists {
-                    "already_exists"
-                } else {
-                    "new"
-                }
+                "new"
             };
 
             // Persist to preview table.
@@ -753,32 +752,14 @@ where
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Check if a work already exists for this user by ISBN-13 or ISBN-10.
-async fn check_work_exists_by_isbn<D: ListImportDb>(
-    db: &D,
-    user_id: i64,
-    isbn_13: Option<&str>,
-    isbn_10: Option<&str>,
-) -> bool {
-    if let Some(isbn) = isbn_13 {
-        if db
-            .work_exists_by_isbn_13(user_id, isbn)
-            .await
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    if let Some(isbn) = isbn_10 {
-        if db
-            .work_exists_by_isbn_10(user_id, isbn)
-            .await
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
+fn normalize_for_dedup(title: &str, author: &str) -> String {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    };
+    format!("{}::{}", norm(title), norm(author))
 }
 
 // ---------------------------------------------------------------------------

@@ -66,6 +66,7 @@ impl WorkService for StubWorkService {
             author_created: false,
             author_id: None,
             messages: vec![],
+            cover_mtime: None,
         })
     }
 

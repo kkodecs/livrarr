@@ -20,6 +20,9 @@ pub struct SeriesResponse {
 pub struct SeriesListResponse {
     pub series: Vec<SeriesResponse>,
     pub fetched_at: Option<String>,
+    pub raw_available: bool,
+    pub filtered_count: usize,
+    pub raw_count: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

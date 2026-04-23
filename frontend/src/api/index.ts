@@ -203,8 +203,8 @@ export const resolveGr = (authorId: number) =>
   apiFetch<ResolveGrResponse>(`/author/${authorId}/resolve-gr`, {
     method: "POST",
   });
-export const getAuthorSeries = (authorId: number) =>
-  apiFetch<SeriesListResponse>(`/author/${authorId}/series`);
+export const getAuthorSeries = (authorId: number, raw = false) =>
+  apiFetch<SeriesListResponse>(`/author/${authorId}/series${raw ? "?raw=true" : ""}`);
 export const refreshAuthorSeries = (authorId: number) =>
   apiFetch<SeriesListResponse>(`/author/${authorId}/series/refresh`, {
     method: "POST",

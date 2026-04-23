@@ -166,10 +166,18 @@ impl ReleaseService {
 
         let cache_age_seconds = max_cache_age.filter(|&a| a > 0);
 
+        let last_name = author.split_whitespace().last().unwrap_or("");
+        let search_query = if last_name.is_empty() {
+            title.to_string()
+        } else {
+            format!("{title} {last_name}")
+        };
+
         ReleaseSearchResponse {
             results,
             warnings,
             cache_age_seconds,
+            search_query,
         }
     }
 

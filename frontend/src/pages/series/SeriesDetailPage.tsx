@@ -128,6 +128,7 @@ export default function SeriesDetailPage() {
               <BookCover
                 workId={work.id}
                 title={work.title}
+                authorName={work.authorName}
                 className="h-12 w-8 sm:h-16 sm:w-11"
                 iconSize={14}
               />

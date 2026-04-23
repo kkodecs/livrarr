@@ -348,6 +348,7 @@ function LibraryResult({ work }: { work: WorkDetailResponse }) {
       <BookCover
         workId={work.id}
         title={work.title}
+        authorName={work.authorName}
         className="h-8 w-6"
         iconSize={10}
       />

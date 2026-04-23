@@ -257,10 +257,14 @@ impl SeriesQueryService for StubSeriesQueryService {
         &self,
         _user_id: UserId,
         _author_id: AuthorId,
+        _raw: bool,
     ) -> Result<AuthorSeriesListView, SeriesServiceError> {
         Ok(AuthorSeriesListView {
             series: vec![],
             fetched_at: None,
+            raw_available: false,
+            filtered_count: 0,
+            raw_count: 0,
         })
     }
 
@@ -272,6 +276,9 @@ impl SeriesQueryService for StubSeriesQueryService {
         Ok(AuthorSeriesListView {
             series: vec![],
             fetched_at: None,
+            raw_available: false,
+            filtered_count: 0,
+            raw_count: 0,
         })
     }
 

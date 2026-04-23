@@ -655,6 +655,8 @@ function TableView({
                   <BookCover
                     workId={work.id}
                     title={work.title}
+                    authorName={work.authorName}
+                    coverVersion={work.coverMtime ?? undefined}
                     className="h-8 w-8"
                     iconSize={12}
                   />
@@ -740,6 +742,8 @@ function PosterView({
                 <BookCover
                   workId={work.id}
                   title={work.title}
+                  authorName={work.authorName}
+                  coverVersion={work.coverMtime ?? undefined}
                   className="h-full w-full"
                   iconSize={24}
                 />
@@ -815,6 +819,8 @@ function OverviewView({
               <BookCover
                 workId={work.id}
                 title={work.title}
+                authorName={work.authorName}
+                coverVersion={work.coverMtime ?? undefined}
                 className="h-20 w-14 sm:h-28 sm:w-20 flex-shrink-0"
                 iconSize={18}
               />
