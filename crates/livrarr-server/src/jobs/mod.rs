@@ -10,8 +10,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use livrarr_db::{CreateNotificationDbRequest, NotificationDb};
-use livrarr_domain::NotificationType;
+use livrarr_db::{CreateNotificationDbRequest, NotificationDb, UserDb};
+use livrarr_domain::{NotificationType, UserRole};
 
 pub mod author_monitor;
 pub mod download_poller;
@@ -165,28 +165,24 @@ impl JobRunner {
                                 .or_else(|| payload.downcast_ref::<String>().cloned())
                                 .unwrap_or_else(|| "unknown panic".to_string());
                             error!("job 'enrichment_retry' panicked: {msg}");
-                            let mut statuses = status.write().await;
-                            if let Some(st) =
-                                statuses.iter_mut().find(|st| st.name == "enrichment_retry")
-                            {
-                                st.running = false;
-                                if !st.panic_notified {
-                                    st.panic_notified = true;
-                                    if let Err(e) =
-                                        s.db.create_notification(CreateNotificationDbRequest {
-                                            user_id: 1,
-                                            notification_type: NotificationType::JobPanicked,
-                                            ref_key: Some("enrichment_retry".to_string()),
-                                            message: format!(
-                                                "Job 'enrichment_retry' panicked: {msg}"
-                                            ),
-                                            data: serde_json::Value::Null,
-                                        })
-                                        .await
-                                    {
-                                        tracing::warn!("create_notification failed: {e}");
+                            let should_notify = {
+                                let mut statuses = status.write().await;
+                                if let Some(st) =
+                                    statuses.iter_mut().find(|st| st.name == "enrichment_retry")
+                                {
+                                    st.running = false;
+                                    if !st.panic_notified {
+                                        st.panic_notified = true;
+                                        true
+                                    } else {
+                                        false
                                     }
+                                } else {
+                                    false
                                 }
+                            };
+                            if should_notify {
+                                notify_admins_of_panic(&s.db, "enrichment_retry", &msg).await;
                             }
                         }
                         Err(join_err) => {
@@ -277,25 +273,22 @@ impl JobRunner {
                             .unwrap_or_else(|| "unknown panic".to_string());
                         error!("job '{job_name}' panicked: {msg}");
 
-                        let mut statuses = status.write().await;
-                        if let Some(s) = statuses.iter_mut().find(|s| s.name == job_name) {
-                            s.running = false;
-                            if !s.panic_notified {
-                                s.panic_notified = true;
-                                if let Err(e) = state
-                                    .db
-                                    .create_notification(CreateNotificationDbRequest {
-                                        user_id: 1,
-                                        notification_type: NotificationType::JobPanicked,
-                                        ref_key: Some(job_name.clone()),
-                                        message: format!("Job '{}' panicked: {}", job_name, msg),
-                                        data: serde_json::Value::Null,
-                                    })
-                                    .await
-                                {
-                                    tracing::warn!("create_notification failed: {e}");
+                        let should_notify = {
+                            let mut statuses = status.write().await;
+                            if let Some(s) = statuses.iter_mut().find(|s| s.name == job_name) {
+                                s.running = false;
+                                if !s.panic_notified {
+                                    s.panic_notified = true;
+                                    true
+                                } else {
+                                    false
                                 }
+                            } else {
+                                false
                             }
+                        };
+                        if should_notify {
+                            notify_admins_of_panic(&state.db, &job_name, &msg).await;
                         }
                     }
                     Err(join_err) => {
@@ -354,5 +347,26 @@ async fn set_job_running(status: &Arc<RwLock<Vec<JobStatus>>>, name: &str, runni
     let mut statuses = status.write().await;
     if let Some(s) = statuses.iter_mut().find(|s| s.name == name) {
         s.running = running;
+    }
+}
+
+async fn notify_admins_of_panic<DB: UserDb + NotificationDb>(db: &DB, job_name: &str, msg: &str) {
+    let users = match db.list_users().await {
+        Ok(u) => u,
+        Err(e) => {
+            warn!("list_users for panic notification failed: {e}");
+            return;
+        }
+    };
+    for user in users.iter().filter(|u| u.role == UserRole::Admin) {
+        let _ = db
+            .create_notification(CreateNotificationDbRequest {
+                user_id: user.id,
+                notification_type: NotificationType::JobPanicked,
+                ref_key: Some(job_name.to_string()),
+                message: format!("Job '{job_name}' panicked: {msg}"),
+                data: serde_json::Value::Null,
+            })
+            .await;
     }
 }

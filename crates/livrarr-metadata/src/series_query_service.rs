@@ -255,6 +255,13 @@ where
                 other => SeriesServiceError::Db(other),
             })?;
 
+        // Primary: JSON autocomplete API (structured, React-proof)
+        let candidates = resolve_gr_candidates_json(&self.fetcher, &author.name).await;
+        if !candidates.is_empty() {
+            return Ok(candidates);
+        }
+
+        // Fallback: HTML scraping (in case JSON API changes)
         let url = format!(
             "https://www.goodreads.com/search?q={}&search_type=authors",
             urlencoding::encode(&author.name)
@@ -781,6 +788,100 @@ async fn fetch_gr_html<F: HttpFetcher>(
         return Err(SeriesServiceError::GoodreadsUnavailable);
     }
     String::from_utf8(resp.body).map_err(|_| SeriesServiceError::GoodreadsUnavailable)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GrAutocompleteBook {
+    author: Option<GrAutocompleteAuthor>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GrAutocompleteAuthor {
+    #[serde(deserialize_with = "de_stringish_id")]
+    id: String,
+    name: String,
+    #[serde(default)]
+    profile_url: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    is_goodreads_author: bool,
+}
+
+fn de_stringish_id<'de, D>(de: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        Num(i64),
+        Str(String),
+    }
+    use serde::Deserialize as _;
+    match Id::deserialize(de)? {
+        Id::Num(n) => Ok(n.to_string()),
+        Id::Str(s) => Ok(s),
+    }
+}
+
+async fn resolve_gr_candidates_json<F: HttpFetcher>(
+    fetcher: &F,
+    author_name: &str,
+) -> Vec<GrAuthorCandidateView> {
+    let clean_name: String = author_name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    let url = format!(
+        "https://www.goodreads.com/book/auto_complete?format=json&q={}",
+        urlencoding::encode(clean_name.trim())
+    );
+
+    let req = FetchRequest {
+        url,
+        method: HttpMethod::Get,
+        headers: vec![],
+        body: None,
+        timeout: Duration::from_secs(10),
+        rate_bucket: RateBucket::Goodreads,
+        max_body_bytes: 512 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Browser,
+    };
+
+    let resp = match fetcher.fetch(req).await {
+        Ok(r) if r.status == 200 => r,
+        _ => return Vec::new(),
+    };
+
+    let items: Vec<GrAutocompleteBook> = match serde_json::from_slice(&resp.body) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+
+    for item in items {
+        let Some(author) = item.author else {
+            continue;
+        };
+        if author.name.trim().is_empty() {
+            continue;
+        }
+        if !seen.insert(author.id.clone()) {
+            continue;
+        }
+        out.push(GrAuthorCandidateView {
+            gr_key: author.id,
+            name: author.name,
+            profile_url: author.profile_url,
+        });
+    }
+
+    out
 }
 
 async fn fetch_author_series_pages<F: HttpFetcher>(

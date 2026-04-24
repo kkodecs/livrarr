@@ -7,6 +7,5 @@
 //! No service traits — concrete structs only.
 
 pub mod manual_import_service;
-pub mod readarr_import_service;
 pub mod release_service;
 pub mod settings_service;

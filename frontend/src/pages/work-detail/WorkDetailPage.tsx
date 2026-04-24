@@ -81,6 +81,10 @@ export default function WorkDetailPage() {
   const queryClient = useQueryClient();
   const initialTab = searchParams.get("tab") ?? "files";
 
+  const [coverPollBaseline, setCoverPollBaseline] = useState<
+    number | null | undefined
+  >(undefined);
+
   const {
     data: work,
     isLoading,
@@ -90,18 +94,32 @@ export default function WorkDetailPage() {
     queryKey: ["work", id],
     queryFn: () => getWork(Number(id)),
     enabled: !!id,
+    refetchInterval: (query) => {
+      const status = query.state.data?.enrichmentStatus;
+      if (status === "pending") return 5_000;
+      if (coverPollBaseline === undefined) return false;
+      const current = query.state.data?.coverMtime ?? null;
+      return current === coverPollBaseline ? 1_000 : false;
+    },
   });
 
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteFiles, setDeleteFiles] = useState(false);
-  const [coverVersion, setCoverVersion] = useState(0);
+
+  useEffect(() => {
+    if (coverPollBaseline === undefined) return;
+    const current = work?.coverMtime ?? null;
+    if (current !== coverPollBaseline) {
+      setCoverPollBaseline(undefined);
+    }
+  }, [work?.coverMtime, coverPollBaseline]);
 
   const refreshMutation = useMutation({
     mutationFn: () => refreshWork(Number(id)),
     onSuccess: () => {
       toast.success("Work refreshed");
-      setCoverVersion((v) => v + 1);
+      setCoverPollBaseline(work?.coverMtime ?? null);
       queryClient.invalidateQueries({ queryKey: ["work", id] });
     },
     onError: () => toast.error("Failed to refresh work"),
@@ -171,7 +189,6 @@ export default function WorkDetailPage() {
       <PageContent>
         <WorkHeader
           work={work}
-          coverVersion={coverVersion}
           activeGrabs={activeGrabs}
           onToggleMonitor={(field) =>
             toggleMonitorMutation.mutate({
@@ -203,7 +220,7 @@ export default function WorkDetailPage() {
         </Tabs.Root>
       </PageContent>
 
-      <EditModal work={work} open={editOpen} onOpenChange={setEditOpen} onCoverUploaded={() => setCoverVersion((v) => v + 1)} />
+      <EditModal work={work} open={editOpen} onOpenChange={setEditOpen} onCoverUploaded={() => refetch()} />
 
       <ConfirmModal
         open={deleteOpen}
@@ -234,12 +251,10 @@ export default function WorkDetailPage() {
 
 function WorkHeader({
   work,
-  coverVersion,
   activeGrabs,
   onToggleMonitor,
 }: {
   work: WorkDetailResponse;
-  coverVersion?: number;
   activeGrabs: Set<string>;
   onToggleMonitor: (field: "monitorEbook" | "monitorAudiobook") => void;
 }) {
@@ -267,14 +282,36 @@ function WorkHeader({
 
   return (
     <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start sm:gap-6">
-      <BookCover
-        workId={work.id}
-        title={work.title}
-        authorName={work.authorName}
-        coverVersion={coverVersion}
-        className="h-[200px] w-[133px] sm:h-[300px] sm:w-[200px] flex-shrink-0 rounded-lg shadow-lg"
-        iconSize={32}
-      />
+      <div className="relative group h-[200px] w-[133px] sm:h-[300px] sm:w-[200px] flex-shrink-0">
+        <BookCover
+          workId={work.id}
+          title={work.title}
+          authorName={work.authorName}
+          coverVersion={work.coverMtime ?? undefined}
+          className="h-full w-full rounded-lg shadow-lg"
+          iconSize={32}
+        />
+        {(ebookItems.length > 0 || audioItems.length > 0) && (
+          <div className="absolute inset-0 flex items-center justify-center gap-4 opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 rounded-lg">
+            {ebookItems[0] && (
+              <Link
+                to={`/read/${ebookItems[0].id}`}
+                className="rounded-full bg-black/60 p-3 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
+              >
+                <BookOpen size={24} />
+              </Link>
+            )}
+            {audioItems[0] && (
+              <Link
+                to={`/listen/${audioItems[0].id}?workId=${work.id}`}
+                className="rounded-full bg-black/60 p-3 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
+              >
+                <Headphones size={24} />
+              </Link>
+            )}
+          </div>
+        )}
+      </div>
       <div className="min-w-0 flex-1 text-center sm:text-left">
         <div className="flex items-baseline gap-2">
           <h1 className="text-2xl font-bold text-zinc-100">{work.title}</h1>

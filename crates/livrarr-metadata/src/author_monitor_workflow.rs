@@ -276,13 +276,13 @@ where
                     continue;
                 }
 
-                // Extract publish year — skip if unparseable
                 let year = match entry.publish_year() {
                     Some(y) => y,
                     None => {
-                        tracing::debug!(
+                        tracing::trace!(
                             ol_key = %stripped_ol_key,
-                            "author monitor: skipping work — unparseable date"
+                            raw_date = ?entry.first_publish_date,
+                            "author monitor: skipping work — no publish date"
                         );
                         continue;
                     }

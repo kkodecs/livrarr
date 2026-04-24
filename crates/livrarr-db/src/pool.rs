@@ -42,7 +42,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::Migr
 // ── Startup checks ──────────────────────────────────────────────────────────
 
 /// Maximum schema_version this binary understands.
-const MAX_SCHEMA_VERSION: i64 = 33;
+const MAX_SCHEMA_VERSION: i64 = 34;
 /// Maximum data_version this binary understands.
 const MAX_DATA_VERSION: i64 = 1;
 

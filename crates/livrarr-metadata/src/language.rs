@@ -151,3 +151,15 @@ pub fn is_llm_configured(
 pub fn is_foreign_source(metadata_source: Option<&str>) -> bool {
     livrarr_domain::is_foreign_source(metadata_source)
 }
+
+pub fn is_foreign_work(metadata_source: Option<&str>, language: Option<&str>) -> bool {
+    is_foreign_source(metadata_source) || is_non_english(language)
+}
+
+fn is_non_english(language: Option<&str>) -> bool {
+    match language.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(s) if matches!(s.as_str(), "en" | "eng" | "english") => false,
+        Some(s) if !s.is_empty() => true,
+        _ => false,
+    }
+}

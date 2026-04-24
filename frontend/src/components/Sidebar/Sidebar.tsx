@@ -331,7 +331,7 @@ function SidebarItem({
 }
 
 const REPO_URL = "https://github.com/kkodecs/livrarr";
-const RELEASES_API = "https://api.github.com/repos/kkodecs/livrarr/releases/latest";
+const RELEASES_API = "https://api.github.com/repos/kkodecs/livrarr/releases";
 
 function useVersionCheck() {
   const checkForUpdates = useUIStore((s) => s.checkForUpdates);
@@ -348,10 +348,10 @@ function useVersionCheck() {
     fetch(RELEASES_API)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data?.tag_name) {
-          // Strip leading "v" if present (e.g. "v0.1.0-alpha3" → "0.1.0-alpha3")
-          setLatestVersion(data.tag_name.replace(/^v/, ""));
-          setLatestUrl(data.html_url);
+        const latest = Array.isArray(data) ? data[0] : data;
+        if (latest?.tag_name) {
+          setLatestVersion(latest.tag_name.replace(/^v/, ""));
+          setLatestUrl(latest.html_url);
         }
       })
       .catch(() => {});

@@ -82,6 +82,7 @@ impl WorkService for StubWorkService {
         Ok(WorkDetailView {
             work: Work::default(),
             library_items: vec![],
+            cover_mtime: None,
         })
     }
 

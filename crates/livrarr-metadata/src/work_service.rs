@@ -329,9 +329,14 @@ where
             .list_library_items_by_work(user_id, work_id)
             .await
             .map_err(WorkServiceError::Db)?;
+        let cover_mtime = {
+            let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
+            crate::cover::cover_file_mtime(&covers_dir, work_id)
+        };
         Ok(WorkDetailView {
             work,
             library_items,
+            cover_mtime,
         })
     }
 
@@ -428,6 +433,7 @@ where
                 WorkDetailView {
                     work: w,
                     library_items: work_items,
+                    cover_mtime: None,
                 }
             })
             .collect();

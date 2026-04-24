@@ -400,15 +400,15 @@ impl PriorityModel {
         }
     }
 
-    /// TEMP(pk-tdd): standard foreign-language priority model.
-    /// All field groups: GR→OL.
+    /// Foreign-language priority model. GR-only for content/description/cover,
+    /// Audnexus-only for audio. OL and HC excluded — poor foreign-language data quality.
     pub fn foreign() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
-            content: vec![P::Goodreads, P::OpenLibrary],
-            description: vec![P::Goodreads, P::OpenLibrary],
-            cover: vec![P::Goodreads, P::OpenLibrary],
-            audio: vec![P::Goodreads, P::OpenLibrary],
+            content: vec![P::Goodreads],
+            description: vec![P::Goodreads],
+            cover: vec![P::Goodreads],
+            audio: vec![P::Audnexus],
         }
     }
 }

@@ -125,7 +125,7 @@ where
                 let api_path = indexer.api_path.trim_start_matches('/');
                 let mut url = format!("{base_url}/{api_path}?t=search&q={}", urlencoded(&query));
                 if let Some(ref api_key) = indexer.api_key {
-                    url.push_str(&format!("&apikey={api_key}"));
+                    url.push_str(&format!("&apikey={}", urlencoded(api_key)));
                 }
                 // Add categories
                 if !indexer.categories.is_empty() {

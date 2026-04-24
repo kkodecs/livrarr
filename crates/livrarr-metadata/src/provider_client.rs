@@ -654,7 +654,8 @@ impl GoodreadsClient {
         let isbn_13 = detail.isbn.filter(|s| s.len() >= 10);
         let cover_url = detail
             .cover_url
-            .filter(|u| goodreads::validate_cover_url(u));
+            .filter(|u| goodreads::validate_cover_url(u))
+            .map(|u| crate::cover::upscale_cover_url(&u));
         let genres = if detail.genres.is_empty() {
             None
         } else {

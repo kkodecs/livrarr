@@ -41,3 +41,4 @@ livrarr-server = { path = "crates/livrarr-server" }
 
 [profile.release]
 strip = true
+lto = true

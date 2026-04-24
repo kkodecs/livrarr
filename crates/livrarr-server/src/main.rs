@@ -256,6 +256,16 @@ async fn main() {
             queue_cfg(P::Goodreads),
         );
 
+        builder = builder.with_applicability_rule(Arc::new(|provider, work| {
+            if !m::language::is_foreign_work(
+                work.metadata_source.as_deref(),
+                work.language.as_deref(),
+            ) {
+                return true;
+            }
+            matches!(provider, P::Goodreads | P::Audnexus)
+        }));
+
         let db_arc = Arc::new(db.clone());
         let queue = Arc::new(builder.build(db_arc.clone()));
         let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));

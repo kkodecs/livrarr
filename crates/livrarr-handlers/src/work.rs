@@ -52,7 +52,8 @@ pub fn validate_image_magic_bytes(data: &[u8]) -> Result<(), ApiError> {
 }
 
 fn detail_from_view(view: WorkDetailView) -> WorkDetailResponse {
-    let mut detail = work_to_detail(&view.work);
+    let mut detail =
+        crate::types::work::work_to_detail_with_cover_mtime(&view.work, view.cover_mtime);
     detail.library_items = view
         .library_items
         .iter()
@@ -256,11 +257,13 @@ pub async fn add<
                 .await
             {
                 Ok(r) => {
-                    if let Some(ref url) = r.work.cover_url {
-                        let _ = s
-                            .work_service()
-                            .download_cover_from_url(user_id, work_id, url)
-                            .await;
+                    if !r.work.cover_manual {
+                        if let Some(ref url) = r.work.cover_url {
+                            let _ = s
+                                .work_service()
+                                .download_cover_from_url(user_id, work_id, url)
+                                .await;
+                        }
                     }
                 }
                 Err(e) => {
@@ -270,8 +273,8 @@ pub async fn add<
         });
     }
 
-    let mut detail = work_to_detail(&result.work);
-    detail.cover_mtime = result.cover_mtime;
+    let detail =
+        crate::types::work::work_to_detail_with_cover_mtime(&result.work, result.cover_mtime);
     Ok(Json(AddWorkResponse {
         work: detail,
         author_created: result.author_created,
@@ -434,13 +437,15 @@ pub async fn refresh<S: HasWorkService + HasTagService>(
 ) -> Result<Json<RefreshWorkResponse>, ApiError> {
     let result = state.work_service().refresh(ctx.user.id, id).await?;
 
-    if let Some(ref cover_url) = result.work.cover_url {
-        if let Err(e) = state
-            .work_service()
-            .download_cover_from_url(ctx.user.id, id, cover_url)
-            .await
-        {
-            tracing::warn!(work_id = id, %e, "cover download failed after refresh");
+    if !result.work.cover_manual {
+        if let Some(ref cover_url) = result.work.cover_url {
+            if let Err(e) = state
+                .work_service()
+                .download_cover_from_url(ctx.user.id, id, cover_url)
+                .await
+            {
+                tracing::warn!(work_id = id, %e, "cover download failed after refresh");
+            }
         }
     }
 
@@ -520,11 +525,13 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
                 }
             };
 
-            if let Some(ref cover_url) = result.work.cover_url {
-                let _ = s
-                    .work_service()
-                    .download_cover_from_url(user_id, work.id, cover_url)
-                    .await;
+            if !result.work.cover_manual {
+                if let Some(ref cover_url) = result.work.cover_url {
+                    let _ = s
+                        .work_service()
+                        .download_cover_from_url(user_id, work.id, cover_url)
+                        .await;
+                }
             }
 
             enriched += 1;
