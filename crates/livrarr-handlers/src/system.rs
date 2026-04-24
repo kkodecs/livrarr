@@ -7,13 +7,11 @@ use crate::accessors::SystemAccessor;
 use crate::context::{AppContext, HasDataDir, HasStartupTime, HasSystem};
 use crate::middleware::RequireAdmin;
 use crate::types::api_error::ApiError;
-use crate::types::auth::AuthContext;
 use crate::types::system::{HealthCheckResult, SystemStatus};
 use livrarr_domain::HealthCheckType;
 
 pub async fn health<S: Clone + Send + Sync + 'static>(
     State(_state): State<S>,
-    _ctx: AuthContext,
 ) -> Result<Json<Vec<HealthCheckResult>>, ApiError> {
     Ok(Json(vec![HealthCheckResult {
         source: "database".into(),

@@ -55,7 +55,8 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/auth/login",
             post(livrarr_handlers::auth::login::<AppState>)
                 .layer(GovernorLayer::new(login_governor)),
-        );
+        )
+        .route("/health", get(livrarr_handlers::system::health::<AppState>));
 
     // Protected API routes (auth middleware applied).
     let protected = Router::new()
@@ -340,7 +341,6 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         // History
         .route("/history", get(livrarr_handlers::history::list::<AppState>))
         // System
-        .route("/health", get(livrarr_handlers::system::health::<AppState>))
         .route(
             "/system/status",
             get(livrarr_handlers::system::status::<AppState>),

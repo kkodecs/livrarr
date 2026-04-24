@@ -59,7 +59,7 @@ export const useUIStore = create<UIState>()(
       theme: "dark",
       tourRunning: false,
       rpmHighlight: false,
-      checkForUpdates: false,
+      checkForUpdates: true,
       toggleSidebar: () =>
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),

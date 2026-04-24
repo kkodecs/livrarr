@@ -73,13 +73,15 @@ pub async fn enrichment_retry_tick(
             {
                 Ok(Ok(result)) => {
                     total_dispatched += 1;
-                    if let Some(ref cover_url) = result.work.cover_url {
-                        if let Err(e) = state
-                            .work_service
-                            .download_cover_from_url(user.id, work_id, cover_url)
-                            .await
-                        {
-                            warn!(work_id, %e, "cover download failed");
+                    if !result.work.cover_manual {
+                        if let Some(ref cover_url) = result.work.cover_url {
+                            if let Err(e) = state
+                                .work_service
+                                .download_cover_from_url(user.id, work_id, cover_url)
+                                .await
+                            {
+                                warn!(work_id, %e, "cover download failed");
+                            }
                         }
                     }
                 }

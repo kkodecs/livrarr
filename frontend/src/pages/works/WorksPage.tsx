@@ -4,6 +4,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Book,
+  BookOpen,
+  Headphones,
   Plus,
   RefreshCw,
   Rss,
@@ -738,7 +740,7 @@ function PosterView({
                 editorMode && isSelected ? "border-brand" : "border-border",
               )}
             >
-              <div className="aspect-[2/3] overflow-hidden">
+              <div className="aspect-[2/3] overflow-hidden relative">
                 <BookCover
                   workId={work.id}
                   title={work.title}
@@ -747,6 +749,7 @@ function PosterView({
                   className="h-full w-full"
                   iconSize={24}
                 />
+                <MediaOverlay work={work} />
               </div>
               <div className="p-2.5 space-y-1">
                 <p className="truncate text-sm font-medium text-zinc-100">
@@ -853,6 +856,35 @@ function OverviewView({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function MediaOverlay({ work }: { work: WorkDetailResponse }) {
+  const ebookItem = work.libraryItems?.find((li) => li.mediaType === "ebook");
+  const audioItem = work.libraryItems?.find((li) => li.mediaType === "audiobook");
+  if (!ebookItem && !audioItem) return null;
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity bg-black/40">
+      {ebookItem && (
+        <Link
+          to={`/read/${ebookItem.id}`}
+          onClick={(e) => e.stopPropagation()}
+          className="rounded-full bg-black/60 p-2.5 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
+        >
+          <BookOpen size={20} />
+        </Link>
+      )}
+      {audioItem && (
+        <Link
+          to={`/listen/${audioItem.id}?workId=${work.id}`}
+          onClick={(e) => e.stopPropagation()}
+          className="rounded-full bg-black/60 p-2.5 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
+        >
+          <Headphones size={20} />
+        </Link>
+      )}
     </div>
   );
 }

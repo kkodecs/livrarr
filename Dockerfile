@@ -16,7 +16,7 @@ RUN pnpm build
 # ─────────────────────────────────────────────
 # Stage 2: Build backend (musl static binary)
 # ─────────────────────────────────────────────
-FROM rust:1.88-alpine AS backend
+FROM rust:1.94-alpine AS backend
 
 WORKDIR /app
 

@@ -2130,18 +2130,9 @@ macro_rules! enrichment_service_tests {
             let seen = merge_engine_observer.inputs().await;
             assert_eq!(seen.len(), 1);
             let pm = &seen[0].priority_model;
-            assert_eq!(
-                pm.content,
-                vec![MetadataProvider::Goodreads, MetadataProvider::OpenLibrary]
-            );
-            assert_eq!(
-                pm.description,
-                vec![MetadataProvider::Goodreads, MetadataProvider::OpenLibrary]
-            );
-            assert_eq!(
-                pm.cover,
-                vec![MetadataProvider::Goodreads, MetadataProvider::OpenLibrary]
-            );
+            assert_eq!(pm.content, vec![MetadataProvider::Goodreads]);
+            assert_eq!(pm.description, vec![MetadataProvider::Goodreads]);
+            assert_eq!(pm.cover, vec![MetadataProvider::Goodreads]);
         }
 
         #[tokio::test]

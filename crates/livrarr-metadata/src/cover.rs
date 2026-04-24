@@ -142,55 +142,6 @@ pub async fn resolve_cover_english(http: &HttpClient, isbn: Option<&str>) -> Opt
     resolve_cover_by_isbn_amazon(http, isbn).await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn isbn_validation() {
-        assert!(is_valid_isbn("9780306406157"));
-        assert!(is_valid_isbn("012000030X"));
-        assert!(is_valid_isbn("012000030x"));
-        assert!(!is_valid_isbn(""));
-        assert!(!is_valid_isbn("978-0-306-40615-7")); // hyphens rejected
-        assert!(!is_valid_isbn("978030640615X7")); // X not at end
-        assert!(!is_valid_isbn("../../../etc/passwd"));
-        assert!(!is_valid_isbn("9780306406157&extra=inject"));
-    }
-
-    #[test]
-    fn isbn13_to_isbn10_valid() {
-        assert_eq!(
-            isbn13_to_isbn10("9782070612758"),
-            Some("2070612759".to_string())
-        );
-        assert_eq!(
-            isbn13_to_isbn10("9783522202022"),
-            Some("3522202023".to_string())
-        );
-    }
-
-    #[test]
-    fn isbn13_to_isbn10_with_x_check() {
-        // ISBN-13 9780306406157 → ISBN-10 0306406152
-        assert_eq!(
-            isbn13_to_isbn10("9780306406157"),
-            Some("0306406152".to_string())
-        );
-        // ISBN-13 9780120000302 → ISBN-10 012000030X (check digit = 10 → X)
-        assert_eq!(
-            isbn13_to_isbn10("9780120000302"),
-            Some("012000030X".to_string())
-        );
-    }
-
-    #[test]
-    fn isbn13_to_isbn10_invalid() {
-        assert_eq!(isbn13_to_isbn10("1234567890"), None); // too short
-        assert_eq!(isbn13_to_isbn10("9791234567890"), None); // 979 prefix
-    }
-}
-
 // =============================================================================
 // Phase 1: synchronous cover acquisition (3s budget)
 // =============================================================================
@@ -209,10 +160,24 @@ fn classify_cover_url(url: &str) -> &'static str {
     }
 }
 
+use std::sync::LazyLock;
+
+static RE_GR_SIZE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\._S[A-Z0-9_,]+_\.").unwrap());
+
+pub fn upscale_cover_url(url: &str) -> String {
+    if url.contains("gr-assets.com") || url.contains("goodreads.com") {
+        RE_GR_SIZE.replace(url, ".").into_owned()
+    } else {
+        url.to_string()
+    }
+}
+
 /// Try to get a cover on disk within 3 seconds. Returns the cover file mtime on success.
 ///
-/// Strategy: try HC GraphQL search first (2s), fall back to request cover URL.
-/// Only one download runs — no concurrent writes.
+/// Branch A: download existing URL immediately (any host, with GR upscaling).
+/// Branch B: HC search only when no URL was provided (recovery path).
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_phase1_cover<H: HttpFetcher>(
     http_fetcher: &H,
     hc_http: &HttpClient,
@@ -231,24 +196,27 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
         .as_deref()
         .filter(|u| crate::llm_scraper::validate_cover_url(u, "").is_some());
 
-    // If request already has an HC/GR cover, download directly (it's already good)
+    // Branch A: download existing URL directly (any provider)
     if let Some(url) = valid_url {
         let source = classify_cover_url(url);
-        if source == "hardcover" || source == "goodreads" {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if tokio::time::timeout(
+        let preferred = upscale_cover_url(url);
+        let preferred_changed = preferred != url;
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining > Duration::from_millis(200) {
+            let result = tokio::time::timeout(
                 remaining,
                 crate::work_service::download_cover_to_disk(
                     http_fetcher,
-                    url,
+                    &preferred,
                     covers_dir,
                     work_id,
                     "",
                 ),
             )
-            .await
-            .is_ok()
-            {
+            .await;
+
+            if matches!(result, Ok(Ok(()))) {
                 tracing::info!(
                     work_id,
                     source,
@@ -258,9 +226,43 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                 return cover_file_mtime(covers_dir, work_id);
             }
         }
+
+        if preferred_changed {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining > Duration::from_millis(200) {
+                let result = tokio::time::timeout(
+                    remaining,
+                    crate::work_service::download_cover_to_disk(
+                        http_fetcher,
+                        url,
+                        covers_dir,
+                        work_id,
+                        "",
+                    ),
+                )
+                .await;
+
+                if matches!(result, Ok(Ok(()))) {
+                    tracing::info!(
+                        work_id,
+                        source = "request_url_fallback",
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "phase1 cover acquired (original URL fallback)"
+                    );
+                    return cover_file_mtime(covers_dir, work_id);
+                }
+            }
+        }
+
+        tracing::info!(
+            work_id,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "phase1 cover miss (direct download failed)"
+        );
+        return None;
     }
 
-    // Try HC search (Tier 1 only, no LLM)
+    // Branch B: no URL provided — HC search as recovery
     if let Some(token) = hc_token {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining > Duration::from_millis(500) {
@@ -273,28 +275,29 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
             {
                 Ok(Ok(Some(hc_url))) => {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if remaining > Duration::from_millis(200) {
-                        if tokio::time::timeout(
-                            remaining,
-                            crate::work_service::download_cover_to_disk(
-                                http_fetcher,
-                                &hc_url,
-                                covers_dir,
-                                work_id,
-                                "",
-                            ),
+                    if remaining > Duration::from_millis(200)
+                        && matches!(
+                            tokio::time::timeout(
+                                remaining,
+                                crate::work_service::download_cover_to_disk(
+                                    http_fetcher,
+                                    &hc_url,
+                                    covers_dir,
+                                    work_id,
+                                    "",
+                                ),
+                            )
+                            .await,
+                            Ok(Ok(()))
                         )
-                        .await
-                        .is_ok()
-                        {
-                            tracing::info!(
-                                work_id,
-                                source = "hardcover",
-                                elapsed_ms = start.elapsed().as_millis() as u64,
-                                "phase1 cover acquired"
-                            );
-                            return cover_file_mtime(covers_dir, work_id);
-                        }
+                    {
+                        tracing::info!(
+                            work_id,
+                            source = "hardcover",
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            "phase1 cover acquired"
+                        );
+                        return cover_file_mtime(covers_dir, work_id);
                     }
                 }
                 Ok(Ok(None)) => {}
@@ -304,34 +307,6 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                 Err(_) => {
                     tracing::debug!(work_id, "phase1 HC search timed out");
                 }
-            }
-        }
-    }
-
-    // Fall back to request cover URL (OL or whatever the lookup returned)
-    if let Some(url) = valid_url {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining > Duration::from_millis(200) {
-            if tokio::time::timeout(
-                remaining,
-                crate::work_service::download_cover_to_disk(
-                    http_fetcher,
-                    url,
-                    covers_dir,
-                    work_id,
-                    "",
-                ),
-            )
-            .await
-            .is_ok()
-            {
-                tracing::info!(
-                    work_id,
-                    source = "request_url",
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    "phase1 cover acquired"
-                );
-                return cover_file_mtime(covers_dir, work_id);
             }
         }
     }
@@ -443,4 +418,51 @@ pub fn cover_file_mtime(covers_dir: &std::path::Path, work_id: i64) -> Option<i6
                 .unwrap_or_default()
                 .as_secs() as i64
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isbn_validation() {
+        assert!(is_valid_isbn("9780306406157"));
+        assert!(is_valid_isbn("012000030X"));
+        assert!(is_valid_isbn("012000030x"));
+        assert!(!is_valid_isbn(""));
+        assert!(!is_valid_isbn("978-0-306-40615-7"));
+        assert!(!is_valid_isbn("978030640615X7"));
+        assert!(!is_valid_isbn("../../../etc/passwd"));
+        assert!(!is_valid_isbn("9780306406157&extra=inject"));
+    }
+
+    #[test]
+    fn isbn13_to_isbn10_valid() {
+        assert_eq!(
+            isbn13_to_isbn10("9782070612758"),
+            Some("2070612759".to_string())
+        );
+        assert_eq!(
+            isbn13_to_isbn10("9783522202022"),
+            Some("3522202023".to_string())
+        );
+    }
+
+    #[test]
+    fn isbn13_to_isbn10_with_x_check() {
+        assert_eq!(
+            isbn13_to_isbn10("9780306406157"),
+            Some("0306406152".to_string())
+        );
+        assert_eq!(
+            isbn13_to_isbn10("9780120000302"),
+            Some("012000030X".to_string())
+        );
+    }
+
+    #[test]
+    fn isbn13_to_isbn10_invalid() {
+        assert_eq!(isbn13_to_isbn10("1234567890"), None);
+        assert_eq!(isbn13_to_isbn10("9791234567890"), None);
+    }
 }

@@ -46,6 +46,7 @@ pub struct UpdateWorkRequest {
 pub struct WorkDetailView {
     pub work: Work,
     pub library_items: Vec<LibraryItem>,
+    pub cover_mtime: Option<i64>,
 }
 
 #[derive(Debug)]
