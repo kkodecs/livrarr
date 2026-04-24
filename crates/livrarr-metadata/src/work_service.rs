@@ -552,7 +552,11 @@ where
             .map_err(|e| match e {
                 DbError::NotFound { .. } => WorkServiceError::NotFound,
                 other => WorkServiceError::Db(other),
-            })
+            })?;
+
+        delete_cover_files(&self.data_dir, user_id, work_id).await;
+
+        Ok(())
     }
 
     async fn refresh(
@@ -1213,5 +1217,15 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
             let _ = tokio::fs::remove_file(&tmp_path).await;
             Err(format!("spawn error: {e}").into())
         }
+    }
+}
+
+pub async fn delete_cover_files(data_dir: &std::path::Path, user_id: i64, work_id: i64) {
+    for dir in [
+        data_dir.join("covers").join(user_id.to_string()),
+        data_dir.join("covers"),
+    ] {
+        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}.jpg"))).await;
+        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_thumb.jpg"))).await;
     }
 }

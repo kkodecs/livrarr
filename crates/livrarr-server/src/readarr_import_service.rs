@@ -60,6 +60,10 @@ pub trait ReadarrImportService: Send + Sync {
     async fn delete_library_item_by_id(&self, id: LibraryItemId) -> Result<(), ReadarrImportError>;
 
     // -- Orphan cleanup (undo) --
+    async fn list_orphan_work_ids_by_import(
+        &self,
+        import_id: &str,
+    ) -> Result<Vec<i64>, ReadarrImportError>;
     async fn delete_orphan_works_by_import(
         &self,
         import_id: &str,
@@ -166,6 +170,13 @@ where
 
     async fn delete_library_item_by_id(&self, id: LibraryItemId) -> Result<(), ReadarrImportError> {
         Ok(self.db.delete_library_item_by_id(id).await?)
+    }
+
+    async fn list_orphan_work_ids_by_import(
+        &self,
+        import_id: &str,
+    ) -> Result<Vec<i64>, ReadarrImportError> {
+        Ok(self.db.list_orphan_work_ids_by_import(import_id).await?)
     }
 
     async fn delete_orphan_works_by_import(

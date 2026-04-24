@@ -196,6 +196,18 @@ impl ImportDb for SqliteDb {
         Ok(())
     }
 
+    async fn list_orphan_work_ids_by_import(&self, import_id: &str) -> Result<Vec<i64>, DbError> {
+        let rows = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM works WHERE import_id = ? AND id NOT IN \
+             (SELECT DISTINCT work_id FROM library_items WHERE work_id IS NOT NULL)",
+        )
+        .bind(import_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(rows)
+    }
+
     async fn delete_orphan_works_by_import(&self, import_id: &str) -> Result<i64, DbError> {
         let result = sqlx::query(
             "DELETE FROM works WHERE import_id = ? AND id NOT IN \

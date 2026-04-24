@@ -1408,6 +1408,9 @@ pub trait ImportDb: Send + Sync {
     /// Delete a library item by ID (no user scope — for undo).
     async fn delete_library_item_by_id(&self, id: LibraryItemId) -> Result<(), DbError>;
 
+    /// List work IDs by import_id that have zero library items (for cover cleanup before delete).
+    async fn list_orphan_work_ids_by_import(&self, import_id: &str) -> Result<Vec<i64>, DbError>;
+
     /// Delete works by import_id that have zero library items.
     async fn delete_orphan_works_by_import(&self, import_id: &str) -> Result<i64, DbError>;
 

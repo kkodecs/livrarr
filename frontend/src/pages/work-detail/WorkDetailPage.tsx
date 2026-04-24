@@ -170,6 +170,14 @@ export default function WorkDetailPage() {
       <PageToolbar>
         <div className="flex items-center gap-2">
           <button
+            onClick={() => refreshMutation.mutate()}
+            disabled={refreshMutation.isPending}
+            className="btn-secondary inline-flex items-center gap-1.5"
+          >
+            <RefreshCw size={14} className={refreshMutation.isPending ? "animate-spin" : ""} />
+            Refresh
+          </button>
+          <button
             onClick={() => setEditOpen(true)}
             className="btn-secondary inline-flex items-center gap-1.5"
           >
@@ -1071,20 +1079,14 @@ function MetadataTab({
     <div className="max-w-2xl">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-zinc-100">Metadata</h3>
-        {!work.metadataSource || work.metadataSource === "OpenLibrary" ? (
-          <button
-            onClick={onRefresh}
-            disabled={refreshing}
-            className="btn-secondary inline-flex items-center gap-1.5 text-xs"
-          >
-            <RefreshCw size={12} className={cn(refreshing && "animate-spin")} />
-            Refresh Metadata
-          </button>
-        ) : (
-          <span className="text-xs text-muted">
-            Metadata from {work.metadataSource}
-          </span>
-        )}
+        <button
+          onClick={onRefresh}
+          disabled={refreshing}
+          className="btn-secondary inline-flex items-center gap-1.5 text-xs"
+        >
+          <RefreshCw size={12} className={cn(refreshing && "animate-spin")} />
+          Refresh Metadata
+        </button>
       </div>
 
       <dl>
