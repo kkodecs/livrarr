@@ -34,7 +34,7 @@ RUN cargo build --release -p livrarr-server
 # ─────────────────────────────────────────────
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata tini curl
+RUN apk add --no-cache ca-certificates tzdata tini
 
 # Non-root user
 RUN addgroup -g 1000 livrarr && \

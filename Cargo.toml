@@ -42,3 +42,5 @@ livrarr-server = { path = "crates/livrarr-server" }
 [profile.release]
 strip = true
 lto = true
+codegen-units = 1
+panic = "abort"
