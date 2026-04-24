@@ -550,14 +550,39 @@ async fn main() {
                 ol_rate_limiter: ol_rate_limiter_shared.clone(),
                 http_client: http_client_for_scan,
             },
-        readarr_import_wf: Arc::new(
-            livrarr_server::readarr_import_workflow::LiveReadarrImportWorkflow::new(
-                http_client_for_readarr,
-                readarr_import_service_arc,
-                readarr_import_progress_arc,
-                data_dir_arc.clone(),
-            ),
-        ),
+        readarr_import_wf: {
+            let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                svc_enrichment.clone(),
+                svc_db.clone(),
+            );
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new_with_llm(
+                svc_db.clone(),
+                ew,
+                livrarr_http::fetcher::HttpFetcherImpl::new()
+                    .expect("HttpFetcherImpl construction for readarr import work service"),
+                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    livrarr_http::HttpClient::builder()
+                        .build()
+                        .expect("LLM HttpClient for readarr import"),
+                ),
+                data_dir.clone(),
+            );
+            let ri_ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                svc_enrichment.clone(),
+                svc_db.clone(),
+            );
+            Arc::new(
+                livrarr_server::readarr_import_workflow::LiveReadarrImportWorkflow::new(
+                    http_client_for_readarr,
+                    readarr_import_service_arc,
+                    readarr_import_progress_arc,
+                    data_dir_arc.clone(),
+                    Arc::new(ri_ew),
+                    Arc::new(ws),
+                ),
+            )
+        },
         enrichment_notify: Arc::new(tokio::sync::Notify::new()),
     };
 

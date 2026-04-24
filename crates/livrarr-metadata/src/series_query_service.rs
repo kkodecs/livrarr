@@ -389,8 +389,7 @@ where
             })?;
 
         let _ = self.db.delete_series_cache(author_id).await;
-        let raw_entries =
-            fetch_author_series_pages(&self.fetcher, gr_key, &author.name).await?;
+        let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key, &author.name).await?;
         let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
             .await
             .unwrap_or_else(|| raw_entries.clone());

@@ -60,7 +60,7 @@ export function WorksPage() {
       if (p <= 1) next.delete("page");
       else next.set("page", String(p));
       return next;
-    });
+    }, { replace: false });
   };
 
   const worksView = useUIStore((s) => s.worksView);

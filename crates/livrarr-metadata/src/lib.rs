@@ -722,10 +722,18 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
             continue;
         }
 
-        // 4b. User-owned skip
+        // 4b. Identity fields are locked at add-time — never overwrite non-empty title/author.
+        if field == WorkField::Title || field == WorkField::AuthorName {
+            let current = extract_current_field(field, &inputs.current_work);
+            if current.is_some() {
+                resolved_values.insert(field, current);
+                continue;
+            }
+        }
+
+        // 4c. User-owned skip
         if let Some(fp) = prov_map.get(&field) {
             if fp.setter == livrarr_domain::ProvenanceSetter::User {
-                // Use current work value (or None if user-cleared)
                 let current = extract_current_field(field, &inputs.current_work);
                 resolved_values.insert(field, current);
                 continue;
