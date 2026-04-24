@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use livrarr_db::{
@@ -309,7 +309,8 @@ where
         let (filtered_entries, raw_entries_opt, fetched_at) = if let Some(cached) = cache {
             (cached.entries, cached.raw_entries, Some(cached.fetched_at))
         } else {
-            let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+            let raw_entries =
+                fetch_author_series_pages(&self.fetcher, gr_key, &author.name).await?;
             let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
                 .await
                 .unwrap_or_else(|| raw_entries.clone());
@@ -388,7 +389,8 @@ where
             })?;
 
         let _ = self.db.delete_series_cache(author_id).await;
-        let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+        let raw_entries =
+            fetch_author_series_pages(&self.fetcher, gr_key, &author.name).await?;
         let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
             .await
             .unwrap_or_else(|| raw_entries.clone());
@@ -887,7 +889,15 @@ async fn resolve_gr_candidates_json<F: HttpFetcher>(
 async fn fetch_author_series_pages<F: HttpFetcher>(
     fetcher: &F,
     gr_author_id: &str,
+    author_name: &str,
 ) -> Result<Vec<SeriesCacheEntry>, SeriesServiceError> {
+    // Primary: extract series from book search results (React-proof)
+    let entries = fetch_series_from_book_search(fetcher, author_name).await;
+    if !entries.is_empty() {
+        return Ok(entries);
+    }
+
+    // Fallback: HTML series list page (requires login on some accounts)
     let mut all_entries = Vec::new();
     let mut page = 1;
 
@@ -919,6 +929,60 @@ async fn fetch_author_series_pages<F: HttpFetcher>(
     }
 
     Ok(all_entries)
+}
+
+async fn fetch_series_from_book_search<F: HttpFetcher>(
+    fetcher: &F,
+    gr_author_id: &str,
+) -> Vec<SeriesCacheEntry> {
+    static RE_SERIES_IN_TITLE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\(([^,]+),\s*#[\d.]+\)").unwrap());
+    static RE_BOOK_TITLE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"itemprop='name'[^>]*>([^<]+)").unwrap());
+
+    let mut series_counts: std::collections::HashMap<String, i32> =
+        std::collections::HashMap::new();
+
+    for page in 1..=3 {
+        let url = format!(
+            "https://www.goodreads.com/search?q={}&search_type=books&page={}",
+            gr_author_id, page
+        );
+
+        let html = match fetch_gr_html(fetcher, &url).await {
+            Ok(h) => h,
+            Err(_) => break,
+        };
+
+        let titles: Vec<String> = RE_BOOK_TITLE
+            .captures_iter(&html)
+            .map(|c| c[1].to_string())
+            .collect();
+
+        if titles.is_empty() {
+            break;
+        }
+
+        for title in &titles {
+            if let Some(cap) = RE_SERIES_IN_TITLE.captures(title) {
+                let name = cap[1].trim().to_string();
+                *series_counts.entry(name).or_insert(0) += 1;
+            }
+        }
+
+        if page < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    series_counts
+        .into_iter()
+        .map(|(name, count)| SeriesCacheEntry {
+            name,
+            gr_key: String::new(),
+            book_count: count,
+        })
+        .collect()
 }
 
 fn build_merged_series_list(
