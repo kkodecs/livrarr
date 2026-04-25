@@ -16,6 +16,7 @@ mod m3_string;
 mod m4_scoring;
 pub mod reconcile;
 pub mod types;
+pub mod work_dedup;
 
 use std::path::Path;
 

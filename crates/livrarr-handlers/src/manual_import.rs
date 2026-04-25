@@ -853,15 +853,15 @@ fn find_existing_work<'a>(
     title: &str,
     author: &str,
 ) -> Option<&'a livrarr_domain::Work> {
-    works
-        .iter()
-        .find(|w| w.ol_key.as_deref() == Some(ol_key))
-        .or_else(|| {
-            works.iter().find(|w| {
-                normalize_for_matching(&w.title) == normalize_for_matching(title)
-                    && normalize_for_matching(&w.author_name) == normalize_for_matching(author)
-            })
-        })
+    livrarr_matching::work_dedup::find_matching_work(
+        works,
+        title,
+        author,
+        &livrarr_matching::work_dedup::ProviderKeys {
+            ol_key: if ol_key.is_empty() { None } else { Some(ol_key) },
+            ..Default::default()
+        },
+    )
 }
 
 async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImportService>(

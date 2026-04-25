@@ -1778,6 +1778,7 @@ dependencies = [
 name = "livrarr-matching"
 version = "0.1.0-alpha3"
 dependencies = [
+ "chrono",
  "id3",
  "livrarr-domain",
  "mp4ameta",

@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, Semaphore};
-use tracing::{debug, error, info, warn};
+use tokio::sync::Mutex;
+use tracing::{error, info, warn};
 
 use livrarr_db::{
     CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest, CreateWorkDbRequest,
@@ -13,16 +13,14 @@ use livrarr_domain::readarr::*;
 use livrarr_domain::services::{ReadarrImportWorkflow, ServiceError};
 use livrarr_domain::{
     derive_sort_name, normalize_for_matching, sanitize_path_component, EnrichmentStatus, Import,
-    MediaType, WorkId,
+    MediaType,
 };
 
 use livrarr_http::HttpClient;
 
 use crate::readarr_client::{self, RdAuthor, RdBook, RdBookFile, RdRootFolder, ReadarrClient};
 use crate::readarr_import_service::ReadarrImportService;
-use crate::state::{LiveEnrichmentWorkflow, LiveWorkService, ReadarrImportServiceImpl};
-
-const POST_IMPORT_ENRICH_CONCURRENCY: usize = 3;
+use crate::state::ReadarrImportServiceImpl;
 
 // =============================================================================
 // LiveReadarrImportWorkflow
@@ -34,8 +32,6 @@ pub struct LiveReadarrImportWorkflow {
     readarr_import_service: Arc<ReadarrImportServiceImpl>,
     readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
     data_dir: Arc<std::path::PathBuf>,
-    enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
-    work_service: Arc<LiveWorkService>,
 }
 
 impl LiveReadarrImportWorkflow {
@@ -44,16 +40,12 @@ impl LiveReadarrImportWorkflow {
         readarr_import_service: Arc<ReadarrImportServiceImpl>,
         readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
         data_dir: Arc<std::path::PathBuf>,
-        enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
-        work_service: Arc<LiveWorkService>,
     ) -> Self {
         Self {
             http_client,
             readarr_import_service,
             readarr_import_progress,
             data_dir,
-            enrichment_workflow,
-            work_service,
         }
     }
 }
@@ -153,8 +145,6 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         let readarr_import_service = self.readarr_import_service.clone();
         let readarr_import_progress = self.readarr_import_progress.clone();
         let data_dir = self.data_dir.clone();
-        let enrichment_workflow = self.enrichment_workflow.clone();
-        let work_service = self.work_service.clone();
         let id = import_id.clone();
 
         tokio::spawn(async move {
@@ -166,8 +156,6 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
                 &id,
                 user_id,
                 req,
-                enrichment_workflow,
-                work_service,
             );
             if let Err(e) = runner.run().await {
                 error!(import_id = %id, "Readarr import failed: {e}");
@@ -839,9 +827,6 @@ struct ImportRunner {
     works_created: i64,
     files_imported: i64,
     files_skipped: i64,
-    enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
-    work_service: Arc<LiveWorkService>,
-    pending_enrich_work_ids: Vec<WorkId>,
 }
 
 impl ImportRunner {
@@ -854,8 +839,6 @@ impl ImportRunner {
         import_id: &str,
         user_id: i64,
         req: ReadarrImportRequest,
-        enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
-        work_service: Arc<LiveWorkService>,
     ) -> Self {
         Self {
             http_client,
@@ -871,9 +854,6 @@ impl ImportRunner {
             works_created: 0,
             files_imported: 0,
             files_skipped: 0,
-            enrichment_workflow,
-            work_service,
-            pending_enrich_work_ids: Vec::new(),
         }
     }
 
@@ -983,28 +963,6 @@ impl ImportRunner {
             self.files_skipped,
             "Readarr import completed"
         );
-
-        if !self.pending_enrich_work_ids.is_empty() {
-            let work_ids = std::mem::take(&mut self.pending_enrich_work_ids);
-            let enrichment_workflow = self.enrichment_workflow.clone();
-            let work_service = self.work_service.clone();
-            let user_id = self.user_id;
-            let import_id = self.import_id.clone();
-            let count = work_ids.len();
-
-            tokio::spawn(async move {
-                run_post_import_enrichment(
-                    &import_id,
-                    user_id,
-                    work_ids,
-                    enrichment_workflow,
-                    work_service,
-                )
-                .await;
-            });
-
-            debug!(import_id = %self.import_id, count, "spawned post-import enrichment");
-        }
 
         Ok(())
     }
@@ -1139,24 +1097,16 @@ impl ImportRunner {
                 .map(|s| s.to_string());
             let year = rd_book.release_date.as_deref().and_then(extract_year);
 
-            let norm_title = normalize_for_matching(title);
-            let norm_author = normalize_for_matching(author_name);
-
-            let existing_work = if let Some(ref isbn_val) = isbn {
-                all_works
-                    .iter()
-                    .find(|w| w.isbn_13.as_deref() == Some(isbn_val))
-            } else if let Some(ref asin_val) = asin {
-                all_works
-                    .iter()
-                    .find(|w| w.asin.as_deref() == Some(asin_val))
-            } else {
-                all_works.iter().find(|w| {
-                    normalize_for_matching(&w.author_name) == norm_author
-                        && normalize_for_matching(&w.title) == norm_title
-                        && w.year == year
-                })
-            };
+            let existing_work = livrarr_matching::work_dedup::find_matching_work(
+                &all_works,
+                title,
+                author_name,
+                &livrarr_matching::work_dedup::ProviderKeys {
+                    isbn_13: isbn.as_deref(),
+                    asin: asin.as_deref(),
+                    ..Default::default()
+                },
+            );
 
             let work_id = if let Some(ew) = existing_work {
                 ew.id
@@ -1312,7 +1262,7 @@ impl ImportRunner {
                             abridged: None,
                             rating,
                             rating_count,
-                            enrichment_status: EnrichmentStatus::Pending,
+                            enrichment_status: EnrichmentStatus::Skipped,
                             enrichment_source: Some("readarr".to_string()),
                             cover_url: None,
                         },
@@ -1347,8 +1297,6 @@ impl ImportRunner {
                         }
                     }
                 }
-
-                self.pending_enrich_work_ids.push(w.id);
 
                 Some(w.id)
             }
@@ -1520,79 +1468,3 @@ impl ImportRunner {
     }
 }
 
-// =============================================================================
-// Post-import enrichment (bounded concurrency, detached from import completion)
-// =============================================================================
-
-async fn run_post_import_enrichment(
-    import_id: &str,
-    user_id: i64,
-    work_ids: Vec<WorkId>,
-    enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
-    work_service: Arc<LiveWorkService>,
-) {
-    let gate = Arc::new(Semaphore::new(POST_IMPORT_ENRICH_CONCURRENCY));
-    let mut join_set = tokio::task::JoinSet::new();
-
-    for work_id in &work_ids {
-        let permit = match gate.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => break,
-        };
-        let ew = enrichment_workflow.clone();
-        let ws = work_service.clone();
-        let wid = *work_id;
-
-        join_set.spawn(async move {
-            let _permit = permit;
-            enrich_one_imported_work(user_id, wid, &ew, &ws).await;
-        });
-    }
-
-    while let Some(joined) = join_set.join_next().await {
-        if let Err(e) = joined {
-            warn!(%e, "post-import enrichment task panicked");
-        }
-    }
-
-    debug!(
-        import_id,
-        count = work_ids.len(),
-        "post-import enrichment finished"
-    );
-}
-
-async fn enrich_one_imported_work(
-    user_id: i64,
-    work_id: WorkId,
-    enrichment_workflow: &LiveEnrichmentWorkflow,
-    work_service: &LiveWorkService,
-) {
-    use livrarr_domain::services::{EnrichmentMode, EnrichmentWorkflow, WorkService};
-
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        enrichment_workflow.enrich_work(user_id, work_id, EnrichmentMode::Background),
-    )
-    .await
-    {
-        Ok(Ok(result)) => {
-            if !result.work.cover_manual {
-                if let Some(ref cover_url) = result.work.cover_url {
-                    if let Err(e) = work_service
-                        .download_cover_from_url(user_id, work_id, cover_url)
-                        .await
-                    {
-                        warn!(work_id, %e, "cover download failed after post-import enrichment");
-                    }
-                }
-            }
-        }
-        Ok(Err(e)) => {
-            warn!(work_id, %e, "post-import enrich_work failed");
-        }
-        Err(_) => {
-            warn!(work_id, "post-import enrich_work timed out");
-        }
-    }
-}

@@ -466,6 +466,7 @@ where
         let cache_entry = cache
             .entries
             .iter()
+            .chain(cache.raw_entries.iter().flatten())
             .find(|e| e.gr_key == req.gr_key)
             .ok_or_else(|| {
                 tracing::warn!(
@@ -624,38 +625,17 @@ where
                 }
             }
 
-            // Match rule 1: exact gr_key.
-            let matched = existing_works
-                .iter()
-                .find(|w| w.gr_key.as_deref() == Some(&book.gr_key));
+            let matched = livrarr_matching::work_dedup::find_matching_work(
+                &existing_works,
+                &book.title,
+                &author.name,
+                &livrarr_matching::work_dedup::ProviderKeys {
+                    gr_key: Some(&book.gr_key),
+                    ..Default::default()
+                },
+            );
 
             if let Some(existing) = matched {
-                let _ = self
-                    .db
-                    .link_work_to_series(
-                        user_id,
-                        LinkWorkToSeriesRequest {
-                            work_id: existing.id,
-                            series_id,
-                            series_work_count: series.work_count,
-                            series_name: series_name.clone(),
-                            series_position: book.position,
-                            monitor_ebook,
-                            monitor_audiobook,
-                        },
-                    )
-                    .await;
-                linked += 1;
-                continue;
-            }
-
-            // Match rule 2: normalized title.
-            let norm_title = normalize_for_match(&book.title);
-            let title_matched = existing_works
-                .iter()
-                .find(|w| normalize_for_match(&w.title) == norm_title);
-
-            if let Some(existing) = title_matched {
                 let _ = self
                     .db
                     .link_work_to_series(
@@ -890,13 +870,7 @@ async fn fetch_author_series_pages<F: HttpFetcher>(
     gr_author_id: &str,
     author_name: &str,
 ) -> Result<Vec<SeriesCacheEntry>, SeriesServiceError> {
-    // Primary: extract series from book search results (React-proof)
-    let entries = fetch_series_from_book_search(fetcher, author_name).await;
-    if !entries.is_empty() {
-        return Ok(entries);
-    }
-
-    // Fallback: HTML series list page (requires login on some accounts)
+    // Primary: HTML series list page (has proper gr_keys for monitoring)
     let mut all_entries = Vec::new();
     let mut page = 1;
 
@@ -927,7 +901,13 @@ async fn fetch_author_series_pages<F: HttpFetcher>(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    Ok(all_entries)
+    if !all_entries.is_empty() {
+        return Ok(all_entries);
+    }
+
+    // Fallback: extract series from book search results (React-proof, no gr_keys)
+    let entries = fetch_series_from_book_search(fetcher, author_name).await;
+    Ok(entries)
 }
 
 async fn fetch_series_from_book_search<F: HttpFetcher>(
@@ -992,7 +972,11 @@ fn build_merged_series_list(
     cache_entries
         .iter()
         .map(|ce| {
-            let db_match = db_series.iter().find(|s| s.gr_key == ce.gr_key);
+            let db_match = if ce.gr_key.is_empty() {
+                db_series.iter().find(|s| s.name == ce.name)
+            } else {
+                db_series.iter().find(|s| s.gr_key == ce.gr_key)
+            };
 
             let (id, monitor_ebook, monitor_audiobook) = if let Some(s) = db_match {
                 (Some(s.id), s.monitor_ebook, s.monitor_audiobook)
@@ -1043,7 +1027,7 @@ async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
          {listing}\n\
          Clean up this list:\n\
          1. REMOVE series by a different person who shares the same name\n\
-         2. REMOVE anthologies, compilations, box sets, and omnibus editions\n\
+         2. REMOVE box sets and omnibus editions that repackage books from other series\n\
          3. REMOVE series where this author only contributed a foreword, introduction, or single story\n\
          4. Keep the author's own original series\n\
          5. Fix capitalization: use standard Title Case (e.g. \"night angel\" → \"Night Angel\")\n\n\
@@ -1113,13 +1097,6 @@ async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
     }
 
     Some(cleaned)
-}
-
-fn normalize_for_match(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
 }
 
 async fn write_addtime_provenance<D: ProvenanceDb>(db: &D, user_id: i64, work: &Work) {

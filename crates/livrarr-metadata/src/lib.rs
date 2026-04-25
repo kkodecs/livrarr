@@ -388,14 +388,14 @@ pub struct PriorityModel {
 }
 
 impl PriorityModel {
-    /// TEMP(pk-tdd): standard English-language priority model.
-    /// Content: HC→GR→OL, Description: HC→OL→GR, Cover: GR→HC→OL, Audio: Audnexus→HC.
+    /// Standard English-language priority model.
+    /// Content: HC→GR→OL, Description: HC→OL→GR, Cover: HC→GR→OL, Audio: Audnexus→HC.
     pub fn english() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
             content: vec![P::Hardcover, P::Goodreads, P::OpenLibrary],
             description: vec![P::Hardcover, P::OpenLibrary, P::Goodreads],
-            cover: vec![P::Goodreads, P::Hardcover, P::OpenLibrary],
+            cover: vec![P::Hardcover, P::Goodreads, P::OpenLibrary],
             audio: vec![P::Audnexus, P::Hardcover],
         }
     }

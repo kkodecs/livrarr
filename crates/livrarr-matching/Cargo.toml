@@ -6,6 +6,7 @@ license = "GPL-3.0-only"
 
 [dependencies]
 livrarr-domain = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 once_cell = "1"
