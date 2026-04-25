@@ -291,7 +291,7 @@ fn fix_casing_if_needed(s: &str) -> String {
     title_case(s)
 }
 
-fn title_case(s: &str) -> String {
+pub fn title_case(s: &str) -> String {
     let words: Vec<&str> = s.split_whitespace().collect();
     let last_idx = words.len().saturating_sub(1);
     words

@@ -70,7 +70,6 @@ export function BookCover({
           timerRef.current = setTimeout(attempt, delay);
         } else {
           setState("failed");
-          timerRef.current = setTimeout(attempt, 60000);
         }
       };
       img.src = url;

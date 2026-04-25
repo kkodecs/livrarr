@@ -160,6 +160,15 @@ where
             }
         }
 
+        let existing = self
+            .db
+            .find_by_normalized_match(user_id, &cleaned_title, &cleaned_author)
+            .await
+            .map_err(WorkServiceError::Db)?;
+        if !existing.is_empty() {
+            return Err(WorkServiceError::AlreadyExists);
+        }
+
         let mut author_created = false;
         let author_id = if !cleaned_author.is_empty() {
             let normalized = cleaned_author.to_lowercase();
@@ -796,7 +805,10 @@ where
             }
         }
 
-        let raw_results = self.lookup(req).await?;
+        let mut raw_results = self.lookup(req).await?;
+        for r in &mut raw_results {
+            r.title = crate::title_cleanup::title_case(&r.title);
+        }
         if raw_results.is_empty() {
             return Ok(LookupResponse {
                 results: vec![],

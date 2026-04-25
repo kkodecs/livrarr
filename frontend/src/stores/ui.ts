@@ -45,7 +45,7 @@ export const useUIStore = create<UIState>()(
     (set) => ({
       sidebarCollapsed: false,
       mobileSidebarOpen: false,
-      worksView: "table",
+      worksView: "poster",
       authorsView: "table",
       worksSort: "title",
       worksSortDir: "asc",

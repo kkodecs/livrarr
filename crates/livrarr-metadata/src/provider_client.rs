@@ -600,8 +600,6 @@ impl GoodreadsClient {
             goodreads::search_goodreads(&self.http, &self.base_url, title, author).await?;
 
         if hits.is_empty() && !title.is_ascii() {
-            // Legacy parity: titles with diacritics often miss in GR's search;
-            // retry once with a stripped-ASCII title.
             let ascii_title: String = title.chars().filter(|c| c.is_ascii()).collect();
             if !ascii_title.trim().is_empty() {
                 hits =
@@ -610,10 +608,31 @@ impl GoodreadsClient {
             }
         }
 
-        Ok(hits
-            .into_iter()
-            .next()
-            .map(|top| goodreads::resolve_detail_url(&self.base_url, &top.detail_url)))
+        if hits.is_empty() {
+            return Ok(None);
+        }
+
+        // GR search results require LLM disambiguation — GR's data includes
+        // study guides, summaries, and companion books with identical
+        // title+author that can't be filtered by exact matching alone.
+        if let Some(live) = &self.live_config {
+            let cfg = live.snapshot();
+            match gr_llm_disambiguate(&self.http, cfg.as_ref(), title, author, &hits).await {
+                Ok(Some(idx)) => {
+                    tracing::info!(title = %title, chosen_idx = idx, "LLM selected GR search result");
+                    return Ok(Some(goodreads::resolve_detail_url(&self.base_url, &hits[idx].detail_url)));
+                }
+                Ok(None) => {
+                    tracing::debug!(title = %title, "LLM declined all GR candidates");
+                }
+                Err(e) => {
+                    tracing::debug!(title = %title, error = %e, "GR LLM disambiguation unavailable");
+                }
+            }
+        }
+
+        // No LLM available — skip GR for this work rather than guess.
+        Ok(None)
     }
 
     fn map_fetch_err(&self, err: GoodreadsFetchError) -> ProviderOutcome<NormalizedWorkDetail> {
@@ -698,6 +717,106 @@ impl GoodreadsClient {
 impl GoodreadsClient {
     pub fn production(http: HttpClient) -> Self {
         Self::new(http, GOODREADS_BASE_URL)
+    }
+}
+
+/// LLM disambiguation for GR search results — same pattern as HC's llm_disambiguate.
+async fn gr_llm_disambiguate(
+    http: &HttpClient,
+    cfg: &livrarr_domain::settings::MetadataConfig,
+    title: &str,
+    author: &str,
+    hits: &[goodreads::GoodreadsSearchResult],
+) -> Result<Option<usize>, String> {
+    if !cfg.llm_enabled {
+        return Err("LLM disabled".into());
+    }
+    let endpoint = cfg
+        .llm_endpoint
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or("LLM not configured")?;
+    let api_key = cfg
+        .llm_api_key
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or("LLM API key not configured")?;
+    let model = cfg
+        .llm_model
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or("LLM model not configured")?;
+
+    let mut candidates = String::new();
+    for (i, hit) in hits.iter().enumerate() {
+        let a = hit.author.as_deref().unwrap_or("?");
+        let y = hit.year.map(|y| y.to_string()).unwrap_or_else(|| "?".into());
+        candidates.push_str(&format!("{i}: \"{}\" by {a} ({y})\n", hit.title));
+    }
+
+    let prompt = format!(
+        "I'm looking for the book \"{title}\" by {author}.\n\n\
+         These are search results from Goodreads:\n{candidates}\n\
+         Which result (by number) is the correct match? \
+         Reject study guides, summaries, SparkNotes, BookRags, and CliffsNotes — those are NOT the real book.\n\
+         Reply with ONLY the number. If none match, reply \"none\"."
+    );
+
+    let url = format!(
+        "{}chat/completions",
+        endpoint.trim_end_matches('/').to_owned() + "/"
+    );
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 10,
+        "temperature": 0.0,
+    });
+
+    let resp = http
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("LLM request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM HTTP {status}: {text}"));
+    }
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("LLM parse error: {e}"))?;
+
+    let answer = data
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+
+    tracing::debug!(
+        candidates_count = hits.len(),
+        raw_answer = %answer,
+        "GR LLM disambiguation"
+    );
+
+    if answer == "none" || answer.is_empty() {
+        return Ok(None);
+    }
+
+    match answer.parse::<usize>() {
+        Ok(idx) if idx < hits.len() => Ok(Some(idx)),
+        _ => {
+            tracing::warn!(answer = %answer, "GR LLM returned unparseable disambiguation result");
+            Ok(None)
+        }
     }
 }
 
