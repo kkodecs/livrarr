@@ -1,62 +1,50 @@
 # Roadmap
 
-## Current Status: Alpha 3 (in development)
+## Current Status: Alpha 3 (released 2026-04-25)
 
-### Active Work
+### What's in Alpha 3
 
-**Service Layer Consolidation** (pk-auto-build cycle)
-- Spec, contracts, elaborate, TDD phases: COMPLETE
-- Implementation (Phase 4 — handler migration): NEXT
-- 13 service traits defined, 15 service impls across 5 crates
-- 500 tests passing, 34 ignored (need handler migration)
-- Phase 5 approved: split handlers into `livrarr-handlers` crate for compile-time service layer enforcement
-
-### Completed Features
-
-- Core library management (import, organize, tag writing)
-- Multi-provider metadata enrichment (Hardcover, OpenLibrary, Audnexus, GoodReads)
-- LLM-based metadata validation
-- qBittorrent + SABnzbd download client integration
-- Direct Torznab/Newznab indexer support (Prowlarr optional)
-- Author monitoring with auto-add
+- Full metadata enrichment pipeline with provenance tracking and merge engine
+- Series monitoring via Goodreads
+- Readarr library import with preview and undo
+- List imports (Goodreads/Hardcover CSV)
+- Built-in EPUB reader, PDF viewer, audiobook player
+- OPDS catalog for reader apps
+- Send to email (Kindle)
+- Foreign language support (10+ languages)
 - RSS sync with auto-grab
-- Multi-user support with admin/user roles
-- Calibre-Web Automated integration
-- React frontend (full SPA)
-- Docker deployment
+- Handler compile-time isolation (livrarr-handlers crate)
+- Docker image optimized to ~76MB
 
-### Must Complete Before Alpha 3
+### Alpha 4 (next)
 
-| Item | Status |
-|------|--------|
-| Service layer consolidation (handler migration) | In progress |
-| Handler compile-time isolation (Phase 5) | Approved, pending |
-| Login/setup endpoint rate limiting | Not started |
-| `_livrarr_meta` version gate table | Not started |
+| Item | Description |
+|------|-------------|
+| Cover architecture overhaul | Trust model (User > Validated > Unvalidated), quality gate, download-then-decide, EPUB cover extraction |
+| Cover picker UI | Browse and select covers from multiple providers |
+| Audiobook cover support | Separate cover slot for audiobook art |
+| Readarr import enrichment | Safe post-import enrichment with trust model protection |
+
+### Alpha 5+
+
+| Item | Description |
+|------|-------------|
+| Author monitoring improvements | Auto-add from monitored authors with better dedup |
+| Mobile-responsive UI | Touch-friendly layout for phones/tablets |
+| PUID/PGID support | Configurable container user/group |
+| ARM Docker image | linux/arm64 support |
 
 ## Deferred to Beta
 
 | Item | Rationale |
 |------|-----------|
-| `async-trait` -> native async fn migration | Mechanical but high-touch, all crates affected |
-| `livrarr doctor` CLI command | Read-only integrity scanner |
 | Cursor-based pagination | Replaces offset-based |
 | HttpOnly cookie sessions | Security hardening |
-| Testkit crates | Test infrastructure cleanup |
-| SSRF validation + resolver pinning | Security hardening (7 items) |
+| SSRF validation + resolver pinning | Security hardening |
+| `livrarr doctor` CLI | Read-only integrity scanner |
 
-## Deferred Indefinitely
+## Future Ideas
 
-| Item | Notes |
-|------|-------|
-| Pagination response wrappers | Existing behavior preserved |
-| Cover caching semantics | Existing behavior preserved |
-| Architectural tests for "exactly once" | Post-consolidation CI gate |
-
-## Future Ideas (build/plans/)
-
-- Playback integration
 - Request system (user requests for works)
-- Shared storage across users
-- Alpha distribution
-- Send to email (Kindle via SMTP)
+- Shared collections across users
+- Notification integrations (Discord, Telegram, etc.)
