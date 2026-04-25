@@ -5,6 +5,7 @@ node_modules/
 .pnpm-store/
 .claude/
 .serena/
+.gemini/
 .mcp.json
 testdata/
 testdat/
