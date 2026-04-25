@@ -32,7 +32,7 @@
 ```yaml
 services:
   livrarr:
-    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha2
+    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha3
     container_name: livrarr
     ports:
       - 8789:8789
@@ -114,10 +114,10 @@ Livrarr and your download client must see completed downloads at the **same host
 
 ## Alpha Limitations
 
-- Multi-user partially implemented — additional users can log in but share admin indexers/clients; Settings not visible to non-admin users. Treat as single-user for alpha.
+- Multi-user partially implemented — additional users can log in but share admin indexers/clients. Treat as single-user for alpha.
 - PUID/PGID not configurable — runs as UID/GID 1000 (fix in beta)
 - No mobile-optimized UI
-- Readarr import not yet supported
+- Cover quality varies — Goodreads matching can return incorrect covers for some titles. Manual refresh usually fixes it. Full cover trust model coming in alpha4.
 
 ---
 
