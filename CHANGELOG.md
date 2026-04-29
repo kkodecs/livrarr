@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha4 (2026-04-29)
+
+### Improvements
+
+- **SSRF trusted origins** — user-configured indexers and download clients (including those on private IPs) now work correctly. The SSRF protection maintains a trusted origin allowlist (host:port) derived from configured infrastructure, rebuilt on startup. Untrusted URLs (cover proxy) remain fully protected.
+- **Manual import dedup** — scan phase uses shared work dedup function; skips OpenLibrary lookup when a file already matches an existing work in the library
+- **Download poller fix** — qBittorrent polling no longer blocked by SSRF when the client is on a private IP or resolves to one via DNS
+
+### Bug Fixes
+
+- Fixed SABnzbd test connection failing on categories check when using a hostname that resolves to a private IP
+- Fixed qBittorrent test connection failing on login/version check for the same reason
+- Fixed Prowlarr import failing when Prowlarr is on a private network
+- Fixed download poller unable to poll qBittorrent via reverse proxy (e.g., `oqbi.petekim.com`)
+
+---
+
 ## 0.1.0-alpha3 (2026-04-25)
 
 ### New Features

@@ -1,8 +1,14 @@
 # Roadmap
 
-## Current Status: Alpha 3 (released 2026-04-25)
+## Current Status: Alpha 4 (released 2026-04-29)
 
-### What's in Alpha 3
+### What's in Alpha 4
+
+- SSRF trusted origins — private-IP indexers and download clients work correctly
+- Manual import dedup improvements
+- Download poller fix for private-IP qBittorrent
+
+### What was in Alpha 3
 
 - Full metadata enrichment pipeline with provenance tracking and merge engine
 - Series monitoring via Goodreads
