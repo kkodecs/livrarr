@@ -83,13 +83,13 @@ async fn poll_qbittorrent(
     client: &livrarr_domain::DownloadClient,
 ) -> Result<(), String> {
     let base_url = crate::infra::release_helpers::qbit_base_url(client);
-    let sid = crate::infra::release_helpers::qbit_login(&state.http_client_safe, &base_url, client)
+    let sid = crate::infra::release_helpers::qbit_login(&state.http_client, &base_url, client)
         .await
         .map_err(|e| format!("qBit login: {e}"))?;
 
     let info_url = format!("{base_url}/api/v2/torrents/info");
     let resp = state
-        .http_client_safe
+        .http_client
         .get(&info_url)
         .query(&[("filter", "all"), ("category", client.category.as_str())])
         .header("Cookie", format!("SID={sid}"))
@@ -185,7 +185,7 @@ async fn poll_qbittorrent(
             // Resolve source path and verify it exists before attempting import.
             // If files aren't available yet (rsync delay), skip and retry next tick.
             let content_path = match crate::infra::import_pipeline::fetch_qbit_content_path(
-                &state.http_client_safe,
+                &state.http_client,
                 client,
                 hash,
             )

@@ -2083,8 +2083,8 @@ macro_rules! enrichment_service_tests {
             assert_eq!(
                 pm.cover,
                 vec![
-                    MetadataProvider::Goodreads,
                     MetadataProvider::Hardcover,
+                    MetadataProvider::Goodreads,
                     MetadataProvider::OpenLibrary
                 ]
             );
