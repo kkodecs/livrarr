@@ -13,7 +13,7 @@
 - Fixed SABnzbd test connection failing on categories check when using a hostname that resolves to a private IP
 - Fixed qBittorrent test connection failing on login/version check for the same reason
 - Fixed Prowlarr import failing when Prowlarr is on a private network
-- Fixed download poller unable to poll qBittorrent via reverse proxy (e.g., `oqbi.petekim.com`)
+- Fixed download poller unable to poll qBittorrent via reverse proxy with hostname resolving to private IP
 
 ---
 
