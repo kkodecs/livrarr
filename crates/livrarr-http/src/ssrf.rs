@@ -145,6 +145,61 @@ impl reqwest::dns::Resolve for SsrfSafeResolver {
     }
 }
 
+/// Set of trusted origins (host:port) derived from user-configured
+/// indexers and download clients. URLs matching a trusted origin
+/// bypass private-IP SSRF checks while still enforcing scheme and
+/// credential validation.
+pub struct TrustedOrigins {
+    origins: std::sync::RwLock<std::collections::HashSet<(String, u16)>>,
+}
+
+impl TrustedOrigins {
+    pub fn new() -> Self {
+        Self {
+            origins: std::sync::RwLock::new(std::collections::HashSet::new()),
+        }
+    }
+
+    pub fn rebuild(&self, urls: &[String]) {
+        let mut set = std::collections::HashSet::new();
+        for url in urls {
+            if let Ok(parsed) = reqwest::Url::parse(url) {
+                if let Some(host) = parsed.host_str() {
+                    let port = parsed.port_or_known_default().unwrap_or(80);
+                    set.insert((host.to_lowercase(), port));
+                }
+            }
+        }
+        *self.origins.write().unwrap() = set;
+    }
+
+    pub fn is_trusted(&self, url: &str) -> bool {
+        let parsed = match reqwest::Url::parse(url) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        match parsed.scheme() {
+            "http" | "https" => {}
+            _ => return false,
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return false;
+        }
+        let host = match parsed.host_str() {
+            Some(h) => h.to_lowercase(),
+            None => return false,
+        };
+        let port = parsed.port_or_known_default().unwrap_or(80);
+        self.origins.read().unwrap().contains(&(host, port))
+    }
+}
+
+impl Default for TrustedOrigins {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

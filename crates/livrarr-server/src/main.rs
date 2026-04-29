@@ -5,6 +5,7 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
+use livrarr_db::{DownloadClientDb, IndexerDb};
 use livrarr_server::config::{AppConfig, LogFormat, LogLevel};
 use livrarr_server::router::build_router;
 use livrarr_server::state::{AppState, ProviderHealthState};
@@ -322,6 +323,23 @@ async fn main() {
         http_client_safe.clone(),
         data_dir_arc.clone(),
     ));
+    // Build trusted origins from configured indexers + download clients.
+    let trusted_origins = Arc::new(livrarr_http::ssrf::TrustedOrigins::new());
+    {
+        let mut urls = Vec::new();
+        if let Ok(indexers) = svc_db.list_indexers().await {
+            urls.extend(indexers.iter().map(|i| i.url.clone()));
+        }
+        if let Ok(clients) = svc_db.list_download_clients().await {
+            for c in &clients {
+                let scheme = if c.use_ssl { "https" } else { "http" };
+                urls.push(format!("{}://{}:{}", scheme, c.host, c.port));
+            }
+        }
+        trusted_origins.rebuild(&urls);
+    }
+    let trusted_origins_arc = trusted_origins.clone();
+
     // Pre-construct shared Arcs for fields referenced by both AppState and readarr_import_wf.
     let readarr_import_service_arc = Arc::new(
         livrarr_server::readarr_import_service::LiveReadarrImportService::new(svc_db.clone()),
@@ -420,6 +438,7 @@ async fn main() {
         release_service: Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
             svc_db.clone(),
             livrarr_http::fetcher::HttpFetcherImpl::new().expect("HttpFetcherImpl construction"),
+            trusted_origins_arc.clone(),
         )),
         file_service: Arc::new(livrarr_library::file_service::FileServiceImpl::new(
             svc_db.clone(),
@@ -430,6 +449,7 @@ async fn main() {
                 svc_db.clone(),
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for rss sync"),
+                trusted_origins_arc.clone(),
             ));
             Arc::new(
                 livrarr_metadata::rss_sync_workflow::RssSyncWorkflowImpl::new(

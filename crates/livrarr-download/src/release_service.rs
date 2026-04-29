@@ -12,11 +12,20 @@ use livrarr_domain::*;
 pub struct ReleaseServiceImpl<D, H> {
     db: D,
     http: H,
+    trusted_origins: std::sync::Arc<livrarr_http::ssrf::TrustedOrigins>,
 }
 
 impl<D, H> ReleaseServiceImpl<D, H> {
-    pub fn new(db: D, http: H) -> Self {
-        Self { db, http }
+    pub fn new(
+        db: D,
+        http: H,
+        trusted_origins: std::sync::Arc<livrarr_http::ssrf::TrustedOrigins>,
+    ) -> Self {
+        Self {
+            db,
+            http,
+            trusted_origins,
+        }
     }
 }
 
@@ -33,27 +42,6 @@ pub fn derive_media_type_from_categories(categories: &[i32]) -> Option<MediaType
         }
     }
     None
-}
-
-/// Reject download URLs with private/loopback IP literals.
-/// Hostname-based URLs are validated at connection time by the SSRF-safe DNS resolver.
-fn is_ssrf_url(url: &str) -> bool {
-    let parsed = match url::Url::parse(url) {
-        Ok(u) => u,
-        Err(_) => return false,
-    };
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return false;
-    }
-    if let Some(host) = parsed.host_str() {
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            return livrarr_http::ssrf::is_private_ip(ip);
-        }
-        if host == "localhost" {
-            return true;
-        }
-    }
-    false
 }
 
 use livrarr_domain::torznab::{parse_torznab_xml, TorznabParseResult};
@@ -277,11 +265,14 @@ where
     }
 
     async fn grab(&self, user_id: UserId, req: GrabRequest) -> Result<Grab, ReleaseServiceError> {
-        // SSRF validation on download_url
-        if is_ssrf_url(&req.download_url) {
-            return Err(ReleaseServiceError::Ssrf(
-                "download URL points to private/loopback address".to_string(),
-            ));
+        // SSRF validation: allow private IPs only for trusted origins
+        // (user-configured indexers and download clients).
+        if !self.trusted_origins.is_trusted(&req.download_url) {
+            if let Err(e) = livrarr_http::ssrf::validate_url(&req.download_url).await {
+                return Err(ReleaseServiceError::Ssrf(format!(
+                    "download URL blocked: {e}"
+                )));
+            }
         }
 
         // Determine client_type from protocol

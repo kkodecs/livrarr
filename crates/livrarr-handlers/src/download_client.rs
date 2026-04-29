@@ -339,8 +339,9 @@ async fn test_sabnzbd<S: HasHttpClient>(
     let api_key = req.api_key.as_deref().unwrap_or("");
 
     let version_url = format!("{base_url}/api?mode=version&apikey={api_key}&output=json");
+    // Use regular client — download clients are user-configured trusted infrastructure.
     let resp = state
-        .http_client_safe()
+        .http_client()
         .get(&version_url)
         .send()
         .await
@@ -370,7 +371,7 @@ async fn test_sabnzbd<S: HasHttpClient>(
     let cat_url =
         format!("{base_url}/api?mode=get_config&section=categories&apikey={api_key}&output=json");
     let resp = state
-        .http_client_safe()
+        .http_client()
         .get(&cat_url)
         .send()
         .await
@@ -433,7 +434,7 @@ async fn test_qbittorrent<S: HasHttpClient>(
     if !username.is_empty() || !password.is_empty() {
         let login_url = format!("{base_url}/api/v2/auth/login");
         let resp = state
-            .http_client_safe()
+            .http_client()
             .post(&login_url)
             .form(&[("username", username), ("password", password)])
             .send()
@@ -461,7 +462,7 @@ async fn test_qbittorrent<S: HasHttpClient>(
     }
 
     let version_url = format!("{base_url}/api/v2/app/webapiVersion");
-    let mut version_req = state.http_client_safe().get(&version_url);
+    let mut version_req = state.http_client().get(&version_url);
     if let Some(ref s) = sid {
         version_req = version_req.header("Cookie", format!("SID={s}"));
     }
@@ -565,7 +566,7 @@ pub async fn import_from_prowlarr<
     let fetch_url = format!("{base}/api/v1/downloadclient");
 
     let resp = state
-        .http_client_safe()
+        .http_client()
         .get(&fetch_url)
         .header("X-Api-Key", &api_key)
         .timeout(Duration::from_secs(15))

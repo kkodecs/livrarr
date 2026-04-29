@@ -367,30 +367,18 @@ pub async fn scan<S: ManualImportHandlerContext>(
     let existing_works = state.manual_import_service().list_works(user_id).await?;
     let root_folders = state.manual_import_service().list_root_folders().await?;
 
-    // Pre-compute normalized lookup HashMap to avoid O(N×M) comparisons.
-    let work_lookup: std::collections::HashMap<(String, String), i64> = existing_works
-        .iter()
-        .map(|w| {
-            (
-                (
-                    normalize_for_matching(&w.title),
-                    normalize_for_matching(&w.author_name),
-                ),
-                w.id,
-            )
-        })
-        .collect();
-
     let pre_existing_work_ids: Vec<Option<i64>> = sort_indices
         .iter()
         .map(|&i| {
             let parsed = parsed_files.get(i).and_then(|p| p.as_ref());
             parsed.and_then(|p| {
-                let key = (
-                    normalize_for_matching(&p.title),
-                    normalize_for_matching(&p.author),
-                );
-                work_lookup.get(&key).copied()
+                livrarr_matching::work_dedup::find_matching_work(
+                    &existing_works,
+                    &p.title,
+                    &p.author,
+                    &Default::default(),
+                )
+                .map(|w| w.id)
             })
         })
         .collect();
@@ -519,6 +507,20 @@ pub async fn scan<S: ManualImportHandlerContext>(
 
                 st.manual_import_scan().acquire_ol_permit().await;
 
+                // Skip OL lookup if the file already matched an existing work
+                // from parsed metadata — don't let OL's potentially bad data
+                // override a correct match.
+                let already_matched = {
+                    let scan = st.manual_import_scan().get_scan(&sid);
+                    scan.and_then(|s| s.files.get(file_idx).and_then(|f| f.existing_work_id))
+                        .is_some()
+                };
+
+                if already_matched {
+                    st.manual_import_scan().increment_ol_completed(&sid);
+                    return;
+                }
+
                 let search_term = {
                     let scan = st.manual_import_scan().get_scan(&sid);
                     let scan = match scan {
@@ -564,15 +566,16 @@ pub async fn scan<S: ManualImportHandlerContext>(
 
                     if !ol_results.is_empty() {
                         let dup_match = ol_results.iter().find_map(|result| {
-                            let dup = existing_works.iter().find(|w| {
-                                (result.ol_key.is_some()
-                                    && w.ol_key.as_deref() == result.ol_key.as_deref())
-                                    || (normalize_for_matching(&w.title)
-                                        == normalize_for_matching(&result.title)
-                                        && normalize_for_matching(&w.author_name)
-                                            == normalize_for_matching(&result.author_name))
-                            });
-                            dup.map(|w| (result, w.id))
+                            let matched = livrarr_matching::work_dedup::find_matching_work(
+                                &existing_works,
+                                &result.title,
+                                &result.author_name,
+                                &livrarr_matching::work_dedup::ProviderKeys {
+                                    ol_key: result.ol_key.as_deref(),
+                                    ..Default::default()
+                                },
+                            );
+                            matched.map(|w| (result, w.id))
                         });
 
                         let update = if let Some((result, dup_id)) = dup_match {
