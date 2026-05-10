@@ -788,22 +788,30 @@ fn validate_download_client(req: &CreateDownloadClientApiRequest) -> Result<(), 
 }
 
 fn get_disk_space(path: &str) -> (Option<i64>, Option<i64>) {
-    // Use statvfs on Linux
     #[cfg(unix)]
     {
         use std::ffi::CString;
-        if let Ok(c_path) = CString::new(path) {
-            unsafe {
-                let mut stat: libc::statvfs = std::mem::zeroed();
-                if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
-                    let free = (stat.f_bavail as i64) * (stat.f_frsize as i64);
-                    let total = (stat.f_blocks as i64) * (stat.f_frsize as i64);
-                    return (Some(free), Some(total));
-                }
+        use std::mem::MaybeUninit;
+        let c_path = match CString::new(path) {
+            Ok(p) => p,
+            Err(_) => return (None, None),
+        };
+        unsafe {
+            let mut stat = MaybeUninit::<libc::statvfs>::uninit();
+            if libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) != 0 {
+                return (None, None);
             }
+            let stat = stat.assume_init();
+            let free = (stat.f_bavail as i64) * (stat.f_frsize as i64);
+            let total = (stat.f_blocks as i64) * (stat.f_frsize as i64);
+            (Some(free), Some(total))
         }
     }
-    (None, None)
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        (None, None)
+    }
 }
 
 #[cfg(test)]

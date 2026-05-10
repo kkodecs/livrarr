@@ -826,6 +826,16 @@ pub fn classify_file(path: &std::path::Path) -> Option<MediaType> {
     }
 }
 
+pub fn decode_xml_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+}
+
 // ---------------------------------------------------------------------------
 // SourceKind — centralized metadata source representation
 // ---------------------------------------------------------------------------

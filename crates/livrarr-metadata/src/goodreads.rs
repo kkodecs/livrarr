@@ -873,15 +873,7 @@ static RE_SERIES_YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"published\s+(\d{4})"#).unwrap());
 
 /// Decode common HTML entities in a string.
-fn decode_html_entities(s: &str) -> String {
-    s.replace("&#x27;", "'")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-}
+use livrarr_domain::decode_xml_entities as decode_html_entities;
 
 /// Returns true if a title looks like an omnibus/collection rather than a single work.
 fn is_collection_title(title: &str) -> bool {

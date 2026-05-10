@@ -1,7 +1,7 @@
 //! M3 — String parsing via regex cascade (Readarr-inspired + extensions).
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock as Lazy;
 
 use crate::types::{Confidence, Extraction, ExtractionSource};
 

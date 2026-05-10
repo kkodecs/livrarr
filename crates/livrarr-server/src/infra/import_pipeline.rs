@@ -1,47 +1,8 @@
 use std::path::Path;
 
-use crate::{ApiError, MediaType};
+use crate::ApiError;
 use livrarr_domain::sanitize_path_component;
-
-/// Build target path: `{root}/{user_id}/{author}/{title}.{ext}` (ebook)
-/// or `{root}/{user_id}/{author}/{title}/{relative}` (audiobook).
-pub fn build_target_path(
-    root: &str,
-    user_id: i64,
-    author: &str,
-    title: &str,
-    media_type: MediaType,
-    source_file: &Path,
-    source_root: &Path,
-) -> String {
-    let author_san = sanitize_path_component(author, "Unknown Author");
-    let title_san = sanitize_path_component(title, "Unknown Title");
-    let root = root.trim_end_matches('/');
-
-    match media_type {
-        MediaType::Ebook => {
-            let ext = source_file
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("epub");
-            format!("{root}/{user_id}/{author_san}/{title_san}.{ext}")
-        }
-        MediaType::Audiobook => {
-            // Preserve subdirectory structure from source.
-            let relative = if source_file == source_root {
-                Path::new(
-                    source_file
-                        .file_name()
-                        .unwrap_or(std::ffi::OsStr::new("unknown")),
-                )
-            } else {
-                source_file.strip_prefix(source_root).unwrap_or(source_file)
-            };
-            let relative_str = relative.to_string_lossy();
-            format!("{root}/{user_id}/{author_san}/{title_san}/{relative_str}")
-        }
-    }
-}
+pub use livrarr_library::import_workflow::build_target_path;
 
 /// Fetch torrent content_path from qBittorrent by hash.
 pub async fn fetch_qbit_content_path(

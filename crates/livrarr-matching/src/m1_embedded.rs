@@ -155,22 +155,14 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
     })
 }
 
-fn decode_xml_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
-}
+use livrarr_domain::decode_xml_entities;
 
 // ---------------------------------------------------------------------------
 // Sanity filters
 // ---------------------------------------------------------------------------
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock as Lazy;
 
 static GARBAGE_TITLE: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![

@@ -34,7 +34,6 @@ argon2 = { version = "0.5", features = ["std"] }
 getrandom = { version = "0.2", features = ["std"] }
 sha2 = "0.10"
 subtle = "2"
-hex = "0.4"
 axum = { version = "0.8", features = ["macros", "multipart"] }
 csv = "1"
 tower = "0.5"

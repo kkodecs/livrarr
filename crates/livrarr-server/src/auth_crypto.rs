@@ -73,13 +73,13 @@ impl AuthCryptoService for RealAuthCrypto {
     async fn generate_token(&self) -> Result<String, AuthCryptoError> {
         let mut bytes = [0u8; 32];
         getrandom::getrandom(&mut bytes).map_err(|e| AuthCryptoError::HashFailed(e.to_string()))?;
-        Ok(hex::encode(bytes))
+        Ok(data_encoding::HEXLOWER.encode(&bytes))
     }
 
     async fn hash_token(&self, token: &str) -> Result<String, AuthCryptoError> {
         let mut hasher = Sha256::new();
         hasher.update(token.as_bytes());
-        Ok(hex::encode(hasher.finalize()))
+        Ok(data_encoding::HEXLOWER.encode(&hasher.finalize()))
     }
 
     async fn constant_time_eq(&self, a: &[u8], b: &[u8]) -> Result<bool, AuthCryptoError> {

@@ -13,28 +13,32 @@ use livrarr_domain::services::{FileService, ImportIoService, RootFolderService, 
 use livrarr_domain::{classify_file, normalize_for_matching, MediaType};
 
 fn disk_space(path: &str) -> (Option<i64>, Option<i64>) {
-    use std::ffi::CString;
-    use std::mem::MaybeUninit;
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::mem::MaybeUninit;
 
-    let c_path = match CString::new(path) {
-        Ok(p) => p,
-        Err(_) => return (None, None),
-    };
+        let c_path = match CString::new(path) {
+            Ok(p) => p,
+            Err(_) => return (None, None),
+        };
 
-    // SAFETY: `c_path` is a valid NUL-terminated C string (CString::new succeeded above).
-    // `stat` is written to by `statvfs` before we read it (return value == 0 confirms success).
-    // `statvfs` is a POSIX function that writes a plain-data struct with no pointers requiring
-    // lifetime management. The `assume_init` call is safe because `statvfs` fully initialises
-    // the struct on success.
-    unsafe {
-        let mut stat = MaybeUninit::<libc::statvfs>::uninit();
-        if libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) != 0 {
-            return (None, None);
+        unsafe {
+            let mut stat = MaybeUninit::<libc::statvfs>::uninit();
+            if libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) != 0 {
+                return (None, None);
+            }
+            let stat = stat.assume_init();
+            let free = (stat.f_bavail as i64) * (stat.f_frsize as i64);
+            let total = (stat.f_blocks as i64) * (stat.f_frsize as i64);
+            (Some(free), Some(total))
         }
-        let stat = stat.assume_init();
-        let free = (stat.f_bavail as i64) * (stat.f_frsize as i64);
-        let total = (stat.f_blocks as i64) * (stat.f_frsize as i64);
-        (Some(free), Some(total))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        (None, None)
     }
 }
 

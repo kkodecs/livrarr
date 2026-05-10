@@ -117,7 +117,7 @@ fn walk_dir(dir: &Path, files: &mut Vec<SourceFile>) -> Result<(), String> {
 // Path building
 // ---------------------------------------------------------------------------
 
-fn build_target_path(
+pub fn build_target_path(
     root: &str,
     user_id: UserId,
     author: &str,

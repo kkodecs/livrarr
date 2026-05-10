@@ -84,11 +84,7 @@ async fn basic_auth<S: HasAuthService>(state: &S, headers: &HeaderMap) -> Result
 // ---------------------------------------------------------------------------
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    quick_xml::escape::escape(s).to_string()
 }
 
 fn mime_for_ext(ext: &str) -> &'static str {
