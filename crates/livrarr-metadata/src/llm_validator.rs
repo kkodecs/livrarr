@@ -456,7 +456,7 @@ Rules for the output:
 #[derive(Debug, Deserialize)]
 struct ValidatorLlmResponse {
     providers: HashMap<String, ProviderVerdict>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // deserialized from LLM response but not consumed
     #[serde(default)]
     notes: String,
 }

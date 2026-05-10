@@ -709,6 +709,3 @@ where
         Ok(())
     }
 }
-
-#[allow(dead_code)]
-const _: Duration = Duration::from_secs(0);

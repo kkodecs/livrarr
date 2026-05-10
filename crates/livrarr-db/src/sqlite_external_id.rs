@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
@@ -55,7 +54,6 @@ fn row_to_external_id(
 // ExternalIdDb impl
 // ---------------------------------------------------------------------------
 
-#[async_trait]
 impl crate::ExternalIdDb for SqliteDb {
     async fn upsert_external_id(
         &self,

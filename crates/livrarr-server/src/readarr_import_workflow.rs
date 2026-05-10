@@ -223,45 +223,58 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             None
         };
 
-        let mut files_deleted = 0i64;
-        let mut files_skipped = 0i64;
+        let undo_items: Vec<_> = items
+            .iter()
+            .map(|item| {
+                let full_path = if let Some(ref root) = root_folder_path {
+                    PathBuf::from(root).join(&item.path)
+                } else {
+                    PathBuf::from(&item.path)
+                };
+                (full_path, item.path.clone(), item.file_size)
+            })
+            .collect();
 
-        for item in &items {
-            let full_path = if let Some(ref root) = root_folder_path {
-                PathBuf::from(root).join(&item.path)
-            } else {
-                PathBuf::from(&item.path)
-            };
-            if full_path.exists() {
-                match std::fs::metadata(&full_path) {
-                    Ok(meta) if meta.len() as i64 == item.file_size => {
-                        match std::fs::remove_file(&full_path) {
-                            Ok(()) => {
-                                files_deleted += 1;
-                                info!(path = %item.path, "Undo: deleted file");
-                            }
-                            Err(e) => {
-                                warn!(path = %item.path, "Undo: failed to delete: {e}");
-                                files_skipped += 1;
+        let (files_deleted, files_skipped) = tokio::task::spawn_blocking(move || {
+            let mut deleted = 0i64;
+            let mut skipped = 0i64;
+            for (full_path, rel_path, expected_size) in &undo_items {
+                if full_path.exists() {
+                    match std::fs::metadata(full_path) {
+                        Ok(meta) if meta.len() as i64 == *expected_size => {
+                            match std::fs::remove_file(full_path) {
+                                Ok(()) => {
+                                    deleted += 1;
+                                    info!(path = %rel_path, "Undo: deleted file");
+                                }
+                                Err(e) => {
+                                    warn!(path = %rel_path, "Undo: failed to delete: {e}");
+                                    skipped += 1;
+                                }
                             }
                         }
-                    }
-                    Ok(meta) => {
-                        warn!(
-                            path = %item.path,
-                            expected = item.file_size,
-                            actual = meta.len(),
-                            "Undo: skipping file with size mismatch"
-                        );
-                        files_skipped += 1;
-                    }
-                    Err(e) => {
-                        warn!(path = %item.path, "Undo: cannot stat file: {e}");
-                        files_skipped += 1;
+                        Ok(meta) => {
+                            warn!(
+                                path = %rel_path,
+                                expected = expected_size,
+                                actual = meta.len(),
+                                "Undo: skipping file with size mismatch"
+                            );
+                            skipped += 1;
+                        }
+                        Err(e) => {
+                            warn!(path = %rel_path, "Undo: cannot stat file: {e}");
+                            skipped += 1;
+                        }
                     }
                 }
             }
+            (deleted, skipped)
+        })
+        .await
+        .unwrap_or((0, items.len() as i64));
 
+        for item in &items {
             if let Err(e) = self
                 .readarr_import_service
                 .delete_library_item_by_id(item.id)
@@ -463,28 +476,25 @@ fn materialize_file(source: &Path, dest: &Path) -> Result<(), String> {
     if std::fs::hard_link(source, dest).is_ok() {
         return Ok(());
     }
-    let temp = dest.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-    match std::fs::copy(source, &temp) {
-        Ok(copied) => {
-            let source_size = std::fs::metadata(source)
-                .map_err(|e| format!("cannot stat source: {e}"))?
-                .len();
-            if copied != source_size {
-                let _ = std::fs::remove_file(&temp);
-                return Err(format!(
-                    "copy size mismatch: copied {copied} vs source {source_size}"
-                ));
-            }
-            std::fs::rename(&temp, dest).map_err(|e| {
-                let _ = std::fs::remove_file(&temp);
-                format!("rename failed: {e}")
-            })
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(format!("copy failed: {e}"))
-        }
+    let parent = dest.parent().ok_or("dest has no parent")?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("tempfile create failed: {e}"))?;
+    let source_size = std::fs::metadata(source)
+        .map_err(|e| format!("cannot stat source: {e}"))?
+        .len();
+    let copied = std::io::copy(
+        &mut std::fs::File::open(source).map_err(|e| format!("open source failed: {e}"))?,
+        &mut tmp,
+    )
+    .map_err(|e| format!("copy failed: {e}"))?;
+    if copied != source_size {
+        return Err(format!(
+            "copy size mismatch: copied {copied} vs source {source_size}"
+        ));
     }
+    tmp.persist(dest)
+        .map_err(|e| format!("rename failed: {e}"))?;
+    Ok(())
 }
 
 fn media_type_str(mt: MediaType) -> &'static str {
@@ -1385,7 +1395,14 @@ impl ImportRunner {
                 self.req.container_path.as_deref(),
                 self.req.host_path.as_deref(),
             );
-            let source = match validate_source_path(&translated_path, readarr_root) {
+            let vsp_translated = translated_path.clone();
+            let vsp_root = readarr_root.to_string();
+            let source = match tokio::task::spawn_blocking(move || {
+                validate_source_path(&vsp_translated, &vsp_root)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("spawn error: {e}")))
+            {
                 Ok(p) => p,
                 Err(e) => {
                     warn!(path = %rd_file.path, "Source path validation failed: {e}");
@@ -1414,7 +1431,11 @@ impl ImportRunner {
                 continue;
             }
 
-            if let Err(e) = materialize_file(&source, &dest) {
+            let mat_src = source.clone();
+            let mat_dst = dest.clone();
+            let mat_result =
+                tokio::task::spawn_blocking(move || materialize_file(&mat_src, &mat_dst)).await;
+            if let Err(e) = mat_result.unwrap_or_else(|e| Err(format!("spawn error: {e}"))) {
                 warn!(src = %rd_file.path, dest = %dest.display(), "File materialization failed: {e}");
                 self.files_skipped += 1;
                 let mut prog = self.progress().lock().await;
@@ -1467,4 +1488,3 @@ impl ImportRunner {
         Ok(())
     }
 }
-

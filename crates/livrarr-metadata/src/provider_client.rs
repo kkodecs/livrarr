@@ -620,7 +620,10 @@ impl GoodreadsClient {
             match gr_llm_disambiguate(&self.http, cfg.as_ref(), title, author, &hits).await {
                 Ok(Some(idx)) => {
                     tracing::info!(title = %title, chosen_idx = idx, "LLM selected GR search result");
-                    return Ok(Some(goodreads::resolve_detail_url(&self.base_url, &hits[idx].detail_url)));
+                    return Ok(Some(goodreads::resolve_detail_url(
+                        &self.base_url,
+                        &hits[idx].detail_url,
+                    )));
                 }
                 Ok(None) => {
                     tracing::debug!(title = %title, "LLM declined all GR candidates");
@@ -750,7 +753,10 @@ async fn gr_llm_disambiguate(
     let mut candidates = String::new();
     for (i, hit) in hits.iter().enumerate() {
         let a = hit.author.as_deref().unwrap_or("?");
-        let y = hit.year.map(|y| y.to_string()).unwrap_or_else(|| "?".into());
+        let y = hit
+            .year
+            .map(|y| y.to_string())
+            .unwrap_or_else(|| "?".into());
         candidates.push_str(&format!("{i}: \"{}\" by {a} ({y})\n", hit.title));
     }
 

@@ -785,8 +785,8 @@ struct GrAutocompleteAuthor {
     name: String,
     #[serde(default)]
     profile_url: String,
+    #[allow(dead_code)] // deserialized from Goodreads but not consumed
     #[serde(default)]
-    #[allow(dead_code)]
     is_goodreads_author: bool,
 }
 
@@ -1041,12 +1041,8 @@ async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
     context.insert(LlmField::BibliographyHtml, LlmValue::Text(listing));
 
     let req = LlmCallRequest {
-        system_template: Box::leak(
-            "You are a librarian assistant. Clean up book series lists."
-                .to_string()
-                .into_boxed_str(),
-        ),
-        user_template: Box::leak(user_template.into_boxed_str()),
+        system_template: "You are a librarian assistant. Clean up book series lists.".to_string(),
+        user_template,
         context,
         allowed_fields: &[LlmField::AuthorName, LlmField::BibliographyHtml],
         timeout: Duration::from_secs(15),

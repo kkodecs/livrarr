@@ -47,7 +47,7 @@ Handlers are generic over `S: AppContext`. The `AppContext` trait (29 associated
 - AppContext type: `type FooSvc = LiveFooService` (inner type, not Arc)
 - Accessor: `fn foo_service(&self) -> &Self::FooSvc { &self.foo_service }` (deref coercion: `&Arc<T>` → `&T`)
 
-**Services that need late-init** (hold AppState reference, circular): ImportService, ReadarrImportWorkflow. Primary import flow works via jobs.rs direct call; retry/readarr endpoints need OnceLock wiring.
+All services use explicit constructor injection — no `OnceLock` or late-init patterns remain.
 
 ## Composition Root (livrarr-server)
 

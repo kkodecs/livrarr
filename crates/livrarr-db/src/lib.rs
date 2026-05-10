@@ -1697,9 +1697,7 @@ pub struct ApplyEnrichmentMergeRequest {
     pub external_id_updates: Vec<UpsertExternalIdRequest>,
 }
 
-/// TEMP(pk-tdd): DB trait for field provenance.
-/// Uses async_trait to match behavioral test impl style.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait ProvenanceDb: Send + Sync {
     async fn set_field_provenance(&self, req: SetFieldProvenanceRequest) -> Result<(), DbError>;
 
@@ -1731,8 +1729,7 @@ pub trait ProvenanceDb: Send + Sync {
     async fn clear_work_provenance(&self, user_id: UserId, work_id: WorkId) -> Result<(), DbError>;
 }
 
-/// TEMP(pk-tdd): DB trait for provider retry state.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait ProviderRetryStateDb: Send + Sync {
     async fn get_retry_state(
         &self,
@@ -1792,8 +1789,7 @@ pub trait ProviderRetryStateDb: Send + Sync {
     ) -> Result<u64, DbError>;
 }
 
-/// TEMP(pk-tdd): DB trait for typed external identifiers.
-#[async_trait::async_trait]
+#[trait_variant::make(Send)]
 pub trait ExternalIdDb: Send + Sync {
     async fn upsert_external_id(
         &self,

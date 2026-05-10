@@ -9,7 +9,10 @@ pub async fn get_cover<S: HasDataDir>(
     Path(id): Path<i64>,
     req_headers: HeaderMap,
 ) -> Response {
-    let cover_path = resolve_cover_path(state.data_dir(), id, "");
+    let data_dir = state.data_dir().to_path_buf();
+    let cover_path = tokio::task::spawn_blocking(move || resolve_cover_path(&data_dir, id, ""))
+        .await
+        .unwrap_or_else(|_| state.data_dir().join("covers").join(format!("{id}.jpg")));
     serve_image(&cover_path, id, &req_headers).await
 }
 
@@ -18,8 +21,20 @@ pub async fn get_thumb<S: HasDataDir>(
     Path(id): Path<i64>,
     req_headers: HeaderMap,
 ) -> Response {
-    let full_path = resolve_cover_path(state.data_dir(), id, "");
-    let thumb_path = resolve_cover_path(state.data_dir(), id, "_thumb");
+    let data_dir = state.data_dir().to_path_buf();
+    let (full_path, thumb_path) = tokio::task::spawn_blocking(move || {
+        let full = resolve_cover_path(&data_dir, id, "");
+        let thumb = resolve_cover_path(&data_dir, id, "_thumb");
+        (full, thumb)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let dir = state.data_dir().join("covers");
+        (
+            dir.join(format!("{id}.jpg")),
+            dir.join(format!("{id}_thumb.jpg")),
+        )
+    });
 
     if !thumb_path.exists() {
         if !full_path.exists() {

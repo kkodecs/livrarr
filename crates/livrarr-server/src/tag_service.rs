@@ -95,17 +95,17 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
                         }
                         _ => {
                             warnings.push(format!("retag: rename failed for {abs}"));
-                            let _ = std::fs::remove_file(&tmp);
+                            let _ = tokio::fs::remove_file(&tmp).await;
                         }
                     }
                 }
                 Ok(livrarr_tagwrite::TagWriteStatus::Unsupported)
                 | Ok(livrarr_tagwrite::TagWriteStatus::NoData) => {
-                    let _ = std::fs::remove_file(&tmp);
+                    let _ = tokio::fs::remove_file(&tmp).await;
                 }
                 Err(e) => {
                     warnings.push(format!("retag: tag write failed for {abs}: {e}"));
-                    let _ = std::fs::remove_file(&tmp);
+                    let _ = tokio::fs::remove_file(&tmp).await;
                 }
             }
         }

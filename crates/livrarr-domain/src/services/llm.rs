@@ -39,8 +39,8 @@ pub enum LlmPurpose {
 
 #[derive(Debug)]
 pub struct LlmCallRequest {
-    pub system_template: &'static str,
-    pub user_template: &'static str,
+    pub system_template: String,
+    pub user_template: String,
     pub context: HashMap<LlmField, LlmValue>,
     pub allowed_fields: &'static [LlmField],
     pub timeout: Duration,

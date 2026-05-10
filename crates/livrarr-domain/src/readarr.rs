@@ -4,14 +4,23 @@ use serde::{Deserialize, Serialize};
 // Request DTOs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadarrConnectRequest {
     pub url: String,
     pub api_key: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for ReadarrConnectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadarrConnectRequest")
+            .field("url", &self.url)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadarrImportRequest {
     pub url: String,
@@ -22,6 +31,20 @@ pub struct ReadarrImportRequest {
     pub files_only: bool,
     pub container_path: Option<String>,
     pub host_path: Option<String>,
+}
+
+impl std::fmt::Debug for ReadarrImportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadarrImportRequest")
+            .field("url", &self.url)
+            .field("api_key", &"[REDACTED]")
+            .field("readarr_root_folder_id", &self.readarr_root_folder_id)
+            .field("livrarr_root_folder_id", &self.livrarr_root_folder_id)
+            .field("files_only", &self.files_only)
+            .field("container_path", &self.container_path)
+            .field("host_path", &self.host_path)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------

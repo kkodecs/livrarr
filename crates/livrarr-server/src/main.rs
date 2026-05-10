@@ -585,6 +585,8 @@ async fn main() {
     livrarr_server::jobs::recover_interrupted_state(&state).await;
 
     // Pre-warm SQLite page cache so first request isn't slow.
+    // Exception to "no SQL outside livrarr-db": these are throwaway startup
+    // queries that touch hot pages. Not worth a trait method.
     let _ = sqlx::query("SELECT COUNT(*) FROM works")
         .fetch_one(state.db.pool())
         .await;

@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
@@ -103,7 +102,6 @@ fn row_to_provenance(row: sqlx::sqlite::SqliteRow) -> Result<FieldProvenance, Db
 // ProvenanceDb impl
 // ---------------------------------------------------------------------------
 
-#[async_trait]
 impl crate::ProvenanceDb for SqliteDb {
     async fn set_field_provenance(&self, req: SetFieldProvenanceRequest) -> Result<(), DbError> {
         validate_req(&req)?;

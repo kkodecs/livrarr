@@ -571,8 +571,8 @@ where
         context.insert(LlmField::BibliographyHtml, LlmValue::Text(listing.clone()));
 
         let req = LlmCallRequest {
-            system_template: Box::leak(system.to_string().into_boxed_str()),
-            user_template: Box::leak(user_template.into_boxed_str()),
+            system_template: system.to_string(),
+            user_template,
             context,
             allowed_fields: &[LlmField::AuthorName, LlmField::BibliographyHtml],
             timeout: Duration::from_secs(30),

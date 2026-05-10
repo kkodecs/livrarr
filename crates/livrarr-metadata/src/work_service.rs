@@ -938,8 +938,8 @@ where
         context.insert(LlmField::BibliographyHtml, LlmValue::Text(listing));
 
         let req = LlmCallRequest {
-            system_template: Box::leak(system.to_string().into_boxed_str()),
-            user_template: Box::leak(user_prompt.into_boxed_str()),
+            system_template: system.to_string(),
+            user_template: user_prompt,
             context,
             allowed_fields: &[LlmField::BibliographyHtml],
             timeout: Duration::from_secs(30),

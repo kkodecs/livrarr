@@ -861,7 +861,11 @@ fn find_existing_work<'a>(
         title,
         author,
         &livrarr_matching::work_dedup::ProviderKeys {
-            ol_key: if ol_key.is_empty() { None } else { Some(ol_key) },
+            ol_key: if ol_key.is_empty() {
+                None
+            } else {
+                Some(ol_key)
+            },
             ..Default::default()
         },
     )

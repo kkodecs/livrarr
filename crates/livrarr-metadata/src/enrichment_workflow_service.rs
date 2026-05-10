@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// and domain-crate types.
 pub struct EnrichmentWorkflowImpl<S, D> {
     inner: Arc<S>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reserved for direct DB access in future enrichment phases
     db: D,
 }
 

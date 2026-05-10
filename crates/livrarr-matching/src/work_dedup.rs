@@ -204,12 +204,7 @@ mod tests {
     #[test]
     fn author_last_first_normalization() {
         let works = vec![make_work("Dune", "Frank Herbert")];
-        let result = find_matching_work(
-            &works,
-            "Dune",
-            "Herbert, Frank",
-            &ProviderKeys::default(),
-        );
+        let result = find_matching_work(&works, "Dune", "Herbert, Frank", &ProviderKeys::default());
         assert!(result.is_some());
     }
 
@@ -233,12 +228,7 @@ mod tests {
     #[test]
     fn different_author_no_match() {
         let works = vec![make_work("Dune", "Frank Herbert")];
-        let result = find_matching_work(
-            &works,
-            "Dune",
-            "Brian Herbert",
-            &ProviderKeys::default(),
-        );
+        let result = find_matching_work(&works, "Dune", "Brian Herbert", &ProviderKeys::default());
         assert!(result.is_none());
     }
 }

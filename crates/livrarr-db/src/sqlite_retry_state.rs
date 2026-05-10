@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
@@ -71,7 +70,6 @@ fn row_to_retry_state(row: sqlx::sqlite::SqliteRow) -> Result<ProviderRetryState
 // ProviderRetryStateDb impl
 // ---------------------------------------------------------------------------
 
-#[async_trait]
 impl crate::ProviderRetryStateDb for SqliteDb {
     async fn get_retry_state(
         &self,

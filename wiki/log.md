@@ -1,5 +1,12 @@
 # Wiki Change Log
 
+## 2026-04-23 — Architecture-excellent sprint review (sixteenth pass)
+
+**Updated pages:**
+- wiki/log.md only — no insights changed; all 43 insights verified accurate against actual code
+
+**Context:** Spot-checked `context.rs` (Has* capability traits), `settings_service.rs` (7-trait split, single struct), and the plan file. Nothing new found beyond the 15 prior passes. Two known stale errors in `wiki/crates/server.md` remain (server.md says "eight service traits" — should be seven; says "no network calls" in import_pipeline.rs — incorrect per insight 40). Both are outside the scope constraint (only insights.md and log.md editable here).
+
 ## 2026-04-23 — Architecture-excellent sprint review (fifteenth pass)
 
 **Updated pages:**

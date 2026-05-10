@@ -77,8 +77,8 @@ impl LlmCaller for LlmCallerImpl {
             .unwrap_or("gpt-4o");
 
         // 3. Render templates.
-        let system_prompt = render_template(req.system_template, &req.context);
-        let user_prompt = render_template(req.user_template, &req.context);
+        let system_prompt = render_template(&req.system_template, &req.context);
+        let user_prompt = render_template(&req.user_template, &req.context);
 
         // 4. Build request body.
         let url = format!(

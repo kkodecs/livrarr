@@ -384,7 +384,6 @@ impl WorkDb for SequencedApplyDb {
     }
 }
 
-#[async_trait]
 impl ProvenanceDb for SequencedApplyDb {
     async fn get_field_provenance(
         &self,
@@ -432,7 +431,6 @@ impl ProvenanceDb for SequencedApplyDb {
     }
 }
 
-#[async_trait]
 impl ProviderRetryStateDb for SequencedApplyDb {
     async fn get_retry_state(
         &self,
@@ -521,7 +519,6 @@ impl ProviderRetryStateDb for SequencedApplyDb {
     }
 }
 
-#[async_trait]
 impl ExternalIdDb for SequencedApplyDb {
     async fn upsert_external_id(
         &self,
