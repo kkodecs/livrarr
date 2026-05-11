@@ -18,6 +18,7 @@ pub mod download_poller;
 pub mod enrichment;
 pub mod maintenance;
 pub mod rss_sync;
+pub mod tag_convergence;
 
 pub use maintenance::recover_interrupted_state;
 
@@ -26,6 +27,7 @@ use self::download_poller::download_poller_tick;
 use self::enrichment::enrichment_retry_tick;
 use self::maintenance::{session_cleanup_tick, state_map_cleanup_tick};
 use self::rss_sync::rss_sync_tick;
+use self::tag_convergence::tag_convergence_tick;
 
 // ---------------------------------------------------------------------------
 // JobRunner
@@ -201,8 +203,20 @@ impl JobRunner {
             state_map_cleanup_tick,
         )
         .await;
-        self.spawn_job("rss_sync", Duration::from_secs(60), state, rss_sync_tick)
-            .await;
+        self.spawn_job(
+            "rss_sync",
+            Duration::from_secs(60),
+            state.clone(),
+            rss_sync_tick,
+        )
+        .await;
+        self.spawn_job(
+            "tag_convergence",
+            Duration::from_secs(60),
+            state,
+            tag_convergence_tick,
+        )
+        .await;
     }
 
     async fn spawn_job<F, Fut>(&self, name: &str, interval: Duration, state: AppState, tick_fn: F)
