@@ -31,7 +31,6 @@ pub struct WorkServiceImpl<D, E, H, L = StubNoLlm> {
     enrichment: E,
     http: H,
     llm: L,
-    hc_client: livrarr_http::HttpClient,
     data_dir: PathBuf,
     refresh_locks: KeyedMutex<(UserId, WorkId)>,
     bulk_refresh_users: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
@@ -45,9 +44,6 @@ impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm> {
             enrichment,
             http,
             llm: StubNoLlm,
-            hc_client: livrarr_http::HttpClient::builder()
-                .build()
-                .expect("HC HttpClient"),
             data_dir,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -63,9 +59,6 @@ impl<D, E, H, L> WorkServiceImpl<D, E, H, L> {
             enrichment,
             http,
             llm,
-            hc_client: livrarr_http::HttpClient::builder()
-                .build()
-                .expect("HC HttpClient"),
             data_dir,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -85,9 +78,6 @@ impl<D, H> WorkServiceImpl<D, (), H> {
             enrichment: StubNoEnrichment,
             http,
             llm: StubNoLlm,
-            hc_client: livrarr_http::HttpClient::builder()
-                .build()
-                .expect("HC HttpClient"),
             data_dir,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -145,30 +135,33 @@ where
     ) -> Result<AddWorkResult, WorkServiceError> {
         let cleaned_title = crate::title_cleanup::clean_title(&req.title);
         if cleaned_title.is_empty() {
-            return Err(WorkServiceError::Enrichment(
+            return Err(WorkServiceError::Validation(
                 "title must not be empty".into(),
             ));
         }
         let cleaned_author = crate::title_cleanup::clean_author(&req.author_name);
 
-        if let Some(ref ol_key) = req.ol_key {
-            if self
-                .db
-                .work_exists_by_ol_key(user_id, ol_key)
-                .await
-                .map_err(WorkServiceError::Db)?
-            {
-                return Err(WorkServiceError::AlreadyExists);
-            }
-        }
+        let normalized_title = livrarr_domain::normalize_for_matching(&cleaned_title);
+        let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
 
+        // Application-level fast-path dedup. The DB UNIQUE(user_id,
+        // normalized_title, normalized_author) is the race-safe backstop.
         let existing = self
             .db
-            .find_by_normalized_match(user_id, &cleaned_title, &cleaned_author)
+            .find_by_normalized_match(user_id, &normalized_title, &normalized_author)
             .await
             .map_err(WorkServiceError::Db)?;
-        if !existing.is_empty() {
-            return Err(WorkServiceError::AlreadyExists);
+        if let Some(work) = existing.into_iter().next() {
+            let enrichment_status = work.enrichment_status;
+            return Ok(AddWorkResult {
+                work,
+                created: false,
+                author_created: false,
+                author_id: None,
+                messages: vec![],
+                cover_mtime: None,
+                enrichment_status,
+            });
         }
 
         let mut author_created = false;
@@ -205,10 +198,7 @@ where
 
         let cover_url = req.cover_url.clone();
 
-        let normalized_title = livrarr_domain::normalize_for_matching(&cleaned_title);
-        let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
-
-        let (work, _actually_created) = self
+        let (work, actually_created) = self
             .db
             .create_work(CreateWorkDbRequest {
                 user_id,
@@ -232,50 +222,26 @@ where
             .await
             .map_err(WorkServiceError::Db)?;
 
-        let setter = req.provenance_setter.unwrap_or(ProvenanceSetter::User);
-        write_addtime_provenance(&self.db, user_id, &work, setter).await;
-
-        let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
-
-        if false {
-            // defer_enrichment removed — kept as dead branch to preserve structure
-            // Phase 3a will replace this block with synchronous enrichment
-            let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-            let hc_token = self
-                .db
-                .get_metadata_config()
-                .await
-                .ok()
-                .and_then(|c| c.hardcover_api_token);
-
-            let cover_mtime = crate::cover::fetch_phase1_cover(
-                &self.http,
-                &self.hc_client,
-                &work.title,
-                &work.author_name,
-                cover_url.as_deref(),
-                hc_token.as_deref(),
-                &covers_dir,
-                work.id,
-            )
-            .await;
-
-            // Delete stale thumbnail if cover was written
-            if cover_mtime.is_some() {
-                let thumb = covers_dir.join(format!("{}_thumb.jpg", work.id));
-                let _ = tokio::fs::remove_file(&thumb).await;
-            }
-
+        // ON CONFLICT race-loser: another caller inserted the same identity
+        // between our find_by_normalized_match() and INSERT. Return the
+        // existing row without re-running enrichment or provenance.
+        if !actually_created {
+            let enrichment_status = work.enrichment_status;
             return Ok(AddWorkResult {
                 work,
-                created: true,
+                created: false,
                 author_created,
                 author_id,
                 messages: vec![],
-                cover_mtime,
-                enrichment_status: EnrichmentStatus::Unenriched,
+                cover_mtime: None,
+                enrichment_status,
             });
         }
+
+        let setter = req.provenance_setter.unwrap_or(ProvenanceSetter::User);
+        write_addtime_provenance(&self.db, user_id, &work, setter).await;
+
+        let _cover_url = cover_url.map(|u| unproxy_cover_url(&u));
 
         let messages = match self
             .enrichment
