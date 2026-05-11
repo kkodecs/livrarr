@@ -35,6 +35,8 @@ pub enum LlmPurpose {
     IdentityValidation,
     SearchResultCleanup,
     BibliographyCleanup,
+    /// Per-field arbitration across provider results during enrichment merge.
+    MergeArbitration,
 }
 
 #[derive(Debug)]

@@ -1069,6 +1069,10 @@ impl<T> MergeResolved<T> {
     pub fn as_inner(&self) -> &T {
         &self.0
     }
+
+    pub fn as_inner_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
 }
 
 /// Typed external identifier kind for a work.

@@ -278,7 +278,25 @@ async fn main() {
 
         let db_arc = Arc::new(db.clone());
         let queue = Arc::new(builder.build(db_arc.clone()));
-        let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
+
+        // Merge engine: LLM arbitration when llm_enabled + credentials present,
+        // deterministic priority fallback otherwise. Reads llm_configured from
+        // the startup-time snapshot; runtime changes take effect on next restart.
+        let merge_engine = {
+            let cfg = live_metadata_config.snapshot();
+            let llm_configured = cfg.llm_enabled
+                && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
+                && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
+            let llm_caller = m::llm_caller_service::LlmCallerImpl::new(
+                live_metadata_config.clone(),
+                http_client.clone(),
+            );
+            Arc::new(m::DefaultMergeEngine::new_with_llm(
+                m::PriorityModel::english(),
+                llm_caller,
+                llm_configured,
+            ))
+        };
 
         // LLM validator — single LiveLlmValidator that reads credentials
         // from live config per-call. When `llm_enabled=false` or

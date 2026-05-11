@@ -482,27 +482,67 @@ pub enum MergeError {
     EmptyPriorityModel,
 }
 
-/// TEMP(pk-tdd): merge engine — computes field-level merge from provider outcomes.
+/// Merge engine — computes field-level merge from provider outcomes.
+///
+/// Async because the LLM arbitration path makes a network call.
+/// The deterministic fallback is purely synchronous — the async overhead
+/// is negligible compared to the prior scatter-gather.
+#[trait_variant::make(Send)]
 pub trait MergeEngine: Send + Sync {
-    fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError>;
+    async fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError>;
 }
 
-/// TEMP(pk-tdd): default merge engine implementation (stub — implement in metadata-overhaul).
-pub struct DefaultMergeEngine {
+/// Default merge engine: LLM arbitration when configured, deterministic fallback otherwise.
+///
+/// `L` is the LLM caller — `LlmCallerImpl` in production, a no-op stub in tests.
+/// When `llm_configured` is false the LLM path is never entered and `L` is never
+/// called, so tests can use `NoOpLlmCaller` without wiring real credentials.
+pub struct DefaultMergeEngine<L = crate::llm_caller_service::LlmCallerImpl> {
+    llm: L,
+    llm_configured: bool,
+    /// Kept to satisfy the old `new(priority_model)` call sites during transition.
+    /// The priority model per merge is taken from `MergeInput` — this field is unused.
     _priority_model: PriorityModel,
 }
 
-impl DefaultMergeEngine {
+impl DefaultMergeEngine<crate::llm_caller_service::LlmCallerImpl> {
+    /// Construct with no LLM (deterministic-only). Compatible with the pre-Phase-5
+    /// `new(priority_model)` signature used in `main.rs` and tests.
     pub fn new(priority_model: PriorityModel) -> Self {
         Self {
+            llm: crate::llm_caller_service::LlmCallerImpl::not_configured(),
+            llm_configured: false,
             _priority_model: priority_model,
         }
     }
 }
 
-impl MergeEngine for DefaultMergeEngine {
-    fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError> {
-        merge_impl(inputs)
+impl<L> DefaultMergeEngine<L>
+where
+    L: livrarr_domain::services::LlmCaller + Send + Sync,
+{
+    /// Construct with an LLM caller. `llm_configured` controls whether the LLM
+    /// path is entered — set to `false` to force deterministic mode even when
+    /// an `L` is supplied (useful in tests).
+    pub fn new_with_llm(priority_model: PriorityModel, llm: L, llm_configured: bool) -> Self {
+        Self {
+            llm,
+            llm_configured,
+            _priority_model: priority_model,
+        }
+    }
+}
+
+impl<L> MergeEngine for DefaultMergeEngine<L>
+where
+    L: livrarr_domain::services::LlmCaller + Send + Sync,
+{
+    async fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError> {
+        if self.llm_configured {
+            merge_impl_llm(&self.llm, inputs).await
+        } else {
+            merge_impl(inputs)
+        }
     }
 }
 
@@ -951,6 +991,368 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
     })
 }
 
+// =============================================================================
+// LLM arbitration merge path
+// =============================================================================
+
+/// LLM response for per-field merge arbitration.
+#[derive(Debug, serde::Deserialize)]
+struct LlmMergeResponse {
+    identity_valid: bool,
+    #[serde(default)]
+    conflict_providers: Vec<String>,
+    #[serde(default)]
+    fields: HashMap<String, LlmFieldSelection>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LlmFieldSelection {
+    value: serde_json::Value,
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+/// LLM arbitration path for merge.
+///
+/// Sends a single call describing all provider payloads and requests per-field
+/// selection with identity validation. Falls back to `merge_impl` on any LLM
+/// error — the LLM is value-add and never gatekeeps enrichment (Principle 11).
+async fn merge_impl_llm<L>(llm: &L, inputs: MergeInput) -> Result<MergeOutput, MergeError>
+where
+    L: livrarr_domain::services::LlmCaller + Send + Sync,
+{
+    use livrarr_domain::services::{LlmCallRequest, LlmPurpose};
+
+    let pm = &inputs.priority_model;
+
+    // Build priority hint string for the system prompt.
+    let priority_hint: Vec<&str> = pm.content.iter().map(|p| provider_name(*p)).collect();
+    let priority_hint_str = priority_hint.join(" > ");
+
+    // Collect user-owned fields.
+    let user_owned: Vec<String> = inputs
+        .current_provenance
+        .iter()
+        .filter(|fp| fp.setter == livrarr_domain::ProvenanceSetter::User)
+        .map(|fp| format!("{:?}", fp.field))
+        .collect();
+
+    // Collect eligible provider payloads.
+    let eligible: Vec<(livrarr_domain::MetadataProvider, serde_json::Value)> = inputs
+        .provider_results
+        .iter()
+        .filter(|(_, o)| o.class == livrarr_domain::OutcomeClass::Success)
+        .filter_map(|(provider, o)| {
+            o.payload.as_ref().map(|detail| {
+                let json = serde_json::to_value(detail).unwrap_or(serde_json::Value::Null);
+                (*provider, json)
+            })
+        })
+        .collect();
+
+    if eligible.is_empty() {
+        // No providers succeeded — fall back to deterministic.
+        return merge_impl(inputs);
+    }
+
+    // Build user prompt: provider data as JSON.
+    let mut provider_block = String::new();
+    for (provider, json) in &eligible {
+        provider_block.push_str(&format!(
+            "- {}: {}\n",
+            provider_name(*provider),
+            serde_json::to_string(json).unwrap_or_default()
+        ));
+    }
+
+    let work_identity = format!(
+        "\"{}\" by \"{}\" (language: {})",
+        inputs.current_work.title,
+        inputs.current_work.author_name,
+        inputs.current_work.language.as_deref().unwrap_or("unknown")
+    );
+    let user_owned_str = if user_owned.is_empty() {
+        "(none)".to_string()
+    } else {
+        user_owned.join(", ")
+    };
+
+    let system_template = format!(
+        "You are a librarian assistant merging book metadata from multiple sources. \
+Pick the best value for each field. Consider: completeness, accuracy, native language \
+for foreign works, and specificity. Provider priority (hint, not rule): {priority_hint_str}. \
+User-owned fields are locked — do not suggest changes to them.",
+    );
+
+    let user_template = format!(
+        "Work identity: {work_identity}\n\n\
+Provider results:\n{provider_block}\n\
+User-owned fields (DO NOT CHANGE): {user_owned_str}\n\n\
+For each field, select the best value and name the source provider.\n\
+Also confirm all providers describe the same work (identity validation).\n\
+If any provider's data is for a different book, flag it in conflict_providers.\n\n\
+Return JSON only:\n\
+{{\n\
+  \"identity_valid\": true,\n\
+  \"conflict_providers\": [],\n\
+  \"fields\": {{\n\
+    \"description\": {{\"value\": \"...\", \"provider\": \"hardcover\"}},\n\
+    \"genres\": {{\"value\": [...], \"provider\": \"goodreads\"}},\n\
+    \"...\": {{\"value\": \"...\", \"provider\": \"...\"}}\n\
+  }}\n\
+}}"
+    );
+
+    let req = LlmCallRequest {
+        system_template,
+        user_template,
+        context: std::collections::HashMap::new(),
+        allowed_fields: &[],
+        timeout: std::time::Duration::from_secs(30),
+        purpose: LlmPurpose::MergeArbitration,
+    };
+
+    let llm_resp = match llm.call(req).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("LLM merge arbitration failed, falling back to deterministic: {e}");
+            return merge_impl(inputs);
+        }
+    };
+
+    // Strip optional code-fence wrapping.
+    let raw = llm_resp.content.trim();
+    let raw = raw
+        .strip_prefix("```json")
+        .or_else(|| raw.strip_prefix("```"))
+        .unwrap_or(raw);
+    let raw = raw.strip_suffix("```").unwrap_or(raw).trim();
+
+    let parsed: LlmMergeResponse = match serde_json::from_str(raw) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("LLM merge response parse failed ({e}), falling back to deterministic");
+            return merge_impl(inputs);
+        }
+    };
+
+    // Identity check: if invalid, mark Conflict and return early.
+    if !parsed.identity_valid {
+        tracing::warn!(
+            work_id = inputs.current_work.id,
+            conflict_providers = ?parsed.conflict_providers,
+            "LLM merge identity check failed — marking work as Conflict"
+        );
+        return Ok(MergeOutput {
+            conflict_detected: true,
+            work_update: None,
+            provenance_upserts: Vec::new(),
+            provenance_deletes: Vec::new(),
+            external_id_updates: collect_external_ids(&inputs),
+            enrichment_status: EnrichmentStatus::Conflict,
+            enrichment_source: None,
+        });
+    }
+
+    // Apply LLM-selected fields on top of the deterministic merge result.
+    // We run deterministic first to get all the bookkeeping (provenance,
+    // external IDs, status), then patch field values and provenance for
+    // fields where the LLM made a selection.
+    let mut output = merge_impl(inputs.clone())?;
+
+    // Build a lookup: provider name → MetadataProvider.
+    let provider_by_name: HashMap<&str, livrarr_domain::MetadataProvider> = [
+        ("hardcover", livrarr_domain::MetadataProvider::Hardcover),
+        ("goodreads", livrarr_domain::MetadataProvider::Goodreads),
+        ("openlibrary", livrarr_domain::MetadataProvider::OpenLibrary),
+        ("audnexus", livrarr_domain::MetadataProvider::Audnexus),
+        ("readarr", livrarr_domain::MetadataProvider::Readarr),
+        ("llm", livrarr_domain::MetadataProvider::Llm),
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
+    // Provenance maps for patching.
+    let user_id = inputs.current_work.user_id;
+    let work_id = inputs.current_work.id;
+    let prov_map: HashMap<WorkField, &FieldProvenance> = inputs
+        .current_provenance
+        .iter()
+        .map(|fp| (fp.field, fp))
+        .collect();
+
+    if let Some(ref mut work_update_inner) = output.work_update {
+        let req = work_update_inner.as_inner_mut();
+
+        for (field_name, selection) in &parsed.fields {
+            let wf = match field_name.as_str() {
+                "title" => WorkField::Title,
+                "subtitle" => WorkField::Subtitle,
+                "original_title" => WorkField::OriginalTitle,
+                "author_name" => WorkField::AuthorName,
+                "description" => WorkField::Description,
+                "year" => WorkField::Year,
+                "series_name" => WorkField::SeriesName,
+                "series_position" => WorkField::SeriesPosition,
+                "genres" => WorkField::Genres,
+                "language" => WorkField::Language,
+                "page_count" => WorkField::PageCount,
+                "duration_seconds" => WorkField::DurationSeconds,
+                "publisher" => WorkField::Publisher,
+                "publish_date" => WorkField::PublishDate,
+                "ol_key" => WorkField::OlKey,
+                "hc_key" => WorkField::HcKey,
+                "gr_key" => WorkField::GrKey,
+                "isbn_13" => WorkField::Isbn13,
+                "asin" => WorkField::Asin,
+                "cover_url" => WorkField::CoverUrl,
+                _ => continue,
+            };
+
+            // Skip user-owned fields.
+            if let Some(fp) = prov_map.get(&wf) {
+                if fp.setter == livrarr_domain::ProvenanceSetter::User {
+                    continue;
+                }
+            }
+            // Skip cover_manual bypass.
+            if wf == WorkField::CoverUrl && inputs.current_work.cover_manual {
+                continue;
+            }
+            // Identity fields locked.
+            if wf == WorkField::Title || wf == WorkField::AuthorName {
+                if !inputs.current_work.title.is_empty() && wf == WorkField::Title {
+                    continue;
+                }
+                if !inputs.current_work.author_name.is_empty() && wf == WorkField::AuthorName {
+                    continue;
+                }
+            }
+
+            // Apply the LLM-selected value to the work_update request.
+            patch_work_update_field(req, wf, &selection.value);
+
+            // Update provenance upsert if the LLM named a provider.
+            if let Some(ref pname) = selection.provider {
+                if let Some(&winning_provider) = provider_by_name.get(pname.as_str()) {
+                    // Remove any existing upsert for this field.
+                    output.provenance_upserts.retain(|u| u.field != wf);
+                    output.provenance_upserts.push(SetFieldProvenanceRequest {
+                        user_id,
+                        work_id,
+                        field: wf,
+                        source: Some(winning_provider),
+                        setter: livrarr_domain::ProvenanceSetter::Provider,
+                        cleared: false,
+                    });
+                }
+            }
+        }
+
+        // Post-merge title/author cleanup on LLM-selected values.
+        if let Some(ref t) = req.title.clone() {
+            let cleaned = crate::title_cleanup::clean_title(t);
+            req.title = Some(cleaned);
+        }
+        if let Some(ref a) = req.author_name.clone() {
+            let cleaned = crate::title_cleanup::clean_author(a);
+            req.author_name = Some(cleaned);
+        }
+
+        // Re-classify enrichment status after LLM patching.
+        let has_desc = req.description.is_some();
+        let has_cover = req.cover_url.is_some();
+        output.enrichment_status = match (has_desc, has_cover) {
+            (true, true) => EnrichmentStatus::Enriched,
+            (true, false) | (false, true) => EnrichmentStatus::Unenriched,
+            (false, false) => EnrichmentStatus::Failed,
+        };
+        req.enrichment_status = output.enrichment_status;
+    }
+
+    output.conflict_detected = false;
+    Ok(output)
+}
+
+/// Collect external IDs from all Success providers (used in LLM conflict path).
+fn collect_external_ids(inputs: &MergeInput) -> Vec<UpsertExternalIdRequest> {
+    let work_id = inputs.current_work.id;
+    let mut external_id_updates = Vec::new();
+    for outcome in inputs.provider_results.values() {
+        if outcome.class == livrarr_domain::OutcomeClass::Success {
+            if let Some(ref detail) = outcome.payload {
+                for isbn in &detail.additional_isbns {
+                    external_id_updates.push(UpsertExternalIdRequest {
+                        work_id,
+                        id_type: livrarr_domain::ExternalIdType::Isbn13,
+                        id_value: isbn.clone(),
+                    });
+                }
+                for asin_val in &detail.additional_asins {
+                    external_id_updates.push(UpsertExternalIdRequest {
+                        work_id,
+                        id_type: livrarr_domain::ExternalIdType::Asin,
+                        id_value: asin_val.clone(),
+                    });
+                }
+            }
+        }
+    }
+    external_id_updates
+}
+
+/// Patch a single field in `UpdateWorkEnrichmentDbRequest` from a JSON value.
+fn patch_work_update_field(
+    req: &mut UpdateWorkEnrichmentDbRequest,
+    field: WorkField,
+    value: &serde_json::Value,
+) {
+    let as_str = |v: &serde_json::Value| -> Option<String> {
+        v.as_str().map(|s| s.to_owned()).or_else(|| {
+            if v.is_null() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        })
+    };
+
+    match field {
+        WorkField::Title => req.title = value.as_str().map(|s| s.to_owned()),
+        WorkField::Subtitle => req.subtitle = as_str(value),
+        WorkField::OriginalTitle => req.original_title = as_str(value),
+        WorkField::AuthorName => req.author_name = value.as_str().map(|s| s.to_owned()),
+        WorkField::Description => req.description = as_str(value),
+        WorkField::Year => req.year = value.as_i64().map(|v| v as i32),
+        WorkField::SeriesName => req.series_name = as_str(value),
+        WorkField::SeriesPosition => req.series_position = value.as_f64(),
+        WorkField::Genres => {
+            req.genres = value.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                    .collect()
+            });
+        }
+        WorkField::Language => {
+            req.language = as_str(value).map(|s| livrarr_domain::normalize_language(&s));
+        }
+        WorkField::PageCount => req.page_count = value.as_i64().map(|v| v as i32),
+        WorkField::DurationSeconds => req.duration_seconds = value.as_i64().map(|v| v as i32),
+        WorkField::Publisher => req.publisher = as_str(value),
+        WorkField::PublishDate => req.publish_date = as_str(value),
+        WorkField::OlKey => req.ol_key = as_str(value),
+        WorkField::HcKey => req.hc_key = as_str(value),
+        WorkField::GrKey => req.gr_key = as_str(value),
+        WorkField::Isbn13 => req.isbn_13 = as_str(value),
+        WorkField::Asin => req.asin = as_str(value),
+        WorkField::CoverUrl => req.cover_url = as_str(value),
+        // Narrator, NarrationType, Abridged, Rating, RatingCount —
+        // complex typed fields: skip LLM override, keep deterministic result.
+        _ => {}
+    }
+}
+
 /// Per-work lock map type [I-12].
 type PerWorkLocks = tokio::sync::Mutex<HashMap<(UserId, WorkId), Arc<tokio::sync::Mutex<()>>>>;
 
@@ -1293,10 +1695,7 @@ where
                 priority_model: priority_model.clone(),
             };
 
-            let me = self.merge_engine.clone();
-            let merge_output = tokio::task::spawn_blocking(move || me.merge(merge_input))
-                .await
-                .expect("merge task panicked")?;
+            let merge_output = self.merge_engine.merge(merge_input).await?;
 
             // Rewrite IDs in sub-requests to match the actual user_id/work_id
             let provenance_upserts: Vec<_> = merge_output

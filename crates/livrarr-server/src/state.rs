@@ -34,7 +34,7 @@ pub type LiveLlmValidator = livrarr_metadata::llm_validator::LiveLlmValidator;
 pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
     SqliteDb,
     LiveProviderQueue,
-    livrarr_metadata::DefaultMergeEngine,
+    livrarr_metadata::DefaultMergeEngine<livrarr_metadata::llm_caller_service::LlmCallerImpl>,
     LiveLlmValidator,
 >;
 
