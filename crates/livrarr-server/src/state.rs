@@ -60,11 +60,15 @@ pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::Series
     LiveEnrichmentWorkflow,
     livrarr_metadata::llm_caller_service::LlmCallerImpl,
 >;
+pub type LiveTagServiceImpl = crate::tag_service::LiveTagService<LiveImportIoService>;
+
 pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     SqliteDb,
     LiveEnrichmentWorkflow,
     livrarr_http::fetcher::HttpFetcherImpl,
     livrarr_metadata::llm_caller_service::LlmCallerImpl,
+    livrarr_metadata::DefaultMergeEngine<livrarr_metadata::llm_caller_service::LlmCallerImpl>,
+    LiveTagServiceImpl,
 >;
 pub type LiveGrabService = livrarr_download::grab_service::GrabServiceImpl<SqliteDb>;
 pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceImpl<

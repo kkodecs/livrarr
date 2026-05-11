@@ -55,4 +55,16 @@ pub trait EnrichmentWorkflow: Send + Sync {
         user_id: crate::UserId,
         work_id: WorkId,
     ) -> Result<(), EnrichmentWorkflowError>;
+
+    /// Pre-inject source provider data before calling `enrich_work`.
+    /// The data is consumed during scatter-gather as a Readarr provider outcome.
+    ///
+    /// Stubs and test implementations provide a no-op body.
+    /// `EnrichmentWorkflowImpl` delegates to `EnrichmentServiceImpl::pre_inject_source_data`.
+    async fn inject_source_data(
+        &self,
+        user_id: crate::UserId,
+        work_id: WorkId,
+        data: super::SourceProviderData,
+    );
 }

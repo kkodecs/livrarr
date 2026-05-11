@@ -433,54 +433,18 @@ pub async fn delete<S: HasWorkService>(
     Ok(Json(DeleteWorkResponse { warnings: vec![] }))
 }
 
-pub async fn refresh<S: HasWorkService + HasTagService>(
+pub async fn refresh<S: HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<RefreshWorkResponse>, ApiError> {
+    // WorkService::refresh() runs the unified enrichment pipeline:
+    // provider dispatch, merge, cover download, and tag sync are all handled inside.
     let result = state.work_service().refresh(ctx.user.id, id).await?;
-
-    if !result.work.cover_manual {
-        if let Some(ref cover_url) = result.work.cover_url {
-            if let Err(e) = state
-                .work_service()
-                .download_cover_from_url(ctx.user.id, id, cover_url)
-                .await
-            {
-                tracing::warn!(work_id = id, %e, "cover download failed after refresh");
-            }
-        }
-    }
-
-    let mut messages = result.messages;
-    if result.merge_deferred {
-        messages.push("Merge deferred — retry pending".to_string());
-    }
-
-    if !result.taggable_items.is_empty() {
-        let tag_results = state
-            .tag_service()
-            .retag_library_items(&result.work, &result.taggable_items)
-            .await;
-        let failures: Vec<_> = tag_results.iter().filter(|r| !r.succeeded).collect();
-        for r in &failures {
-            let err = r.error.as_deref().unwrap_or("unknown error");
-            messages.push(format!(
-                "tag rewrite warning (item {}): {}",
-                r.library_item_id, err
-            ));
-        }
-        if failures.is_empty() {
-            messages.push(format!(
-                "tags rewritten on {} file(s)",
-                result.taggable_items.len()
-            ));
-        }
-    }
 
     Ok(Json(RefreshWorkResponse {
         work: work_to_detail(&result.work),
-        messages,
+        messages: result.messages,
     }))
 }
 

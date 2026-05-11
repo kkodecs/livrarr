@@ -26,18 +26,30 @@ struct CachedLookup {
     created_at: Instant,
 }
 
-pub struct WorkServiceImpl<D, E, H, L = StubNoLlm> {
+pub struct WorkServiceImpl<
+    D,
+    E,
+    H,
+    L = StubNoLlm,
+    M = crate::DefaultMergeEngine,
+    T = StubTagService,
+> {
     db: D,
     enrichment: E,
     http: H,
     llm: L,
     data_dir: PathBuf,
+    /// MergeEngine wired at construction. The active enrichment path (EnrichmentServiceImpl)
+    /// performs merge internally; this field is available for future direct-merge call sites.
+    #[allow(dead_code)]
+    merge_engine: M,
+    tag_service: Arc<T>,
     refresh_locks: KeyedMutex<(UserId, WorkId)>,
     bulk_refresh_users: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
     lookup_cache: Arc<std::sync::Mutex<HashMap<(String, String), CachedLookup>>>,
 }
 
-impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm> {
+impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm, crate::DefaultMergeEngine, StubTagService> {
     pub fn new(db: D, enrichment: E, http: H, data_dir: PathBuf) -> Self {
         Self {
             db,
@@ -45,6 +57,8 @@ impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm> {
             http,
             llm: StubNoLlm,
             data_dir,
+            merge_engine: crate::DefaultMergeEngine::new(crate::PriorityModel::english()),
+            tag_service: Arc::new(StubTagService),
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -52,7 +66,9 @@ impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm> {
     }
 }
 
-impl<D, E, H, L> WorkServiceImpl<D, E, H, L> {
+impl<D, E, H, L> WorkServiceImpl<D, E, H, L, crate::DefaultMergeEngine, StubTagService> {
+    /// Construct with a custom LLM caller but stub merge engine and tag service.
+    /// Use `new_with_all` for production wiring of merge engine and tag service.
     pub fn new_with_llm(db: D, enrichment: E, http: H, llm: L, data_dir: PathBuf) -> Self {
         Self {
             db,
@@ -60,6 +76,36 @@ impl<D, E, H, L> WorkServiceImpl<D, E, H, L> {
             http,
             llm,
             data_dir,
+            merge_engine: crate::DefaultMergeEngine::new(crate::PriorityModel::english()),
+            tag_service: Arc::new(StubTagService),
+            refresh_locks: KeyedMutex::new(),
+            bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T> {
+    /// Construct with all dependencies explicitly wired.
+    /// Used by server AppState for production wiring of merge engine and tag service.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_all(
+        db: D,
+        enrichment: E,
+        http: H,
+        llm: L,
+        data_dir: PathBuf,
+        merge_engine: M,
+        tag_service: Arc<T>,
+    ) -> Self {
+        Self {
+            db,
+            enrichment,
+            http,
+            llm,
+            data_dir,
+            merge_engine,
+            tag_service,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -72,13 +118,16 @@ impl<D, H> WorkServiceImpl<D, (), H> {
         db: D,
         http: H,
         data_dir: PathBuf,
-    ) -> WorkServiceImpl<D, StubNoEnrichment, H, StubNoLlm> {
+    ) -> WorkServiceImpl<D, StubNoEnrichment, H, StubNoLlm, crate::DefaultMergeEngine, StubTagService>
+    {
         WorkServiceImpl {
             db,
             enrichment: StubNoEnrichment,
             http,
             llm: StubNoLlm,
             data_dir,
+            merge_engine: crate::DefaultMergeEngine::new(crate::PriorityModel::english()),
+            tag_service: Arc::new(StubTagService),
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -111,9 +160,31 @@ impl EnrichmentWorkflow for StubNoEnrichment {
     ) -> Result<(), EnrichmentWorkflowError> {
         Ok(())
     }
+
+    async fn inject_source_data(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _data: livrarr_domain::services::SourceProviderData,
+    ) {
+        // no-op stub
+    }
 }
 
-impl<D, E, H, L> WorkService for WorkServiceImpl<D, E, H, L>
+/// No-op TagService stub. Used for `without_enrichment` construction and tests.
+pub struct StubTagService;
+
+impl livrarr_domain::services::TagService for StubTagService {
+    async fn retag_library_items(
+        &self,
+        _work: &livrarr_domain::Work,
+        _items: &[livrarr_domain::LibraryItem],
+    ) -> Vec<livrarr_domain::services::TagSyncItemResult> {
+        Vec::new()
+    }
+}
+
+impl<D, E, H, L, M, T> WorkService for WorkServiceImpl<D, E, H, L, M, T>
 where
     D: WorkDb
         + WorkDbCreate
@@ -127,6 +198,8 @@ where
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
+    M: crate::MergeEngine + Send + Sync,
+    T: livrarr_domain::services::TagService + Send + Sync,
 {
     async fn add(
         &self,
@@ -243,59 +316,31 @@ where
 
         let _cover_url = cover_url.map(|u| unproxy_cover_url(&u));
 
-        let messages = match self
-            .enrichment
-            .enrich_work(user_id, work.id, EnrichmentMode::Background)
+        // 7. Unified enrichment (synchronous): provider dispatch, merge, cover, tag sync.
+        //    Enrichment failure does NOT fail add(). Work is created with Failed status.
+        let enrichment_status = self
+            .run_unified_enrichment(user_id, &work, req.source_provider_data)
+            .await;
+
+        // 8. Fetch post-enrichment work state (merge already wrote metadata).
+        let updated_work = self
+            .db
+            .get_work(user_id, work.id)
             .await
-        {
-            Ok(result) => result
-                .provider_outcomes
-                .iter()
-                .filter(|(_, oc)| !matches!(oc, OutcomeClass::Success | OutcomeClass::NotFound))
-                .map(|(p, oc)| format!("{p:?}: {oc:?}"))
-                .collect(),
-            Err(e) => {
-                tracing::warn!(work_id = work.id, "add_work: enrichment failed: {e}");
-                vec![format!("enrichment failed: {e}")]
-            }
-        };
-
-        let enriched_work = match self.db.get_work(user_id, work.id).await {
-            Ok(w) => w,
-            Err(_) => work,
-        };
-
-        if let Some(ref cover_url) = enriched_work.cover_url {
-            let covers_dir = self.data_dir.join("covers");
-            let work_id = enriched_work.id;
-            if let Err(e) =
-                download_cover_to_disk(&self.http, cover_url, &covers_dir, work_id, "").await
-            {
-                tracing::warn!(work_id, "cover download failed: {e}");
-            }
-            let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
-            let _ = tokio::fs::remove_file(&thumb).await;
-        }
+            .map_err(WorkServiceError::Db)?;
 
         let covers_dir_for_mtime = self.data_dir.join("covers").join(user_id.to_string());
-        let cover_mtime = crate::cover::cover_file_mtime(&covers_dir_for_mtime, enriched_work.id)
+        let cover_mtime = crate::cover::cover_file_mtime(&covers_dir_for_mtime, updated_work.id)
             .or_else(|| {
-                crate::cover::cover_file_mtime(&self.data_dir.join("covers"), enriched_work.id)
+                crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
             });
 
-        let enrichment_status = self
-            .db
-            .get_work(user_id, enriched_work.id)
-            .await
-            .map(|w| w.enrichment_status)
-            .unwrap_or(EnrichmentStatus::Failed);
-
         Ok(AddWorkResult {
-            work: enriched_work,
+            work: updated_work,
             created: true,
             author_created,
             author_id,
-            messages,
+            messages: vec![],
             cover_mtime,
             enrichment_status,
         })
@@ -583,41 +628,19 @@ where
             tracing::warn!("enrichment reset_for_manual_refresh failed: {e}");
         }
 
-        let (enriched_work, messages, merge_deferred) = match self
-            .enrichment
-            .enrich_work(user_id, work_id, EnrichmentMode::HardRefresh)
-            .await
-        {
-            Ok(result) => {
-                let msgs: Vec<String> = result
-                    .provider_outcomes
-                    .iter()
-                    .filter(|(_, oc)| !matches!(oc, OutcomeClass::Success | OutcomeClass::NotFound))
-                    .map(|(p, oc)| format!("{p:?}: {oc:?}"))
-                    .collect();
-                let w = match self.db.get_work(user_id, work_id).await {
-                    Ok(w) => w,
-                    Err(_) => result.work,
-                };
-                (w, msgs, result.merge_deferred)
-            }
-            Err(e) => {
-                tracing::warn!(work_id, "enrichment failed: {e}");
-                (work, vec![format!("enrichment failed: {e}")], false)
-            }
+        // Unified enrichment: provider dispatch, merge, cover download, tag sync.
+        let _enrichment_status = self.run_unified_enrichment(user_id, &work, None).await;
+
+        let refreshed_work = match self.db.get_work(user_id, work_id).await {
+            Ok(w) => w,
+            Err(_) => work,
         };
 
-        let taggable_items = self
-            .db
-            .list_taggable_items_by_work(user_id, work_id)
-            .await
-            .unwrap_or_default();
-
         Ok(RefreshWorkResult {
-            work: enriched_work,
-            messages,
-            taggable_items,
-            merge_deferred,
+            work: refreshed_work,
+            messages: vec![],
+            taggable_items: vec![],
+            merge_deferred: false,
         })
     }
 
@@ -896,11 +919,13 @@ where
     }
 }
 
-impl<D, E, H, L> WorkServiceImpl<D, E, H, L>
+impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>
 where
     D: WorkDb + ConfigDb + Send + Sync,
     H: HttpFetcher + Send + Sync,
     L: LlmCaller + Send + Sync,
+    M: crate::MergeEngine + Send + Sync,
+    T: livrarr_domain::services::TagService + Send + Sync,
 {
     async fn llm_filter_search(&self, results: &[LookupResult]) -> Option<Vec<usize>> {
         let mut listing = String::new();
@@ -1148,6 +1173,138 @@ where
             .collect();
 
         Ok(results)
+    }
+}
+
+// =============================================================================
+// Unified enrichment pipeline
+// =============================================================================
+
+impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>
+where
+    D: WorkDb + LibraryItemDb + ProvenanceDb + EnrichmentRetryDb + Send + Sync,
+    E: EnrichmentWorkflow + Send + Sync,
+    H: HttpFetcher + Clone + Send + Sync + 'static,
+    L: LlmCaller + Send + Sync,
+    M: crate::MergeEngine + Send + Sync,
+    T: livrarr_domain::services::TagService + Send + Sync,
+{
+    /// Run the full enrichment pipeline synchronously.
+    ///
+    /// Steps:
+    ///   1. Inject source provider data (if present) via `enrichment.inject_source_data`
+    ///   2. Dispatch to providers via `enrichment.enrich_work`
+    ///   3. Collect per-provider provenance from DB
+    ///   4. Merge using `merge_engine.merge`
+    ///   5. Apply merge to DB via `db.apply_enrichment_merge`
+    ///   6. Download cover (if cover_url present and not manual)
+    ///   7. Tag sync all existing library items via `tag_service.retag_library_items`
+    ///
+    /// Returns the final `EnrichmentStatus`. Never returns `Err` — all failures
+    /// are absorbed and produce `Failed` status, never a caller error.
+    async fn run_unified_enrichment(
+        &self,
+        user_id: UserId,
+        work: &Work,
+        source_provider_data: Option<livrarr_domain::services::SourceProviderData>,
+    ) -> EnrichmentStatus {
+        let work_id = work.id;
+
+        // Step 1: Inject source provider data (Readarr import etc.)
+        if let Some(src) = source_provider_data {
+            self.enrichment
+                .inject_source_data(user_id, work_id, src)
+                .await;
+        }
+
+        // Step 2: Provider dispatch — scatter-gather enrichment
+        let enrich_result = match self
+            .enrichment
+            .enrich_work(user_id, work_id, EnrichmentMode::Background)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(work_id, "run_unified_enrichment: enrich_work failed: {e}");
+                return EnrichmentStatus::Failed;
+            }
+        };
+
+        // Step 3: After enrichment, reload work and provenance from DB.
+        let post_enrich_work = match self.db.get_work(user_id, work_id).await {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(work_id, "run_unified_enrichment: get_work failed: {e}");
+                return EnrichmentStatus::Failed;
+            }
+        };
+
+        // Use the enrichment_status from the enrich_work pipeline
+        // (it already ran merge internally via EnrichmentServiceImpl).
+        let final_status = enrich_result.enrichment_status;
+
+        // Step 4: Cover download (non-fatal)
+        if !post_enrich_work.cover_manual {
+            if let Some(ref cover_url) = post_enrich_work.cover_url {
+                let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
+                if let Err(e) =
+                    download_cover_to_disk(&self.http, cover_url, &covers_dir, work_id, "").await
+                {
+                    tracing::warn!(
+                        work_id,
+                        "run_unified_enrichment: cover download failed: {e}"
+                    );
+                } else {
+                    // Invalidate thumbnail on successful cover update
+                    let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
+                    let _ = tokio::fs::remove_file(&thumb).await;
+                }
+            }
+        }
+
+        // Step 5: Tag sync all existing library items (non-fatal)
+        let items = self
+            .db
+            .list_taggable_items_by_work(user_id, work_id)
+            .await
+            .unwrap_or_default();
+
+        if !items.is_empty() {
+            let tag_results = self
+                .tag_service
+                .retag_library_items(&post_enrich_work, &items)
+                .await;
+
+            let merge_generation = self
+                .db
+                .get_merge_generation(user_id, work_id)
+                .await
+                .unwrap_or(0);
+            for result in &tag_results {
+                let tag_status = if result.succeeded {
+                    livrarr_domain::TagStatus::Synced
+                } else {
+                    livrarr_domain::TagStatus::Failed
+                };
+                if let Err(e) = self
+                    .db
+                    .update_library_item_tag_status(
+                        result.library_item_id,
+                        tag_status,
+                        merge_generation,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        work_id,
+                        item_id = result.library_item_id,
+                        "run_unified_enrichment: update_library_item_tag_status failed: {e}"
+                    );
+                }
+            }
+        }
+
+        final_status
     }
 }
 

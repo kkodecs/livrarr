@@ -211,6 +211,15 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
     ) -> Result<(), EnrichmentWorkflowError> {
         Ok(())
     }
+
+    async fn inject_source_data(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _data: livrarr_domain::services::SourceProviderData,
+    ) {
+        // no-op stub
+    }
 }
 
 // =============================================================================

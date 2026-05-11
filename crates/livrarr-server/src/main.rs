@@ -443,8 +443,25 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
+            let ws_merge_engine = {
+                let cfg = live_metadata_config.snapshot();
+                let llm_configured = cfg.llm_enabled
+                    && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
+                    && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
+                let llm_caller = livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    livrarr_http::HttpClient::builder()
+                        .build()
+                        .expect("LLM HttpClient for work service merge engine"),
+                );
+                livrarr_metadata::DefaultMergeEngine::new_with_llm(
+                    livrarr_metadata::PriorityModel::english(),
+                    llm_caller,
+                    llm_configured,
+                )
+            };
             Arc::new(
-                livrarr_metadata::work_service::WorkServiceImpl::new_with_llm(
+                livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
                     svc_db.clone(),
                     ew,
                     livrarr_http::fetcher::HttpFetcherImpl::new()
@@ -456,6 +473,8 @@ async fn main() {
                             .expect("LLM HttpClient for work service"),
                     ),
                     data_dir.clone(),
+                    ws_merge_engine,
+                    tag_service_arc.clone(),
                 ),
             )
         },
@@ -494,7 +513,7 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
-            let ws = livrarr_metadata::work_service::WorkServiceImpl::new_with_llm(
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
                 svc_db.clone(),
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
@@ -506,6 +525,23 @@ async fn main() {
                         .expect("LLM HttpClient for list service"),
                 ),
                 data_dir.clone(),
+                {
+                    let cfg = live_metadata_config.snapshot();
+                    let llm_configured = cfg.llm_enabled
+                        && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
+                        && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
+                    livrarr_metadata::DefaultMergeEngine::new_with_llm(
+                        livrarr_metadata::PriorityModel::english(),
+                        livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                            live_metadata_config.clone(),
+                            livrarr_http::HttpClient::builder()
+                                .build()
+                                .expect("LLM HttpClient for list service merge engine"),
+                        ),
+                        llm_configured,
+                    )
+                },
+                tag_service_arc.clone(),
             );
             Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
                 svc_db.clone(),
@@ -526,7 +562,7 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
-            let ws = livrarr_metadata::work_service::WorkServiceImpl::new_with_llm(
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
                 svc_db.clone(),
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
@@ -538,6 +574,23 @@ async fn main() {
                         .expect("LLM HttpClient for author monitor"),
                 ),
                 data_dir.clone(),
+                {
+                    let cfg = live_metadata_config.snapshot();
+                    let llm_configured = cfg.llm_enabled
+                        && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
+                        && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
+                    livrarr_metadata::DefaultMergeEngine::new_with_llm(
+                        livrarr_metadata::PriorityModel::english(),
+                        livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                            live_metadata_config.clone(),
+                            livrarr_http::HttpClient::builder()
+                                .build()
+                                .expect("LLM HttpClient for author monitor merge engine"),
+                        ),
+                        llm_configured,
+                    )
+                },
+                tag_service_arc.clone(),
             );
             Arc::new(
                 livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::new(

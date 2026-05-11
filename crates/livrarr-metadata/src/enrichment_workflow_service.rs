@@ -1,7 +1,7 @@
 use livrarr_db::{EnrichmentRetryDb, WorkDb};
 use livrarr_domain::services::{
     EnrichmentMode as DomainEnrichmentMode, EnrichmentResult as DomainEnrichmentResult,
-    EnrichmentWorkflow, EnrichmentWorkflowError,
+    EnrichmentWorkflow, EnrichmentWorkflowError, SourceProviderData,
 };
 use livrarr_domain::*;
 
@@ -85,6 +85,10 @@ where
             .await
             .map_err(convert_error)
     }
+
+    async fn inject_source_data(&self, user_id: UserId, work_id: WorkId, data: SourceProviderData) {
+        self.inner.inject_source_data(user_id, work_id, data).await;
+    }
 }
 
 /// Standalone impl for tests that only need reset, not the full enrichment pipeline.
@@ -132,5 +136,14 @@ where
             .map_err(EnrichmentWorkflowError::Db)?;
 
         Ok(())
+    }
+
+    async fn inject_source_data(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _data: SourceProviderData,
+    ) {
+        // no-op — reset-only workflow does not run enrichment
     }
 }

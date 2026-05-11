@@ -158,6 +158,17 @@ pub trait EnrichmentService: Send + Sync {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<(), EnrichmentError>;
+
+    /// Pre-inject source provider data before calling `enrich_work`.
+    /// The data is consumed during scatter-gather as a Readarr provider outcome.
+    ///
+    /// `EnrichmentServiceImpl` overrides this; stubs provide a no-op.
+    async fn inject_source_data(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        data: livrarr_domain::services::SourceProviderData,
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -1777,6 +1788,15 @@ where
         self.db.reset_for_manual_refresh(user_id, work_id).await?;
         Ok(())
     }
+
+    async fn inject_source_data(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        data: livrarr_domain::services::SourceProviderData,
+    ) {
+        self.pre_inject_source_data(user_id, work_id, data).await;
+    }
 }
 
 // =============================================================================
@@ -2165,6 +2185,15 @@ pub mod tests {
             _work_id: WorkId,
         ) -> Result<(), EnrichmentError> {
             Ok(())
+        }
+
+        async fn inject_source_data(
+            &self,
+            _user_id: UserId,
+            _work_id: WorkId,
+            _data: livrarr_domain::services::SourceProviderData,
+        ) {
+            // no-op stub
         }
     }
 
