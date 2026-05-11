@@ -13,7 +13,9 @@ testdat/
 test_list.txt
 frontend/testdata/
 CLAUDE.md
+GEMINI.md
 HANDOFF.md
+graphify-out/
 scripts/
 tools/
 /src/
