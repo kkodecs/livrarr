@@ -491,25 +491,16 @@ impl<L: LlmClient + 'static> MetadataProvider for LlmScraperProvider<L> {
 /// Deferred until render proxy is available (same as Skoob/Brazil).
 pub fn build_llm_scraper_configs() -> Vec<LlmScraperConfig> {
     let goodreads_url = "https://www.goodreads.com/search?q={query}";
-    let goodreads_languages = ["fr", "de", "es", "nl", "it", "ja", "ko"];
+    let goodreads_languages = ["fr", "de", "es", "nl", "it", "ja", "ko", "pl"];
 
-    let mut configs: Vec<LlmScraperConfig> = goodreads_languages
+    goodreads_languages
         .iter()
         .map(|lang| LlmScraperConfig {
             name: "Web Search".to_string(),
             search_url_template: goodreads_url.to_string(),
             language: lang.to_string(),
         })
-        .collect();
-
-    // Native-language sites with distinct routing
-    configs.push(LlmScraperConfig {
-        name: "lubimyczytac.pl".to_string(),
-        search_url_template: "https://lubimyczytac.pl/szukaj/ksiazki?phrase={query}".to_string(),
-        language: "pl".to_string(),
-    });
-
-    configs
+        .collect()
 }
 
 #[cfg(test)]

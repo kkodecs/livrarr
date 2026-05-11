@@ -243,6 +243,40 @@ pub struct NormalizedWorkDetail {
     pub additional_asins: Vec<String>,
 }
 
+impl From<livrarr_domain::services::SourceProviderData> for NormalizedWorkDetail {
+    fn from(src: livrarr_domain::services::SourceProviderData) -> Self {
+        Self {
+            title: None,
+            subtitle: None,
+            original_title: None,
+            author_name: None,
+            description: src.description,
+            year: None,
+            series_name: src.series_name,
+            series_position: src.series_position.and_then(|s| s.parse::<f64>().ok()),
+            genres: src.genres,
+            language: None,
+            page_count: src.page_count,
+            duration_seconds: None,
+            publisher: src.publisher,
+            publish_date: None,
+            hc_key: None,
+            gr_key: None,
+            ol_key: None,
+            isbn_13: src.isbn,
+            asin: src.asin,
+            narrator: None,
+            narration_type: None,
+            abridged: None,
+            rating: src.rating,
+            rating_count: src.rating_count,
+            cover_url: src.cover_url,
+            additional_isbns: vec![],
+            additional_asins: vec![],
+        }
+    }
+}
+
 /// TEMP(pk-tdd): per-provider outcome with typed payload for Success.
 #[derive(Debug, Clone)]
 pub enum ProviderOutcome<T> {
@@ -388,27 +422,33 @@ pub struct PriorityModel {
 }
 
 impl PriorityModel {
-    /// Standard English-language priority model.
-    /// Content: HC→GR→OL, Description: HC→OL→GR, Cover: HC→GR→OL, Audio: Audnexus→HC.
+    /// English: HC → GR → Readarr → OL, Audio: Audnexus → HC.
     pub fn english() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
-            content: vec![P::Hardcover, P::Goodreads, P::OpenLibrary],
-            description: vec![P::Hardcover, P::OpenLibrary, P::Goodreads],
-            cover: vec![P::Hardcover, P::Goodreads, P::OpenLibrary],
+            content: vec![P::Hardcover, P::Goodreads, P::Readarr, P::OpenLibrary],
+            description: vec![P::Hardcover, P::Goodreads, P::Readarr, P::OpenLibrary],
+            cover: vec![P::Hardcover, P::Goodreads, P::Readarr, P::OpenLibrary],
             audio: vec![P::Audnexus, P::Hardcover],
         }
     }
 
-    /// Foreign-language priority model. GR-only for content/description/cover,
-    /// Audnexus-only for audio. OL and HC excluded — poor foreign-language data quality.
+    /// Foreign: GR → HC → Readarr → OL, Audio: Audnexus → HC.
     pub fn foreign() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
-            content: vec![P::Goodreads],
-            description: vec![P::Goodreads],
-            cover: vec![P::Goodreads],
-            audio: vec![P::Audnexus],
+            content: vec![P::Goodreads, P::Hardcover, P::Readarr, P::OpenLibrary],
+            description: vec![P::Goodreads, P::Hardcover, P::Readarr, P::OpenLibrary],
+            cover: vec![P::Goodreads, P::Hardcover, P::Readarr, P::OpenLibrary],
+            audio: vec![P::Audnexus, P::Hardcover],
+        }
+    }
+
+    /// Select model based on work language.
+    pub fn for_language(language: Option<&str>) -> Self {
+        match crate::language::provider_priority(language) {
+            crate::language::ProviderPriority::English => Self::english(),
+            crate::language::ProviderPriority::Foreign => Self::foreign(),
         }
     }
 }
@@ -914,6 +954,10 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
 /// Per-work lock map type [I-12].
 type PerWorkLocks = tokio::sync::Mutex<HashMap<(UserId, WorkId), Arc<tokio::sync::Mutex<()>>>>;
 
+/// Source data pending injection for a specific (user_id, work_id) pair.
+type SourceDataStore =
+    tokio::sync::Mutex<HashMap<(UserId, WorkId), livrarr_domain::services::SourceProviderData>>;
+
 /// Enrichment service implementation.
 /// Generic over DB, Q (ProviderQueue), ME (MergeEngine), and V (LlmValidator)
 /// to avoid dyn-compatibility issues.
@@ -927,6 +971,9 @@ pub struct EnrichmentServiceImpl<DB, Q, ME, V> {
     validator: Arc<V>,
     /// Per-work lock map [I-12]: serializes concurrent enrichment calls for the same (user_id, work_id).
     locks: Arc<PerWorkLocks>,
+    /// Pre-injected source provider data (e.g., from Readarr import).
+    /// Set via `pre_inject_source_data` before calling `enrich_work`.
+    source_data_store: Arc<SourceDataStore>,
 }
 
 impl<DB, Q, ME, V> EnrichmentServiceImpl<DB, Q, ME, V>
@@ -949,7 +996,20 @@ where
             merge_engine,
             validator,
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            source_data_store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Pre-inject source provider data before calling `enrich_work`.
+    /// The data is consumed during scatter-gather and appended as a Readarr provider outcome.
+    pub async fn pre_inject_source_data(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        data: livrarr_domain::services::SourceProviderData,
+    ) {
+        let mut store = self.source_data_store.lock().await;
+        store.insert((user_id, work_id), data);
     }
 }
 
@@ -1000,7 +1060,20 @@ where
             priority: RequestPriority::Normal,
             mode,
         };
-        let scatter_result = self.queue.dispatch_enrichment(&work, context).await?;
+        let mut scatter_result = self.queue.dispatch_enrichment(&work, context).await?;
+
+        // Step 4.5: Append source provider data (Readarr import) if pre-injected.
+        // Treated as an additional provider outcome — merge engine arbitrates field selection.
+        {
+            let mut store = self.source_data_store.lock().await;
+            if let Some(source_data) = store.remove(&(user_id, work_id)) {
+                let normalized: NormalizedWorkDetail = source_data.into();
+                scatter_result.outcomes.insert(
+                    livrarr_domain::MetadataProvider::Readarr,
+                    ProviderOutcome::Success(Box::new(normalized)),
+                );
+            }
+        }
 
         // Step 5: Re-read current work after dispatch (TOCTOU safety — content freshness)
         let mut current_work = self.db.get_work(user_id, work_id).await?;
@@ -1207,12 +1280,7 @@ where
         }
 
         // Determine priority model based on work language
-        let priority_model = match current_work.language.as_deref() {
-            Some(lang) if !matches!(lang.to_lowercase().as_str(), "en" | "eng" | "english") => {
-                PriorityModel::foreign()
-            }
-            _ => PriorityModel::english(),
-        };
+        let priority_model = PriorityModel::for_language(current_work.language.as_deref());
 
         // Step 9: CAS retry loop — max 3 attempts
         const MAX_CAS_ATTEMPTS: usize = 3;

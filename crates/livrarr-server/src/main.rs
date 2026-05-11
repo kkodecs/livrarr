@@ -267,9 +267,9 @@ async fn main() {
         );
 
         builder = builder.with_applicability_rule(Arc::new(|provider, work| {
-            if !m::language::is_foreign_work(
-                work.enrichment_source.as_deref(),
-                work.language.as_deref(),
+            if matches!(
+                m::language::provider_priority(work.language.as_deref()),
+                m::language::ProviderPriority::English
             ) {
                 return true;
             }

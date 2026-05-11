@@ -61,7 +61,7 @@ pub const SUPPORTED_LANGUAGES: &[LanguageInfo] = &[
     LanguageInfo {
         code: "pl",
         english_name: "Polish",
-        provider_name: "lubimyczytac.pl",
+        provider_name: "Web Search",
         provider_type: "llm",
         requires_llm: true,
     },
@@ -148,18 +148,17 @@ pub fn is_llm_configured(
         && llm_model.is_some_and(|s| !s.is_empty())
 }
 
-pub fn is_foreign_source(metadata_source: Option<&str>) -> bool {
-    livrarr_domain::is_foreign_source(metadata_source)
-}
-
-pub fn is_foreign_work(metadata_source: Option<&str>, language: Option<&str>) -> bool {
-    is_foreign_source(metadata_source) || is_non_english(language)
-}
-
-fn is_non_english(language: Option<&str>) -> bool {
-    match language.map(|s| s.trim().to_ascii_lowercase()) {
-        Some(s) if matches!(s.as_str(), "en" | "eng" | "english") => false,
-        Some(s) if !s.is_empty() => true,
-        _ => false,
+/// Determine provider priority order based on work language.
+/// English (or unknown) → English priority. Everything else → foreign priority.
+pub fn provider_priority(language: Option<&str>) -> ProviderPriority {
+    match language.map(|l| l.trim().to_lowercase()).as_deref() {
+        None | Some("en") | Some("eng") | Some("english") | Some("") => ProviderPriority::English,
+        Some(_) => ProviderPriority::Foreign,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderPriority {
+    English,
+    Foreign,
 }
