@@ -2,53 +2,35 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use livrarr_db::{
-    AuthorDb, CreateSeriesDbRequest, CreateWorkDbRequest, LibraryItemDb, LinkWorkToSeriesRequest,
-    ProvenanceDb, SeriesCacheDb, SeriesCacheEntry, SeriesDb, WorkDb, WorkDbCreate,
+    AuthorDb, CreateSeriesDbRequest, LibraryItemDb, LinkWorkToSeriesRequest, SeriesCacheDb,
+    SeriesCacheEntry, SeriesDb, WorkDb,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 
-pub struct SeriesQueryServiceImpl<D, F, E, L = crate::llm_caller_service::LlmCallerImpl> {
+pub struct SeriesQueryServiceImpl<D, F, W, L = crate::llm_caller_service::LlmCallerImpl> {
     db: D,
     fetcher: F,
-    enrichment: Arc<E>,
-    data_dir: std::path::PathBuf,
+    work_service: Arc<W>,
     llm: L,
 }
 
-impl<D, F, E, L> SeriesQueryServiceImpl<D, F, E, L> {
-    pub fn new(
-        db: D,
-        fetcher: F,
-        enrichment: Arc<E>,
-        data_dir: std::path::PathBuf,
-        llm: L,
-    ) -> Self {
+impl<D, F, W, L> SeriesQueryServiceImpl<D, F, W, L> {
+    pub fn new(db: D, fetcher: F, work_service: Arc<W>, llm: L) -> Self {
         Self {
             db,
             fetcher,
-            enrichment,
-            data_dir,
+            work_service,
             llm,
         }
     }
 }
 
-impl<D, F, E, L> SeriesQueryService for SeriesQueryServiceImpl<D, F, E, L>
+impl<D, F, W, L> SeriesQueryService for SeriesQueryServiceImpl<D, F, W, L>
 where
-    D: SeriesDb
-        + AuthorDb
-        + WorkDb
-        + WorkDbCreate
-        + LibraryItemDb
-        + SeriesCacheDb
-        + ProvenanceDb
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    D: SeriesDb + AuthorDb + WorkDb + LibraryItemDb + SeriesCacheDb + Clone + Send + Sync + 'static,
     F: HttpFetcher + Clone + Send + Sync + 'static,
-    E: EnrichmentWorkflow + Send + Sync + 'static,
+    W: WorkService + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
 {
     async fn list_enriched(
@@ -654,77 +636,42 @@ where
                 continue;
             }
 
-            // No match — create new work.
-            let cleaned_title = crate::title_cleanup::clean_title(&book.title);
-            let cleaned_author = crate::title_cleanup::clean_author(&author.name);
-            let norm_title = livrarr_domain::normalize_for_matching(&cleaned_title);
-            let norm_author = livrarr_domain::normalize_for_matching(&cleaned_author);
+            // No match — create new work via WorkService::add() (M2 single creation gate).
             match self
-                .db
-                .create_work(CreateWorkDbRequest {
-                    user_id: author.user_id,
-                    title: cleaned_title,
-                    author_name: cleaned_author,
-                    normalized_title: norm_title,
-                    normalized_author: norm_author,
-                    author_id: Some(author.id),
-                    ol_key: None,
-                    gr_key: Some(book.gr_key.clone()),
-                    year: book.year,
-                    cover_url: None,
-                    language: None,
-                    import_id: None,
-                    series_id: Some(series_id),
-                    series_name: Some(series_name.clone()),
-                    series_position: book.position,
-                    monitor_ebook,
-                    monitor_audiobook,
-                    source_provider_json: None,
-                })
+                .work_service
+                .add(
+                    author.user_id,
+                    AddWorkRequest {
+                        title: book.title.clone(),
+                        author_name: author.name.clone(),
+                        gr_key: Some(book.gr_key.clone()),
+                        year: book.year,
+                        series_id: Some(series_id),
+                        series_name: Some(series_name.clone()),
+                        series_position: book.position,
+                        monitor_ebook: Some(monitor_ebook),
+                        monitor_audiobook: Some(monitor_audiobook),
+                        provenance_setter: Some(ProvenanceSetter::AutoAdded),
+                        ..Default::default()
+                    },
+                )
                 .await
             {
-                Ok((work, _actually_created)) => {
-                    created += 1;
-                    write_addtime_provenance(&self.db, user_id, &work).await;
-                    tracing::debug!(
-                        work_id = work.id,
-                        title = %book.title,
-                        "created work from series"
-                    );
-                    let enrichment = self.enrichment.clone();
-                    let work_id = work.id;
-                    let covers_dir = self.data_dir.join("covers");
-                    let fetcher = self.fetcher.clone();
-                    tokio::spawn(async move {
-                        let result = tokio::time::timeout(
-                            Duration::from_secs(30),
-                            enrichment.enrich_work(user_id, work_id, EnrichmentMode::Background),
-                        )
-                        .await;
-                        match result {
-                            Ok(Ok(r)) => {
-                                if let Some(ref url) = r.work.cover_url {
-                                    if let Err(e) = crate::work_service::download_cover_to_disk(
-                                        &fetcher,
-                                        url,
-                                        &covers_dir,
-                                        work_id,
-                                        "",
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!(work_id, "cover download failed: {e}");
-                                    }
-                                }
-                            }
-                            Ok(Err(e)) => {
-                                tracing::warn!(work_id, "series-add enrichment failed: {e}");
-                            }
-                            Err(_) => {
-                                tracing::warn!(work_id, "enrichment timed out");
-                            }
-                        }
-                    });
+                Ok(result) => {
+                    if result.created {
+                        created += 1;
+                        tracing::debug!(
+                            work_id = result.work.id,
+                            title = %book.title,
+                            "created work from series"
+                        );
+                    } else {
+                        tracing::debug!(
+                            work_id = result.work.id,
+                            title = %book.title,
+                            "dedup matched existing work in series monitor"
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(title = %book.title, "failed to create work: {e}");
@@ -1095,9 +1042,4 @@ async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
     }
 
     Some(cleaned)
-}
-
-async fn write_addtime_provenance<D: ProvenanceDb>(db: &D, user_id: i64, work: &Work) {
-    crate::provenance::write_addtime_provenance(db, user_id, work, ProvenanceSetter::AutoAdded)
-        .await;
 }

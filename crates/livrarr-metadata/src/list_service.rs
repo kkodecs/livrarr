@@ -571,6 +571,14 @@ where
 
             // Try to add via WorkService.
             match self.work_service.add(user_id, add_req).await {
+                Ok(add_result) if !add_result.created => {
+                    // Dedup match — work already exists, nothing to tag or track.
+                    results.push(ListConfirmRowResult {
+                        row_index: row_idx,
+                        status: "already_exists".into(),
+                        message: None,
+                    });
+                }
                 Ok(add_result) => {
                     // Tag the work with import_id (explicit, race-free).
                     if let Err(e) = self
@@ -599,13 +607,6 @@ where
                     results.push(ListConfirmRowResult {
                         row_index: row_idx,
                         status: "added".into(),
-                        message: None,
-                    });
-                }
-                Err(WorkServiceError::AlreadyExists) => {
-                    results.push(ListConfirmRowResult {
-                        row_index: row_idx,
-                        status: "already_exists".into(),
                         message: None,
                     });
                 }

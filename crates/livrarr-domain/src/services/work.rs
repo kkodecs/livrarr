@@ -23,7 +23,7 @@ pub struct SourceProviderData {
     pub series_position: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AddWorkRequest {
     // Core identity
     pub title: String,

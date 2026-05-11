@@ -57,7 +57,7 @@ pub type LiveSeriesService = livrarr_metadata::series_service::SeriesServiceImpl
 pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::SeriesQueryServiceImpl<
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
-    LiveEnrichmentWorkflow,
+    LiveWorkService,
     livrarr_metadata::llm_caller_service::LlmCallerImpl,
 >;
 pub type LiveTagServiceImpl = crate::tag_service::LiveTagService<LiveImportIoService>;

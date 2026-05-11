@@ -5,22 +5,21 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use livrarr_db::{
-    CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest, CreateWorkDbRequest,
-    UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest,
-};
+use livrarr_db::{CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest};
 use livrarr_domain::readarr::*;
-use livrarr_domain::services::{ReadarrImportWorkflow, ServiceError};
+use livrarr_domain::services::{
+    AddWorkRequest, ReadarrImportWorkflow, ServiceError, SourceProviderData, WorkService,
+};
 use livrarr_domain::{
-    derive_sort_name, normalize_for_matching, sanitize_path_component, EnrichmentStatus, Import,
-    MediaType,
+    derive_sort_name, normalize_for_matching, sanitize_path_component, Import, MediaType,
+    ProvenanceSetter,
 };
 
 use livrarr_http::HttpClient;
 
 use crate::readarr_client::{self, RdAuthor, RdBook, RdBookFile, RdRootFolder, ReadarrClient};
 use crate::readarr_import_service::ReadarrImportService;
-use crate::state::ReadarrImportServiceImpl;
+use crate::state::{LiveWorkService, ReadarrImportServiceImpl};
 
 // =============================================================================
 // LiveReadarrImportWorkflow
@@ -32,6 +31,7 @@ pub struct LiveReadarrImportWorkflow {
     readarr_import_service: Arc<ReadarrImportServiceImpl>,
     readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
     data_dir: Arc<std::path::PathBuf>,
+    work_service: Arc<LiveWorkService>,
 }
 
 impl LiveReadarrImportWorkflow {
@@ -40,12 +40,14 @@ impl LiveReadarrImportWorkflow {
         readarr_import_service: Arc<ReadarrImportServiceImpl>,
         readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
         data_dir: Arc<std::path::PathBuf>,
+        work_service: Arc<LiveWorkService>,
     ) -> Self {
         Self {
             http_client,
             readarr_import_service,
             readarr_import_progress,
             data_dir,
+            work_service,
         }
     }
 }
@@ -144,7 +146,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         let http_client = self.http_client.clone();
         let readarr_import_service = self.readarr_import_service.clone();
         let readarr_import_progress = self.readarr_import_progress.clone();
-        let data_dir = self.data_dir.clone();
+        let work_service = self.work_service.clone();
         let id = import_id.clone();
 
         tokio::spawn(async move {
@@ -152,10 +154,10 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
                 http_client,
                 readarr_import_service.clone(),
                 readarr_import_progress.clone(),
-                data_dir,
                 &id,
                 user_id,
                 req,
+                work_service,
             );
             if let Err(e) = runner.run().await {
                 error!(import_id = %id, "Readarr import failed: {e}");
@@ -827,10 +829,10 @@ struct ImportRunner {
     http_client: HttpClient,
     readarr_import_service: Arc<ReadarrImportServiceImpl>,
     readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
-    data_dir: Arc<std::path::PathBuf>,
     import_id: String,
     user_id: i64,
     req: ReadarrImportRequest,
+    work_service: Arc<LiveWorkService>,
     author_map_rd: HashMap<i64, i64>,
     work_map_rd: HashMap<i64, i64>,
     authors_created: i64,
@@ -845,19 +847,19 @@ impl ImportRunner {
         http_client: HttpClient,
         readarr_import_service: Arc<ReadarrImportServiceImpl>,
         readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
-        data_dir: Arc<std::path::PathBuf>,
         import_id: &str,
         user_id: i64,
         req: ReadarrImportRequest,
+        work_service: Arc<LiveWorkService>,
     ) -> Self {
         Self {
             http_client,
             readarr_import_service,
             readarr_import_progress,
-            data_dir,
             import_id: import_id.to_string(),
             user_id,
             req,
+            work_service,
             author_map_rd: HashMap::new(),
             work_map_rd: HashMap::new(),
             authors_created: 0,
@@ -1162,7 +1164,7 @@ impl ImportRunner {
         rd_book: &RdBook,
         author_name: &str,
         title: &str,
-        livrarr_author_id: Option<i64>,
+        _livrarr_author_id: Option<i64>,
         isbn: Option<String>,
         asin: Option<String>,
         publisher: Option<String>,
@@ -1183,7 +1185,7 @@ impl ImportRunner {
             })
             .map(|s| s.to_string());
 
-        let (series_name, series_position) = rd_book
+        let (series_name, series_position_f64) = rd_book
             .series_title
             .as_deref()
             .map(parse_series_title)
@@ -1216,102 +1218,48 @@ impl ImportRunner {
         let monitor_ebook = has_ebook_file || rd_book.monitored.unwrap_or(false);
         let monitor_audiobook = has_audiobook_file;
 
+        // Build SourceProviderData from Readarr metadata for enrichment pipeline.
+        let source_data = SourceProviderData {
+            description,
+            isbn,
+            asin,
+            publisher,
+            genres,
+            page_count,
+            rating,
+            rating_count,
+            cover_url: cover_url.clone(),
+            series_name: series_name.clone(),
+            series_position: series_position_f64.map(|p| p.to_string()),
+        };
+
         match self
-            .readarr_import_service
-            .create_work(CreateWorkDbRequest {
-                user_id: self.user_id,
-                title: title.to_string(),
-                author_name: author_name.to_string(),
-                normalized_title: String::new(),
-                normalized_author: String::new(),
-                author_id: livrarr_author_id,
-                ol_key: None,
-                gr_key: None,
-                year,
-                cover_url: cover_url.clone(),
-                language: language.clone(),
-                import_id: Some(self.import_id.clone()),
-                series_id: None,
-                series_name: None,
-                series_position: None,
-                monitor_ebook: false,
-                monitor_audiobook: false,
-                source_provider_json: None,
-            })
+            .work_service
+            .add(
+                self.user_id,
+                AddWorkRequest {
+                    title: title.to_string(),
+                    author_name: author_name.to_string(),
+                    year,
+                    language,
+                    monitor_ebook: Some(monitor_ebook),
+                    monitor_audiobook: Some(monitor_audiobook),
+                    import_id: Some(self.import_id.clone()),
+                    source_provider_data: Some(source_data),
+                    provenance_setter: Some(ProvenanceSetter::Import),
+                    series_name,
+                    series_position: series_position_f64,
+                    cover_url,
+                    ..Default::default()
+                },
+            )
             .await
         {
-            Ok(w) => {
-                self.works_created += 1;
-
-                let _ = self
-                    .readarr_import_service
-                    .update_work_enrichment(
-                        self.user_id,
-                        w.id,
-                        UpdateWorkEnrichmentDbRequest {
-                            title: None,
-                            subtitle: None,
-                            original_title: None,
-                            author_name: None,
-                            description,
-                            year: None,
-                            series_name,
-                            series_position,
-                            genres,
-                            language: None,
-                            page_count,
-                            duration_seconds: None,
-                            publisher,
-                            publish_date: rd_book.release_date.clone(),
-                            ol_key: None,
-                            gr_key: None,
-                            hc_key: None,
-                            isbn_13: isbn,
-                            asin,
-                            narrator: None,
-                            narration_type: None,
-                            abridged: None,
-                            rating,
-                            rating_count,
-                            enrichment_status: EnrichmentStatus::Failed,
-                            enrichment_source: Some("readarr".to_string()),
-                            cover_url: None,
-                        },
-                    )
-                    .await;
-
-                let _ = self
-                    .readarr_import_service
-                    .update_work_user_fields(
-                        self.user_id,
-                        w.id,
-                        UpdateWorkUserFieldsDbRequest {
-                            title: None,
-                            author_name: None,
-                            normalized_title: None,
-                            normalized_author: None,
-                            series_name: None,
-                            series_position: None,
-                            monitor_ebook: Some(monitor_ebook),
-                            monitor_audiobook: Some(monitor_audiobook),
-                        },
-                    )
-                    .await;
-
-                if let Some(ref url) = cover_url {
-                    let covers_dir = self.data_dir.join("covers");
-                    let _ = tokio::fs::create_dir_all(&covers_dir).await;
-                    if let Ok(resp) = self.http_client.get(url).send().await {
-                        if resp.status().is_success() {
-                            if let Ok(bytes) = resp.bytes().await {
-                                let path = covers_dir.join(format!("{}.jpg", w.id));
-                                let _ = tokio::fs::write(&path, &bytes).await;
-                            }
-                        }
-                    }
+            Ok(result) => {
+                if result.created {
+                    self.works_created += 1;
                 }
-
-                Some(w.id)
+                Some(result.work.id)
             }
             Err(e) => {
                 warn!(title = %title, "Failed to create work: {e}");
