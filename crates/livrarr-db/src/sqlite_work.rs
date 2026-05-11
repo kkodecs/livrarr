@@ -305,38 +305,6 @@ impl WorkDb for SqliteDb {
         Ok((works, total))
     }
 
-    async fn create_work(&self, req: CreateWorkDbRequest) -> Result<Work, DbError> {
-        let now = Utc::now().to_rfc3339();
-        let id = sqlx::query(
-            "INSERT INTO works (user_id, title, author_name, author_id, ol_key, gr_key, year, \
-             cover_url, enrichment_status, added_at, language, import_id, \
-             series_id, series_name, series_position, monitor_ebook, monitor_audiobook) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(req.user_id)
-        .bind(&req.title)
-        .bind(&req.author_name)
-        .bind(req.author_id)
-        .bind(&req.ol_key)
-        .bind(&req.gr_key)
-        .bind(req.year)
-        .bind(&req.cover_url)
-        .bind(&now)
-        .bind(&req.language)
-        .bind(&req.import_id)
-        .bind(req.series_id)
-        .bind(&req.series_name)
-        .bind(req.series_position)
-        .bind(req.monitor_ebook)
-        .bind(req.monitor_audiobook)
-        .execute(self.pool())
-        .await
-        .map_err(map_db_err)?
-        .last_insert_rowid();
-
-        self.get_work(req.user_id, id).await
-    }
-
     async fn update_work_enrichment(
         &self,
         user_id: UserId,
@@ -602,16 +570,6 @@ impl WorkDb for SqliteDb {
         rows.into_iter().map(row_to_work).collect()
     }
 
-    async fn reset_pending_enrichments(&self) -> Result<u64, crate::DbError> {
-        let result = sqlx::query(
-            "UPDATE works SET enrichment_status = 'failed' WHERE enrichment_status = 'pending'",
-        )
-        .execute(self.pool())
-        .await
-        .map_err(map_db_err)?;
-        Ok(result.rows_affected())
-    }
-
     async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError> {
         let rows = sqlx::query(
             "SELECT * FROM works WHERE monitor_ebook = 1 OR monitor_audiobook = 1 \
@@ -623,13 +581,31 @@ impl WorkDb for SqliteDb {
         rows.into_iter().map(row_to_work).collect()
     }
 
-    async fn set_enrichment_status_skipped(&self, id: WorkId) -> Result<(), DbError> {
-        sqlx::query("UPDATE works SET enrichment_status = 'skipped' WHERE id = ?")
-            .bind(id)
-            .execute(self.pool())
-            .await
-            .map_err(map_db_err)?;
-        Ok(())
+    async fn list_stale_unenriched_works(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Work>, DbError> {
+        let rows = sqlx::query(
+            "SELECT * FROM works WHERE enrichment_status = 'unenriched' AND added_at < ?",
+        )
+        .bind(older_than.to_rfc3339())
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_work).collect()
+    }
+
+    async fn list_failed_works_without_retry_state(&self) -> Result<Vec<Work>, DbError> {
+        let rows = sqlx::query(
+            "SELECT w.* FROM works w \
+             LEFT JOIN provider_retry_state prs \
+                 ON w.id = prs.work_id AND w.user_id = prs.user_id \
+             WHERE w.enrichment_status = 'failed' AND prs.work_id IS NULL",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_work).collect()
     }
 
     async fn apply_enrichment_merge(
@@ -913,10 +889,64 @@ impl WorkDb for SqliteDb {
     }
 }
 
+impl crate::WorkDbCreate for SqliteDb {
+    async fn create_work(&self, req: CreateWorkDbRequest) -> Result<(Work, bool), DbError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "INSERT INTO works (user_id, title, author_name, normalized_title, normalized_author, \
+             author_id, ol_key, gr_key, year, cover_url, enrichment_status, added_at, \
+             language, import_id, series_id, series_name, series_position, \
+             monitor_ebook, monitor_audiobook) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(user_id, normalized_title, normalized_author) DO NOTHING",
+        )
+        .bind(req.user_id)
+        .bind(&req.title)
+        .bind(&req.author_name)
+        .bind(&req.normalized_title)
+        .bind(&req.normalized_author)
+        .bind(req.author_id)
+        .bind(&req.ol_key)
+        .bind(&req.gr_key)
+        .bind(req.year)
+        .bind(&req.cover_url)
+        .bind(&now)
+        .bind(&req.language)
+        .bind(&req.import_id)
+        .bind(req.series_id)
+        .bind(&req.series_name)
+        .bind(req.series_position)
+        .bind(req.monitor_ebook)
+        .bind(req.monitor_audiobook)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        if result.rows_affected() == 1 {
+            // Newly inserted — last_insert_rowid is the new ID.
+            let id = result.last_insert_rowid();
+            let work = self.get_work(req.user_id, id).await?;
+            Ok((work, true))
+        } else {
+            // Conflict — fetch the existing row.
+            let row = sqlx::query(
+                "SELECT * FROM works WHERE user_id = ? AND normalized_title = ? AND normalized_author = ?",
+            )
+            .bind(req.user_id)
+            .bind(&req.normalized_title)
+            .bind(&req.normalized_author)
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_db_err)?;
+            Ok((row_to_work(row)?, false))
+        }
+    }
+}
+
 impl crate::EnrichmentRetryDb for SqliteDb {
     async fn list_works_for_retry(&self) -> Result<Vec<Work>, crate::DbError> {
         let rows = sqlx::query(
-            "SELECT * FROM works WHERE enrichment_status IN ('pending', 'failed', 'partial') \
+            "SELECT * FROM works WHERE enrichment_status = 'failed' \
              AND enrichment_retry_count < 3 ORDER BY id",
         )
         .fetch_all(self.pool())

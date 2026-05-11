@@ -121,7 +121,14 @@ impl<D> LiveReadarrImportService<D> {
 
 impl<D> ReadarrImportService for LiveReadarrImportService<D>
 where
-    D: ImportDb + RootFolderDb + AuthorDb + WorkDb + LibraryItemDb + Send + Sync,
+    D: ImportDb
+        + RootFolderDb
+        + AuthorDb
+        + WorkDb
+        + livrarr_db::WorkDbCreate
+        + LibraryItemDb
+        + Send
+        + Sync,
 {
     async fn get_root_folder(&self, id: RootFolderId) -> Result<RootFolder, ReadarrImportError> {
         Ok(self.db.get_root_folder(id).await?)
@@ -212,7 +219,8 @@ where
         &self,
         req: livrarr_db::CreateWorkDbRequest,
     ) -> Result<Work, ReadarrImportError> {
-        Ok(self.db.create_work(req).await?)
+        let (work, _created) = self.db.create_work(req).await?;
+        Ok(work)
     }
 
     async fn update_work_enrichment(

@@ -895,7 +895,7 @@ async fn test_work_delete_removes_work_and_library_items() {
         .unwrap();
 
     // Seed a library item for this work
-    use livrarr_db::{CreateLibraryItemDbRequest, LibraryItemDb, RootFolderDb};
+    use livrarr_db::{CreateLibraryItemDbRequest, LibraryItemDb, RootFolderDb, TagStatus};
     let rf = db2
         .create_root_folder("/tmp/test-library", livrarr_domain::MediaType::Ebook)
         .await
@@ -908,6 +908,8 @@ async fn test_work_delete_removes_work_and_library_items() {
         media_type: livrarr_domain::MediaType::Ebook,
         file_size: 1024,
         import_id: None,
+        tag_status: TagStatus::Pending,
+        tagged_at_generation: 0,
     })
     .await
     .unwrap();

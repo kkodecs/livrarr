@@ -14,8 +14,8 @@ mod tests {
         CreateDownloadClientDbRequest, CreateGrabDbRequest, CreateImportDbRequest,
         CreateLibraryItemDbRequest, CreateSeriesDbRequest, CreateUserDbRequest,
         CreateWorkDbRequest, DbError, DownloadClientDb, DownloadClientImplementation, GrabDb,
-        GrabStatus, ImportDb, LibraryItemDb, MediaType, RootFolderDb, SeriesDb, UserDb, UserId,
-        UserRole, WorkDb, WorkId,
+        GrabStatus, ImportDb, LibraryItemDb, MediaType, RootFolderDb, SeriesDb, TagStatus, UserDb,
+        UserId, UserRole, WorkDb, WorkId,
     };
 
     // -------------------------------------------------------------------------
@@ -31,7 +31,9 @@ mod tests {
         work_b_id: WorkId,
     }
 
-    async fn seed_two_users(db: &(impl UserDb + AuthorDb + WorkDb)) -> TwoUsers {
+    async fn seed_two_users(
+        db: &(impl UserDb + AuthorDb + WorkDb + crate::WorkDbCreate),
+    ) -> TwoUsers {
         let user_a = db
             .create_user(CreateUserDbRequest {
                 username: "alice".to_string(),
@@ -78,7 +80,7 @@ mod tests {
             .await
             .expect("create author_b");
 
-        let work_a = db
+        let (work_a, _) = db
             .create_work(CreateWorkDbRequest {
                 user_id: user_a.id,
                 title: "Work A".to_string(),
@@ -102,7 +104,7 @@ mod tests {
             .await
             .expect("create work_a");
 
-        let work_b = db
+        let (work_b, _) = db
             .create_work(CreateWorkDbRequest {
                 user_id: user_b.id,
                 title: "Work B".to_string(),
@@ -516,6 +518,8 @@ mod tests {
                 media_type: MediaType::Ebook,
                 file_size: 1024,
                 import_id: None,
+                tag_status: TagStatus::Pending,
+                tagged_at_generation: 0,
             })
             .await
             .expect("create library_item_a");
@@ -529,6 +533,8 @@ mod tests {
                 media_type: MediaType::Ebook,
                 file_size: 2048,
                 import_id: None,
+                tag_status: TagStatus::Pending,
+                tagged_at_generation: 0,
             })
             .await
             .expect("create library_item_b");

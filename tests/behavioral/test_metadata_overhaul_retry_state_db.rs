@@ -13,7 +13,7 @@ use livrarr_domain::{MetadataProvider, OutcomeClass, UserId, UserRole, WorkId};
 
 #[async_trait]
 pub trait DbTestHarness: Send + Sync {
-    type Db: ProviderRetryStateDb + WorkDb;
+    type Db: ProviderRetryStateDb + WorkDb + WorkDbCreate;
     async fn setup() -> Self;
     fn db(&self) -> &Self::Db;
     fn user_ids(&self) -> (UserId, UserId);
@@ -32,10 +32,11 @@ fn make_work_req(user_id: UserId, title: &str, author: &str) -> CreateWorkDbRequ
     }
 }
 
-async fn make_work<DB: WorkDb>(db: &DB, user_id: UserId, title: &str) -> WorkId {
+async fn make_work<DB: WorkDb + WorkDbCreate>(db: &DB, user_id: UserId, title: &str) -> WorkId {
     db.create_work(make_work_req(user_id, title, &format!("{title} Author")))
         .await
         .unwrap()
+        .0
         .id
 }
 
@@ -166,7 +167,7 @@ async fn seed_all_non_conflict_terminal_rows<DB: ProviderRetryStateDb>(
 }
 
 async fn assert_get_retry_state_returns_none_before_any_record<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -182,7 +183,7 @@ async fn assert_get_retry_state_returns_none_before_any_record<
 }
 
 async fn assert_get_retry_state_returns_some_after_first_write<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -207,7 +208,9 @@ async fn assert_get_retry_state_returns_some_after_first_write<
     assert!(state.is_some());
 }
 
-async fn assert_record_will_retry_increments_attempts_by_one<DB: ProviderRetryStateDb + WorkDb>(
+async fn assert_record_will_retry_increments_attempts_by_one<
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
+>(
     db: &DB,
     user_id: UserId,
 ) {
@@ -231,7 +234,7 @@ async fn assert_record_will_retry_increments_attempts_by_one<DB: ProviderRetrySt
 }
 
 async fn assert_record_will_retry_clears_normalized_payload_json<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -270,7 +273,9 @@ async fn assert_record_will_retry_clears_normalized_payload_json<
     assert_eq!(stored.normalized_payload_json, None);
 }
 
-async fn assert_record_will_retry_clears_first_suppressed_at<DB: ProviderRetryStateDb + WorkDb>(
+async fn assert_record_will_retry_clears_first_suppressed_at<
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
+>(
     db: &DB,
     user_id: UserId,
 ) {
@@ -302,7 +307,7 @@ async fn assert_record_will_retry_clears_first_suppressed_at<DB: ProviderRetrySt
 }
 
 async fn assert_record_suppressed_increments_suppressed_passes_without_incrementing_attempts<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -331,7 +336,7 @@ async fn assert_record_suppressed_increments_suppressed_passes_without_increment
 }
 
 async fn assert_record_suppressed_sets_first_suppressed_at_when_none<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -358,7 +363,7 @@ async fn assert_record_suppressed_sets_first_suppressed_at_when_none<
 }
 
 async fn assert_record_suppressed_preserves_existing_first_suppressed_at<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -392,7 +397,7 @@ async fn assert_record_suppressed_preserves_existing_first_suppressed_at<
 }
 
 async fn assert_record_terminal_outcome_success_persists_normalized_payload_json<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -425,7 +430,7 @@ async fn assert_record_terminal_outcome_success_persists_normalized_payload_json
 }
 
 async fn assert_record_terminal_outcome_non_success_rejects_normalized_payload_json<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -457,7 +462,7 @@ async fn assert_record_terminal_outcome_non_success_rejects_normalized_payload_j
 }
 
 async fn assert_record_terminal_outcome_non_success_rejects_normalized_payload_json_for_all_terminal_non_success_classes<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -498,7 +503,7 @@ async fn assert_record_terminal_outcome_non_success_rejects_normalized_payload_j
 }
 
 async fn assert_record_terminal_outcome_success_requires_normalized_payload_json<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -530,7 +535,7 @@ async fn assert_record_terminal_outcome_success_requires_normalized_payload_json
 }
 
 async fn assert_record_terminal_outcome_rejects_non_terminal_outcome_classes<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -559,7 +564,7 @@ async fn assert_record_terminal_outcome_rejects_non_terminal_outcome_classes<
 }
 
 async fn assert_record_terminal_outcome_clears_next_attempt_at_and_first_suppressed_at<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -600,7 +605,7 @@ async fn assert_record_terminal_outcome_clears_next_attempt_at_and_first_suppres
     assert_eq!(state.first_suppressed_at, None);
 }
 
-async fn assert_not_configured_reset_flow<DB: ProviderRetryStateDb + WorkDb>(
+async fn assert_not_configured_reset_flow<DB: ProviderRetryStateDb + WorkDb + WorkDbCreate>(
     db: &DB,
     user_id: UserId,
 ) {
@@ -659,7 +664,7 @@ async fn assert_not_configured_reset_flow<DB: ProviderRetryStateDb + WorkDb>(
 }
 
 async fn assert_reset_all_retry_states_deletes_all_rows_for_work<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -711,7 +716,7 @@ async fn assert_reset_all_retry_states_deletes_all_rows_for_work<
 }
 
 async fn assert_list_works_due_for_retry_returns_due_will_retry_and_suppressed_only<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -773,7 +778,7 @@ async fn assert_list_works_due_for_retry_returns_due_will_retry_and_suppressed_o
 }
 
 async fn assert_list_works_due_for_retry_includes_rows_when_query_now_equals_next_attempt_at<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -817,7 +822,9 @@ async fn assert_list_works_due_for_retry_includes_rows_when_query_now_equals_nex
     assert_eq!(got, expected);
 }
 
-async fn assert_list_retry_states_returns_all_rows_for_work<DB: ProviderRetryStateDb + WorkDb>(
+async fn assert_list_retry_states_returns_all_rows_for_work<
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
+>(
     db: &DB,
     user_id: UserId,
 ) {
@@ -853,7 +860,9 @@ async fn assert_list_retry_states_returns_all_rows_for_work<DB: ProviderRetrySta
     assert_eq!(got_pairs, expected_pairs);
 }
 
-async fn assert_list_retry_states_isolates_by_user_id<DB: ProviderRetryStateDb + WorkDb>(
+async fn assert_list_retry_states_isolates_by_user_id<
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
+>(
     db: &DB,
     user1: UserId,
     user2: UserId,
@@ -950,7 +959,7 @@ async fn assert_list_retry_states_isolates_by_user_id<DB: ProviderRetryStateDb +
 }
 
 async fn assert_list_works_with_terminal_provider_rows_includes_only_all_non_conflict_terminal_works<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -1003,7 +1012,7 @@ async fn assert_list_works_with_terminal_provider_rows_includes_only_all_non_con
 }
 
 async fn assert_list_works_with_terminal_provider_rows_returns_terminal_provider_set_for_full_terminal_work<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -1026,7 +1035,7 @@ async fn assert_list_works_with_terminal_provider_rows_returns_terminal_provider
 }
 
 async fn assert_list_works_with_terminal_provider_rows_includes_partial_provider_set_when_all_rows_are_terminal<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -1063,7 +1072,7 @@ async fn assert_list_works_with_terminal_provider_rows_includes_partial_provider
 }
 
 async fn assert_list_works_with_terminal_provider_rows_returns_only_terminal_non_conflict_providers_for_partial_work<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -1105,7 +1114,7 @@ async fn assert_list_works_with_terminal_provider_rows_returns_only_terminal_non
 }
 
 async fn assert_list_works_with_terminal_provider_rows_works_with_terminal_provider_rows_for_single_work_with_three_terminal_non_conflict_rows<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -1177,7 +1186,7 @@ async fn assert_list_works_with_terminal_provider_rows_works_with_terminal_provi
 }
 
 async fn assert_list_works_with_terminal_provider_rows_isolated_by_user_id<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user1: UserId,
@@ -1264,7 +1273,7 @@ async fn assert_list_works_with_terminal_provider_rows_isolated_by_user_id<
 }
 
 async fn assert_list_works_with_terminal_provider_rows_excludes_conflict_rows<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -1304,7 +1313,7 @@ async fn assert_list_works_with_terminal_provider_rows_excludes_conflict_rows<
 }
 
 async fn assert_list_works_with_terminal_provider_rows_excludes_work_with_any_conflict_row<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -1367,7 +1376,7 @@ async fn assert_list_works_with_terminal_provider_rows_excludes_work_with_any_co
 }
 
 async fn assert_list_works_with_terminal_provider_rows_excludes_works_with_no_rows<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -1389,7 +1398,7 @@ async fn assert_list_works_with_terminal_provider_rows_excludes_works_with_no_ro
 }
 
 async fn assert_list_works_with_terminal_provider_rows_excludes_in_flight_rows<
-    DB: ProviderRetryStateDb + WorkDb,
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
@@ -1439,7 +1448,9 @@ async fn assert_list_works_with_terminal_provider_rows_excludes_in_flight_rows<
     }
 }
 
-async fn assert_retry_state_is_isolated_by_user_id<DB: ProviderRetryStateDb + WorkDb>(
+async fn assert_retry_state_is_isolated_by_user_id<
+    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
+>(
     db: &DB,
     user1: UserId,
     user2: UserId,

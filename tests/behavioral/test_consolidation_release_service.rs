@@ -9,7 +9,7 @@ use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
     CreateDownloadClientDbRequest, CreateIndexerDbRequest, CreateUserDbRequest,
-    CreateWorkDbRequest, DownloadClientDb, GrabDb, IndexerDb, UserDb, WorkDb,
+    CreateWorkDbRequest, DownloadClientDb, GrabDb, IndexerDb, UserDb, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
@@ -43,7 +43,7 @@ async fn setup_user(db: &SqliteDb) -> i64 {
 }
 
 async fn setup_work(db: &SqliteDb, user_id: i64) -> i64 {
-    let work = db
+    let (work, _) = db
         .create_work(CreateWorkDbRequest {
             user_id,
             title: "The Great Book".into(),

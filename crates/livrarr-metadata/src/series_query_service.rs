@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use livrarr_db::{
     AuthorDb, CreateSeriesDbRequest, CreateWorkDbRequest, LibraryItemDb, LinkWorkToSeriesRequest,
-    ProvenanceDb, SeriesCacheDb, SeriesCacheEntry, SeriesDb, WorkDb,
+    ProvenanceDb, SeriesCacheDb, SeriesCacheEntry, SeriesDb, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
@@ -39,6 +39,7 @@ where
     D: SeriesDb
         + AuthorDb
         + WorkDb
+        + WorkDbCreate
         + LibraryItemDb
         + SeriesCacheDb
         + ProvenanceDb
@@ -682,7 +683,7 @@ where
                 })
                 .await
             {
-                Ok(work) => {
+                Ok((work, _actually_created)) => {
                     created += 1;
                     write_addtime_provenance(&self.db, user_id, &work).await;
                     tracing::debug!(

@@ -5,8 +5,16 @@ use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{map_db_err, parse_dt};
 use crate::{
     CreateLibraryItemDbRequest, DbError, LibraryItem, LibraryItemDb, LibraryItemId, MediaType,
-    RootFolderId, UserId, WorkId,
+    RootFolderId, TagStatus, UserId, WorkId,
 };
+
+fn tag_status_str(s: TagStatus) -> &'static str {
+    match s {
+        TagStatus::Synced => "synced",
+        TagStatus::Pending => "pending",
+        TagStatus::Failed => "failed",
+    }
+}
 
 fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbError> {
     let media_type_str: String = row
@@ -227,8 +235,9 @@ impl LibraryItemDb for SqliteDb {
 
         // No conflict -- insert new row.
         let id = sqlx::query(
-            "INSERT INTO library_items (user_id, work_id, root_folder_id, path, media_type, file_size, import_id, imported_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO library_items (user_id, work_id, root_folder_id, path, media_type, \
+             file_size, import_id, imported_at, tag_status, tagged_at_generation) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(req.user_id)
         .bind(req.work_id)
@@ -238,6 +247,8 @@ impl LibraryItemDb for SqliteDb {
         .bind(req.file_size)
         .bind(&req.import_id)
         .bind(&now)
+        .bind(tag_status_str(req.tag_status))
+        .bind(req.tagged_at_generation)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?
@@ -324,5 +335,43 @@ impl LibraryItemDb for SqliteDb {
         .map_err(map_db_err)?;
         let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(Box::new(e)))?;
         Ok(cnt > 0)
+    }
+
+    async fn list_library_items_needing_tag_sync(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<LibraryItem>, DbError> {
+        let rows = sqlx::query(
+            "SELECT li.* FROM library_items li \
+             JOIN works w ON li.work_id = w.id AND li.user_id = w.user_id \
+             WHERE w.enrichment_status = 'enriched' \
+               AND (li.tag_status = 'pending' \
+                    OR (li.tag_status IN ('synced', 'failed') \
+                        AND li.tagged_at_generation < w.merge_generation)) \
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_library_item).collect()
+    }
+
+    async fn update_library_item_tag_status(
+        &self,
+        id: LibraryItemId,
+        tag_status: TagStatus,
+        tagged_at_generation: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE library_items SET tag_status = ?, tagged_at_generation = ? WHERE id = ?",
+        )
+        .bind(tag_status_str(tag_status))
+        .bind(tagged_at_generation)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(())
     }
 }

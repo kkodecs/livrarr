@@ -124,6 +124,15 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Step 9b: Backfill normalized identity columns and create UNIQUE index.
+    // Migration 038 adds columns with `__UNMIGRATED__` defaults; this hook
+    // computes real values, resolves duplicates, and creates the index.
+    if let Err(e) = livrarr_db::pool::backfill_normalized_identity(&pool).await {
+        error!("normalized identity backfill failed: {e}");
+        livrarr_db::pool::release_pid_lock(&data_dir);
+        std::process::exit(1);
+    }
+
     // Step 10: Clean up old backups (keep 3).
     {
         let data_dir_clone = data_dir.clone();

@@ -5,7 +5,7 @@ use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
     CreateLibraryItemDbRequest, CreateUserDbRequest, CreateWorkDbRequest, LibraryItemDb,
-    ListImportDb, PlaybackProgressDb, RootFolderDb, UserDb, WorkDb,
+    ListImportDb, PlaybackProgressDb, RootFolderDb, TagStatus, UserDb, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::{MediaType, UserRole};
@@ -62,6 +62,7 @@ async fn seed_work(db: &SqliteDb, user_id: i64, title: &str, author_name: &str) 
     })
     .await
     .unwrap()
+    .0
     .id
 }
 
@@ -83,6 +84,8 @@ async fn seed_library_item(
             media_type,
             file_size: 1024,
             import_id: None,
+            tag_status: TagStatus::Pending,
+            tagged_at_generation: 0,
         })
         .await
         .unwrap();
@@ -419,6 +422,8 @@ async fn test_file_list_paginated_page_zero_behaves_like_first_page() {
             media_type: MediaType::Ebook,
             file_size: 100,
             import_id: None,
+            tag_status: TagStatus::Pending,
+            tagged_at_generation: 0,
         })
         .await
         .unwrap();

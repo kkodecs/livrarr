@@ -11,7 +11,7 @@ use livrarr_db::{
     CreateWorkDbRequest, DownloadClientDb, HistoryDb, HistoryFilter, LibraryItemDb, NotificationDb,
     RemotePathMappingDb, RootFolderDb, UpdateAuthorDbRequest, UpdateDownloadClientDbRequest,
     UpdateEmailConfigRequest, UpdateMediaManagementConfigRequest, UpdateMetadataConfigRequest,
-    UpdateProwlarrConfigRequest, UserDb, WorkDb,
+    UpdateProwlarrConfigRequest, UserDb, WorkDb, WorkDbCreate,
 };
 use livrarr_handlers::types::work::work_to_detail;
 
@@ -857,7 +857,7 @@ impl SecondaryApiImpl {
         root_folder_id: RootFolderId,
     ) -> LibraryItemId {
         // Ensure a work exists
-        let work = self
+        let (work, _) = self
             .db
             .create_work(CreateWorkDbRequest {
                 user_id,
@@ -894,6 +894,8 @@ impl SecondaryApiImpl {
                 media_type: MediaType::Ebook,
                 file_size: 1234,
                 import_id: None,
+                tag_status: livrarr_db::TagStatus::Pending,
+                tagged_at_generation: 0,
             })
             .await
             .unwrap();
@@ -922,7 +924,7 @@ impl SecondaryApiImpl {
                 .await
                 .unwrap(),
         };
-        let work = self
+        let (work, _) = self
             .db
             .create_work(CreateWorkDbRequest {
                 user_id,
@@ -956,6 +958,8 @@ impl SecondaryApiImpl {
                 media_type: MediaType::Ebook,
                 file_size: 12,
                 import_id: None,
+                tag_status: livrarr_db::TagStatus::Pending,
+                tagged_at_generation: 0,
             })
             .await
             .unwrap();

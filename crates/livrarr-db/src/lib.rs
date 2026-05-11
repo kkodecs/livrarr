@@ -10,8 +10,8 @@ pub use livrarr_domain::{
     Indexer, IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider,
     MediaType, MergeResolved, MetadataProvider, NarrationType, Notification, NotificationId,
     NotificationType, OutcomeClass, PlaybackProgress, ProvenanceSetter, RemotePathMapping,
-    RemotePathMappingId, RootFolder, RootFolderId, Series, Session, User, UserId, UserRole, Work,
-    WorkField, WorkId,
+    RemotePathMappingId, RootFolder, RootFolderId, Series, Session, TagStatus, User, UserId,
+    UserRole, Work, WorkField, WorkId,
 };
 
 pub mod pool;
@@ -155,6 +155,20 @@ pub trait SessionDb: Send + Sync {
 // Work DB
 // ---------------------------------------------------------------------------
 
+/// Work creation — separated from `WorkDb` so only `WorkServiceImpl` can
+/// create works (compile-time enforcement of M2: single creation gate).
+/// All other code paths must call `WorkService::add()`.
+#[trait_variant::make(Send)]
+pub trait WorkDbCreate: Send + Sync {
+    /// Create work. Returns `(work, actually_created)`.
+    /// `actually_created == false` indicates the UNIQUE constraint matched
+    /// an existing row; the returned `work` is the existing one.
+    ///
+    /// Precondition: `normalized_title` and `normalized_author` were computed
+    ///               via `livrarr_domain::normalize_for_matching()`.
+    async fn create_work(&self, req: CreateWorkDbRequest) -> Result<(Work, bool), DbError>;
+}
+
 /// Work data access. All queries scoped to user_id.
 ///
 /// Satisfies: AUTH-003
@@ -182,11 +196,6 @@ pub trait WorkDb: Send + Sync {
         sort_by: &str,
         sort_dir: &str,
     ) -> Result<(Vec<Work>, i64), DbError>;
-
-    /// Create work. Returns created work with generated ID.
-    ///
-    /// Satisfies: SEARCH-004
-    async fn create_work(&self, req: CreateWorkDbRequest) -> Result<Work, DbError>;
 
     /// Update work (enrichment fields -- overwrites).
     async fn update_work_enrichment(
@@ -254,16 +263,20 @@ pub trait WorkDb: Send + Sync {
         author: &str,
     ) -> Result<Vec<Work>, DbError>;
 
-    /// Reset all pending enrichments to failed (startup recovery — JOBS-003).
-    async fn reset_pending_enrichments(&self) -> Result<u64, DbError>;
-
     /// List all works where monitor_ebook=1 OR monitor_audiobook=1, across all users.
     ///
     /// Satisfies: RSS-MATCH-001, RSS-FILTER-002
     async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError>;
 
-    /// Set enrichment_status = 'skipped' for a work (no user scope — called from add pipeline).
-    async fn set_enrichment_status_skipped(&self, id: WorkId) -> Result<(), DbError>;
+    /// List works stuck in Unenriched state older than threshold (crash recovery).
+    async fn list_stale_unenriched_works(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Work>, DbError>;
+
+    /// List Failed works with no provider_retry_state rows
+    /// (failed before any provider was queried).
+    async fn list_failed_works_without_retry_state(&self) -> Result<Vec<Work>, DbError>;
 
     /// TEMP(pk-tdd): compile-only scaffold — apply a merge result to the work record.
     async fn apply_enrichment_merge(
@@ -518,6 +531,22 @@ pub trait LibraryItemDb: Send + Sync {
         work_id: WorkId,
         media_type: MediaType,
     ) -> Result<bool, DbError>;
+
+    /// List library items needing tag sync: pending for enriched works,
+    /// or synced/failed whose `tagged_at_generation` is older than the work's
+    /// current `merge_generation`. The tag convergence sweep (Phase 7) calls this.
+    async fn list_library_items_needing_tag_sync(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<LibraryItem>, DbError>;
+
+    /// Update tag sync status and generation for a library item.
+    async fn update_library_item_tag_status(
+        &self,
+        id: LibraryItemId,
+        tag_status: TagStatus,
+        tagged_at_generation: i64,
+    ) -> Result<(), DbError>;
 }
 
 pub struct CreateLibraryItemDbRequest {
@@ -528,6 +557,13 @@ pub struct CreateLibraryItemDbRequest {
     pub media_type: MediaType,
     pub file_size: i64,
     pub import_id: Option<String>,
+    /// Initial tag sync state. Set by import pipeline:
+    /// - `Synced` if inline tag write succeeded against an Enriched work
+    /// - `Failed` if inline tag write failed
+    /// - `Pending` for Unenriched/Failed/Conflict works (convergence sweep handles)
+    pub tag_status: TagStatus,
+    /// Generation snapshot at write time; convergence detects stale items.
+    pub tagged_at_generation: i64,
 }
 
 // ---------------------------------------------------------------------------

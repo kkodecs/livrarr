@@ -356,7 +356,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use livrarr_db::{ProviderRetryStateDb, UserDb, WorkDb};
+    use livrarr_db::{ProviderRetryStateDb, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, OutcomeClass};
 
     #[tokio::test]
@@ -372,7 +372,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let work = db
+        let (work, _) = db
             .create_work(livrarr_db::CreateWorkDbRequest {
                 user_id: user.id,
                 title: "Test Work".into(),

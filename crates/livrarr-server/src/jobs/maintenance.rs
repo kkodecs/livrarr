@@ -2,7 +2,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::state::AppState;
-use livrarr_db::{GrabDb, ListImportDb, SessionDb, WorkDb};
+use livrarr_db::{GrabDb, ListImportDb, SessionDb};
 
 // ---------------------------------------------------------------------------
 // Startup Recovery (JOBS-003)
@@ -19,14 +19,8 @@ pub async fn recover_interrupted_state(state: &AppState) {
         Err(e) => error!("startup recovery (grabs) failed: {e}"),
     }
 
-    // Reset pending enrichments → failed (retry queue will pick them up).
-    match state.db.reset_pending_enrichments().await {
-        Ok(count) if count > 0 => {
-            warn!("recovered {count} works from pending → failed");
-        }
-        Ok(_) => {}
-        Err(e) => error!("startup recovery (enrichments) failed: {e}"),
-    }
+    // Phase 7 will requeue stale Unenriched works via list_stale_unenriched_works.
+    // No-op here until Phase 7 lands.
 
     // Sweep stale temp files from root folders (crashed imports).
     sweep_stale_temp_files(state).await;

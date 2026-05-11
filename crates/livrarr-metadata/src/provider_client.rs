@@ -834,7 +834,7 @@ mod audnexus_tracer_tests {
     use super::*;
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
-    use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb};
+    use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole};
     use livrarr_http::HttpClient;
     use std::sync::Arc;
@@ -890,7 +890,7 @@ mod audnexus_tracer_tests {
             .await
             .unwrap()
             .id;
-        let work = db
+        let (work, _) = db
             .create_work(CreateWorkDbRequest {
                 user_id,
                 title: "Tracer Audiobook".to_string(),
@@ -1003,7 +1003,7 @@ mod goodreads_tracer_tests {
     use super::*;
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
-    use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb};
+    use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole, WillRetryReason};
     use livrarr_http::HttpClient;
     use std::sync::Arc;
@@ -1061,7 +1061,7 @@ mod goodreads_tracer_tests {
             .await
             .unwrap()
             .id;
-        let work = db
+        let (work, _) = db
             .create_work(CreateWorkDbRequest {
                 user_id,
                 title: "Tracer Book".to_string(),

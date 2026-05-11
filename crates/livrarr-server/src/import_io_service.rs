@@ -133,6 +133,8 @@ where
                 media_type: req.media_type,
                 file_size: req.file_size,
                 import_id: req.import_id,
+                tag_status: livrarr_db::TagStatus::Pending,
+                tagged_at_generation: 0,
             })
             .await
             .map_err(map_db_err)

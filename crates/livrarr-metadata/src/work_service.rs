@@ -1,6 +1,7 @@
 use livrarr_db::{
     AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, EnrichmentRetryDb,
     LibraryItemDb, ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
+    WorkDbCreate,
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::*;
@@ -125,6 +126,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
 impl<D, E, H, L> WorkService for WorkServiceImpl<D, E, H, L>
 where
     D: WorkDb
+        + WorkDbCreate
         + AuthorDb
         + LibraryItemDb
         + ProvenanceDb
@@ -206,7 +208,7 @@ where
         let normalized_title = livrarr_domain::normalize_for_matching(&cleaned_title);
         let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
 
-        let work = self
+        let (work, _actually_created) = self
             .db
             .create_work(CreateWorkDbRequest {
                 user_id,

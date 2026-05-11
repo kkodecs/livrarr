@@ -1463,6 +1463,8 @@ impl ImportRunner {
                     media_type,
                     file_size: rd_file.size,
                     import_id: Some(self.import_id.clone()),
+                    tag_status: livrarr_db::TagStatus::Pending,
+                    tagged_at_generation: 0,
                 })
                 .await
             {

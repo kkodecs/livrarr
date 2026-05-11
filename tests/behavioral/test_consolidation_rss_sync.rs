@@ -173,6 +173,7 @@ async fn seed_monitored_work(
     })
     .await
     .unwrap()
+    .0
 }
 
 // =============================================================================
@@ -367,6 +368,8 @@ async fn test_rss_sync_skips_work_with_library_item() {
         media_type: MediaType::Ebook,
         file_size: 500_000,
         import_id: None,
+        tag_status: TagStatus::Pending,
+        tagged_at_generation: 0,
     })
     .await
     .unwrap();

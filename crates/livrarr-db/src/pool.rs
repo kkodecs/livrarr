@@ -42,7 +42,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::Migr
 // ── Startup checks ──────────────────────────────────────────────────────────
 
 /// Maximum schema_version this binary understands.
-const MAX_SCHEMA_VERSION: i64 = 34;
+const MAX_SCHEMA_VERSION: i64 = 38;
 /// Maximum data_version this binary understands.
 const MAX_DATA_VERSION: i64 = 1;
 
@@ -213,6 +213,161 @@ pub async fn create_backup(
 
     tracing::info!("pre-migration backup: {backup_name}");
     Ok(backup_path)
+}
+
+/// Backfill `normalized_title` / `normalized_author` and create the
+/// UNIQUE(user_id, normalized_title, normalized_author) index.
+///
+/// Migration 038 added the columns with `'__UNMIGRATED__'` defaults and no
+/// index — duplicates may exist that would violate UNIQUE. This function
+/// computes real normalized values, merges duplicate work rows into the
+/// oldest keeper, then creates the index.
+///
+/// Idempotent: skips quickly if no `__UNMIGRATED__` rows remain.
+pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), String> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE normalized_title = '__UNMIGRATED__'")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("count unmigrated works: {e}"))?;
+
+    if count == 0 {
+        // Still ensure the index exists in case a prior run partially completed.
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_works_identity \
+             ON works(user_id, normalized_title, normalized_author)",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| format!("create idx_works_identity: {e}"))?;
+        tracing::info!("normalized identity backfill: already complete");
+        return Ok(());
+    }
+
+    tracing::info!("normalized identity backfill: {count} works to backfill");
+
+    // Step 1: compute normalized values for each __UNMIGRATED__ row.
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, title, author_name FROM works WHERE normalized_title = '__UNMIGRATED__'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("select unmigrated rows: {e}"))?;
+
+    for (id, title, author_name) in &rows {
+        let norm_title = livrarr_domain::normalize_for_matching(title);
+        let norm_author = livrarr_domain::normalize_for_matching(author_name);
+        sqlx::query("UPDATE works SET normalized_title = ?, normalized_author = ? WHERE id = ?")
+            .bind(&norm_title)
+            .bind(&norm_author)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("update normalized for work {id}: {e}"))?;
+    }
+
+    // Step 2: resolve duplicates. For each (user_id, norm_title, norm_author)
+    // group with cnt > 1, keep the lowest id; redirect dependent rows; drop the rest.
+    let dupes: Vec<(i64, String, String, String, i64)> = sqlx::query_as(
+        "SELECT user_id, normalized_title, normalized_author, \
+                GROUP_CONCAT(id) as ids, COUNT(*) as cnt \
+         FROM works \
+         GROUP BY user_id, normalized_title, normalized_author \
+         HAVING cnt > 1",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("scan duplicates: {e}"))?;
+
+    if !dupes.is_empty() {
+        tracing::warn!(
+            "normalized identity backfill: {} duplicate work groups detected",
+            dupes.len()
+        );
+    }
+
+    let mut merged_count = 0i64;
+    for (user_id, _nt, _na, ids_csv, _cnt) in &dupes {
+        let mut ids: Vec<i64> = ids_csv
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        ids.sort_unstable();
+        let keeper_id = ids[0];
+        for &dup_id in &ids[1..] {
+            sqlx::query("UPDATE library_items SET work_id = ? WHERE work_id = ? AND user_id = ?")
+                .bind(keeper_id)
+                .bind(dup_id)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("redirect library_items for work {dup_id}: {e}"))?;
+
+            sqlx::query("UPDATE grabs SET work_id = ? WHERE work_id = ? AND user_id = ?")
+                .bind(keeper_id)
+                .bind(dup_id)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("redirect grabs for work {dup_id}: {e}"))?;
+
+            sqlx::query("UPDATE history SET work_id = ? WHERE work_id = ? AND user_id = ?")
+                .bind(keeper_id)
+                .bind(dup_id)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("redirect history for work {dup_id}: {e}"))?;
+
+            sqlx::query("UPDATE external_ids SET work_id = ? WHERE work_id = ?")
+                .bind(keeper_id)
+                .bind(dup_id)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("redirect external_ids for work {dup_id}: {e}"))?;
+
+            sqlx::query("DELETE FROM work_metadata_provenance WHERE work_id = ? AND user_id = ?")
+                .bind(dup_id)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("delete provenance for work {dup_id}: {e}"))?;
+
+            sqlx::query("DELETE FROM provider_retry_state WHERE work_id = ? AND user_id = ?")
+                .bind(dup_id)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("delete retry_state for work {dup_id}: {e}"))?;
+
+            sqlx::query("DELETE FROM works WHERE id = ?")
+                .bind(dup_id)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("delete duplicate work {dup_id}: {e}"))?;
+
+            merged_count += 1;
+        }
+        tracing::info!(
+            "normalized identity backfill: merged {} duplicates into work {keeper_id}",
+            ids.len() - 1
+        );
+    }
+
+    // Step 3: create UNIQUE index (now that conflicts are resolved).
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_works_identity \
+         ON works(user_id, normalized_title, normalized_author)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("create idx_works_identity: {e}"))?;
+
+    tracing::info!(
+        "normalized identity backfill complete: {} works, {merged_count} duplicates resolved",
+        rows.len()
+    );
+    Ok(())
 }
 
 /// Delete old backups, keeping the most recent `keep` versions.

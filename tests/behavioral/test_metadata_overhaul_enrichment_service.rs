@@ -23,7 +23,7 @@ use livrarr_db::{
     create_test_db, ApplyEnrichmentMergeRequest, CreateUserDbRequest, CreateWorkDbRequest, DbError,
     ExternalIdDb, ProvenanceDb, ProviderRetryStateDb, SetFieldProvenanceRequest,
     UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, UpsertExternalIdRequest, UserDb,
-    WorkDb,
+    WorkDb, WorkDbCreate,
 };
 use livrarr_domain::{
     ApplyMergeOutcome, EnrichmentStatus, FieldProvenance, MergeResolved, MetadataProvider,
@@ -223,11 +223,13 @@ impl SequencedApplyDb {
     }
 }
 
-impl WorkDb for SequencedApplyDb {
-    async fn create_work(&self, req: CreateWorkDbRequest) -> Result<Work, DbError> {
+impl WorkDbCreate for SequencedApplyDb {
+    async fn create_work(&self, req: CreateWorkDbRequest) -> Result<(Work, bool), DbError> {
         self.inner.create_work(req).await
     }
+}
 
+impl WorkDb for SequencedApplyDb {
     async fn get_work(&self, user_id: UserId, work_id: WorkId) -> Result<Work, DbError> {
         self.inner.get_work(user_id, work_id).await
     }
@@ -319,16 +321,19 @@ impl WorkDb for SequencedApplyDb {
             .await
     }
 
-    async fn reset_pending_enrichments(&self) -> Result<u64, DbError> {
-        self.inner.reset_pending_enrichments().await
-    }
-
     async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError> {
         self.inner.list_monitored_works_all_users().await
     }
 
-    async fn set_enrichment_status_skipped(&self, id: WorkId) -> Result<(), DbError> {
-        self.inner.set_enrichment_status_skipped(id).await
+    async fn list_stale_unenriched_works(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Work>, DbError> {
+        self.inner.list_stale_unenriched_works(older_than).await
+    }
+
+    async fn list_failed_works_without_retry_state(&self) -> Result<Vec<Work>, DbError> {
+        self.inner.list_failed_works_without_retry_state().await
     }
 
     async fn apply_enrichment_merge(
@@ -558,10 +563,11 @@ fn make_work_req(user_id: UserId, title: &str, author: &str) -> CreateWorkDbRequ
     }
 }
 
-async fn seed_work<DB: WorkDb>(db: &DB, user_id: UserId) -> Work {
+async fn seed_work<DB: WorkDb + WorkDbCreate>(db: &DB, user_id: UserId) -> Work {
     db.create_work(make_work_req(user_id, "Original Title", "Original Author"))
         .await
         .unwrap()
+        .0
 }
 
 fn normalized_payload(

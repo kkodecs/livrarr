@@ -96,6 +96,8 @@ where
                 media_type,
                 file_size,
                 import_id: None,
+                tag_status: livrarr_db::TagStatus::Pending,
+                tagged_at_generation: 0,
             })
             .await
             .map_err(map_db_err)
