@@ -1222,13 +1222,13 @@ impl ImportRunner {
                 user_id: self.user_id,
                 title: title.to_string(),
                 author_name: author_name.to_string(),
+                normalized_title: String::new(),
+                normalized_author: String::new(),
                 author_id: livrarr_author_id,
                 ol_key: None,
                 gr_key: None,
                 year,
                 cover_url: cover_url.clone(),
-                metadata_source: Some("readarr".to_string()),
-                detail_url: None,
                 language: language.clone(),
                 import_id: Some(self.import_id.clone()),
                 series_id: None,
@@ -1236,6 +1236,7 @@ impl ImportRunner {
                 series_position: None,
                 monitor_ebook: false,
                 monitor_audiobook: false,
+                source_provider_json: None,
             })
             .await
         {
@@ -1272,7 +1273,7 @@ impl ImportRunner {
                             abridged: None,
                             rating,
                             rating_count,
-                            enrichment_status: EnrichmentStatus::Skipped,
+                            enrichment_status: EnrichmentStatus::Failed,
                             enrichment_source: Some("readarr".to_string()),
                             cover_url: None,
                         },
@@ -1287,6 +1288,8 @@ impl ImportRunner {
                         UpdateWorkUserFieldsDbRequest {
                             title: None,
                             author_name: None,
+                            normalized_title: None,
+                            normalized_author: None,
                             series_name: None,
                             series_position: None,
                             monitor_ebook: Some(monitor_ebook),

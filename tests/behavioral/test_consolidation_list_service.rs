@@ -124,12 +124,15 @@ async fn test_list_preview_existing_works_marked_already_exists() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
     svc.work_service.add(USER, add_req).await.unwrap();
 
@@ -256,12 +259,15 @@ async fn test_list_undo_returns_removed_and_skipped_counts() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
     let work_result = svc.work_service.add(USER, add_req).await.unwrap();
 
@@ -323,12 +329,15 @@ async fn test_list_undo_already_undone_returns_conflict() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
     let work_result = svc.work_service.add(USER, add_req).await.unwrap();
 

@@ -614,6 +614,7 @@ fn provider_name(p: livrarr_domain::MetadataProvider) -> &'static str {
         livrarr_domain::MetadataProvider::Goodreads => "goodreads",
         livrarr_domain::MetadataProvider::Audnexus => "audnexus",
         livrarr_domain::MetadataProvider::Llm => "llm",
+        livrarr_domain::MetadataProvider::Readarr => "readarr",
     }
 }
 
@@ -830,7 +831,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
     // 6. Status classification (R-14).
     let enrichment_status = match (merged_description.is_some(), merged_cover_url.is_some()) {
         (true, true) => EnrichmentStatus::Enriched,
-        (true, false) | (false, true) => EnrichmentStatus::Partial,
+        (true, false) | (false, true) => EnrichmentStatus::Unenriched,
         (false, false) => EnrichmentStatus::Failed,
     };
 
@@ -1643,7 +1644,7 @@ pub mod tests {
                     provider_outcomes: std::collections::HashMap::new(),
                 }),
                 StubEnrichmentMode::Partial => Ok(EnrichmentResult {
-                    enrichment_status: EnrichmentStatus::Partial,
+                    enrichment_status: EnrichmentStatus::Unenriched,
                     enrichment_source: Some("openlibrary".to_string()),
                     llm_task_spawned: false,
                     work: Work {

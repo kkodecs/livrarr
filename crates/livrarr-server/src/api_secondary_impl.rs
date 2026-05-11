@@ -863,13 +863,13 @@ impl SecondaryApiImpl {
                 user_id,
                 title: format!("Work-{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)),
                 author_name: "Test Author".into(),
+                normalized_title: String::new(),
+                normalized_author: String::new(),
                 author_id: None,
                 ol_key: None,
                 gr_key: None,
                 year: None,
                 cover_url: None,
-                metadata_source: None,
-                detail_url: None,
                 language: None,
                 import_id: None,
                 series_id: None,
@@ -877,6 +877,7 @@ impl SecondaryApiImpl {
                 series_position: None,
                 monitor_ebook: false,
                 monitor_audiobook: false,
+                source_provider_json: None,
             })
             .await
             .unwrap();
@@ -927,13 +928,13 @@ impl SecondaryApiImpl {
                 user_id,
                 title: "File Test Work".into(),
                 author_name: "File Author".into(),
+                normalized_title: String::new(),
+                normalized_author: String::new(),
                 author_id: None,
                 ol_key: None,
                 gr_key: None,
                 year: None,
                 cover_url: None,
-                metadata_source: None,
-                detail_url: None,
                 language: None,
                 import_id: None,
                 series_id: None,
@@ -941,6 +942,7 @@ impl SecondaryApiImpl {
                 series_position: None,
                 monitor_ebook: false,
                 monitor_audiobook: false,
+                source_provider_json: None,
             })
             .await
             .unwrap();

@@ -1,6 +1,7 @@
 use crate::{GrabStatus, LibraryItem, MediaType, Work};
 
 use super::common::ServiceError;
+use super::work::TagSyncItemResult;
 
 #[derive(Debug, Clone)]
 pub struct ImportGrabResult {
@@ -23,6 +24,7 @@ pub struct ImportSingleFileRequest {
     pub work_id: i64,
     pub author_name: String,
     pub title: String,
+    pub import_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -57,7 +59,11 @@ pub trait ImportService: Send + Sync {
 
 #[trait_variant::make(Send)]
 pub trait TagService: Send + Sync {
-    async fn retag_library_items(&self, work: &Work, items: &[LibraryItem]) -> Vec<String>;
+    async fn retag_library_items(
+        &self,
+        work: &Work,
+        items: &[LibraryItem],
+    ) -> Vec<TagSyncItemResult>;
 }
 
 #[trait_variant::make(Send)]

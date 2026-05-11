@@ -143,23 +143,18 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
             .try_get("import_id")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         added_at: parse_dt(&added_at_str)?,
-        metadata_source: row
-            .try_get("metadata_source")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
-        detail_url: row
-            .try_get("detail_url")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
     })
 }
 
 fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
     match s {
-        "pending" => Ok(EnrichmentStatus::Pending),
-        "partial" => Ok(EnrichmentStatus::Partial),
+        "unenriched" => Ok(EnrichmentStatus::Unenriched),
+        // Legacy values migrated to unenriched by migration 035
+        "pending" | "partial" => Ok(EnrichmentStatus::Unenriched),
         "enriched" => Ok(EnrichmentStatus::Enriched),
         "failed" => Ok(EnrichmentStatus::Failed),
-        "exhausted" => Ok(EnrichmentStatus::Exhausted),
-        "skipped" => Ok(EnrichmentStatus::Skipped),
+        // Legacy exhausted/skipped mapped to failed — migration handles DB rows
+        "exhausted" | "skipped" => Ok(EnrichmentStatus::Failed),
         "conflict" => Ok(EnrichmentStatus::Conflict),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown enrichment status: {s}"),
@@ -169,13 +164,9 @@ fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
 
 fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
     match s {
-        EnrichmentStatus::Pending => "pending",
-        EnrichmentStatus::Partial => "partial",
+        EnrichmentStatus::Unenriched => "unenriched",
         EnrichmentStatus::Enriched => "enriched",
         EnrichmentStatus::Failed => "failed",
-        EnrichmentStatus::Exhausted => "exhausted",
-        EnrichmentStatus::Skipped => "skipped",
-        // TEMP(pk-tdd): compile-only scaffold
         EnrichmentStatus::Conflict => "conflict",
     }
 }
@@ -318,9 +309,9 @@ impl WorkDb for SqliteDb {
         let now = Utc::now().to_rfc3339();
         let id = sqlx::query(
             "INSERT INTO works (user_id, title, author_name, author_id, ol_key, gr_key, year, \
-             cover_url, enrichment_status, added_at, metadata_source, detail_url, language, \
-             import_id, series_id, series_name, series_position, monitor_ebook, monitor_audiobook) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             cover_url, enrichment_status, added_at, language, import_id, \
+             series_id, series_name, series_position, monitor_ebook, monitor_audiobook) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(req.user_id)
         .bind(&req.title)
@@ -331,8 +322,6 @@ impl WorkDb for SqliteDb {
         .bind(req.year)
         .bind(&req.cover_url)
         .bind(&now)
-        .bind(&req.metadata_source)
-        .bind(&req.detail_url)
         .bind(&req.language)
         .bind(&req.import_id)
         .bind(req.series_id)
@@ -762,7 +751,8 @@ impl WorkDb for SqliteDb {
                     ProvenanceSetter::User
                     | ProvenanceSetter::System
                     | ProvenanceSetter::AutoAdded
-                    | ProvenanceSetter::Imported => {
+                    | ProvenanceSetter::Imported
+                    | ProvenanceSetter::Import => {
                         if prov.source.is_some() {
                             return Err(DbError::Constraint {
                                 message: "user/system/auto_added setter must not have a source"

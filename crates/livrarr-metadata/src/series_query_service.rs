@@ -91,10 +91,9 @@ where
                 let first_work_id = series_works.and_then(|ws| {
                     ws.iter()
                         .min_by(|a, b| {
-                            a.series_position
-                                .unwrap_or(f64::MAX)
-                                .partial_cmp(&b.series_position.unwrap_or(f64::MAX))
-                                .unwrap_or(std::cmp::Ordering::Equal)
+                            let pa = a.series_position.unwrap_or(f64::MAX);
+                            let pb = b.series_position.unwrap_or(f64::MAX);
+                            pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
                         })
                         .map(|w| w.id)
                 });
@@ -148,10 +147,9 @@ where
             .filter(|w| w.series_id == Some(series_id))
             .collect();
         series_works.sort_by(|a, b| {
-            a.series_position
-                .unwrap_or(f64::MAX)
-                .partial_cmp(&b.series_position.unwrap_or(f64::MAX))
-                .unwrap_or(std::cmp::Ordering::Equal)
+            let pa = a.series_position.unwrap_or(f64::MAX);
+            let pb = b.series_position.unwrap_or(f64::MAX);
+            pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         let work_ids: Vec<i64> = series_works.iter().map(|w| w.id).collect();
@@ -658,19 +656,21 @@ where
             // No match — create new work.
             let cleaned_title = crate::title_cleanup::clean_title(&book.title);
             let cleaned_author = crate::title_cleanup::clean_author(&author.name);
+            let norm_title = livrarr_domain::normalize_for_matching(&cleaned_title);
+            let norm_author = livrarr_domain::normalize_for_matching(&cleaned_author);
             match self
                 .db
                 .create_work(CreateWorkDbRequest {
                     user_id: author.user_id,
                     title: cleaned_title,
                     author_name: cleaned_author,
+                    normalized_title: norm_title,
+                    normalized_author: norm_author,
                     author_id: Some(author.id),
                     ol_key: None,
                     gr_key: Some(book.gr_key.clone()),
                     year: book.year,
                     cover_url: None,
-                    metadata_source: None,
-                    detail_url: None,
                     language: None,
                     import_id: None,
                     series_id: Some(series_id),
@@ -678,6 +678,7 @@ where
                     series_position: book.position,
                     monitor_ebook,
                     monitor_audiobook,
+                    source_provider_json: None,
                 })
                 .await
             {

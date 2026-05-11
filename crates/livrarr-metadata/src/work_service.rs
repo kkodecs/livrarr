@@ -105,7 +105,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
         _mode: EnrichmentMode,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         Ok(EnrichmentResult {
-            enrichment_status: EnrichmentStatus::Pending,
+            enrichment_status: EnrichmentStatus::Unenriched,
             enrichment_source: None,
             work: Work::default(),
             merge_deferred: false,
@@ -203,24 +203,28 @@ where
 
         let cover_url = req.cover_url.clone();
 
+        let normalized_title = livrarr_domain::normalize_for_matching(&cleaned_title);
+        let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
+
         let work = self
             .db
             .create_work(CreateWorkDbRequest {
                 user_id,
                 title: cleaned_title,
                 author_name: cleaned_author,
+                normalized_title,
+                normalized_author,
                 author_id,
                 ol_key: req.ol_key,
                 gr_key: req.gr_key,
                 year: req.year,
                 cover_url: req.cover_url,
-                metadata_source: req.metadata_source,
-                detail_url: req.detail_url,
                 language: livrarr_domain::normalize_language_opt(req.language.as_deref()),
                 series_name: req.series_name,
                 series_position: req.series_position,
-                monitor_ebook: true,
-                monitor_audiobook: true,
+                monitor_ebook: req.monitor_ebook.unwrap_or(true),
+                monitor_audiobook: req.monitor_audiobook.unwrap_or(true),
+                import_id: req.import_id,
                 ..Default::default()
             })
             .await
@@ -229,10 +233,11 @@ where
         let setter = req.provenance_setter.unwrap_or(ProvenanceSetter::User);
         write_addtime_provenance(&self.db, user_id, &work, setter).await;
 
-        let _is_foreign = crate::language::is_foreign_source(work.metadata_source.as_deref());
         let cover_url = cover_url.map(|u| unproxy_cover_url(&u));
 
-        if req.defer_enrichment {
+        if false {
+            // defer_enrichment removed — kept as dead branch to preserve structure
+            // Phase 3a will replace this block with synchronous enrichment
             let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
             let hc_token = self
                 .db
@@ -261,10 +266,12 @@ where
 
             return Ok(AddWorkResult {
                 work,
+                created: true,
                 author_created,
                 author_id,
                 messages: vec![],
                 cover_mtime,
+                enrichment_status: EnrichmentStatus::Unenriched,
             });
         }
 
@@ -308,12 +315,21 @@ where
                 crate::cover::cover_file_mtime(&self.data_dir.join("covers"), enriched_work.id)
             });
 
+        let enrichment_status = self
+            .db
+            .get_work(user_id, enriched_work.id)
+            .await
+            .map(|w| w.enrichment_status)
+            .unwrap_or(EnrichmentStatus::Failed);
+
         Ok(AddWorkResult {
             work: enriched_work,
+            created: true,
             author_created,
             author_id,
             messages,
             cover_mtime,
+            enrichment_status,
         })
     }
 
@@ -475,11 +491,21 @@ where
         let series_position_cleared = matches!(req.series_position, Some(None));
         let has_series_name = req.series_name.is_some();
         let has_series_position = req.series_position.is_some();
+        let cleaned_title = req.title.map(|t| crate::title_cleanup::clean_title(&t));
+        let cleaned_author = req
+            .author_name
+            .map(|a| crate::title_cleanup::clean_author(&a));
+        let normalized_title = cleaned_title
+            .as_deref()
+            .map(livrarr_domain::normalize_for_matching);
+        let normalized_author = cleaned_author
+            .as_deref()
+            .map(livrarr_domain::normalize_for_matching);
         let db_req = UpdateWorkUserFieldsDbRequest {
-            title: req.title.map(|t| crate::title_cleanup::clean_title(&t)),
-            author_name: req
-                .author_name
-                .map(|a| crate::title_cleanup::clean_author(&a)),
+            title: cleaned_title,
+            author_name: cleaned_author,
+            normalized_title,
+            normalized_author,
             series_name: req.series_name,
             series_position: req.series_position,
             monitor_ebook: req.monitor_ebook,
@@ -805,7 +831,7 @@ where
             }
         }
 
-        let mut raw_results = self.lookup(req).await?;
+        let mut raw_results: Vec<LookupResult> = self.lookup(req).await?;
         for r in &mut raw_results {
             r.title = crate::title_cleanup::title_case(&r.title);
         }

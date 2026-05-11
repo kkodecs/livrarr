@@ -162,13 +162,16 @@ pub async fn add<
         gr_key: None,
         year: req.year,
         cover_url: req.cover_url,
-        metadata_source: req.metadata_source,
         language: req.language,
         detail_url: req.detail_url,
+        series_id: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: true,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
 
     let result = state.work_service().add(ctx.user.id, svc_req).await?;
@@ -455,14 +458,19 @@ pub async fn refresh<S: HasWorkService + HasTagService>(
     }
 
     if !result.taggable_items.is_empty() {
-        let tag_warnings = state
+        let tag_results = state
             .tag_service()
             .retag_library_items(&result.work, &result.taggable_items)
             .await;
-        for w in &tag_warnings {
-            messages.push(format!("tag rewrite warning: {w}"));
+        let failures: Vec<_> = tag_results.iter().filter(|r| !r.succeeded).collect();
+        for r in &failures {
+            let err = r.error.as_deref().unwrap_or("unknown error");
+            messages.push(format!(
+                "tag rewrite warning (item {}): {}",
+                r.library_item_id, err
+            ));
         }
-        if tag_warnings.is_empty() {
+        if failures.is_empty() {
             messages.push(format!(
                 "tags rewritten on {} file(s)",
                 result.taggable_items.len()

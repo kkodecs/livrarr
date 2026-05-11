@@ -311,6 +311,7 @@ fn provider_key(p: MetadataProvider) -> &'static str {
         MetadataProvider::Goodreads => "goodreads",
         MetadataProvider::Audnexus => "audnexus",
         MetadataProvider::Llm => "llm",
+        MetadataProvider::Readarr => "readarr",
     }
 }
 
@@ -585,7 +586,7 @@ mod tests {
             abridged: false,
             rating: None,
             rating_count: None,
-            enrichment_status: EnrichmentStatus::Pending,
+            enrichment_status: EnrichmentStatus::Unenriched,
             enrichment_retry_count: 0,
             enriched_at: None,
             enrichment_source: None,
@@ -595,8 +596,6 @@ mod tests {
             monitor_audiobook: false,
             import_id: None,
             added_at: chrono::Utc::now(),
-            metadata_source: None,
-            detail_url: None,
         }
     }
 

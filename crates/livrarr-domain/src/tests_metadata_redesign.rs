@@ -15,9 +15,11 @@ fn fixed_time() -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-fn assert_option_string(_: &Option<String>) {}
+fn assert_option_f64(_: &Option<f64>) {}
 
-fn assert_option_option_string(_: &Option<Option<String>>) {}
+fn assert_option_option_f64(_: &Option<Option<f64>>) {}
+
+fn assert_option_string(_: &Option<String>) {}
 
 fn enrichment_status_wire_name(status: EnrichmentStatus) -> &'static str {
     match status {
@@ -36,7 +38,7 @@ fn tag_status_wire_name(status: TagStatus) -> &'static str {
     }
 }
 
-fn sample_work(series_position: Option<String>) -> Work {
+fn sample_work(series_position: Option<f64>) -> Work {
     Work {
         id: 42,
         user_id: 7,
@@ -134,10 +136,10 @@ fn tag_status_has_three_variants_default_and_snake_case_serde() {
 
 #[test]
 #[ignore = "pk-implement: behavioral test registered pre-implementation"]
-fn series_position_is_optional_string_on_work_add_request_and_update_request() {
-    let work = sample_work(Some("Book 1.5".to_string()));
-    assert_option_string(&work.series_position);
-    assert_eq!(work.series_position.as_deref(), Some("Book 1.5"));
+fn series_position_is_optional_f64_on_work_add_request_and_update_request() {
+    let work = sample_work(Some(1.5));
+    assert_option_f64(&work.series_position);
+    assert_eq!(work.series_position, Some(1.5));
 
     let add_req = AddWorkRequest {
         title: "Contract Work".to_string(),
@@ -151,32 +153,26 @@ fn series_position_is_optional_string_on_work_add_request_and_update_request() {
         detail_url: Some("https://example.test/work".to_string()),
         series_id: Some(11),
         series_name: Some("Contract Series".to_string()),
-        series_position: Some("Book 1.5".to_string()),
+        series_position: Some(1.5),
         monitor_ebook: Some(true),
         monitor_audiobook: Some(false),
         provenance_setter: Some(ProvenanceSetter::Import),
         import_id: Some("import-1".to_string()),
         source_provider_data: None,
     };
-    assert_option_string(&add_req.series_position);
-    assert_eq!(add_req.series_position.as_deref(), Some("Book 1.5"));
+    assert_option_f64(&add_req.series_position);
+    assert_eq!(add_req.series_position, Some(1.5));
 
     let update_req = UpdateWorkRequest {
         title: None,
         author_name: None,
         series_name: None,
-        series_position: Some(Some("Omnibus".to_string())),
+        series_position: Some(Some(2.0)),
         monitor_ebook: None,
         monitor_audiobook: None,
     };
-    assert_option_option_string(&update_req.series_position);
-    assert_eq!(
-        update_req
-            .series_position
-            .as_ref()
-            .and_then(Option::as_deref),
-        Some("Omnibus")
-    );
+    assert_option_option_f64(&update_req.series_position);
+    assert_eq!(update_req.series_position, Some(Some(2.0)));
 }
 
 #[test]
@@ -208,7 +204,7 @@ fn add_work_request_uses_source_provider_data_import_context_and_optional_monito
         detail_url: Some("https://example.test/work".to_string()),
         series_id: Some(11),
         series_name: Some("Contract Series".to_string()),
-        series_position: Some("1-3".to_string()),
+        series_position: None,
         monitor_ebook: None,
         monitor_audiobook: Some(false),
         provenance_setter: Some(ProvenanceSetter::Import),
@@ -290,8 +286,8 @@ fn source_provider_data_fields_are_all_optional_and_default_to_none() {
 #[test]
 #[ignore = "pk-implement: behavioral test registered pre-implementation"]
 fn work_omits_metadata_source_and_library_item_tracks_tag_status() {
-    let work = sample_work(Some("0.5".to_string()));
-    assert_eq!(work.series_position.as_deref(), Some("0.5"));
+    let work = sample_work(Some(0.5));
+    assert_eq!(work.series_position, Some(0.5));
     assert_eq!(work.enrichment_status, EnrichmentStatus::Unenriched);
 
     let item = LibraryItem {

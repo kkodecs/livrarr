@@ -811,6 +811,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
         work_id,
         author_name: item.author.clone(),
         title: item.title.clone(),
+        import_id: None,
     };
 
     match state.import_service().import_single_file(req).await {
@@ -911,13 +912,16 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
         gr_key: None,
         year: None,
         cover_url: None,
-        metadata_source: None,
         language: item.language.clone(),
         detail_url: None,
+        series_id: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
 
     match state.work_service().add(user_id, add_req).await {

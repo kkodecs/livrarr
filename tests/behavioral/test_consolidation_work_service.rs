@@ -13,10 +13,11 @@ use livrarr_behavioral::stubs::StubHttpFetcher;
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
-    AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb,
+    AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, CreateWorkDbRequest, ProvenanceDb,
+    UserDb, WorkDb,
 };
 use livrarr_domain::services::*;
-use livrarr_domain::UserRole;
+use livrarr_domain::{ProvenanceSetter, UserRole, WorkField};
 use livrarr_metadata::work_service::WorkServiceImpl;
 use std::sync::Arc;
 
@@ -72,7 +73,7 @@ async fn test_work_add_happy_path_creates_with_provenance() {
     // SVC-WORK-001, SVC-WORK-002: Given a new work with ol_key, work is created
     let db = create_test_db().await;
     let user_id = setup_user(&db).await;
-    let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
+    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
 
     let req = AddWorkRequest {
         title: "The Way of Kings".into(),
@@ -83,12 +84,27 @@ async fn test_work_add_happy_path_creates_with_provenance() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
-        provenance_setter: None,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
+        provenance_setter: Some(ProvenanceSetter::Import),
+        import_id: Some("readarr-import-123".into()),
+        source_provider_data: Some(SourceProviderData {
+            description: Some("Readarr supplied description".into()),
+            isbn: Some("9780765326355".into()),
+            asin: Some("B003P2WO5E".into()),
+            publisher: Some("Tor Books".into()),
+            genres: Some(vec!["Fantasy".into()]),
+            page_count: Some(1007),
+            rating: Some(4.65),
+            rating_count: Some(42),
+            cover_url: Some("https://example.test/readarr-cover.jpg".into()),
+            series_name: Some("The Stormlight Archive".into()),
+            series_position: Some("1".into()),
+        }),
     };
 
     let result = svc.add(user_id, req).await.expect("add should succeed");
@@ -98,6 +114,20 @@ async fn test_work_add_happy_path_creates_with_provenance() {
     assert_eq!(work.title, "The Way of Kings");
     assert_eq!(work.ol_key.as_deref(), Some("/works/OL123W"));
     assert_eq!(work.author_name, "Brandon Sanderson");
+
+    let title_provenance = db
+        .get_field_provenance(user_id, work.id, WorkField::Title)
+        .await
+        .expect("title provenance lookup should succeed")
+        .expect("title provenance should be written at add time");
+    assert_eq!(title_provenance.setter, ProvenanceSetter::Import);
+
+    let ol_key_provenance = db
+        .get_field_provenance(user_id, work.id, WorkField::OlKey)
+        .await
+        .expect("ol_key provenance lookup should succeed")
+        .expect("ol_key provenance should be written at add time");
+    assert_eq!(ol_key_provenance.setter, ProvenanceSetter::Import);
 }
 
 #[tokio::test]
@@ -116,12 +146,15 @@ async fn test_work_add_duplicate_ol_key_returns_already_exists() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
     svc.add(user_id, req1).await.unwrap();
 
@@ -134,12 +167,15 @@ async fn test_work_add_duplicate_ol_key_returns_already_exists() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
     let result = svc.add(user_id, req2).await;
     assert!(
@@ -170,12 +206,15 @@ async fn test_work_add_enrichment_failure_returns_ok_unenriched() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
 
     let result = svc
@@ -223,12 +262,15 @@ async fn test_work_add_finds_existing_author_by_normalized_name() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
 
     let result = svc.add(user_id, req).await.unwrap();
@@ -260,12 +302,15 @@ async fn test_work_add_creates_author_when_not_found() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
 
     let result = svc.add(user_id, req).await.unwrap();
@@ -293,12 +338,15 @@ async fn test_work_add_cleans_title_and_author() {
         author_ol_key: None,
         gr_key: None,
         year: None,
-        metadata_source: None,
         language: None,
         series_name: None,
         series_position: None,
-        defer_enrichment: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
         provenance_setter: None,
+        import_id: None,
+        source_provider_data: None,
     };
 
     let result = svc.add(user_id, req).await.unwrap();
@@ -325,13 +373,16 @@ async fn test_work_add_result_author_id_when_new_author_created() {
                 gr_key: None,
                 year: None,
                 cover_url: None,
-                metadata_source: None,
                 language: None,
                 detail_url: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -379,13 +430,16 @@ async fn test_work_add_result_author_id_when_existing_author_reused() {
                 gr_key: None,
                 year: None,
                 cover_url: None,
-                metadata_source: None,
                 language: None,
                 detail_url: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -417,13 +471,16 @@ async fn test_work_add_result_author_id_none_when_no_author_name() {
                 gr_key: None,
                 year: None,
                 cover_url: None,
-                metadata_source: None,
                 language: None,
                 detail_url: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -481,12 +538,15 @@ async fn test_work_get_existing_returns_work() {
                 author_ol_key: None,
                 gr_key: None,
                 year: None,
-                metadata_source: None,
                 language: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -529,12 +589,15 @@ async fn test_work_get_wrong_user_returns_not_found() {
                 author_ol_key: None,
                 gr_key: None,
                 year: None,
-                metadata_source: None,
                 language: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -567,12 +630,15 @@ async fn test_work_list_no_filter_returns_all() {
             author_ol_key: None,
             gr_key: None,
             year: None,
-            metadata_source: None,
             language: None,
             series_name: None,
             series_position: None,
-            defer_enrichment: false,
+            series_id: None,
+            monitor_ebook: None,
+            monitor_audiobook: None,
             provenance_setter: None,
+            import_id: None,
+            source_provider_data: None,
         },
     )
     .await
@@ -588,12 +654,15 @@ async fn test_work_list_no_filter_returns_all() {
             author_ol_key: None,
             gr_key: None,
             year: None,
-            metadata_source: None,
             language: None,
             series_name: None,
             series_position: None,
-            defer_enrichment: false,
+            series_id: None,
+            monitor_ebook: None,
+            monitor_audiobook: None,
             provenance_setter: None,
+            import_id: None,
+            source_provider_data: None,
         },
     )
     .await
@@ -609,12 +678,15 @@ async fn test_work_list_no_filter_returns_all() {
             author_ol_key: None,
             gr_key: None,
             year: None,
-            metadata_source: None,
             language: None,
             series_name: None,
             series_position: None,
-            defer_enrichment: false,
+            series_id: None,
+            monitor_ebook: None,
+            monitor_audiobook: None,
             provenance_setter: None,
+            import_id: None,
+            source_provider_data: None,
         },
     )
     .await
@@ -664,12 +736,15 @@ async fn test_work_update_title_changes() {
                 author_ol_key: None,
                 gr_key: None,
                 year: None,
-                metadata_source: None,
                 language: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -724,12 +799,15 @@ async fn test_work_update_none_title_unchanged() {
                 author_ol_key: None,
                 gr_key: None,
                 year: None,
-                metadata_source: None,
                 language: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -802,12 +880,15 @@ async fn test_work_delete_removes_work_and_library_items() {
                 author_ol_key: None,
                 gr_key: None,
                 year: None,
-                metadata_source: None,
                 language: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -887,12 +968,15 @@ async fn test_work_delete_missing_cover_still_ok() {
                 author_ol_key: None,
                 gr_key: None,
                 year: None,
-                metadata_source: None,
                 language: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -932,12 +1016,15 @@ async fn test_work_refresh_returns_updated_metadata() {
                 author_ol_key: None,
                 gr_key: None,
                 year: None,
-                metadata_source: None,
                 language: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -973,12 +1060,15 @@ async fn test_work_refresh_concurrent_waits_not_rejects() {
                 author_ol_key: None,
                 gr_key: None,
                 year: None,
-                metadata_source: None,
                 language: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -1024,12 +1114,15 @@ async fn test_work_refresh_enrichment_failure_returns_error() {
                 author_ol_key: None,
                 gr_key: None,
                 year: None,
-                metadata_source: None,
                 language: None,
                 series_name: None,
                 series_position: None,
-                defer_enrichment: false,
+                series_id: None,
+                monitor_ebook: None,
+                monitor_audiobook: None,
                 provenance_setter: None,
+                import_id: None,
+                source_provider_data: None,
             },
         )
         .await
@@ -1082,12 +1175,15 @@ async fn test_work_refresh_all_returns_immediately() {
             author_ol_key: None,
             gr_key: None,
             year: None,
-            metadata_source: None,
             language: None,
             series_name: None,
             series_position: None,
-            defer_enrichment: false,
+            series_id: None,
+            monitor_ebook: None,
+            monitor_audiobook: None,
             provenance_setter: None,
+            import_id: None,
+            source_provider_data: None,
         },
     )
     .await
@@ -1103,12 +1199,15 @@ async fn test_work_refresh_all_returns_immediately() {
             author_ol_key: None,
             gr_key: None,
             year: None,
-            metadata_source: None,
             language: None,
             series_name: None,
             series_position: None,
-            defer_enrichment: false,
+            series_id: None,
+            monitor_ebook: None,
+            monitor_audiobook: None,
             provenance_setter: None,
+            import_id: None,
+            source_provider_data: None,
         },
     )
     .await
@@ -1124,12 +1223,15 @@ async fn test_work_refresh_all_returns_immediately() {
             author_ol_key: None,
             gr_key: None,
             year: None,
-            metadata_source: None,
             language: None,
             series_name: None,
             series_position: None,
-            defer_enrichment: false,
+            series_id: None,
+            monitor_ebook: None,
+            monitor_audiobook: None,
             provenance_setter: None,
+            import_id: None,
+            source_provider_data: None,
         },
     )
     .await

@@ -63,10 +63,12 @@ impl WorkService for StubWorkService {
         }
         Ok(AddWorkResult {
             work: Work::default(),
+            created: true,
             author_created: false,
             author_id: None,
             messages: vec![],
             cover_mtime: None,
+            enrichment_status: EnrichmentStatus::Enriched,
         })
     }
 
@@ -345,13 +347,13 @@ async fn test_monitor_skips_existing_work() {
         user_id,
         title: "Existing Book".into(),
         author_name: "Brandon Sanderson".into(),
+        normalized_title: String::new(),
+        normalized_author: String::new(),
         author_id: Some(author.id),
         ol_key: Some("OL999W".into()),
         gr_key: None,
         year: None,
         cover_url: None,
-        metadata_source: None,
-        detail_url: None,
         language: None,
         import_id: None,
         series_id: None,
@@ -359,6 +361,7 @@ async fn test_monitor_skips_existing_work() {
         series_position: None,
         monitor_ebook: true,
         monitor_audiobook: false,
+        source_provider_json: None,
     })
     .await
     .unwrap();
@@ -544,7 +547,6 @@ async fn test_monitor_auto_add_passes_auto_added_provenance_setter() {
         Some(ProvenanceSetter::AutoAdded),
         "auto-added monitor work should carry AutoAdded provenance"
     );
-    assert!(!req.defer_enrichment);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use livrarr_domain::services::{ImportIoService, TagService};
+use livrarr_domain::services::{ImportIoService, TagService, TagSyncItemResult};
 use livrarr_domain::{LibraryItem, Work};
 
 pub struct LiveTagService<I> {
@@ -19,11 +19,15 @@ impl<I> LiveTagService<I> {
 }
 
 impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
-    async fn retag_library_items(&self, work: &Work, items: &[LibraryItem]) -> Vec<String> {
+    async fn retag_library_items(
+        &self,
+        work: &Work,
+        items: &[LibraryItem],
+    ) -> Vec<TagSyncItemResult> {
         let tag_metadata = build_tag_metadata(work);
         let cover_data = read_cover_bytes(&self.data_dir, work.user_id, work.id).await;
 
-        let mut warnings = Vec::new();
+        let mut results: Vec<TagSyncItemResult> = Vec::with_capacity(items.len());
 
         let mut mp3_items = Vec::new();
         let mut other_items = Vec::new();
@@ -44,7 +48,10 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
             let root = match self.import_io.get_root_folder(item.root_folder_id).await {
                 Ok(rf) => rf,
                 Err(e) => {
-                    warnings.push(format!("root folder lookup failed: {e}"));
+                    results.push(item_failure(
+                        item.id,
+                        format!("root folder lookup failed: {e}"),
+                    ));
                     continue;
                 }
             };
@@ -57,7 +64,10 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
             let copy_result = tokio::task::spawn_blocking(move || std::fs::copy(&src, &dst)).await;
 
             if copy_result.is_err() || copy_result.as_ref().unwrap().is_err() {
-                warnings.push(format!("retag: copy to .tmp failed for {abs}"));
+                results.push(item_failure(
+                    item.id,
+                    format!("retag: copy to .tmp failed for {abs}"),
+                ));
                 continue;
             }
 
@@ -92,9 +102,13 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
                             {
                                 tracing::warn!("update_library_item_size failed: {e}");
                             }
+                            results.push(item_success(item.id));
                         }
                         _ => {
-                            warnings.push(format!("retag: rename failed for {abs}"));
+                            results.push(item_failure(
+                                item.id,
+                                format!("retag: rename failed for {abs}"),
+                            ));
                             let _ = tokio::fs::remove_file(&tmp).await;
                         }
                     }
@@ -102,9 +116,13 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
                 Ok(livrarr_tagwrite::TagWriteStatus::Unsupported)
                 | Ok(livrarr_tagwrite::TagWriteStatus::NoData) => {
                     let _ = tokio::fs::remove_file(&tmp).await;
+                    results.push(item_success(item.id));
                 }
                 Err(e) => {
-                    warnings.push(format!("retag: tag write failed for {abs}: {e}"));
+                    results.push(item_failure(
+                        item.id,
+                        format!("retag: tag write failed for {abs}: {e}"),
+                    ));
                     let _ = tokio::fs::remove_file(&tmp).await;
                 }
             }
@@ -115,8 +133,11 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
             let root = match self.import_io.get_root_folder(first.root_folder_id).await {
                 Ok(rf) => rf,
                 Err(e) => {
-                    warnings.push(format!("root folder lookup failed: {e}"));
-                    return warnings;
+                    let msg = format!("root folder lookup failed: {e}");
+                    for item in &mp3_items {
+                        results.push(item_failure(item.id, msg.clone()));
+                    }
+                    return results;
                 }
             };
 
@@ -130,12 +151,13 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
             }
 
             let mut copy_ok = true;
+            let mut copy_err: Option<String> = None;
             for (abs, tmp) in abs_paths.iter().zip(tmp_paths.iter()) {
                 let src = abs.clone();
                 let dst = tmp.clone();
                 let result = tokio::task::spawn_blocking(move || std::fs::copy(&src, &dst)).await;
                 if result.is_err() || result.unwrap().is_err() {
-                    warnings.push(format!("MP3 batch: copy to .tmp failed for {abs}"));
+                    copy_err = Some(format!("MP3 batch: copy to .tmp failed for {abs}"));
                     copy_ok = false;
                     break;
                 }
@@ -144,6 +166,10 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
             if !copy_ok {
                 for tmp in &tmp_paths {
                     let _ = std::fs::remove_file(tmp);
+                }
+                let msg = copy_err.unwrap_or_else(|| "MP3 batch copy failed".to_string());
+                for item in &mp3_items {
+                    results.push(item_failure(item.id, msg.clone()));
                 }
             } else {
                 match livrarr_tagwrite::write_tags_batch(
@@ -159,7 +185,10 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
                                 let _ = f.sync_all();
                             }
                             if let Err(e) = std::fs::rename(tmp, abs) {
-                                warnings.push(format!("MP3 batch rename failed for {abs}: {e}"));
+                                results.push(item_failure(
+                                    mp3_items[i].id,
+                                    format!("MP3 batch rename failed for {abs}: {e}"),
+                                ));
                                 let _ = std::fs::remove_file(tmp);
                             } else {
                                 let new_size = Path::new(abs)
@@ -177,20 +206,40 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
                                 {
                                     tracing::warn!("update_library_item_size failed: {e}");
                                 }
+                                results.push(item_success(mp3_items[i].id));
                             }
                         }
                     }
                     Err(e) => {
-                        warnings.push(format!("MP3 batch tag write failed: {e}"));
+                        let msg = format!("MP3 batch tag write failed: {e}");
                         for tmp in &tmp_paths {
                             let _ = std::fs::remove_file(tmp);
+                        }
+                        for item in &mp3_items {
+                            results.push(item_failure(item.id, msg.clone()));
                         }
                     }
                 }
             }
         }
 
-        warnings
+        results
+    }
+}
+
+fn item_success(library_item_id: i64) -> TagSyncItemResult {
+    TagSyncItemResult {
+        library_item_id,
+        succeeded: true,
+        error: None,
+    }
+}
+
+fn item_failure(library_item_id: i64, error: String) -> TagSyncItemResult {
+    TagSyncItemResult {
+        library_item_id,
+        succeeded: false,
+        error: Some(error),
     }
 }
 

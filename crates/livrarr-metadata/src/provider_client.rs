@@ -585,14 +585,8 @@ impl GoodreadsClient {
             return Ok(Some(goodreads::detail_url_for_gr_key(&self.base_url, key)));
         }
 
-        if let Some(url) = work.detail_url.as_deref().filter(|u| !u.is_empty()) {
-            // Validate it's a Goodreads URL (SSRF guard against stale data
-            // pointing somewhere unexpected).
-            if goodreads::validate_detail_url(url) {
-                let resolved = goodreads::resolve_detail_url(&self.base_url, url);
-                return Ok(Some(resolved));
-            }
-        }
+        // detail_url removed from Work struct (Phase 1) — provider routing
+        // now relies solely on gr_key for direct Goodreads lookups.
 
         let title = &work.title;
         let author = &work.author_name;

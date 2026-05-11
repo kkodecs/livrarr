@@ -38,7 +38,23 @@ fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbEr
             .try_get("import_id")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         imported_at: parse_dt(&imported_at_str)?,
+        tag_status: parse_tag_status(
+            row.try_get::<Option<String>, _>("tag_status")
+                .ok()
+                .flatten()
+                .as_deref()
+                .unwrap_or("pending"),
+        ),
+        tagged_at_generation: row.try_get::<i64, _>("tagged_at_generation").unwrap_or(0),
     })
+}
+
+fn parse_tag_status(s: &str) -> livrarr_domain::TagStatus {
+    match s {
+        "synced" => livrarr_domain::TagStatus::Synced,
+        "failed" => livrarr_domain::TagStatus::Failed,
+        _ => livrarr_domain::TagStatus::Pending,
+    }
 }
 
 fn parse_media_type(s: &str) -> Result<MediaType, DbError> {

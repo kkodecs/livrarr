@@ -147,13 +147,13 @@ async fn seed_monitored_work(
         user_id,
         title: title.into(),
         author_name: author.into(),
+        normalized_title: String::new(),
+        normalized_author: String::new(),
         author_id: None,
         ol_key: None,
         gr_key: None,
         year: None,
         cover_url: None,
-        metadata_source: None,
-        detail_url: None,
         language: None,
         import_id: None,
         series_id: None,
@@ -161,6 +161,15 @@ async fn seed_monitored_work(
         series_position: None,
         monitor_ebook: true,
         monitor_audiobook: false,
+        source_provider_json: Some(
+            serde_json::json!({
+                "provider": "readarr",
+                "description": "Readarr supplied seed metadata for RSS matching",
+                "isbn": "9780765326355",
+                "cover_url": "https://example.test/readarr-cover.jpg"
+            })
+            .to_string(),
+        ),
     })
     .await
     .unwrap()

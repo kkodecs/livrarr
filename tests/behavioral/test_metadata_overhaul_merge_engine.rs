@@ -543,8 +543,8 @@ fn test_merge_engine_status_enriched_when_description_and_cover_present() {
 }
 
 #[test]
-fn test_merge_engine_status_partial_when_only_one_of_description_or_cover_is_present() {
-    // REQ-ID: R-02, R-14 | Contract: MergeEngine::merge | Behavior: status is Partial when exactly one of description or cover_url is present
+fn test_merge_engine_status_unenriched_when_only_one_of_description_or_cover_is_present() {
+    // REQ-ID: R-02, R-14 | Contract: MergeEngine::merge | Behavior: status is Unenriched when exactly one of description or cover_url is present
     let engine = make_engine();
 
     let input = MergeInput {
@@ -561,7 +561,16 @@ fn test_merge_engine_status_partial_when_only_one_of_description_or_cover_is_pre
 
     let output = merge(engine.as_ref(), input);
 
-    assert_eq!(output.enrichment_status, EnrichmentStatus::Partial);
+    assert_eq!(output.enrichment_status, EnrichmentStatus::Unenriched);
+    assert_eq!(
+        resolved(&output).description.as_deref(),
+        Some("description only"),
+        "partial metadata should be preserved even though the collapsed Phase 1 status is Unenriched"
+    );
+    assert!(
+        resolved(&output).cover_url.is_none(),
+        "missing counterpart metadata should remain absent rather than being fabricated"
+    );
 }
 
 #[test]

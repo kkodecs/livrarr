@@ -2133,8 +2133,8 @@ macro_rules! enrichment_service_tests {
         }
 
         #[tokio::test]
-        async fn test_enrichment_service_reset_for_manual_refresh_sets_pending_clears_enriched_at_and_bumps_generation() {
-            // REQ-ID: R-20, R-21 | Contract: EnrichmentService::reset_for_manual_refresh | Behavior: reset sets status=Pending, clears enriched_at, increments merge_generation, clears all provider_retry_state rows, and preserves provenance rows
+        async fn test_enrichment_service_reset_for_manual_refresh_sets_unenriched_clears_enriched_at_and_bumps_generation() {
+            // REQ-ID: R-20, R-21 | Contract: EnrichmentService::reset_for_manual_refresh | Behavior: reset sets status=Unenriched, clears enriched_at, increments merge_generation, clears all provider_retry_state rows, and preserves provenance rows
             let h = <$harness as DbTestHarness>::setup().await;
             let user_id = h.user_id();
             let work = seed_work(h.db(), user_id).await;
@@ -2197,7 +2197,7 @@ macro_rules! enrichment_service_tests {
             let reset = h.db().get_work(user_id, work.id).await.unwrap();
             let generation_after = h.db().get_merge_generation(user_id, work.id).await.unwrap();
 
-            assert_eq!(reset.enrichment_status, EnrichmentStatus::Pending);
+            assert_eq!(reset.enrichment_status, EnrichmentStatus::Unenriched);
             assert!(reset.enriched_at.is_none());
             assert_eq!(generation_after, generation_before + 1);
 
@@ -2415,7 +2415,7 @@ macro_rules! enrichment_service_tests {
 
             assert!(gr_after.is_none());
             assert!(ol_after.is_none());
-            assert_eq!(reset_work.enrichment_status, EnrichmentStatus::Pending);
+            assert_eq!(reset_work.enrichment_status, EnrichmentStatus::Unenriched);
             assert_eq!(queue_observer.dispatch_count().await, 1);
         }
 
@@ -2465,7 +2465,7 @@ macro_rules! enrichment_service_tests {
             let gen_a_after = db.get_merge_generation(user_a, work_a.id).await.unwrap();
             let gen_b_after = db.get_merge_generation(user_b, work_b.id).await.unwrap();
 
-            assert_eq!(after_a.enrichment_status, EnrichmentStatus::Pending);
+            assert_eq!(after_a.enrichment_status, EnrichmentStatus::Unenriched);
             assert!(after_a.enriched_at.is_none());
             assert_eq!(gen_a_after, gen_a_before + 1);
 

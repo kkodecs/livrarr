@@ -314,13 +314,16 @@ where
                         gr_key: None,
                         year: Some(year),
                         cover_url: None,
-                        metadata_source: None,
                         language: None,
                         detail_url: None,
+                        series_id: None,
                         series_name: None,
                         series_position: None,
-                        defer_enrichment: false,
+                        monitor_ebook: None,
+                        monitor_audiobook: None,
                         provenance_setter: Some(ProvenanceSetter::AutoAdded),
+                        import_id: None,
+                        source_provider_data: None,
                     };
 
                     match self.work_service.add(author.user_id, add_req).await {

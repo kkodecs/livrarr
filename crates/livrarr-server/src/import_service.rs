@@ -324,7 +324,7 @@ impl ImportService for LiveImportService {
                 .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
             // Tag writing — retag the just-imported files if enrichment data available.
-            if work.enrichment_status != livrarr_domain::EnrichmentStatus::Pending {
+            if work.enrichment_status != livrarr_domain::EnrichmentStatus::Unenriched {
                 let items = self
                     .import_io
                     .list_library_items_by_work(user_id, work.id)
@@ -342,8 +342,14 @@ impl ImportService for LiveImportService {
                     .collect();
                 if !matching.is_empty() {
                     use livrarr_domain::services::TagService;
-                    let tag_warnings = self.tag_service.retag_library_items(&work, &matching).await;
-                    warnings.extend(tag_warnings);
+                    let tag_results = self.tag_service.retag_library_items(&work, &matching).await;
+                    warnings.extend(tag_results.into_iter().filter(|r| !r.succeeded).map(|r| {
+                        format!(
+                            "tag rewrite warning (item {}): {}",
+                            r.library_item_id,
+                            r.error.unwrap_or_else(|| "unknown error".to_string())
+                        )
+                    }));
                 }
             }
 

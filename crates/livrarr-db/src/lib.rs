@@ -299,13 +299,13 @@ pub struct CreateWorkDbRequest {
     pub user_id: UserId,
     pub title: String,
     pub author_name: String,
+    pub normalized_title: String,
+    pub normalized_author: String,
     pub author_id: Option<AuthorId>,
     pub ol_key: Option<String>,
     pub gr_key: Option<String>,
     pub year: Option<i32>,
     pub cover_url: Option<String>,
-    pub metadata_source: Option<String>,
-    pub detail_url: Option<String>,
     pub language: Option<String>,
     pub import_id: Option<String>,
     pub series_id: Option<i64>,
@@ -313,6 +313,7 @@ pub struct CreateWorkDbRequest {
     pub series_position: Option<f64>,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    pub source_provider_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -350,6 +351,8 @@ pub struct UpdateWorkEnrichmentDbRequest {
 pub struct UpdateWorkUserFieldsDbRequest {
     pub title: Option<String>,
     pub author_name: Option<String>,
+    pub normalized_title: Option<String>,
+    pub normalized_author: Option<String>,
     pub series_name: Option<Option<String>>,
     pub series_position: Option<Option<f64>>,
     pub monitor_ebook: Option<bool>,

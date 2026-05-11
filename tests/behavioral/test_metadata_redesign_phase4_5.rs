@@ -236,7 +236,7 @@ fn source_provider_data_converts_to_normalized_detail_without_identity_fields() 
     let src = SourceProviderData {
         description: Some("Readarr description".to_string()),
         series_name: Some("Readarr Series".to_string()),
-        series_position: Some(2.5),
+        series_position: Some("2.5".to_string()),
         genres: Some(vec!["Fantasy".to_string(), "Adventure".to_string()]),
         page_count: Some(456),
         publisher: Some("Readarr Publisher".to_string()),

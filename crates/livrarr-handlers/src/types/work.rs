@@ -97,13 +97,9 @@ pub struct AddWorkRequest {
     pub year: Option<i32>,
     pub cover_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail_url: Option<String>,
-    #[serde(default)]
-    pub defer_enrichment: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -178,8 +174,6 @@ pub struct WorkDetailResponse {
     pub added_at: String,
     pub library_items: Vec<LibraryItemResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cover_mtime: Option<i64>,
 }
 
@@ -227,7 +221,6 @@ pub fn work_to_detail_with_cover_mtime(w: &Work, cover_mtime: Option<i64>) -> Wo
         monitor_audiobook: w.monitor_audiobook,
         added_at: w.added_at.to_rfc3339(),
         library_items: vec![],
-        metadata_source: w.metadata_source.clone(),
         cover_mtime,
     }
 }

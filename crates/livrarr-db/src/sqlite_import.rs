@@ -89,6 +89,8 @@ fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbEr
             .try_get("import_id")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         imported_at: parse_dt(&imported_at_str)?,
+        tag_status: livrarr_domain::TagStatus::Pending,
+        tagged_at_generation: 0,
     })
 }
 

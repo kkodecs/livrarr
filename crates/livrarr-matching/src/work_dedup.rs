@@ -140,7 +140,7 @@ mod tests {
             abridged: false,
             rating: None,
             rating_count: None,
-            enrichment_status: livrarr_domain::EnrichmentStatus::Pending,
+            enrichment_status: livrarr_domain::EnrichmentStatus::Unenriched,
             enrichment_retry_count: 0,
             enriched_at: None,
             enrichment_source: None,
@@ -150,8 +150,6 @@ mod tests {
             monitor_audiobook: false,
             import_id: None,
             added_at: chrono::Utc::now(),
-            metadata_source: None,
-            detail_url: None,
         }
     }
 

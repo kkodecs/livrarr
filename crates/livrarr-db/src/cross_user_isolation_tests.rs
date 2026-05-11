@@ -83,13 +83,13 @@ mod tests {
                 user_id: user_a.id,
                 title: "Work A".to_string(),
                 author_name: "Author A".to_string(),
+                normalized_title: "work a".to_string(),
+                normalized_author: "author a".to_string(),
                 author_id: Some(author_a.id),
                 ol_key: None,
                 gr_key: None,
                 year: None,
                 cover_url: None,
-                metadata_source: None,
-                detail_url: None,
                 language: None,
                 import_id: None,
                 series_id: None,
@@ -97,6 +97,7 @@ mod tests {
                 series_position: None,
                 monitor_ebook: true,
                 monitor_audiobook: false,
+                source_provider_json: None,
             })
             .await
             .expect("create work_a");
@@ -106,13 +107,13 @@ mod tests {
                 user_id: user_b.id,
                 title: "Work B".to_string(),
                 author_name: "Author B".to_string(),
+                normalized_title: "work b".to_string(),
+                normalized_author: "author b".to_string(),
                 author_id: Some(author_b.id),
                 ol_key: None,
                 gr_key: None,
                 year: None,
                 cover_url: None,
-                metadata_source: None,
-                detail_url: None,
                 language: None,
                 import_id: None,
                 series_id: None,
@@ -120,6 +121,7 @@ mod tests {
                 series_position: None,
                 monitor_ebook: true,
                 monitor_audiobook: false,
+                source_provider_json: None,
             })
             .await
             .expect("create work_b");
@@ -207,6 +209,8 @@ mod tests {
                 UpdateWorkUserFieldsDbRequest {
                     title: Some("TAMPERED".to_string()),
                     author_name: None,
+                    normalized_title: None,
+                    normalized_author: None,
                     series_name: None,
                     series_position: None,
                     monitor_ebook: None,

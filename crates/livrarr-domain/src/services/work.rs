@@ -5,31 +5,80 @@ use crate::{
     WorkId,
 };
 
+/// Domain-owned source metadata from external systems (e.g., Readarr import).
+/// Enters the enrichment pipeline as a provider input via MetadataProvider::Readarr.
+/// Converted to NormalizedWorkDetail at the livrarr-metadata crate boundary.
+#[derive(Debug, Clone, Default)]
+pub struct SourceProviderData {
+    pub description: Option<String>,
+    pub isbn: Option<String>,
+    pub asin: Option<String>,
+    pub publisher: Option<String>,
+    pub genres: Option<Vec<String>>,
+    pub page_count: Option<i32>,
+    pub rating: Option<f64>,
+    pub rating_count: Option<i32>,
+    pub cover_url: Option<String>,
+    pub series_name: Option<String>,
+    pub series_position: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct AddWorkRequest {
+    // Core identity
     pub title: String,
     pub author_name: String,
-    pub author_ol_key: Option<String>,
+    pub year: Option<i32>,
+    pub language: Option<String>,
+
+    // Provider keys
     pub ol_key: Option<String>,
     pub gr_key: Option<String>,
-    pub year: Option<i32>,
+    pub author_ol_key: Option<String>,
     pub cover_url: Option<String>,
-    pub metadata_source: Option<String>,
-    pub language: Option<String>,
     pub detail_url: Option<String>,
+
+    // Series
+    pub series_id: Option<i64>,
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
-    pub defer_enrichment: bool,
+
+    // Monitoring — defaults to both true if None
+    pub monitor_ebook: Option<bool>,
+    pub monitor_audiobook: Option<bool>,
+
+    // Provenance
     pub provenance_setter: Option<ProvenanceSetter>,
+
+    // Import context
+    pub import_id: Option<String>,
+
+    // Source provider data (e.g., from Readarr import)
+    // Passed into enrichment pipeline as MetadataProvider::Readarr input.
+    // Not written to the work directly — the merge engine arbitrates.
+    pub source_provider_data: Option<SourceProviderData>,
 }
 
 #[derive(Debug)]
 pub struct AddWorkResult {
     pub work: Work,
+    /// true if a new work was created, false if dedup matched an existing work.
+    pub created: bool,
     pub author_created: bool,
     pub author_id: Option<i64>,
     pub messages: Vec<String>,
     pub cover_mtime: Option<i64>,
+    /// Final enrichment status after synchronous enrichment attempt.
+    pub enrichment_status: EnrichmentStatus,
+}
+
+/// Per-item result from tag sync. TagService returns these;
+/// the caller updates DB tag_status per item.
+#[derive(Debug)]
+pub struct TagSyncItemResult {
+    pub library_item_id: i64,
+    pub succeeded: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -146,6 +195,8 @@ pub enum WorkServiceError {
     EnrichmentConflict,
     #[error("cover too large")]
     CoverTooLarge,
+    #[error("validation error: {0}")]
+    Validation(String),
     #[error("enrichment failed: {0}")]
     Enrichment(String),
     #[error("cover download failed: {0}")]
@@ -210,7 +261,6 @@ pub trait WorkService: Send + Sync {
         req: LookupRequest,
         raw: bool,
     ) -> Result<LookupResponse, WorkServiceError>;
-    /// Search works by title or author name (LIKE match). Used by OPDS search.
     async fn search_works(
         &self,
         user_id: UserId,

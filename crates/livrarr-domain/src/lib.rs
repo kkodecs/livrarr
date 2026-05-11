@@ -67,24 +67,37 @@ pub enum GrabStatus {
 }
 
 /// Enrichment status per work.
-///
-/// Satisfies: SEARCH-006, SEARCH-008
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum EnrichmentStatus {
+    /// Initial state. Enrichment has not completed.
+    /// Also used as crash recovery signal — retry job picks up Unenriched
+    /// works older than 5 minutes.
+    #[default]
+    Unenriched,
+    /// Enrichment completed. DB metadata is authoritative.
+    Enriched,
+    /// Enrichment attempted, transient error. Background job retries.
+    Failed,
+    /// LLM identity validation detected a provider mismatch. Terminal until
+    /// user resolves. Only reachable when LLM is configured.
+    Conflict,
+}
+
+/// Per-file tag sync status. Tracked on LibraryItem, not on Work.
+/// Enrichment is about works; tag sync is about files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TagStatus {
+    /// File tags match DB metadata at `tagged_at_generation`.
+    Synced,
+    /// File exists but tags not yet written (imported for unenriched work,
+    /// or crash interrupted tag sync).
     #[default]
     Pending,
-    Partial,
-    Enriched,
+    /// Tag write attempted and failed. Retried only when work.merge_generation
+    /// advances (metadata changes).
     Failed,
-    /// v2.1 — terminal state after 3 retry failures.
-    /// Satisfies: IMPL-JOBS-005
-    Exhausted,
-    /// Foreign-language work — enrichment intentionally skipped.
-    Skipped,
-    /// TEMP(pk-tdd): compile-only scaffold — Conflicting metadata from providers.
-    Conflict,
 }
 
 /// History event types. Append-only.
@@ -373,14 +386,6 @@ pub struct Work {
     pub monitor_audiobook: bool,
     pub import_id: Option<String>,
     pub added_at: DateTime<Utc>,
-    /// Foreign language provider attribution (e.g., "BnF", "lubimyczytac.pl").
-    /// Null for existing English/OL works.
-    #[serde(default)]
-    pub metadata_source: Option<String>,
-    /// Detail page URL for foreign work enrichment (e.g., Goodreads book page).
-    /// Server-side only — never exposed in API responses.
-    #[serde(default, skip_serializing)]
-    pub detail_url: Option<String>,
 }
 
 /// Author entity.
@@ -430,6 +435,8 @@ pub struct LibraryItem {
     pub file_size: i64,
     pub import_id: Option<String>,
     pub imported_at: DateTime<Utc>,
+    pub tag_status: TagStatus,
+    pub tagged_at_generation: i64,
 }
 
 /// Playback progress — reading/listening position for a library item.
@@ -924,6 +931,9 @@ pub enum MetadataProvider {
     Goodreads,
     Audnexus,
     Llm,
+    /// Source data from a Readarr import. Treated as another provider
+    /// input in the merge engine — ranked above OL, below GR.
+    Readarr,
 }
 
 /// A named work field that can have per-provider provenance tracked.
@@ -1001,6 +1011,9 @@ pub enum ProvenanceSetter {
     AutoAdded,
     /// Field value originated from a bulk list import (CSV upload).
     Imported,
+    /// Field value originated from an external system import (e.g., Readarr).
+    /// Treated as provider-quality data, not user-sovereign.
+    Import,
 }
 
 /// Provenance record for a single field value.

@@ -149,6 +149,7 @@ impl From<livrarr_domain::services::WorkServiceError> for ApiError {
                 reason: "enrichment conflict".into(),
             },
             WorkServiceError::CoverTooLarge => ApiError::BadRequest("cover too large".into()),
+            WorkServiceError::Validation(msg) => ApiError::BadRequest(msg),
             WorkServiceError::Enrichment(msg) => ApiError::Internal(msg),
             WorkServiceError::Cover(msg) => ApiError::Internal(msg),
             WorkServiceError::Db(db_err) => ApiError::Db(db_err),
