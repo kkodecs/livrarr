@@ -199,10 +199,11 @@ impl StubMergeEngine {
 }
 
 impl MergeEngine for StubMergeEngine {
-    fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError> {
-        self.seen_inputs.blocking_lock().push(inputs);
+    async fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError> {
+        self.seen_inputs.lock().await.push(inputs);
         self.outputs
-            .blocking_lock()
+            .lock()
+            .await
             .pop_front()
             .expect("test merge output missing")
     }

@@ -29,12 +29,12 @@ fn default_priority_model() -> PriorityModel {
     }
 }
 
-fn make_engine() -> Box<dyn MergeEngine> {
-    Box::new(DefaultMergeEngine::new(default_priority_model()))
+fn make_engine() -> DefaultMergeEngine {
+    DefaultMergeEngine::new(default_priority_model())
 }
 
-fn merge(engine: &(impl MergeEngine + ?Sized), input: MergeInput) -> MergeOutput {
-    engine.merge(input).expect("merge should succeed")
+async fn merge(engine: &impl MergeEngine, input: MergeInput) -> MergeOutput {
+    engine.merge(input).await.expect("merge should succeed")
 }
 
 fn resolved(output: &MergeOutput) -> &livrarr_db::UpdateWorkEnrichmentDbRequest {
@@ -193,8 +193,8 @@ fn upsert_signature(
     )
 }
 
-#[test]
-fn test_merge_engine_priority_first_non_none_provider_wins_custom_order() {
+#[tokio::test]
+async fn test_merge_engine_priority_first_non_none_provider_wins_custom_order() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: first non-None provider in priority order wins for a content field
     let engine = make_engine();
 
@@ -240,7 +240,7 @@ fn test_merge_engine_priority_first_non_none_provider_wins_custom_order() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(
         resolved(&output).subtitle.as_deref(),
@@ -248,8 +248,8 @@ fn test_merge_engine_priority_first_non_none_provider_wins_custom_order() {
     );
 }
 
-#[test]
-fn test_merge_engine_last_known_good_preserves_current_value_when_no_provider_replacement() {
+#[tokio::test]
+async fn test_merge_engine_last_known_good_preserves_current_value_when_no_provider_replacement() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: preserves the current field value when no provider has a replacement
     let engine = make_engine();
 
@@ -275,7 +275,7 @@ fn test_merge_engine_last_known_good_preserves_current_value_when_no_provider_re
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(
         resolved(&output).description.as_deref(),
@@ -283,8 +283,9 @@ fn test_merge_engine_last_known_good_preserves_current_value_when_no_provider_re
     );
 }
 
-#[test]
-fn test_merge_engine_last_known_good_outputs_none_only_when_current_none_and_no_provider_value() {
+#[tokio::test]
+async fn test_merge_engine_last_known_good_outputs_none_only_when_current_none_and_no_provider_value(
+) {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: outputs None only when the current field is already None and providers have no value
     let engine = make_engine();
 
@@ -300,13 +301,13 @@ fn test_merge_engine_last_known_good_outputs_none_only_when_current_none_and_no_
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert!(resolved(&output).description.is_none());
 }
 
-#[test]
-fn test_merge_engine_purity_same_inputs_same_observable_output() {
+#[tokio::test]
+async fn test_merge_engine_purity_same_inputs_same_observable_output() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: same input produces the same observable output on repeated calls
     let engine = make_engine();
 
@@ -328,8 +329,8 @@ fn test_merge_engine_purity_same_inputs_same_observable_output() {
         ),
     };
 
-    let first = merge(engine.as_ref(), input.clone());
-    let second = merge(engine.as_ref(), input);
+    let first = merge(&engine, input.clone()).await;
+    let second = merge(&engine, input).await;
 
     assert_eq!(first.conflict_detected, second.conflict_detected);
     assert_eq!(first.enrichment_status, second.enrichment_status);
@@ -349,8 +350,8 @@ fn test_merge_engine_purity_same_inputs_same_observable_output() {
     );
 }
 
-#[test]
-fn test_merge_engine_user_owned_field_skips_provider_replacement() {
+#[tokio::test]
+async fn test_merge_engine_user_owned_field_skips_provider_replacement() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: user-owned fields are skipped even when providers supply data
     let engine = make_engine();
 
@@ -372,7 +373,7 @@ fn test_merge_engine_user_owned_field_skips_provider_replacement() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(
         resolved(&output).description.as_deref(),
@@ -381,8 +382,8 @@ fn test_merge_engine_user_owned_field_skips_provider_replacement() {
     assert_no_field_mutation(&output, WorkField::Description);
 }
 
-#[test]
-fn test_merge_engine_user_cleared_sticky_empty_skips_provider_replacement() {
+#[tokio::test]
+async fn test_merge_engine_user_cleared_sticky_empty_skips_provider_replacement() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: user-cleared sticky empty fields are preserved and skipped
     let engine = make_engine();
 
@@ -404,14 +405,14 @@ fn test_merge_engine_user_cleared_sticky_empty_skips_provider_replacement() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert!(resolved(&output).description.is_none());
     assert_no_field_mutation(&output, WorkField::Description);
 }
 
-#[test]
-fn test_merge_engine_provider_owned_field_is_replaced_by_priority_model() {
+#[tokio::test]
+async fn test_merge_engine_provider_owned_field_is_replaced_by_priority_model() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: hard refresh allows populated provider-owned fields to be replaced by priority order
     let engine = make_engine();
 
@@ -449,13 +450,13 @@ fn test_merge_engine_provider_owned_field_is_replaced_by_priority_model() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(resolved(&output).subtitle.as_deref(), Some("new subtitle"));
 }
 
-#[test]
-fn test_merge_engine_conflict_blocks_all_mutations() {
+#[tokio::test]
+async fn test_merge_engine_conflict_blocks_all_mutations() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: any conflict blocks field writes and clears all mutation collections
     let engine = make_engine();
 
@@ -480,7 +481,7 @@ fn test_merge_engine_conflict_blocks_all_mutations() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert!(output.conflict_detected);
     assert!(output.work_update.is_none());
@@ -489,8 +490,8 @@ fn test_merge_engine_conflict_blocks_all_mutations() {
     assert!(output.external_id_updates.is_empty());
 }
 
-#[test]
-fn test_merge_engine_conflict_sets_status_conflict() {
+#[tokio::test]
+async fn test_merge_engine_conflict_sets_status_conflict() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: conflict detection sets enrichment status to Conflict
     let engine = make_engine();
 
@@ -509,13 +510,13 @@ fn test_merge_engine_conflict_sets_status_conflict() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(output.enrichment_status, EnrichmentStatus::Conflict);
 }
 
-#[test]
-fn test_merge_engine_status_enriched_when_description_and_cover_present() {
+#[tokio::test]
+async fn test_merge_engine_status_enriched_when_description_and_cover_present() {
     // REQ-ID: R-02, R-14 | Contract: MergeEngine::merge | Behavior: status is Enriched when merged output has both description and cover_url
     let engine = make_engine();
 
@@ -537,13 +538,13 @@ fn test_merge_engine_status_enriched_when_description_and_cover_present() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(output.enrichment_status, EnrichmentStatus::Enriched);
 }
 
-#[test]
-fn test_merge_engine_status_unenriched_when_only_one_of_description_or_cover_is_present() {
+#[tokio::test]
+async fn test_merge_engine_status_unenriched_when_only_one_of_description_or_cover_is_present() {
     // REQ-ID: R-02, R-14 | Contract: MergeEngine::merge | Behavior: status is Unenriched when exactly one of description or cover_url is present
     let engine = make_engine();
 
@@ -559,7 +560,7 @@ fn test_merge_engine_status_unenriched_when_only_one_of_description_or_cover_is_
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(output.enrichment_status, EnrichmentStatus::Unenriched);
     assert_eq!(
@@ -573,8 +574,8 @@ fn test_merge_engine_status_unenriched_when_only_one_of_description_or_cover_is_
     );
 }
 
-#[test]
-fn test_merge_engine_status_failed_when_neither_description_nor_cover_is_present() {
+#[tokio::test]
+async fn test_merge_engine_status_failed_when_neither_description_nor_cover_is_present() {
     // REQ-ID: R-02, R-14 | Contract: MergeEngine::merge | Behavior: status is Failed when neither description nor cover_url is present
     let engine = make_engine();
 
@@ -590,13 +591,13 @@ fn test_merge_engine_status_failed_when_neither_description_nor_cover_is_present
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(output.enrichment_status, EnrichmentStatus::Failed);
 }
 
-#[test]
-fn test_merge_engine_successful_provider_field_produces_provenance_upsert() {
+#[tokio::test]
+async fn test_merge_engine_successful_provider_field_produces_provenance_upsert() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: merged provider-owned field values produce provenance upsert entries
     let engine = make_engine();
 
@@ -618,7 +619,7 @@ fn test_merge_engine_successful_provider_field_produces_provenance_upsert() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
     let upsert = provenance_upsert(&output, WorkField::Description)
         .expect("expected provenance upsert for description");
 
@@ -630,8 +631,8 @@ fn test_merge_engine_successful_provider_field_produces_provenance_upsert() {
     assert!(!upsert.cleared);
 }
 
-#[test]
-fn test_merge_engine_provider_owned_field_without_replacement_produces_provenance_delete() {
+#[tokio::test]
+async fn test_merge_engine_provider_owned_field_without_replacement_produces_provenance_delete() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: provider-owned fields with no replacement preserve value and produce provenance delete entries
     let engine = make_engine();
 
@@ -654,7 +655,7 @@ fn test_merge_engine_provider_owned_field_without_replacement_produces_provenanc
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(
         resolved(&output).description.as_deref(),
@@ -663,8 +664,8 @@ fn test_merge_engine_provider_owned_field_without_replacement_produces_provenanc
     assert!(has_provenance_delete(&output, WorkField::Description));
 }
 
-#[test]
-fn test_merge_engine_success_provider_additional_ids_produce_external_id_updates() {
+#[tokio::test]
+async fn test_merge_engine_success_provider_additional_ids_produce_external_id_updates() {
     // REQ-ID: R-02, R-06 | Contract: MergeEngine::merge | Behavior: success-provider additional ISBNs and ASINs are emitted as external ID updates
     let engine = make_engine();
 
@@ -696,7 +697,7 @@ fn test_merge_engine_success_provider_additional_ids_produce_external_id_updates
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert!(has_external_id_update(
         &output,
@@ -715,8 +716,8 @@ fn test_merge_engine_success_provider_additional_ids_produce_external_id_updates
     ));
 }
 
-#[test]
-fn test_merge_engine_hard_refresh_replaces_provider_owned_populated_field() {
+#[tokio::test]
+async fn test_merge_engine_hard_refresh_replaces_provider_owned_populated_field() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: hard refresh treats provider-owned populated fields as replaceable candidates
     let engine = make_engine();
 
@@ -745,7 +746,7 @@ fn test_merge_engine_hard_refresh_replaces_provider_owned_populated_field() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(
         resolved(&output).subtitle.as_deref(),
@@ -753,8 +754,8 @@ fn test_merge_engine_hard_refresh_replaces_provider_owned_populated_field() {
     );
 }
 
-#[test]
-fn test_merge_engine_manual_mode_preserves_last_known_good_for_will_retry() {
+#[tokio::test]
+async fn test_merge_engine_manual_mode_preserves_last_known_good_for_will_retry() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: manual mode coerces WillRetry to merge-eligible while preserving last-known-good
     let engine = make_engine();
 
@@ -773,7 +774,7 @@ fn test_merge_engine_manual_mode_preserves_last_known_good_for_will_retry() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert!(!output.conflict_detected);
     assert_eq!(
@@ -782,8 +783,8 @@ fn test_merge_engine_manual_mode_preserves_last_known_good_for_will_retry() {
     );
 }
 
-#[test]
-fn test_merge_engine_manual_mode_preserves_last_known_good_for_suppressed() {
+#[tokio::test]
+async fn test_merge_engine_manual_mode_preserves_last_known_good_for_suppressed() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: manual mode coerces Suppressed to merge-eligible while preserving last-known-good
     let engine = make_engine();
 
@@ -802,7 +803,7 @@ fn test_merge_engine_manual_mode_preserves_last_known_good_for_suppressed() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert!(!output.conflict_detected);
     assert_eq!(
@@ -811,8 +812,8 @@ fn test_merge_engine_manual_mode_preserves_last_known_good_for_suppressed() {
     );
 }
 
-#[test]
-fn test_merge_engine_hard_refresh_preserves_last_known_good_for_will_retry() {
+#[tokio::test]
+async fn test_merge_engine_hard_refresh_preserves_last_known_good_for_will_retry() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: hard refresh coerces WillRetry to merge-eligible while preserving the current last-known-good field value
     let engine = make_engine();
 
@@ -838,7 +839,7 @@ fn test_merge_engine_hard_refresh_preserves_last_known_good_for_will_retry() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert!(!output.conflict_detected);
     assert_eq!(
@@ -847,8 +848,8 @@ fn test_merge_engine_hard_refresh_preserves_last_known_good_for_will_retry() {
     );
 }
 
-#[test]
-fn test_merge_engine_hard_refresh_suppressed_coercion_is_observable() {
+#[tokio::test]
+async fn test_merge_engine_hard_refresh_suppressed_coercion_is_observable() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: hard refresh coerces Suppressed to merge-eligible. HardRefresh coercion: Suppressed→merge_eligible=true. Observable via work_update.is_some()
     let engine = make_engine();
 
@@ -874,7 +875,7 @@ fn test_merge_engine_hard_refresh_suppressed_coercion_is_observable() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert!(!output.conflict_detected);
     assert!(
@@ -883,8 +884,8 @@ fn test_merge_engine_hard_refresh_suppressed_coercion_is_observable() {
     );
 }
 
-#[test]
-fn test_merge_engine_hard_refresh_suppressed_preserves_last_known_good_value() {
+#[tokio::test]
+async fn test_merge_engine_hard_refresh_suppressed_preserves_last_known_good_value() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: hard refresh preserves the last-known-good populated field value for a coerced Suppressed outcome
     let engine = make_engine();
 
@@ -911,14 +912,14 @@ fn test_merge_engine_hard_refresh_suppressed_preserves_last_known_good_value() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert!(!output.conflict_detected);
     assert_eq!(resolved(&output).title.as_deref(), Some("current title"));
 }
 
-#[test]
-fn test_merge_engine_english_priority_model_uses_documented_provider_order() {
+#[tokio::test]
+async fn test_merge_engine_english_priority_model_uses_documented_provider_order() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: English priority model uses HC→GR→OL for content, HC→OL→GR for description, and HC→GR→OL for cover
     let engine = make_engine();
 
@@ -957,7 +958,7 @@ fn test_merge_engine_english_priority_model_uses_documented_provider_order() {
         priority_model: PriorityModel::english(),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(resolved(&output).subtitle.as_deref(), Some("hc content"));
     assert_eq!(
@@ -970,8 +971,8 @@ fn test_merge_engine_english_priority_model_uses_documented_provider_order() {
     );
 }
 
-#[test]
-fn test_merge_engine_foreign_priority_model_uses_gr_only() {
+#[tokio::test]
+async fn test_merge_engine_foreign_priority_model_uses_gr_only() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: foreign priority model uses GR-only; OL excluded
     let engine = make_engine();
 
@@ -1002,7 +1003,7 @@ fn test_merge_engine_foreign_priority_model_uses_gr_only() {
         priority_model: PriorityModel::foreign(),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(resolved(&output).subtitle.as_deref(), Some("gr subtitle"));
     assert_eq!(
@@ -1015,8 +1016,8 @@ fn test_merge_engine_foreign_priority_model_uses_gr_only() {
     );
 }
 
-#[test]
-fn test_merge_engine_whitespace_only_high_priority_value_does_not_block_fallback() {
+#[tokio::test]
+async fn test_merge_engine_whitespace_only_high_priority_value_does_not_block_fallback() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: empty and whitespace-only strings are treated as no value so a lower-priority valid string wins
     let engine = make_engine();
 
@@ -1047,7 +1048,7 @@ fn test_merge_engine_whitespace_only_high_priority_value_does_not_block_fallback
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(resolved(&output).subtitle.as_deref(), Some("Valid"));
     let upsert = provenance_upsert(&output, WorkField::Subtitle)
@@ -1055,8 +1056,8 @@ fn test_merge_engine_whitespace_only_high_priority_value_does_not_block_fallback
     assert_eq!(upsert.source, Some(MetadataSource::Goodreads));
 }
 
-#[test]
-fn test_merge_engine_audio_fields_use_audio_priority_model_not_content_priority() {
+#[tokio::test]
+async fn test_merge_engine_audio_fields_use_audio_priority_model_not_content_priority() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: narrator, duration_seconds, asin, and narration_type are resolved from PriorityModel.audio rather than PriorityModel.content
     let engine = make_engine();
 
@@ -1098,7 +1099,7 @@ fn test_merge_engine_audio_fields_use_audio_priority_model_not_content_priority(
         },
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(
         resolved(&output).narrator.as_ref(),
@@ -1128,8 +1129,8 @@ fn test_merge_engine_audio_fields_use_audio_priority_model_not_content_priority(
     assert_eq!(narration_type_upsert.source, Some(MetadataSource::Audnexus));
 }
 
-#[test]
-fn test_merge_engine_cover_manual_bypasses_provider_cover_logic() {
+#[tokio::test]
+async fn test_merge_engine_cover_manual_bypasses_provider_cover_logic() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: when cover_manual is true provider cover values are ignored, existing cover is preserved, and cover provenance is unchanged
     let engine = make_engine();
 
@@ -1169,7 +1170,7 @@ fn test_merge_engine_cover_manual_bypasses_provider_cover_logic() {
         ),
     };
 
-    let output = merge(engine.as_ref(), input);
+    let output = merge(&engine, input).await;
 
     assert_eq!(
         resolved(&output).cover_url.as_deref(),
@@ -1178,87 +1179,93 @@ fn test_merge_engine_cover_manual_bypasses_provider_cover_logic() {
     assert_no_field_mutation(&output, WorkField::CoverUrl);
 }
 
-#[test]
-fn test_merge_engine_empty_priority_model_returns_error() {
+#[tokio::test]
+async fn test_merge_engine_empty_priority_model_returns_error() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: merge fails when the required priority list for a field category is empty
     let engine = make_engine();
 
-    let result = engine.merge(MergeInput {
-        current_work: work_with(None, Some("current description"), Some("current cover")),
-        current_provenance: vec![],
-        provider_results: HashMap::from([(
-            MetadataSource::Goodreads,
-            success(NormalizedWorkDetail {
-                subtitle: Some("provider subtitle".to_string()),
-                ..empty_detail()
-            }),
-        )]),
-        mode: EnrichmentMode::Background,
-        priority_model: PriorityModel {
-            content: vec![],
-            description: vec![MetadataSource::Hardcover],
-            cover: vec![MetadataSource::Goodreads],
-            audio: vec![MetadataSource::Audnexus],
-        },
-    });
+    let result = engine
+        .merge(MergeInput {
+            current_work: work_with(None, Some("current description"), Some("current cover")),
+            current_provenance: vec![],
+            provider_results: HashMap::from([(
+                MetadataSource::Goodreads,
+                success(NormalizedWorkDetail {
+                    subtitle: Some("provider subtitle".to_string()),
+                    ..empty_detail()
+                }),
+            )]),
+            mode: EnrichmentMode::Background,
+            priority_model: PriorityModel {
+                content: vec![],
+                description: vec![MetadataSource::Hardcover],
+                cover: vec![MetadataSource::Goodreads],
+                audio: vec![MetadataSource::Audnexus],
+            },
+        })
+        .await;
 
     assert!(matches!(result, Err(MergeError::EmptyPriorityModel)));
 }
 
-#[test]
-fn test_merge_engine_empty_description_priority_model_returns_error_for_description_field() {
+#[tokio::test]
+async fn test_merge_engine_empty_description_priority_model_returns_error_for_description_field() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: merge fails with EmptyPriorityModel when description priority is empty for a description merge decision
     let engine = make_engine();
 
-    let result = engine.merge(MergeInput {
-        current_work: work_with(None, Some("current description"), Some("current cover")),
-        current_provenance: vec![],
-        provider_results: HashMap::from([(
-            MetadataSource::Hardcover,
-            success(NormalizedWorkDetail {
-                description: Some("provider description".to_string()),
-                ..empty_detail()
-            }),
-        )]),
-        mode: EnrichmentMode::Background,
-        priority_model: PriorityModel {
-            content: vec![MetadataSource::Hardcover],
-            description: vec![],
-            cover: vec![MetadataSource::Goodreads],
-            audio: vec![MetadataSource::Audnexus],
-        },
-    });
+    let result = engine
+        .merge(MergeInput {
+            current_work: work_with(None, Some("current description"), Some("current cover")),
+            current_provenance: vec![],
+            provider_results: HashMap::from([(
+                MetadataSource::Hardcover,
+                success(NormalizedWorkDetail {
+                    description: Some("provider description".to_string()),
+                    ..empty_detail()
+                }),
+            )]),
+            mode: EnrichmentMode::Background,
+            priority_model: PriorityModel {
+                content: vec![MetadataSource::Hardcover],
+                description: vec![],
+                cover: vec![MetadataSource::Goodreads],
+                audio: vec![MetadataSource::Audnexus],
+            },
+        })
+        .await;
 
     assert!(matches!(result, Err(MergeError::EmptyPriorityModel)));
 }
 
-#[test]
-fn test_merge_engine_empty_audio_priority_model_returns_error_for_audio_field() {
+#[tokio::test]
+async fn test_merge_engine_empty_audio_priority_model_returns_error_for_audio_field() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: merge fails with EmptyPriorityModel when audio priority is empty for an audio-field merge decision
     let engine = make_engine();
 
-    let result = engine.merge(MergeInput {
-        current_work: Work {
-            id: WORK_ID,
-            user_id: USER_ID,
-            ..Default::default()
-        },
-        current_provenance: vec![],
-        provider_results: HashMap::from([(
-            MetadataSource::Audnexus,
-            success(NormalizedWorkDetail {
-                narrator: Some(vec!["Audio Narrator".to_string()]),
-                ..empty_detail()
-            }),
-        )]),
-        mode: EnrichmentMode::Background,
-        priority_model: PriorityModel {
-            content: vec![MetadataSource::Hardcover],
-            description: vec![MetadataSource::Hardcover],
-            cover: vec![MetadataSource::Goodreads],
-            audio: vec![],
-        },
-    });
+    let result = engine
+        .merge(MergeInput {
+            current_work: Work {
+                id: WORK_ID,
+                user_id: USER_ID,
+                ..Default::default()
+            },
+            current_provenance: vec![],
+            provider_results: HashMap::from([(
+                MetadataSource::Audnexus,
+                success(NormalizedWorkDetail {
+                    narrator: Some(vec!["Audio Narrator".to_string()]),
+                    ..empty_detail()
+                }),
+            )]),
+            mode: EnrichmentMode::Background,
+            priority_model: PriorityModel {
+                content: vec![MetadataSource::Hardcover],
+                description: vec![MetadataSource::Hardcover],
+                cover: vec![MetadataSource::Goodreads],
+                audio: vec![],
+            },
+        })
+        .await;
 
     assert!(matches!(result, Err(MergeError::EmptyPriorityModel)));
 }
