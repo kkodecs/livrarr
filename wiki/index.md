@@ -18,6 +18,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 ## Domain Entities
 
+- [Metadata Principles](domain/metadata-principles.md) — M1-M7: the governing principles for all metadata handling
 - [BIG7 Overview](domain/big7.md) — the seven core entities and their relationships
 - [Work](domain/work.md) — primary entity, lifecycle, provenance, semantics
 - [Author](domain/author.md) — lifecycle, monitoring, relationship to works
