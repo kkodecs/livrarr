@@ -38,9 +38,11 @@ Source data (Readarr, CSV, search result, monitor detection) seeds identity — 
 
 Enrichment is synchronous — part of work creation, not a background afterthought. A work is not "created" until enrichment has completed (or explicitly failed). No deferred enrichment, no "eventually consistent" metadata. The user sees progress and gets a complete result.
 
+For bulk operations (Readarr import, list import, series monitor), multiple `add()` calls run with bounded concurrency (`buffer_unordered(5)`). Each individual work is still fully enriched before its `add()` returns — the concurrency is between works, not within a single work's enrichment. Rate limiters throttle provider calls naturally. ~30 works/minute sustained throughput.
+
 ## M10: No special cases by language
 
-Foreign language works go through the same enrichment states and lifecycle as English works. The pipeline routes to different providers internally (SRU national libraries, LLM scrapers) but the status model, provenance, tag sync, and creation gate are identical. No separate states, no separate code paths.
+Foreign language works go through the same enrichment states and lifecycle as English works. The pipeline routes to different providers internally (Goodreads scraping, Hardcover API) but the status model, provenance, tag sync, and creation gate are identical. No separate states, no separate code paths.
 
 ---
 
