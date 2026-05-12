@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use futures::stream::{self, StreamExt};
 use tracing::{info, warn};
 
 use livrarr_db::ListImportDb;
@@ -522,103 +523,151 @@ where
             id
         };
 
-        // Process each requested row.
+        // Process rows with M9 bounded concurrency. Each row's pipeline
+        // (preview lookup -> OL lookup -> work_service.add) runs in its own
+        // future; up to 5 run in parallel. work_service.add is itself
+        // synchronous and fully enriches before returning, so the
+        // concurrency is between distinct rows, not within one.
+        //
+        // Each future produces a self-contained RowOutcome. The serial
+        // post-pass folds outcomes into running totals.
+        struct RowOutcome {
+            result: ListConfirmRowResult,
+            works_created: bool,
+            new_author_id: Option<i64>,
+        }
+
+        let resolved_id_ref = &resolved_import_id;
+        let outcomes: Vec<RowOutcome> = stream::iter(row_indices.iter().copied())
+            .map(|row_idx| async move {
+                let row = match self
+                    .db
+                    .get_list_import_preview_row(preview_id, user_id, row_idx as i64)
+                    .await
+                {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        return RowOutcome {
+                            result: ListConfirmRowResult {
+                                row_index: row_idx,
+                                status: "add_failed".into(),
+                                message: Some("row not found in preview".into()),
+                            },
+                            works_created: false,
+                            new_author_id: None,
+                        };
+                    }
+                    Err(e) => {
+                        return RowOutcome {
+                            result: ListConfirmRowResult {
+                                row_index: row_idx,
+                                status: "add_failed".into(),
+                                message: Some(format!("{e}")),
+                            },
+                            works_created: false,
+                            new_author_id: None,
+                        };
+                    }
+                };
+
+                let add_req = match self
+                    .ol_lookup(
+                        row.isbn_13.as_deref(),
+                        row.isbn_10.as_deref(),
+                        &row.title,
+                        &row.author,
+                        row.year,
+                    )
+                    .await
+                {
+                    Ok(req) => req,
+                    Err(msg) => {
+                        return RowOutcome {
+                            result: ListConfirmRowResult {
+                                row_index: row_idx,
+                                status: "lookup_error".into(),
+                                message: Some(msg),
+                            },
+                            works_created: false,
+                            new_author_id: None,
+                        };
+                    }
+                };
+
+                match self.work_service.add(user_id, add_req).await {
+                    Ok(add_result) if !add_result.created => RowOutcome {
+                        result: ListConfirmRowResult {
+                            row_index: row_idx,
+                            status: "already_exists".into(),
+                            message: None,
+                        },
+                        works_created: false,
+                        new_author_id: None,
+                    },
+                    Ok(add_result) => {
+                        if let Err(e) = self
+                            .db
+                            .tag_work_with_import(user_id, add_result.work.id, resolved_id_ref)
+                            .await
+                        {
+                            warn!(
+                                user_id,
+                                work_id = add_result.work.id,
+                                import_id = %resolved_id_ref,
+                                "tag_work_with_import failed (non-fatal): {e}"
+                            );
+                        }
+                        let new_author_id = if add_result.author_created {
+                            add_result.author_id
+                        } else {
+                            None
+                        };
+                        RowOutcome {
+                            result: ListConfirmRowResult {
+                                row_index: row_idx,
+                                status: "added".into(),
+                                message: None,
+                            },
+                            works_created: true,
+                            new_author_id,
+                        }
+                    }
+                    Err(e) => {
+                        warn!(row_idx, error = %e, "list import: add_work failed");
+                        RowOutcome {
+                            result: ListConfirmRowResult {
+                                row_index: row_idx,
+                                status: "add_failed".into(),
+                                message: Some(format!("{e}")),
+                            },
+                            works_created: false,
+                            new_author_id: None,
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(5)
+            .collect()
+            .await;
+
+        // Fold outcomes into final state. Preserve input order for results.
         let mut results = Vec::with_capacity(row_indices.len());
         let mut works_created: i64 = 0;
         let mut new_author_ids: Vec<i64> = Vec::new();
-
-        for &row_idx in row_indices {
-            let row = self
-                .db
-                .get_list_import_preview_row(preview_id, user_id, row_idx as i64)
-                .await
-                .map_err(ListServiceError::Db)?;
-
-            let row = match row {
-                Some(r) => r,
-                None => {
-                    results.push(ListConfirmRowResult {
-                        row_index: row_idx,
-                        status: "add_failed".into(),
-                        message: Some("row not found in preview".into()),
-                    });
-                    continue;
-                }
-            };
-
-            // OL lookup: ISBN first, fallback to title+author search.
-            let lookup_result = self
-                .ol_lookup(
-                    row.isbn_13.as_deref(),
-                    row.isbn_10.as_deref(),
-                    &row.title,
-                    &row.author,
-                    row.year,
-                )
-                .await;
-
-            let add_req = match lookup_result {
-                Ok(req) => req,
-                Err(msg) => {
-                    results.push(ListConfirmRowResult {
-                        row_index: row_idx,
-                        status: "lookup_error".into(),
-                        message: Some(msg),
-                    });
-                    continue;
-                }
-            };
-
-            // Try to add via WorkService.
-            match self.work_service.add(user_id, add_req).await {
-                Ok(add_result) if !add_result.created => {
-                    // Dedup match — work already exists, nothing to tag or track.
-                    results.push(ListConfirmRowResult {
-                        row_index: row_idx,
-                        status: "already_exists".into(),
-                        message: None,
-                    });
-                }
-                Ok(add_result) => {
-                    // Tag the work with import_id (explicit, race-free).
-                    if let Err(e) = self
-                        .db
-                        .tag_work_with_import(user_id, add_result.work.id, &resolved_import_id)
-                        .await
-                    {
-                        warn!(
-                            user_id,
-                            work_id = add_result.work.id,
-                            import_id = %resolved_import_id,
-                            "tag_work_with_import failed (non-fatal): {e}"
-                        );
-                    }
-
-                    // Track new authors for bibliography trigger.
-                    if add_result.author_created {
-                        if let Some(author_id) = add_result.author_id {
-                            if !new_author_ids.contains(&author_id) {
-                                new_author_ids.push(author_id);
-                            }
-                        }
-                    }
-
-                    works_created += 1;
-                    results.push(ListConfirmRowResult {
-                        row_index: row_idx,
-                        status: "added".into(),
-                        message: None,
-                    });
-                }
-                Err(e) => {
-                    warn!(row_idx, error = %e, "list import: add_work failed");
-                    results.push(ListConfirmRowResult {
-                        row_index: row_idx,
-                        status: "add_failed".into(),
-                        message: Some(format!("{e}")),
-                    });
+        // buffer_unordered yields out-of-order; sort by row_index to get a
+        // stable response.
+        let mut outcomes = outcomes;
+        outcomes.sort_by_key(|o| o.result.row_index);
+        for outcome in outcomes {
+            if outcome.works_created {
+                works_created += 1;
+            }
+            if let Some(aid) = outcome.new_author_id {
+                if !new_author_ids.contains(&aid) {
+                    new_author_ids.push(aid);
                 }
             }
+            results.push(outcome.result);
         }
 
         // Update import counters (non-fatal if this fails).

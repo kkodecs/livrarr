@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::stream::{self, StreamExt};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -1065,13 +1066,23 @@ impl ImportRunner {
         active_books: &[&RdBook],
         author_map: &HashMap<i64, &RdAuthor>,
         book_files_by_book: &HashMap<i64, Vec<&RdBookFile>>,
-        livrarr_root_path: &str,
+        _livrarr_root_path: &str,
     ) -> Result<(), String> {
-        let all_works = self
-            .readarr_import_service
-            .list_works(self.user_id)
-            .await
-            .map_err(|e| format!("list works: {e}"))?;
+        // M9 bounded concurrency: serial prep (cheap, read-only) builds an
+        // AddWorkRequest per active book; concurrent dispatch runs up to 5
+        // work_service.add() calls in parallel; serial post-pass folds the
+        // outcomes into self.works_created / self.work_map_rd / progress.
+        // Each individual add() is still synchronous-and-complete — bounded
+        // concurrency is BETWEEN works, not within one.
+
+        // --- Pass 1: serial prep + skip-on-empty-author ---
+        struct Prep {
+            rd_book_id: i64,
+            title: String,
+            add_req: AddWorkRequest,
+        }
+        let mut preps: Vec<Prep> = Vec::with_capacity(active_books.len());
+        let mut skip_errors: Vec<String> = Vec::new();
 
         for rd_book in active_books {
             let author_name = author_map
@@ -1081,14 +1092,9 @@ impl ImportRunner {
             let title = rd_book.title.as_deref().unwrap_or("").trim();
 
             if author_name.is_empty() {
-                let mut prog = self.progress().lock().await;
-                prog.works_processed += 1;
-                prog.errors
-                    .push(format!("Book '{title}': skipped (no author)"));
+                skip_errors.push(format!("Book '{title}': skipped (no author)"));
                 continue;
             }
-
-            let livrarr_author_id = self.author_map_rd.get(&rd_book.author_id).copied();
 
             let edition = rd_book.monitored_edition();
             let isbn = edition
@@ -1109,165 +1115,145 @@ impl ImportRunner {
                 .map(|s| s.to_string());
             let year = rd_book.release_date.as_deref().and_then(extract_year);
 
-            let existing_work = livrarr_matching::work_dedup::find_matching_work(
-                &all_works,
-                title,
-                author_name,
-                &livrarr_matching::work_dedup::ProviderKeys {
-                    isbn_13: isbn.as_deref(),
-                    asin: asin.as_deref(),
-                    ..Default::default()
-                },
-            );
+            let description = rd_book
+                .overview
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    edition
+                        .and_then(|e| e.overview.as_deref())
+                        .filter(|s| !s.is_empty())
+                })
+                .map(|s| s.to_string());
+            let (series_name, series_position_f64) = rd_book
+                .series_title
+                .as_deref()
+                .map(parse_series_title)
+                .unwrap_or((None, None));
+            let genres = rd_book.genres.clone();
+            let page_count = rd_book
+                .page_count
+                .or_else(|| edition.and_then(|e| e.page_count));
+            let rating = rd_book.ratings.as_ref().and_then(|r| r.value);
+            let rating_count = rd_book.ratings.as_ref().and_then(|r| r.votes);
+            let cover_url = extract_cover_url(&rd_book.images);
 
-            let work_id = if let Some(ew) = existing_work {
-                ew.id
-            } else {
-                match self
-                    .create_work(
-                        rd_book,
-                        author_name,
-                        title,
-                        livrarr_author_id,
-                        isbn.clone(),
-                        asin.clone(),
-                        publisher,
-                        language,
-                        year,
-                        book_files_by_book,
-                        livrarr_root_path,
-                    )
-                    .await
-                {
-                    Some(id) => id,
-                    None => {
-                        let mut prog = self.progress().lock().await;
-                        prog.works_processed += 1;
-                        continue;
-                    }
-                }
+            let book_files_list = book_files_by_book.get(&rd_book.id);
+            let has_ebook_file = book_files_list
+                .map(|fs| {
+                    fs.iter().any(|f| {
+                        resolve_media_type(extract_quality_id(f), &f.path) == Some(MediaType::Ebook)
+                    })
+                })
+                .unwrap_or(false);
+            let has_audiobook_file = book_files_list
+                .map(|fs| {
+                    fs.iter().any(|f| {
+                        resolve_media_type(extract_quality_id(f), &f.path)
+                            == Some(MediaType::Audiobook)
+                    })
+                })
+                .unwrap_or(false);
+
+            let monitor_ebook = has_ebook_file || rd_book.monitored.unwrap_or(false);
+            let monitor_audiobook = has_audiobook_file;
+
+            let source_data = SourceProviderData {
+                description,
+                isbn,
+                asin,
+                publisher,
+                genres,
+                page_count,
+                rating,
+                rating_count,
+                cover_url: cover_url.clone(),
+                series_name: series_name.clone(),
+                series_position: series_position_f64.map(|p| p.to_string()),
             };
 
-            self.work_map_rd.insert(rd_book.id, work_id);
+            let add_req = AddWorkRequest {
+                title: title.to_string(),
+                author_name: author_name.to_string(),
+                year,
+                language,
+                monitor_ebook: Some(monitor_ebook),
+                monitor_audiobook: Some(monitor_audiobook),
+                import_id: Some(self.import_id.clone()),
+                source_provider_data: Some(source_data),
+                provenance_setter: Some(ProvenanceSetter::Import),
+                series_name,
+                series_position: series_position_f64,
+                cover_url,
+                ..Default::default()
+            };
 
-            {
-                let mut prog = self.progress().lock().await;
+            preps.push(Prep {
+                rd_book_id: rd_book.id,
+                title: title.to_string(),
+                add_req,
+            });
+        }
+
+        // --- Pass 2: concurrent dispatch (M9 buffer_unordered(5)) ---
+        struct AddOutcome {
+            rd_book_id: i64,
+            work_id: Option<i64>,
+            was_created: bool,
+            error: Option<String>,
+        }
+        let user_id = self.user_id;
+        let work_service = self.work_service.clone();
+        let outcomes: Vec<AddOutcome> = stream::iter(preps)
+            .map(|p| {
+                let ws = work_service.clone();
+                async move {
+                    match ws.add(user_id, p.add_req).await {
+                        Ok(result) => AddOutcome {
+                            rd_book_id: p.rd_book_id,
+                            work_id: Some(result.work.id),
+                            was_created: result.created,
+                            error: None,
+                        },
+                        Err(e) => {
+                            warn!(title = %p.title, "Failed to create work: {e}");
+                            AddOutcome {
+                                rd_book_id: p.rd_book_id,
+                                work_id: None,
+                                was_created: false,
+                                error: Some(format!("Work '{}': {e}", p.title)),
+                            }
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(5)
+            .collect()
+            .await;
+
+        // --- Pass 3: serial post-pass to fold outcomes into shared state ---
+        {
+            let mut prog = self.progress().lock().await;
+            for err in skip_errors {
+                prog.errors.push(err);
                 prog.works_processed += 1;
+            }
+            for outcome in &outcomes {
+                prog.works_processed += 1;
+                if let Some(err) = &outcome.error {
+                    prog.errors.push(err.clone());
+                }
+            }
+        }
+        for outcome in outcomes {
+            if outcome.was_created {
+                self.works_created += 1;
+            }
+            if let Some(id) = outcome.work_id {
+                self.work_map_rd.insert(outcome.rd_book_id, id);
             }
         }
         Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn create_work(
-        &mut self,
-        rd_book: &RdBook,
-        author_name: &str,
-        title: &str,
-        _livrarr_author_id: Option<i64>,
-        isbn: Option<String>,
-        asin: Option<String>,
-        publisher: Option<String>,
-        language: Option<String>,
-        year: Option<i32>,
-        book_files_by_book: &HashMap<i64, Vec<&RdBookFile>>,
-        _livrarr_root_path: &str,
-    ) -> Option<i64> {
-        let edition = rd_book.monitored_edition();
-        let description = rd_book
-            .overview
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                edition
-                    .and_then(|e| e.overview.as_deref())
-                    .filter(|s| !s.is_empty())
-            })
-            .map(|s| s.to_string());
-
-        let (series_name, series_position_f64) = rd_book
-            .series_title
-            .as_deref()
-            .map(parse_series_title)
-            .unwrap_or((None, None));
-
-        let genres = rd_book.genres.clone();
-        let page_count = rd_book
-            .page_count
-            .or_else(|| edition.and_then(|e| e.page_count));
-        let rating = rd_book.ratings.as_ref().and_then(|r| r.value);
-        let rating_count = rd_book.ratings.as_ref().and_then(|r| r.votes);
-        let cover_url = extract_cover_url(&rd_book.images);
-
-        let book_files_list = book_files_by_book.get(&rd_book.id);
-        let has_ebook_file = book_files_list
-            .map(|fs| {
-                fs.iter().any(|f| {
-                    resolve_media_type(extract_quality_id(f), &f.path) == Some(MediaType::Ebook)
-                })
-            })
-            .unwrap_or(false);
-        let has_audiobook_file = book_files_list
-            .map(|fs| {
-                fs.iter().any(|f| {
-                    resolve_media_type(extract_quality_id(f), &f.path) == Some(MediaType::Audiobook)
-                })
-            })
-            .unwrap_or(false);
-
-        let monitor_ebook = has_ebook_file || rd_book.monitored.unwrap_or(false);
-        let monitor_audiobook = has_audiobook_file;
-
-        // Build SourceProviderData from Readarr metadata for enrichment pipeline.
-        let source_data = SourceProviderData {
-            description,
-            isbn,
-            asin,
-            publisher,
-            genres,
-            page_count,
-            rating,
-            rating_count,
-            cover_url: cover_url.clone(),
-            series_name: series_name.clone(),
-            series_position: series_position_f64.map(|p| p.to_string()),
-        };
-
-        match self
-            .work_service
-            .add(
-                self.user_id,
-                AddWorkRequest {
-                    title: title.to_string(),
-                    author_name: author_name.to_string(),
-                    year,
-                    language,
-                    monitor_ebook: Some(monitor_ebook),
-                    monitor_audiobook: Some(monitor_audiobook),
-                    import_id: Some(self.import_id.clone()),
-                    source_provider_data: Some(source_data),
-                    provenance_setter: Some(ProvenanceSetter::Import),
-                    series_name,
-                    series_position: series_position_f64,
-                    cover_url,
-                    ..Default::default()
-                },
-            )
-            .await
-        {
-            Ok(result) => {
-                if result.created {
-                    self.works_created += 1;
-                }
-                Some(result.work.id)
-            }
-            Err(e) => {
-                warn!(title = %title, "Failed to create work: {e}");
-                let mut prog = self.progress().lock().await;
-                prog.errors.push(format!("Work '{title}': {e}"));
-                None
-            }
-        }
     }
 
     #[allow(clippy::too_many_arguments)]

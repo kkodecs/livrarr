@@ -1,3 +1,4 @@
+use futures::stream::{self, StreamExt};
 use livrarr_db::{CreateNotificationDbRequest, NotificationDb, WorkDb};
 use livrarr_domain::services::*;
 use livrarr_domain::*;
@@ -259,136 +260,157 @@ where
 
             let cleaned_author = crate::title_cleanup::clean_author(&author.name);
 
-            // Process each work entry
-            for entry in &works_response.entries {
-                let stripped_ol_key = match entry.ol_key() {
-                    Some(k) => k.to_string(),
-                    None => continue,
-                };
-
-                // Dedup against existing works — match on OL key.
-                // OL entries don't carry GR keys; when non-OL monitors are added,
-                // extend this to cross-check gr_key as well.
-                if existing_keys
-                    .iter()
-                    .any(|(ol, _gr)| ol.as_deref() == Some(stripped_ol_key.as_str()))
-                {
-                    continue;
-                }
-
-                let year = match entry.publish_year() {
-                    Some(y) => y,
-                    None => {
-                        tracing::trace!(
-                            ol_key = %stripped_ol_key,
-                            raw_date = ?entry.first_publish_date,
-                            "author monitor: skipping work — no publish date"
-                        );
-                        continue;
+            // M9 bounded concurrency: filter eligible entries serially (cheap
+            // CPU-only dedup + year filter), then auto-add or notify with
+            // buffer_unordered(5) so up to 5 work_service.add() calls run in
+            // parallel. Each future owns its own request and returns deltas;
+            // the serial post-pass folds into `report`.
+            let cleaned_author_ref = &cleaned_author;
+            let author_ref = &author;
+            let ol_key_ref = &ol_key;
+            let eligible: Vec<(String, i32, String)> = works_response
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    let stripped_ol_key = entry.ol_key()?.to_string();
+                    if existing_keys
+                        .iter()
+                        .any(|(ol, _gr)| ol.as_deref() == Some(stripped_ol_key.as_str()))
+                    {
+                        return None;
                     }
-                };
-
-                // Filter by monitor_since
-                if year < monitor_since_year {
-                    continue;
-                }
-
-                let raw_title = entry.title.as_deref().unwrap_or("Unknown").to_string();
-                let work_title = crate::title_cleanup::clean_title(&raw_title);
-
-                tracing::info!(
-                    author_id = author.id,
-                    year = year,
-                    "author monitor: new work detected"
-                );
-
-                report.new_works_found += 1;
-
-                if author.monitor_new_items {
-                    // Auto-add via WorkService
-                    let add_req = AddWorkRequest {
-                        title: work_title.clone(),
-                        author_name: cleaned_author.clone(),
-                        author_ol_key: Some(ol_key.clone()),
-                        ol_key: Some(stripped_ol_key.clone()),
-                        gr_key: None,
-                        year: Some(year),
-                        cover_url: None,
-                        language: None,
-                        detail_url: None,
-                        series_id: None,
-                        series_name: None,
-                        series_position: None,
-                        monitor_ebook: None,
-                        monitor_audiobook: None,
-                        provenance_setter: Some(ProvenanceSetter::AutoAdded),
-                        import_id: None,
-                        source_provider_data: None,
+                    let year = match entry.publish_year() {
+                        Some(y) => y,
+                        None => {
+                            tracing::trace!(
+                                ol_key = %stripped_ol_key,
+                                raw_date = ?entry.first_publish_date,
+                                "author monitor: skipping work — no publish date"
+                            );
+                            return None;
+                        }
                     };
+                    if year < monitor_since_year {
+                        return None;
+                    }
+                    let raw_title = entry.title.as_deref().unwrap_or("Unknown").to_string();
+                    let work_title = crate::title_cleanup::clean_title(&raw_title);
+                    Some((stripped_ol_key, year, work_title))
+                })
+                .collect();
 
-                    match self.work_service.add(author.user_id, add_req).await {
-                        Ok(_work) => {
-                            report.works_added += 1;
+            report.new_works_found += eligible.len();
 
-                            // WorkAutoAdded notification — only on successful add
-                            if let Err(e) = self
-                                .db
-                                .create_notification(CreateNotificationDbRequest {
-                                    user_id: author.user_id,
-                                    notification_type: NotificationType::WorkAutoAdded,
-                                    ref_key: Some(stripped_ol_key.clone()),
-                                    message: format!(
-                                        "New work '{}' by {} auto-added to your library",
-                                        work_title, author.name
-                                    ),
-                                    data: serde_json::json!({
-                                        "title": work_title,
-                                        "author": author.name,
-                                        "year": year,
-                                        "ol_key": stripped_ol_key,
-                                    }),
-                                })
-                                .await
-                            {
-                                tracing::warn!("create_notification failed: {e}");
-                            } else {
-                                report.notifications_created += 1;
+            struct EntryOutcome {
+                works_added: bool,
+                notifications_created: bool,
+            }
+
+            let outcomes: Vec<EntryOutcome> = stream::iter(eligible.into_iter())
+                .map(|(stripped_ol_key, year, work_title)| async move {
+                    tracing::info!(
+                        author_id = author_ref.id,
+                        year = year,
+                        "author monitor: new work detected"
+                    );
+
+                    if author_ref.monitor_new_items {
+                        let add_req = AddWorkRequest {
+                            title: work_title.clone(),
+                            author_name: cleaned_author_ref.clone(),
+                            author_ol_key: Some(ol_key_ref.clone()),
+                            ol_key: Some(stripped_ol_key.clone()),
+                            gr_key: None,
+                            year: Some(year),
+                            cover_url: None,
+                            language: None,
+                            detail_url: None,
+                            series_id: None,
+                            series_name: None,
+                            series_position: None,
+                            monitor_ebook: None,
+                            monitor_audiobook: None,
+                            provenance_setter: Some(ProvenanceSetter::AutoAdded),
+                            import_id: None,
+                            source_provider_data: None,
+                        };
+                        match self.work_service.add(author_ref.user_id, add_req).await {
+                            Ok(_work) => {
+                                let notif_ok = self
+                                    .db
+                                    .create_notification(CreateNotificationDbRequest {
+                                        user_id: author_ref.user_id,
+                                        notification_type: NotificationType::WorkAutoAdded,
+                                        ref_key: Some(stripped_ol_key.clone()),
+                                        message: format!(
+                                            "New work '{}' by {} auto-added to your library",
+                                            work_title, author_ref.name
+                                        ),
+                                        data: serde_json::json!({
+                                            "title": work_title,
+                                            "author": author_ref.name,
+                                            "year": year,
+                                            "ol_key": stripped_ol_key,
+                                        }),
+                                    })
+                                    .await
+                                    .map_err(|e| tracing::warn!("create_notification failed: {e}"))
+                                    .is_ok();
+                                EntryOutcome {
+                                    works_added: true,
+                                    notifications_created: notif_ok,
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    author_id = author_ref.id,
+                                    ol_key = %stripped_ol_key,
+                                    error = %e,
+                                    "author monitor: failed to auto-add work"
+                                );
+                                EntryOutcome {
+                                    works_added: false,
+                                    notifications_created: false,
+                                }
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                author_id = author.id,
-                                ol_key = %stripped_ol_key,
-                                error = %e,
-                                "author monitor: failed to auto-add work"
-                            );
+                    } else {
+                        let notif_ok = self
+                            .db
+                            .create_notification(CreateNotificationDbRequest {
+                                user_id: author_ref.user_id,
+                                notification_type: NotificationType::NewWorkDetected,
+                                ref_key: Some(stripped_ol_key.clone()),
+                                message: format!(
+                                    "New work '{}' by {} detected",
+                                    work_title, author_ref.name
+                                ),
+                                data: serde_json::json!({
+                                    "title": work_title,
+                                    "author": author_ref.name,
+                                    "year": year,
+                                    "ol_key": stripped_ol_key,
+                                }),
+                            })
+                            .await
+                            .map_err(|e| tracing::warn!("create_notification failed: {e}"))
+                            .is_ok();
+                        EntryOutcome {
+                            works_added: false,
+                            notifications_created: notif_ok,
                         }
                     }
-                } else {
-                    // Notification only — NewWorkDetected
-                    if let Err(e) = self
-                        .db
-                        .create_notification(CreateNotificationDbRequest {
-                            user_id: author.user_id,
-                            notification_type: NotificationType::NewWorkDetected,
-                            ref_key: Some(stripped_ol_key.clone()),
-                            message: format!(
-                                "New work '{}' by {} detected",
-                                work_title, author.name
-                            ),
-                            data: serde_json::json!({
-                                "title": work_title,
-                                "author": author.name,
-                                "year": year,
-                                "ol_key": stripped_ol_key,
-                            }),
-                        })
-                        .await
-                    {
-                        tracing::warn!("create_notification failed: {e}");
-                    } else {
-                        report.notifications_created += 1;
-                    }
+                })
+                .buffer_unordered(5)
+                .collect()
+                .await;
+
+            for outcome in outcomes {
+                if outcome.works_added {
+                    report.works_added += 1;
+                }
+                if outcome.notifications_created {
+                    report.notifications_created += 1;
                 }
             }
 

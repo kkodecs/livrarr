@@ -224,8 +224,24 @@ where
             .find_by_normalized_match(user_id, &normalized_title, &normalized_author)
             .await
             .map_err(WorkServiceError::Db)?;
+        let source_provider_data = req.source_provider_data;
         if let Some(work) = existing.into_iter().next() {
-            let enrichment_status = work.enrichment_status;
+            // M2/M8: if the caller supplied SourceProviderData (e.g. a Readarr
+            // re-import surfacing new identifiers, description, cover), the
+            // matched-existing path must still inject + re-enrich so that the
+            // metadata state ends up identical to the newly-created path.
+            // Without this, Readarr imports of works that already exist in
+            // Livrarr would silently discard the source payload.
+            let (work, enrichment_status) = if source_provider_data.is_some() {
+                let status = self
+                    .run_unified_enrichment(user_id, &work, source_provider_data)
+                    .await;
+                let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
+                (refreshed, status)
+            } else {
+                let status = work.enrichment_status;
+                (work, status)
+            };
             return Ok(AddWorkResult {
                 work,
                 created: false,
@@ -319,7 +335,7 @@ where
         // 7. Unified enrichment (synchronous): provider dispatch, merge, cover, tag sync.
         //    Enrichment failure does NOT fail add(). Work is created with Failed status.
         let enrichment_status = self
-            .run_unified_enrichment(user_id, &work, req.source_provider_data)
+            .run_unified_enrichment(user_id, &work, source_provider_data)
             .await;
 
         // 8. Fetch post-enrichment work state (merge already wrote metadata).

@@ -80,10 +80,6 @@ pub trait ReadarrImportService: Send + Sync {
 
     // -- Work operations (run_import) --
     async fn list_works(&self, user_id: UserId) -> Result<Vec<Work>, ReadarrImportError>;
-    async fn create_work(
-        &self,
-        req: livrarr_db::CreateWorkDbRequest,
-    ) -> Result<Work, ReadarrImportError>;
     async fn update_work_enrichment(
         &self,
         user_id: UserId,
@@ -121,14 +117,7 @@ impl<D> LiveReadarrImportService<D> {
 
 impl<D> ReadarrImportService for LiveReadarrImportService<D>
 where
-    D: ImportDb
-        + RootFolderDb
-        + AuthorDb
-        + WorkDb
-        + livrarr_db::WorkDbCreate
-        + LibraryItemDb
-        + Send
-        + Sync,
+    D: ImportDb + RootFolderDb + AuthorDb + WorkDb + LibraryItemDb + Send + Sync,
 {
     async fn get_root_folder(&self, id: RootFolderId) -> Result<RootFolder, ReadarrImportError> {
         Ok(self.db.get_root_folder(id).await?)
@@ -213,14 +202,6 @@ where
 
     async fn list_works(&self, user_id: UserId) -> Result<Vec<Work>, ReadarrImportError> {
         Ok(self.db.list_works(user_id).await?)
-    }
-
-    async fn create_work(
-        &self,
-        req: livrarr_db::CreateWorkDbRequest,
-    ) -> Result<Work, ReadarrImportError> {
-        let (work, _created) = self.db.create_work(req).await?;
-        Ok(work)
     }
 
     async fn update_work_enrichment(
