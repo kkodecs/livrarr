@@ -121,9 +121,33 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         user_id: i64,
         req: ReadarrImportRequest,
     ) -> Result<ReadarrStartResponse, ServiceError> {
+        // Single-flight guard: claim the running slot under the progress
+        // lock atomically (check + set). Two concurrent imports for the
+        // same normalized identity can race on `source_provider_data`
+        // injection (see M2/M8); serializing Readarr imports closes that
+        // window without needing finer-grained per-work locks. Other entry
+        // paths (list import, author monitor) do not pass
+        // `source_provider_data` and are not subject to this race.
         let import_id = uuid::Uuid::new_v4().to_string();
+        {
+            let mut prog = self.readarr_import_progress.lock().await;
+            if prog.running {
+                return Err(ServiceError::Internal(
+                    "Readarr import already running".into(),
+                ));
+            }
+            *prog = ReadarrImportProgress {
+                running: true,
+                import_id: Some(import_id.clone()),
+                phase: "fetching".to_string(),
+                ..Default::default()
+            };
+        }
 
-        self.readarr_import_service
+        // Create the DB import record AFTER claiming the slot, so the slot
+        // is correctly released if create_import fails.
+        if let Err(e) = self
+            .readarr_import_service
             .create_import(CreateImportDbRequest {
                 id: import_id.clone(),
                 user_id,
@@ -132,16 +156,11 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
                 target_root_folder_id: Some(req.livrarr_root_folder_id),
             })
             .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
-
         {
             let mut prog = self.readarr_import_progress.lock().await;
-            *prog = ReadarrImportProgress {
-                running: true,
-                import_id: Some(import_id.clone()),
-                phase: "fetching".to_string(),
-                ..Default::default()
-            };
+            prog.running = false;
+            prog.phase = "failed".to_string();
+            return Err(ServiceError::Internal(e.to_string()));
         }
 
         let http_client = self.http_client.clone();
