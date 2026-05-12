@@ -312,10 +312,24 @@ where
             .map_err(WorkServiceError::Db)?;
 
         // ON CONFLICT race-loser: another caller inserted the same identity
-        // between our find_by_normalized_match() and INSERT. Return the
-        // existing row without re-running enrichment or provenance.
+        // between our find_by_normalized_match() and INSERT. Apply the same
+        // M2/M8 rule as the fast-path dedup branch — if source_provider_data
+        // was supplied (e.g. Readarr import), inject it and re-enrich the
+        // existing work so the matched-existing path produces the same
+        // metadata state as the newly-created path. Without this, the
+        // buffer_unordered(5) refactor on Readarr import could silently
+        // discard SourceProviderData for the race-loser.
         if !actually_created {
-            let enrichment_status = work.enrichment_status;
+            let (work, enrichment_status) = if source_provider_data.is_some() {
+                let status = self
+                    .run_unified_enrichment(user_id, &work, source_provider_data)
+                    .await;
+                let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
+                (refreshed, status)
+            } else {
+                let status = work.enrichment_status;
+                (work, status)
+            };
             return Ok(AddWorkResult {
                 work,
                 created: false,
