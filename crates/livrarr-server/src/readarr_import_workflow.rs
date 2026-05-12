@@ -170,6 +170,22 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         let id = import_id.clone();
 
         tokio::spawn(async move {
+            // RAII slot guard — clears `running` even on panic.
+            // Drop is synchronous, so we spawn a one-shot cleanup task
+            // rather than blocking. The tokio runtime is alive at this
+            // point because we are inside a spawned task.
+            struct SlotGuard(Arc<Mutex<ReadarrImportProgress>>);
+            impl Drop for SlotGuard {
+                fn drop(&mut self) {
+                    let progress = self.0.clone();
+                    tokio::spawn(async move {
+                        let mut prog = progress.lock().await;
+                        prog.running = false;
+                    });
+                }
+            }
+            let _slot_guard = SlotGuard(readarr_import_progress.clone());
+
             let runner = ImportRunner::new(
                 http_client,
                 readarr_import_service.clone(),
@@ -186,8 +202,9 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
                     .await;
             }
 
+            // Normal completion: set phase=done; slot_guard handles `running`
+            // unconditionally on drop (including the panic path).
             let mut prog = readarr_import_progress.lock().await;
-            prog.running = false;
             prog.phase = "done".to_string();
         });
 
@@ -1214,6 +1231,52 @@ impl ImportRunner {
             });
         }
 
+        // --- Pass 1b: dedupe by normalized identity ---
+        //
+        // Readarr can return two books that normalize to the same Livrarr
+        // identity (e.g. "The Stand" and "Stand, The"). Dispatching them
+        // concurrently through buffer_unordered would race on
+        // EnrichmentServiceImpl's per-(user, work) source_data_store —
+        // both calls supplying SourceProviderData for the same (user_id,
+        // work_id), the later inject overwriting the earlier one. Closing
+        // the race at the dispatch boundary is cheaper than threading a
+        // payload through the trait surface.
+        //
+        // Strategy: keep the first prep per identity as the "primary"; track
+        // the remaining rd_book_ids as "secondaries" and fan the resulting
+        // work_id out to them in the post-pass. All secondaries' rd_files
+        // therefore map to the same Livrarr work as the primary.
+        let mut by_identity: HashMap<(String, String), (Prep, Vec<i64>)> =
+            HashMap::with_capacity(preps.len());
+        for prep in preps {
+            let key = (
+                normalize_for_matching(&prep.add_req.title),
+                normalize_for_matching(&prep.add_req.author_name),
+            );
+            by_identity
+                .entry(key)
+                .and_modify(|(_, secs)| secs.push(prep.rd_book_id))
+                .or_insert_with(|| (prep, Vec::new()));
+        }
+        let total_dispatch = by_identity.len();
+        let total_secondaries: usize = by_identity.values().map(|(_, s)| s.len()).sum();
+        if total_secondaries > 0 {
+            info!(
+                primaries = total_dispatch,
+                secondaries = total_secondaries,
+                "Readarr import: deduplicated {} books by normalized identity",
+                total_secondaries
+            );
+        }
+        // Split into parallel-dispatch list and secondary map keyed by primary rd_book_id.
+        let mut primary_preps: Vec<Prep> = Vec::with_capacity(total_dispatch);
+        let mut secondaries_by_primary: HashMap<i64, Vec<i64>> =
+            HashMap::with_capacity(total_dispatch);
+        for (prep, secs) in by_identity.into_values() {
+            secondaries_by_primary.insert(prep.rd_book_id, secs);
+            primary_preps.push(prep);
+        }
+
         // --- Pass 2: concurrent dispatch (M9 buffer_unordered(5)) ---
         struct AddOutcome {
             rd_book_id: i64,
@@ -1223,7 +1286,7 @@ impl ImportRunner {
         }
         let user_id = self.user_id;
         let work_service = self.work_service.clone();
-        let outcomes: Vec<AddOutcome> = stream::iter(preps)
+        let outcomes: Vec<AddOutcome> = stream::iter(primary_preps)
             .map(|p| {
                 let ws = work_service.clone();
                 async move {
@@ -1258,7 +1321,13 @@ impl ImportRunner {
                 prog.works_processed += 1;
             }
             for outcome in &outcomes {
-                prog.works_processed += 1;
+                // Each outcome represents one primary identity; secondaries
+                // count as "processed" but didn't run their own add() call.
+                let group_size = 1 + secondaries_by_primary
+                    .get(&outcome.rd_book_id)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                prog.works_processed += group_size as i64;
                 if let Some(err) = &outcome.error {
                     prog.errors.push(err.clone());
                 }
@@ -1270,6 +1339,11 @@ impl ImportRunner {
             }
             if let Some(id) = outcome.work_id {
                 self.work_map_rd.insert(outcome.rd_book_id, id);
+                if let Some(secs) = secondaries_by_primary.get(&outcome.rd_book_id) {
+                    for sec_id in secs {
+                        self.work_map_rd.insert(*sec_id, id);
+                    }
+                }
             }
         }
         Ok(())
