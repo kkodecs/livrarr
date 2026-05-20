@@ -20,16 +20,28 @@ FROM rust:1.94-alpine AS backend
 
 WORKDIR /app
 
+ARG TARGETARCH
+ARG BUILDARCH
+
 # musl-dev + gcc required by libsqlite3-sys bundled (compiles SQLite from C source)
-# QEMU (set up by docker/setup-qemu-action) handles arch emulation transparently;
-# no musl.cc cross-toolchain needed.
-RUN apk add --no-cache musl-dev gcc
+# cross-compilation uses a prebuilt musl.cc toolchain only when building x86_64 -> arm64
+RUN apk add --no-cache musl-dev gcc curl && \
+    if [ "$TARGETARCH" = "arm64" ] && [ "$BUILDARCH" = "amd64" ]; then \
+      curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar -xz -C /usr/local && \
+      rustup target add aarch64-unknown-linux-musl; \
+    fi
 
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo/ ./.cargo/
 COPY crates/ ./crates/
 
-RUN cargo build --release -p livrarr-server
+RUN if [ "$TARGETARCH" = "arm64" ] && [ "$BUILDARCH" = "amd64" ]; then \
+      CC_aarch64_unknown_linux_musl=/usr/local/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc \
+      cargo build --release -p livrarr-server --target aarch64-unknown-linux-musl; \
+    else \
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc \
+      cargo build --release -p livrarr-server; \
+    fi
 
 # ─────────────────────────────────────────────
 # Stage 3: Runtime image (~35-40MB)
@@ -44,8 +56,14 @@ RUN addgroup -g 1000 livrarr && \
 
 WORKDIR /app
 
+ARG TARGETARCH
+ARG BUILDARCH
 RUN --mount=type=bind,from=backend,source=/app,target=/build \
-    cp /build/target/release/livrarr ./livrarr
+    if [ "$TARGETARCH" = "arm64" ] && [ "$BUILDARCH" = "amd64" ]; then \
+      cp /build/target/aarch64-unknown-linux-musl/release/livrarr ./livrarr; \
+    else \
+      cp /build/target/release/livrarr ./livrarr; \
+    fi
 COPY --from=frontend /app/dist ./ui
 
 RUN chown -R livrarr:livrarr /app
