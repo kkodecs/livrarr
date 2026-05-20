@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Livrarr Metadata Pathway Pseudocode</title>
+  <style>
+    :root {
+      --bg: #f7f8fa;
+      --ink: #18212f;
+      --muted: #5c6878;
+      --line: #c4ccd6;
+      --panel: #ffffff;
+      --code: #101820;
+      --code-ink: #e7edf5;
+      --accent: #225ea8;
+      --warn: #8a3b12;
+      --warn-bg: #fff1e7;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 28px;
+      line-height: 1.2;
+    }
+
+    h2 {
+      margin: 0 0 10px;
+      font-size: 19px;
+    }
+
+    p {
+      margin: 0 0 14px;
+      color: var(--muted);
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    .topnav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 16px 0 28px;
+    }
+
+    .topnav a {
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      text-decoration: none;
+      font-weight: 650;
+    }
+
+    section {
+      margin: 0 0 22px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .meta {
+      margin-bottom: 10px;
+      color: var(--muted);
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 0;
+      padding: 16px;
+      border-radius: 8px;
+      background: var(--code);
+      color: var(--code-ink);
+      line-height: 1.45;
+      tab-size: 2;
+    }
+
+    code {
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    .warn {
+      margin: 12px 0 0;
+      padding: 11px 12px;
+      border: 1px solid #e4b690;
+      border-radius: 7px;
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+
+    .warn strong {
+      color: var(--warn);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Metadata Pathway Pseudocode</h1>
+    <p>
+      Companion to <a href="./metadata-pathway-diagram.html">metadata-pathway-diagram.html</a>.
+      This page expands the critical boxes into implementation-shaped pseudocode.
+    </p>
+
+    <nav class="topnav" aria-label="Pseudocode sections">
+      <a href="#add">WorkService::add</a>
+      <a href="#creation-paths">Creation paths</a>
+      <a href="#unified">run_unified_enrichment</a>
+      <a href="#enrich">EnrichmentService::enrich_work</a>
+      <a href="#queue">ProviderQueue</a>
+      <a href="#goodreads">Goodreads selection</a>
+      <a href="#validator">Validator</a>
+      <a href="#merge">MergeEngine</a>
+      <a href="#apply">DB apply</a>
+    </nav>
+
+    <section id="add">
+      <h2>1. <code>WorkServiceImpl::add</code></h2>
+      <p class="meta">Source: <code>crates/livrarr-metadata/src/work_service.rs</code></p>
+      <pre><code>fn add(user_id, req):
+    cleaned_title = clean_title(req.title)
+    if cleaned_title is empty:
+        return validation_error
+
+    cleaned_author = clean_author(req.author_name)
+
+    normalized_title = normalize_for_matching(cleaned_title)
+    normalized_author = normalize_for_matching(cleaned_author)
+
+    source_provider_data = req.source_provider_data
+
+    existing = db.find_by_normalized_match(user_id, normalized_title, normalized_author)
+    if existing exists:
+        if source_provider_data exists:
+            run_unified_enrichment(user_id, existing, source_provider_data)
+            return reloaded existing work
+        return existing work as created=false
+
+    author_id = find_or_create_author(user_id, cleaned_author, req.author_ol_key)
+
+    gr_key = req.gr_key
+        or extract_gr_key(req.detail_url) if detail_url is valid Goodreads URL
+
+    work, actually_created = db.create_work(
+        title = cleaned_title,
+        author_name = cleaned_author,
+        normalized_title = normalized_title,
+        normalized_author = normalized_author,
+        author_id = author_id,
+        ol_key = req.ol_key,
+        gr_key = gr_key,
+        year = req.year,
+        cover_url = req.cover_url,
+        language = normalize_language(req.language),
+        series = req.series,
+        monitor flags = req.monitor flags,
+        import_id = req.import_id,
+    )
+
+    if !actually_created:
+        if source_provider_data exists:
+            run_unified_enrichment(user_id, work, source_provider_data)
+            return reloaded work
+        return work as created=false
+
+    setter = req.provenance_setter or User
+    write_addtime_provenance(user_id, work, setter)
+
+    status = run_unified_enrichment(user_id, work, source_provider_data)
+
+    updated_work = db.get_work(user_id, work.id)
+    cover_mtime = find_cover_file_mtime(updated_work.id)
+
+    return AddWorkResult(updated_work, created=true, enrichment_status=status)</code></pre>
+    </section>
+
+    <section id="creation-paths">
+      <h2>1a. Work Creation Paths Before <code>WorkService::add</code></h2>
+      <p class="meta">Sources: <code>frontend/src/pages/search/SearchPage.tsx</code>, <code>crates/livrarr-handlers/src/work.rs</code>, <code>frontend/src/pages/manual-import/ManualImportPage.tsx</code>, <code>crates/livrarr-handlers/src/manual_import.rs</code></p>
+      <pre><code>Manual add from search:
+    user enters query and language
+
+    frontend:
+        lookupWorks(term, lang, raw)
+            -> GET /api/v1/work/lookup?term=...&lang=...
+
+    backend:
+        work::lookup
+            -> WorkService::lookup_filtered
+            -> WorkService::lookup
+
+        if lang != "en":
+            lookup_goodreads(term, lang)
+        else:
+            lookup_openlibrary(term)
+
+        optional LLM cleanup filters the displayed candidates
+
+    frontend:
+        user selects WorkSearchResult
+        addWork({
+            olKey: result.olKey,
+            title: result.title,
+            authorName: result.authorName,
+            authorOlKey: result.authorOlKey,
+            year: result.year,
+            coverUrl: result.coverUrl,
+            metadataSource: result.source,
+            language: result.language,
+            detailUrl: result.detailUrl,
+        })
+
+    backend:
+        work::add receives API AddWorkRequest
+        maps to domain AddWorkRequest:
+            title = req.title
+            author_name = req.author_name
+            author_ol_key = req.author_ol_key
+            ol_key = req.ol_key
+            gr_key = None
+            year = req.year
+            cover_url = req.cover_url
+            language = req.language
+            detail_url = req.detail_url
+            source_provider_data = None
+
+        WorkService::add(user_id, domain_req)
+
+Manual import:
+    user picks a filesystem path
+
+    frontend:
+        scanManualImport(path)
+
+    backend:
+        manual_import::scan
+            enumerate files
+            matching_service.extract_and_reconcile(file/path)
+                -> ParsedFile { title, author, series, series_position, language }
+
+            for parsed files:
+                search OpenLibrary using "{clean_title} {author}"
+                choose duplicate-matching OL result, else first OL result
+                store OlMatch {
+                    ol_key,
+                    title,
+                    author,
+                    cover_url,
+                    existing_work_id,
+                }
+
+    frontend:
+        user selects rows and optional corrected match
+        executeManualImport([{
+            path,
+            olKey,
+            title,
+            author,
+            deleteExisting,
+            language,
+        }])
+
+        note: current ManualImportItem does not include coverUrl, series,
+              seriesPosition, ISBN, grKey, detailUrl, or source provider data.
+
+    backend:
+        manual_import::import
+            -> import_single_item
+            -> find_or_create_work
+
+        find_or_create_work:
+            if matching existing work by OL key/title/author:
+                return existing work id
+
+            author_ol_key = author_service.lookup_authors(author, limit=1).first.ol_key
+
+            domain AddWorkRequest:
+                ol_key = item.ol_key if non-empty
+                title = item.title
+                author_name = item.author
+                author_ol_key = author_ol_key
+                gr_key = None
+                year = None
+                cover_url = None
+                language = item.language
+                detail_url = None
+                series_id = None
+                series_name = None
+                series_position = None
+                monitor_ebook = None
+                monitor_audiobook = None
+                provenance_setter = None
+                import_id = None
+                source_provider_data = None
+
+            WorkService::add(user_id, domain_req)
+
+        after work exists:
+            import_service.import_single_file(file, work_id)</code></pre>
+
+      <div class="warn">
+        <strong>Current asymmetry:</strong> manual add from search preserves
+        <code>coverUrl</code> and <code>detailUrl</code>. Manual import scan may
+        know an OpenLibrary <code>coverUrl</code>, but the final
+        <code>ManualImportItem</code> drops it before <code>WorkService::add</code>.
+      </div>
+    </section>
+
+    <section id="unified">
+      <h2>2. <code>WorkServiceImpl::run_unified_enrichment</code></h2>
+      <p class="meta">Source: <code>crates/livrarr-metadata/src/work_service.rs</code></p>
+      <pre><code>fn run_unified_enrichment(user_id, work, source_provider_data):
+    if source_provider_data exists:
+        enrichment.inject_source_data(user_id, work.id, source_provider_data)
+
+    enrich_result = enrichment.enrich_work(user_id, work.id, Background)
+    if enrich_result errors:
+        log warning
+        return Failed
+
+    post_enrich_work = db.get_work(user_id, work.id)
+    if reload errors:
+        log warning
+        return Failed
+
+    if !post_enrich_work.cover_manual:
+        if post_enrich_work.cover_url exists:
+            download_cover_to_disk(
+                http,
+                post_enrich_work.cover_url,
+                data_dir / "covers" / user_id,
+                work.id,
+            )
+            if successful:
+                delete stale thumbnail
+
+    items = db.list_taggable_items_by_work(user_id, work.id)
+    if items not empty:
+        tag_results = tag_service.retag_library_items(post_enrich_work, items)
+        merge_generation = db.get_merge_generation(user_id, work.id)
+
+        for result in tag_results:
+            status = Synced if result.succeeded else Failed
+            db.update_library_item_tag_status(result.item_id, status, merge_generation)
+
+    return enrich_result.enrichment_status</code></pre>
+    </section>
+
+    <section id="enrich">
+      <h2>3. <code>EnrichmentServiceImpl::enrich_work</code></h2>
+      <p class="meta">Source: <code>crates/livrarr-metadata/src/lib.rs</code></p>
+      <pre><code>fn enrich_work(user_id, work_id, mode):
+    acquire per_work_lock(user_id, work_id)
+
+    work = db.get_work(user_id, work_id)
+    generation = db.get_merge_generation(user_id, work_id)
+
+    scatter = queue.dispatch_enrichment(work, EnrichmentContext(mode, NormalPriority))
+
+    if source_data_store has injected data for this work:
+        scatter.outcomes[Readarr] = Success(normalize(source_provider_data))
+
+    current_work = db.get_work(user_id, work_id)
+    current_provenance = db.list_work_provenance(user_id, work_id)
+
+    provider_outcomes = map provider -> outcome class
+
+    if scatter.deferred and mode == Background:
+        return current work without merge
+
+    reconstructed = {}
+    for each provider outcome:
+        if outcome is Success:
+            retry_state = db.get_retry_state(user_id, work_id, provider)
+            payload = parse retry_state.normalized_payload_json
+            reconstructed[provider] = Success(payload)
+        else:
+            reconstructed[provider] = outcome class with no payload
+
+    validation = validator.validate(current_work, current_provenance, reconstructed)
+    if validation errors:
+        log warning
+        validation = pass-through reconstruction
+
+    if validation.all_success_rejected:
+        db.apply_enrichment_merge(status = Conflict, work_update = None)
+        return Conflict
+
+    priority_model = PriorityModel::for_language(current_work.language)
+
+    for attempt in 0..3:
+        merge_output = merge_engine.merge(
+            current_work,
+            current_provenance,
+            validation.reconstructed,
+            mode,
+            priority_model,
+        )
+
+        apply_outcome = db.apply_enrichment_merge(
+            expected_generation = generation,
+            work_update = merge_output.work_update,
+            status = merge_output.enrichment_status,
+            provenance_upserts = merge_output.provenance_upserts,
+            provenance_deletes = merge_output.provenance_deletes,
+            external_id_updates = merge_output.external_id_updates,
+        )
+
+        if apply_outcome in [Applied, NoChange, Deferred]:
+            return reloaded work and merge status
+
+        if apply_outcome == Superseded:
+            reload current_work, current_provenance, generation
+            continue
+
+    return MergeSuperseded</code></pre>
+    </section>
+
+    <section id="queue">
+      <h2>4. <code>DefaultProviderQueue::dispatch_enrichment</code></h2>
+      <p class="meta">Source: <code>crates/livrarr-metadata/src/provider_queue.rs</code></p>
+      <pre><code>fn dispatch_enrichment(work, context):
+    outcomes = {}
+    to_dispatch = []
+    suppressed_open = []
+
+    for provider in registered_providers:
+        if provider is not applicable to work:
+            continue
+
+        if existing_terminal_outcome(user_id, work.id, provider) exists:
+            continue
+
+        if provider.circuit_breaker == Open:
+            suppressed_open.push(provider)
+            continue
+
+        to_dispatch.push(provider)
+
+    spawn one task per provider in to_dispatch:
+        acquire provider concurrency permit
+        acquire provider rate-limit token
+        if token rejected:
+            return WillRetry(RateLimit)
+        return provider_client.fetch(work, context)
+
+    gather task results:
+        if task panicked or disappeared:
+            outcome = PermanentFailure(ProviderPanic)
+
+    for each provider outcome:
+        outcome = apply_budget_rules(outcome)
+        persist provider_retry_state(outcome)
+        update circuit breaker from outcome
+        outcomes[provider] = outcome
+
+    for provider in suppressed_open:
+        db.record_suppressed(provider)
+        outcomes[provider] = Suppressed(until)
+
+    conflict_present = any outcome is Conflict
+    merge_eligible = !conflict_present
+
+    if conflict_present:
+        deferred = false
+    else if context.mode == Background:
+        deferred = any outcome cannot_merge
+    else:
+        deferred = false
+
+    return ScatterGatherResult(outcomes, merge_eligible, deferred)</code></pre>
+    </section>
+
+    <section id="goodreads">
+      <h2>5. Goodreads Search And Selection</h2>
+      <p class="meta">Source: <code>crates/livrarr-metadata/src/provider_client.rs</code> and <code>goodreads.rs</code></p>
+      <pre><code>fn GoodreadsClient.fetch(work):
+    detail_url = resolve_detail_url(work)
+    if no detail_url:
+        return NotFound
+
+    html = fetch_goodreads_html(detail_url)
+    if fetch fails:
+        return mapped retry/not-found outcome
+
+    detail = parse_detail_html(html)
+    if detail parsed:
+        return Success(normalize(detail_url, detail))
+
+    if LLM configured:
+        payload = extract_detail_with_llm(html, language_hint)
+        if payload parsed:
+            ensure payload.gr_key from detail_url
+            return Success(payload)
+
+    return NotFound
+
+fn resolve_detail_url(work):
+    if work.gr_key exists:
+        return Goodreads detail URL for gr_key
+
+    hits = search_goodreads(title = work.title, author = work.author_name)
+
+    if hits empty and title is non-ASCII:
+        hits = search_goodreads(ascii_stripped_title, author)
+
+    if hits empty:
+        return None
+
+    if LLM live config exists:
+        idx = gr_llm_disambiguate(title, author, hits)
+        if idx is Some:
+            return hits[idx].detail_url
+
+    return None
+
+fn gr_llm_disambiguate(title, author, hits):
+    require llm_enabled, endpoint, api_key, model
+
+    candidates = for each hit:
+        "{index}: {hit.title} by {hit.author} ({hit.year or ?})"
+
+    prompt = "I'm looking for {title} by {author}.
+              Which numbered Goodreads result is correct?
+              Reject study guides, summaries, SparkNotes, BookRags, CliffsNotes.
+              Reply only number or none."
+
+    answer = call LLM(prompt, max_tokens=10, temperature=0)
+
+    if answer == "none" or empty:
+        return None
+    if answer parses to valid index:
+        return index
+    return None</code></pre>
+
+      <div class="warn">
+        <strong>Current weakness:</strong> there is no deterministic candidate
+        filter before the LLM and no hard post-check after the LLM. A selected
+        candidate with "Study Guide", "Summary", "BookRags", "SuperSummary", or
+        a wrong author can still be fetched; the later validator may reject it
+        and push the work into <code>conflict</code>.
+      </div>
+    </section>
+
+    <section id="validator">
+      <h2>6. LLM Identity Validator</h2>
+      <p class="meta">Source: <code>crates/livrarr-metadata/src/llm_validator.rs</code></p>
+      <pre><code>fn validator.validate(work, provenance, reconstructed):
+    if LLM not configured:
+        return reconstructed unchanged
+
+    if no user-set title or author anchor in provenance:
+        return reconstructed unchanged
+
+    success_provider_count = count Success outcomes with payload
+    if success_provider_count == 0:
+        return reconstructed unchanged
+
+    prompt_input = {
+        anchor: {
+            title: work.title,
+            author_name: work.author_name,
+            language: work.language,
+        },
+        providers: public metadata payloads only
+    }
+
+    response = call LLM identity validator
+
+    for each provider verdict:
+        if provider outcome is not Success:
+            continue
+
+        if verdict == reject:
+            reconstructed[provider] = PermanentFailure with no payload
+            rejections[provider] = reason
+
+        if verdict == accept and dropped_fields exist:
+            null those fields in the payload
+
+    surviving_success = count Success outcomes with payload
+    all_success_rejected = success_provider_count > 0 and surviving_success == 0
+
+    return ValidationOutcome(reconstructed, rejections, all_success_rejected)</code></pre>
+    </section>
+
+    <section id="merge">
+      <h2>7. <code>MergeEngine::merge</code></h2>
+      <p class="meta">Source: <code>crates/livrarr-metadata/src/lib.rs</code></p>
+      <pre><code>fn merge(inputs):
+    if LLM merge arbitration configured:
+        return merge_impl_llm(inputs)
+    else:
+        return merge_impl(inputs)
+
+fn merge_impl(inputs):
+    if priority model has empty required provider lists:
+        return EmptyPriorityModel
+
+    if any provider result class is Conflict:
+        return MergeOutput(status = Conflict, work_update = None)
+
+    if mode == Background:
+        eligible = providers where outcome.can_merge()
+    else:
+        eligible = providers except Conflict
+
+    provenance_by_field = map current provenance by field
+    resolved_values = {}
+    provenance_upserts = []
+    provenance_deletes = []
+
+    for field in enrichable fields:
+        if field == CoverUrl and current_work.cover_manual:
+            preserve current value
+            continue
+
+        if field in [Title, AuthorName] and current value is non-empty:
+            preserve current value
+            continue
+
+        if provenance says field is User-owned:
+            preserve current value
+            continue
+
+        winner = first provider in priority_list_for(field) where:
+            provider is eligible
+            provider payload has non-empty value for field
+
+        if winner exists:
+            resolved_values[field] = winner value
+            provenance_upserts.push(field set by Provider/winner)
+        else:
+            resolved_values[field] = current field value
+            if old provenance was provider-owned and value is now absent:
+                provenance_deletes.push(field)
+
+    work_update = build UpdateWorkEnrichmentDbRequest from resolved_values
+
+    if any resolved field has value:
+        status = Enriched
+    else:
+        status = Failed
+
+    external_id_updates = collect additional ISBNs/ASINs from success payloads
+    enrichment_source = providers that contributed fields
+
+    return MergeOutput(work_update, provenance changes, external IDs, status)</code></pre>
+    </section>
+
+    <section id="apply">
+      <h2>8. <code>SqliteWorkRepository::apply_enrichment_merge</code></h2>
+      <p class="meta">Source: <code>crates/livrarr-db/src/sqlite_work.rs</code></p>
+      <pre><code>fn apply_enrichment_merge(req):
+    begin transaction
+
+    current_generation = select works.merge_generation
+    if current_generation != req.expected_merge_generation:
+        rollback
+        return Superseded
+
+    if req.work_update exists:
+        update works set:
+            metadata fields = req.work_update values
+            enrichment_status = req.new_enrichment_status
+            enrichment_source = req.work_update.enrichment_source
+            enriched_at = now
+            merge_generation = merge_generation + 1
+    else:
+        update works set:
+            enrichment_status = req.new_enrichment_status
+            enriched_at = now
+            merge_generation = merge_generation + 1
+
+    for provenance_upsert in req.provenance_upserts:
+        insert or replace work_metadata_provenance row
+
+    for field in req.provenance_deletes:
+        delete work_metadata_provenance row for field
+
+    for external_id in req.external_id_updates:
+        upsert external_ids row
+
+    commit
+
+    if rows changed:
+        return Applied
+    else:
+        return NoChange</code></pre>
+    </section>
+  </main>
+</body>
+</html>

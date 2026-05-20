@@ -1,5 +1,19 @@
 # Wiki Change Log
 
+## 2026-05-14 - Metadata pathway explainer
+
+**Updated pages:**
+- wiki/architecture/metadata-pathway.md - added current add/enrich/merge/cover/tag pathway, entry points, pseudocode, risk areas, and speed/accuracy improvement backlog
+- wiki/index.md - linked the new metadata pathway explainer and corrected the
+  Metadata Principles count from M1-M7 to M1-M10
+
+**Context:** The current metadata pipeline has diverged from older enrichment
+notes. This pass documents the active code path through `WorkService::add`,
+`run_unified_enrichment`, `EnrichmentServiceImpl::enrich_work`,
+`DefaultProviderQueue::dispatch_enrichment`, merge application, cover caching,
+and tag sync. It also captures the main convergence risk: manual import starts
+with much sparser seed metadata than Readarr import.
+
 ## 2026-04-23 — Architecture-excellent sprint review (sixteenth pass)
 
 **Updated pages:**
