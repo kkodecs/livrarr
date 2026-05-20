@@ -2,6 +2,7 @@ pub mod keyed_mutex;
 pub mod readarr;
 pub mod services;
 pub mod settings;
+pub mod title_cleanup;
 pub mod torznab;
 
 use chrono::{DateTime, Utc};
