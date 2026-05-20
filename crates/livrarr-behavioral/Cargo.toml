@@ -127,3 +127,87 @@ path = "../../tests/behavioral/test_consolidation_dto.rs"
 [[test]]
 name = "test_stress_phase4a"
 path = "../../tests/behavioral/test_stress_phase4a.rs"
+
+# --- English work lifecycle behavioral test skeletons ---
+
+[[test]]
+name = "test_ewl_text_norm"
+path = "../../tests/behavioral/test_ewl_text_norm.rs"
+
+[[test]]
+name = "test_ewl_work_identity"
+path = "../../tests/behavioral/test_ewl_work_identity.rs"
+
+[[test]]
+name = "test_ewl_conflict_service"
+path = "../../tests/behavioral/test_ewl_conflict_service.rs"
+
+[[test]]
+name = "test_ewl_resolver"
+path = "../../tests/behavioral/test_ewl_resolver.rs"
+
+[[test]]
+name = "test_ewl_bulk_resolver"
+path = "../../tests/behavioral/test_ewl_bulk_resolver.rs"
+
+[[test]]
+name = "test_ewl_cover_gate"
+path = "../../tests/behavioral/test_ewl_cover_gate.rs"
+
+[[test]]
+name = "test_ewl_llm"
+path = "../../tests/behavioral/test_ewl_llm.rs"
+
+[[test]]
+name = "test_ewl_work_service_add"
+path = "../../tests/behavioral/test_ewl_work_service_add.rs"
+
+[[test]]
+name = "test_ewl_enrichment"
+path = "../../tests/behavioral/test_ewl_enrichment.rs"
+
+[[test]]
+name = "test_ewl_merge_engine"
+path = "../../tests/behavioral/test_ewl_merge_engine.rs"
+
+[[test]]
+name = "test_ewl_open_library"
+path = "../../tests/behavioral/test_ewl_open_library.rs"
+
+[[test]]
+name = "test_ewl_goodreads"
+path = "../../tests/behavioral/test_ewl_goodreads.rs"
+
+[[test]]
+name = "test_ewl_conflict_repo"
+path = "../../tests/behavioral/test_ewl_conflict_repo.rs"
+
+[[test]]
+name = "test_ewl_sqlite_work"
+path = "../../tests/behavioral/test_ewl_sqlite_work.rs"
+
+[[test]]
+name = "test_ewl_work_db"
+path = "../../tests/behavioral/test_ewl_work_db.rs"
+
+[[test]]
+name = "test_ewl_provider_retry_state"
+path = "../../tests/behavioral/test_ewl_provider_retry_state.rs"
+
+[[test]]
+name = "test_ewl_handlers"
+path = "../../tests/behavioral/test_ewl_handlers.rs"
+
+[[test]]
+name = "test_ewl_repair"
+path = "../../tests/behavioral/test_ewl_repair.rs"
+
+[[test]]
+name = "test_ewl_readarr_import"
+path = "../../tests/behavioral/test_ewl_readarr_import.rs"
+
+[[test]]
+name = "test_ewl_manual_import_scan"
+path = "../../tests/behavioral/test_ewl_manual_import_scan.rs"
+
+# --- End English work lifecycle behavioral test skeletons ---
