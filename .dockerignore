@@ -31,3 +31,7 @@ test_list.txt
 .vscode/
 .idea/
 *.swp
+
+# macOS resource forks
+._*
+.DS_Store

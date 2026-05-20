@@ -2710,7 +2710,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "repub"
 version = "0.1.0"
-source = "git+https://github.com/kkodecs/repub?tag=v0.1.0-alpha#fd6d1030881fd61fe68312defdfb1fec77e9657a"
+source = "git+https://github.com/kkodecs/repub?tag=v0.1.0-alpha#44422fbeef8d0e6807ce2323199915195dfd74ab"
 dependencies = [
  "clap",
  "quick-xml",
