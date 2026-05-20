@@ -27,7 +27,7 @@ ARG BUILDARCH
 # cross-compilation uses a prebuilt musl.cc toolchain only when building x86_64 -> arm64
 RUN apk add --no-cache musl-dev gcc curl && \
     if [ "$TARGETARCH" = "arm64" ] && [ "$BUILDARCH" = "amd64" ]; then \
-      curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar -xz -C /usr/local && \
+      curl -fsSL https://github.com/kkodecs/livrarr/releases/download/toolchain/aarch64-linux-musl-cross.tgz | tar -xz -C /usr/local && \
       rustup target add aarch64-unknown-linux-musl; \
     fi
 
