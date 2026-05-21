@@ -17,7 +17,10 @@ use chrono::{DateTime, Utc};
 
 pub mod audnexus;
 pub mod author_service;
+pub mod bulk_resolver;
 pub mod cover;
+pub mod cover_gate;
+pub mod english_identity_resolver;
 pub mod enrichment_workflow_service;
 pub mod goodreads;
 pub mod hardcover;

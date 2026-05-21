@@ -156,6 +156,7 @@ fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
         // Legacy exhausted/skipped mapped to failed — migration handles DB rows
         "exhausted" | "skipped" => Ok(EnrichmentStatus::Failed),
         "conflict" => Ok(EnrichmentStatus::Conflict),
+        "identity_pending" => Ok(EnrichmentStatus::IdentityPending),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown enrichment status: {s}"),
         }),
@@ -168,6 +169,7 @@ fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
         EnrichmentStatus::Enriched => "enriched",
         EnrichmentStatus::Failed => "failed",
         EnrichmentStatus::Conflict => "conflict",
+        EnrichmentStatus::IdentityPending => "identity_pending",
     }
 }
 
