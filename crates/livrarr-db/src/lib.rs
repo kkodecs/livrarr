@@ -169,6 +169,13 @@ pub trait WorkDbCreate: Send + Sync {
     /// Precondition: `normalized_title` and `normalized_author` were computed
     ///               via `livrarr_domain::normalize_for_matching()`.
     async fn create_work(&self, req: CreateWorkDbRequest) -> Result<(Work, bool), DbError>;
+
+    async fn create_work_with_anchor(
+        &self,
+        req: CreateWorkDbRequest,
+        ol_key: &str,
+        anchor_setter: livrarr_domain::identity::AnchorSetter,
+    ) -> Result<(Work, bool), DbError>;
 }
 
 /// Work data access. All queries scoped to user_id.
@@ -265,12 +272,21 @@ pub trait WorkDb: Send + Sync {
         author: &str,
     ) -> Result<Vec<Work>, DbError>;
 
+    async fn find_normalized_match_no_anchor_for_user(
+        &self,
+        user_id: UserId,
+        raw_title: &str,
+        raw_author: &str,
+    ) -> Result<Option<Work>, DbError>;
+
     /// List all works where monitor_ebook=1 OR monitor_audiobook=1, across all users.
     ///
     /// Satisfies: RSS-MATCH-001, RSS-FILTER-002
     async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError>;
 
     /// List works stuck in Unenriched state older than threshold (crash recovery).
+    async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError>;
+
     async fn list_stale_unenriched_works(
         &self,
         older_than: chrono::DateTime<chrono::Utc>,
@@ -324,6 +340,9 @@ pub struct CreateWorkDbRequest {
     pub language: Option<String>,
     pub import_id: Option<String>,
     pub series_id: Option<i64>,
+    pub isbn_13: Option<String>,
+    pub asin: Option<String>,
+    pub description: Option<String>,
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
     pub monitor_ebook: bool,
@@ -1670,6 +1689,13 @@ pub mod test_helpers {
             .unwrap();
 
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_works_user_normalized \
+             ON works(user_id, normalized_title, normalized_author)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         SqliteDb::new(pool)
     }
 }

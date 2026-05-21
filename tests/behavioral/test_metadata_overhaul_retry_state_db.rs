@@ -24,6 +24,8 @@ fn make_work_req(user_id: UserId, title: &str, author: &str) -> CreateWorkDbRequ
         user_id,
         title: title.to_string(),
         author_name: author.to_string(),
+        normalized_title: livrarr_domain::normalize_for_matching(title),
+        normalized_author: livrarr_domain::normalize_for_matching(author),
         author_id: None,
         ol_key: None,
         year: Some(2024),

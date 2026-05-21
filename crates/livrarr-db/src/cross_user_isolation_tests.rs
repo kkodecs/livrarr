@@ -100,6 +100,9 @@ mod tests {
                 monitor_ebook: true,
                 monitor_audiobook: false,
                 source_provider_json: None,
+                isbn_13: None,
+                asin: None,
+                description: None,
             })
             .await
             .expect("create work_a");
@@ -124,6 +127,9 @@ mod tests {
                 monitor_ebook: true,
                 monitor_audiobook: false,
                 source_provider_json: None,
+                isbn_13: None,
+                asin: None,
+                description: None,
             })
             .await
             .expect("create work_b");

@@ -36,6 +36,7 @@ pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
     LiveProviderQueue,
     livrarr_metadata::DefaultMergeEngine<livrarr_metadata::llm_caller_service::LlmCallerImpl>,
     LiveLlmValidator,
+    livrarr_metadata::llm_caller_service::LlmCallerImpl,
 >;
 
 // =============================================================================
@@ -61,6 +62,12 @@ pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::Series
     livrarr_metadata::llm_caller_service::LlmCallerImpl,
 >;
 pub type LiveTagServiceImpl = crate::tag_service::LiveTagService<LiveImportIoService>;
+pub type LiveIdentityResolver =
+    livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver<
+        livrarr_metadata::ol_resolver_client::LiveOlResolverClient<
+            livrarr_http::fetcher::HttpFetcherImpl,
+        >,
+    >;
 
 pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     SqliteDb,
@@ -169,6 +176,7 @@ pub struct AppState {
     pub list_service: Arc<LiveListService>,
     pub identity_conflict_service:
         Arc<crate::services::identity_conflict_service::LiveIdentityConflictService>,
+    pub identity_resolver: Arc<LiveIdentityResolver>,
     pub rss_sync_workflow: Arc<LiveRssSyncWorkflow>,
     pub author_monitor_workflow: Arc<LiveAuthorMonitorWorkflow>,
     pub enrichment_workflow: Arc<LiveEnrichmentWorkflow>,
@@ -283,13 +291,13 @@ use livrarr_handlers::context::{
     HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasCoverCache,
     HasDataDir, HasDownloadClientCredentialService, HasDownloadClientSettingsService,
     HasEmailService, HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasGrabService,
-    HasHistoryService, HasHttpClient, HasIdentityConflictService, HasImportIoService,
-    HasImportService, HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService,
-    HasListService, HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
-    HasNotificationService, HasProviderHealth, HasQueueService, HasReadarrImportWorkflow,
-    HasReleaseService, HasRemotePathMappingService, HasRootFolderService, HasRssSync,
-    HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem,
-    HasTagService, HasWorkService,
+    HasHistoryService, HasHttpClient, HasIdentityConflictService, HasIdentityResolver,
+    HasImportIoService, HasImportService, HasImportWorkflow, HasIndexerCredentialService,
+    HasIndexerSettingsService, HasListService, HasLiveConfig, HasManualImportScan,
+    HasManualImportService, HasMatchingService, HasNotificationService, HasProviderHealth,
+    HasQueueService, HasReadarrImportWorkflow, HasReleaseService, HasRemotePathMappingService,
+    HasRootFolderService, HasRssSync, HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService,
+    HasStartupTime, HasSystem, HasTagService, HasWorkService,
 };
 
 impl HasWorkService for AppState {
@@ -353,6 +361,13 @@ impl HasIdentityConflictService for AppState {
         crate::services::identity_conflict_service::LiveIdentityConflictService;
     fn identity_conflict_service(&self) -> &Self::IdentityConflictSvc {
         &self.identity_conflict_service
+    }
+}
+
+impl HasIdentityResolver for AppState {
+    type IdentityResolverSvc = LiveIdentityResolver;
+    fn identity_resolver(&self) -> &Self::IdentityResolverSvc {
+        &self.identity_resolver
     }
 }
 

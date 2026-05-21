@@ -17,7 +17,7 @@ impl WorkIdentityRepository for SqliteDb {
         }
 
         let now = Utc::now().to_rfc3339();
-        let setter_str = serde_json::to_value(&setter)
+        let setter_str = serde_json::to_value(setter)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "user".to_string());
@@ -29,13 +29,14 @@ impl WorkIdentityRepository for SqliteDb {
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
         sqlx::query(
-            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at)
-             VALUES (?1, 'ol_work', ?2, 'confirmed', ?3, ?4)
+            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
+             VALUES (?1, 'ol_work', ?2, 'confirmed', ?3, ?4, (SELECT user_id FROM works WHERE id = ?1))
              ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
                  confidence = 'confirmed',
                  setter = ?3,
                  set_at = ?4,
-                 superseded_by = NULL"
+                 superseded_by = NULL,
+                 user_id = (SELECT user_id FROM works WHERE id = ?1)"
         )
         .bind(work_id)
         .bind(ol_key)
@@ -70,7 +71,7 @@ impl WorkIdentityRepository for SqliteDb {
             return Err(WorkIdentityError::InvalidAnchorValue);
         }
         let now = Utc::now().to_rfc3339();
-        let setter_str = serde_json::to_value(&setter)
+        let setter_str = serde_json::to_value(setter)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "redirect".to_string());
@@ -97,13 +98,14 @@ impl WorkIdentityRepository for SqliteDb {
         }
 
         sqlx::query(
-            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at)
-             VALUES (?1, 'ol_work', ?2, 'confirmed', ?3, ?4)
+            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
+             VALUES (?1, 'ol_work', ?2, 'confirmed', ?3, ?4, (SELECT user_id FROM works WHERE id = ?1))
              ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
                  confidence = 'confirmed',
                  setter = ?3,
                  set_at = ?4,
-                 superseded_by = NULL"
+                 superseded_by = NULL,
+                 user_id = (SELECT user_id FROM works WHERE id = ?1)"
         )
         .bind(work_id)
         .bind(new_ol_key)
@@ -133,7 +135,7 @@ impl WorkIdentityRepository for SqliteDb {
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError> {
         let now = Utc::now().to_rfc3339();
-        let setter_str = serde_json::to_value(&setter)
+        let setter_str = serde_json::to_value(setter)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "auto_search".to_string());
@@ -147,8 +149,8 @@ impl WorkIdentityRepository for SqliteDb {
         // Empty string sentinel for pending anchor_value per IR v2 decision.
         // Reason is logged but not persisted in the anchor table.
         sqlx::query(
-            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at)
-             VALUES (?1, 'ol_work', '', 'pending', ?2, ?3)
+            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
+             VALUES (?1, 'ol_work', '', 'pending', ?2, ?3, (SELECT user_id FROM works WHERE id = ?1))
              ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
                  confidence = 'pending',
                  setter = ?2,

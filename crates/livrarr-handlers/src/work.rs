@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Response};
 
 use crate::context::{
     HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasEmailService,
-    HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasNotificationService,
-    HasSeriesQueryService, HasTagService, HasWorkService,
+    HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasIdentityResolver,
+    HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
@@ -18,7 +18,8 @@ use crate::{
 };
 use livrarr_domain::services::{
     AuthorService, CreateNotificationRequest, EmailService, EnrichmentWorkflow, FileService,
-    NotificationService, SeriesQueryService, TagService, WorkDetailView, WorkService,
+    IdentityResolver, NotificationService, SeriesQueryService, TagService, WorkDetailView,
+    WorkService,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -147,34 +148,93 @@ pub async fn add<
         + HasAuthorService
         + HasSeriesQueryService
         + HasEnrichmentNotify
-        + HasEnrichmentWorkflow,
+        + HasEnrichmentWorkflow
+        + HasIdentityResolver,
 >(
     State(state): State<S>,
     ctx: AuthContext,
     Json(req): Json<AddWorkRequest>,
 ) -> Result<Json<AddWorkResponse>, ApiError> {
     let author_name_for_gr = req.author_name.clone();
-    let svc_req = livrarr_domain::services::AddWorkRequest {
-        title: req.title,
-        author_name: req.author_name,
-        author_ol_key: req.author_ol_key,
-        ol_key: req.ol_key,
+    use livrarr_domain::identity::{
+        EnglishSeed, EnglishSeedFields, EnglishWorkCandidate, IdentityResolution, IdentityState,
+    };
+
+    let language = req
+        .language
+        .as_deref()
+        .map(livrarr_domain::normalize_language)
+        .unwrap_or_else(|| "en".to_string());
+
+    let seed = EnglishSeed {
+        title: req.title.clone(),
+        author_name: req.author_name.clone(),
+        isbn: None,
+        user_confirmed_ol_key: req.ol_key.clone(),
+    };
+    let resolution = state.identity_resolver().resolve(&seed).await;
+
+    let identity = match resolution {
+        IdentityResolution::Confirmed {
+            ol_key,
+            method,
+            score,
+        } => IdentityState::Confirmed {
+            ol_key,
+            method,
+            score: Some(score),
+        },
+        IdentityResolution::Pending {
+            reason,
+            top_candidates,
+        } => IdentityState::Pending {
+            reason,
+            top_candidates,
+        },
+        IdentityResolution::Conflict {
+            existing_work_id, ..
+        } => {
+            let work = state
+                .work_service()
+                .get(ctx.user.id, existing_work_id)
+                .await?;
+            let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None);
+            return Ok(Json(AddWorkResponse {
+                work: detail,
+                author_created: false,
+                messages: vec!["identity conflict: existing work has a different OL key".into()],
+            }));
+        }
+    };
+
+    let candidate = EnglishWorkCandidate {
+        fields: EnglishSeedFields {
+            title: req.title,
+            author_name: req.author_name,
+            language,
+            author_ol_key: req.author_ol_key,
+            year: req.year,
+            cover_url: req.cover_url,
+            detail_url: req.detail_url,
+            isbn: None,
+            asin: None,
+            description: None,
+            series_name: None,
+            series_position: None,
+        },
+        identity,
+        source_provider_data: None,
+        file_path: None,
+        delete_existing_after_import: false,
         gr_key: None,
-        year: req.year,
-        cover_url: req.cover_url,
-        language: req.language,
-        detail_url: req.detail_url,
         series_id: None,
-        series_name: None,
-        series_position: None,
         monitor_ebook: None,
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
-        source_provider_data: None,
     };
 
-    let result = state.work_service().add(ctx.user.id, svc_req).await?;
+    let result = state.work_service().add(ctx.user.id, candidate).await?;
 
     if result.author_created {
         if let Some(author_id) = result.author_id {

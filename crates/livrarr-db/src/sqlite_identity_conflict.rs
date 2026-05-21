@@ -4,6 +4,22 @@ use livrarr_domain::{UserId, WorkId};
 
 use crate::sqlite::SqliteDb;
 
+#[allow(clippy::type_complexity)]
+type ConflictRow = (
+    i64,
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 impl SqliteDb {
     pub async fn find_existing_open_conflict(
         &self,
@@ -26,6 +42,7 @@ impl SqliteDb {
         Ok(row.map(|(id,)| id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_identity_conflict(
         &self,
         user_id: UserId,
@@ -36,11 +53,11 @@ impl SqliteDb {
         raised_by: ConflictSource,
         raised_source_path: Option<&str>,
     ) -> Result<i64, sqlx::Error> {
-        let kind_str = serde_json::to_value(&kind)
+        let kind_str = serde_json::to_value(kind)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "incoming_different_ol_key".to_string());
-        let raised_by_str = serde_json::to_value(&raised_by)
+        let raised_by_str = serde_json::to_value(raised_by)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "manual_add".to_string());
@@ -69,12 +86,12 @@ impl SqliteDb {
         user_id: UserId,
         status: ConflictStatus,
     ) -> Result<Vec<IdentityConflict>, sqlx::Error> {
-        let status_str = serde_json::to_value(&status)
+        let status_str = serde_json::to_value(status)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "open".to_string());
 
-        let rows: Vec<(i64, i64, i64, String, String, String, String, Option<String>, String, Option<String>, Option<String>, Option<String>)> =
+        let rows: Vec<ConflictRow> =
             sqlx::query_as(
                 "SELECT id, user_id, existing_work_id, kind, incoming_payload_json, raised_at, raised_by, raised_source_path, status, resolved_at, resolution_action, resolution_notes
                  FROM work_identity_conflicts
@@ -97,7 +114,7 @@ impl SqliteDb {
         id: i64,
         user_id: UserId,
     ) -> Result<Option<IdentityConflict>, sqlx::Error> {
-        let row: Option<(i64, i64, i64, String, String, String, String, Option<String>, String, Option<String>, Option<String>, Option<String>)> =
+        let row: Option<ConflictRow> =
             sqlx::query_as(
                 "SELECT id, user_id, existing_work_id, kind, incoming_payload_json, raised_at, raised_by, raised_source_path, status, resolved_at, resolution_action, resolution_notes
                  FROM work_identity_conflicts WHERE id = ?1 AND user_id = ?2",
@@ -117,7 +134,7 @@ impl SqliteDb {
         notes: Option<&str>,
         resolved_at: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
-        let action_str = serde_json::to_value(&action)
+        let action_str = serde_json::to_value(action)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "keep_existing".to_string());
@@ -159,22 +176,7 @@ impl SqliteDb {
     }
 }
 
-fn parse_conflict_row(
-    row: (
-        i64,
-        i64,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ),
-) -> Result<IdentityConflict, String> {
+fn parse_conflict_row(row: ConflictRow) -> Result<IdentityConflict, String> {
     let (
         id,
         user_id,

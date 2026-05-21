@@ -637,22 +637,41 @@ where
             }
 
             // No match — create new work via WorkService::add() (M2 single creation gate).
+            use livrarr_domain::identity::{
+                EnglishSeedFields, EnglishWorkCandidate, IdentityState, PendingReason,
+            };
             match self
                 .work_service
                 .add(
                     author.user_id,
-                    AddWorkRequest {
-                        title: book.title.clone(),
-                        author_name: author.name.clone(),
+                    EnglishWorkCandidate {
+                        fields: EnglishSeedFields {
+                            title: book.title.clone(),
+                            author_name: author.name.clone(),
+                            language: "en".into(),
+                            author_ol_key: None,
+                            year: book.year,
+                            cover_url: None,
+                            detail_url: None,
+                            isbn: None,
+                            asin: None,
+                            description: None,
+                            series_name: Some(series_name.clone()),
+                            series_position: book.position,
+                        },
+                        identity: IdentityState::Pending {
+                            reason: PendingReason::NoCandidates,
+                            top_candidates: vec![],
+                        },
+                        source_provider_data: None,
+                        file_path: None,
+                        delete_existing_after_import: false,
                         gr_key: Some(book.gr_key.clone()),
-                        year: book.year,
                         series_id: Some(series_id),
-                        series_name: Some(series_name.clone()),
-                        series_position: book.position,
                         monitor_ebook: Some(monitor_ebook),
                         monitor_audiobook: Some(monitor_audiobook),
                         provenance_setter: Some(ProvenanceSetter::AutoAdded),
-                        ..Default::default()
+                        import_id: None,
                     },
                 )
                 .await

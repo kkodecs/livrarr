@@ -3,13 +3,7 @@ use livrarr_domain::text_norm;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Debug, Clone)]
-pub struct EnglishSeed {
-    pub title: String,
-    pub author_name: String,
-    pub isbn: Option<String>,
-    pub user_confirmed_ol_key: Option<String>,
-}
+pub use livrarr_domain::identity::EnglishSeed;
 
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
@@ -61,10 +55,7 @@ pub trait OpenLibraryClient: Send + Sync {
     ) -> Result<Vec<OlSearchHit>, OlError>;
 }
 
-#[trait_variant::make(Send)]
-pub trait EnglishIdentityResolver: Send + Sync {
-    async fn resolve(&self, seed: &EnglishSeed) -> IdentityResolution;
-}
+pub use livrarr_domain::services::IdentityResolver as EnglishIdentityResolver;
 
 pub struct LiveEnglishIdentityResolver<O> {
     pub ol: Arc<O>,

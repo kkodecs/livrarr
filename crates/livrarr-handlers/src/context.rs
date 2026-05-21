@@ -1,11 +1,11 @@
 use livrarr_domain::services::{
     AppConfigService, AuthorMonitorWorkflow, AuthorService, DownloadClientCredentialService,
     DownloadClientSettingsService, EmailService, EnrichmentWorkflow, FileService, GrabService,
-    HistoryService, IdentityConflictService, ImportIoService, ImportService, ImportWorkflow,
-    IndexerCredentialService, IndexerSettingsService, ListService, ManualImportService,
-    MatchingService, NotificationService, QueueService, ReadarrImportWorkflow, ReleaseService,
-    RemotePathMappingService, RootFolderService, RssSyncWorkflow, SeriesQueryService,
-    SeriesService, TagService, WorkService,
+    HistoryService, IdentityConflictService, IdentityResolver, ImportIoService, ImportService,
+    ImportWorkflow, IndexerCredentialService, IndexerSettingsService, ListService,
+    ManualImportService, MatchingService, NotificationService, QueueService, ReadarrImportWorkflow,
+    ReleaseService, RemotePathMappingService, RootFolderService, RssSyncWorkflow,
+    SeriesQueryService, SeriesService, TagService, WorkService,
 };
 use livrarr_http::HttpClient;
 
@@ -64,6 +64,11 @@ pub trait HasListService: Clone + Send + Sync + 'static {
 pub trait HasIdentityConflictService: Clone + Send + Sync + 'static {
     type IdentityConflictSvc: IdentityConflictService + Send + Sync + 'static;
     fn identity_conflict_service(&self) -> &Self::IdentityConflictSvc;
+}
+
+pub trait HasIdentityResolver: Clone + Send + Sync + 'static {
+    type IdentityResolverSvc: IdentityResolver + Send + Sync + 'static;
+    fn identity_resolver(&self) -> &Self::IdentityResolverSvc;
 }
 
 pub trait HasAppConfigService: Clone + Send + Sync + 'static {
@@ -239,6 +244,7 @@ pub trait AppContext:
     + HasReleaseService
     + HasListService
     + HasIdentityConflictService
+    + HasIdentityResolver
     + HasAppConfigService
     + HasDownloadClientSettingsService
     + HasDownloadClientCredentialService
@@ -284,6 +290,7 @@ impl<T> AppContext for T where
         + HasReleaseService
         + HasListService
         + HasIdentityConflictService
+        + HasIdentityResolver
         + HasAppConfigService
         + HasDownloadClientSettingsService
         + HasDownloadClientCredentialService

@@ -228,6 +228,17 @@ impl WorkDbCreate for SequencedApplyDb {
     async fn create_work(&self, req: CreateWorkDbRequest) -> Result<(Work, bool), DbError> {
         self.inner.create_work(req).await
     }
+
+    async fn create_work_with_anchor(
+        &self,
+        req: CreateWorkDbRequest,
+        ol_key: &str,
+        anchor_setter: livrarr_domain::identity::AnchorSetter,
+    ) -> Result<(Work, bool), DbError> {
+        self.inner
+            .create_work_with_anchor(req, ol_key, anchor_setter)
+            .await
+    }
 }
 
 impl WorkDb for SequencedApplyDb {
@@ -387,6 +398,21 @@ impl WorkDb for SequencedApplyDb {
         self.inner
             .list_work_provider_keys_by_author(user_id, author_id)
             .await
+    }
+
+    async fn find_normalized_match_no_anchor_for_user(
+        &self,
+        user_id: UserId,
+        raw_title: &str,
+        raw_author: &str,
+    ) -> Result<Option<Work>, DbError> {
+        self.inner
+            .find_normalized_match_no_anchor_for_user(user_id, raw_title, raw_author)
+            .await
+    }
+
+    async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError> {
+        self.inner.list_identity_pending_works().await
     }
 }
 
@@ -556,6 +582,8 @@ fn make_work_req(user_id: UserId, title: &str, author: &str) -> CreateWorkDbRequ
         user_id,
         title: title.to_string(),
         author_name: author.to_string(),
+        normalized_title: livrarr_domain::normalize_for_matching(title),
+        normalized_author: livrarr_domain::normalize_for_matching(author),
         author_id: None,
         ol_key: None,
         year: Some(2024),
@@ -715,6 +743,8 @@ where
         Arc::new(queue),
         Arc::new(merge_engine),
         Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
+        livrarr_metadata::work_service::StubNoLlm,
+        false,
     )
 }
 
@@ -1308,6 +1338,8 @@ macro_rules! enrichment_service_tests {
                 Arc::new(queue),
                 Arc::new(merge_engine),
                 Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
+                livrarr_metadata::work_service::StubNoLlm,
+                false,
             );
 
             let result = service
@@ -1368,6 +1400,8 @@ macro_rules! enrichment_service_tests {
                 Arc::new(queue),
                 Arc::new(merge_engine),
                 Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
+                livrarr_metadata::work_service::StubNoLlm,
+                false,
             );
 
             let err = service
@@ -1971,6 +2005,8 @@ macro_rules! enrichment_service_tests {
                 Arc::new(queue),
                 Arc::new(merge_engine),
                 Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
+                livrarr_metadata::work_service::StubNoLlm,
+                false,
             );
 
             let result = service
@@ -2073,6 +2109,7 @@ macro_rules! enrichment_service_tests {
                 vec![
                     MetadataProvider::Hardcover,
                     MetadataProvider::Goodreads,
+                    MetadataProvider::Readarr,
                     MetadataProvider::OpenLibrary
                 ]
             );
@@ -2080,8 +2117,9 @@ macro_rules! enrichment_service_tests {
                 pm.description,
                 vec![
                     MetadataProvider::Hardcover,
-                    MetadataProvider::OpenLibrary,
-                    MetadataProvider::Goodreads
+                    MetadataProvider::Goodreads,
+                    MetadataProvider::Readarr,
+                    MetadataProvider::OpenLibrary
                 ]
             );
             assert_eq!(
@@ -2089,6 +2127,7 @@ macro_rules! enrichment_service_tests {
                 vec![
                     MetadataProvider::Hardcover,
                     MetadataProvider::Goodreads,
+                    MetadataProvider::Readarr,
                     MetadataProvider::OpenLibrary
                 ]
             );
@@ -2134,9 +2173,33 @@ macro_rules! enrichment_service_tests {
             let seen = merge_engine_observer.inputs().await;
             assert_eq!(seen.len(), 1);
             let pm = &seen[0].priority_model;
-            assert_eq!(pm.content, vec![MetadataProvider::Goodreads]);
-            assert_eq!(pm.description, vec![MetadataProvider::Goodreads]);
-            assert_eq!(pm.cover, vec![MetadataProvider::Goodreads]);
+            assert_eq!(
+                pm.content,
+                vec![
+                    MetadataProvider::Goodreads,
+                    MetadataProvider::Hardcover,
+                    MetadataProvider::Readarr,
+                    MetadataProvider::OpenLibrary
+                ]
+            );
+            assert_eq!(
+                pm.description,
+                vec![
+                    MetadataProvider::Goodreads,
+                    MetadataProvider::Hardcover,
+                    MetadataProvider::Readarr,
+                    MetadataProvider::OpenLibrary
+                ]
+            );
+            assert_eq!(
+                pm.cover,
+                vec![
+                    MetadataProvider::Goodreads,
+                    MetadataProvider::Hardcover,
+                    MetadataProvider::Readarr,
+                    MetadataProvider::OpenLibrary
+                ]
+            );
         }
 
         #[tokio::test]

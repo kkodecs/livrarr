@@ -75,6 +75,14 @@ pub struct OlCandidate {
     pub author_overlap: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct EnglishSeed {
+    pub title: String,
+    pub author_name: String,
+    pub isbn: Option<String>,
+    pub user_confirmed_ol_key: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IdentityResolution {
     Confirmed {
@@ -242,4 +250,10 @@ pub struct EnglishWorkCandidate {
     pub source_provider_data: Option<crate::services::SourceProviderData>,
     pub file_path: Option<std::path::PathBuf>,
     pub delete_existing_after_import: bool,
+    pub gr_key: Option<String>,
+    pub series_id: Option<i64>,
+    pub monitor_ebook: Option<bool>,
+    pub monitor_audiobook: Option<bool>,
+    pub provenance_setter: Option<crate::ProvenanceSetter>,
+    pub import_id: Option<String>,
 }
