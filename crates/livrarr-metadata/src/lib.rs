@@ -1696,6 +1696,51 @@ where
             });
         }
 
+        // Cover gate: for English works with an OL key, filter GR cover_urls
+        // through the deterministic Jaccard gate before merge (REQ-017).
+        let reconstructed = if current_work.language.as_deref() == Some("en")
+            && current_work.ol_key.is_some()
+        {
+            let mut filtered = reconstructed;
+            if let Some(gr_outcome) = filtered.get_mut(&livrarr_domain::MetadataProvider::Goodreads)
+            {
+                if let Some(ref mut payload) = gr_outcome.payload {
+                    if payload.cover_url.is_some() {
+                        let anchor = crate::cover_gate::OlAnchor {
+                            title: &current_work.title,
+                            author_name: &current_work.author_name,
+                            year: current_work.year,
+                            isbn: None,
+                            ol_key: current_work.ol_key.as_deref().unwrap_or(""),
+                        };
+                        let candidate = crate::cover_gate::GrCandidate {
+                            title: payload.title.as_deref().unwrap_or(""),
+                            author_name: payload.author_name.as_deref().unwrap_or(""),
+                            year: payload.year,
+                            isbn: None,
+                            gr_key: payload.gr_key.as_deref().unwrap_or(""),
+                        };
+                        let outcome =
+                            crate::cover_gate::evaluate_gr_cover_gate(&anchor, &candidate, false);
+                        match outcome {
+                            crate::cover_gate::CoverGateOutcome::Apply { .. } => {}
+                            _ => {
+                                tracing::info!(
+                                    work_id,
+                                    "cover gate: stripping GR cover_url (low Jaccard)"
+                                );
+                                payload.cover_url = None;
+                                payload.gr_key = None;
+                            }
+                        }
+                    }
+                }
+            }
+            filtered
+        } else {
+            reconstructed
+        };
+
         // Determine priority model based on work language
         let priority_model = PriorityModel::for_language(current_work.language.as_deref());
 
