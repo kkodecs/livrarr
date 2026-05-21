@@ -76,7 +76,6 @@ export function WorksPage() {
     isLoading,
     error,
     refetch,
-    isFetching,
   } = useQuery({
     queryKey: ["works", page, worksSort, worksSortDir],
     queryFn: () =>
@@ -385,10 +384,6 @@ export function WorksPage() {
             />
           </div>
         </div>
-
-        {isFetching && !isLoading && (
-          <div className="mb-2 text-xs text-muted">Loading...</div>
-        )}
 
         {filtered.length === 0 ? (
           <EmptyState
