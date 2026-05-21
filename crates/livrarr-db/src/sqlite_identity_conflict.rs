@@ -7,15 +7,17 @@ use crate::sqlite::SqliteDb;
 impl SqliteDb {
     pub async fn find_existing_open_conflict(
         &self,
+        user_id: UserId,
         existing_work_id: WorkId,
         incoming_ol_key: &str,
     ) -> Result<Option<i64>, sqlx::Error> {
         let row: Option<(i64,)> = sqlx::query_as(
             "SELECT id FROM work_identity_conflicts
-             WHERE existing_work_id = ?1 AND status = 'open'
-             AND json_extract(incoming_payload_json, '$.ol_key') = ?2
+             WHERE user_id = ?1 AND existing_work_id = ?2 AND status = 'open'
+             AND json_extract(incoming_payload_json, '$.ol_key') = ?3
              ORDER BY id DESC LIMIT 1",
         )
+        .bind(user_id)
         .bind(existing_work_id)
         .bind(incoming_ol_key)
         .fetch_optional(self.pool())

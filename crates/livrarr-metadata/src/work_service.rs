@@ -390,13 +390,12 @@ where
                     ProvenanceSetter::Import => AnchorSetter::Import,
                     _ => AnchorSetter::AutoSearch,
                 };
-                if let Err(e) = self
-                    .db
+                self.db
                     .confirm_ol_anchor(work.id, ol_key, anchor_setter)
                     .await
-                {
-                    tracing::warn!(work_id = work.id, ol_key, "anchor write failed: {e}");
-                }
+                    .map_err(|e| {
+                        WorkServiceError::Validation(format!("anchor write failed: {e}"))
+                    })?;
             }
         }
 

@@ -22,6 +22,7 @@ impl IdentityConflictService for LiveIdentityConflictService {
         if let Some(existing_id) = self
             .db
             .find_existing_open_conflict(
+                conflict.user_id,
                 conflict.existing_work_id,
                 conflict.incoming.ol_key.as_deref().unwrap_or(""),
             )
