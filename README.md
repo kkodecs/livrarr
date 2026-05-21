@@ -8,7 +8,7 @@
 
 ## What it does
 
-- **Search** any Torznab or Newznab indexer for ebooks and audiobooks
+- **Search** any Torznab or Newznab indexer (Prowlarr, NZBHydra2, Jackett, or direct) for ebooks and audiobooks
 - **Grab** via qBittorrent or SABnzbd (forthcoming: support for other clients)
 - **Import** to your library with automatic file organization
 - **Enrich** metadata from Hardcover, OpenLibrary, and Audnexus
@@ -60,7 +60,7 @@ Navigate to `http://your-server:8789`. You'll be prompted to create your admin a
 Go to **Settings** and add:
 - A root folder (where books land after import)
 - A download client (qBittorrent or SABnzbd)
-- At least one indexer (Torznab or Newznab URL + API key)
+- At least one indexer (any Torznab/Newznab source: Prowlarr, NZBHydra2, Jackett, or direct indexer URL + API key)
 
 ---
 
@@ -85,7 +85,7 @@ level = "info"       # trace | debug | info | warn | error
 |---|---|---|
 | Docker | Yes | linux/amd64 only (ARM coming later) |
 | qBittorrent or SABnzbd | Yes | Download client |
-| Torznab or Newznab indexer | Yes | Torznab / Newznab feed |
+| Torznab or Newznab indexer | Yes | Prowlarr, NZBHydra2, Jackett, or direct feed |
 | Hardcover API key | No | Better metadata — free at hardcover.app |
 | LLM integration | No | Better search and metadata |
 | Calibre-Web Automated | No | Downstream ebook delivery |

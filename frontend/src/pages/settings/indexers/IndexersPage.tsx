@@ -308,7 +308,7 @@ export default function IndexersPage() {
     <>
       <PageToolbar>
         <h1 className="text-lg font-semibold text-zinc-100">Indexers</h1>
-        <HelpTip text="Indexers are search engines that Livrarr queries to find ebook and audiobook releases. You need at least one indexer configured to search. Each indexer requires a URL and API key from your account on that indexer." />
+        <HelpTip text="Indexers are search engines that Livrarr queries to find ebook and audiobook releases. You need at least one indexer configured to search. Each indexer requires a URL and API key. Livrarr works with any Torznab or Newznab compatible indexer, including Prowlarr, NZBHydra2, Jackett, and direct indexer APIs." />
       </PageToolbar>
 
       <PageContent className="space-y-4">
@@ -422,7 +422,7 @@ export default function IndexersPage() {
             <h2 className="text-base font-semibold text-zinc-100">
               Usenet Indexers
             </h2>
-            <HelpTip text="Newznab indexers serve NZB files for Usenet downloads. Popular options include DrunkenSlug, NZBGeek, and NZBFinder. Requires a Usenet provider (separate from the indexer) and a download client like SABnzbd." />
+            <HelpTip text="Newznab indexers serve NZB files for Usenet downloads. Popular options include DrunkenSlug, NZBGeek, and NZBFinder. NZBHydra2 also works as a meta-indexer. Requires a Usenet provider (separate from the indexer) and a download client like SABnzbd." />
           </div>
 
           {usenetIndexers.length > 0 ? (
@@ -654,7 +654,7 @@ function IndexerFormModal({
           <div>
             <div className="flex items-center gap-2 mb-1">
               <label className="block text-xs text-muted">Protocol</label>
-              <HelpTip text="Torznab indexers serve torrent files (e.g., MyAnonamouse, TorrentLeech). Newznab indexers serve NZB/Usenet files (e.g., DrunkenSlug, NZBGeek)." />
+              <HelpTip text="Torznab indexers serve torrent files (e.g., MyAnonamouse, TorrentLeech, Jackett). Newznab indexers serve NZB/Usenet files (e.g., DrunkenSlug, NZBGeek, NZBHydra2)." />
             </div>
             <select
               {...register("protocol")}
@@ -945,7 +945,7 @@ function InlineIndexerForm({
         <div>
           <div className="flex items-center gap-2 mb-1">
             <label className="block text-xs text-muted">Protocol</label>
-            <HelpTip text="Torznab indexers serve torrent files (e.g., MyAnonamouse, TorrentLeech). Newznab indexers serve NZB/Usenet files (e.g., DrunkenSlug, NZBGeek)." />
+            <HelpTip text="Torznab indexers serve torrent files (e.g., MyAnonamouse, TorrentLeech, Jackett). Newznab indexers serve NZB/Usenet files (e.g., DrunkenSlug, NZBGeek, NZBHydra2)." />
           </div>
           <select
             {...register("protocol")}
