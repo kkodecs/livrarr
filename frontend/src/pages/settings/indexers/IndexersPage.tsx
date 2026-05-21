@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { HelpTip } from "@/components/HelpTip";
+import { UrlInput } from "@/components/UrlInput";
 import { toast } from "sonner";
 import {
   Plus,
@@ -675,10 +676,13 @@ function IndexerFormModal({
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="sm:col-span-2">
             <label className="block text-xs text-muted mb-1">URL</label>
-            <input
-              {...register("url", { required: true })}
-              placeholder="https://indexer.example.com"
-              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            <Controller
+              name="url"
+              control={control}
+              rules={{ required: true }}
+              render={({ field }) => (
+                <UrlInput value={field.value} onChange={field.onChange} placeholder="indexer.example.com" />
+              )}
             />
           </div>
           <div>
@@ -960,10 +964,13 @@ function InlineIndexerForm({
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="sm:col-span-2">
           <label className="block text-xs text-muted mb-1">URL</label>
-          <input
-            {...register("url", { required: true })}
-            placeholder="https://indexer.example.com"
-            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+          <Controller
+            name="url"
+            control={control}
+            rules={{ required: true }}
+            render={({ field }) => (
+              <UrlInput value={field.value} onChange={field.onChange} placeholder="indexer.example.com" />
+            )}
           />
         </div>
         <div>
@@ -1127,11 +1134,10 @@ function ProwlarrImportSection({ onImported }: { onImported: () => void }) {
 
           <div>
             <label className="block text-xs text-muted mb-1">Prowlarr URL</label>
-            <input
+            <UrlInput
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="http://localhost:9696"
-              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+              onChange={setUrl}
+              placeholder="localhost:9696"
             />
           </div>
 

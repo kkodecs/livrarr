@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router";
+import { UrlInput } from "@/components/UrlInput";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -259,13 +260,11 @@ export default function ReadarrImportPage() {
             <div className="space-y-3">
               <div>
                 <label className="mb-1 block text-sm text-muted">Readarr URL</label>
-                <input
-                  type="text"
-                  placeholder="http://localhost:8787"
+                <UrlInput
                   value={url}
-                  onChange={(e) => setUrl(e.target.value)}
+                  onChange={setUrl}
+                  placeholder="localhost:8787"
                   disabled={phase !== "idle"}
-                  className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-brand focus:outline-none disabled:opacity-50"
                 />
               </div>
               <div>

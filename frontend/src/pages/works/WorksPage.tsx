@@ -47,6 +47,7 @@ const SORT_FIELD_MAP: Record<WorkSortField, string> = {
   authorName: "author",
   year: "year",
   addedAt: "date_added",
+  recentlyDownloaded: "recently_downloaded",
 };
 
 export function WorksPage() {
@@ -521,6 +522,7 @@ function SortDropdown({
   onChange: (field: WorkSortField) => void;
 }) {
   const fields: { key: WorkSortField; label: string }[] = [
+    { key: "recentlyDownloaded", label: "Recent" },
     { key: "title", label: "Title" },
     { key: "authorName", label: "Author" },
     { key: "year", label: "Year" },

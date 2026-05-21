@@ -1,6 +1,6 @@
 import type { WorkDetailResponse } from "@/types/api";
 
-export type WorkSortField = "title" | "authorName" | "year" | "addedAt";
+export type WorkSortField = "title" | "authorName" | "year" | "addedAt" | "recentlyDownloaded";
 
 export function sortWorks(
   works: WorkDetailResponse[],

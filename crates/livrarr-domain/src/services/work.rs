@@ -124,6 +124,7 @@ pub enum WorkSortField {
     DateAdded,
     Year,
     Author,
+    RecentlyDownloaded,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

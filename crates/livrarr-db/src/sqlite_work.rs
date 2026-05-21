@@ -280,25 +280,31 @@ impl WorkDb for SqliteDb {
             None => "",
         };
 
-        let count_sql = format!(
-            "SELECT COUNT(*) FROM works WHERE user_id = ?{media_clause}"
-        );
+        let count_sql = format!("SELECT COUNT(*) FROM works WHERE user_id = ?{media_clause}");
         let total: i64 = sqlx::query_scalar(&count_sql)
             .bind(user_id)
             .fetch_one(self.pool())
             .await
             .map_err(map_db_err)?;
 
-        let order_col = match sort_by {
-            "title" => "title",
-            "date_added" => "added_at",
-            "year" => "year",
-            "author" => "author_name",
-            _ => "id",
-        };
         let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
+        let order_clause = match sort_by {
+            "recently_downloaded" => format!(
+                "COALESCE((SELECT MAX(imported_at) FROM library_items WHERE library_items.work_id = works.id), '1970-01-01') {dir}"
+            ),
+            other => {
+                let col = match other {
+                    "title" => "title",
+                    "date_added" => "added_at",
+                    "year" => "year",
+                    "author" => "author_name",
+                    _ => "id",
+                };
+                format!("{col} {dir}")
+            }
+        };
         let sql = format!(
-            "SELECT * FROM works WHERE user_id = ?{media_clause} ORDER BY {order_col} {dir} LIMIT ? OFFSET ?"
+            "SELECT * FROM works WHERE user_id = ?{media_clause} ORDER BY {order_clause} LIMIT ? OFFSET ?"
         );
 
         let offset = (page.saturating_sub(1) * per_page) as i64;

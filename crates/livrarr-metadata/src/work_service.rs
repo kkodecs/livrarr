@@ -608,7 +608,9 @@ where
             works.sort_by(|a, b| {
                 let cmp = match sort_by {
                     WorkSortField::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
-                    WorkSortField::DateAdded => a.added_at.cmp(&b.added_at),
+                    WorkSortField::DateAdded | WorkSortField::RecentlyDownloaded => {
+                        a.added_at.cmp(&b.added_at)
+                    }
                     WorkSortField::Year => a.year.cmp(&b.year),
                     WorkSortField::Author => a.author_name.cmp(&b.author_name),
                 };
@@ -636,6 +638,7 @@ where
             WorkSortField::DateAdded => "date_added",
             WorkSortField::Year => "year",
             WorkSortField::Author => "author",
+            WorkSortField::RecentlyDownloaded => "recently_downloaded",
         };
         let dir = match sort_dir {
             SortDirection::Asc => "asc",
