@@ -270,39 +270,22 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
                 } else {
                     PathBuf::from(&item.path)
                 };
-                (full_path, item.path.clone(), item.file_size)
+                (full_path, item.path.clone())
             })
             .collect();
 
         let (files_deleted, files_skipped) = tokio::task::spawn_blocking(move || {
             let mut deleted = 0i64;
             let mut skipped = 0i64;
-            for (full_path, rel_path, expected_size) in &undo_items {
+            for (full_path, rel_path) in &undo_items {
                 if full_path.exists() {
-                    match std::fs::metadata(full_path) {
-                        Ok(meta) if meta.len() as i64 == *expected_size => {
-                            match std::fs::remove_file(full_path) {
-                                Ok(()) => {
-                                    deleted += 1;
-                                    info!(path = %rel_path, "Undo: deleted file");
-                                }
-                                Err(e) => {
-                                    warn!(path = %rel_path, "Undo: failed to delete: {e}");
-                                    skipped += 1;
-                                }
-                            }
-                        }
-                        Ok(meta) => {
-                            warn!(
-                                path = %rel_path,
-                                expected = expected_size,
-                                actual = meta.len(),
-                                "Undo: skipping file with size mismatch"
-                            );
-                            skipped += 1;
+                    match std::fs::remove_file(full_path) {
+                        Ok(()) => {
+                            deleted += 1;
+                            info!(path = %rel_path, "Undo: deleted file");
                         }
                         Err(e) => {
-                            warn!(path = %rel_path, "Undo: cannot stat file: {e}");
+                            warn!(path = %rel_path, "Undo: failed to delete: {e}");
                             skipped += 1;
                         }
                     }
