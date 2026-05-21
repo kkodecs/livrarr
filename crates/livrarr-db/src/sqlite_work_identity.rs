@@ -65,6 +65,10 @@ impl WorkIdentityRepository for SqliteDb {
         new_ol_key: &str,
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError> {
+        if old_ol_key.trim().is_empty() || new_ol_key.trim().is_empty() || old_ol_key == new_ol_key
+        {
+            return Err(WorkIdentityError::InvalidAnchorValue);
+        }
         let now = Utc::now().to_rfc3339();
         let setter_str = serde_json::to_value(&setter)
             .ok()
