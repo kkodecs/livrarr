@@ -29,6 +29,7 @@ pub mod language;
 pub mod list_service;
 pub mod live_config;
 pub mod llm_caller_service;
+pub mod llm_ewl;
 pub mod llm_scraper;
 pub mod llm_validator;
 pub mod normalize;
