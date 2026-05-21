@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 use livrarr_db::{CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest};
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::{
-    AddWorkRequest, ReadarrImportWorkflow, ServiceError, SourceProviderData, WorkService,
+    ReadarrImportWorkflow, ServiceError, SourceProviderData, WorkService,
 };
 use livrarr_domain::{
     derive_sort_name, normalize_for_matching, sanitize_path_component, Import, MediaType,
@@ -1115,7 +1115,7 @@ impl ImportRunner {
         struct Prep {
             rd_book_id: i64,
             title: String,
-            add_req: AddWorkRequest,
+            candidate: livrarr_domain::identity::EnglishWorkCandidate,
         }
         let mut preps: Vec<Prep> = Vec::with_capacity(active_books.len());
         let mut skip_errors: Vec<String> = Vec::new();
@@ -1208,26 +1208,43 @@ impl ImportRunner {
                 series_position: series_position_f64.map(|p| p.to_string()),
             };
 
-            let add_req = AddWorkRequest {
-                title: title.to_string(),
-                author_name: author_name.to_string(),
-                year,
-                language,
+            use livrarr_domain::identity::{
+                EnglishSeedFields, EnglishWorkCandidate, IdentityState, PendingReason,
+            };
+            let candidate = EnglishWorkCandidate {
+                fields: EnglishSeedFields {
+                    title: title.to_string(),
+                    author_name: author_name.to_string(),
+                    language: language.unwrap_or_else(|| "en".to_string()),
+                    author_ol_key: None,
+                    year,
+                    cover_url,
+                    detail_url: None,
+                    isbn: source_data.isbn.clone(),
+                    asin: source_data.asin.clone(),
+                    description: source_data.description.clone(),
+                    series_name,
+                    series_position: series_position_f64,
+                },
+                identity: IdentityState::Pending {
+                    reason: PendingReason::NoCandidates,
+                    top_candidates: vec![],
+                },
+                source_provider_data: Some(source_data),
+                file_path: None,
+                delete_existing_after_import: false,
+                gr_key: None,
+                series_id: None,
                 monitor_ebook: Some(monitor_ebook),
                 monitor_audiobook: Some(monitor_audiobook),
-                import_id: Some(self.import_id.clone()),
-                source_provider_data: Some(source_data),
                 provenance_setter: Some(ProvenanceSetter::Import),
-                series_name,
-                series_position: series_position_f64,
-                cover_url,
-                ..Default::default()
+                import_id: Some(self.import_id.clone()),
             };
 
             preps.push(Prep {
                 rd_book_id: rd_book.id,
                 title: title.to_string(),
-                add_req,
+                candidate,
             });
         }
 
@@ -1250,8 +1267,8 @@ impl ImportRunner {
             HashMap::with_capacity(preps.len());
         for prep in preps {
             let key = (
-                normalize_for_matching(&prep.add_req.title),
-                normalize_for_matching(&prep.add_req.author_name),
+                normalize_for_matching(&prep.candidate.fields.title),
+                normalize_for_matching(&prep.candidate.fields.author_name),
             );
             by_identity
                 .entry(key)
@@ -1290,7 +1307,7 @@ impl ImportRunner {
             .map(|p| {
                 let ws = work_service.clone();
                 async move {
-                    match ws.add(user_id, p.add_req).await {
+                    match ws.add(user_id, p.candidate).await {
                         Ok(result) => AddOutcome {
                             rd_book_id: p.rd_book_id,
                             work_id: Some(result.work.id),

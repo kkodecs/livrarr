@@ -1,7 +1,10 @@
+pub mod identity;
 pub mod keyed_mutex;
 pub mod readarr;
 pub mod services;
 pub mod settings;
+pub mod text_norm;
+pub mod title_cleanup;
 pub mod torznab;
 
 use chrono::{DateTime, Utc};
@@ -82,6 +85,9 @@ pub enum EnrichmentStatus {
     /// LLM identity validation detected a provider mismatch. Terminal until
     /// user resolves. Only reachable when LLM is configured.
     Conflict,
+    /// OL identity could not be confidently resolved at add-time. Background
+    /// job will retry resolution. Only for English works.
+    IdentityPending,
 }
 
 /// Per-file tag sync status. Tracked on LibraryItem, not on Work.

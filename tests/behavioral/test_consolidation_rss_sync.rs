@@ -170,6 +170,9 @@ async fn seed_monitored_work(
             })
             .to_string(),
         ),
+        isbn_13: None,
+        asin: None,
+        description: None,
     })
     .await
     .unwrap()

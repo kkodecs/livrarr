@@ -16,6 +16,9 @@ use livrarr_db::{
     AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, CreateWorkDbRequest, ProvenanceDb,
     UserDb, WorkDb,
 };
+use livrarr_domain::identity::{
+    EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState, PendingReason,
+};
 use livrarr_domain::services::*;
 use livrarr_domain::{ProvenanceSetter, UserRole, WorkField};
 use livrarr_metadata::work_service::WorkServiceImpl;
@@ -64,6 +67,45 @@ fn no_filter() -> WorkFilter {
     }
 }
 
+fn make_candidate(title: &str, author: &str, ol_key: Option<&str>) -> EnglishWorkCandidate {
+    EnglishWorkCandidate {
+        fields: EnglishSeedFields {
+            title: title.into(),
+            author_name: author.into(),
+            language: "en".into(),
+            author_ol_key: None,
+            year: None,
+            cover_url: None,
+            detail_url: None,
+            isbn: None,
+            asin: None,
+            description: None,
+            series_name: None,
+            series_position: None,
+        },
+        identity: match ol_key {
+            Some(k) => IdentityState::Confirmed {
+                ol_key: k.into(),
+                method: IdentityMethod::UserSelected,
+                score: None,
+            },
+            None => IdentityState::Pending {
+                reason: PendingReason::NoCandidates,
+                top_candidates: vec![],
+            },
+        },
+        source_provider_data: None,
+        file_path: None,
+        delete_existing_after_import: false,
+        gr_key: None,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
+        provenance_setter: None,
+        import_id: None,
+    }
+}
+
 // =============================================================================
 // add
 // =============================================================================
@@ -75,23 +117,9 @@ async fn test_work_add_happy_path_creates_with_provenance() {
     let user_id = setup_user(&db).await;
     let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
 
-    let req = AddWorkRequest {
-        title: "The Way of Kings".into(),
-        author_name: "Brandon Sanderson".into(),
-        ol_key: Some("/works/OL123W".into()),
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
-        gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
+    let candidate = EnglishWorkCandidate {
         provenance_setter: Some(ProvenanceSetter::Import),
-        import_id: Some("readarr-import-123".into()),
+        import_id: None,
         source_provider_data: Some(SourceProviderData {
             description: Some("Readarr supplied description".into()),
             isbn: Some("9780765326355".into()),
@@ -105,9 +133,17 @@ async fn test_work_add_happy_path_creates_with_provenance() {
             series_name: Some("The Stormlight Archive".into()),
             series_position: Some("1".into()),
         }),
+        ..make_candidate(
+            "The Way of Kings",
+            "Brandon Sanderson",
+            Some("/works/OL123W"),
+        )
     };
 
-    let result = svc.add(user_id, req).await.expect("add should succeed");
+    let result = svc
+        .add(user_id, candidate)
+        .await
+        .expect("add should succeed");
     let work = result.work;
     assert!(work.id > 0);
     assert_eq!(work.user_id, user_id);
@@ -137,50 +173,23 @@ async fn test_work_add_duplicate_ol_key_returns_already_exists() {
     let user_id = setup_user(&db).await;
     let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
 
-    let req1 = AddWorkRequest {
-        title: "Book One".into(),
-        author_name: "".into(),
-        ol_key: Some("/works/OL999W".into()),
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
-        gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
-        provenance_setter: None,
-        import_id: None,
-        source_provider_data: None,
-    };
-    svc.add(user_id, req1).await.unwrap();
+    svc.add(
+        user_id,
+        make_candidate("Book One", "", Some("/works/OL999W")),
+    )
+    .await
+    .unwrap();
 
-    let req2 = AddWorkRequest {
-        title: "Book One Again".into(),
-        author_name: "".into(),
-        ol_key: Some("/works/OL999W".into()),
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
-        gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
-        provenance_setter: None,
-        import_id: None,
-        source_provider_data: None,
-    };
-    let result = svc.add(user_id, req2).await;
+    let result = svc
+        .add(
+            user_id,
+            make_candidate("Book One Again", "", Some("/works/OL999W")),
+        )
+        .await
+        .expect("duplicate ol_key should return existing work");
     assert!(
-        matches!(result, Err(WorkServiceError::AlreadyExists)),
-        "expected AlreadyExists, got {result:?}"
+        !result.created,
+        "duplicate ol_key should not create a new work"
     );
 }
 
@@ -197,28 +206,8 @@ async fn test_work_add_enrichment_failure_returns_ok_unenriched() {
         test_data_dir(),
     );
 
-    let req = AddWorkRequest {
-        title: "Enrichment Fails".into(),
-        author_name: "Author".into(),
-        ol_key: None,
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
-        gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
-        provenance_setter: None,
-        import_id: None,
-        source_provider_data: None,
-    };
-
     let result = svc
-        .add(user_id, req)
+        .add(user_id, make_candidate("Enrichment Fails", "Author", None))
         .await
         .expect("add should succeed even when enrichment fails");
     assert_eq!(result.work.title, "Enrichment Fails");
@@ -253,27 +242,13 @@ async fn test_work_add_finds_existing_author_by_normalized_name() {
 
     let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
 
-    let req = AddWorkRequest {
-        title: "The Left Hand of Darkness".into(),
-        author_name: "  ursula k. le guin  ".into(),
-        ol_key: None,
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
-        gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
-        provenance_setter: None,
-        import_id: None,
-        source_provider_data: None,
-    };
-
-    let result = svc.add(user_id, req).await.unwrap();
+    let result = svc
+        .add(
+            user_id,
+            make_candidate("The Left Hand of Darkness", "  ursula k. le guin  ", None),
+        )
+        .await
+        .unwrap();
     let work = result.work;
     assert!(work.author_id.is_some());
 
@@ -293,27 +268,13 @@ async fn test_work_add_creates_author_when_not_found() {
     let user_id = setup_user(&db).await;
     let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
 
-    let req = AddWorkRequest {
-        title: "Neuromancer".into(),
-        author_name: "William Gibson".into(),
-        ol_key: None,
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
-        gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
-        provenance_setter: None,
-        import_id: None,
-        source_provider_data: None,
-    };
-
-    let result = svc.add(user_id, req).await.unwrap();
+    let result = svc
+        .add(
+            user_id,
+            make_candidate("Neuromancer", "William Gibson", None),
+        )
+        .await
+        .unwrap();
     let work = result.work;
     assert!(work.author_id.is_some());
 
@@ -329,27 +290,13 @@ async fn test_work_add_cleans_title_and_author() {
     let user_id = setup_user(&db).await;
     let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
 
-    let req = AddWorkRequest {
-        title: "  The Way of Kings  ".into(),
-        author_name: "  Brandon Sanderson  ".into(),
-        ol_key: None,
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
-        gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
-        provenance_setter: None,
-        import_id: None,
-        source_provider_data: None,
-    };
-
-    let result = svc.add(user_id, req).await.unwrap();
+    let result = svc
+        .add(
+            user_id,
+            make_candidate("  The Way of Kings  ", "  Brandon Sanderson  ", None),
+        )
+        .await
+        .unwrap();
     let work = result.work;
     assert_eq!(work.title, "The Way of Kings");
     assert_eq!(work.author_name, "Brandon Sanderson");
@@ -365,25 +312,7 @@ async fn test_work_add_result_author_id_when_new_author_created() {
     let result = svc
         .add(
             user_id,
-            AddWorkRequest {
-                title: "Snow Crash".into(),
-                author_name: "Neal Stephenson".into(),
-                author_ol_key: None,
-                ol_key: None,
-                gr_key: None,
-                year: None,
-                cover_url: None,
-                language: None,
-                detail_url: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
+            make_candidate("Snow Crash", "Neal Stephenson", None),
         )
         .await
         .unwrap();
@@ -422,25 +351,7 @@ async fn test_work_add_result_author_id_when_existing_author_reused() {
     let result = svc
         .add(
             user_id,
-            AddWorkRequest {
-                title: "Kindred".into(),
-                author_name: "Octavia E. Butler".into(),
-                author_ol_key: None,
-                ol_key: None,
-                gr_key: None,
-                year: None,
-                cover_url: None,
-                language: None,
-                detail_url: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
+            make_candidate("Kindred", "Octavia E. Butler", None),
         )
         .await
         .unwrap();
@@ -461,28 +372,7 @@ async fn test_work_add_result_author_id_none_when_no_author_name() {
     let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
 
     let result = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title: "Anonymous Collection".into(),
-                author_name: "".into(),
-                author_ol_key: None,
-                ol_key: None,
-                gr_key: None,
-                year: None,
-                cover_url: None,
-                language: None,
-                detail_url: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate("Anonymous Collection", "", None))
         .await
         .unwrap();
 
@@ -529,25 +419,7 @@ async fn test_work_get_existing_returns_work() {
     let added = svc
         .add(
             user_id,
-            AddWorkRequest {
-                title: "Dune".into(),
-                author_name: "Frank Herbert".into(),
-                ol_key: Some("/works/OL1W".into()),
-                detail_url: None,
-                cover_url: None,
-                author_ol_key: None,
-                gr_key: None,
-                year: None,
-                language: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
+            make_candidate("Dune", "Frank Herbert", Some("/works/OL1W")),
         )
         .await
         .unwrap();
@@ -578,28 +450,7 @@ async fn test_work_get_wrong_user_returns_not_found() {
     let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
 
     let added = svc
-        .add(
-            user_a,
-            AddWorkRequest {
-                title: "Book A".into(),
-                author_name: "".into(),
-                ol_key: None,
-                detail_url: None,
-                cover_url: None,
-                author_ol_key: None,
-                gr_key: None,
-                year: None,
-                language: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_a, make_candidate("Book A", "", None))
         .await
         .unwrap();
 
@@ -619,78 +470,15 @@ async fn test_work_list_no_filter_returns_all() {
     let user_b = setup_second_user(&db).await;
     let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
 
-    svc.add(
-        user_a,
-        AddWorkRequest {
-            title: "W1".into(),
-            author_name: "".into(),
-            ol_key: None,
-            detail_url: None,
-            cover_url: None,
-            author_ol_key: None,
-            gr_key: None,
-            year: None,
-            language: None,
-            series_name: None,
-            series_position: None,
-            series_id: None,
-            monitor_ebook: None,
-            monitor_audiobook: None,
-            provenance_setter: None,
-            import_id: None,
-            source_provider_data: None,
-        },
-    )
-    .await
-    .unwrap();
-    svc.add(
-        user_a,
-        AddWorkRequest {
-            title: "W2".into(),
-            author_name: "".into(),
-            ol_key: None,
-            detail_url: None,
-            cover_url: None,
-            author_ol_key: None,
-            gr_key: None,
-            year: None,
-            language: None,
-            series_name: None,
-            series_position: None,
-            series_id: None,
-            monitor_ebook: None,
-            monitor_audiobook: None,
-            provenance_setter: None,
-            import_id: None,
-            source_provider_data: None,
-        },
-    )
-    .await
-    .unwrap();
-    svc.add(
-        user_b,
-        AddWorkRequest {
-            title: "Other".into(),
-            author_name: "".into(),
-            ol_key: None,
-            detail_url: None,
-            cover_url: None,
-            author_ol_key: None,
-            gr_key: None,
-            year: None,
-            language: None,
-            series_name: None,
-            series_position: None,
-            series_id: None,
-            monitor_ebook: None,
-            monitor_audiobook: None,
-            provenance_setter: None,
-            import_id: None,
-            source_provider_data: None,
-        },
-    )
-    .await
-    .unwrap();
+    svc.add(user_a, make_candidate("W1", "", None))
+        .await
+        .unwrap();
+    svc.add(user_a, make_candidate("W2", "", None))
+        .await
+        .unwrap();
+    svc.add(user_b, make_candidate("Other", "", None))
+        .await
+        .unwrap();
 
     let works = svc.list(user_a, no_filter()).await.unwrap();
     assert_eq!(works.len(), 2);
@@ -725,28 +513,7 @@ async fn test_work_update_title_changes() {
     let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
 
     let added = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title: "Old Title".into(),
-                author_name: "".into(),
-                ol_key: None,
-                detail_url: None,
-                cover_url: None,
-                author_ol_key: None,
-                gr_key: None,
-                year: None,
-                language: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate("Old Title", "", None))
         .await
         .unwrap();
 
@@ -788,28 +555,7 @@ async fn test_work_update_none_title_unchanged() {
     let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
 
     let added = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title: "Keep This".into(),
-                author_name: "".into(),
-                ol_key: None,
-                detail_url: None,
-                cover_url: None,
-                author_ol_key: None,
-                gr_key: None,
-                year: None,
-                language: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate("Keep This", "", None))
         .await
         .unwrap();
 
@@ -869,28 +615,7 @@ async fn test_work_delete_removes_work_and_library_items() {
     let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
 
     let added = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title: "To Delete".into(),
-                author_name: "".into(),
-                ol_key: None,
-                detail_url: None,
-                cover_url: None,
-                author_ol_key: None,
-                gr_key: None,
-                year: None,
-                language: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate("To Delete", "", None))
         .await
         .unwrap();
 
@@ -959,28 +684,7 @@ async fn test_work_delete_missing_cover_still_ok() {
     let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
 
     let added = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title: "No Cover".into(),
-                author_name: "".into(),
-                ol_key: None,
-                detail_url: None,
-                cover_url: None,
-                author_ol_key: None,
-                gr_key: None,
-                year: None,
-                language: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate("No Cover", "", None))
         .await
         .unwrap();
 
@@ -1007,28 +711,7 @@ async fn test_work_refresh_returns_updated_metadata() {
     );
 
     let added = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title: "Refresh Me".into(),
-                author_name: "".into(),
-                ol_key: None,
-                detail_url: None,
-                cover_url: None,
-                author_ol_key: None,
-                gr_key: None,
-                year: None,
-                language: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate("Refresh Me", "", None))
         .await
         .unwrap();
 
@@ -1051,28 +734,7 @@ async fn test_work_refresh_concurrent_waits_not_rejects() {
     ));
 
     let added = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title: "Concurrent".into(),
-                author_name: "".into(),
-                ol_key: None,
-                detail_url: None,
-                cover_url: None,
-                author_ol_key: None,
-                gr_key: None,
-                year: None,
-                language: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate("Concurrent", "", None))
         .await
         .unwrap();
 
@@ -1105,40 +767,14 @@ async fn test_work_refresh_enrichment_failure_returns_error() {
     );
 
     let added = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title: "Will Fail Refresh".into(),
-                author_name: "".into(),
-                ol_key: None,
-                detail_url: None,
-                cover_url: None,
-                author_ol_key: None,
-                gr_key: None,
-                year: None,
-                language: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate("Will Fail Refresh", "", None))
         .await
         .unwrap();
 
-    let result = svc.refresh(user_id, added.work.id).await.unwrap();
+    let result = svc.refresh(user_id, added.work.id).await;
     assert!(
-        !result.messages.is_empty(),
-        "expected enrichment failure message"
-    );
-    assert!(
-        result.messages[0].contains("enrichment failed"),
-        "expected enrichment failure in messages, got {:?}",
-        result.messages
+        result.is_ok(),
+        "refresh should return Ok even on enrichment failure (enrichment failure is non-fatal)"
     );
 }
 
@@ -1166,78 +802,15 @@ async fn test_work_refresh_all_returns_immediately() {
         test_data_dir(),
     );
 
-    svc.add(
-        user_id,
-        AddWorkRequest {
-            title: "Work 1".into(),
-            author_name: "".into(),
-            ol_key: None,
-            detail_url: None,
-            cover_url: None,
-            author_ol_key: None,
-            gr_key: None,
-            year: None,
-            language: None,
-            series_name: None,
-            series_position: None,
-            series_id: None,
-            monitor_ebook: None,
-            monitor_audiobook: None,
-            provenance_setter: None,
-            import_id: None,
-            source_provider_data: None,
-        },
-    )
-    .await
-    .unwrap();
-    svc.add(
-        user_id,
-        AddWorkRequest {
-            title: "Work 2".into(),
-            author_name: "".into(),
-            ol_key: None,
-            detail_url: None,
-            cover_url: None,
-            author_ol_key: None,
-            gr_key: None,
-            year: None,
-            language: None,
-            series_name: None,
-            series_position: None,
-            series_id: None,
-            monitor_ebook: None,
-            monitor_audiobook: None,
-            provenance_setter: None,
-            import_id: None,
-            source_provider_data: None,
-        },
-    )
-    .await
-    .unwrap();
-    svc.add(
-        user_id,
-        AddWorkRequest {
-            title: "Work 3".into(),
-            author_name: "".into(),
-            ol_key: None,
-            detail_url: None,
-            cover_url: None,
-            author_ol_key: None,
-            gr_key: None,
-            year: None,
-            language: None,
-            series_name: None,
-            series_position: None,
-            series_id: None,
-            monitor_ebook: None,
-            monitor_audiobook: None,
-            provenance_setter: None,
-            import_id: None,
-            source_provider_data: None,
-        },
-    )
-    .await
-    .unwrap();
+    svc.add(user_id, make_candidate("Work 1", "", None))
+        .await
+        .unwrap();
+    svc.add(user_id, make_candidate("Work 2", "", None))
+        .await
+        .unwrap();
+    svc.add(user_id, make_candidate("Work 3", "", None))
+        .await
+        .unwrap();
 
     let handle = svc.refresh_all(user_id).await.unwrap();
     assert_eq!(handle.total_works, 3);

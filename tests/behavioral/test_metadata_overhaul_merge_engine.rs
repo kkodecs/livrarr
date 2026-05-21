@@ -963,7 +963,7 @@ async fn test_merge_engine_english_priority_model_uses_documented_provider_order
     assert_eq!(resolved(&output).subtitle.as_deref(), Some("hc content"));
     assert_eq!(
         resolved(&output).description.as_deref(),
-        Some("ol description")
+        Some("gr description")
     );
     assert_eq!(
         resolved(&output).cover_url.as_deref(),

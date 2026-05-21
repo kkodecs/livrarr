@@ -307,11 +307,18 @@ async fn main() {
             live_metadata_config.clone(),
         );
 
+        let llm_caller = m::llm_caller_service::LlmCallerImpl::new(
+            live_metadata_config.clone(),
+            http_client.clone(),
+        );
+        let llm_configured = live_metadata_config.snapshot().llm_enabled;
         let service = Arc::new(m::EnrichmentServiceImpl::new(
             db_arc,
             queue.clone(),
             merge_engine,
             Arc::new(validator),
+            llm_caller,
+            llm_configured,
         ));
         (queue, service)
     };
@@ -545,6 +552,22 @@ async fn main() {
                 livrarr_metadata::list_service::NoOpBibliographyTrigger,
             ))
         },
+        identity_conflict_service: Arc::new(
+            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
+                svc_db.clone(),
+            ),
+        ),
+        identity_resolver: Arc::new(
+            livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver {
+                ol: Arc::new(
+                    livrarr_metadata::ol_resolver_client::LiveOlResolverClient::new(
+                        livrarr_http::fetcher::HttpFetcherImpl::new()
+                            .expect("HttpFetcherImpl for identity resolver"),
+                    ),
+                ),
+                config: Default::default(),
+            },
+        ),
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
                 svc_enrichment.clone(),

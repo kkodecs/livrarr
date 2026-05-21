@@ -157,6 +157,20 @@ pub struct ImportItem {
     pub delete_existing: bool,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default)]
+    pub author_ol_key: Option<String>,
+    #[serde(default)]
+    pub year: Option<i32>,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+    #[serde(default)]
+    pub isbn: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub series_name: Option<String>,
+    #[serde(default)]
+    pub series_position: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -899,32 +913,55 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
         result
     };
 
-    let ol_key = if item.ol_key.is_empty() {
-        None
-    } else {
-        Some(item.ol_key.clone())
+    use livrarr_domain::identity::{
+        EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState, PendingReason,
     };
-    let add_req = livrarr_domain::services::AddWorkRequest {
-        ol_key,
-        title: item.title.clone(),
-        author_name: item.author.clone(),
-        author_ol_key,
+    let identity = if !item.ol_key.is_empty() {
+        IdentityState::Confirmed {
+            ol_key: item.ol_key.clone(),
+            method: IdentityMethod::UserSelected,
+            score: None,
+        }
+    } else {
+        IdentityState::Pending {
+            reason: PendingReason::NoCandidates,
+            top_candidates: vec![],
+        }
+    };
+    let language = item
+        .language
+        .as_deref()
+        .map(livrarr_domain::normalize_language)
+        .unwrap_or_else(|| "en".to_string());
+    let author_ol_key = item.author_ol_key.clone().or(author_ol_key);
+    let candidate = EnglishWorkCandidate {
+        fields: EnglishSeedFields {
+            title: item.title.clone(),
+            author_name: item.author.clone(),
+            language,
+            author_ol_key,
+            year: item.year,
+            cover_url: item.cover_url.clone(),
+            detail_url: None,
+            isbn: item.isbn.clone(),
+            asin: None,
+            description: item.description.clone(),
+            series_name: item.series_name.clone(),
+            series_position: item.series_position,
+        },
+        identity,
+        source_provider_data: None,
+        file_path: None,
+        delete_existing_after_import: false,
         gr_key: None,
-        year: None,
-        cover_url: None,
-        language: item.language.clone(),
-        detail_url: None,
         series_id: None,
-        series_name: None,
-        series_position: None,
         monitor_ebook: None,
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
-        source_provider_data: None,
     };
 
-    match state.work_service().add(user_id, add_req).await {
+    match state.work_service().add(user_id, candidate).await {
         Ok(result) => Ok(result.work.id),
         Err(e) => {
             let fresh_works = state

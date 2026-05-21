@@ -1680,12 +1680,14 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "quick-xml",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "trait-variant",
+ "unicode-normalization",
 ]
 
 [[package]]

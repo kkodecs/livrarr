@@ -8,6 +8,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 - [Overview](architecture/overview.md) — crate dependency graph, key invariants, composition root
 - [Enrichment Pipeline](architecture/enrichment-pipeline.md) — provider stack, enrichment modes, provenance, privacy
+- [Metadata Pathway](architecture/metadata-pathway.md) — current add/enrich/merge/cover/tag flow, entry points, and improvement opportunities
 - [Grab System](architecture/grab-system.md) — indexers, download clients, import lock, orphan adoption
 - [Library Management](architecture/library-management.md) — filesystem layout, import pipeline, tag writing, CWA
 - [Import Pipeline](architecture/import-pipeline.md) — scan → classify → copy → tag → CWA → track (detailed)
@@ -18,7 +19,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 ## Domain Entities
 
-- [Metadata Principles](domain/metadata-principles.md) — M1-M7: the governing principles for all metadata handling
+- [Metadata Principles](domain/metadata-principles.md) — M1-M10: the governing principles for all metadata handling
 - [BIG7 Overview](domain/big7.md) — the seven core entities and their relationships
 - [Work](domain/work.md) — primary entity, lifecycle, provenance, semantics
 - [Author](domain/author.md) — lifecycle, monitoring, relationship to works

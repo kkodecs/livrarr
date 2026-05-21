@@ -210,7 +210,7 @@ pub trait WorkService: Send + Sync {
     async fn add(
         &self,
         user_id: UserId,
-        req: AddWorkRequest,
+        candidate: crate::identity::EnglishWorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError>;
     async fn get(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError>;
     async fn get_detail(

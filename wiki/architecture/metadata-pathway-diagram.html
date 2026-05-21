@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Livrarr Metadata Pathway Diagram</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --ink: #17202a;
+      --muted: #5f6b7a;
+      --line: #b8c2cf;
+      --entry: #e8f1ff;
+      --core: #eef7ef;
+      --provider: #fff4de;
+      --risk: #ffe9e6;
+      --output: #ede9ff;
+      --card: #ffffff;
+      --shadow: 0 8px 24px rgba(23, 32, 42, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 32px;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 28px;
+      font-weight: 750;
+    }
+
+    .subtitle {
+      max-width: 880px;
+      margin: 0 0 28px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .diagram {
+      display: grid;
+      grid-template-columns: 1.05fr 0.9fr 1.2fr 1.2fr 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .column {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .stage-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .box {
+      position: relative;
+      min-height: 72px;
+      padding: 14px 14px 13px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+    }
+
+    .box h2,
+    .box h3 {
+      margin: 0 0 5px;
+      font-size: 15px;
+      line-height: 1.25;
+    }
+
+    .box p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .entry {
+      background: var(--entry);
+    }
+
+    .core {
+      background: var(--core);
+    }
+
+    .provider {
+      background: var(--provider);
+    }
+
+    .risk {
+      background: var(--risk);
+    }
+
+    .output {
+      background: var(--output);
+    }
+
+    .stack {
+      display: grid;
+      gap: 8px;
+    }
+
+    .mini {
+      padding: 9px 10px;
+      border: 1px solid rgba(23, 32, 42, 0.16);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.58);
+      color: var(--ink);
+      font-size: 13px;
+    }
+
+    .arrow-right::after {
+      content: "->";
+      position: absolute;
+      top: 50%;
+      right: -18px;
+      transform: translateY(-50%);
+      color: #52606d;
+      font-weight: 800;
+      z-index: 2;
+    }
+
+    .arrow-down::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: -14px;
+      width: 2px;
+      height: 14px;
+      background: var(--line);
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .note {
+      margin-top: 24px;
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .note h2 {
+      margin: 0 0 8px;
+      font-size: 16px;
+    }
+
+    .note ul {
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+    }
+
+    .path-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 24px;
+    }
+
+    .path-card {
+      min-height: 150px;
+    }
+
+    code {
+      padding: 1px 4px;
+      border-radius: 4px;
+      background: rgba(23, 32, 42, 0.08);
+      color: var(--ink);
+      font-size: 0.94em;
+    }
+
+    @media (max-width: 1050px) {
+      .diagram {
+        grid-template-columns: 1fr;
+      }
+
+      .path-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .arrow-right::after {
+        content: "";
+        right: auto;
+        left: 50%;
+        top: auto;
+        bottom: -18px;
+        width: 2px;
+        height: 18px;
+        background: var(--line);
+        transform: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Livrarr Metadata Pathway</h1>
+    <p class="subtitle">
+      All normal add paths converge through <code>WorkService::add</code>. Existing
+      works re-enter through refresh/retry. The pipeline locks the work identity,
+      gathers provider metadata, validates identity, merges fields, downloads
+      covers, and retags files.
+      <a href="./metadata-pathway-pseudocode.html">Open the companion pseudocode</a>.
+    </p>
+
+    <section class="diagram" aria-label="Metadata pathway diagram">
+      <div class="column">
+        <div class="stage-title">Entry Points</div>
+        <div class="box entry arrow-right">
+          <h2>Application Workflows</h2>
+          <div class="stack">
+            <div class="mini">Direct work add</div>
+            <div class="mini">Manual import</div>
+            <div class="mini">List import</div>
+            <div class="mini">Readarr import</div>
+            <div class="mini">Author monitor auto-add</div>
+          </div>
+        </div>
+        <div class="box entry">
+          <h3>Refresh Side</h3>
+          <p>Manual refresh, bulk refresh, and background retry reprocess an existing work instead of creating one.</p>
+        </div>
+      </div>
+
+      <div class="column">
+        <div class="stage-title">Identity Anchor</div>
+        <div class="box core arrow-right">
+          <h2><code>WorkService::add</code></h2>
+          <p>Clean title/author, normalize for dedupe, create or find the work, preserve provider keys, and write add-time provenance.</p>
+        </div>
+        <div class="box core">
+          <h3>Anchor Fields</h3>
+          <div class="stack">
+            <div class="mini">Title</div>
+            <div class="mini">Author</div>
+            <div class="mini">Language</div>
+            <div class="mini">Provider keys: OL, GR, HC, ISBN, ASIN</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="column">
+        <div class="stage-title">Enrichment Dispatch</div>
+        <div class="box core arrow-right">
+          <h2><code>run_unified_enrichment</code></h2>
+          <p>Inject source data, call enrichment, then later handle covers and tag sync.</p>
+        </div>
+        <div class="box core arrow-right">
+          <h2><code>ProviderQueue</code></h2>
+          <p>Runs providers with concurrency limits, rate limits, retry state, and circuit breakers.</p>
+        </div>
+        <div class="split">
+          <div class="box provider">
+            <h3>English Main Path</h3>
+            <div class="stack">
+              <div class="mini">Hardcover</div>
+              <div class="mini">OpenLibrary</div>
+              <div class="mini">Audnexus</div>
+              <div class="mini">Goodreads if direct key or selected search result</div>
+            </div>
+          </div>
+          <div class="box provider">
+            <h3>Foreign Path</h3>
+            <div class="stack">
+              <div class="mini">Goodreads favored in merge priority</div>
+              <div class="mini">LLM may be required for extraction/cleanup</div>
+              <div class="mini">Other providers can still run in current unified queue</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="column">
+        <div class="stage-title">Validation And Merge</div>
+        <div class="box risk arrow-right">
+          <h2>Identity Validation</h2>
+          <p>Provider payloads are compared to the locked title/author anchor. Bad matches become rejected outcomes.</p>
+        </div>
+        <div class="box risk">
+          <h3>Current Goodreads Risk</h3>
+          <p>Search fallback is LLM-gated and lacks deterministic junk filtering before selection.</p>
+        </div>
+        <div class="box core arrow-right">
+          <h2><code>MergeEngine</code></h2>
+          <p>Chooses field winners by provider priority while preserving user-owned fields and manual covers.</p>
+        </div>
+        <div class="box core">
+          <h3>DB Apply</h3>
+          <p><code>apply_enrichment_merge</code> writes fields, provenance, external IDs, status, and merge generation.</p>
+        </div>
+      </div>
+
+      <div class="column">
+        <div class="stage-title">Outputs</div>
+        <div class="box output">
+          <h2>Work Metadata</h2>
+          <p>Canonical fields live on <code>works</code>, with field-level provenance in <code>work_metadata_provenance</code>.</p>
+        </div>
+        <div class="box output">
+          <h2>Cover Cache</h2>
+          <p>If the merged work has <code>cover_url</code> and no manual cover, Livrarr downloads the image to the cover cache.</p>
+        </div>
+        <div class="box output">
+          <h2>File Tags</h2>
+          <p>Existing library items are retagged from the post-enrichment work metadata.</p>
+        </div>
+        <div class="box risk">
+          <h2>Conflict State</h2>
+          <p>If all successful provider payloads are rejected, the work becomes <code>conflict</code>. No metadata or cover URL is merged.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="path-grid" aria-label="Work creation paths">
+      <div class="box entry path-card">
+        <h2>Manual Add From Search</h2>
+        <p>User searches, selects a metadata candidate, then POSTs a comparatively rich add request with selected title, author, keys, cover URL, language, and detail URL.</p>
+      </div>
+      <div class="box entry path-card">
+        <h2>Manual Import</h2>
+        <p>Scanner parses local files and OpenLibrary matches, but the final import request currently carries only path, OL key, title, author, delete flag, and language.</p>
+      </div>
+      <div class="box entry path-card">
+        <h2>Bulk Sources</h2>
+        <p>Readarr, list import, and author monitor create works in batches. Readarr is the richest source because it injects source provider data.</p>
+      </div>
+      <div class="box entry path-card">
+        <h2>Existing Works</h2>
+        <p>Refresh, bulk refresh, and background retry skip work creation and re-enter at enrichment for an existing work ID.</p>
+      </div>
+    </section>
+
+    <section class="note">
+      <h2>Important Detail</h2>
+      <ul>
+        <li>Manual import often starts with sparse seed data, so provider matching has to do more work.</li>
+        <li>Readarr import starts with richer <code>SourceProviderData</code>, including covers and identifiers.</li>
+        <li>Goodreads direct detail pages can work when Livrarr already has a <code>gr_key</code>.</li>
+        <li>Goodreads search is currently the fragile part: it can be WAF-challenged and its candidate selection is too LLM-dependent.</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

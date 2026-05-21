@@ -878,6 +878,9 @@ impl SecondaryApiImpl {
                 monitor_ebook: false,
                 monitor_audiobook: false,
                 source_provider_json: None,
+                isbn_13: None,
+                asin: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -945,6 +948,9 @@ impl SecondaryApiImpl {
                 monitor_ebook: false,
                 monitor_audiobook: false,
                 source_provider_json: None,
+                isbn_13: None,
+                asin: None,
+                description: None,
             })
             .await
             .unwrap();

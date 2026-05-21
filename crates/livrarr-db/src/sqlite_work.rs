@@ -156,6 +156,7 @@ fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
         // Legacy exhausted/skipped mapped to failed — migration handles DB rows
         "exhausted" | "skipped" => Ok(EnrichmentStatus::Failed),
         "conflict" => Ok(EnrichmentStatus::Conflict),
+        "identity_pending" => Ok(EnrichmentStatus::IdentityPending),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown enrichment status: {s}"),
         }),
@@ -168,6 +169,7 @@ fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
         EnrichmentStatus::Enriched => "enriched",
         EnrichmentStatus::Failed => "failed",
         EnrichmentStatus::Conflict => "conflict",
+        EnrichmentStatus::IdentityPending => "identity_pending",
     }
 }
 
@@ -559,7 +561,7 @@ impl WorkDb for SqliteDb {
         let norm_title = normalize(title);
         let norm_author = normalize(author);
         let rows = sqlx::query(
-            "SELECT * FROM works WHERE user_id = ? AND LOWER(TRIM(title)) = ? AND LOWER(TRIM(author_name)) = ?",
+            "SELECT * FROM works WHERE user_id = ? AND normalized_title = ? AND normalized_author = ?",
         )
         .bind(user_id)
         .bind(&norm_title)
@@ -570,6 +572,39 @@ impl WorkDb for SqliteDb {
         rows.into_iter().map(row_to_work).collect()
     }
 
+    async fn find_normalized_match_no_anchor_for_user(
+        &self,
+        user_id: UserId,
+        raw_title: &str,
+        raw_author: &str,
+    ) -> Result<Option<Work>, DbError> {
+        let norm_title = normalize(raw_title);
+        let norm_author = normalize(raw_author);
+        if norm_title.is_empty() || norm_author.is_empty() {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT w.* FROM works w \
+             WHERE w.user_id = ? \
+               AND w.normalized_title = ? \
+               AND w.normalized_author = ? \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM work_identity_anchors a \
+                   WHERE a.work_id = w.id \
+                     AND a.anchor_type = 'ol_work' \
+                     AND a.confidence = 'confirmed' \
+               ) \
+             LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(&norm_title)
+        .bind(&norm_author)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        row.map(row_to_work).transpose()
+    }
+
     async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError> {
         let rows = sqlx::query(
             "SELECT * FROM works WHERE monitor_ebook = 1 OR monitor_audiobook = 1 \
@@ -578,6 +613,14 @@ impl WorkDb for SqliteDb {
         .fetch_all(self.pool())
         .await
         .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_work).collect()
+    }
+
+    async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError> {
+        let rows = sqlx::query("SELECT * FROM works WHERE enrichment_status = 'identity_pending'")
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_db_err)?;
         rows.into_iter().map(row_to_work).collect()
     }
 
@@ -644,11 +687,20 @@ impl WorkDb for SqliteDb {
                 .map(|n| serde_json::to_string(n).map_err(|e| DbError::Io(Box::new(e))))
                 .transpose()?;
             let narration_type_val = u.narration_type.as_ref().map(narration_type_str);
+            let norm_title = u
+                .title
+                .as_deref()
+                .map(livrarr_domain::normalize_for_matching);
+            let norm_author = u
+                .author_name
+                .as_deref()
+                .map(livrarr_domain::normalize_for_matching);
 
-            // Straight assignment: None → NULL (no COALESCE).
             sqlx::query(
                 "UPDATE works SET \
                  title = ?, subtitle = ?, original_title = ?, author_name = ?, \
+                 normalized_title = COALESCE(?, normalized_title), \
+                 normalized_author = COALESCE(?, normalized_author), \
                  description = ?, year = ?, series_name = ?, series_position = ?, \
                  genres = ?, language = ?, page_count = ?, duration_seconds = ?, \
                  publisher = ?, publish_date = ?, hc_key = ?, gr_key = ?, ol_key = ?, \
@@ -662,6 +714,8 @@ impl WorkDb for SqliteDb {
             .bind(u.subtitle.as_deref())
             .bind(u.original_title.as_deref())
             .bind(u.author_name.as_deref())
+            .bind(norm_title.as_deref())
+            .bind(norm_author.as_deref())
             .bind(u.description.as_deref())
             .bind(u.year)
             .bind(u.series_name.as_deref())
@@ -896,8 +950,8 @@ impl crate::WorkDbCreate for SqliteDb {
             "INSERT INTO works (user_id, title, author_name, normalized_title, normalized_author, \
              author_id, ol_key, gr_key, year, cover_url, enrichment_status, added_at, \
              language, import_id, series_id, series_name, series_position, \
-             monitor_ebook, monitor_audiobook) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?) \
+             monitor_ebook, monitor_audiobook, isbn_13, asin, description) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(user_id, normalized_title, normalized_author) DO NOTHING",
         )
         .bind(req.user_id)
@@ -918,6 +972,9 @@ impl crate::WorkDbCreate for SqliteDb {
         .bind(req.series_position)
         .bind(req.monitor_ebook)
         .bind(req.monitor_audiobook)
+        .bind(&req.isbn_13)
+        .bind(&req.asin)
+        .bind(&req.description)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?;
@@ -939,6 +996,28 @@ impl crate::WorkDbCreate for SqliteDb {
             .await
             .map_err(map_db_err)?;
             Ok((row_to_work(row)?, false))
+        }
+    }
+
+    async fn create_work_with_anchor(
+        &self,
+        req: CreateWorkDbRequest,
+        ol_key: &str,
+        anchor_setter: livrarr_domain::identity::AnchorSetter,
+    ) -> Result<(Work, bool), DbError> {
+        use livrarr_domain::services::WorkIdentityRepository;
+
+        let (work, created) = self.create_work(req).await?;
+        if created {
+            self.confirm_ol_anchor(work.id, ol_key, anchor_setter)
+                .await
+                .map_err(|e| DbError::Constraint {
+                    message: format!("anchor write failed: {e}"),
+                })?;
+            let work = self.get_work(work.user_id, work.id).await?;
+            Ok((work, true))
+        } else {
+            Ok((work, false))
         }
     }
 }

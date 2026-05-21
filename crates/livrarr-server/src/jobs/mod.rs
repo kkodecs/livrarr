@@ -17,6 +17,7 @@ pub mod author_monitor;
 pub mod download_poller;
 pub mod enrichment;
 pub mod maintenance;
+pub mod repair;
 pub mod rss_sync;
 pub mod tag_convergence;
 

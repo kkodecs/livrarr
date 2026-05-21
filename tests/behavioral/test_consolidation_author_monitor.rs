@@ -8,6 +8,7 @@
 use livrarr_behavioral::stubs::{create_second_test_user, create_test_user, StubHttpFetcher};
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::*;
+use livrarr_domain::identity::EnglishWorkCandidate;
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl;
@@ -23,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 // =============================================================================
 
 struct StubWorkService {
-    add_calls: Mutex<Vec<(UserId, AddWorkRequest)>>,
+    add_calls: Mutex<Vec<(UserId, EnglishWorkCandidate)>>,
     should_fail: bool,
 }
 
@@ -46,7 +47,7 @@ impl StubWorkService {
         self.add_calls.lock().await.len()
     }
 
-    async fn add_calls_snapshot(&self) -> Vec<(UserId, AddWorkRequest)> {
+    async fn add_calls_snapshot(&self) -> Vec<(UserId, EnglishWorkCandidate)> {
         self.add_calls.lock().await.drain(..).collect()
     }
 }
@@ -55,9 +56,9 @@ impl WorkService for StubWorkService {
     async fn add(
         &self,
         user_id: UserId,
-        req: AddWorkRequest,
+        candidate: EnglishWorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError> {
-        self.add_calls.lock().await.push((user_id, req));
+        self.add_calls.lock().await.push((user_id, candidate));
         if self.should_fail {
             return Err(WorkServiceError::Enrichment("stub failure".into()));
         }
@@ -347,8 +348,8 @@ async fn test_monitor_skips_existing_work() {
         user_id,
         title: "Existing Book".into(),
         author_name: "Brandon Sanderson".into(),
-        normalized_title: String::new(),
-        normalized_author: String::new(),
+        normalized_title: "existing book".into(),
+        normalized_author: "brandon sanderson".into(),
         author_id: Some(author.id),
         ol_key: Some("OL999W".into()),
         gr_key: None,
@@ -362,6 +363,9 @@ async fn test_monitor_skips_existing_work() {
         monitor_ebook: true,
         monitor_audiobook: false,
         source_provider_json: None,
+        isbn_13: None,
+        asin: None,
+        description: None,
     })
     .await
     .unwrap();
@@ -540,10 +544,10 @@ async fn test_monitor_auto_add_passes_auto_added_provenance_setter() {
 
     let calls = work_svc.add_calls_snapshot().await;
     assert_eq!(calls.len(), 1);
-    let (called_user_id, req) = &calls[0];
+    let (called_user_id, candidate) = &calls[0];
     assert_eq!(*called_user_id, user_id);
     assert_eq!(
-        req.provenance_setter,
+        candidate.provenance_setter,
         Some(ProvenanceSetter::AutoAdded),
         "auto-added monitor work should carry AutoAdded provenance"
     );

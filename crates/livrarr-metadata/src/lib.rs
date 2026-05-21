@@ -17,7 +17,10 @@ use chrono::{DateTime, Utc};
 
 pub mod audnexus;
 pub mod author_service;
+pub mod bulk_resolver;
 pub mod cover;
+pub mod cover_gate;
+pub mod english_identity_resolver;
 pub mod enrichment_workflow_service;
 pub mod goodreads;
 pub mod hardcover;
@@ -26,9 +29,11 @@ pub mod language;
 pub mod list_service;
 pub mod live_config;
 pub mod llm_caller_service;
+pub mod llm_ewl;
 pub mod llm_scraper;
 pub mod llm_validator;
 pub mod normalize;
+pub mod ol_resolver_client;
 pub mod openlibrary;
 pub mod parsers;
 pub mod provider_client;
@@ -1372,9 +1377,9 @@ type SourceDataStore =
     tokio::sync::Mutex<HashMap<(UserId, WorkId), livrarr_domain::services::SourceProviderData>>;
 
 /// Enrichment service implementation.
-/// Generic over DB, Q (ProviderQueue), ME (MergeEngine), and V (LlmValidator)
-/// to avoid dyn-compatibility issues.
-pub struct EnrichmentServiceImpl<DB, Q, ME, V> {
+/// Generic over DB, Q (ProviderQueue), ME (MergeEngine), V (LlmValidator),
+/// and L (LlmCaller for cover gate disambiguation).
+pub struct EnrichmentServiceImpl<DB, Q, ME, V, L = crate::work_service::StubNoLlm> {
     db: Arc<DB>,
     queue: Arc<Q>,
     merge_engine: Arc<ME>,
@@ -1382,6 +1387,8 @@ pub struct EnrichmentServiceImpl<DB, Q, ME, V> {
     /// per-provider accept/reject step between scatter-gather and merge.
     /// Use `NoOpLlmValidator` to disable when LLM is not configured.
     validator: Arc<V>,
+    llm: L,
+    llm_configured: bool,
     /// Per-work lock map [I-12]: serializes concurrent enrichment calls for the same (user_id, work_id).
     locks: Arc<PerWorkLocks>,
     /// Pre-injected source provider data (e.g., from Readarr import).
@@ -1389,7 +1396,7 @@ pub struct EnrichmentServiceImpl<DB, Q, ME, V> {
     source_data_store: Arc<SourceDataStore>,
 }
 
-impl<DB, Q, ME, V> EnrichmentServiceImpl<DB, Q, ME, V>
+impl<DB, Q, ME, V, L> EnrichmentServiceImpl<DB, Q, ME, V, L>
 where
     DB: livrarr_db::WorkDb
         + livrarr_db::ProvenanceDb
@@ -1401,13 +1408,23 @@ where
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
     V: crate::llm_validator::LlmValidator + Send + Sync + 'static,
+    L: livrarr_domain::services::LlmCaller + Send + Sync + 'static,
 {
-    pub fn new(db: Arc<DB>, queue: Arc<Q>, merge_engine: Arc<ME>, validator: Arc<V>) -> Self {
+    pub fn new(
+        db: Arc<DB>,
+        queue: Arc<Q>,
+        merge_engine: Arc<ME>,
+        validator: Arc<V>,
+        llm: L,
+        llm_configured: bool,
+    ) -> Self {
         Self {
             db,
             queue,
             merge_engine,
             validator,
+            llm,
+            llm_configured,
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             source_data_store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
@@ -1426,7 +1443,7 @@ where
     }
 }
 
-impl<DB, Q, ME, V> EnrichmentService for EnrichmentServiceImpl<DB, Q, ME, V>
+impl<DB, Q, ME, V, L> EnrichmentService for EnrichmentServiceImpl<DB, Q, ME, V, L>
 where
     DB: livrarr_db::WorkDb
         + livrarr_db::ProvenanceDb
@@ -1438,6 +1455,7 @@ where
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
     V: crate::llm_validator::LlmValidator + Send + Sync + 'static,
+    L: livrarr_domain::services::LlmCaller + Send + Sync + 'static,
 {
     async fn enrich_work(
         &self,
@@ -1691,6 +1709,70 @@ where
                 provider_outcomes,
             });
         }
+
+        // Cover gate: for English works with an OL key, filter GR cover_urls
+        // through the deterministic Jaccard gate before merge (REQ-017).
+        let reconstructed = if current_work.language.as_deref() == Some("en")
+            && current_work.ol_key.is_some()
+        {
+            let mut filtered = reconstructed;
+            if let Some(gr_outcome) = filtered.get_mut(&livrarr_domain::MetadataProvider::Goodreads)
+            {
+                if let Some(ref mut payload) = gr_outcome.payload {
+                    if payload.cover_url.is_some() {
+                        let anchor = crate::cover_gate::OlAnchor {
+                            title: &current_work.title,
+                            author_name: &current_work.author_name,
+                            year: current_work.year,
+                            isbn: current_work.isbn_13.as_deref(),
+                            ol_key: current_work.ol_key.as_deref().unwrap_or(""),
+                        };
+                        let candidate = crate::cover_gate::GrCandidate {
+                            title: payload.title.as_deref().unwrap_or(""),
+                            author_name: payload.author_name.as_deref().unwrap_or(""),
+                            year: payload.year,
+                            isbn: None,
+                            gr_key: payload.gr_key.as_deref().unwrap_or(""),
+                        };
+                        let outcome = crate::cover_gate::evaluate_gr_cover_gate(
+                            &anchor,
+                            &candidate,
+                            self.llm_configured,
+                        );
+                        let final_outcome = match outcome {
+                            crate::cover_gate::CoverGateOutcome::AskLlm {
+                                jaccard,
+                                ref prompt_inputs,
+                            } => {
+                                let decision = crate::llm_ewl::ask_same_book(
+                                    &self.llm,
+                                    prompt_inputs,
+                                    self.llm_configured,
+                                )
+                                .await;
+                                crate::cover_gate::apply_llm_decision(decision, jaccard)
+                            }
+                            other => other,
+                        };
+                        match final_outcome {
+                            crate::cover_gate::CoverGateOutcome::Apply { .. } => {}
+                            _ => {
+                                tracing::info!(
+                                    work_id,
+                                    ?final_outcome,
+                                    "cover gate: stripping GR cover_url"
+                                );
+                                payload.cover_url = None;
+                                payload.gr_key = None;
+                            }
+                        }
+                    }
+                }
+            }
+            filtered
+        } else {
+            reconstructed
+        };
 
         // Determine priority model based on work language
         let priority_model = PriorityModel::for_language(current_work.language.as_deref());

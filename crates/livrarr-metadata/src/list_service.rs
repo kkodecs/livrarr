@@ -45,8 +45,6 @@ impl<D, W, H, B> ListServiceImpl<D, W, H, B>
 where
     H: HttpFetcher + Send + Sync,
 {
-    /// Look up a book on OpenLibrary by ISBN (preferred) or title+author search.
-    /// Returns an AddWorkRequest on success, or an error message.
     async fn ol_lookup(
         &self,
         isbn_13: Option<&str>,
@@ -54,21 +52,20 @@ where
         title: &str,
         author: &str,
         year: Option<i32>,
-    ) -> Result<AddWorkRequest, String> {
-        // Try ISBN lookup first (more precise).
+    ) -> Result<livrarr_domain::identity::EnglishWorkCandidate, String> {
         let isbn = isbn_13.or(isbn_10);
         if let Some(isbn) = isbn {
-            if let Some(req) = self.ol_isbn_lookup(isbn).await {
-                return Ok(req);
+            if let Some(candidate) = self.ol_isbn_lookup(isbn).await {
+                return Ok(candidate);
             }
         }
-
-        // Fallback: title + author search.
         self.ol_search(title, author, year).await
     }
 
-    /// OpenLibrary ISBN lookup -> AddWorkRequest.
-    async fn ol_isbn_lookup(&self, isbn: &str) -> Option<AddWorkRequest> {
+    async fn ol_isbn_lookup(
+        &self,
+        isbn: &str,
+    ) -> Option<livrarr_domain::identity::EnglishWorkCandidate> {
         let url = format!("https://openlibrary.org/isbn/{isbn}.json");
         let req = FetchRequest {
             url,
@@ -184,34 +181,47 @@ where
             .and_then(|c| c.as_i64())
             .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
 
-        Some(AddWorkRequest {
-            ol_key: Some(ol_key),
-            title,
-            author_name,
-            author_ol_key,
-            year,
-            cover_url,
-            language: None,
-            detail_url: None,
+        use livrarr_domain::identity::{
+            EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState,
+        };
+        Some(EnglishWorkCandidate {
+            fields: EnglishSeedFields {
+                title,
+                author_name,
+                language: "en".into(),
+                author_ol_key,
+                year,
+                cover_url,
+                detail_url: None,
+                isbn: Some(isbn.to_string()),
+                asin: None,
+                description: None,
+                series_name: None,
+                series_position: None,
+            },
+            identity: IdentityState::Confirmed {
+                ol_key,
+                method: IdentityMethod::IsbnDirect,
+                score: None,
+            },
+            source_provider_data: None,
+            file_path: None,
+            delete_existing_after_import: false,
             gr_key: None,
-            series_name: None,
-            series_position: None,
             series_id: None,
             monitor_ebook: None,
             monitor_audiobook: None,
-            import_id: None,
-            source_provider_data: None,
             provenance_setter: Some(ProvenanceSetter::Imported),
+            import_id: None,
         })
     }
 
-    /// OpenLibrary search by title + author -> AddWorkRequest.
     async fn ol_search(
         &self,
         title: &str,
         author: &str,
         csv_year: Option<i32>,
-    ) -> Result<AddWorkRequest, String> {
+    ) -> Result<livrarr_domain::identity::EnglishWorkCandidate, String> {
         let search_term = format!("{title} {author}");
         let encoded = urlencoding::encode(&search_term);
         let url = format!(
@@ -305,24 +315,38 @@ where
             .and_then(|c| c.as_i64())
             .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
 
-        Ok(AddWorkRequest {
-            ol_key: Some(ol_key),
-            title: result_title,
-            author_name,
-            author_ol_key,
-            year,
-            cover_url,
-            language: None,
-            detail_url: None,
+        use livrarr_domain::identity::{
+            EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState,
+        };
+        Ok(EnglishWorkCandidate {
+            fields: EnglishSeedFields {
+                title: result_title,
+                author_name,
+                language: "en".into(),
+                author_ol_key,
+                year,
+                cover_url,
+                detail_url: None,
+                isbn: None,
+                asin: None,
+                description: None,
+                series_name: None,
+                series_position: None,
+            },
+            identity: IdentityState::Confirmed {
+                ol_key,
+                method: IdentityMethod::TitleAuthorSearch,
+                score: None,
+            },
+            source_provider_data: None,
+            file_path: None,
+            delete_existing_after_import: false,
             gr_key: None,
-            series_name: None,
-            series_position: None,
             series_id: None,
             monitor_ebook: None,
             monitor_audiobook: None,
-            import_id: None,
-            source_provider_data: None,
             provenance_setter: Some(ProvenanceSetter::Imported),
+            import_id: None,
         })
     }
 }

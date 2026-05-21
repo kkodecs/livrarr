@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::state::AppState;
-use livrarr_domain::services::WorkService;
+use livrarr_domain::services::{WorkIdentityRepository, WorkService};
 
 // ---------------------------------------------------------------------------
 // Enrichment Retry Tick (JOBS-ENRICH-001)
@@ -122,6 +122,64 @@ pub async fn enrichment_retry_tick(
             "enrichment_retry: retrying orphan failed work (no provider state)"
         );
         dispatch_enrich(&state, work.user_id, work.id, &mut total_dispatched).await;
+    }
+
+    // Source 4: identity-pending works — re-attempt OL resolution.
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    let pending = match state.db.list_identity_pending_works().await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("enrichment_retry: list_identity_pending_works: {e}");
+            vec![]
+        }
+    };
+
+    if !pending.is_empty() {
+        use livrarr_domain::identity::{AnchorSetter, EnglishSeed, IdentityResolution};
+        use livrarr_domain::services::IdentityResolver;
+
+        for work in &pending {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            let seed = EnglishSeed {
+                title: work.title.clone(),
+                author_name: work.author_name.clone(),
+                isbn: work.isbn_13.clone(),
+                user_confirmed_ol_key: None,
+            };
+            let resolution = state.identity_resolver.resolve(&seed).await;
+            match resolution {
+                IdentityResolution::Confirmed {
+                    ol_key, method: _, ..
+                } => {
+                    info!(
+                        work_id = work.id,
+                        ol_key = %ol_key,
+                        "enrichment_retry: identity resolved, promoting anchor"
+                    );
+                    let _ = state
+                        .db
+                        .confirm_ol_anchor(work.id, &ol_key, AnchorSetter::AutoSearch)
+                        .await;
+                    dispatch_enrich(&state, work.user_id, work.id, &mut total_dispatched).await;
+                }
+                IdentityResolution::Pending { .. } => {
+                    debug!(
+                        work_id = work.id,
+                        "enrichment_retry: identity still pending, skipping"
+                    );
+                }
+                IdentityResolution::Conflict { .. } => {
+                    debug!(
+                        work_id = work.id,
+                        "enrichment_retry: identity conflict detected, skipping"
+                    );
+                }
+            }
+        }
     }
 
     if total_due > 0 {

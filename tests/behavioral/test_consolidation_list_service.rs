@@ -9,6 +9,9 @@
 use livrarr_behavioral::stubs::StubHttpFetcher;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{ListImportDb, WorkDb};
+use livrarr_domain::identity::{
+    EnglishSeedFields, EnglishWorkCandidate, IdentityState, PendingReason,
+};
 use livrarr_domain::services::*;
 use livrarr_metadata::list_service::{ListServiceImpl, NoOpBibliographyTrigger};
 use livrarr_metadata::work_service::WorkServiceImpl;
@@ -115,26 +118,36 @@ async fn test_list_preview_existing_works_marked_already_exists() {
     let svc = make_service().await;
 
     // Add a work that matches by ISBN.
-    let add_req = AddWorkRequest {
-        title: "The Great Gatsby".to_string(),
-        author_name: "F. Scott Fitzgerald".to_string(),
-        ol_key: None,
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
+    let candidate = EnglishWorkCandidate {
+        fields: EnglishSeedFields {
+            title: "The Great Gatsby".into(),
+            author_name: "F. Scott Fitzgerald".into(),
+            language: "en".into(),
+            author_ol_key: None,
+            year: None,
+            cover_url: None,
+            detail_url: None,
+            isbn: None,
+            asin: None,
+            description: None,
+            series_name: None,
+            series_position: None,
+        },
+        identity: IdentityState::Pending {
+            reason: PendingReason::NoCandidates,
+            top_candidates: vec![],
+        },
+        source_provider_data: None,
+        file_path: None,
+        delete_existing_after_import: false,
         gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
         series_id: None,
         monitor_ebook: None,
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
-        source_provider_data: None,
     };
-    svc.work_service.add(USER, add_req).await.unwrap();
+    svc.work_service.add(USER, candidate).await.unwrap();
 
     // Now set ISBN on the work so ISBN check matches.
     // The preview checks by ISBN, not by title.
@@ -250,26 +263,36 @@ async fn test_list_undo_returns_removed_and_skipped_counts() {
 
     // Since StubHttpFetcher has no responses, confirm will fail OL lookup.
     // We need to add works manually and tag them.
-    let add_req = AddWorkRequest {
-        title: "Dune".to_string(),
-        author_name: "Frank Herbert".to_string(),
-        ol_key: None,
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
+    let candidate = EnglishWorkCandidate {
+        fields: EnglishSeedFields {
+            title: "Dune".into(),
+            author_name: "Frank Herbert".into(),
+            language: "en".into(),
+            author_ol_key: None,
+            year: None,
+            cover_url: None,
+            detail_url: None,
+            isbn: None,
+            asin: None,
+            description: None,
+            series_name: None,
+            series_position: None,
+        },
+        identity: IdentityState::Pending {
+            reason: PendingReason::NoCandidates,
+            top_candidates: vec![],
+        },
+        source_provider_data: None,
+        file_path: None,
+        delete_existing_after_import: false,
         gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
         series_id: None,
         monitor_ebook: None,
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
-        source_provider_data: None,
     };
-    let work_result = svc.work_service.add(USER, add_req).await.unwrap();
+    let work_result = svc.work_service.add(USER, candidate).await.unwrap();
 
     // Create an import record manually.
     let import_id = "test-import-1";
@@ -320,26 +343,36 @@ async fn test_list_undo_already_undone_returns_conflict() {
     let svc = make_service().await;
 
     // Create a completed import with a tagged work.
-    let add_req = AddWorkRequest {
-        title: "Dune".to_string(),
-        author_name: "Frank Herbert".to_string(),
-        ol_key: None,
-        detail_url: None,
-        cover_url: None,
-        author_ol_key: None,
+    let candidate = EnglishWorkCandidate {
+        fields: EnglishSeedFields {
+            title: "Dune".into(),
+            author_name: "Frank Herbert".into(),
+            language: "en".into(),
+            author_ol_key: None,
+            year: None,
+            cover_url: None,
+            detail_url: None,
+            isbn: None,
+            asin: None,
+            description: None,
+            series_name: None,
+            series_position: None,
+        },
+        identity: IdentityState::Pending {
+            reason: PendingReason::NoCandidates,
+            top_candidates: vec![],
+        },
+        source_provider_data: None,
+        file_path: None,
+        delete_existing_after_import: false,
         gr_key: None,
-        year: None,
-        language: None,
-        series_name: None,
-        series_position: None,
         series_id: None,
         monitor_ebook: None,
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
-        source_provider_data: None,
     };
-    let work_result = svc.work_service.add(USER, add_req).await.unwrap();
+    let work_result = svc.work_service.add(USER, candidate).await.unwrap();
 
     let import_id = "test-import-undo";
     let now = chrono::Utc::now().to_rfc3339();

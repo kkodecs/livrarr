@@ -315,26 +315,40 @@ where
                     );
 
                     if author_ref.monitor_new_items {
-                        let add_req = AddWorkRequest {
-                            title: work_title.clone(),
-                            author_name: cleaned_author_ref.clone(),
-                            author_ol_key: Some(ol_key_ref.clone()),
-                            ol_key: Some(stripped_ol_key.clone()),
+                        use livrarr_domain::identity::{
+                            EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState,
+                        };
+                        let candidate = EnglishWorkCandidate {
+                            fields: EnglishSeedFields {
+                                title: work_title.clone(),
+                                author_name: cleaned_author_ref.clone(),
+                                language: "en".into(),
+                                author_ol_key: Some(ol_key_ref.clone()),
+                                year: Some(year),
+                                cover_url: None,
+                                detail_url: None,
+                                isbn: None,
+                                asin: None,
+                                description: None,
+                                series_name: None,
+                                series_position: None,
+                            },
+                            identity: IdentityState::Confirmed {
+                                ol_key: stripped_ol_key.clone(),
+                                method: IdentityMethod::TitleAuthorSearch,
+                                score: None,
+                            },
+                            source_provider_data: None,
+                            file_path: None,
+                            delete_existing_after_import: false,
                             gr_key: None,
-                            year: Some(year),
-                            cover_url: None,
-                            language: None,
-                            detail_url: None,
                             series_id: None,
-                            series_name: None,
-                            series_position: None,
                             monitor_ebook: None,
                             monitor_audiobook: None,
                             provenance_setter: Some(ProvenanceSetter::AutoAdded),
                             import_id: None,
-                            source_provider_data: None,
                         };
-                        match self.work_service.add(author_ref.user_id, add_req).await {
+                        match self.work_service.add(author_ref.user_id, candidate).await {
                             Ok(_work) => {
                                 let notif_ok = self
                                     .db

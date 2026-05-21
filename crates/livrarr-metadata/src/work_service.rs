@@ -193,6 +193,7 @@ where
         + ProvenanceDb
         + EnrichmentRetryDb
         + ConfigDb
+        + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
@@ -204,176 +205,341 @@ where
     async fn add(
         &self,
         user_id: UserId,
-        req: AddWorkRequest,
+        candidate: livrarr_domain::identity::EnglishWorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError> {
-        let cleaned_title = crate::title_cleanup::clean_title(&req.title);
+        use livrarr_domain::identity::{AnchorSetter, AnchorType, IdentityState};
+
+        let cleaned_title = crate::title_cleanup::clean_title(&candidate.fields.title);
         if cleaned_title.is_empty() {
             return Err(WorkServiceError::Validation(
                 "title must not be empty".into(),
             ));
         }
-        let cleaned_author = crate::title_cleanup::clean_author(&req.author_name);
-
+        let cleaned_author = crate::title_cleanup::clean_author(&candidate.fields.author_name);
         let normalized_title = livrarr_domain::normalize_for_matching(&cleaned_title);
         let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
 
-        // Application-level fast-path dedup. The DB UNIQUE(user_id,
-        // normalized_title, normalized_author) is the race-safe backstop.
-        let existing = self
-            .db
-            .find_by_normalized_match(user_id, &normalized_title, &normalized_author)
-            .await
-            .map_err(WorkServiceError::Db)?;
-        let source_provider_data = req.source_provider_data;
-        if let Some(work) = existing.into_iter().next() {
-            // M2/M8: if the caller supplied SourceProviderData (e.g. a Readarr
-            // re-import surfacing new identifiers, description, cover), the
-            // matched-existing path must still inject + re-enrich so that the
-            // metadata state ends up identical to the newly-created path.
-            // Without this, Readarr imports of works that already exist in
-            // Livrarr would silently discard the source payload.
-            let (work, enrichment_status) = if source_provider_data.is_some() {
-                let status = self
-                    .run_unified_enrichment(user_id, &work, source_provider_data)
-                    .await;
-                let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
-                (refreshed, status)
-            } else {
-                let status = work.enrichment_status;
-                (work, status)
-            };
-            return Ok(AddWorkResult {
-                work,
-                created: false,
-                author_created: false,
-                author_id: None,
-                messages: vec![],
-                cover_mtime: None,
-                enrichment_status,
-            });
-        }
-
-        let mut author_created = false;
-        let author_id = if !cleaned_author.is_empty() {
-            let normalized = cleaned_author.to_lowercase();
-            match self
-                .db
-                .find_author_by_name(user_id, &normalized)
-                .await
-                .map_err(WorkServiceError::Db)?
-            {
-                Some(existing) => Some(existing.id),
-                None => {
-                    let author = self
+        match &candidate.identity {
+            IdentityState::Confirmed {
+                ol_key,
+                method: _,
+                score: _,
+            } => {
+                let anchor_type = AnchorType::new(AnchorType::OL_WORK);
+                if let Ok(Some(existing_id)) = self
+                    .db
+                    .find_work_by_anchor(user_id, &anchor_type, ol_key)
+                    .await
+                {
+                    let work = self
                         .db
-                        .create_author(CreateAuthorDbRequest {
-                            user_id,
-                            name: cleaned_author.clone(),
-                            sort_name: None,
-                            ol_key: req.author_ol_key,
-                            gr_key: None,
-                            hc_key: None,
-                            import_id: None,
-                        })
+                        .get_work(user_id, existing_id)
                         .await
                         .map_err(WorkServiceError::Db)?;
-                    author_created = true;
-                    Some(author.id)
+                    let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
+                        let status = self
+                            .run_unified_enrichment(user_id, &work, candidate.source_provider_data)
+                            .await;
+                        let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
+                        (refreshed, status)
+                    } else {
+                        let status = work.enrichment_status;
+                        (work, status)
+                    };
+                    return Ok(AddWorkResult {
+                        work,
+                        created: false,
+                        author_created: false,
+                        author_id: None,
+                        messages: vec![],
+                        cover_mtime: None,
+                        enrichment_status,
+                    });
                 }
+
+                // Step 3: REQ-005 adopt path — existing ol-key-less work with
+                // same normalized identity absorbs the incoming confirmed key.
+                if let Some(existing) = self
+                    .db
+                    .find_normalized_match_no_anchor_for_user(
+                        user_id,
+                        &candidate.fields.title,
+                        &candidate.fields.author_name,
+                    )
+                    .await
+                    .map_err(WorkServiceError::Db)?
+                {
+                    let setter = candidate
+                        .provenance_setter
+                        .unwrap_or(ProvenanceSetter::User);
+                    let anchor_setter = match setter {
+                        ProvenanceSetter::User => AnchorSetter::User,
+                        ProvenanceSetter::Import => AnchorSetter::Import,
+                        _ => AnchorSetter::AutoSearch,
+                    };
+                    self.db
+                        .confirm_ol_anchor(existing.id, ol_key, anchor_setter)
+                        .await
+                        .map_err(|e| {
+                            WorkServiceError::Validation(format!("adopt anchor write failed: {e}"))
+                        })?;
+                    let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
+                        let status = self
+                            .run_unified_enrichment(
+                                user_id,
+                                &existing,
+                                candidate.source_provider_data.clone(),
+                            )
+                            .await;
+                        let refreshed = self
+                            .db
+                            .get_work(user_id, existing.id)
+                            .await
+                            .unwrap_or(existing);
+                        (refreshed, status)
+                    } else {
+                        let status = existing.enrichment_status;
+                        (existing, status)
+                    };
+                    return Ok(AddWorkResult {
+                        work,
+                        created: false,
+                        author_created: false,
+                        author_id: None,
+                        messages: vec![],
+                        cover_mtime: None,
+                        enrichment_status,
+                    });
+                }
+
+                // Normalized-match dedup with step 3e race-loser detection.
+                let existing = self
+                    .db
+                    .find_by_normalized_match(user_id, &normalized_title, &normalized_author)
+                    .await
+                    .map_err(WorkServiceError::Db)?;
+                if let Some(work) = existing.into_iter().next() {
+                    if work.ol_key.is_some() && work.ol_key.as_deref() != Some(ol_key) {
+                        // Step 3e: same normalized identity, different OL anchor.
+                        // TODO: call identity_conflict_service.raise() once wired.
+                        tracing::warn!(
+                            work_id = work.id,
+                            existing_key = ?work.ol_key,
+                            incoming_key = ol_key,
+                            "race-loser: normalized match has different OL anchor"
+                        );
+                    }
+                    let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
+                        let status = self
+                            .run_unified_enrichment(
+                                user_id,
+                                &work,
+                                candidate.source_provider_data.clone(),
+                            )
+                            .await;
+                        let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
+                        (refreshed, status)
+                    } else {
+                        let status = work.enrichment_status;
+                        (work, status)
+                    };
+                    return Ok(AddWorkResult {
+                        work,
+                        created: false,
+                        author_created: false,
+                        author_id: None,
+                        messages: vec![],
+                        cover_mtime: None,
+                        enrichment_status,
+                    });
+                }
+
+                let (author_created, author_id) = self
+                    .find_or_create_author(
+                        user_id,
+                        &cleaned_author,
+                        candidate.fields.author_ol_key.as_deref(),
+                    )
+                    .await?;
+
+                let setter = candidate
+                    .provenance_setter
+                    .unwrap_or(ProvenanceSetter::User);
+                let anchor_setter = match setter {
+                    ProvenanceSetter::User => AnchorSetter::User,
+                    ProvenanceSetter::Import => AnchorSetter::Import,
+                    _ => AnchorSetter::AutoSearch,
+                };
+
+                let (work, actually_created) = self
+                    .db
+                    .create_work_with_anchor(
+                        CreateWorkDbRequest {
+                            user_id,
+                            title: cleaned_title,
+                            author_name: cleaned_author,
+                            normalized_title,
+                            normalized_author,
+                            author_id,
+                            ol_key: None,
+                            gr_key: candidate.gr_key.clone(),
+                            year: candidate.fields.year,
+                            cover_url: candidate.fields.cover_url.clone(),
+                            language: Some(livrarr_domain::normalize_language(
+                                &candidate.fields.language,
+                            )),
+                            series_name: candidate.fields.series_name.clone(),
+                            series_position: candidate.fields.series_position,
+                            monitor_ebook: candidate.monitor_ebook.unwrap_or(true),
+                            monitor_audiobook: candidate.monitor_audiobook.unwrap_or(true),
+                            import_id: candidate.import_id.clone(),
+                            series_id: candidate.series_id,
+                            isbn_13: candidate.fields.isbn.clone(),
+                            asin: candidate.fields.asin.clone(),
+                            description: candidate.fields.description.clone(),
+                            ..Default::default()
+                        },
+                        ol_key,
+                        anchor_setter,
+                    )
+                    .await
+                    .map_err(WorkServiceError::Db)?;
+
+                if !actually_created {
+                    return self
+                        .handle_race_loser(
+                            user_id,
+                            work,
+                            author_created,
+                            author_id,
+                            candidate.source_provider_data,
+                        )
+                        .await;
+                }
+
+                write_addtime_provenance(&self.db, user_id, &work, setter).await;
+
+                self.finish_created_work(
+                    user_id,
+                    work,
+                    author_created,
+                    author_id,
+                    candidate.source_provider_data,
+                )
+                .await
             }
-        } else {
-            None
-        };
+            IdentityState::Pending {
+                reason: _,
+                top_candidates: _,
+            } => {
+                if let Some((work, enrichment_status)) = self
+                    .try_dedup_by_normalized(
+                        user_id,
+                        &normalized_title,
+                        &normalized_author,
+                        &candidate.source_provider_data,
+                    )
+                    .await?
+                {
+                    return Ok(AddWorkResult {
+                        work,
+                        created: false,
+                        author_created: false,
+                        author_id: None,
+                        messages: vec![],
+                        cover_mtime: None,
+                        enrichment_status,
+                    });
+                }
 
-        let cover_url = req.cover_url.clone();
+                let (author_created, author_id) = self
+                    .find_or_create_author(
+                        user_id,
+                        &cleaned_author,
+                        candidate.fields.author_ol_key.as_deref(),
+                    )
+                    .await?;
 
-        let (work, actually_created) = self
-            .db
-            .create_work(CreateWorkDbRequest {
-                user_id,
-                title: cleaned_title,
-                author_name: cleaned_author,
-                normalized_title,
-                normalized_author,
-                author_id,
-                ol_key: req.ol_key,
-                gr_key: req.gr_key,
-                year: req.year,
-                cover_url: req.cover_url,
-                language: livrarr_domain::normalize_language_opt(req.language.as_deref()),
-                series_name: req.series_name,
-                series_position: req.series_position,
-                monitor_ebook: req.monitor_ebook.unwrap_or(true),
-                monitor_audiobook: req.monitor_audiobook.unwrap_or(true),
-                import_id: req.import_id,
-                ..Default::default()
-            })
-            .await
-            .map_err(WorkServiceError::Db)?;
+                let (work, actually_created) = self
+                    .db
+                    .create_work(CreateWorkDbRequest {
+                        user_id,
+                        title: cleaned_title,
+                        author_name: cleaned_author,
+                        normalized_title,
+                        normalized_author,
+                        author_id,
+                        ol_key: None,
+                        gr_key: candidate.gr_key.clone(),
+                        year: candidate.fields.year,
+                        cover_url: candidate.fields.cover_url.clone(),
+                        language: Some(livrarr_domain::normalize_language(
+                            &candidate.fields.language,
+                        )),
+                        series_name: candidate.fields.series_name.clone(),
+                        series_position: candidate.fields.series_position,
+                        monitor_ebook: candidate.monitor_ebook.unwrap_or(true),
+                        monitor_audiobook: candidate.monitor_audiobook.unwrap_or(true),
+                        import_id: candidate.import_id.clone(),
+                        series_id: candidate.series_id,
+                        isbn_13: candidate.fields.isbn.clone(),
+                        asin: candidate.fields.asin.clone(),
+                        description: candidate.fields.description.clone(),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(WorkServiceError::Db)?;
 
-        // ON CONFLICT race-loser: another caller inserted the same identity
-        // between our find_by_normalized_match() and INSERT. Apply the same
-        // M2/M8 rule as the fast-path dedup branch — if source_provider_data
-        // was supplied (e.g. Readarr import), inject it and re-enrich the
-        // existing work so the matched-existing path produces the same
-        // metadata state as the newly-created path. Without this, the
-        // buffer_unordered(5) refactor on Readarr import could silently
-        // discard SourceProviderData for the race-loser.
-        if !actually_created {
-            let (work, enrichment_status) = if source_provider_data.is_some() {
-                let status = self
-                    .run_unified_enrichment(user_id, &work, source_provider_data)
-                    .await;
-                let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
-                (refreshed, status)
-            } else {
-                let status = work.enrichment_status;
-                (work, status)
-            };
-            return Ok(AddWorkResult {
-                work,
-                created: false,
-                author_created,
-                author_id,
-                messages: vec![],
-                cover_mtime: None,
-                enrichment_status,
-            });
+                if !actually_created {
+                    return self
+                        .handle_race_loser(
+                            user_id,
+                            work,
+                            author_created,
+                            author_id,
+                            candidate.source_provider_data,
+                        )
+                        .await;
+                }
+
+                let setter = candidate
+                    .provenance_setter
+                    .unwrap_or(ProvenanceSetter::User);
+                write_addtime_provenance(&self.db, user_id, &work, setter).await;
+
+                if let IdentityState::Pending {
+                    reason,
+                    top_candidates: _,
+                } = &candidate.identity
+                {
+                    let anchor_setter = match setter {
+                        ProvenanceSetter::User => AnchorSetter::User,
+                        ProvenanceSetter::Import => AnchorSetter::Import,
+                        _ => AnchorSetter::AutoSearch,
+                    };
+                    self.db
+                        .set_identity_pending(work.id, *reason, anchor_setter)
+                        .await
+                        .map_err(|e| {
+                            WorkServiceError::Validation(format!(
+                                "set_identity_pending failed: {e}"
+                            ))
+                        })?;
+                }
+
+                // Enrichment runs even for Pending works — providers search
+                // by title/author and don't need a confirmed OL key. Identity
+                // resolution is orthogonal; the retry job handles that.
+                self.finish_created_work(
+                    user_id,
+                    work,
+                    author_created,
+                    author_id,
+                    candidate.source_provider_data,
+                )
+                .await
+            }
         }
-
-        let setter = req.provenance_setter.unwrap_or(ProvenanceSetter::User);
-        write_addtime_provenance(&self.db, user_id, &work, setter).await;
-
-        let _cover_url = cover_url.map(|u| unproxy_cover_url(&u));
-
-        // 7. Unified enrichment (synchronous): provider dispatch, merge, cover, tag sync.
-        //    Enrichment failure does NOT fail add(). Work is created with Failed status.
-        let enrichment_status = self
-            .run_unified_enrichment(user_id, &work, source_provider_data)
-            .await;
-
-        // 8. Fetch post-enrichment work state (merge already wrote metadata).
-        let updated_work = self
-            .db
-            .get_work(user_id, work.id)
-            .await
-            .map_err(WorkServiceError::Db)?;
-
-        let covers_dir_for_mtime = self.data_dir.join("covers").join(user_id.to_string());
-        let cover_mtime = crate::cover::cover_file_mtime(&covers_dir_for_mtime, updated_work.id)
-            .or_else(|| {
-                crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
-            });
-
-        Ok(AddWorkResult {
-            work: updated_work,
-            created: true,
-            author_created,
-            author_id,
-            messages: vec![],
-            cover_mtime,
-            enrichment_status,
-        })
     }
 
     async fn get(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError> {
@@ -1203,6 +1369,154 @@ where
             .collect();
 
         Ok(results)
+    }
+}
+
+// =============================================================================
+// add() helpers
+// =============================================================================
+
+impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>
+where
+    D: WorkDb
+        + WorkDbCreate
+        + AuthorDb
+        + LibraryItemDb
+        + ProvenanceDb
+        + EnrichmentRetryDb
+        + livrarr_domain::services::WorkIdentityRepository
+        + Send
+        + Sync,
+    E: EnrichmentWorkflow + Send + Sync,
+    H: HttpFetcher + Clone + Send + Sync + 'static,
+    L: LlmCaller + Send + Sync,
+    M: crate::MergeEngine + Send + Sync,
+    T: livrarr_domain::services::TagService + Send + Sync,
+{
+    async fn try_dedup_by_normalized(
+        &self,
+        user_id: UserId,
+        normalized_title: &str,
+        normalized_author: &str,
+        source_provider_data: &Option<SourceProviderData>,
+    ) -> Result<Option<(Work, EnrichmentStatus)>, WorkServiceError> {
+        let existing = self
+            .db
+            .find_by_normalized_match(user_id, normalized_title, normalized_author)
+            .await
+            .map_err(WorkServiceError::Db)?;
+        if let Some(work) = existing.into_iter().next() {
+            let (work, enrichment_status) = if source_provider_data.is_some() {
+                let status = self
+                    .run_unified_enrichment(user_id, &work, source_provider_data.clone())
+                    .await;
+                let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
+                (refreshed, status)
+            } else {
+                let status = work.enrichment_status;
+                (work, status)
+            };
+            Ok(Some((work, enrichment_status)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn find_or_create_author(
+        &self,
+        user_id: UserId,
+        cleaned_author: &str,
+        author_ol_key: Option<&str>,
+    ) -> Result<(bool, Option<i64>), WorkServiceError> {
+        if cleaned_author.is_empty() {
+            return Ok((false, None));
+        }
+        let normalized = cleaned_author.to_lowercase();
+        match self
+            .db
+            .find_author_by_name(user_id, &normalized)
+            .await
+            .map_err(WorkServiceError::Db)?
+        {
+            Some(existing) => Ok((false, Some(existing.id))),
+            None => {
+                let author = self
+                    .db
+                    .create_author(CreateAuthorDbRequest {
+                        user_id,
+                        name: cleaned_author.to_string(),
+                        sort_name: None,
+                        ol_key: author_ol_key.map(|s| s.to_string()),
+                        gr_key: None,
+                        hc_key: None,
+                        import_id: None,
+                    })
+                    .await
+                    .map_err(WorkServiceError::Db)?;
+                Ok((true, Some(author.id)))
+            }
+        }
+    }
+
+    async fn handle_race_loser(
+        &self,
+        user_id: UserId,
+        work: Work,
+        author_created: bool,
+        author_id: Option<i64>,
+        source_provider_data: Option<SourceProviderData>,
+    ) -> Result<AddWorkResult, WorkServiceError> {
+        let (work, enrichment_status) = if source_provider_data.is_some() {
+            let status = self
+                .run_unified_enrichment(user_id, &work, source_provider_data)
+                .await;
+            let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
+            (refreshed, status)
+        } else {
+            let status = work.enrichment_status;
+            (work, status)
+        };
+        Ok(AddWorkResult {
+            work,
+            created: false,
+            author_created,
+            author_id,
+            messages: vec![],
+            cover_mtime: None,
+            enrichment_status,
+        })
+    }
+
+    async fn finish_created_work(
+        &self,
+        user_id: UserId,
+        work: Work,
+        author_created: bool,
+        author_id: Option<i64>,
+        source_provider_data: Option<SourceProviderData>,
+    ) -> Result<AddWorkResult, WorkServiceError> {
+        let enrichment_status = self
+            .run_unified_enrichment(user_id, &work, source_provider_data)
+            .await;
+        let updated_work = self
+            .db
+            .get_work(user_id, work.id)
+            .await
+            .map_err(WorkServiceError::Db)?;
+        let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
+        let cover_mtime =
+            crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
+                crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
+            });
+        Ok(AddWorkResult {
+            work: updated_work,
+            created: true,
+            author_created,
+            author_id,
+            messages: vec![],
+            cover_mtime,
+            enrichment_status,
+        })
     }
 }
 

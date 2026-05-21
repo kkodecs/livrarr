@@ -7,6 +7,9 @@ use livrarr_db::{
     CreateLibraryItemDbRequest, CreateUserDbRequest, CreateWorkDbRequest, LibraryItemDb,
     ListImportDb, PlaybackProgressDb, RootFolderDb, TagStatus, UserDb, WorkDb, WorkDbCreate,
 };
+use livrarr_domain::identity::{
+    EnglishSeedFields, EnglishWorkCandidate, IdentityState, PendingReason,
+};
 use livrarr_domain::services::*;
 use livrarr_domain::{MediaType, UserRole};
 use livrarr_library::file_service::FileServiceImpl;
@@ -111,6 +114,38 @@ async fn make_list_service() -> TestListService {
     ListServiceImpl::new(db, work_svc, stub_http(), NoOpBibliographyTrigger)
 }
 
+fn make_candidate(title: &str, author: &str) -> EnglishWorkCandidate {
+    EnglishWorkCandidate {
+        fields: EnglishSeedFields {
+            title: title.into(),
+            author_name: author.into(),
+            language: "en".into(),
+            author_ol_key: None,
+            year: None,
+            cover_url: None,
+            detail_url: None,
+            isbn: None,
+            asin: None,
+            description: None,
+            series_name: None,
+            series_position: None,
+        },
+        identity: IdentityState::Pending {
+            reason: PendingReason::NoCandidates,
+            top_candidates: vec![],
+        },
+        source_provider_data: None,
+        file_path: None,
+        delete_existing_after_import: false,
+        gr_key: None,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
+        provenance_setter: None,
+        import_id: None,
+    }
+}
+
 fn single_row_csv_bytes() -> Vec<u8> {
     b"Book Id,Title,Author,ISBN,ISBN13,My Rating,Exclusive Shelf\n\
      1,Dune,Frank Herbert,=\"\",=\"9780441172719\",5,read\n"
@@ -124,28 +159,7 @@ async fn test_work_add_empty_author_persists_without_author_record() {
     let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
 
     let result = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title: "No Author".into(),
-                author_name: "   ".into(),
-                author_ol_key: None,
-                ol_key: None,
-                gr_key: None,
-                year: None,
-                cover_url: None,
-                language: None,
-                detail_url: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate("No Author", "   "))
         .await
         .unwrap();
 
@@ -164,28 +178,7 @@ async fn test_work_add_long_title_round_trips() {
     let expected_title = format!("A{}", "a".repeat(8191));
 
     let result = svc
-        .add(
-            user_id,
-            AddWorkRequest {
-                title,
-                author_name: "Long Author".into(),
-                author_ol_key: None,
-                ol_key: None,
-                gr_key: None,
-                year: None,
-                cover_url: None,
-                language: None,
-                detail_url: None,
-                series_name: None,
-                series_position: None,
-                series_id: None,
-                monitor_ebook: None,
-                monitor_audiobook: None,
-                provenance_setter: None,
-                import_id: None,
-                source_provider_data: None,
-            },
-        )
+        .add(user_id, make_candidate(&title, "Long Author"))
         .await
         .unwrap();
 
