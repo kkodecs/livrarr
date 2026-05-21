@@ -1,10 +1,11 @@
 use livrarr_domain::services::{
     AppConfigService, AuthorMonitorWorkflow, AuthorService, DownloadClientCredentialService,
     DownloadClientSettingsService, EmailService, EnrichmentWorkflow, FileService, GrabService,
-    HistoryService, ImportIoService, ImportService, ImportWorkflow, IndexerCredentialService,
-    IndexerSettingsService, ListService, ManualImportService, MatchingService, NotificationService,
-    QueueService, ReadarrImportWorkflow, ReleaseService, RemotePathMappingService,
-    RootFolderService, RssSyncWorkflow, SeriesQueryService, SeriesService, TagService, WorkService,
+    HistoryService, IdentityConflictService, ImportIoService, ImportService, ImportWorkflow,
+    IndexerCredentialService, IndexerSettingsService, ListService, ManualImportService,
+    MatchingService, NotificationService, QueueService, ReadarrImportWorkflow, ReleaseService,
+    RemotePathMappingService, RootFolderService, RssSyncWorkflow, SeriesQueryService,
+    SeriesService, TagService, WorkService,
 };
 use livrarr_http::HttpClient;
 
@@ -58,6 +59,11 @@ pub trait HasReleaseService: Clone + Send + Sync + 'static {
 pub trait HasListService: Clone + Send + Sync + 'static {
     type ListSvc: ListService + Send + Sync + 'static;
     fn list_service(&self) -> &Self::ListSvc;
+}
+
+pub trait HasIdentityConflictService: Clone + Send + Sync + 'static {
+    type IdentityConflictSvc: IdentityConflictService + Send + Sync + 'static;
+    fn identity_conflict_service(&self) -> &Self::IdentityConflictSvc;
 }
 
 pub trait HasAppConfigService: Clone + Send + Sync + 'static {
@@ -232,6 +238,7 @@ pub trait AppContext:
     + HasGrabService
     + HasReleaseService
     + HasListService
+    + HasIdentityConflictService
     + HasAppConfigService
     + HasDownloadClientSettingsService
     + HasDownloadClientCredentialService
@@ -276,6 +283,7 @@ impl<T> AppContext for T where
         + HasGrabService
         + HasReleaseService
         + HasListService
+        + HasIdentityConflictService
         + HasAppConfigService
         + HasDownloadClientSettingsService
         + HasDownloadClientCredentialService

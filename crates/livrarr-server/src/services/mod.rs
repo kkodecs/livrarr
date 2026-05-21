@@ -6,6 +6,7 @@
 //!
 //! No service traits — concrete structs only.
 
+pub mod identity_conflict_service;
 pub mod manual_import_service;
 pub mod release_service;
 pub mod settings_service;

@@ -545,6 +545,11 @@ async fn main() {
                 livrarr_metadata::list_service::NoOpBibliographyTrigger,
             ))
         },
+        identity_conflict_service: Arc::new(
+            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
+                svc_db.clone(),
+            ),
+        ),
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
                 svc_enrichment.clone(),

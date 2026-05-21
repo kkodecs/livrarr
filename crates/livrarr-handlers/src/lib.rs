@@ -7,6 +7,7 @@ pub mod coverproxy;
 pub mod download_client;
 pub mod filesystem;
 pub mod history;
+pub mod identity_conflicts;
 pub mod indexer;
 pub mod list_import;
 pub mod manual_import;
