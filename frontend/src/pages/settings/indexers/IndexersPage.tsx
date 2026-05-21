@@ -77,11 +77,10 @@ function toCreateRequest(data: IndexerFormData): CreateIndexerRequest {
 }
 
 function toUpdateRequest(data: IndexerFormData): UpdateIndexerRequest {
-  return {
+  const req: UpdateIndexerRequest = {
     name: data.name,
     url: data.url,
     apiPath: data.apiPath || "/",
-    apiKey: data.apiKey,
     categories: parseCategories(data.categories),
     priority: data.priority,
     enableAutomaticSearch: data.enableAutomaticSearch,
@@ -89,6 +88,8 @@ function toUpdateRequest(data: IndexerFormData): UpdateIndexerRequest {
     enableRss: data.enableRss,
     enabled: data.enabled,
   };
+  if (data.apiKey) req.apiKey = data.apiKey;
+  return req;
 }
 
 const defaultValues: IndexerFormData = {

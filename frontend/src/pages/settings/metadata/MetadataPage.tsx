@@ -242,7 +242,7 @@ export default function MetadataPage() {
               <input
                 {...register("hardcoverApiToken")}
                 type="password"
-                placeholder="Hardcover API token"
+                placeholder={config.hardcoverApiTokenSet ? "Leave blank to keep saved token" : "Hardcover API token"}
                 className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
               />
             </div>
@@ -415,7 +415,7 @@ export default function MetadataPage() {
                   <input
                     {...register("llmApiKey")}
                     type="password"
-                    placeholder="Paste your API key"
+                    placeholder={config.llmApiKeySet ? "Leave blank to keep saved key" : "Paste your API key"}
                     className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
                   />
                 </div>
