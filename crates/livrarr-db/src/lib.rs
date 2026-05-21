@@ -204,6 +204,7 @@ pub trait WorkDb: Send + Sync {
         per_page: u32,
         sort_by: &str,
         sort_dir: &str,
+        media_type: Option<MediaType>,
     ) -> Result<(Vec<Work>, i64), DbError>;
 
     /// Update work (enrichment fields -- overwrites).

@@ -629,6 +629,7 @@ where
         page_size: u32,
         sort_by: WorkSortField,
         sort_dir: SortDirection,
+        media_type: Option<MediaType>,
     ) -> Result<PaginatedWorksView, WorkServiceError> {
         let sort_col = match sort_by {
             WorkSortField::Title => "title",
@@ -642,7 +643,7 @@ where
         };
         let (works, total) = self
             .db
-            .list_works_paginated(user_id, page, page_size, sort_col, dir)
+            .list_works_paginated(user_id, page, page_size, sort_col, dir, media_type)
             .await
             .map_err(WorkServiceError::Db)?;
 

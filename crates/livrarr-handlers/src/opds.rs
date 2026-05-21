@@ -275,6 +275,7 @@ pub async fn recent<S: OpdsHandlerContext>(
             PAGE_SIZE as u32,
             WorkSortField::Title,
             SortDirection::Asc,
+            None,
         )
         .await
         .map_err(api_err_to_response)?;

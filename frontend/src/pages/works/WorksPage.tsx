@@ -70,6 +70,8 @@ export function WorksPage() {
   const setWorksSort = useUIStore((s) => s.setWorksSort);
   const posterZoom = useUIStore((s) => s.posterZoom);
   const setPosterZoom = useUIStore((s) => s.setPosterZoom);
+  const mediaTypeFilter = useUIStore((s) => s.worksMediaFilter) as MediaType | "";
+  const setMediaTypeFilter = useUIStore((s) => s.setWorksMediaFilter);
 
   const {
     data: worksData,
@@ -77,13 +79,14 @@ export function WorksPage() {
     error,
     refetch,
   } = useQuery({
-    queryKey: ["works", page, worksSort, worksSortDir],
+    queryKey: ["works", page, worksSort, worksSortDir, mediaTypeFilter],
     queryFn: () =>
       listWorks({
         page,
         pageSize: PAGE_SIZE,
         sortBy: SORT_FIELD_MAP[worksSort] ?? "date_added",
         sortDir: worksSortDir,
+        mediaType: mediaTypeFilter || undefined,
       }),
     refetchInterval: 60_000,
     placeholderData: (prev) => prev,
@@ -122,8 +125,6 @@ export function WorksPage() {
     return set;
   }, [queueItems]);
 
-  const mediaTypeFilter = useUIStore((s) => s.worksMediaFilter) as MediaType | "";
-  const setMediaTypeFilter = useUIStore((s) => s.setWorksMediaFilter);
   const [searchQuery, setSearchQuery] = useState("");
 
   const [editorMode, setEditorMode] = useState(false);
@@ -154,22 +155,14 @@ export function WorksPage() {
 
   const filtered = useMemo(() => {
     if (!works) return [];
-    let result = works;
-    if (mediaTypeFilter) {
-      result = result.filter((w) =>
-        w.libraryItems.some((item) => item.mediaType === mediaTypeFilter),
-      );
-    }
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      result = result.filter(
-        (w) =>
-          w.title.toLowerCase().includes(q) ||
-          w.authorName.toLowerCase().includes(q),
-      );
-    }
-    return result;
-  }, [works, mediaTypeFilter, searchQuery]);
+    if (!searchQuery) return works;
+    const q = searchQuery.toLowerCase();
+    return works.filter(
+      (w) =>
+        w.title.toLowerCase().includes(q) ||
+        w.authorName.toLowerCase().includes(q),
+    );
+  }, [works, searchQuery]);
 
   const allSelected =
     filtered.length > 0 && filtered.every((w) => selectedIds.has(w.id));
@@ -360,9 +353,10 @@ export function WorksPage() {
         <div className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3 overflow-x-auto">
           <select
             value={mediaTypeFilter}
-            onChange={(e) =>
-              setMediaTypeFilter(e.target.value as MediaType | "")
-            }
+            onChange={(e) => {
+              setMediaTypeFilter(e.target.value as MediaType | "");
+              setPage(1);
+            }}
             className="h-8 rounded border border-border bg-zinc-800 px-2 text-sm text-zinc-100"
           >
             <option value="">All Media</option>

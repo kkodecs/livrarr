@@ -49,6 +49,7 @@ pub async fn list<S: HasHistoryService>(
         page_size: q.page_size,
         sort_by: None,
         sort_dir: None,
+        media_type: None,
     };
     let page = pq.page();
     let page_size = pq.page_size();

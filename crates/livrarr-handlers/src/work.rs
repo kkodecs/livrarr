@@ -358,6 +358,7 @@ pub async fn list<S: HasWorkService>(
             pq.page_size(),
             pq.sort_by(),
             pq.sort_dir(),
+            pq.media_type,
         )
         .await?;
 

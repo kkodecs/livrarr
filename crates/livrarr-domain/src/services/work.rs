@@ -230,6 +230,7 @@ pub trait WorkService: Send + Sync {
         page_size: u32,
         sort_by: WorkSortField,
         sort_dir: SortDirection,
+        media_type: Option<MediaType>,
     ) -> Result<PaginatedWorksView, WorkServiceError>;
     async fn update(
         &self,

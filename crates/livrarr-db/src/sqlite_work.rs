@@ -5,7 +5,7 @@ use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{map_db_err, parse_dt};
 use crate::{
     ApplyEnrichmentMergeRequest, ApplyMergeOutcome, AuthorId, CreateWorkDbRequest, DbError,
-    EnrichmentStatus, NarrationType, ProvenanceSetter, UpdateWorkEnrichmentDbRequest,
+    EnrichmentStatus, MediaType, NarrationType, ProvenanceSetter, UpdateWorkEnrichmentDbRequest,
     UpdateWorkUserFieldsDbRequest, UserId, Work, WorkDb, WorkId,
 };
 
@@ -272,8 +272,18 @@ impl WorkDb for SqliteDb {
         per_page: u32,
         sort_by: &str,
         sort_dir: &str,
+        media_type: Option<MediaType>,
     ) -> Result<(Vec<Work>, i64), DbError> {
-        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE user_id = ?")
+        let media_clause = match media_type {
+            Some(MediaType::Ebook) => " AND monitor_ebook = 1",
+            Some(MediaType::Audiobook) => " AND monitor_audiobook = 1",
+            None => "",
+        };
+
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM works WHERE user_id = ?{media_clause}"
+        );
+        let total: i64 = sqlx::query_scalar(&count_sql)
             .bind(user_id)
             .fetch_one(self.pool())
             .await
@@ -288,7 +298,7 @@ impl WorkDb for SqliteDb {
         };
         let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
         let sql = format!(
-            "SELECT * FROM works WHERE user_id = ? ORDER BY {order_col} {dir} LIMIT ? OFFSET ?"
+            "SELECT * FROM works WHERE user_id = ?{media_clause} ORDER BY {order_col} {dir} LIMIT ? OFFSET ?"
         );
 
         let offset = (page.saturating_sub(1) * per_page) as i64;

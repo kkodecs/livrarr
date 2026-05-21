@@ -26,9 +26,9 @@ use livrarr_db::{
     WorkDb, WorkDbCreate,
 };
 use livrarr_domain::{
-    ApplyMergeOutcome, EnrichmentStatus, FieldProvenance, MergeResolved, MetadataProvider,
-    NarrationType, OutcomeClass, PermanentFailureReason, ProvenanceSetter, UserId, UserRole, Work,
-    WorkField, WorkId,
+    ApplyMergeOutcome, EnrichmentStatus, FieldProvenance, MediaType, MergeResolved,
+    MetadataProvider, NarrationType, OutcomeClass, PermanentFailureReason, ProvenanceSetter,
+    UserId, UserRole, Work, WorkField, WorkId,
 };
 use livrarr_metadata::{
     CircuitState, EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentService,
@@ -265,9 +265,10 @@ impl WorkDb for SequencedApplyDb {
         per_page: u32,
         sort_by: &str,
         sort_dir: &str,
+        media_type: Option<MediaType>,
     ) -> Result<(Vec<Work>, i64), DbError> {
         self.inner
-            .list_works_paginated(user_id, page, per_page, sort_by, sort_dir)
+            .list_works_paginated(user_id, page, per_page, sort_by, sort_dir, media_type)
             .await
     }
 

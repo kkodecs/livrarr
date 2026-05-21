@@ -1,4 +1,5 @@
 use livrarr_domain::services::{SortDirection, WorkSortField};
+use livrarr_domain::MediaType;
 use serde::Serialize;
 
 #[derive(Debug, serde::Deserialize)]
@@ -7,6 +8,7 @@ pub struct PaginationQuery {
     pub page_size: Option<u32>,
     pub sort_by: Option<WorkSortField>,
     pub sort_dir: Option<SortDirection>,
+    pub media_type: Option<MediaType>,
 }
 
 impl PaginationQuery {

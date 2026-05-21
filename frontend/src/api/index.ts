@@ -139,12 +139,14 @@ export const listWorks = (params?: {
   pageSize?: number;
   sortBy?: string;
   sortDir?: string;
+  mediaType?: string;
 }) => {
   const sp = new URLSearchParams();
   sp.set("page", String(params?.page ?? 1));
   sp.set("page_size", String(params?.pageSize ?? 1000));
   sp.set("sort_by", String(params?.sortBy ?? "date_added"));
   sp.set("sort_dir", String(params?.sortDir ?? "desc"));
+  if (params?.mediaType) sp.set("media_type", params.mediaType);
   return apiFetch<PaginatedResponse<WorkDetailResponse>>(`/work?${sp}`);
 };
 export const getWork = (id: number) =>
