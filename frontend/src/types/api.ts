@@ -672,7 +672,7 @@ export interface LanguageInfo {
 
 /** All supported languages with their metadata providers. */
 export const SUPPORTED_LANGUAGES: LanguageInfo[] = [
-  { code: "en", englishName: "English", providerName: "OpenLibrary + Hardcover", providerType: "api", requiresLlm: false, flag: "EN" },
+  { code: "en", englishName: "English", providerName: "OpenLibrary + Hardcover", providerType: "api", requiresLlm: false, flag: "\u{1F1FA}\u{1F1F8}" },
   { code: "nl", englishName: "Dutch", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1F3}\u{1F1F1}" },
   { code: "fr", englishName: "French", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1EB}\u{1F1F7}" },
   { code: "de", englishName: "German", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1E9}\u{1F1EA}" },
