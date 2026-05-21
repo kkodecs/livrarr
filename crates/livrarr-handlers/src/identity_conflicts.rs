@@ -63,13 +63,22 @@ pub async fn list_open<S: HasIdentityConflictService>(
         .map(|c| IdentityConflictDto {
             id: c.id,
             existing_work_id: c.existing_work_id,
-            kind: format!("{:?}", c.kind),
+            kind: serde_json::to_value(&c.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
             incoming_title: c.incoming.title.clone(),
             incoming_author: c.incoming.author_name.clone(),
             incoming_ol_key: c.incoming.ol_key.clone(),
             raised_at: c.raised_at.to_rfc3339(),
-            raised_by: format!("{:?}", c.raised_by),
-            status: format!("{:?}", c.status),
+            raised_by: serde_json::to_value(&c.raised_by)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+            status: serde_json::to_value(&c.status)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
         })
         .collect();
 

@@ -125,7 +125,7 @@ impl WorkIdentityRepository for SqliteDb {
     async fn set_identity_pending(
         &self,
         work_id: WorkId,
-        reason: PendingReason,
+        _reason: PendingReason,
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError> {
         let now = Utc::now().to_rfc3339();
@@ -133,10 +133,6 @@ impl WorkIdentityRepository for SqliteDb {
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "auto_search".to_string());
-        let reason_str = serde_json::to_value(&reason)
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_else(|| "low_confidence".to_string());
 
         let mut tx = self
             .pool()
@@ -144,27 +140,30 @@ impl WorkIdentityRepository for SqliteDb {
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
+        // Empty string sentinel for pending anchor_value per IR v2 decision.
+        // Reason is logged but not persisted in the anchor table.
         sqlx::query(
             "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at)
-             VALUES (?1, 'ol_work', ?2, 'pending', ?3, ?4)
+             VALUES (?1, 'ol_work', '', 'pending', ?2, ?3)
              ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
                  confidence = 'pending',
-                 setter = ?3,
-                 set_at = ?4"
+                 setter = ?2,
+                 set_at = ?3"
         )
         .bind(work_id)
-        .bind(&reason_str)
         .bind(&setter_str)
         .bind(&now)
         .execute(&mut *tx)
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
-        sqlx::query("UPDATE works SET enrichment_status = 'identity_pending' WHERE id = ?1")
-            .bind(work_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        sqlx::query(
+            "UPDATE works SET ol_key = NULL, enrichment_status = 'identity_pending' WHERE id = ?1",
+        )
+        .bind(work_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
         tx.commit()
             .await
@@ -218,14 +217,17 @@ impl WorkIdentityRepository for SqliteDb {
 
     async fn find_work_by_anchor(
         &self,
+        user_id: livrarr_domain::UserId,
         anchor_type: &AnchorType,
         anchor_value: &str,
     ) -> Result<Option<WorkId>, WorkIdentityError> {
         let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT work_id FROM work_identity_anchors
-             WHERE anchor_type = ?1 AND anchor_value = ?2 AND confidence = 'confirmed'
+            "SELECT a.work_id FROM work_identity_anchors a
+             JOIN works w ON w.id = a.work_id AND w.user_id = ?1
+             WHERE a.anchor_type = ?2 AND a.anchor_value = ?3 AND a.confidence = 'confirmed'
              LIMIT 1",
         )
+        .bind(user_id)
         .bind(anchor_type.as_str())
         .bind(anchor_value)
         .fetch_optional(self.pool())

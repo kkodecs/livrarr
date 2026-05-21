@@ -93,13 +93,15 @@ impl SqliteDb {
     pub async fn get_identity_conflict(
         &self,
         id: i64,
+        user_id: UserId,
     ) -> Result<Option<IdentityConflict>, sqlx::Error> {
         let row: Option<(i64, i64, i64, String, String, String, String, Option<String>, String, Option<String>, Option<String>, Option<String>)> =
             sqlx::query_as(
                 "SELECT id, user_id, existing_work_id, kind, incoming_payload_json, raised_at, raised_by, raised_source_path, status, resolved_at, resolution_action, resolution_notes
-                 FROM work_identity_conflicts WHERE id = ?1",
+                 FROM work_identity_conflicts WHERE id = ?1 AND user_id = ?2",
             )
             .bind(id)
+            .bind(user_id)
             .fetch_optional(self.pool())
             .await?;
 

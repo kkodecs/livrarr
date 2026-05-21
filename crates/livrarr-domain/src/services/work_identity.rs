@@ -41,6 +41,7 @@ pub trait WorkIdentityRepository: Send + Sync {
 
     async fn find_work_by_anchor(
         &self,
+        user_id: crate::UserId,
         anchor_type: &AnchorType,
         anchor_value: &str,
     ) -> Result<Option<WorkId>, WorkIdentityError>;

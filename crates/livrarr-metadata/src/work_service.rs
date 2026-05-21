@@ -230,8 +230,10 @@ where
             if let Some(ref ol_key) = req.ol_key {
                 use livrarr_domain::identity::AnchorType;
                 let anchor_type = AnchorType::new(AnchorType::OL_WORK);
-                if let Ok(Some(existing_id)) =
-                    self.db.find_work_by_anchor(&anchor_type, ol_key).await
+                if let Ok(Some(existing_id)) = self
+                    .db
+                    .find_work_by_anchor(user_id, &anchor_type, ol_key)
+                    .await
                 {
                     let work = self
                         .db

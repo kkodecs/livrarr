@@ -243,23 +243,3 @@ pub struct EnglishWorkCandidate {
     pub file_path: Option<std::path::PathBuf>,
     pub delete_existing_after_import: bool,
 }
-
-// ---------------------------------------------------------------------------
-// AddWorkResult (replaces the old Work return from work_service::add)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum AddWorkResult {
-    Created {
-        work_id: WorkId,
-        enrichment_status: crate::EnrichmentStatus,
-    },
-    Existing {
-        work_id: WorkId,
-        enrichment_status: crate::EnrichmentStatus,
-    },
-    IdentityPending {
-        work_id: WorkId,
-        reason: PendingReason,
-    },
-}

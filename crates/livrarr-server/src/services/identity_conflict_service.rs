@@ -58,10 +58,10 @@ impl IdentityConflictService for LiveIdentityConflictService {
     async fn get(
         &self,
         id: i64,
-        _user_id: UserId,
+        user_id: UserId,
     ) -> Result<Option<IdentityConflict>, ConflictError> {
         self.db
-            .get_identity_conflict(id)
+            .get_identity_conflict(id, user_id)
             .await
             .map_err(|e| ConflictError::Db(e.to_string()))
     }
@@ -75,7 +75,7 @@ impl IdentityConflictService for LiveIdentityConflictService {
     ) -> Result<(), ConflictError> {
         let conflict = self
             .db
-            .get_identity_conflict(id)
+            .get_identity_conflict(id, user_id)
             .await
             .map_err(|e| ConflictError::Db(e.to_string()))?
             .ok_or(ConflictError::NotFound)?;
@@ -97,7 +97,7 @@ impl IdentityConflictService for LiveIdentityConflictService {
     async fn dismiss(&self, id: i64, user_id: UserId) -> Result<(), ConflictError> {
         let conflict = self
             .db
-            .get_identity_conflict(id)
+            .get_identity_conflict(id, user_id)
             .await
             .map_err(|e| ConflictError::Db(e.to_string()))?
             .ok_or(ConflictError::NotFound)?;
