@@ -39,7 +39,7 @@ const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
     label: "Gemini (Free)",
     endpoint: "https://generativelanguage.googleapis.com/v1beta/openai",
     models: [
-      { value: "gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash-Lite Preview (recommended)" },
+      { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite (recommended)" },
       { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" },
       { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
     ],
