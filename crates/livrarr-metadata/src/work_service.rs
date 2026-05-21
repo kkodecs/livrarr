@@ -193,6 +193,7 @@ where
         + ProvenanceDb
         + EnrichmentRetryDb
         + ConfigDb
+        + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
@@ -216,6 +217,40 @@ where
 
         let normalized_title = livrarr_domain::normalize_for_matching(&cleaned_title);
         let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
+
+        // OL-key-first dedup for English works (REQ-003/REQ-005).
+        // If the request carries an ol_key and the language is English,
+        // check for an existing work by anchor before the normalized-match check.
+        let is_english = req
+            .language
+            .as_deref()
+            .map(|l| livrarr_domain::normalize_language(l) == "en")
+            .unwrap_or(false);
+        if is_english {
+            if let Some(ref ol_key) = req.ol_key {
+                use livrarr_domain::identity::AnchorType;
+                let anchor_type = AnchorType::new(AnchorType::OL_WORK);
+                if let Ok(Some(existing_id)) =
+                    self.db.find_work_by_anchor(&anchor_type, ol_key).await
+                {
+                    let work = self
+                        .db
+                        .get_work(user_id, existing_id)
+                        .await
+                        .map_err(WorkServiceError::Db)?;
+                    let enrichment_status = work.enrichment_status;
+                    return Ok(AddWorkResult {
+                        work,
+                        created: false,
+                        author_created: false,
+                        author_id: None,
+                        messages: vec![],
+                        cover_mtime: None,
+                        enrichment_status,
+                    });
+                }
+            }
+        }
 
         // Application-level fast-path dedup. The DB UNIQUE(user_id,
         // normalized_title, normalized_author) is the race-safe backstop.
@@ -343,6 +378,25 @@ where
 
         let setter = req.provenance_setter.unwrap_or(ProvenanceSetter::User);
         write_addtime_provenance(&self.db, user_id, &work, setter).await;
+
+        // Write the OL anchor for English works with a confirmed ol_key.
+        if is_english {
+            if let Some(ref ol_key) = work.ol_key {
+                use livrarr_domain::identity::AnchorSetter;
+                let anchor_setter = match setter {
+                    ProvenanceSetter::User => AnchorSetter::User,
+                    ProvenanceSetter::Import => AnchorSetter::Import,
+                    _ => AnchorSetter::AutoSearch,
+                };
+                if let Err(e) = self
+                    .db
+                    .confirm_ol_anchor(work.id, ol_key, anchor_setter)
+                    .await
+                {
+                    tracing::warn!(work_id = work.id, ol_key, "anchor write failed: {e}");
+                }
+            }
+        }
 
         let _cover_url = cover_url.map(|u| unproxy_cover_url(&u));
 
