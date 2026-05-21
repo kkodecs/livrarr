@@ -294,6 +294,12 @@ where
         };
 
         let source = PathBuf::from(&source_path);
+        tracing::info!(
+            grab_id = grab_id,
+            raw_path = grab.content_path.as_deref().unwrap_or("(none)"),
+            resolved_path = %source.display(),
+            "import: resolved source path"
+        );
 
         // Check source exists
         let source_clone = source.clone();
@@ -302,8 +308,27 @@ where
             .unwrap_or(false);
 
         if !exists {
+            tracing::warn!(
+                grab_id = grab_id,
+                path = %source.display(),
+                "import: source path does not exist"
+            );
             return Err(ImportWorkflowError::SourceInaccessible);
         }
+
+        let source_for_meta = source.clone();
+        let (is_file, is_dir) = tokio::task::spawn_blocking(move || {
+            (source_for_meta.is_file(), source_for_meta.is_dir())
+        })
+        .await
+        .unwrap_or((false, false));
+        tracing::info!(
+            grab_id = grab_id,
+            path = %source.display(),
+            is_file = is_file,
+            is_dir = is_dir,
+            "import: source type"
+        );
 
         // Enumerate files
         let source_clone = source.clone();
@@ -314,6 +339,13 @@ where
                 .map_err(|e| {
                     ImportWorkflowError::SourceNotResolved(format!("enumeration failed: {e}"))
                 })?;
+
+        tracing::info!(
+            grab_id = grab_id,
+            file_count = source_files.len(),
+            files = ?source_files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>(),
+            "import: enumerated source files"
+        );
 
         if source_files.is_empty() {
             self.db
