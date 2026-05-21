@@ -24,6 +24,7 @@ mod sqlite_download_client;
 mod sqlite_external_id;
 mod sqlite_grab;
 mod sqlite_history;
+mod sqlite_identity_conflict;
 mod sqlite_import;
 mod sqlite_indexer;
 mod sqlite_library_item;
@@ -39,6 +40,7 @@ mod sqlite_series_cache;
 mod sqlite_session;
 mod sqlite_user;
 mod sqlite_work;
+mod sqlite_work_identity;
 
 #[cfg(test)]
 mod cross_user_isolation_tests;
