@@ -550,7 +550,7 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         axum::http::header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
             "default-src 'self'; script-src 'self' blob:; style-src 'self' 'unsafe-inline'; \
-             img-src 'self' data: blob: https: http:; connect-src 'self'; \
+             img-src 'self' data: blob: https: http:; connect-src 'self' https://api.github.com; \
              worker-src 'self' blob:; frame-src 'self' blob:; \
              frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'",
         ),

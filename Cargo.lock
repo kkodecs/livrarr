@@ -1631,7 +1631,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "livrarr-behavioral"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "assert_matches",
  "async-trait",
@@ -1655,11 +1655,11 @@ dependencies = [
 
 [[package]]
 name = "livrarr-cli"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 
 [[package]]
 name = "livrarr-db"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-domain"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "chrono",
  "quick-xml",
@@ -1692,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-download"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "bendy",
  "chrono",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-handlers"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "axum",
  "chrono",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-http"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "livrarr-domain",
  "reqwest",
@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-jobs"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "livrarr-domain",
  "thiserror 2.0.18",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-library"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "libc",
  "livrarr-db",
@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-matching"
-version = "0.1.0-alpha3"
+version = "0.1.0-alpha4"
 dependencies = [
  "chrono",
  "id3",
@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-metadata"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "chrono",
  "csv",
@@ -1820,7 +1820,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-server"
-version = "0.1.0-alpha3"
+version = "0.1.0-alpha4"
 dependencies = [
  "argon2",
  "axum",
@@ -1868,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-tagwrite"
-version = "0.1.0"
+version = "0.1.0-alpha4"
 dependencies = [
  "futures",
  "id3",

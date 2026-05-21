@@ -34,7 +34,6 @@ import { cn } from "@/utils/cn";
 import { useAuthStore } from "@/stores/auth";
 import { useUIStore } from "@/stores/ui";
 import { useState, useEffect, type ReactNode } from "react";
-import { getSystemStatus } from "@/api";
 
 interface NavItem {
   label: string;
@@ -333,22 +332,23 @@ function SidebarItem({
 const REPO_URL = "https://github.com/kkodecs/livrarr";
 const RELEASES_API = "https://api.github.com/repos/kkodecs/livrarr/releases";
 
+const APP_VERSION = __APP_VERSION__;
+
 function useVersionCheck() {
   const checkForUpdates = useUIStore((s) => s.checkForUpdates);
-  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+  const currentVersion = APP_VERSION;
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [latestUrl, setLatestUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    getSystemStatus().then((s) => setCurrentVersion(s.version)).catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (!checkForUpdates) return;
     fetch(RELEASES_API)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        const latest = Array.isArray(data) ? data[0] : data;
+        if (!Array.isArray(data)) return;
+        const latest = data.find(
+          (r: { tag_name?: string }) => r.tag_name && /^v?\d/.test(r.tag_name),
+        );
         if (latest?.tag_name) {
           setLatestVersion(latest.tag_name.replace(/^v/, ""));
           setLatestUrl(latest.html_url);
@@ -379,7 +379,7 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
           href={latestUrl ?? `${REPO_URL}/releases`}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-2 rounded px-2 py-1.5 mb-1 text-xs font-medium bg-brand/15 text-brand hover:bg-brand/25 transition-colors"
+          className="flex items-center gap-2 rounded px-2 py-1.5 mb-1 text-xs font-semibold bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition-colors"
         >
           <ArrowUpCircle size={14} className="shrink-0" />
           <span>Update: livrarr:{latestVersion}</span>
@@ -391,7 +391,7 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
           target="_blank"
           rel="noopener noreferrer"
           title={`Update available: livrarr:${latestVersion}`}
-          className="flex items-center justify-center rounded p-1.5 mb-1 text-brand hover:bg-brand/25 transition-colors"
+          className="flex items-center justify-center rounded p-1.5 mb-1 text-amber-400 hover:bg-amber-500/25 transition-colors"
         >
           <ArrowUpCircle size={16} />
         </a>
