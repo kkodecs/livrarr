@@ -14,3 +14,4 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 quick-xml = "0.37"
 regex = "1"
+unicode-normalization = "0.1"

@@ -37,6 +37,7 @@ pub enum LlmPurpose {
     BibliographyCleanup,
     /// Per-field arbitration across provider results during enrichment merge.
     MergeArbitration,
+    CoverDisambiguation,
 }
 
 #[derive(Debug)]

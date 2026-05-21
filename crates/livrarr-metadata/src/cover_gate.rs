@@ -1,3 +1,5 @@
+use livrarr_domain::text_norm;
+
 pub const COVER_GATE_JACCARD_THRESHOLD: f64 = 0.6;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,14 +64,57 @@ pub struct GrCandidate<'a> {
     pub gr_key: &'a str,
 }
 
-pub fn evaluate_gr_cover_gate<'a>(
-    _anchor: &OlAnchor<'a>,
-    _candidate: &GrCandidate<'a>,
-    _llm_configured: bool,
+pub fn evaluate_gr_cover_gate(
+    anchor: &OlAnchor<'_>,
+    candidate: &GrCandidate<'_>,
+    llm_enabled: bool,
 ) -> CoverGateOutcome {
-    todo!()
+    let anchor_tokens = text_norm::title_tokens(anchor.title);
+    let candidate_tokens = text_norm::title_tokens(candidate.title);
+    let jaccard = text_norm::jaccard(&anchor_tokens, &candidate_tokens);
+
+    if jaccard >= COVER_GATE_JACCARD_THRESHOLD {
+        return CoverGateOutcome::Apply {
+            jaccard,
+            via: GateReason::DeterministicAccept,
+        };
+    }
+
+    if !llm_enabled {
+        return CoverGateOutcome::Skip {
+            jaccard,
+            via: GateReason::DeterministicSkipNoLlm,
+        };
+    }
+
+    CoverGateOutcome::AskLlm {
+        jaccard,
+        prompt_inputs: LlmPromptInputs {
+            ol_title: anchor.title.to_string(),
+            ol_author: anchor.author_name.to_string(),
+            ol_year: anchor.year,
+            ol_isbn: anchor.isbn.map(String::from),
+            gr_title: candidate.title.to_string(),
+            gr_author: candidate.author_name.to_string(),
+            gr_year: candidate.year,
+            gr_isbn: candidate.isbn.map(String::from),
+        },
+    }
 }
 
-pub fn apply_llm_decision(_decision: LlmDecision, _jaccard: f64) -> CoverGateOutcome {
-    todo!()
+pub fn apply_llm_decision(decision: LlmDecision, jaccard: f64) -> CoverGateOutcome {
+    match decision {
+        LlmDecision::SameBook => CoverGateOutcome::Apply {
+            jaccard,
+            via: GateReason::LlmAccepted,
+        },
+        LlmDecision::NotSameBook => CoverGateOutcome::Skip {
+            jaccard,
+            via: GateReason::LlmRejected,
+        },
+        LlmDecision::Failed => CoverGateOutcome::Skip {
+            jaccard,
+            via: GateReason::LlmCallFailed,
+        },
+    }
 }
