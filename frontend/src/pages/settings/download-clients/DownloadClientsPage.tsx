@@ -50,6 +50,7 @@ interface ClientFormData {
   password: string;
   apiKey: string;
   category: string;
+  downloadDir: string;
   enabled: boolean;
   isDefaultForProtocol: boolean;
 }
@@ -63,9 +64,10 @@ function toRequest(data: ClientFormData): CreateDownloadClientRequest {
     useSsl: data.useSsl,
     skipSslValidation: data.skipSslValidation,
     urlBase: data.urlBase || null,
-    username: data.implementation === "qBittorrent" ? data.username || null : null,
-    password: data.implementation === "qBittorrent" ? data.password || null : null,
+    username: data.implementation !== "sabnzbd" ? data.username || null : null,
+    password: data.implementation !== "sabnzbd" ? data.password || null : null,
     category: data.category,
+    downloadDir: data.implementation === "transmission" ? data.downloadDir || null : null,
     enabled: data.enabled,
     apiKey: data.implementation === "sabnzbd" ? data.apiKey || null : null,
     isDefaultForProtocol: data.isDefaultForProtocol,
@@ -83,14 +85,15 @@ function toUpdateRequest(data: ClientFormData): UpdateDownloadClientRequest {
     useSsl: data.useSsl,
     skipSslValidation: data.skipSslValidation,
     urlBase: data.urlBase || null,
-    username: data.implementation === "qBittorrent" ? data.username || null : null,
+    username: data.implementation !== "sabnzbd" ? data.username || null : null,
     category: data.category,
+    downloadDir: data.implementation === "transmission" ? data.downloadDir || null : null,
     enabled: data.enabled,
     isDefaultForProtocol: data.isDefaultForProtocol,
   };
 
   // Only include password when the user actually typed a new one.
-  if (data.implementation === "qBittorrent" && data.password) {
+  if (data.implementation !== "sabnzbd" && data.password) {
     req.password = data.password;
   }
   // Only include apiKey when the user actually typed a new one.
@@ -113,6 +116,7 @@ const defaultValues: ClientFormData = {
   password: "",
   apiKey: "",
   category: "livrarr",
+  downloadDir: "",
   enabled: true,
   isDefaultForProtocol: false,
 };
@@ -504,6 +508,7 @@ function ClientFormModal({
           password: "",
           apiKey: "",
           category: editing.category,
+          downloadDir: editing.downloadDir ?? "",
           enabled: editing.enabled,
           isDefaultForProtocol: editing.isDefaultForProtocol,
         }
@@ -542,6 +547,7 @@ function ClientFormModal({
               className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
             >
               <option value="qBittorrent">qBittorrent</option>
+              <option value="transmission">Transmission</option>
               <option value="sabnzbd">SABnzbd</option>
             </select>
           </div>
@@ -550,7 +556,7 @@ function ClientFormModal({
         {editing && (
           <div className="text-xs text-muted mb-1">
             Implementation:{" "}
-            <span className="font-medium text-zinc-300">{editing.implementation === "sabnzbd" ? "SABnzbd" : "qBittorrent"}</span>
+            <span className="font-medium text-zinc-300">{editing.implementation === "sabnzbd" ? "SABnzbd" : editing.implementation === "transmission" ? "Transmission" : "qBittorrent"}</span>
           </div>
         )}
 
@@ -619,7 +625,7 @@ function ClientFormModal({
           <label className="block text-xs text-muted mb-1">URL Base</label>
           <input
             {...register("urlBase")}
-            placeholder={isSabnzbd ? "/sabnzbd" : "/qbittorrent"}
+            placeholder={isSabnzbd ? "/sabnzbd" : impl === "transmission" ? "/transmission" : "/qbittorrent"}
             className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
           />
         </div>
@@ -656,13 +662,25 @@ function ClientFormModal({
           </div>
         )}
 
-        <div>
-          <label className="block text-xs text-muted mb-1">Category</label>
-          <input
-            {...register("category", { required: true })}
-            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
-          />
-        </div>
+        {impl === "transmission" ? (
+          <div>
+            <label className="block text-xs text-muted mb-1">Download Directory</label>
+            <input
+              {...register("downloadDir", { required: impl === "transmission" })}
+              placeholder="/downloads/livrarr"
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            />
+            <p className="text-xs text-muted mt-1">Directory where Transmission saves Livrarr downloads. Must exist and be writable by Transmission.</p>
+          </div>
+        ) : (
+          <div>
+            <label className="block text-xs text-muted mb-1">Category</label>
+            <input
+              {...register("category", { required: true })}
+              className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+            />
+          </div>
+        )}
 
         <Controller
           name="enabled"

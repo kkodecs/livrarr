@@ -51,7 +51,7 @@ export type EventType =
   | "tagWritten"
   | "tagWriteFailed"
   | "fileDeleted";
-export type DownloadClientImplementation = "qBittorrent" | "sabnzbd";
+export type DownloadClientImplementation = "qBittorrent" | "sabnzbd" | "transmission";
 export type LlmProvider = "groq" | "gemini" | "openai" | "custom";
 
 // Paginated response wrapper
@@ -472,6 +472,7 @@ export interface DownloadClientResponse {
   urlBase: string | null;
   username: string | null;
   category: string;
+  downloadDir: string | null;
   enabled: boolean;
   clientType: string;
   apiKeySet: boolean;
@@ -489,6 +490,7 @@ export interface CreateDownloadClientRequest {
   username: string | null;
   password: string | null;
   category: string;
+  downloadDir?: string | null;
   enabled: boolean;
   apiKey?: string | null;
   isDefaultForProtocol?: boolean;
@@ -504,6 +506,7 @@ export interface UpdateDownloadClientRequest {
   username?: string | null;
   password?: string | null;
   category?: string | null;
+  downloadDir?: string | null;
   enabled?: boolean | null;
   apiKey?: string | null;
   isDefaultForProtocol?: boolean | null;

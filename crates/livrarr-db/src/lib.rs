@@ -801,6 +801,7 @@ pub struct CreateDownloadClientDbRequest {
     pub username: Option<String>,
     pub password: Option<String>,
     pub category: String,
+    pub download_dir: Option<String>,
     pub enabled: bool,
     pub api_key: Option<String>,
 }
@@ -817,6 +818,7 @@ pub struct UpdateDownloadClientDbRequest {
     /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
     pub password: Option<Option<String>>,
     pub category: Option<String>,
+    pub download_dir: Option<Option<String>>,
     pub enabled: Option<bool>,
     /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
     pub api_key: Option<Option<String>>,
@@ -1152,6 +1154,7 @@ impl From<CreateDownloadClientParams> for CreateDownloadClientDbRequest {
             username: p.username,
             password: p.password,
             category: p.category,
+            download_dir: p.download_dir,
             enabled: p.enabled,
             api_key: p.api_key,
         }
@@ -1170,6 +1173,7 @@ impl From<UpdateDownloadClientParams> for UpdateDownloadClientDbRequest {
             username: p.username,
             password: p.password,
             category: p.category,
+            download_dir: p.download_dir,
             enabled: p.enabled,
             api_key: p.api_key,
             is_default_for_protocol: p.is_default_for_protocol,

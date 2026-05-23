@@ -202,6 +202,8 @@ pub enum DownloadClientImplementation {
     QBittorrent,
     #[serde(rename = "sabnzbd")]
     SABnzbd,
+    #[serde(rename = "transmission")]
+    Transmission,
 }
 
 impl DownloadClientImplementation {
@@ -210,6 +212,7 @@ impl DownloadClientImplementation {
         match self {
             Self::QBittorrent => "qbittorrent",
             Self::SABnzbd => "sabnzbd",
+            Self::Transmission => "transmission",
         }
     }
 
@@ -217,6 +220,7 @@ impl DownloadClientImplementation {
         match self {
             Self::QBittorrent => crate::services::DownloadProtocol::Torrent,
             Self::SABnzbd => crate::services::DownloadProtocol::Usenet,
+            Self::Transmission => crate::services::DownloadProtocol::Torrent,
         }
     }
 }
@@ -494,6 +498,7 @@ pub struct DownloadClient {
     #[serde(skip_serializing)]
     pub password: Option<String>,
     pub category: String,
+    pub download_dir: Option<String>,
     pub enabled: bool,
     #[serde(skip_serializing)]
     pub api_key: Option<String>,

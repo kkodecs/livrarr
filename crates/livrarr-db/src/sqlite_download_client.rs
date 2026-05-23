@@ -39,6 +39,9 @@ fn row_to_download_client(row: sqlx::sqlite::SqliteRow) -> Result<DownloadClient
         category: row
             .try_get("category")
             .map_err(|e| DbError::Io(Box::new(e)))?,
+        download_dir: row
+            .try_get("download_dir")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         enabled: row
             .try_get::<bool, _>("enabled")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -55,6 +58,7 @@ fn parse_implementation(s: &str) -> Result<DownloadClientImplementation, DbError
     match s {
         "qbittorrent" | "qBittorrent" => Ok(DownloadClientImplementation::QBittorrent),
         "sabnzbd" | "SABnzbd" => Ok(DownloadClientImplementation::SABnzbd),
+        "transmission" | "Transmission" => Ok(DownloadClientImplementation::Transmission),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown download client implementation: {s}"),
         }),
@@ -124,8 +128,8 @@ impl DownloadClientDb for SqliteDb {
         let id = sqlx::query(
             "INSERT INTO download_clients \
              (name, implementation, host, port, use_ssl, skip_ssl_validation, \
-              url_base, username, password, category, enabled, client_type, api_key, is_default_for_protocol) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              url_base, username, password, category, download_dir, enabled, client_type, api_key, is_default_for_protocol) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&req.name)
         .bind(impl_str)
@@ -137,6 +141,7 @@ impl DownloadClientDb for SqliteDb {
         .bind(&req.username)
         .bind(&req.password)
         .bind(&req.category)
+        .bind(&req.download_dir)
         .bind(req.enabled)
         .bind(client_type)
         .bind(&req.api_key)
@@ -178,6 +183,10 @@ impl DownloadClientDb for SqliteDb {
             Some(Some(v)) => Some(v),
         };
         let category = req.category.unwrap_or(current.category);
+        let download_dir = match req.download_dir {
+            None => current.download_dir,
+            Some(v) => v,
+        };
         let enabled = req.enabled.unwrap_or(current.enabled);
         // API key tri-state: None = keep, Some(None) = clear, Some(Some(v)) = set.
         let api_key = match req.api_key {
@@ -204,7 +213,7 @@ impl DownloadClientDb for SqliteDb {
         sqlx::query(
             "UPDATE download_clients SET name = ?, host = ?, port = ?, use_ssl = ?, \
              skip_ssl_validation = ?, url_base = ?, username = ?, password = ?, \
-             category = ?, enabled = ?, api_key = ?, is_default_for_protocol = ? \
+             category = ?, download_dir = ?, enabled = ?, api_key = ?, is_default_for_protocol = ? \
              WHERE id = ?",
         )
         .bind(&name)
@@ -216,6 +225,7 @@ impl DownloadClientDb for SqliteDb {
         .bind(&username)
         .bind(&password)
         .bind(&category)
+        .bind(&download_dir)
         .bind(enabled)
         .bind(&api_key)
         .bind(is_default)

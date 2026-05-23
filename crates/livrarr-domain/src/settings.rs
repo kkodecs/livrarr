@@ -160,6 +160,7 @@ pub struct CreateDownloadClientParams {
     pub username: Option<String>,
     pub password: Option<String>,
     pub category: String,
+    pub download_dir: Option<String>,
     pub enabled: bool,
     pub api_key: Option<String>,
 }
@@ -175,6 +176,7 @@ pub struct UpdateDownloadClientParams {
     pub username: Option<String>,
     pub password: Option<Option<String>>,
     pub category: Option<String>,
+    pub download_dir: Option<Option<String>>,
     pub enabled: Option<bool>,
     pub api_key: Option<Option<String>>,
     pub is_default_for_protocol: Option<bool>,

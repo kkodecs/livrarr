@@ -342,6 +342,7 @@ impl DownloadClientApi for SecondaryApiImpl {
                 username: req.username,
                 password: req.password,
                 category: req.category,
+                download_dir: req.download_dir,
                 enabled: req.enabled,
                 api_key: req.api_key,
             })
@@ -382,6 +383,7 @@ impl DownloadClientApi for SecondaryApiImpl {
                     username: req.username,
                     password: req.password,
                     category: req.category,
+                    download_dir: req.download_dir,
                     enabled: req.enabled,
                     api_key: req.api_key,
                     is_default_for_protocol: req.is_default_for_protocol,
@@ -731,6 +733,7 @@ fn dc_to_response(dc: &DownloadClient) -> DownloadClientResponse {
         url_base: dc.url_base.clone(),
         username: dc.username.clone(),
         category: dc.category.clone(),
+        download_dir: dc.download_dir.clone(),
         enabled: dc.enabled,
         client_type: dc.client_type().to_string(),
         api_key_set: dc.api_key.is_some(),

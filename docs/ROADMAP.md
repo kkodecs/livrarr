@@ -2,9 +2,19 @@
 
 ## Current Status: Alpha 4 (released 2026-04-29)
 
-### What's in Alpha 4
+Post-alpha4 work has landed on `main` but is not yet tagged as a release.
 
-- SSRF trusted origins — private-IP indexers and download clients work correctly
+### Shipped since Alpha 4
+
+- Trust-aware multi-cover system with picker UI (ebook + audiobook slots, quality gate, reject filter)
+- English Work Lifecycle refactor (identity anchors, cover gate, conflict resolution)
+- Recently-downloaded sort + URL protocol dropdowns
+- Server-side media type filter across all layers
+- Various bug fixes (import, UI, version display)
+
+### What was in Alpha 4
+
+- SSRF trusted origins for private-IP indexers and download clients
 - Manual import dedup improvements
 - Download poller fix for private-IP qBittorrent
 
@@ -20,25 +30,36 @@
 - Foreign language support (10+ languages)
 - RSS sync with auto-grab
 - Handler compile-time isolation (livrarr-handlers crate)
+- Mobile-responsive UI (all 27 pages)
 - Docker image optimized to ~76MB
 
-### Alpha 4 (next)
+## Enhancement Roadmap
 
-| Item | Description |
-|------|-------------|
-| Cover architecture overhaul | Trust model (User > Validated > Unvalidated), quality gate, download-then-decide, EPUB cover extraction |
-| Cover picker UI | Browse and select covers from multiple providers |
-| Audiobook cover support | Separate cover slot for audiobook art |
-| Readarr import enrichment | Safe post-import enrichment with trust model protection |
+Prioritized list of planned features. See `build/plans/enhancement-roadmap.md` for full details and difficulty estimates.
 
-### Alpha 5+
+| Priority | Issue | Title | Size |
+|----------|-------|-------|------|
+| 1 | — | ~~Quick UI polish (#30, #32, #41)~~ | ~~S-M~~ Done |
+| 2 | #17 | Transmission download client | L |
+| 3 | #26 | Collapse series toggle | L |
+| 3 | #27 | Lists / bookshelves | L |
+| 4 | #20 | ~~Multi-cover harvest + selection~~ | ~~XL~~ Done |
+| 4 | #33 | Separate audiobook cover | L |
+| 5 | #22 | M4B chapter navigation | M |
+| 5 | #23 | Progress memory + KASH sync | XXL |
+| 6 | #28 | Auto-tagging / genre curation (LLM) | XL |
+| 6 | #31 | Discovery / suggestions (LLM) | XL |
+| 7 | #16 | Watch folder | L |
+| 8 | #34 | rclone seedbox integration | XL |
+| 9 | #21 | Push metadata to OpenLibrary | L |
+| 10 | #29 | Third-party security audit | — |
 
-| Item | Description |
-|------|-------------|
-| Author monitoring improvements | Auto-add from monitored authors with better dedup |
-| Mobile-responsive UI | Touch-friendly layout for phones/tablets |
-| PUID/PGID support | Configurable container user/group |
-| ARM Docker image | linux/arm64 support |
+### Parked (no timeline)
+
+| Issue | Title |
+|-------|-------|
+| #25 | Magazine support |
+| #24 | Anime / manga support |
 
 ## Deferred to Beta
 

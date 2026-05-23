@@ -30,6 +30,11 @@ pub(super) async fn download_poller_tick(
                     warn!("poller: SABnzbd error for {}: {e}", client.name);
                 }
             }
+            "transmission" => {
+                if let Err(e) = poll_transmission(&state, client).await {
+                    warn!("poller: Transmission error for {}: {e}", client.name);
+                }
+            }
             _ => {
                 if let Err(e) = poll_qbittorrent(&state, client).await {
                     warn!("poller: qBit error for {}: {e}", client.name);
@@ -580,6 +585,206 @@ async fn poll_sabnzbd(
     }
 
     Ok(())
+}
+
+/// Poll Transmission for completed torrents matching active grabs.
+async fn poll_transmission(
+    state: &AppState,
+    client: &livrarr_domain::DownloadClient,
+) -> Result<(), String> {
+    let base_url = crate::infra::release_helpers::qbit_base_url(client);
+    let rpc_url = format!("{base_url}/transmission/rpc");
+
+    let fields = serde_json::json!([
+        "hashString",
+        "name",
+        "status",
+        "percentDone",
+        "totalSize",
+        "sizeWhenDone",
+        "downloadDir",
+        "eta",
+        "error",
+        "errorString",
+        "isFinished",
+        "leftUntilDone"
+    ]);
+
+    let req_body = serde_json::json!({
+        "method": "torrent-get",
+        "arguments": {"fields": fields}
+    });
+
+    let resp_body = transmission_rpc(state, client, &rpc_url, &req_body)
+        .await
+        .map_err(|e| format!("Transmission RPC: {e}"))?;
+
+    let torrents = resp_body
+        .pointer("/arguments/torrents")
+        .and_then(|v| v.as_array())
+        .ok_or("Transmission: missing torrents array")?;
+
+    let active_grabs = state
+        .db
+        .list_active_grabs()
+        .await
+        .map_err(|e| format!("list grabs: {e}"))?;
+
+    let client_grabs: Vec<_> = active_grabs
+        .iter()
+        .filter(|g| g.download_client_id == client.id)
+        .collect();
+
+    let grabs_by_hash: std::collections::HashMap<String, usize> = client_grabs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, g)| {
+            g.download_id
+                .as_deref()
+                .filter(|id| *id != "pending" && !id.is_empty())
+                .map(|id| (id.to_ascii_lowercase(), idx))
+        })
+        .collect();
+
+    for torrent in torrents {
+        let hash = torrent
+            .get("hashString")
+            .and_then(|h| h.as_str())
+            .unwrap_or_default();
+
+        let grab = match grabs_by_hash.get(&hash.to_ascii_lowercase()) {
+            Some(&idx) => client_grabs[idx],
+            None => continue,
+        };
+
+        let percent_done = torrent
+            .get("percentDone")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let status = torrent.get("status").and_then(|v| v.as_i64()).unwrap_or(-1);
+
+        let is_completed = percent_done >= 1.0 && matches!(status, 0 | 5 | 6);
+
+        if !is_completed {
+            continue;
+        }
+
+        let download_dir = torrent
+            .get("downloadDir")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let name = torrent
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default();
+
+        let content_path = format!("{}/{}", download_dir.trim_end_matches('/'), name);
+
+        let mappings = match state.import_io_service.list_remote_path_mappings().await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("poller: list_remote_path_mappings failed: {e}");
+                continue;
+            }
+        };
+        let mapping_result = match crate::infra::import_pipeline::apply_remote_path_mapping(
+            &mappings,
+            &client.host,
+            &content_path,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("poller: path mapping failed for grab {}: {e}", grab.id);
+                continue;
+            }
+        };
+        if !tokio::fs::try_exists(&mapping_result.local_path)
+            .await
+            .unwrap_or(false)
+        {
+            tracing::debug!(
+                "poller: source not yet available for <grab {}>, will retry",
+                grab.id
+            );
+            continue;
+        }
+
+        if grab.content_path.is_none() {
+            if let Err(e) = state
+                .db
+                .set_grab_content_path(grab.user_id, grab.id, &content_path)
+                .await
+            {
+                warn!(
+                    "poller: failed to persist content_path for grab {}: {e}",
+                    grab.id
+                );
+            }
+        }
+
+        let transitioned = match state.db.try_set_importing(grab.user_id, grab.id).await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("poller: try_set_importing failed for grab {}: {e}", grab.id);
+                continue;
+            }
+        };
+
+        if transitioned {
+            spawn_import(state, grab.user_id, grab.id);
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute a Transmission RPC call with automatic session-ID handling.
+async fn transmission_rpc(
+    state: &AppState,
+    client: &livrarr_domain::DownloadClient,
+    rpc_url: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut session_id: Option<String> = None;
+
+    for attempt in 0..2 {
+        let mut rb = state.http_client.post(rpc_url).json(body);
+        if let (Some(u), Some(p)) = (client.username.as_deref(), client.password.as_deref()) {
+            rb = rb.basic_auth(u, Some(p));
+        }
+        if let Some(ref sid) = session_id {
+            rb = rb.header("X-Transmission-Session-Id", sid.as_str());
+        }
+
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| format!("connection failed: {e}"))?;
+
+        if resp.status().as_u16() == 409 {
+            session_id = resp
+                .headers()
+                .get("x-transmission-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            if attempt == 1 {
+                return Err("CSRF handshake failed after retry".to_string());
+            }
+            continue;
+        }
+
+        if resp.status().as_u16() == 401 {
+            return Err("authentication failed".to_string());
+        }
+
+        if !resp.status().is_success() {
+            return Err(format!("RPC returned {}", resp.status()));
+        }
+
+        return resp.json().await.map_err(|e| format!("parse error: {e}"));
+    }
+
+    Err("RPC call failed".to_string())
 }
 
 /// Spawn an import task with concurrency semaphore. Poller continues immediately.

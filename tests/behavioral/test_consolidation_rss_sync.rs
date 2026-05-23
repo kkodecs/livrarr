@@ -209,6 +209,7 @@ async fn test_rss_sync_matches_and_grabs_release() {
         username: None,
         password: None,
         category: "books".into(),
+        download_dir: None,
         enabled: true,
         api_key: None,
     })
@@ -302,6 +303,7 @@ async fn test_rss_sync_skips_active_grab() {
             username: None,
             password: None,
             category: "books".into(),
+            download_dir: None,
             enabled: true,
             api_key: None,
         })
@@ -427,6 +429,7 @@ async fn test_rss_sync_partial_indexer_failure_continues() {
         username: None,
         password: None,
         category: "books".into(),
+        download_dir: None,
         enabled: true,
         api_key: None,
     })
@@ -523,6 +526,7 @@ async fn test_rss_sync_creates_notifications() {
         username: None,
         password: None,
         category: "books".into(),
+        download_dir: None,
         enabled: true,
         api_key: None,
     })
@@ -573,6 +577,7 @@ async fn test_rss_sync_creates_notifications() {
         username: None,
         password: None,
         category: "books".into(),
+        download_dir: None,
         enabled: true,
         api_key: None,
     })

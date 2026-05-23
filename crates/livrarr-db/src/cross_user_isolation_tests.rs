@@ -303,6 +303,7 @@ mod tests {
                 username: None,
                 password: None,
                 category: "livrarr".to_string(),
+                download_dir: None,
                 enabled: true,
                 api_key: None,
             })

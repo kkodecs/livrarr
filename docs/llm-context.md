@@ -205,7 +205,7 @@ Everything else (download clients, indexers, metadata providers, root folders) i
 ```yaml
 services:
   livrarr:
-    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha2
+    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha4
     container_name: livrarr
     ports:
       - "8789:8789"
@@ -395,7 +395,7 @@ List endpoints accept `page` and `page_size` query parameters:
 
 ## Architecture (for advanced troubleshooting)
 
-- **10 Rust crates:** livrarr-server (composition root), livrarr-db (SQLite), livrarr-domain (types), livrarr-metadata (providers), livrarr-http (HTTP client), livrarr-download (torrent/NZB), livrarr-organize (file management), livrarr-tagwrite (EPUB/M4B/MP3 tags)
+- **13 Rust crates:** livrarr-server (composition root), livrarr-handlers (route handlers, compile-walled), livrarr-jobs (job triggering trait), livrarr-db (SQLite), livrarr-domain (types/traits), livrarr-metadata (providers), livrarr-http (HTTP client), livrarr-download (torrent/NZB), livrarr-matching (file matching), livrarr-library (import/layout), livrarr-tagwrite (EPUB/M4B/MP3 tags), livrarr-behavioral (test harness), livrarr-cli (stub)
 - **Database:** SQLite via sqlx with versioned migrations
 - **Enrichment pipeline:** Hardcover GraphQL → OpenLibrary JSON → Audnexus REST (English); Goodreads HTML → LLM extraction (foreign)
 - **Import pipeline:** Poller detects completion → copies to .tmp → writes tags → atomic rename to final path → creates DB record → optional CWA hardlink

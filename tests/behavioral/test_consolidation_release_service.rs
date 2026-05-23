@@ -409,6 +409,7 @@ async fn test_release_grab_happy_path_creates_sent_grab() {
             username: Some("admin".into()),
             password: Some("password".into()),
             category: "livrarr".into(),
+            download_dir: None,
             enabled: true,
             api_key: None,
         })
@@ -543,6 +544,7 @@ async fn test_release_grab_client_unreachable() {
             username: Some("admin".into()),
             password: Some("password".into()),
             category: "livrarr".into(),
+            download_dir: None,
             enabled: true,
             api_key: None,
         })
@@ -603,6 +605,7 @@ async fn test_release_grab_client_rejection_leaves_no_db_record() {
             username: Some("admin".into()),
             password: Some("password".into()),
             category: "livrarr".into(),
+            download_dir: None,
             enabled: true,
             api_key: None,
         })
@@ -670,6 +673,7 @@ async fn test_release_grab_category_mapping() {
             username: Some("admin".into()),
             password: Some("password".into()),
             category: "livrarr".into(),
+            download_dir: None,
             enabled: true,
             api_key: None,
         })

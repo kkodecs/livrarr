@@ -31,6 +31,7 @@ fn to_response(dc: DownloadClient) -> DownloadClientResponse {
         url_base: dc.url_base,
         username: dc.username,
         category: dc.category,
+        download_dir: dc.download_dir,
         enabled: dc.enabled,
         client_type,
         api_key_set: dc.api_key.is_some(),
@@ -137,6 +138,7 @@ pub async fn create<S: HasDownloadClientSettingsService>(
             username: req.username,
             password: req.password,
             category: req.category,
+            download_dir: req.download_dir,
             enabled: req.enabled,
             api_key: req.api_key,
         })
@@ -221,6 +223,7 @@ pub async fn update<S: HasDownloadClientSettingsService>(
                 username: req.username,
                 password: req.password,
                 category: req.category,
+                download_dir: req.download_dir,
                 enabled: req.enabled,
                 api_key,
                 is_default_for_protocol: req.is_default_for_protocol,
@@ -315,6 +318,7 @@ pub async fn test_saved<S: HasDownloadClientCredentialService + HasHttpClient>(
         username: dc.username,
         password: dc.password,
         category: dc.category,
+        download_dir: dc.download_dir,
         enabled: dc.enabled,
         api_key: dc.api_key,
     };
@@ -328,6 +332,7 @@ async fn run_connection_test<S: HasHttpClient>(
     match req.implementation {
         DownloadClientImplementation::SABnzbd => test_sabnzbd(state, req).await,
         DownloadClientImplementation::QBittorrent => test_qbittorrent(state, req).await,
+        DownloadClientImplementation::Transmission => test_transmission(state, req).await,
     }
 }
 
@@ -480,6 +485,115 @@ async fn test_qbittorrent<S: HasHttpClient>(
     }
 
     Ok(())
+}
+
+async fn test_transmission<S: HasHttpClient>(
+    state: &S,
+    req: &CreateDownloadClientApiRequest,
+) -> Result<(), ApiError> {
+    let base_url = request_base_url(req);
+    let rpc_url = format!("{base_url}/transmission/rpc");
+
+    let session_body = serde_json::json!({"method": "session-get", "arguments": {"fields": ["rpc-version", "version"]}});
+
+    let mut session_id: Option<String> = None;
+
+    for attempt in 0..2 {
+        let mut rb = state.http_client().post(&rpc_url).json(&session_body);
+
+        if let (Some(u), Some(p)) = (req.username.as_deref(), req.password.as_deref()) {
+            rb = rb.basic_auth(u, Some(p));
+        }
+        if let Some(ref sid) = session_id {
+            rb = rb.header("X-Transmission-Session-Id", sid.as_str());
+        }
+
+        let resp = rb.send().await.map_err(|e| {
+            ApiError::BadGateway(format!(
+                "Transmission connection failed: {}",
+                e.without_url()
+            ))
+        })?;
+
+        if resp.status().as_u16() == 409 {
+            if attempt == 1 {
+                return Err(ApiError::BadGateway(
+                    "Transmission CSRF handshake failed after retry".into(),
+                ));
+            }
+            session_id = resp
+                .headers()
+                .get("x-transmission-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            continue;
+        }
+
+        if resp.status().as_u16() == 401 {
+            return Err(ApiError::BadGateway(
+                "Transmission authentication failed — check username/password".into(),
+            ));
+        }
+
+        if !resp.status().is_success() {
+            return Err(ApiError::BadGateway(format!(
+                "Transmission RPC returned {}",
+                resp.status()
+            )));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ApiError::BadGateway(format!("Transmission parse error: {e}")))?;
+
+        let rpc_version = body
+            .pointer("/arguments/rpc-version")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        if rpc_version < 14 {
+            return Err(ApiError::BadGateway(format!(
+                "Transmission RPC version {rpc_version} is too old (minimum 14 / Transmission 2.80+)"
+            )));
+        }
+
+        if let Some(ref download_dir) = req.download_dir {
+            let fs_body =
+                serde_json::json!({"method": "free-space", "arguments": {"path": download_dir}});
+            let mut fb = state.http_client().post(&rpc_url).json(&fs_body);
+            if let (Some(u), Some(p)) = (req.username.as_deref(), req.password.as_deref()) {
+                fb = fb.basic_auth(u, Some(p));
+            }
+            if let Some(ref sid) = session_id {
+                fb = fb.header("X-Transmission-Session-Id", sid.as_str());
+            }
+            let fs_resp = fb.send().await.map_err(|e| {
+                ApiError::BadGateway(format!(
+                    "Transmission free-space check failed: {}",
+                    e.without_url()
+                ))
+            })?;
+            let fs_body: serde_json::Value = fs_resp
+                .json()
+                .await
+                .map_err(|e| ApiError::BadGateway(format!("Transmission parse error: {e}")))?;
+
+            let result = fs_body.get("result").and_then(|v| v.as_str()).unwrap_or("");
+            if result != "success" {
+                return Err(ApiError::BadGateway(format!(
+                    "Transmission download directory '{}' is not accessible: {}",
+                    download_dir, result
+                )));
+            }
+        }
+
+        return Ok(());
+    }
+
+    Err(ApiError::BadGateway(
+        "Transmission connection test failed".into(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +772,7 @@ pub async fn import_from_prowlarr<
         let port = pc.field_u16("port").unwrap_or(match impl_enum {
             DownloadClientImplementation::QBittorrent => 8080,
             DownloadClientImplementation::SABnzbd => 8080,
+            DownloadClientImplementation::Transmission => 9091,
         });
 
         let (clean_host, ssl_override) = normalize_host(&host);
@@ -686,6 +801,7 @@ pub async fn import_from_prowlarr<
         let has_creds = match impl_enum {
             DownloadClientImplementation::QBittorrent => password.is_some(),
             DownloadClientImplementation::SABnzbd => api_key_field.is_some(),
+            DownloadClientImplementation::Transmission => password.is_some(),
         };
 
         tracing::info!(
@@ -711,6 +827,7 @@ pub async fn import_from_prowlarr<
                 username,
                 password,
                 category,
+                download_dir: None,
                 enabled: has_creds,
                 api_key: api_key_field,
             })

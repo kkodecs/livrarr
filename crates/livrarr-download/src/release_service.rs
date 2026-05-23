@@ -275,7 +275,8 @@ where
             }
         }
 
-        // Determine client_type from protocol
+        // Determine client_type from protocol.
+        // For Torrent, prefer the is_default_for_protocol client (could be qBittorrent or Transmission).
         let client_type = match req.protocol {
             DownloadProtocol::Torrent => "qbittorrent",
             DownloadProtocol::Usenet => "sabnzbd",
@@ -295,30 +296,41 @@ where
                 })?;
 
             // Verify protocol match
-            if c.client_type() != client_type {
+            if c.implementation.protocol() != req.protocol {
                 return Err(ReleaseServiceError::ClientProtocolMismatch {
                     protocol: protocol_str(&req.protocol).to_string(),
                 });
             }
             c
         } else {
-            // Use default client for protocol
-            self.db
+            // Use default client for protocol. For Torrent, check both qBittorrent and Transmission.
+            let mut found = self
+                .db
                 .get_default_download_client(client_type)
                 .await
-                .map_err(ReleaseServiceError::Db)?
-                .ok_or_else(|| ReleaseServiceError::NoClient {
-                    protocol: client_type.to_string(),
-                })?
+                .map_err(ReleaseServiceError::Db)?;
+
+            if found.is_none() && req.protocol == DownloadProtocol::Torrent {
+                found = self
+                    .db
+                    .get_default_download_client("transmission")
+                    .await
+                    .map_err(ReleaseServiceError::Db)?;
+            }
+
+            found.ok_or_else(|| ReleaseServiceError::NoClient {
+                protocol: protocol_str(&req.protocol).to_string(),
+            })?
         };
 
         // Dispatch to download client via HTTP
-        // For torrent: POST to qBit API
-        // For usenet: POST to SABnzbd API
         let dispatch_result = match req.protocol {
-            DownloadProtocol::Torrent => {
-                dispatch_torrent(&self.http, &client, &req.download_url).await
-            }
+            DownloadProtocol::Torrent => match client.implementation {
+                DownloadClientImplementation::Transmission => {
+                    dispatch_transmission(&self.http, &client, &req.download_url).await
+                }
+                _ => dispatch_torrent(&self.http, &client, &req.download_url).await,
+            },
             DownloadProtocol::Usenet => {
                 dispatch_usenet(&self.http, &client, &req.download_url, &req.title).await
             }
@@ -509,6 +521,128 @@ async fn dispatch_torrent<H: HttpFetcher>(
     } else {
         Err(format!("qBit rejected torrent: HTTP {}", add_resp.status))
     }
+}
+
+/// Dispatch torrent to Transmission via JSON-RPC.
+async fn dispatch_transmission<H: HttpFetcher>(
+    http: &H,
+    client: &DownloadClient,
+    download_url: &str,
+) -> Result<String, String> {
+    let download_id = fetch_and_extract_hash(http, download_url)
+        .await
+        .unwrap_or_else(|| "pending".to_string());
+
+    let scheme = if client.use_ssl { "https" } else { "http" };
+    let url_base = client.url_base.as_deref().unwrap_or("");
+    let base = format!("{}://{}:{}{}", scheme, client.host, client.port, url_base);
+    let rpc_url = format!("{base}/transmission/rpc");
+
+    // Build torrent-add request. Use filename for magnet URIs, metainfo for .torrent files.
+    let mut args = serde_json::json!({});
+    if download_url.starts_with("magnet:") {
+        args["filename"] = serde_json::Value::String(download_url.to_string());
+    } else {
+        // Download .torrent file and base64-encode it
+        let torrent_resp = http
+            .fetch(FetchRequest {
+                url: download_url.to_string(),
+                method: HttpMethod::Get,
+                headers: vec![],
+                body: None,
+                timeout: Duration::from_secs(30),
+                rate_bucket: RateBucket::None,
+                max_body_bytes: 10 * 1024 * 1024,
+                anti_bot_check: false,
+                user_agent: UserAgentProfile::Server,
+            })
+            .await
+            .map_err(|e| format!("failed to download .torrent: {e}"))?;
+
+        if !(200..300).contains(&torrent_resp.status) {
+            return Err(format!(
+                "torrent download returned HTTP {}",
+                torrent_resp.status
+            ));
+        }
+
+        use data_encoding::BASE64;
+        args["metainfo"] = serde_json::Value::String(BASE64.encode(&torrent_resp.body));
+    }
+
+    if let Some(ref dir) = client.download_dir {
+        args["download-dir"] = serde_json::Value::String(dir.clone());
+    }
+
+    let rpc_body = serde_json::json!({"method": "torrent-add", "arguments": args});
+
+    // Session-ID handshake: first request may return 409
+    let mut session_id: Option<String> = None;
+    for attempt in 0..2 {
+        let mut headers = vec![("Content-Type".into(), "application/json".into())];
+        if let (Some(u), Some(p)) = (client.username.as_deref(), client.password.as_deref()) {
+            use data_encoding::BASE64;
+            let cred = BASE64.encode(format!("{u}:{p}").as_bytes());
+            headers.push(("Authorization".into(), format!("Basic {cred}")));
+        }
+        if let Some(ref sid) = session_id {
+            headers.push(("X-Transmission-Session-Id".into(), sid.clone()));
+        }
+
+        let resp = http
+            .fetch(FetchRequest {
+                url: rpc_url.clone(),
+                method: HttpMethod::Post,
+                headers,
+                body: Some(serde_json::to_vec(&rpc_body).unwrap()),
+                timeout: Duration::from_secs(30),
+                rate_bucket: RateBucket::None,
+                max_body_bytes: 64 * 1024,
+                anti_bot_check: false,
+                user_agent: UserAgentProfile::Server,
+            })
+            .await
+            .map_err(|e| format!("Transmission RPC failed: {e}"))?;
+
+        if resp.status == 409 {
+            if attempt == 1 {
+                return Err("Transmission CSRF handshake failed".to_string());
+            }
+            session_id = resp
+                .headers
+                .iter()
+                .find(|(k, _)| k.to_lowercase() == "x-transmission-session-id")
+                .map(|(_, v)| v.clone());
+            continue;
+        }
+
+        if resp.status == 401 {
+            return Err("Transmission auth failed".to_string());
+        }
+
+        if resp.status != 200 {
+            return Err(format!("Transmission rejected: HTTP {}", resp.status));
+        }
+
+        let body: serde_json::Value = serde_json::from_slice(&resp.body)
+            .map_err(|e| format!("Transmission parse error: {e}"))?;
+
+        let result = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
+        if result != "success" {
+            return Err(format!("Transmission error: {result}"));
+        }
+
+        // Extract hash from response (torrent-added or torrent-duplicate)
+        let hash = body
+            .pointer("/arguments/torrent-added/hashString")
+            .or_else(|| body.pointer("/arguments/torrent-duplicate/hashString"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&download_id);
+
+        return Ok(hash.to_string());
+    }
+
+    Err("Transmission dispatch failed".to_string())
 }
 
 /// Dispatch NZB to SABnzbd: download NZB from indexer, push via multipart addfile.

@@ -16,6 +16,7 @@ pub struct DownloadClientResponse {
     pub url_base: Option<String>,
     pub username: Option<String>,
     pub category: String,
+    pub download_dir: Option<String>,
     pub enabled: bool,
     pub client_type: String,
     pub api_key_set: bool,
@@ -36,6 +37,7 @@ pub struct CreateDownloadClientApiRequest {
     #[serde(skip_serializing)]
     pub password: Option<String>,
     pub category: String,
+    pub download_dir: Option<String>,
     pub enabled: bool,
     #[serde(skip_serializing)]
     pub api_key: Option<String>,
@@ -74,6 +76,7 @@ pub struct UpdateDownloadClientApiRequest {
     #[serde(skip_serializing)]
     pub password: Option<Option<String>>,
     pub category: Option<String>,
+    pub download_dir: Option<Option<String>>,
     pub enabled: Option<bool>,
     #[serde(default, deserialize_with = "crate::deserialize_optional_secret")]
     #[serde(skip_serializing)]
