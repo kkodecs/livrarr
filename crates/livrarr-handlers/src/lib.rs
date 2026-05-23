@@ -3,6 +3,7 @@ pub mod auth;
 pub mod author;
 pub mod config;
 pub mod context;
+pub mod cover;
 pub mod coverproxy;
 pub mod download_client;
 pub mod filesystem;

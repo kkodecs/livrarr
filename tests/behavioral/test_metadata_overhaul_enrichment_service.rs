@@ -415,6 +415,64 @@ impl WorkDb for SequencedApplyDb {
     async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError> {
         self.inner.list_identity_pending_works().await
     }
+
+    async fn update_cover_metadata(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        cover_url: Option<&str>,
+        cover_source: &str,
+        cover_trust: livrarr_domain::CoverTrust,
+        cover_width: i32,
+        cover_height: i32,
+    ) -> Result<(), DbError> {
+        self.inner
+            .update_cover_metadata(
+                user_id,
+                work_id,
+                cover_url,
+                cover_source,
+                cover_trust,
+                cover_width,
+                cover_height,
+            )
+            .await
+    }
+
+    async fn update_audiobook_cover_metadata(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        audiobook_cover_url: Option<&str>,
+        audiobook_cover_source: &str,
+        audiobook_cover_trust: livrarr_domain::CoverTrust,
+        audiobook_cover_width: i32,
+        audiobook_cover_height: i32,
+    ) -> Result<(), DbError> {
+        self.inner
+            .update_audiobook_cover_metadata(
+                user_id,
+                work_id,
+                audiobook_cover_url,
+                audiobook_cover_source,
+                audiobook_cover_trust,
+                audiobook_cover_width,
+                audiobook_cover_height,
+            )
+            .await
+    }
+
+    async fn update_cover_dimensions(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DbError> {
+        self.inner
+            .update_cover_dimensions(user_id, work_id, width, height)
+            .await
+    }
 }
 
 impl ProvenanceDb for SequencedApplyDb {
@@ -716,6 +774,7 @@ fn merge_output_success(title: &str) -> MergeOutput {
         ],
         enrichment_status: EnrichmentStatus::Enriched,
         enrichment_source: Some("goodreads".to_string()),
+        cover_resolution: None,
     }
 }
 
@@ -728,6 +787,7 @@ fn merge_output_conflict() -> MergeOutput {
         external_id_updates: vec![],
         enrichment_status: EnrichmentStatus::Conflict,
         enrichment_source: None,
+        cover_resolution: None,
     }
 }
 

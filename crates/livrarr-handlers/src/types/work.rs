@@ -1,5 +1,5 @@
 use livrarr_domain::{
-    AuthorId, EnrichmentStatus, LibraryItemId, MediaType, NarrationType, Work, WorkId,
+    AuthorId, CoverTrust, EnrichmentStatus, LibraryItemId, MediaType, NarrationType, Work, WorkId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -169,12 +169,23 @@ pub struct WorkDetailResponse {
     pub enriched_at: Option<String>,
     pub enrichment_source: Option<String>,
     pub cover_manual: bool,
+    pub cover_source: Option<String>,
+    pub cover_trust: CoverTrust,
+    pub cover_width: i32,
+    pub cover_height: i32,
+    pub audiobook_cover_url: Option<String>,
+    pub audiobook_cover_source: Option<String>,
+    pub audiobook_cover_trust: CoverTrust,
+    pub audiobook_cover_width: i32,
+    pub audiobook_cover_height: i32,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
     pub added_at: String,
     pub library_items: Vec<LibraryItemResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cover_mtime: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audiobook_cover_mtime: Option<i64>,
 }
 
 /// Convert a domain `Work` into a `WorkDetailResponse` (with empty `library_items`).
@@ -217,11 +228,21 @@ pub fn work_to_detail_with_cover_mtime(w: &Work, cover_mtime: Option<i64>) -> Wo
         enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
         enrichment_source: w.enrichment_source.clone(),
         cover_manual: w.cover_manual,
+        cover_source: w.cover_source.clone(),
+        cover_trust: w.cover_trust,
+        cover_width: w.cover_width,
+        cover_height: w.cover_height,
+        audiobook_cover_url: w.audiobook_cover_url.clone(),
+        audiobook_cover_source: w.audiobook_cover_source.clone(),
+        audiobook_cover_trust: w.audiobook_cover_trust,
+        audiobook_cover_width: w.audiobook_cover_width,
+        audiobook_cover_height: w.audiobook_cover_height,
         monitor_ebook: w.monitor_ebook,
         monitor_audiobook: w.monitor_audiobook,
         added_at: w.added_at.to_rfc3339(),
         library_items: vec![],
         cover_mtime,
+        audiobook_cover_mtime: None,
     }
 }
 

@@ -37,10 +37,9 @@ pub struct WorkServiceImpl<
     db: D,
     enrichment: E,
     http: H,
+    http_client: livrarr_http::HttpClient,
     llm: L,
     data_dir: PathBuf,
-    /// MergeEngine wired at construction. The active enrichment path (EnrichmentServiceImpl)
-    /// performs merge internally; this field is available for future direct-merge call sites.
     #[allow(dead_code)]
     merge_engine: M,
     tag_service: Arc<T>,
@@ -55,6 +54,9 @@ impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm, crate::DefaultMergeEngine, Stu
             db,
             enrichment,
             http,
+            http_client: livrarr_http::HttpClient::builder()
+                .build()
+                .expect("default HttpClient"),
             llm: StubNoLlm,
             data_dir,
             merge_engine: crate::DefaultMergeEngine::new(crate::PriorityModel::english()),
@@ -74,6 +76,9 @@ impl<D, E, H, L> WorkServiceImpl<D, E, H, L, crate::DefaultMergeEngine, StubTagS
             db,
             enrichment,
             http,
+            http_client: livrarr_http::HttpClient::builder()
+                .build()
+                .expect("default HttpClient"),
             llm,
             data_dir,
             merge_engine: crate::DefaultMergeEngine::new(crate::PriorityModel::english()),
@@ -93,6 +98,7 @@ impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T> {
         db: D,
         enrichment: E,
         http: H,
+        http_client: livrarr_http::HttpClient,
         llm: L,
         data_dir: PathBuf,
         merge_engine: M,
@@ -102,6 +108,7 @@ impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T> {
             db,
             enrichment,
             http,
+            http_client,
             llm,
             data_dir,
             merge_engine,
@@ -124,6 +131,9 @@ impl<D, H> WorkServiceImpl<D, (), H> {
             db,
             enrichment: StubNoEnrichment,
             http,
+            http_client: livrarr_http::HttpClient::builder()
+                .build()
+                .expect("default HttpClient"),
             llm: StubNoLlm,
             data_dir,
             merge_engine: crate::DefaultMergeEngine::new(crate::PriorityModel::english()),
@@ -150,6 +160,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
             work: Work::default(),
             merge_deferred: false,
             provider_outcomes: HashMap::new(),
+            cover_resolution: None,
         })
     }
 
@@ -1499,6 +1510,41 @@ where
         author_id: Option<i64>,
         source_provider_data: Option<SourceProviderData>,
     ) -> Result<AddWorkResult, WorkServiceError> {
+        // Phase 1: synchronous cover download within 3s budget (REQ-010).
+        // Downloads the cover to disk immediately so the UI shows an image right away.
+        let is_user_initiated = source_provider_data.is_none();
+        let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
+        let phase1_mtime = crate::cover::fetch_phase1_cover(
+            &self.http,
+            &self.http_client,
+            &work.title,
+            &work.author_name,
+            work.cover_url.as_deref(),
+            None,
+            &covers_dir,
+            work.id,
+        )
+        .await;
+
+        // Assign trust based on how the work was added.
+        if phase1_mtime.is_some() || work.cover_url.is_some() {
+            let is_fallback = phase1_mtime.is_some() && work.cover_url.is_none();
+            let trust = crate::cover_resolution::phase1_trust(is_user_initiated, is_fallback);
+            let source = work.cover_source.as_deref().unwrap_or("add");
+            let _ = self
+                .db
+                .update_cover_metadata(
+                    user_id,
+                    work.id,
+                    work.cover_url.as_deref(),
+                    source,
+                    trust,
+                    0,
+                    0,
+                )
+                .await;
+        }
+
         let enrichment_status = self
             .run_unified_enrichment(user_id, &work, source_provider_data)
             .await;
@@ -1591,22 +1637,36 @@ where
         // (it already ran merge internally via EnrichmentServiceImpl).
         let final_status = enrich_result.enrichment_status;
 
-        // Step 4: Cover download (non-fatal)
-        if !post_enrich_work.cover_manual {
-            if let Some(ref cover_url) = post_enrich_work.cover_url {
-                let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-                if let Err(e) =
-                    download_cover_to_disk(&self.http, cover_url, &covers_dir, work_id, "").await
-                {
-                    tracing::warn!(
+        // Step 4: Trust-aware cover upgrade (non-fatal)
+        let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
+        match crate::cover_resolution::maybe_upgrade_cover(
+            &post_enrich_work,
+            enrich_result.cover_resolution,
+            &covers_dir,
+            &self.http,
+        )
+        .await
+        {
+            Ok(Some(upgrade)) => {
+                if let Err(e) = self
+                    .db
+                    .update_cover_metadata(
+                        user_id,
                         work_id,
-                        "run_unified_enrichment: cover download failed: {e}"
-                    );
-                } else {
-                    // Invalidate thumbnail on successful cover update
-                    let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
-                    let _ = tokio::fs::remove_file(&thumb).await;
+                        Some(&upgrade.url),
+                        &upgrade.source,
+                        upgrade.trust,
+                        upgrade.width as i32,
+                        upgrade.height as i32,
+                    )
+                    .await
+                {
+                    tracing::warn!(work_id, "cover metadata update failed: {e}");
                 }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(work_id, "cover upgrade failed: {e}");
             }
         }
 
@@ -1738,5 +1798,9 @@ pub async fn delete_cover_files(data_dir: &std::path::Path, user_id: i64, work_i
     ] {
         let _ = tokio::fs::remove_file(dir.join(format!("{work_id}.jpg"))).await;
         let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_thumb.jpg"))).await;
+        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_audio.jpg"))).await;
+        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_audio_thumb.jpg"))).await;
+        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}.candidate.tmp"))).await;
+        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_audio.candidate.tmp"))).await;
     }
 }

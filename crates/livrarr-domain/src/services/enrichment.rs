@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DbError, EnrichmentStatus, MetadataProvider, OutcomeClass, Work, WorkId};
+use crate::{
+    CoverResolution, DbError, EnrichmentStatus, MetadataProvider, OutcomeClass, Work, WorkId,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +21,7 @@ pub struct EnrichmentResult {
     pub work: Work,
     pub merge_deferred: bool,
     pub provider_outcomes: HashMap<MetadataProvider, OutcomeClass>,
+    pub cover_resolution: Option<CoverResolution>,
 }
 
 #[derive(Debug, thiserror::Error)]

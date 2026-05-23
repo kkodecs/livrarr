@@ -156,8 +156,27 @@ export const updateWork = (id: number, req: UpdateWorkRequest) =>
     method: "PUT",
     body: JSON.stringify(req),
   });
-export const uploadWorkCover = (id: number, imageData: Blob) =>
-  apiUpload<void>(`/work/${id}/cover`, imageData);
+export const uploadWorkCover = (id: number, imageData: Blob, mediaType: string = "ebook") =>
+  apiUpload<void>(`/work/${id}/cover/upload?media_type=${mediaType}`, imageData);
+
+export interface CoverCandidate {
+  candidateId: string;
+  proxyUrl: string;
+  source: string;
+  mediaType: string;
+  width: number;
+  height: number;
+  passesQualityGate: boolean;
+}
+
+export const getCoverAlternatives = (workId: number) =>
+  apiFetch<CoverCandidate[]>(`/work/${workId}/cover/alternatives`);
+
+export const selectCover = (workId: number, candidateId: string, mediaType: string) =>
+  apiFetch<void>(`/work/${workId}/cover/select`, {
+    method: "POST",
+    body: JSON.stringify({ candidateId, mediaType }),
+  });
 export const deleteWork = (id: number, deleteFiles: boolean) =>
   apiFetch<DeleteWorkResponse>(`/work/${id}?deleteFiles=${deleteFiles}`, {
     method: "DELETE",

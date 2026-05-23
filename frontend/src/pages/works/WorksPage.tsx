@@ -415,6 +415,7 @@ export function WorksPage() {
                 allSelected={allSelected}
                 onToggleAll={toggleSelectAll}
                 activeGrabs={activeGrabs}
+                coverMediaType={mediaTypeFilter === "audiobook" ? "audiobook" as const : undefined}
               />
             )}
             {worksView === "poster" && (
@@ -425,6 +426,7 @@ export function WorksPage() {
                 onToggle={toggleSelection}
                 columns={posterZoom}
                 activeGrabs={activeGrabs}
+                coverMediaType={mediaTypeFilter === "audiobook" ? "audiobook" as const : undefined}
               />
             )}
             {worksView === "overview" && (
@@ -434,6 +436,7 @@ export function WorksPage() {
                 selectedIds={selectedIds}
                 onToggle={toggleSelection}
                 activeGrabs={activeGrabs}
+                coverMediaType={mediaTypeFilter === "audiobook" ? "audiobook" as const : undefined}
               />
             )}
 
@@ -595,6 +598,7 @@ function TableView({
   allSelected,
   onToggleAll,
   activeGrabs,
+  coverMediaType,
 }: {
   works: WorkDetailResponse[];
   sort: WorkSortField;
@@ -606,6 +610,7 @@ function TableView({
   allSelected: boolean;
   onToggleAll: () => void;
   activeGrabs: Set<string>;
+  coverMediaType?: "ebook" | "audiobook";
 }) {
   return (
     <div className="overflow-x-auto">
@@ -650,6 +655,7 @@ function TableView({
                     title={work.title}
                     authorName={work.authorName}
                     coverVersion={work.coverMtime ?? undefined}
+                    mediaType={coverMediaType}
                     className="h-8 w-8"
                     iconSize={12}
                   />
@@ -699,6 +705,7 @@ function PosterView({
   onToggle,
   columns,
   activeGrabs,
+  coverMediaType,
 }: {
   works: WorkDetailResponse[];
   editorMode: boolean;
@@ -706,6 +713,7 @@ function PosterView({
   onToggle: (id: number) => void;
   columns: number;
   activeGrabs: Set<string>;
+  coverMediaType?: "ebook" | "audiobook";
 }) {
   const navigate = useNavigate();
 
@@ -737,6 +745,7 @@ function PosterView({
                   title={work.title}
                   authorName={work.authorName}
                   coverVersion={work.coverMtime ?? undefined}
+                  mediaType={coverMediaType}
                   className="h-full w-full"
                   iconSize={24}
                 />
@@ -776,12 +785,14 @@ function OverviewView({
   selectedIds,
   onToggle,
   activeGrabs,
+  coverMediaType,
 }: {
   works: WorkDetailResponse[];
   editorMode: boolean;
   selectedIds: Set<number>;
   onToggle: (id: number) => void;
   activeGrabs: Set<string>;
+  coverMediaType?: "ebook" | "audiobook";
 }) {
   const navigate = useNavigate();
 
@@ -815,6 +826,7 @@ function OverviewView({
                 title={work.title}
                 authorName={work.authorName}
                 coverVersion={work.coverMtime ?? undefined}
+                mediaType={coverMediaType}
                 className="h-20 w-14 sm:h-28 sm:w-20 flex-shrink-0"
                 iconSize={18}
               />

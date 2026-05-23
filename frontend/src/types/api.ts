@@ -212,6 +212,15 @@ export interface WorkDetailResponse {
   enrichedAt: string | null;
   enrichmentSource: string | null;
   coverManual: boolean;
+  coverSource: string | null;
+  coverTrust: string;
+  coverWidth: number;
+  coverHeight: number;
+  audiobookCoverUrl: string | null;
+  audiobookCoverSource: string | null;
+  audiobookCoverTrust: string;
+  audiobookCoverWidth: number;
+  audiobookCoverHeight: number;
   monitorEbook: boolean;
   monitorAudiobook: boolean;
   addedAt: string;
@@ -219,6 +228,7 @@ export interface WorkDetailResponse {
   metadataSource?: string | null;
   detailUrl?: string | null;
   coverMtime?: number | null;
+  audiobookCoverMtime?: number | null;
 }
 
 export interface LibraryItemResponse {

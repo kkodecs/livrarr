@@ -1,11 +1,11 @@
 use livrarr_domain::services::{
-    AppConfigService, AuthorMonitorWorkflow, AuthorService, DownloadClientCredentialService,
-    DownloadClientSettingsService, EmailService, EnrichmentWorkflow, FileService, GrabService,
-    HistoryService, IdentityConflictService, IdentityResolver, ImportIoService, ImportService,
-    ImportWorkflow, IndexerCredentialService, IndexerSettingsService, ListService,
-    ManualImportService, MatchingService, NotificationService, QueueService, ReadarrImportWorkflow,
-    ReleaseService, RemotePathMappingService, RootFolderService, RssSyncWorkflow,
-    SeriesQueryService, SeriesService, TagService, WorkService,
+    AppConfigService, AuthorMonitorWorkflow, AuthorService, CoverService,
+    DownloadClientCredentialService, DownloadClientSettingsService, EmailService,
+    EnrichmentWorkflow, FileService, GrabService, HistoryService, IdentityConflictService,
+    IdentityResolver, ImportIoService, ImportService, ImportWorkflow, IndexerCredentialService,
+    IndexerSettingsService, ListService, ManualImportService, MatchingService, NotificationService,
+    QueueService, ReadarrImportWorkflow, ReleaseService, RemotePathMappingService,
+    RootFolderService, RssSyncWorkflow, SeriesQueryService, SeriesService, TagService, WorkService,
 };
 use livrarr_http::HttpClient;
 
@@ -230,6 +230,15 @@ pub trait HasEnrichmentNotify: Clone + Send + Sync + 'static {
     fn enrichment_notify(&self) -> &tokio::sync::Notify;
 }
 
+pub trait HasCoverService: Clone + Send + Sync + 'static {
+    type CoverSvc: CoverService + Send + Sync + 'static;
+    fn cover_service(&self) -> &Self::CoverSvc;
+}
+
+pub trait HasHmacKey: Clone + Send + Sync + 'static {
+    fn hmac_key(&self) -> &[u8];
+}
+
 // =============================================================================
 // AppContext — supertrait union of all capability traits
 // =============================================================================
@@ -277,6 +286,8 @@ pub trait AppContext:
     + HasSystem
     + HasCoverCache
     + HasEnrichmentNotify
+    + HasCoverService
+    + HasHmacKey
 {
 }
 
@@ -323,5 +334,7 @@ impl<T> AppContext for T where
         + HasSystem
         + HasCoverCache
         + HasEnrichmentNotify
+        + HasCoverService
+        + HasHmacKey
 {
 }

@@ -133,6 +133,31 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
         cover_manual: row
             .try_get::<bool, _>("cover_manual")
             .map_err(|e| DbError::Io(Box::new(e)))?,
+        cover_source: row.try_get("cover_source").unwrap_or(None),
+        cover_trust: row
+            .try_get::<String, _>("cover_trust")
+            .ok()
+            .map(|s| match s.as_str() {
+                "user" => livrarr_domain::CoverTrust::User,
+                "validated" => livrarr_domain::CoverTrust::Validated,
+                _ => livrarr_domain::CoverTrust::Unvalidated,
+            })
+            .unwrap_or_default(),
+        cover_width: row.try_get("cover_width").unwrap_or(0),
+        cover_height: row.try_get("cover_height").unwrap_or(0),
+        audiobook_cover_url: row.try_get("audiobook_cover_url").unwrap_or(None),
+        audiobook_cover_source: row.try_get("audiobook_cover_source").unwrap_or(None),
+        audiobook_cover_trust: row
+            .try_get::<String, _>("audiobook_cover_trust")
+            .ok()
+            .map(|s| match s.as_str() {
+                "user" => livrarr_domain::CoverTrust::User,
+                "validated" => livrarr_domain::CoverTrust::Validated,
+                _ => livrarr_domain::CoverTrust::Unvalidated,
+            })
+            .unwrap_or_default(),
+        audiobook_cover_width: row.try_get("audiobook_cover_width").unwrap_or(0),
+        audiobook_cover_height: row.try_get("audiobook_cover_height").unwrap_or(0),
         monitor_ebook: row
             .try_get::<bool, _>("monitor_ebook")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -484,6 +509,102 @@ impl WorkDb for SqliteDb {
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound { entity: "work" });
         }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_cover_metadata(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        cover_url: Option<&str>,
+        cover_source: &str,
+        cover_trust: livrarr_domain::CoverTrust,
+        cover_width: i32,
+        cover_height: i32,
+    ) -> Result<(), DbError> {
+        let trust_str = match cover_trust {
+            livrarr_domain::CoverTrust::User => "user",
+            livrarr_domain::CoverTrust::Validated => "validated",
+            livrarr_domain::CoverTrust::Unvalidated => "unvalidated",
+        };
+        let cover_manual = cover_trust == livrarr_domain::CoverTrust::User;
+        let result = sqlx::query(
+            "UPDATE works SET cover_url = ?, cover_source = ?, cover_trust = ?, \
+             cover_width = ?, cover_height = ?, cover_manual = ? \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(cover_url)
+        .bind(cover_source)
+        .bind(trust_str)
+        .bind(cover_width)
+        .bind(cover_height)
+        .bind(cover_manual)
+        .bind(work_id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound { entity: "work" });
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_audiobook_cover_metadata(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        audiobook_cover_url: Option<&str>,
+        audiobook_cover_source: &str,
+        audiobook_cover_trust: livrarr_domain::CoverTrust,
+        audiobook_cover_width: i32,
+        audiobook_cover_height: i32,
+    ) -> Result<(), DbError> {
+        let trust_str = match audiobook_cover_trust {
+            livrarr_domain::CoverTrust::User => "user",
+            livrarr_domain::CoverTrust::Validated => "validated",
+            livrarr_domain::CoverTrust::Unvalidated => "unvalidated",
+        };
+        let result = sqlx::query(
+            "UPDATE works SET audiobook_cover_url = ?, audiobook_cover_source = ?, \
+             audiobook_cover_trust = ?, audiobook_cover_width = ?, audiobook_cover_height = ? \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(audiobook_cover_url)
+        .bind(audiobook_cover_source)
+        .bind(trust_str)
+        .bind(audiobook_cover_width)
+        .bind(audiobook_cover_height)
+        .bind(work_id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound { entity: "work" });
+        }
+        Ok(())
+    }
+
+    async fn update_cover_dimensions(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE works SET cover_width = ?, cover_height = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(width)
+        .bind(height)
+        .bind(work_id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
         Ok(())
     }
 

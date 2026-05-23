@@ -965,10 +965,11 @@ async fn test_merge_engine_english_priority_model_uses_documented_provider_order
         resolved(&output).description.as_deref(),
         Some("gr description")
     );
-    assert_eq!(
-        resolved(&output).cover_url.as_deref(),
-        Some("https://example.test/hc-cover.jpg")
-    );
+    let cover = output
+        .cover_resolution
+        .as_ref()
+        .expect("should resolve a cover");
+    assert_eq!(cover.url, "https://example.test/hc-cover.jpg");
 }
 
 #[tokio::test]
@@ -1010,10 +1011,11 @@ async fn test_merge_engine_foreign_priority_model_uses_gr_only() {
         resolved(&output).description.as_deref(),
         Some("gr description")
     );
-    assert_eq!(
-        resolved(&output).cover_url.as_deref(),
-        Some("https://example.test/gr-cover.jpg")
-    );
+    let cover = output
+        .cover_resolution
+        .as_ref()
+        .expect("should resolve a cover");
+    assert_eq!(cover.url, "https://example.test/gr-cover.jpg");
 }
 
 #[tokio::test]

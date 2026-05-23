@@ -1,6 +1,7 @@
 mod app_config;
 mod author;
 mod common;
+mod cover;
 mod download_client_credentials;
 mod download_client_settings;
 mod email;
@@ -35,6 +36,7 @@ mod work_identity;
 pub use app_config::*;
 pub use author::*;
 pub use common::*;
+pub use cover::*;
 pub use download_client_credentials::*;
 pub use download_client_settings::*;
 pub use email::*;

@@ -72,6 +72,7 @@ where
             work: result.work,
             merge_deferred: result.merge_deferred,
             provider_outcomes: result.provider_outcomes,
+            cover_resolution: result.cover_resolution,
         })
     }
 

@@ -502,18 +502,35 @@ impl GoodreadsClient {
         work: &Work,
         _ctx: &EnrichmentContext,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
+        let had_gr_key = work.gr_key.as_deref().is_some_and(|k| !k.is_empty());
         let detail_url = match self.resolve_detail_url(work).await {
             Ok(Some(url)) => url,
             Ok(None) => return ProviderOutcome::NotFound,
             Err(err) => return self.map_fetch_err(err),
         };
 
+        // Extract gr_key from the resolved URL so we can persist it even if page fetch fails.
+        let resolved_gr_key = goodreads::extract_gr_key(&detail_url);
+
         // Direct parse path. On Parse failure, optionally fall through to
         // LLM extraction if configured (typical for foreign-language pages
         // where JSON-LD / regex don't match the locale-specific HTML).
         let html = match goodreads::fetch_goodreads_html(&self.http, &detail_url).await {
             Ok(h) => h,
-            Err(err) => return self.map_fetch_err(err),
+            Err(err) => {
+                // Page fetch failed, but if we resolved a new gr_key via LLM,
+                // return a minimal Success so the merge engine persists the key.
+                if !had_gr_key {
+                    if let Some(ref key) = resolved_gr_key {
+                        tracing::info!(gr_key = %key, "GR page fetch failed but persisting LLM-resolved key");
+                        return ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
+                            gr_key: Some(key.clone()),
+                            ..Default::default()
+                        }));
+                    }
+                }
+                return self.map_fetch_err(err);
+            }
         };
 
         if let Some(detail) = goodreads::parse_detail_html(&html) {
@@ -558,38 +575,58 @@ impl GoodreadsClient {
                 .await
                 {
                     Ok(mut payload) => {
-                        // Normalize gr_key from the resolved URL — the LLM
-                        // doesn't know our identifier scheme.
                         if payload.gr_key.is_none() {
-                            payload.gr_key = goodreads::extract_gr_key(&detail_url);
+                            payload.gr_key = resolved_gr_key;
                         }
                         return ProviderOutcome::Success(Box::new(payload));
                     }
-                    Err(GoodreadsFetchError::Parse) => return ProviderOutcome::NotFound,
+                    Err(GoodreadsFetchError::Parse) => {}
                     Err(err) => return self.map_fetch_err(err),
                 }
             }
         }
 
-        // No LLM configured + direct parse failed → NotFound.
+        // All parse paths failed. If we have a new LLM-resolved key, persist it.
+        if !had_gr_key {
+            if let Some(ref key) = resolved_gr_key {
+                tracing::info!(gr_key = %key, "GR parse failed but persisting LLM-resolved key");
+                return ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
+                    gr_key: Some(key.clone()),
+                    ..Default::default()
+                }));
+            }
+        }
+
         ProviderOutcome::NotFound
     }
 
     async fn resolve_detail_url(&self, work: &Work) -> Result<Option<String>, GoodreadsFetchError> {
-        // Priority order:
-        //   1. work.gr_key — canonical GR identity (R-21).
-        //   2. work.detail_url — typically set on foreign-work add (the GR
-        //      URL the user picked from the foreign search results).
-        //   3. Search by title+author with ASCII-strip diacritics fallback.
+        // 1. work.gr_key — canonical GR identity.
         if let Some(key) = work.gr_key.as_deref().filter(|k| !k.is_empty()) {
             return Ok(Some(goodreads::detail_url_for_gr_key(&self.base_url, key)));
         }
 
-        // detail_url removed from Work struct (Phase 1) — provider routing
-        // now relies solely on gr_key for direct Goodreads lookups.
-
         let title = &work.title;
         let author = &work.author_name;
+
+        // 2. Ask LLM for the GR key directly — fast, no scraping.
+        if let Some(live) = &self.live_config {
+            let cfg = live.snapshot();
+            match gr_llm_key_lookup(&self.http, cfg.as_ref(), title, author).await {
+                Ok(Some(key)) => {
+                    tracing::info!(title = %title, gr_key = %key, "LLM resolved GR key directly");
+                    return Ok(Some(goodreads::detail_url_for_gr_key(&self.base_url, &key)));
+                }
+                Ok(None) => {
+                    tracing::debug!(title = %title, "LLM returned no GR key");
+                }
+                Err(e) => {
+                    tracing::debug!(title = %title, error = %e, "LLM GR key lookup unavailable");
+                }
+            }
+        }
+
+        // 3. Fallback: search GR by title+author + LLM disambiguation.
         let mut hits =
             goodreads::search_goodreads(&self.http, &self.base_url, title, author).await?;
 
@@ -606,9 +643,6 @@ impl GoodreadsClient {
             return Ok(None);
         }
 
-        // GR search results require LLM disambiguation — GR's data includes
-        // study guides, summaries, and companion books with identical
-        // title+author that can't be filtered by exact matching alone.
         if let Some(live) = &self.live_config {
             let cfg = live.snapshot();
             match gr_llm_disambiguate(&self.http, cfg.as_ref(), title, author, &hits).await {
@@ -628,7 +662,6 @@ impl GoodreadsClient {
             }
         }
 
-        // No LLM available — skip GR for this work rather than guess.
         Ok(None)
     }
 
@@ -817,6 +850,91 @@ async fn gr_llm_disambiguate(
             tracing::warn!(answer = %answer, "GR LLM returned unparseable disambiguation result");
             Ok(None)
         }
+    }
+}
+
+async fn gr_llm_key_lookup(
+    http: &HttpClient,
+    cfg: &livrarr_domain::settings::MetadataConfig,
+    title: &str,
+    author: &str,
+) -> Result<Option<String>, String> {
+    if !cfg.llm_enabled {
+        return Err("LLM disabled".into());
+    }
+    let endpoint = cfg
+        .llm_endpoint
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or("LLM not configured")?;
+    let api_key = cfg
+        .llm_api_key
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or("LLM API key not configured")?;
+    let model = cfg
+        .llm_model
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or("LLM model not configured")?;
+
+    let prompt = format!(
+        "What is the Goodreads numeric book ID for \"{title}\" by {author}? \
+         Return ONLY a JSON object: {{\"gr_id\": \"<numeric_id>\"}}. \
+         IMPORTANT: If you are not confident you have the correct ID, \
+         return {{\"gr_id\": null}}. Do NOT guess or fabricate an ID. \
+         A wrong ID is worse than no ID. No explanation."
+    );
+
+    let url = format!(
+        "{}chat/completions",
+        endpoint.trim_end_matches('/').to_owned() + "/"
+    );
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 30,
+        "temperature": 0.0,
+    });
+
+    let resp = http
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("LLM request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM HTTP {status}: {text}"));
+    }
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("LLM parse error: {e}"))?;
+
+    let answer = data
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(answer);
+    let gr_id = parsed
+        .ok()
+        .and_then(|v| v.get("gr_id")?.as_str().map(String::from));
+
+    match gr_id {
+        Some(id) if !id.is_empty() && id != "null" => {
+            tracing::debug!(title = %title, gr_key = %id, "LLM provided GR key");
+            Ok(Some(id))
+        }
+        _ => Ok(None),
     }
 }
 

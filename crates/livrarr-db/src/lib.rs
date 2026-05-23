@@ -235,6 +235,38 @@ pub trait WorkDb: Send + Sync {
         manual: bool,
     ) -> Result<(), DbError>;
 
+    #[allow(clippy::too_many_arguments)]
+    async fn update_cover_metadata(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        cover_url: Option<&str>,
+        cover_source: &str,
+        cover_trust: livrarr_domain::CoverTrust,
+        cover_width: i32,
+        cover_height: i32,
+    ) -> Result<(), DbError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_audiobook_cover_metadata(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        audiobook_cover_url: Option<&str>,
+        audiobook_cover_source: &str,
+        audiobook_cover_trust: livrarr_domain::CoverTrust,
+        audiobook_cover_width: i32,
+        audiobook_cover_height: i32,
+    ) -> Result<(), DbError>;
+
+    async fn update_cover_dimensions(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DbError>;
+
     /// Delete work. Returns deleted work for file cleanup.
     async fn delete_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError>;
 

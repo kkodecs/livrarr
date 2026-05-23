@@ -83,7 +83,7 @@ export function AudioPlayer({
   }, [skipFwd]);
 
   const streamUrl = getStreamUrl(libraryItemId);
-  const coverUrl = `/api/v1/mediacover/${workId}/cover.jpg`;
+  const coverUrl = `/api/v1/mediacover/${workId}/audiocover.jpg`;
 
   // Load saved progress.
   useEffect(() => {
@@ -340,11 +340,11 @@ export function AudioPlayer({
       {/* Main content */}
       <div className="flex flex-1 flex-col items-center justify-center gap-8 px-8">
         {/* Cover */}
-        <div className="h-64 w-64 overflow-hidden rounded-lg bg-zinc-800 shadow-2xl">
+        <div className="flex max-h-80 max-w-64 items-center justify-center overflow-hidden rounded-lg bg-zinc-800 shadow-2xl">
           <img
             src={coverUrl}
             alt={workTitle}
-            className="h-full w-full object-cover"
+            className="max-h-80 max-w-64 object-contain"
             onError={(e) => {
               (e.target as HTMLImageElement).style.display = "none";
             }}

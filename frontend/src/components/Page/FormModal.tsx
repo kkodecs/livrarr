@@ -17,7 +17,7 @@ export function FormModal({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-zinc-800 p-6 shadow-xl max-h-[85vh] overflow-y-auto">
+        <Dialog.Content aria-describedby={undefined} className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-zinc-800 p-6 shadow-xl max-h-[85vh] overflow-y-auto">
           <div className="flex items-start justify-between">
             <Dialog.Title className="text-lg font-semibold text-zinc-100">
               {title}

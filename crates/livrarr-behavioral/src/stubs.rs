@@ -201,6 +201,7 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
             work: Work::default(),
             merge_deferred: false,
             provider_outcomes: HashMap::new(),
+            cover_resolution: None,
         })
     }
 

@@ -104,6 +104,7 @@ pub type LiveRssSyncWorkflow = livrarr_metadata::rss_sync_workflow::RssSyncWorkf
     livrarr_http::fetcher::HttpFetcherImpl,
     LiveReleaseService,
 >;
+pub type LiveCoverService = crate::cover_service::LiveCoverService;
 pub type LiveNotificationService = crate::notification_service::NotificationServiceImpl<SqliteDb>;
 pub type LiveHistoryService = crate::history_service::HistoryServiceImpl<SqliteDb>;
 pub type LiveQueueService = crate::queue_service::QueueServiceImpl<SqliteDb>;
@@ -201,6 +202,8 @@ pub struct AppState {
     pub manual_import_scan_svc: crate::manual_import_scan_service::LiveManualImportScanService,
     pub readarr_import_wf: Arc<crate::readarr_import_workflow::LiveReadarrImportWorkflow>,
     pub enrichment_notify: Arc<tokio::sync::Notify>,
+    pub cover_service: Arc<LiveCoverService>,
+    pub hmac_key: Vec<u8>,
 }
 
 // =============================================================================
@@ -289,15 +292,16 @@ impl livrarr_handlers::accessors::CoverProxyCacheAccessor for CoverProxyCacheAcc
 
 use livrarr_handlers::context::{
     HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasCoverCache,
-    HasDataDir, HasDownloadClientCredentialService, HasDownloadClientSettingsService,
-    HasEmailService, HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasGrabService,
-    HasHistoryService, HasHttpClient, HasIdentityConflictService, HasIdentityResolver,
-    HasImportIoService, HasImportService, HasImportWorkflow, HasIndexerCredentialService,
-    HasIndexerSettingsService, HasListService, HasLiveConfig, HasManualImportScan,
-    HasManualImportService, HasMatchingService, HasNotificationService, HasProviderHealth,
-    HasQueueService, HasReadarrImportWorkflow, HasReleaseService, HasRemotePathMappingService,
-    HasRootFolderService, HasRssSync, HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService,
-    HasStartupTime, HasSystem, HasTagService, HasWorkService,
+    HasCoverService, HasDataDir, HasDownloadClientCredentialService,
+    HasDownloadClientSettingsService, HasEmailService, HasEnrichmentNotify, HasEnrichmentWorkflow,
+    HasFileService, HasGrabService, HasHistoryService, HasHmacKey, HasHttpClient,
+    HasIdentityConflictService, HasIdentityResolver, HasImportIoService, HasImportService,
+    HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService, HasListService,
+    HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
+    HasNotificationService, HasProviderHealth, HasQueueService, HasReadarrImportWorkflow,
+    HasReleaseService, HasRemotePathMappingService, HasRootFolderService, HasRssSync,
+    HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem,
+    HasTagService, HasWorkService,
 };
 
 impl HasWorkService for AppState {
@@ -591,6 +595,19 @@ impl HasCoverCache for AppState {
 impl HasEnrichmentNotify for AppState {
     fn enrichment_notify(&self) -> &tokio::sync::Notify {
         &self.enrichment_notify
+    }
+}
+
+impl HasCoverService for AppState {
+    type CoverSvc = LiveCoverService;
+    fn cover_service(&self) -> &Self::CoverSvc {
+        &self.cover_service
+    }
+}
+
+impl HasHmacKey for AppState {
+    fn hmac_key(&self) -> &[u8] {
+        &self.hmac_key
     }
 }
 

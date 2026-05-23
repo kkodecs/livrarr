@@ -158,6 +158,7 @@ pub mod api_secondary_impl;
 pub mod auth_crypto;
 pub mod auth_service;
 pub mod config;
+pub mod cover_service;
 pub mod infra;
 pub mod jobs;
 pub mod rate_limit;

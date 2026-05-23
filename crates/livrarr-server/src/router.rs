@@ -241,8 +241,16 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
                 .delete(livrarr_handlers::work::delete::<AppState>),
         )
         .route(
-            "/work/{id}/cover",
-            post(livrarr_handlers::work::upload_cover::<AppState>)
+            "/work/{id}/cover/alternatives",
+            get(livrarr_handlers::cover::get_cover_alternatives::<AppState>),
+        )
+        .route(
+            "/work/{id}/cover/select",
+            post(livrarr_handlers::cover::select_cover_handler::<AppState>),
+        )
+        .route(
+            "/work/{id}/cover/upload",
+            post(livrarr_handlers::cover::upload_cover_handler::<AppState>)
                 .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .route(
@@ -481,6 +489,14 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .route(
             "/mediacover/{id}/thumb.jpg",
             get(livrarr_handlers::mediacover::get_thumb::<AppState>),
+        )
+        .route(
+            "/mediacover/{id}/audiocover.jpg",
+            get(livrarr_handlers::cover::get_audiobook_cover::<AppState>),
+        )
+        .route(
+            "/mediacover/{id}/audiocover_thumb.jpg",
+            get(livrarr_handlers::cover::get_audiobook_thumb::<AppState>),
         );
 
     // Cover proxy requires auth (user-supplied URLs → SSRF surface).

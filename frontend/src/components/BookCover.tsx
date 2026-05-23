@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from "react";
-import { BookOpen, Loader2 } from "lucide-react";
+import { useState } from "react";
+import { BookOpen } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { getCoverUrl } from "@/utils/format";
 
@@ -10,10 +10,8 @@ interface BookCoverProps {
   className?: string;
   iconSize?: number;
   coverVersion?: number;
+  mediaType?: "ebook" | "audiobook";
 }
-
-const MAX_RETRIES = 8;
-const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000, 12000, 20000, 30000];
 
 const FAUX_COLORS = [
   "from-indigo-900 to-indigo-700",
@@ -26,8 +24,6 @@ const FAUX_COLORS = [
   "from-orange-900 to-orange-700",
 ];
 
-type CoverState = "loading" | "loaded" | "retrying" | "failed";
-
 export function BookCover({
   workId,
   title,
@@ -35,55 +31,12 @@ export function BookCover({
   className = "h-16 w-11",
   iconSize = 16,
   coverVersion,
+  mediaType,
 }: BookCoverProps) {
-  const [state, setState] = useState<CoverState>("loading");
-  const [resolvedSrc, setResolvedSrc] = useState<string | null>(null);
-  const retryCount = useRef(0);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [failed, setFailed] = useState(false);
+  const src = getCoverUrl(workId, coverVersion, mediaType);
 
-  useEffect(() => {
-    let cancelled = false;
-    retryCount.current = 0;
-    setState("loading");
-    setResolvedSrc(null);
-
-    function attempt() {
-      const cacheBust =
-        retryCount.current > 0
-          ? `&_r=${retryCount.current}&_t=${Date.now()}`
-          : "";
-      const url = getCoverUrl(workId, coverVersion) + cacheBust;
-
-      const img = new Image();
-      img.onload = () => {
-        if (!cancelled) {
-          setResolvedSrc(url);
-          setState("loaded");
-        }
-      };
-      img.onerror = () => {
-        if (cancelled) return;
-        if (retryCount.current < MAX_RETRIES) {
-          setState("retrying");
-          const delay = RETRY_DELAYS[retryCount.current] ?? 30000;
-          retryCount.current += 1;
-          timerRef.current = setTimeout(attempt, delay);
-        } else {
-          setState("failed");
-        }
-      };
-      img.src = url;
-    }
-
-    attempt();
-
-    return () => {
-      cancelled = true;
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [workId, coverVersion]);
-
-  if (state === "loaded" && resolvedSrc) {
+  if (!failed) {
     return (
       <div
         className={cn(
@@ -92,22 +45,22 @@ export function BookCover({
         )}
       >
         <img
-          src={resolvedSrc}
+          src={src}
           alt=""
           aria-hidden
           className="absolute inset-0 h-full w-full object-cover blur-xl scale-125"
         />
         <img
-          src={resolvedSrc}
+          src={src}
           alt={title ?? ""}
           className="relative h-full w-full object-contain"
+          onError={() => setFailed(true)}
         />
       </div>
     );
   }
 
   const colorClass = FAUX_COLORS[workId % FAUX_COLORS.length];
-  const showSpinner = state === "loading" || state === "retrying";
 
   return (
     <div
@@ -130,12 +83,6 @@ export function BookCover({
         </>
       ) : (
         <BookOpen size={iconSize} className="text-zinc-500" />
-      )}
-      {showSpinner && (
-        <Loader2
-          className="animate-spin text-zinc-400"
-          style={{ width: "15%", height: "15%" }}
-        />
       )}
     </div>
   );

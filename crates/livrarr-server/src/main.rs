@@ -160,6 +160,8 @@ async fn main() {
         .ssrf_safe(true)
         .build()
         .expect("failed to build SSRF-safe HTTP client");
+    let http_fetcher =
+        livrarr_http::fetcher::HttpFetcherImpl::new().expect("failed to build HTTP fetcher");
     let job_runner = livrarr_server::jobs::JobRunner::new();
 
     // Phase 1.5 plumbing: build the live DefaultProviderQueue + EnrichmentServiceImpl
@@ -411,6 +413,7 @@ async fn main() {
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for work service"),
+                http_client.clone(),
                 livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
@@ -423,6 +426,47 @@ async fn main() {
             ),
         )
     };
+    // Cover service + HMAC key
+    let hmac_key = livrarr_server::cover_service::generate_hmac_key();
+    let cover_service = {
+        use livrarr_domain::MetadataProvider as P;
+        use livrarr_metadata as m;
+        let mut clients = std::collections::HashMap::new();
+        clients.insert(
+            P::Audnexus,
+            m::ProviderClient::Audnexus(m::AudnexusClient::new(
+                http_client.clone(),
+                live_metadata_config.snapshot().audnexus_url.clone(),
+            )),
+        );
+        clients.insert(
+            P::OpenLibrary,
+            m::ProviderClient::OpenLibrary(m::OpenLibraryClient::new(http_client.clone())),
+        );
+        clients.insert(
+            P::Hardcover,
+            m::ProviderClient::Hardcover(m::HardcoverClient::new(
+                http_client.clone(),
+                live_metadata_config.clone(),
+            )),
+        );
+        clients.insert(
+            P::Goodreads,
+            m::ProviderClient::Goodreads(
+                m::GoodreadsClient::production(http_client.clone())
+                    .with_live_config(live_metadata_config.clone()),
+            ),
+        );
+        Arc::new(livrarr_server::cover_service::LiveCoverService::new(
+            db.clone(),
+            http_client.clone(),
+            http_fetcher.clone(),
+            clients,
+            hmac_key.clone(),
+            data_dir_arc.clone(),
+        ))
+    };
+    let http_client_for_services = http_client.clone();
     let state = AppState {
         db,
         auth_service,
@@ -519,6 +563,7 @@ async fn main() {
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for list work service"),
+                http_client_for_services.clone(),
                 livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
@@ -584,6 +629,7 @@ async fn main() {
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for author monitor work service"),
+                http_client_for_services.clone(),
                 livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
@@ -677,6 +723,8 @@ async fn main() {
             ),
         ),
         enrichment_notify: Arc::new(tokio::sync::Notify::new()),
+        cover_service,
+        hmac_key,
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).

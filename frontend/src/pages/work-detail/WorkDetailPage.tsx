@@ -23,6 +23,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Mail,
+  ImagePlus,
+  Upload,
 } from "lucide-react";
 import {
   getWork,
@@ -30,6 +32,9 @@ import {
   updateWork,
   deleteWork,
   uploadWorkCover,
+  getCoverAlternatives,
+  selectCover,
+  type CoverCandidate,
   searchReleases,
   grabRelease,
   getHistory,
@@ -203,6 +208,7 @@ export default function WorkDetailPage() {
               [field]: !work[field],
             } as UpdateWorkRequest)
           }
+          onEditCover={() => setEditOpen(true)}
         />
 
         <Tabs.Root defaultValue={initialTab} className="mt-6">
@@ -261,10 +267,12 @@ function WorkHeader({
   work,
   activeGrabs,
   onToggleMonitor,
+  onEditCover,
 }: {
   work: WorkDetailResponse;
   activeGrabs: Set<string>;
   onToggleMonitor: (field: "monitorEbook" | "monitorAudiobook") => void;
+  onEditCover: () => void;
 }) {
   const ebookItems = work.libraryItems?.filter((li) => li.mediaType === "ebook") ?? [];
   const audioItems = work.libraryItems?.filter((li) => li.mediaType === "audiobook") ?? [];
@@ -288,35 +296,73 @@ function WorkHeader({
   const ebook = monitorStatus(work.monitorEbook, ebookItems.length > 0, ebookSize, ebookDownloading);
   const audio = monitorStatus(work.monitorAudiobook, audioItems.length > 0, audioSize, audioDownloading);
 
+  const hasAudioFiles = audioItems.length > 0;
+  const hasDedicatedAudioCover = !!work.audiobookCoverUrl;
+  const showSeparateAudioCover = hasAudioFiles && hasDedicatedAudioCover;
+
   return (
     <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start sm:gap-6">
-      <div className="relative group h-[200px] w-[133px] sm:h-[300px] sm:w-[200px] flex-shrink-0">
-        <BookCover
-          workId={work.id}
-          title={work.title}
-          authorName={work.authorName}
-          coverVersion={work.coverMtime ?? undefined}
-          className="h-full w-full rounded-lg shadow-lg"
-          iconSize={32}
-        />
-        {(ebookItems.length > 0 || audioItems.length > 0) && (
-          <div className="absolute inset-0 flex items-center justify-center gap-4 opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 rounded-lg">
-            {ebookItems[0] && (
-              <Link
-                to={`/read/${ebookItems[0].id}`}
-                className="rounded-full bg-black/60 p-3 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
-              >
-                <BookOpen size={24} />
-              </Link>
+      <div className="flex gap-3 flex-shrink-0 order-first sm:order-last">
+        <div className="flex flex-col items-center gap-1">
+          <div className="relative group h-[200px] w-[133px] sm:h-[300px] sm:w-[200px]">
+            <BookCover
+              workId={work.id}
+              title={work.title}
+              authorName={work.authorName}
+              coverVersion={work.coverMtime ?? undefined}
+              className="h-full w-full rounded-lg shadow-lg"
+              iconSize={32}
+            />
+            {(ebookItems.length > 0 || audioItems.length > 0) && (
+              <div className="absolute inset-0 flex items-center justify-center gap-4 opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 rounded-lg">
+                {ebookItems[0] && (
+                  <Link
+                    to={`/read/${ebookItems[0].id}`}
+                    className="rounded-full bg-black/60 p-3 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
+                  >
+                    <BookOpen size={24} />
+                  </Link>
+                )}
+                {audioItems[0] && (
+                  <Link
+                    to={`/listen/${audioItems[0].id}?workId=${work.id}`}
+                    className="rounded-full bg-black/60 p-3 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
+                  >
+                    <Headphones size={24} />
+                  </Link>
+                )}
+              </div>
             )}
-            {audioItems[0] && (
-              <Link
-                to={`/listen/${audioItems[0].id}?workId=${work.id}`}
-                className="rounded-full bg-black/60 p-3 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
-              >
-                <Headphones size={24} />
-              </Link>
-            )}
+          </div>
+          <span className="text-[10px] text-zinc-500">{hasAudioFiles && !hasDedicatedAudioCover ? "Ebook/Audiobook Cover" : "Ebook Cover"}</span>
+          <button
+            type="button"
+            onClick={onEditCover}
+            className="text-[10px] text-brand hover:text-brand/80"
+          >
+            Update
+          </button>
+        </div>
+        {showSeparateAudioCover && (
+          <div className="hidden sm:flex flex-col items-center gap-1">
+            <div className="relative h-[200px] w-[133px] sm:h-[300px] sm:w-[200px]">
+              <BookCover
+                workId={work.id}
+                title={work.title}
+                coverVersion={work.audiobookCoverMtime ?? work.coverMtime ?? undefined}
+                mediaType="audiobook"
+                className="h-full w-full rounded-lg shadow-lg"
+                iconSize={32}
+              />
+            </div>
+            <span className="text-[10px] text-zinc-500">Audiobook Cover</span>
+            <button
+              type="button"
+              onClick={onEditCover}
+              className="text-[10px] text-brand hover:text-brand/80"
+            >
+              Update
+            </button>
           </div>
         )}
       </div>
@@ -1133,10 +1179,11 @@ function MetadataTab({
         )}
 
         <div className="mt-4 mb-2 text-xs font-medium text-muted uppercase tracking-wide">Identifiers</div>
-        <MetadataRow label="Open Library" value={work.olKey} />
-        <MetadataRow label="Hardcover" value={work.hcKey} />
-        <MetadataRow label="ISBN-13" value={work.isbn13} />
-        <MetadataRow label="ASIN" value={work.asin} />
+        <MetadataRow label="Open Library" value={work.olKey || <span className="text-zinc-600">—</span>} />
+        <MetadataRow label="Hardcover" value={work.hcKey || <span className="text-zinc-600">—</span>} />
+        <MetadataRow label="Goodreads" value={work.grKey || <span className="text-zinc-600">—</span>} />
+        <MetadataRow label="ISBN-13" value={work.isbn13 || <span className="text-zinc-600">—</span>} />
+        <MetadataRow label="ASIN" value={work.asin || <span className="text-zinc-600">—</span>} />
       </dl>
     </div>
   );
@@ -1226,7 +1273,6 @@ function EditModal({
   onCoverUploaded?: () => void;
 }) {
   const queryClient = useQueryClient();
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const {
     register,
@@ -1255,16 +1301,6 @@ function EditModal({
     onError: () => toast.error("Failed to update work"),
   });
 
-  const coverMutation = useMutation({
-    mutationFn: (file: Blob) => uploadWorkCover(work.id, file),
-    onSuccess: () => {
-      toast.success("Cover uploaded");
-      onCoverUploaded?.();
-      queryClient.invalidateQueries({ queryKey: ["work", String(work.id)] });
-    },
-    onError: () => toast.error("Failed to upload cover"),
-  });
-
   const onSubmit = (data: EditForm) => {
     const req: UpdateWorkRequest = {
       title: data.title || null,
@@ -1275,11 +1311,6 @@ function EditModal({
       monitorAudiobook: data.monitorAudiobook,
     };
     updateMutation.mutate(req);
-  };
-
-  const handleCoverChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) coverMutation.mutate(file);
   };
 
   return (
@@ -1336,18 +1367,11 @@ function EditModal({
           </label>
         </div>
 
-        <div>
-          <span className="mb-1 block text-sm font-medium text-zinc-300">
-            Cover
-          </span>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handleCoverChange}
-            className="block w-full text-sm text-zinc-400 file:mr-3 file:rounded file:border-0 file:bg-zinc-700 file:px-3 file:py-1.5 file:text-sm file:text-zinc-100 hover:file:bg-zinc-600"
-          />
-        </div>
+        <CoverSection
+          work={work}
+          onCoverUploaded={onCoverUploaded}
+          onClose={() => onOpenChange(false)}
+        />
 
         <div className="flex justify-end gap-3 pt-2">
           <button
@@ -1367,6 +1391,289 @@ function EditModal({
         </div>
       </form>
     </FormModal>
+  );
+}
+
+function CoverSection({
+  work,
+  onCoverUploaded,
+  onClose,
+}: {
+  work: WorkDetailResponse;
+  onCoverUploaded?: () => void;
+  onClose: () => void;
+}) {
+  const [showAlternatives, setShowAlternatives] = useState(false);
+  const queryClient = useQueryClient();
+
+  const altQuery = useQuery({
+    queryKey: ["coverAlternatives", work.id],
+    queryFn: () => getCoverAlternatives(work.id),
+    enabled: showAlternatives,
+    staleTime: 60_000,
+  });
+
+  const selectMutation = useMutation({
+    mutationFn: (candidate: CoverCandidate) =>
+      selectCover(work.id, candidate.candidateId, candidate.mediaType),
+    onSuccess: () => {
+      toast.success("Cover updated");
+      queryClient.invalidateQueries({ queryKey: ["work", String(work.id)] });
+      queryClient.invalidateQueries({ queryKey: ["coverAlternatives", work.id] });
+      onCoverUploaded?.();
+      onClose();
+    },
+    onError: () => toast.error("Failed to select cover"),
+  });
+
+  const uploadMutation = useMutation({
+    mutationFn: ({ file, mediaType }: { file: Blob; mediaType: string }) =>
+      uploadWorkCover(work.id, file, mediaType),
+    onSuccess: () => {
+      toast.success("Cover uploaded");
+      queryClient.invalidateQueries({ queryKey: ["work", String(work.id)] });
+      queryClient.invalidateQueries({ queryKey: ["coverAlternatives", work.id] });
+      onCoverUploaded?.();
+      onClose();
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : "Failed to upload cover";
+      toast.error(msg);
+    },
+  });
+
+  const ebookCandidates = altQuery.data?.filter((c) => c.mediaType === "ebook") ?? [];
+  const audioCandidates = altQuery.data?.filter((c) => c.mediaType === "audiobook") ?? [];
+
+  return (
+    <div>
+      <span className="mb-1 block text-sm font-medium text-zinc-300">Cover</span>
+
+      {/* Current covers */}
+      <div className="flex gap-4 mb-2">
+        <div className="flex items-start gap-2">
+          <div className="h-20 w-14 flex-shrink-0">
+            <BookCover
+              workId={work.id}
+              coverVersion={work.coverMtime ?? undefined}
+              className="h-full w-full rounded"
+            />
+          </div>
+          <div className="text-xs text-zinc-400 space-y-0.5">
+            <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Ebook</p>
+            <p>Trust: <span className="text-zinc-200">{work.coverTrust}</span></p>
+            {work.coverSource && (
+              <p>Source: <span className="text-zinc-200">{work.coverSource}</span></p>
+            )}
+            {(work.coverWidth > 0 || work.coverHeight > 0) && (
+              <p>Size: <span className="text-zinc-200">{work.coverWidth}&times;{work.coverHeight}</span></p>
+            )}
+            {work.coverTrust === "user" && (
+              <p className="text-amber-500 text-[10px]">Locked</p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-start gap-2">
+          <div className="h-20 w-20 flex-shrink-0">
+            <BookCover
+              workId={work.id}
+              coverVersion={work.audiobookCoverMtime ?? work.coverMtime ?? undefined}
+              mediaType="audiobook"
+              className="h-full w-full rounded"
+            />
+          </div>
+          <div className="text-xs text-zinc-400 space-y-0.5">
+            <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Audiobook</p>
+            <p>Trust: <span className="text-zinc-200">{work.audiobookCoverTrust}</span></p>
+            {work.audiobookCoverSource && (
+              <p>Source: <span className="text-zinc-200">{work.audiobookCoverSource}</span></p>
+            )}
+            {(work.audiobookCoverWidth > 0 || work.audiobookCoverHeight > 0) && (
+              <p>Size: <span className="text-zinc-200">{work.audiobookCoverWidth}&times;{work.audiobookCoverHeight}</span></p>
+            )}
+            {work.audiobookCoverTrust === "user" && (
+              <p className="text-amber-500 text-[10px]">Locked</p>
+            )}
+            {!work.audiobookCoverUrl && (
+              <p className="text-zinc-600 text-[10px]">Falls back to ebook</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Browse alternatives toggle */}
+      <button
+        type="button"
+        onClick={() => setShowAlternatives(!showAlternatives)}
+        className="flex items-center gap-1.5 text-xs text-brand hover:text-brand/80 mb-2"
+      >
+        <ImagePlus size={14} />
+        {showAlternatives ? "Hide alternatives" : "Browse alternatives"}
+        <ChevronDown
+          size={12}
+          className={cn("transition-transform", showAlternatives && "rotate-180")}
+        />
+      </button>
+
+      {/* Alternatives grid */}
+      {showAlternatives && (
+        <div className="space-y-3 mb-3">
+          {altQuery.isLoading && (
+            <div className="flex items-center gap-2 text-xs text-zinc-400 py-4">
+              <Loader2 size={14} className="animate-spin" />
+              Loading alternatives...
+            </div>
+          )}
+
+          {altQuery.isError && (
+            <p className="text-xs text-red-400">Failed to load alternatives</p>
+          )}
+
+          {altQuery.data && (
+            <>
+              <CoverGrid
+                label="Ebook"
+                candidates={ebookCandidates}
+                selecting={selectMutation.isPending}
+                onSelect={(c) => selectMutation.mutate(c)}
+                onUpload={(file) => uploadMutation.mutate({ file, mediaType: "ebook" })}
+              />
+              <CoverGrid
+                label="Audiobook"
+                candidates={audioCandidates}
+                selecting={selectMutation.isPending}
+                onSelect={(c) => selectMutation.mutate(c)}
+                onUpload={(file) => uploadMutation.mutate({ file, mediaType: "audiobook" })}
+              />
+              {ebookCandidates.length === 0 && audioCandidates.length === 0 && (
+                <p className="text-xs text-zinc-500 py-2">No alternative covers found</p>
+              )}
+              <button
+                type="button"
+                onClick={() => altQuery.refetch()}
+                disabled={altQuery.isFetching}
+                className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200"
+              >
+                <RefreshCw size={10} className={altQuery.isFetching ? "animate-spin" : ""} />
+                Refresh
+              </button>
+              <p className="text-[10px] text-zinc-600">
+                Selecting a cover locks it from automatic updates.
+              </p>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Upload fallback when alternatives not shown */}
+      {!showAlternatives && (
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 cursor-pointer rounded bg-zinc-700 px-3 py-1.5 text-xs text-zinc-100 hover:bg-zinc-600">
+            <Upload size={12} />
+            Upload ebook cover
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) uploadMutation.mutate({ file, mediaType: "ebook" });
+              }}
+              className="hidden"
+            />
+          </label>
+          <span className="text-[10px] text-zinc-500">JPEG, PNG, or WebP (max 5MB)</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CoverGrid({
+  label,
+  candidates,
+  selecting,
+  onSelect,
+  onUpload,
+}: {
+  label: string;
+  candidates: CoverCandidate[];
+  selecting: boolean;
+  onSelect: (c: CoverCandidate) => void;
+  onUpload: (file: Blob) => void;
+}) {
+  return (
+    <div>
+      <span className="text-[10px] font-medium text-zinc-400 uppercase tracking-wider">{label}</span>
+      <div className="grid grid-cols-3 gap-2 mt-1">
+        {candidates.map((c) => (
+          <CoverCard
+            key={c.candidateId}
+            candidate={c}
+            selecting={selecting}
+            onSelect={() => onSelect(c)}
+          />
+        ))}
+        <label className="flex flex-col items-center justify-center gap-1 rounded border border-dashed border-zinc-600 hover:border-brand bg-zinc-800/50 cursor-pointer aspect-[2/3] transition-colors">
+          <Upload size={16} className="text-zinc-500" />
+          <span className="text-[9px] text-zinc-500">Upload</span>
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) onUpload(file);
+            }}
+            className="hidden"
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function CoverCard({
+  candidate,
+  selecting,
+  onSelect,
+}: {
+  candidate: CoverCandidate;
+  selecting: boolean;
+  onSelect: () => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
+  const good = dims ? dims.w >= 400 && dims.h >= 600 : null;
+
+  if (failed) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      disabled={selecting}
+      className="group relative rounded border border-zinc-700 hover:border-brand overflow-hidden bg-zinc-800 transition-colors"
+    >
+      <div className="aspect-[2/3] relative">
+        <img
+          src={candidate.proxyUrl}
+          alt={candidate.source}
+          className="absolute inset-0 h-full w-full object-contain"
+          onError={() => setFailed(true)}
+          onLoad={(e) => {
+            const img = e.target as HTMLImageElement;
+            setDims({ w: img.naturalWidth, h: img.naturalHeight });
+          }}
+        />
+      </div>
+      <div className="px-1.5 py-1 text-center">
+        <span className="text-[11px] text-zinc-400 block truncate">{candidate.source}</span>
+        {dims && (
+          <span className={cn("text-[10px]", good ? "text-green-500" : "text-amber-500")}>
+            {dims.w}&times;{dims.h}
+          </span>
+        )}
+      </div>
+    </button>
   );
 }
 

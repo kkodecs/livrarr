@@ -3,22 +3,29 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use crate::accessors::CoverProxyCacheAccessor;
-use crate::context::{HasCoverCache, HasHttpClient};
+use crate::context::{HasCoverCache, HasHmacKey, HasHttpClient};
 
 const MAX_IMAGE_SIZE: usize = 500_000;
 
 #[derive(serde::Deserialize)]
 pub struct CoverProxyQuery {
     pub url: String,
+    #[serde(default)]
+    pub sig: String,
 }
 
-pub async fn proxy_cover<S: HasCoverCache + HasHttpClient>(
+pub async fn proxy_cover<S: HasCoverCache + HasHttpClient + HasHmacKey>(
     State(state): State<S>,
     Query(q): Query<CoverProxyQuery>,
 ) -> Response {
     let url = &q.url;
 
-    if !is_allowed_cover_source(url) {
+    // HMAC verification: if sig is present, verify it; if absent, fall back to allowlist
+    if !q.sig.is_empty() {
+        if !verify_proxy_sig(url, &q.sig, state.hmac_key()) {
+            return (StatusCode::FORBIDDEN, "invalid signature").into_response();
+        }
+    } else if !is_allowed_cover_source(url) {
         return (StatusCode::FORBIDDEN, "not an allowed cover source").into_response();
     }
 
@@ -87,6 +94,19 @@ pub async fn proxy_cover<S: HasCoverCache + HasHttpClient>(
         data,
     )
         .into_response()
+}
+
+fn verify_proxy_sig(url: &str, sig: &str, key: &[u8]) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let mut mac = match Hmac::<Sha256>::new_from_slice(key) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(url.as_bytes());
+    let expected = data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes());
+    subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), sig.as_bytes()).into()
 }
 
 fn is_allowed_cover_source(url: &str) -> bool {

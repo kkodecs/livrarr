@@ -9,8 +9,8 @@ use chrono::{Duration, Utc};
 use common::create_test_db;
 use livrarr_db::*;
 use livrarr_domain::{
-    ApplyMergeOutcome, EnrichmentStatus, ExternalIdType, MergeResolved, MetadataProvider,
-    ProvenanceSetter, UserId, UserRole, Work, WorkField, WorkId,
+    ApplyMergeOutcome, CoverTrust, EnrichmentStatus, ExternalIdType, MergeResolved,
+    MetadataProvider, ProvenanceSetter, UserId, UserRole, Work, WorkField, WorkId,
 };
 
 const ORIGINAL_TITLE: &str = "Original Title";
@@ -748,6 +748,191 @@ macro_rules! work_db_merge_tests {
 
             assert!(title_provenance.is_some());
             assert!(description_provenance.is_none());
+        }
+
+        #[tokio::test]
+        /// REQ-ID: REQ-007 | Contract: WorkDb::update_cover_metadata | Behavior: updates active ebook cover metadata fields.
+        async fn test_multi_cover_update_cover_metadata_sets_ebook_cover_fields() {
+            let (db, u1, _) = $setup().await;
+            let work = create_new_work(&db, u1).await;
+
+            db.update_cover_metadata(
+                u1,
+                work.id,
+                Some("covers/41.jpg"),
+                "Goodreads",
+                CoverTrust::Validated,
+                800,
+                1200,
+            )
+            .await
+            .unwrap();
+
+            let updated = db.get_work(u1, work.id).await.unwrap();
+
+            assert_eq!(updated.cover_url.as_deref(), Some("covers/41.jpg"));
+            assert_eq!(updated.cover_source.as_deref(), Some("Goodreads"));
+            assert_eq!(updated.cover_trust, CoverTrust::Validated);
+            assert_eq!(updated.cover_width, 800);
+            assert_eq!(updated.cover_height, 1200);
+        }
+
+        #[tokio::test]
+        /// REQ-ID: REQ-004 | Contract: WorkDb::update_cover_metadata | Behavior: User trust keeps legacy cover_manual synchronized to true.
+        async fn test_multi_cover_update_cover_metadata_sets_cover_manual_for_user_trust() {
+            let (db, u1, _) = $setup().await;
+            let work = create_new_work(&db, u1).await;
+
+            db.update_cover_metadata(
+                u1,
+                work.id,
+                Some("covers/user-selected.jpg"),
+                "Picker",
+                CoverTrust::User,
+                900,
+                1300,
+            )
+            .await
+            .unwrap();
+
+            let updated = db.get_work(u1, work.id).await.unwrap();
+
+            assert!(updated.cover_manual);
+            assert_eq!(updated.cover_trust, CoverTrust::User);
+        }
+
+        #[tokio::test]
+        /// REQ-ID: REQ-001 | Contract: WorkDb::update_cover_metadata | Behavior: Validated trust keeps legacy cover_manual synchronized to false.
+        async fn test_multi_cover_update_cover_metadata_clears_cover_manual_for_validated_trust() {
+            let (db, u1, _) = $setup().await;
+            let work = create_new_work(&db, u1).await;
+
+            db.update_cover_metadata(
+                u1,
+                work.id,
+                Some("covers/validated.jpg"),
+                "Hardcover",
+                CoverTrust::Validated,
+                640,
+                960,
+            )
+            .await
+            .unwrap();
+
+            let updated = db.get_work(u1, work.id).await.unwrap();
+
+            assert!(!updated.cover_manual);
+            assert_eq!(updated.cover_trust, CoverTrust::Validated);
+        }
+
+        #[tokio::test]
+        /// REQ-ID: REQ-007/REQ-009 | Contract: WorkDb::update_audiobook_cover_metadata | Behavior: updates audiobook cover fields without mutating ebook cover fields.
+        async fn test_multi_cover_update_audiobook_cover_metadata_is_independent_from_ebook_cover() {
+            let (db, u1, _) = $setup().await;
+            let work = create_new_work(&db, u1).await;
+
+            db.update_cover_metadata(
+                u1,
+                work.id,
+                Some("covers/ebook.jpg"),
+                "Goodreads",
+                CoverTrust::Validated,
+                800,
+                1200,
+            )
+            .await
+            .unwrap();
+
+            db.update_audiobook_cover_metadata(
+                u1,
+                work.id,
+                Some("covers/audio.jpg"),
+                "Audnexus",
+                CoverTrust::User,
+                1400,
+                1400,
+            )
+            .await
+            .unwrap();
+
+            let updated = db.get_work(u1, work.id).await.unwrap();
+
+            assert_eq!(updated.cover_url.as_deref(), Some("covers/ebook.jpg"));
+            assert_eq!(updated.cover_source.as_deref(), Some("Goodreads"));
+            assert_eq!(updated.cover_trust, CoverTrust::Validated);
+            assert_eq!(updated.cover_width, 800);
+            assert_eq!(updated.cover_height, 1200);
+            assert_eq!(
+                updated.audiobook_cover_url.as_deref(),
+                Some("covers/audio.jpg")
+            );
+            assert_eq!(updated.audiobook_cover_source.as_deref(), Some("Audnexus"));
+            assert_eq!(updated.audiobook_cover_trust, CoverTrust::User);
+            assert_eq!(updated.audiobook_cover_width, 1400);
+            assert_eq!(updated.audiobook_cover_height, 1400);
+        }
+
+        #[tokio::test]
+        /// REQ-ID: REQ-007/REQ-009 | Contract: WorkDb::update_cover_metadata | Behavior: updates ebook cover fields without mutating audiobook cover fields.
+        async fn test_multi_cover_update_cover_metadata_preserves_audiobook_cover_fields() {
+            let (db, u1, _) = $setup().await;
+            let work = create_new_work(&db, u1).await;
+
+            db.update_audiobook_cover_metadata(
+                u1,
+                work.id,
+                Some("covers/audio.jpg"),
+                "Audnexus",
+                CoverTrust::User,
+                1400,
+                1400,
+            )
+            .await
+            .unwrap();
+
+            db.update_cover_metadata(
+                u1,
+                work.id,
+                Some("covers/ebook.jpg"),
+                "Goodreads",
+                CoverTrust::Validated,
+                800,
+                1200,
+            )
+            .await
+            .unwrap();
+
+            let updated = db.get_work(u1, work.id).await.unwrap();
+
+            assert_eq!(updated.cover_url.as_deref(), Some("covers/ebook.jpg"));
+            assert_eq!(updated.cover_source.as_deref(), Some("Goodreads"));
+            assert_eq!(updated.cover_trust, CoverTrust::Validated);
+            assert_eq!(updated.cover_width, 800);
+            assert_eq!(updated.cover_height, 1200);
+            assert_eq!(
+                updated.audiobook_cover_url.as_deref(),
+                Some("covers/audio.jpg")
+            );
+            assert_eq!(updated.audiobook_cover_source.as_deref(), Some("Audnexus"));
+            assert_eq!(updated.audiobook_cover_trust, CoverTrust::User);
+            assert_eq!(updated.audiobook_cover_width, 1400);
+            assert_eq!(updated.audiobook_cover_height, 1400);
+        }
+
+        #[tokio::test]
+        /// REQ-ID: REQ-007 | Contract: WorkDb::update_cover_dimensions | Behavior: lazily updates ebook cover dimensions for an existing work.
+        async fn test_multi_cover_update_cover_dimensions_updates_existing_work_dimensions() {
+            let (db, u1, _) = $setup().await;
+            let work = create_new_work(&db, u1).await;
+
+            db.update_cover_dimensions(u1, work.id, 1024, 1536)
+                .await
+                .unwrap();
+
+            let updated = db.get_work(u1, work.id).await.unwrap();
+
+            assert_eq!(updated.cover_width, 1024);
+            assert_eq!(updated.cover_height, 1536);
         }
     };
 }

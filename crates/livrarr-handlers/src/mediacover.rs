@@ -94,7 +94,7 @@ pub fn resolve_cover_path(
     covers_dir.join(&filename)
 }
 
-fn generate_thumbnail_jpeg(bytes: &[u8], max_width: u32) -> Result<Vec<u8>, String> {
+pub fn generate_thumbnail_jpeg(bytes: &[u8], max_width: u32) -> Result<Vec<u8>, String> {
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
     let thumb = img.thumbnail(max_width, u32::MAX / 2);
     let mut out = Vec::new();
@@ -107,7 +107,7 @@ fn generate_thumbnail_jpeg(bytes: &[u8], max_width: u32) -> Result<Vec<u8>, Stri
     Ok(out)
 }
 
-fn placeholder_response() -> Response {
+pub fn placeholder_response() -> Response {
     (
         StatusCode::NOT_FOUND,
         [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
@@ -115,7 +115,7 @@ fn placeholder_response() -> Response {
         .into_response()
 }
 
-async fn serve_image(path: &std::path::Path, id: i64, req_headers: &HeaderMap) -> Response {
+pub async fn serve_image(path: &std::path::Path, id: i64, req_headers: &HeaderMap) -> Response {
     if !path.exists() {
         return placeholder_response();
     }

@@ -19,7 +19,9 @@ pub mod audnexus;
 pub mod author_service;
 pub mod bulk_resolver;
 pub mod cover;
+pub mod cover_alternatives;
 pub mod cover_gate;
+pub mod cover_resolution;
 pub mod english_identity_resolver;
 pub mod enrichment_workflow_service;
 pub mod goodreads;
@@ -186,6 +188,7 @@ pub struct EnrichmentResult {
     pub merge_deferred: bool,
     /// TEMP(pk-tdd): compile-only scaffold — per-provider outcome classes.
     pub provider_outcomes: HashMap<livrarr_domain::MetadataProvider, livrarr_domain::OutcomeClass>,
+    pub cover_resolution: Option<livrarr_domain::CoverResolution>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -228,7 +231,7 @@ pub enum EnrichmentMode {
 }
 
 /// TEMP(pk-tdd): normalized provider output — common schema for all metadata providers.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct NormalizedWorkDetail {
     pub title: Option<String>,
     pub subtitle: Option<String>,
@@ -489,6 +492,7 @@ pub struct MergeOutput {
     pub external_id_updates: Vec<UpsertExternalIdRequest>,
     pub enrichment_status: EnrichmentStatus,
     pub enrichment_source: Option<String>,
+    pub cover_resolution: Option<livrarr_domain::CoverResolution>,
 }
 
 /// TEMP(pk-tdd): error from MergeEngine::merge.
@@ -741,7 +745,6 @@ const MERGE_FIELDS: &[WorkField] = &[
     WorkField::Abridged,
     WorkField::Rating,
     WorkField::RatingCount,
-    WorkField::CoverUrl,
 ];
 
 /// Core merge implementation.
@@ -772,6 +775,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
             external_id_updates: Vec::new(),
             enrichment_status: EnrichmentStatus::Conflict,
             enrichment_source: None,
+            cover_resolution: None,
         });
     }
 
@@ -812,14 +816,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
     let mut contributing_providers: Vec<livrarr_domain::MetadataProvider> = Vec::new();
 
     for &field in MERGE_FIELDS {
-        // 4a. cover_manual bypass
-        if field == WorkField::CoverUrl && inputs.current_work.cover_manual {
-            let current = extract_current_field(field, &inputs.current_work);
-            resolved_values.insert(field, current);
-            continue;
-        }
-
-        // 4b. Identity fields are locked at add-time — never overwrite non-empty title/author.
+        // 4a. Identity fields are locked at add-time — never overwrite non-empty title/author.
         if field == WorkField::Title || field == WorkField::AuthorName {
             let current = extract_current_field(field, &inputs.current_work);
             if current.is_some() {
@@ -922,10 +919,23 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
     };
 
     let merged_description = get_str(WorkField::Description);
-    let merged_cover_url = get_str(WorkField::CoverUrl);
+
+    // 5b. Cover resolution (separate from generic field merge).
+    let outcomes_ref: HashMap<livrarr_domain::MetadataProvider, &ReconstructedOutcome> = inputs
+        .provider_results
+        .iter()
+        .map(|(p, o)| (*p, o))
+        .collect();
+    let cover_resolution = cover_resolution::resolve_cover(
+        &inputs.current_work,
+        &pm.cover,
+        &eligible_providers,
+        &outcomes_ref,
+    );
+    let has_cover = cover_resolution.is_some() || inputs.current_work.cover_url.is_some();
 
     // 6. Status classification (R-14).
-    let enrichment_status = match (merged_description.is_some(), merged_cover_url.is_some()) {
+    let enrichment_status = match (merged_description.is_some(), has_cover) {
         (true, true) => EnrichmentStatus::Enriched,
         (true, false) | (false, true) => EnrichmentStatus::Unenriched,
         (false, false) => EnrichmentStatus::Failed,
@@ -969,7 +979,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         rating_count: get_int(WorkField::RatingCount),
         enrichment_status,
         enrichment_source: enrichment_source.clone(),
-        cover_url: get_str(WorkField::CoverUrl),
+        cover_url: inputs.current_work.cover_url.clone(),
     };
 
     // 8. External ID collection: from all Success providers.
@@ -1004,6 +1014,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         external_id_updates,
         enrichment_status,
         enrichment_source,
+        cover_resolution,
     })
 }
 
@@ -1167,6 +1178,7 @@ Return JSON only:\n\
             external_id_updates: collect_external_ids(&inputs),
             enrichment_status: EnrichmentStatus::Conflict,
             enrichment_source: None,
+            cover_resolution: None,
         });
     }
 
@@ -1222,7 +1234,6 @@ Return JSON only:\n\
                 "gr_key" => WorkField::GrKey,
                 "isbn_13" => WorkField::Isbn13,
                 "asin" => WorkField::Asin,
-                "cover_url" => WorkField::CoverUrl,
                 _ => continue,
             };
 
@@ -1538,6 +1549,7 @@ where
                 work: result_work,
                 merge_deferred,
                 provider_outcomes,
+                cover_resolution: None,
             });
         }
 
@@ -1707,6 +1719,7 @@ where
                 work: result_work,
                 merge_deferred,
                 provider_outcomes,
+                cover_resolution: None,
             });
         }
 
@@ -1835,6 +1848,7 @@ where
                         work: result_work,
                         merge_deferred,
                         provider_outcomes,
+                        cover_resolution: merge_output.cover_resolution,
                     });
                 }
                 ApplyMergeOutcome::Superseded => {
@@ -2211,6 +2225,7 @@ pub mod tests {
                     },
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
+                    cover_resolution: None,
                 }),
                 StubEnrichmentMode::Partial => Ok(EnrichmentResult {
                     enrichment_status: EnrichmentStatus::Unenriched,
@@ -2222,6 +2237,7 @@ pub mod tests {
                     },
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
+                    cover_resolution: None,
                 }),
                 StubEnrichmentMode::AllFail => Ok(EnrichmentResult {
                     enrichment_status: EnrichmentStatus::Failed,
@@ -2237,6 +2253,7 @@ pub mod tests {
                     },
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
+                    cover_resolution: None,
                 }),
                 StubEnrichmentMode::NotFound => Err(EnrichmentError::WorkNotFound),
                 StubEnrichmentMode::ManualCover => Ok(EnrichmentResult {
@@ -2249,6 +2266,7 @@ pub mod tests {
                     },
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
+                    cover_resolution: None,
                 }),
                 StubEnrichmentMode::LlmFallback => Ok(EnrichmentResult {
                     enrichment_status: EnrichmentStatus::Enriched,
@@ -2257,6 +2275,7 @@ pub mod tests {
                     work,
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
+                    cover_resolution: None,
                 }),
             }
         }

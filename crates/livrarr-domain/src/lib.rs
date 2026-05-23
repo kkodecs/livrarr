@@ -388,6 +388,15 @@ pub struct Work {
     pub enrichment_source: Option<String>,
     pub cover_url: Option<String>,
     pub cover_manual: bool,
+    pub cover_source: Option<String>,
+    pub cover_trust: CoverTrust,
+    pub cover_width: i32,
+    pub cover_height: i32,
+    pub audiobook_cover_url: Option<String>,
+    pub audiobook_cover_source: Option<String>,
+    pub audiobook_cover_trust: CoverTrust,
+    pub audiobook_cover_width: i32,
+    pub audiobook_cover_height: i32,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
     pub import_id: Option<String>,
@@ -866,6 +875,105 @@ pub enum MetadataProvider {
     /// Source data from a Readarr import. Treated as another provider
     /// input in the merge engine — ranked above OL, below GR.
     Readarr,
+}
+
+/// Trust level for a work's cover image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CoverTrust {
+    #[default]
+    Unvalidated,
+    Validated,
+    User,
+}
+
+impl CoverTrust {
+    pub fn allows_replacement_by(self, incoming: CoverTrust) -> bool {
+        match (self, incoming) {
+            (CoverTrust::User, _) => false,
+            (CoverTrust::Validated, CoverTrust::User) => true,
+            (CoverTrust::Validated, CoverTrust::Validated) => true,
+            (CoverTrust::Validated, CoverTrust::Unvalidated) => false,
+            (CoverTrust::Unvalidated, _) => true,
+        }
+    }
+}
+
+/// Which cover slot: ebook or audiobook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CoverMediaType {
+    Ebook,
+    Audiobook,
+}
+
+impl CoverMediaType {
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            CoverMediaType::Ebook => "",
+            CoverMediaType::Audiobook => "_audio",
+        }
+    }
+}
+
+/// Source of a cover candidate — wraps MetadataProvider for standard providers,
+/// adds EPUB and ISBN-based sources that don't participate in enrichment infra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoverCandidateSource {
+    Provider(MetadataProvider),
+    Epub,
+    IsbnOl,
+    IsbnAmazon,
+}
+
+impl std::fmt::Display for CoverCandidateSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Provider(p) => write!(f, "{p:?}"),
+            Self::Epub => write!(f, "epub"),
+            Self::IsbnOl => write!(f, "isbn_ol"),
+            Self::IsbnAmazon => write!(f, "isbn_amazon"),
+        }
+    }
+}
+
+/// A cover candidate with browser-safe proxied URL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverCandidate {
+    pub candidate_id: String,
+    pub proxy_url: String,
+    pub source: String,
+    pub media_type: CoverMediaType,
+    pub width: u32,
+    pub height: u32,
+    pub passes_quality_gate: bool,
+}
+
+/// Internal cover candidate with raw provider URL — never serialize to browser.
+#[derive(Debug, Clone)]
+pub struct InternalCoverCandidate {
+    pub source: CoverCandidateSource,
+    pub url: String,
+    pub media_type: CoverMediaType,
+    pub edition_title: Option<String>,
+}
+
+/// Request to select a cover from alternatives.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectCoverRequest {
+    pub candidate_id: String,
+    pub media_type: CoverMediaType,
+}
+
+/// Result of a cover resolution during enrichment merge.
+#[derive(Debug, Clone)]
+pub struct CoverResolution {
+    pub url: String,
+    pub source: String,
+    pub trust: CoverTrust,
+    pub media_type: CoverMediaType,
 }
 
 /// A named work field that can have per-provider provenance tracked.

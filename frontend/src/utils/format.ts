@@ -45,8 +45,9 @@ export function formatEta(seconds: number | null): string {
   return formatDuration(seconds);
 }
 
-export function getCoverUrl(workId: number, v?: number): string {
-  const base = `/api/v1/mediacover/${workId}/cover.jpg`;
+export function getCoverUrl(workId: number, v?: number, mediaType?: "ebook" | "audiobook"): string {
+  const file = mediaType === "audiobook" ? "audiocover.jpg" : "cover.jpg";
+  const base = `/api/v1/mediacover/${workId}/${file}`;
   return v ? `${base}?v=${v}` : base;
 }
 
