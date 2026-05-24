@@ -35,6 +35,7 @@ pub enum ProviderClient {
     Hardcover(HardcoverClient),
     OpenLibrary(OpenLibraryClient),
     Goodreads(GoodreadsClient),
+    GoogleBooks(crate::google_books::GoogleBooksClient),
 }
 
 impl ProviderClient {
@@ -49,6 +50,7 @@ impl ProviderClient {
             Self::Hardcover(h) => h.fetch(work, ctx).await,
             Self::OpenLibrary(o) => o.fetch(work, ctx).await,
             Self::Goodreads(g) => g.fetch(work, ctx).await,
+            Self::GoogleBooks(g) => g.fetch(work, ctx).await,
         }
     }
 
@@ -59,6 +61,7 @@ impl ProviderClient {
             Self::Hardcover(_) => MetadataProvider::Hardcover,
             Self::OpenLibrary(_) => MetadataProvider::OpenLibrary,
             Self::Goodreads(_) => MetadataProvider::Goodreads,
+            Self::GoogleBooks(_) => MetadataProvider::GoogleBooks,
         }
     }
 
@@ -67,7 +70,11 @@ impl ProviderClient {
             Self::Stub(s) => s.call_count(),
             // Real network adapters don't track call counts — the queue tracks
             // dispatch counts elsewhere; this accessor exists for stub-driven tests.
-            Self::Audnexus(_) | Self::Hardcover(_) | Self::OpenLibrary(_) | Self::Goodreads(_) => 0,
+            Self::Audnexus(_)
+            | Self::Hardcover(_)
+            | Self::OpenLibrary(_)
+            | Self::Goodreads(_)
+            | Self::GoogleBooks(_) => 0,
         }
     }
 }

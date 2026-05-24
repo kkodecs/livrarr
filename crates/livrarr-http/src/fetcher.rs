@@ -73,6 +73,7 @@ impl RateLimiterMap {
             RateBucket::Goodreads => Duration::from_secs(1),
             RateBucket::Hardcover => Duration::from_secs(1),
             RateBucket::Audnexus => Duration::from_secs(2),
+            RateBucket::GoogleBooks => Duration::from_secs(1),
             RateBucket::Indexer(_) => Duration::from_millis(500),
             RateBucket::None => Duration::ZERO,
         }

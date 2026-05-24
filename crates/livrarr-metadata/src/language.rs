@@ -19,58 +19,58 @@ pub const SUPPORTED_LANGUAGES: &[LanguageInfo] = &[
     LanguageInfo {
         code: "nl",
         english_name: "Dutch",
-        provider_name: "Web Search",
-        provider_type: "llm",
-        requires_llm: true,
+        provider_name: "Google Books",
+        provider_type: "api",
+        requires_llm: false,
     },
     LanguageInfo {
         code: "fr",
         english_name: "French",
-        provider_name: "Web Search",
-        provider_type: "llm",
-        requires_llm: true,
+        provider_name: "Google Books",
+        provider_type: "api",
+        requires_llm: false,
     },
     LanguageInfo {
         code: "de",
         english_name: "German",
-        provider_name: "Web Search",
-        provider_type: "llm",
-        requires_llm: true,
+        provider_name: "Google Books",
+        provider_type: "api",
+        requires_llm: false,
     },
     LanguageInfo {
         code: "it",
         english_name: "Italian",
-        provider_name: "Web Search",
-        provider_type: "llm",
-        requires_llm: true,
+        provider_name: "Google Books",
+        provider_type: "api",
+        requires_llm: false,
     },
     LanguageInfo {
         code: "ja",
         english_name: "Japanese",
-        provider_name: "Web Search",
-        provider_type: "llm",
-        requires_llm: true,
+        provider_name: "Google Books",
+        provider_type: "api",
+        requires_llm: false,
     },
     LanguageInfo {
         code: "ko",
         english_name: "Korean",
-        provider_name: "Web Search",
-        provider_type: "llm",
-        requires_llm: true,
+        provider_name: "Google Books",
+        provider_type: "api",
+        requires_llm: false,
     },
     LanguageInfo {
         code: "pl",
         english_name: "Polish",
-        provider_name: "Web Search",
-        provider_type: "llm",
-        requires_llm: true,
+        provider_name: "Google Books",
+        provider_type: "api",
+        requires_llm: false,
     },
     LanguageInfo {
         code: "es",
         english_name: "Spanish",
-        provider_name: "Web Search",
-        provider_type: "llm",
-        requires_llm: true,
+        provider_name: "Google Books",
+        provider_type: "api",
+        requires_llm: false,
     },
 ];
 
@@ -99,6 +99,7 @@ pub fn get_language_info(code: &str) -> Option<&'static LanguageInfo> {
 pub fn validate_languages(
     languages: &[String],
     llm_configured: bool,
+    google_books_configured: bool,
 ) -> Result<Vec<String>, String> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
@@ -111,8 +112,7 @@ pub fn validate_languages(
         if !is_supported_language(&code) {
             return Err(format!("unsupported language code: {code}"));
         }
-        if !llm_configured && language_requires_llm(&code) {
-            // Auto-strip LLM languages when LLM not configured
+        if code != "en" && !llm_configured && !google_books_configured {
             continue;
         }
         if seen.insert(code.clone()) {

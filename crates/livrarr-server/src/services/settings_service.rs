@@ -82,6 +82,13 @@ where
         {
             tracing::warn!("failed to reset NotConfigured outcomes for Hardcover: {e}");
         }
+        if let Err(e) = self
+            .db
+            .reset_not_configured_outcomes(MetadataProvider::GoogleBooks)
+            .await
+        {
+            tracing::warn!("failed to reset NotConfigured outcomes for GoogleBooks: {e}");
+        }
 
         Ok(cfg)
     }
@@ -93,6 +100,7 @@ where
         llm_endpoint: Option<&str>,
         llm_api_key: Option<&str>,
         llm_model: Option<&str>,
+        google_books_api_key: Option<&str>,
     ) -> Result<Vec<String>, String> {
         let existing = self
             .db
@@ -111,7 +119,15 @@ where
             effective_key.as_deref(),
             effective_model,
         );
-        livrarr_metadata::language::validate_languages(languages, llm_configured)
+        let effective_gb_key = google_books_api_key
+            .map(|s| s.to_string())
+            .or(existing.google_books_api_key.clone());
+        let google_books_configured = effective_gb_key.as_deref().is_some_and(|s| !s.is_empty());
+        livrarr_metadata::language::validate_languages(
+            languages,
+            llm_configured,
+            google_books_configured,
+        )
     }
 
     async fn get_email_config(&self) -> Result<EmailConfig, DbError> {
@@ -412,6 +428,7 @@ mod tests {
             llm_model: None,
             audnexus_url: None,
             languages: None,
+            google_books_api_key: None,
         })
         .await
         .unwrap();

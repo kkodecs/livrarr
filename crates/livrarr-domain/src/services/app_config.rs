@@ -30,5 +30,6 @@ pub trait AppConfigService: Send + Sync {
         llm_endpoint: Option<&str>,
         llm_api_key: Option<&str>,
         llm_model: Option<&str>,
+        google_books_api_key: Option<&str>,
     ) -> Result<Vec<String>, String>;
 }

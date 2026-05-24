@@ -40,6 +40,7 @@ pub struct MetadataConfigResponse {
     pub llm_model: Option<String>,
     pub audnexus_url: String,
     pub languages: Vec<String>,
+    pub google_books_api_key_set: bool,
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub provider_status: std::collections::HashMap<String, String>,
 }
@@ -184,6 +185,9 @@ pub struct UpdateMetadataApiRequest {
     pub llm_model: Option<String>,
     pub audnexus_url: Option<String>,
     pub languages: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "crate::deserialize_optional_secret")]
+    #[serde(skip_serializing)]
+    pub google_books_api_key: Option<Option<String>>,
 }
 
 impl std::fmt::Debug for UpdateMetadataApiRequest {
@@ -204,6 +208,10 @@ impl std::fmt::Debug for UpdateMetadataApiRequest {
             .field("llm_model", &self.llm_model)
             .field("audnexus_url", &self.audnexus_url)
             .field("languages", &self.languages)
+            .field(
+                "google_books_api_key",
+                &self.google_books_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }

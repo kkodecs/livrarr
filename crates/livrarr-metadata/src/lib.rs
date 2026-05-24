@@ -25,6 +25,7 @@ pub mod cover_resolution;
 pub mod english_identity_resolver;
 pub mod enrichment_workflow_service;
 pub mod goodreads;
+pub mod google_books;
 pub mod hardcover;
 pub mod http_llm;
 pub mod language;
@@ -49,6 +50,7 @@ pub mod author_monitor_workflow;
 pub mod provenance;
 pub mod rss_sync_workflow;
 
+pub use google_books::GoogleBooksClient;
 pub use provider_client::{
     AudnexusClient, GoodreadsClient, HardcoverClient, OpenLibraryClient, ProviderClient,
     StubProviderClient,
@@ -452,13 +454,31 @@ impl PriorityModel {
         }
     }
 
-    /// Foreign: GR → HC → Readarr → OL, Audio: Audnexus → HC.
+    /// Foreign: GB → GR → HC → Readarr → OL, Audio: Audnexus → HC.
     pub fn foreign() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
-            content: vec![P::Goodreads, P::Hardcover, P::Readarr, P::OpenLibrary],
-            description: vec![P::Goodreads, P::Hardcover, P::Readarr, P::OpenLibrary],
-            cover: vec![P::Goodreads, P::Hardcover, P::Readarr, P::OpenLibrary],
+            content: vec![
+                P::GoogleBooks,
+                P::Goodreads,
+                P::Hardcover,
+                P::Readarr,
+                P::OpenLibrary,
+            ],
+            description: vec![
+                P::GoogleBooks,
+                P::Goodreads,
+                P::Hardcover,
+                P::Readarr,
+                P::OpenLibrary,
+            ],
+            cover: vec![
+                P::GoogleBooks,
+                P::Goodreads,
+                P::Hardcover,
+                P::Readarr,
+                P::OpenLibrary,
+            ],
             audio: vec![P::Audnexus, P::Hardcover],
         }
     }
@@ -715,6 +735,7 @@ fn provider_name(p: livrarr_domain::MetadataProvider) -> &'static str {
         livrarr_domain::MetadataProvider::Audnexus => "audnexus",
         livrarr_domain::MetadataProvider::Llm => "llm",
         livrarr_domain::MetadataProvider::Readarr => "readarr",
+        livrarr_domain::MetadataProvider::GoogleBooks => "google_books",
     }
 }
 
@@ -1196,6 +1217,11 @@ Return JSON only:\n\
         ("audnexus", livrarr_domain::MetadataProvider::Audnexus),
         ("readarr", livrarr_domain::MetadataProvider::Readarr),
         ("llm", livrarr_domain::MetadataProvider::Llm),
+        (
+            "google_books",
+            livrarr_domain::MetadataProvider::GoogleBooks,
+        ),
+        ("googlebooks", livrarr_domain::MetadataProvider::GoogleBooks),
     ]
     .iter()
     .cloned()
@@ -1255,6 +1281,17 @@ Return JSON only:\n\
                 if !inputs.current_work.author_name.is_empty() && wf == WorkField::AuthorName {
                     continue;
                 }
+            }
+
+            // Skip null/empty LLM selections — a provider with no data should
+            // never override one that has data, regardless of priority.
+            if selection.value.is_null()
+                || selection
+                    .value
+                    .as_str()
+                    .is_some_and(|s| s.trim().is_empty())
+            {
+                continue;
             }
 
             // Apply the LLM-selected value to the work_update request.

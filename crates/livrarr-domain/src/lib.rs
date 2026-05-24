@@ -880,6 +880,7 @@ pub enum MetadataProvider {
     /// Source data from a Readarr import. Treated as another provider
     /// input in the merge engine — ranked above OL, below GR.
     Readarr,
+    GoogleBooks,
 }
 
 /// Trust level for a work's cover image.

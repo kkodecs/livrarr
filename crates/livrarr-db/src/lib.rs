@@ -1068,6 +1068,8 @@ pub struct UpdateMetadataConfigRequest {
     pub llm_model: Option<String>,
     pub audnexus_url: Option<String>,
     pub languages: Option<Vec<String>>,
+    /// Tri-state: None = keep existing, Some(None) = clear, Some(Some(v)) = set.
+    pub google_books_api_key: Option<Option<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,6 +1104,7 @@ impl From<UpdateMetadataParams> for UpdateMetadataConfigRequest {
             llm_model: p.llm_model,
             audnexus_url: p.audnexus_url,
             languages: p.languages,
+            google_books_api_key: p.google_books_api_key,
         }
     }
 }

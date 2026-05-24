@@ -2237,6 +2237,7 @@ macro_rules! enrichment_service_tests {
             assert_eq!(
                 pm.content,
                 vec![
+                    MetadataProvider::GoogleBooks,
                     MetadataProvider::Goodreads,
                     MetadataProvider::Hardcover,
                     MetadataProvider::Readarr,
@@ -2246,6 +2247,7 @@ macro_rules! enrichment_service_tests {
             assert_eq!(
                 pm.description,
                 vec![
+                    MetadataProvider::GoogleBooks,
                     MetadataProvider::Goodreads,
                     MetadataProvider::Hardcover,
                     MetadataProvider::Readarr,
@@ -2255,6 +2257,7 @@ macro_rules! enrichment_service_tests {
             assert_eq!(
                 pm.cover,
                 vec![
+                    MetadataProvider::GoogleBooks,
                     MetadataProvider::Goodreads,
                     MetadataProvider::Hardcover,
                     MetadataProvider::Readarr,

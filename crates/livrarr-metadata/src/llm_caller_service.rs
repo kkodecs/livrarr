@@ -41,6 +41,7 @@ impl LlmCallerImpl {
                 llm_model: None,
                 audnexus_url: String::new(),
                 languages: vec![],
+                google_books_api_key: None,
             }),
             client: HttpClient::builder()
                 .build()

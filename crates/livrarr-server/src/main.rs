@@ -186,6 +186,7 @@ async fn main() {
                 llm_model: None,
                 audnexus_url: "https://api.audnex.us".to_string(),
                 languages: vec!["en".to_string()],
+                google_books_api_key: None,
             }
         });
         livrarr_metadata::live_config::LiveMetadataConfig::new(initial)
@@ -268,14 +269,24 @@ async fn main() {
             queue_cfg(P::Goodreads),
         );
 
+        // Google Books — always registered. Reads API key from live config per-fetch.
+        builder = builder.add_provider(
+            P::GoogleBooks,
+            m::ProviderClient::GoogleBooks(m::GoogleBooksClient::new(
+                http_client.clone(),
+                live_metadata_config.clone(),
+            )),
+            queue_cfg(P::GoogleBooks),
+        );
+
         builder = builder.with_applicability_rule(Arc::new(|provider, work| {
             if matches!(
                 m::language::provider_priority(work.language.as_deref()),
                 m::language::ProviderPriority::English
             ) {
-                return true;
+                return !matches!(provider, P::GoogleBooks);
             }
-            matches!(provider, P::Goodreads | P::Audnexus)
+            matches!(provider, P::Goodreads | P::Audnexus | P::GoogleBooks)
         }));
 
         let db_arc = Arc::new(db.clone());
@@ -456,6 +467,13 @@ async fn main() {
                 m::GoodreadsClient::production(http_client.clone())
                     .with_live_config(live_metadata_config.clone()),
             ),
+        );
+        clients.insert(
+            P::GoogleBooks,
+            m::ProviderClient::GoogleBooks(m::GoogleBooksClient::new(
+                http_client.clone(),
+                live_metadata_config.clone(),
+            )),
         );
         Arc::new(livrarr_server::cover_service::LiveCoverService::new(
             db.clone(),

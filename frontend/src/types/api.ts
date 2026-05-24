@@ -671,6 +671,7 @@ export interface MetadataConfigResponse {
   llmModel: string | null;
   audnexusUrl: string;
   languages: string[];
+  googleBooksApiKeySet: boolean;
   providerStatus?: Record<string, string>;
 }
 
@@ -686,14 +687,14 @@ export interface LanguageInfo {
 /** All supported languages with their metadata providers. */
 export const SUPPORTED_LANGUAGES: LanguageInfo[] = [
   { code: "en", englishName: "English", providerName: "OpenLibrary + Hardcover", providerType: "api", requiresLlm: false, flag: "\u{1F1FA}\u{1F1F8}" },
-  { code: "nl", englishName: "Dutch", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1F3}\u{1F1F1}" },
-  { code: "fr", englishName: "French", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1EB}\u{1F1F7}" },
-  { code: "de", englishName: "German", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1E9}\u{1F1EA}" },
-  { code: "it", englishName: "Italian", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1EE}\u{1F1F9}" },
-  { code: "ja", englishName: "Japanese", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1EF}\u{1F1F5}" },
-  { code: "ko", englishName: "Korean", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1F0}\u{1F1F7}" },
-  { code: "pl", englishName: "Polish", providerName: "lubimyczytac.pl", providerType: "llm", requiresLlm: true, flag: "\u{1F1F5}\u{1F1F1}" },
-  { code: "es", englishName: "Spanish", providerName: "Web Search", providerType: "llm", requiresLlm: true, flag: "\u{1F1EA}\u{1F1F8}" },
+  { code: "nl", englishName: "Dutch", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1F3}\u{1F1F1}" },
+  { code: "fr", englishName: "French", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1EB}\u{1F1F7}" },
+  { code: "de", englishName: "German", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1E9}\u{1F1EA}" },
+  { code: "it", englishName: "Italian", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1EE}\u{1F1F9}" },
+  { code: "ja", englishName: "Japanese", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1EF}\u{1F1F5}" },
+  { code: "ko", englishName: "Korean", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1F0}\u{1F1F7}" },
+  { code: "pl", englishName: "Polish", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1F5}\u{1F1F1}" },
+  { code: "es", englishName: "Spanish", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1EA}\u{1F1F8}" },
 ];
 
 export interface UpdateMetadataConfigRequest {
@@ -706,6 +707,7 @@ export interface UpdateMetadataConfigRequest {
   llmModel?: string | null;
   audnexusUrl?: string | null;
   languages?: string[] | null;
+  googleBooksApiKey?: string | null;
 }
 
 // System

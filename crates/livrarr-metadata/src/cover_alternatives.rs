@@ -26,7 +26,7 @@ fn eligible_providers(work: &Work) -> Vec<MetadataProvider> {
             MetadataProvider::Audnexus,
         ]
     } else {
-        vec![MetadataProvider::Audnexus]
+        vec![MetadataProvider::GoogleBooks, MetadataProvider::Audnexus]
     }
 }
 
@@ -160,7 +160,10 @@ mod tests {
             ..Default::default()
         };
         let providers = eligible_providers(&work);
-        assert_eq!(providers, vec![MetadataProvider::Audnexus]);
+        assert_eq!(
+            providers,
+            vec![MetadataProvider::GoogleBooks, MetadataProvider::Audnexus]
+        );
     }
 
     #[test]

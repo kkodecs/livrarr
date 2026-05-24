@@ -49,6 +49,10 @@ fn metadata_to_response(
         llm_model: cfg.llm_model,
         audnexus_url: cfg.audnexus_url,
         languages: cfg.languages,
+        google_books_api_key_set: cfg
+            .google_books_api_key
+            .as_ref()
+            .is_some_and(|s| !s.is_empty()),
         provider_status,
     }
 }
@@ -173,15 +177,31 @@ pub async fn update_metadata<S: HasAppConfigService + HasProviderHealth + HasLiv
         }
     }
 
+    if let Some(Some(ref k)) = req.google_books_api_key {
+        if k.is_empty() {
+            return Err(ApiError::BadRequest(
+                "googleBooksApiKey must not be empty string; use null to clear".into(),
+            ));
+        }
+    }
+
     let hardcover_api_token = req
         .hardcover_api_token
         .map(|inner| inner.map(|t| clean_token(&t)));
     let llm_api_key = req.llm_api_key.map(|inner| inner.map(|t| clean_token(&t)));
+    let google_books_api_key = req
+        .google_books_api_key
+        .map(|inner| inner.map(|t| clean_token(&t)));
 
     let validated_languages = if let Some(langs) = req.languages {
         let effective_key = match &llm_api_key {
             None => None,
             Some(None) => None,
+            Some(Some(v)) => Some(v.as_str()),
+        };
+        let effective_gb_key = match &google_books_api_key {
+            None => None,
+            Some(None) => Some(""),
             Some(Some(v)) => Some(v.as_str()),
         };
         Some(
@@ -193,6 +213,7 @@ pub async fn update_metadata<S: HasAppConfigService + HasProviderHealth + HasLiv
                     req.llm_endpoint.as_deref(),
                     effective_key,
                     req.llm_model.as_deref(),
+                    effective_gb_key,
                 )
                 .await
                 .map_err(ApiError::BadRequest)?,
@@ -213,6 +234,7 @@ pub async fn update_metadata<S: HasAppConfigService + HasProviderHealth + HasLiv
             llm_model: req.llm_model,
             audnexus_url: req.audnexus_url,
             languages: validated_languages,
+            google_books_api_key,
         })
         .await?;
 

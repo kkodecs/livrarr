@@ -557,6 +557,10 @@ impl ConfigApi for SecondaryApiImpl {
             llm_model: c.llm_model,
             audnexus_url: c.audnexus_url,
             languages: c.languages,
+            google_books_api_key_set: c
+                .google_books_api_key
+                .as_ref()
+                .is_some_and(|s| !s.is_empty()),
             provider_status: std::collections::HashMap::new(),
         })
     }
@@ -577,6 +581,7 @@ impl ConfigApi for SecondaryApiImpl {
                 llm_model: req.llm_model,
                 audnexus_url: req.audnexus_url,
                 languages: req.languages,
+                google_books_api_key: req.google_books_api_key,
             })
             .await
             .map_err(db_err)?;
@@ -590,6 +595,10 @@ impl ConfigApi for SecondaryApiImpl {
             llm_model: c.llm_model,
             audnexus_url: c.audnexus_url,
             languages: c.languages,
+            google_books_api_key_set: c
+                .google_books_api_key
+                .as_ref()
+                .is_some_and(|s| !s.is_empty()),
             provider_status: std::collections::HashMap::new(),
         })
     }

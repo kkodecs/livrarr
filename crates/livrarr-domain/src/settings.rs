@@ -45,6 +45,7 @@ pub struct MetadataConfig {
     pub llm_model: Option<String>,
     pub audnexus_url: String,
     pub languages: Vec<String>,
+    pub google_books_api_key: Option<String>,
 }
 
 impl std::fmt::Debug for MetadataConfig {
@@ -65,6 +66,10 @@ impl std::fmt::Debug for MetadataConfig {
             .field("llm_model", &self.llm_model)
             .field("audnexus_url", &self.audnexus_url)
             .field("languages", &self.languages)
+            .field(
+                "google_books_api_key",
+                &self.google_books_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -118,6 +123,7 @@ pub struct UpdateMetadataParams {
     pub llm_model: Option<String>,
     pub audnexus_url: Option<String>,
     pub languages: Option<Vec<String>>,
+    pub google_books_api_key: Option<Option<String>>,
 }
 
 pub struct UpdateProwlarrParams {

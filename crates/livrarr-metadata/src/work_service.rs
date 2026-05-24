@@ -11,6 +11,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+fn iso639_1_to_3(code: &str) -> &str {
+    match code {
+        "nl" => "dut",
+        "fr" => "fre",
+        "de" => "ger",
+        "it" => "ita",
+        "ja" => "jpn",
+        "ko" => "kor",
+        "pl" => "pol",
+        "es" => "spa",
+        "en" => "eng",
+        other => other,
+    }
+}
+
 pub struct StubNoLlm;
 
 impl LlmCaller for StubNoLlm {
@@ -978,15 +993,17 @@ where
             )));
         }
 
-        // Non-English: Goodreads search with regex HTML parsing.
-        if lang != "en" {
-            return self.lookup_goodreads(&term, lang).await;
-        }
-
-        // English: OpenLibrary search.
-        let results = self.lookup_openlibrary(&term).await?;
+        // All languages: OpenLibrary search (OL finds works in any language).
+        // Foreign-language *metadata* comes from Google Books during enrichment,
+        // but OL is fine for discovery (title/author/OLID/ISBN).
+        let results = self.lookup_openlibrary(&term, lang).await?;
         if !results.is_empty() {
             return Ok(results);
+        }
+
+        // Fallback: Goodreads search for foreign languages (regex HTML parsing).
+        if lang != "en" {
+            return self.lookup_goodreads(&term, lang).await;
         }
 
         Ok(vec![])
@@ -1289,9 +1306,19 @@ where
         Ok(results)
     }
 
-    async fn lookup_openlibrary(&self, term: &str) -> Result<Vec<LookupResult>, WorkServiceError> {
+    async fn lookup_openlibrary(
+        &self,
+        term: &str,
+        lang: &str,
+    ) -> Result<Vec<LookupResult>, WorkServiceError> {
+        let lang_param = if lang != "en" {
+            let ol_lang = iso639_1_to_3(lang);
+            format!("&language={}", urlencoding::encode(ol_lang))
+        } else {
+            String::new()
+        };
         let url = format!(
-            "https://openlibrary.org/search.json?q={}&limit=50&fields=key,title,author_name,author_key,first_publish_year,cover_i",
+            "https://openlibrary.org/search.json?q={}&limit=50&fields=key,title,author_name,author_key,first_publish_year,cover_i{lang_param}",
             urlencoding::encode(term)
         );
 
@@ -1376,7 +1403,7 @@ where
                     series_position: None,
                     source: None,
                     source_type: None,
-                    language: Some("en".to_string()),
+                    language: Some(lang.to_string()),
                     detail_url: None,
                     rating: None,
                 })

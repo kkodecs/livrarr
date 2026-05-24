@@ -73,6 +73,7 @@ const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
 interface MetadataForm {
   hardcoverEnabled: boolean;
   hardcoverApiToken: string;
+  googleBooksApiKey: string;
   audnexusUrl: string;
   llmEnabled: boolean;
   llmProvider: LlmProvider | "";
@@ -109,6 +110,7 @@ export default function MetadataPage() {
     values: {
       hardcoverEnabled: configQ.data?.hardcoverEnabled ?? true,
       hardcoverApiToken: "",
+      googleBooksApiKey: "",
       audnexusUrl: configQ.data?.audnexusUrl ?? "",
       llmEnabled: configQ.data?.llmEnabled ?? true,
       llmProvider: configQ.data?.llmProvider ?? "",
@@ -166,6 +168,8 @@ export default function MetadataPage() {
 
     if (data.hardcoverApiToken)
       req.hardcoverApiToken = data.hardcoverApiToken;
+    if (data.googleBooksApiKey)
+      req.googleBooksApiKey = data.googleBooksApiKey;
     if (data.audnexusUrl !== config.audnexusUrl)
       req.audnexusUrl = data.audnexusUrl || null;
     if (data.llmProvider) req.llmProvider = data.llmProvider as LlmProvider;
@@ -243,6 +247,28 @@ export default function MetadataPage() {
                 {...register("hardcoverApiToken")}
                 type="password"
                 placeholder={config.hardcoverApiTokenSet ? "Leave blank to keep saved token" : "Hardcover API token"}
+                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
+              />
+            </div>
+          </section>
+
+          {/* ── Google Books ── */}
+          <section>
+            <div className="flex items-center gap-2 mb-4">
+              <BookOpen size={18} className="text-muted" />
+              <h2 className="text-base font-semibold text-zinc-100">
+                Google Books
+              </h2>
+              <HelpTip text="Google Books provides structured metadata for books in all languages. Required for foreign-language enrichment without an LLM. Get an API key from console.cloud.google.com → APIs & Services → Credentials." />
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1">
+                API Key
+              </label>
+              <input
+                {...register("googleBooksApiKey")}
+                type="password"
+                placeholder={config.googleBooksApiKeySet ? "Leave blank to keep saved key" : "Google Books API key"}
                 className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
               />
             </div>
@@ -458,7 +484,8 @@ export default function MetadataPage() {
                   !!config.llmEndpoint &&
                   config.llmApiKeySet &&
                   !!config.llmModel;
-                const needsLlm = lang.requiresLlm && !llmConfigured;
+                const googleBooksConfigured = !!config.googleBooksApiKeySet || !!watch("googleBooksApiKey")?.trim();
+                const needsProvider = !isEnglish && !llmConfigured && !googleBooksConfigured;
                 const providerError =
                   config.providerStatus?.[lang.providerName];
 
@@ -469,7 +496,7 @@ export default function MetadataPage() {
                       isEnabled || isEnglish
                         ? "bg-zinc-800/50"
                         : "bg-zinc-800/20"
-                    } ${needsLlm ? "opacity-60" : ""}`}
+                    } ${needsProvider ? "opacity-60" : ""}`}
                   >
                     <span
                       className={`text-lg ${!isEnabled && !isEnglish ? "opacity-40" : ""}`}
@@ -508,15 +535,15 @@ export default function MetadataPage() {
                           &#9679; Not Responding
                         </span>
                       )}
-                      {needsLlm && (
+                      {needsProvider && (
                         <a
                           href="#llm-section"
                           className="text-[11px] text-red-400 underline"
                         >
-                          Needs LLM &rarr;
+                          Needs Google Books or LLM &rarr;
                         </a>
                       )}
-                      {!isEnglish && !needsLlm && (
+                      {!isEnglish && (!needsProvider || isEnabled) && (
                         <button
                           type="button"
                           onClick={() => {

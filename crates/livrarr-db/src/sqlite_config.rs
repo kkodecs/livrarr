@@ -183,6 +183,9 @@ impl ConfigDb for SqliteDb {
                 .try_get("audnexus_url")
                 .map_err(|e| DbError::Io(Box::new(e)))?,
             languages: parse_languages(&languages_str)?,
+            google_books_api_key: row
+                .try_get("google_books_api_key")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         })
     }
 
@@ -214,12 +217,18 @@ impl ConfigDb for SqliteDb {
         let languages = req.languages.unwrap_or(current.languages);
         let languages_json =
             serde_json::to_string(&languages).map_err(|e| DbError::Io(Box::new(e)))?;
+        let google_books_api_key = match req.google_books_api_key {
+            None => current.google_books_api_key,
+            Some(None) => None,
+            Some(Some(v)) => Some(v),
+        };
 
         sqlx::query(
             "UPDATE metadata_config SET \
              hardcover_enabled = ?, hardcover_api_token = ?, \
              llm_enabled = ?, llm_provider = ?, llm_endpoint = ?, \
-             llm_api_key = ?, llm_model = ?, audnexus_url = ?, languages = ? \
+             llm_api_key = ?, llm_model = ?, audnexus_url = ?, languages = ?, \
+             google_books_api_key = ? \
              WHERE id = 1",
         )
         .bind(hardcover_enabled)
@@ -231,6 +240,7 @@ impl ConfigDb for SqliteDb {
         .bind(&llm_model)
         .bind(&audnexus_url)
         .bind(&languages_json)
+        .bind(&google_books_api_key)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?;
