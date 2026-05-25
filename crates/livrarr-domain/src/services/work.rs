@@ -142,10 +142,15 @@ pub struct RefreshWorkResult {
     pub merge_deferred: bool,
 }
 
-#[derive(Debug)]
-pub struct RefreshAllHandle {
-    pub total_works: usize,
-}
+// Dead: bulk refresh is implemented at the handler layer
+// (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g
+// (handler-level spawning for long-running background work). This type
+// was an earlier design that never wired up. Restore only if the spawn
+// pattern is ever moved into the service layer.
+// #[derive(Debug)]
+// pub struct RefreshAllHandle {
+//     pub total_works: usize,
+// }
 
 #[derive(Debug)]
 pub struct LookupRequest {
@@ -245,7 +250,10 @@ pub trait WorkService: Send + Sync {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<RefreshWorkResult, WorkServiceError>;
-    async fn refresh_all(&self, user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError>;
+    // Dead: bulk refresh is implemented at the handler layer
+    // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g.
+    // Restore here only if the spawn pattern is ever moved into services.
+    // async fn refresh_all(&self, user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError>;
     async fn upload_cover(
         &self,
         user_id: UserId,

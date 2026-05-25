@@ -87,10 +87,17 @@ impl<C: AuthCryptoService> ServerAuthService<C> {
 
     async fn record_failure(&self, username: &str) {
         let mut lockouts = self.lockouts.write().await;
-        // Bounded eviction: if the map exceeds the max, remove arbitrary entries.
         if lockouts.len() >= MAX_LOCKOUT_ENTRIES {
-            let keys: Vec<String> = lockouts.keys().take(EVICT_COUNT).cloned().collect();
-            for key in keys {
+            // Never evict an active lockout — that's the attack vector.
+            // Evict expired lockouts and not-yet-locked entries only.
+            let now = Utc::now();
+            let evictable: Vec<String> = lockouts
+                .iter()
+                .filter(|(_, s)| s.locked_until.is_none_or(|t| t <= now))
+                .map(|(k, _)| k.clone())
+                .take(EVICT_COUNT)
+                .collect();
+            for key in evictable {
                 lockouts.remove(&key);
             }
         }

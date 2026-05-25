@@ -177,8 +177,8 @@ export const selectCover = (workId: number, candidateId: string, mediaType: stri
     method: "POST",
     body: JSON.stringify({ candidateId, mediaType }),
   });
-export const deleteWork = (id: number, deleteFiles: boolean) =>
-  apiFetch<DeleteWorkResponse>(`/work/${id}?deleteFiles=${deleteFiles}`, {
+export const deleteWork = (id: number) =>
+  apiFetch<DeleteWorkResponse>(`/work/${id}`, {
     method: "DELETE",
   });
 export const refreshWork = (id: number) =>

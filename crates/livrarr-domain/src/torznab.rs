@@ -28,6 +28,7 @@ pub fn parse_torznab_xml(xml: &[u8]) -> Result<TorznabParseResult, String> {
     let mut in_item = false;
     let mut item = TorznabItem::default();
     let mut current_tag: Vec<u8> = Vec::new();
+    let mut current_text_buf = String::new();
 
     loop {
         match reader.read_event() {
@@ -122,26 +123,31 @@ pub fn parse_torznab_xml(xml: &[u8]) -> Result<TorznabParseResult, String> {
                     }
                     _ if in_item && is_start => {
                         current_tag = local.as_ref().to_vec();
+                        current_text_buf.clear();
                     }
                     _ => {}
                 }
             }
             Ok(Event::Text(ref e)) if in_item => {
                 if let Ok(text) = e.unescape() {
-                    handle_xml_text(&text, &current_tag, &mut item);
+                    current_text_buf.push_str(&text);
                 }
             }
             Ok(Event::CData(ref e)) if in_item => {
                 if let Ok(text) = std::str::from_utf8(e.as_ref()) {
-                    handle_xml_text(text, &current_tag, &mut item);
+                    current_text_buf.push_str(text);
                 }
             }
             Ok(Event::End(ref e)) => {
+                if in_item && !current_text_buf.is_empty() {
+                    flush_element_text(&current_tag, &current_text_buf, &mut item);
+                }
+                current_text_buf.clear();
+                current_tag.clear();
                 if e.local_name().as_ref() == b"item" && in_item {
                     in_item = false;
                     items.push(std::mem::take(&mut item));
                 }
-                current_tag.clear();
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(format!("XML parse error: {e}")),
@@ -153,13 +159,19 @@ pub fn parse_torznab_xml(xml: &[u8]) -> Result<TorznabParseResult, String> {
 }
 
 #[inline(always)]
-fn handle_xml_text(text: &str, current_tag: &[u8], item: &mut TorznabItem) {
+fn flush_element_text(current_tag: &[u8], text: &str, item: &mut TorznabItem) {
     match current_tag {
         b"title" => item.title.push_str(text),
         b"guid" => item.guid.push_str(text),
-        b"link" if item.download_url.is_empty() => item.download_url.push_str(text),
-        b"size" if item.size == 0 => {
-            item.size = text.parse().unwrap_or(0);
+        b"link" => {
+            if item.download_url.is_empty() {
+                item.download_url.push_str(text);
+            }
+        }
+        b"size" => {
+            if item.size == 0 {
+                item.size = text.trim().parse().unwrap_or(0);
+            }
         }
         b"pubDate" => {
             item.publish_date

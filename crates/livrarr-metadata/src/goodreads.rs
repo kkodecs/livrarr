@@ -619,6 +619,7 @@ pub async fn extract_with_llm(
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
         .json(&body)
+        .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
         .map_err(|e| GoodreadsFetchError::Network(format!("LLM extract: {e}")))?;

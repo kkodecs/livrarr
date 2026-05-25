@@ -1420,6 +1420,25 @@ fn patch_work_update_field(
 /// Per-work lock map type [I-12].
 type PerWorkLocks = tokio::sync::Mutex<HashMap<(UserId, WorkId), Arc<tokio::sync::Mutex<()>>>>;
 
+/// On drop, schedules a sweep of the PerWorkLocks map that removes entries
+/// whose only remaining reference is the map itself (orphaned per-work mutexes).
+/// Without this, the map grows unboundedly across enrichment calls.
+struct SweepLocksOnDrop {
+    locks: Arc<PerWorkLocks>,
+}
+
+impl Drop for SweepLocksOnDrop {
+    fn drop(&mut self) {
+        let locks = self.locks.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut lock_map = locks.lock().await;
+                lock_map.retain(|_, arc| Arc::strong_count(arc) > 1);
+            });
+        }
+    }
+}
+
 /// Source data pending injection for a specific (user_id, work_id) pair.
 type SourceDataStore =
     tokio::sync::Mutex<HashMap<(UserId, WorkId), livrarr_domain::services::SourceProviderData>>;
@@ -1512,6 +1531,9 @@ where
         mode: EnrichmentMode,
     ) -> Result<EnrichmentResult, EnrichmentError> {
         // Step 1: Acquire per-work lock [I-12]
+        let _sweep = SweepLocksOnDrop {
+            locks: self.locks.clone(),
+        };
         let per_work_lock = {
             let mut lock_map = self.locks.lock().await;
             lock_map
@@ -1909,6 +1931,9 @@ where
         work_id: WorkId,
     ) -> Result<(), EnrichmentError> {
         // Acquire per-work lock [I-12] — serializes with enrich_work
+        let _sweep = SweepLocksOnDrop {
+            locks: self.locks.clone(),
+        };
         let per_work_lock = {
             let mut lock_map = self.locks.lock().await;
             lock_map

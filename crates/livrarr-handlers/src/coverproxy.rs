@@ -68,9 +68,15 @@ pub async fn proxy_cover<S: HasCoverCache + HasHttpClient + HasHmacKey>(
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    if let Some(declared) = resp.content_length() {
+        if declared as usize > MAX_IMAGE_SIZE {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        }
+    }
+
     let data = match resp.bytes().await {
         Ok(b) if b.len() <= MAX_IMAGE_SIZE => b.to_vec(),
-        _ => return StatusCode::BAD_GATEWAY.into_response(),
+        _ => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
 
     state

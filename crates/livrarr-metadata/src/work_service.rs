@@ -819,6 +819,12 @@ where
                 other => WorkServiceError::Db(other),
             })?;
 
+        let items = self
+            .db
+            .list_library_items_by_work(user_id, work_id)
+            .await
+            .map_err(WorkServiceError::Db)?;
+
         self.db
             .delete_work(user_id, work_id)
             .await
@@ -829,6 +835,17 @@ where
             })?;
 
         delete_cover_files(&self.data_dir, user_id, work_id).await;
+
+        for item in &items {
+            if let Err(e) = tokio::fs::remove_file(&item.path).await {
+                tracing::warn!(
+                    work_id = work_id,
+                    item_id = item.id,
+                    path = %item.path,
+                    "failed to delete library file on work delete: {e}"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -870,23 +887,28 @@ where
         })
     }
 
-    async fn refresh_all(&self, user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError> {
-        let works = self
-            .db
-            .list_works(user_id)
-            .await
-            .map_err(WorkServiceError::Db)?;
-
-        let total_works = works.len();
-
-        if !self.try_start_bulk_refresh(user_id) {
-            return Err(WorkServiceError::Enrichment(
-                "bulk refresh already in progress".into(),
-            ));
-        }
-
-        Ok(RefreshAllHandle { total_works })
-    }
+    // Dead: bulk refresh is implemented at the handler layer
+    // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g
+    // (handler-level spawning for long-running background work). This stub
+    // never wired up — the handler does its own list + spawn + iterate +
+    // finish_bulk_refresh directly.
+    // async fn refresh_all(&self, user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError> {
+    //     let works = self
+    //         .db
+    //         .list_works(user_id)
+    //         .await
+    //         .map_err(WorkServiceError::Db)?;
+    //
+    //     let total_works = works.len();
+    //
+    //     if !self.try_start_bulk_refresh(user_id) {
+    //         return Err(WorkServiceError::Enrichment(
+    //             "bulk refresh already in progress".into(),
+    //         ));
+    //     }
+    //
+    //     Ok(RefreshAllHandle { total_works })
+    // }
 
     async fn upload_cover(
         &self,
@@ -905,6 +927,11 @@ where
         }
         if bytes.is_empty() {
             return Err(WorkServiceError::Enrichment("empty image data".into()));
+        }
+        if !is_supported_image(bytes) {
+            return Err(WorkServiceError::Enrichment(
+                "unrecognized image format (expected JPEG, PNG, GIF, or WebP)".into(),
+            ));
         }
 
         let _work = self.get(user_id, work_id).await?;
@@ -1830,4 +1857,23 @@ pub async fn delete_cover_files(data_dir: &std::path::Path, user_id: i64, work_i
         let _ = tokio::fs::remove_file(dir.join(format!("{work_id}.candidate.tmp"))).await;
         let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_audio.candidate.tmp"))).await;
     }
+}
+
+fn is_supported_image(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 {
+        return false;
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return true;
+    }
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return true;
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return true;
+    }
+    if &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return true;
+    }
+    false
 }

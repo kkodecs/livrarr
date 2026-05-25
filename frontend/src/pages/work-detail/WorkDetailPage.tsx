@@ -111,7 +111,6 @@ export default function WorkDetailPage() {
 
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleteFiles, setDeleteFiles] = useState(false);
 
   useEffect(() => {
     if (coverPollBaseline === undefined) return;
@@ -132,7 +131,7 @@ export default function WorkDetailPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => deleteWork(Number(id), deleteFiles),
+    mutationFn: () => deleteWork(Number(id)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["works"] });
       toast.success("Work deleted");
@@ -241,23 +240,14 @@ export default function WorkDetailPage() {
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
         title="Delete Work"
-        description={`Are you sure you want to delete "${work.title}"?`}
+        description={`Permanently delete "${work.title}" and all associated files on disk? This cannot be undone.`}
         confirmLabel="Delete"
         variant="danger"
         onConfirm={async () => {
           await deleteMutation.mutateAsync();
         }}
-      >
-        <label className="mt-4 flex items-center gap-2 text-sm text-zinc-300">
-          <input
-            type="checkbox"
-            checked={deleteFiles}
-            onChange={(e) => setDeleteFiles(e.target.checked)}
-            className="rounded border-zinc-600 bg-zinc-800"
-          />
-          Also delete files from disk
-        </label>
-      </ConfirmModal>
+      />
+
     </>
   );
 }

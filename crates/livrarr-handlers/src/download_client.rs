@@ -342,8 +342,9 @@ async fn test_sabnzbd<S: HasHttpClient>(
 ) -> Result<(), ApiError> {
     let base_url = request_base_url(req);
     let api_key = req.api_key.as_deref().unwrap_or("");
+    let api_key_enc = urlencoding::encode(api_key);
 
-    let version_url = format!("{base_url}/api?mode=version&apikey={api_key}&output=json");
+    let version_url = format!("{base_url}/api?mode=version&apikey={api_key_enc}&output=json");
     // Use regular client — download clients are user-configured trusted infrastructure.
     let resp = state
         .http_client()
@@ -373,8 +374,9 @@ async fn test_sabnzbd<S: HasHttpClient>(
         )));
     }
 
-    let cat_url =
-        format!("{base_url}/api?mode=get_config&section=categories&apikey={api_key}&output=json");
+    let cat_url = format!(
+        "{base_url}/api?mode=get_config&section=categories&apikey={api_key_enc}&output=json"
+    );
     let resp = state
         .http_client()
         .get(&cat_url)

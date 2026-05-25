@@ -786,42 +786,42 @@ async fn test_work_refresh_preserves_user_provenance() {
 }
 
 // =============================================================================
-// refresh_all
+// refresh_all (dead — bulk refresh moved to handler layer per insight 9g)
 // =============================================================================
 
-#[tokio::test]
-async fn test_work_refresh_all_returns_immediately() {
-    // SVC-WORK-003: Returns immediately with correct total_works count
-    use livrarr_behavioral::stubs::StubEnrichmentWorkflow;
-    let db = create_test_db().await;
-    let user_id = setup_user(&db).await;
-    let svc = WorkServiceImpl::new(
-        db,
-        StubEnrichmentWorkflow::succeeding(),
-        stub_http(),
-        test_data_dir(),
-    );
-
-    svc.add(user_id, make_candidate("Work 1", "", None))
-        .await
-        .unwrap();
-    svc.add(user_id, make_candidate("Work 2", "", None))
-        .await
-        .unwrap();
-    svc.add(user_id, make_candidate("Work 3", "", None))
-        .await
-        .unwrap();
-
-    let handle = svc.refresh_all(user_id).await.unwrap();
-    assert_eq!(handle.total_works, 3);
-}
-
-#[tokio::test]
-#[ignore = "pk-implement: requires background task spawning + failure tracking"]
-async fn test_work_refresh_all_single_failure_continues() {
-    // SVC-WORK-003: Single work failure does not abort the batch
-    todo!("Setup: seed multiple works and stub refresh so one work fails")
-}
+// #[tokio::test]
+// async fn test_work_refresh_all_returns_immediately() {
+//     // SVC-WORK-003: Returns immediately with correct total_works count
+//     use livrarr_behavioral::stubs::StubEnrichmentWorkflow;
+//     let db = create_test_db().await;
+//     let user_id = setup_user(&db).await;
+//     let svc = WorkServiceImpl::new(
+//         db,
+//         StubEnrichmentWorkflow::succeeding(),
+//         stub_http(),
+//         test_data_dir(),
+//     );
+//
+//     svc.add(user_id, make_candidate("Work 1", "", None))
+//         .await
+//         .unwrap();
+//     svc.add(user_id, make_candidate("Work 2", "", None))
+//         .await
+//         .unwrap();
+//     svc.add(user_id, make_candidate("Work 3", "", None))
+//         .await
+//         .unwrap();
+//
+//     let handle = svc.refresh_all(user_id).await.unwrap();
+//     assert_eq!(handle.total_works, 3);
+// }
+//
+// #[tokio::test]
+// #[ignore = "pk-implement: requires background task spawning + failure tracking"]
+// async fn test_work_refresh_all_single_failure_continues() {
+//     // SVC-WORK-003: Single work failure does not abort the batch
+//     todo!("Setup: seed multiple works and stub refresh so one work fails")
+// }
 
 // =============================================================================
 // upload_cover

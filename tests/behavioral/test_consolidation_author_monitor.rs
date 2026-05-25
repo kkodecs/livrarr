@@ -140,9 +140,11 @@ impl WorkService for StubWorkService {
         })
     }
 
-    async fn refresh_all(&self, _user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError> {
-        Ok(RefreshAllHandle { total_works: 0 })
-    }
+    // Dead: refresh_all moved out of WorkService trait — bulk refresh is handler-level
+    // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g.
+    // async fn refresh_all(&self, _user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError> {
+    //     Ok(RefreshAllHandle { total_works: 0 })
+    // }
 
     async fn upload_cover(
         &self,

@@ -73,12 +73,6 @@ pub struct LookupQuery {
 }
 
 #[derive(serde::Deserialize)]
-pub struct DeleteQuery {
-    #[serde(rename = "deleteFiles")]
-    pub delete_files: Option<bool>,
-}
-
-#[derive(serde::Deserialize)]
 pub struct StreamQuery {
     pub token: Option<String>,
 }
@@ -549,7 +543,6 @@ pub async fn delete<S: HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-    Query(_q): Query<DeleteQuery>,
 ) -> Result<Json<DeleteWorkResponse>, ApiError> {
     state.work_service().delete(ctx.user.id, id).await?;
     Ok(Json(DeleteWorkResponse { warnings: vec![] }))

@@ -394,6 +394,10 @@ async fn main() {
     let readarr_import_progress_arc = Arc::new(tokio::sync::Mutex::new(
         livrarr_server::readarr_import_service::ReadarrImportProgress::default(),
     ));
+    // Readarr URL is admin-configured trusted infrastructure (matches the
+    // alpha4 trusted-infrastructure pattern: download clients, indexers,
+    // Readarr import all use the unrestricted client because the admin
+    // chose the endpoint).
     let http_client_for_readarr = http_client.clone();
     // Pre-construct WorkService Arc so series_query_service and readarr_import_wf can share it.
     let work_service_arc: Arc<livrarr_server::state::LiveWorkService> = {

@@ -115,7 +115,11 @@ pub async fn get_metadata<S: HasAppConfigService + HasProviderHealth>(
 }
 
 /// Validate an LLM endpoint URL: must be http/https, no embedded credentials,
-/// no private IP addresses.
+/// no literal private IP addresses. Hostnames resolving to private IPs are
+/// permitted — the LLM endpoint is admin-configured trusted infrastructure
+/// (self-hosted LocalAI / vLLM / llama.cpp on a private LAN/Docker network
+/// is a common and supported deployment). The literal-IP check stays as a
+/// sanity rail against obvious admin mistakes like pasting `127.0.0.1`.
 fn validate_llm_endpoint(endpoint: &str) -> Result<(), ApiError> {
     let parsed = reqwest::Url::parse(endpoint)
         .map_err(|e| ApiError::BadRequest(format!("invalid LLM endpoint URL: {e}")))?;
@@ -333,8 +337,9 @@ pub async fn test_llm<S: HasAppConfigService + HasHttpClient>(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        tracing::warn!(status = %status, body = %text, "LLM test endpoint returned non-success");
         return Err(ApiError::BadGateway(format!(
-            "LLM returned {status}: {text}"
+            "LLM returned {status} (see server logs for details)"
         )));
     }
     Ok(())

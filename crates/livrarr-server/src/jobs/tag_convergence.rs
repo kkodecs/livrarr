@@ -47,7 +47,10 @@ pub async fn tag_convergence_tick(
             }
 
             // I/O backpressure — reuse existing import semaphore.
-            let _permit = state.import_semaphore.acquire().await;
+            let _permit = match state.import_semaphore.acquire().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
 
             let work = match state.db.get_work(item.user_id, item.work_id).await {
                 Ok(w) => w,

@@ -206,7 +206,10 @@ async fn test_work_upload_cover_one_mebibyte_boundary_succeeds() {
     let user_id = setup_user(&db).await;
     let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
     let work_id = seed_work(&db, user_id, "Boundary Cover", "Author").await;
-    let bytes = vec![0x5a; 1_024 * 1_024];
+    let mut bytes = vec![0x5a; 1_024 * 1_024];
+    bytes[0] = 0xFF;
+    bytes[1] = 0xD8;
+    bytes[2] = 0xFF;
 
     svc.upload_cover(user_id, work_id, &bytes).await.unwrap();
 

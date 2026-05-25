@@ -414,6 +414,7 @@ async fn llm_disambiguate(
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
         .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| format!("LLM request failed: {e}"))?;

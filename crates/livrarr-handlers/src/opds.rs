@@ -273,8 +273,8 @@ pub async fn recent<S: OpdsHandlerContext>(
             user.id,
             page as u32,
             PAGE_SIZE as u32,
-            WorkSortField::Title,
-            SortDirection::Asc,
+            WorkSortField::DateAdded,
+            SortDirection::Desc,
             None,
         )
         .await

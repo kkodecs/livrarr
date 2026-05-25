@@ -452,10 +452,15 @@ impl OpenLibraryClient {
 /// Resolution order:
 ///   1. If `work.gr_key` is populated, fetch the detail page directly
 ///      (skips a search round-trip — see R-21 canonical-identity policy).
-///   2. Otherwise, search by `title author`; on empty results, retry once
-///      with non-ASCII characters stripped from the title (legacy parity for
-///      titles with diacritics). Take the first hit.
-///   3. Resolve the search hit's (often relative) `detail_url` against
+///   2. Otherwise, search by `title author` and use the LLM to disambiguate
+///      among hits. GR is a hostile scraping target (anti-bot, HTML drift,
+///      noisy results full of study guides and alternate editions) — naive
+///      first-hit matching is unreliable, and LLM judgment is required.
+///      Without an LLM configured, this path returns `NotFound`. Use
+///      Hardcover + OpenLibrary for LLM-free English enrichment; GR
+///      contributes cover quality + supplemental fields when LLM is
+///      available.
+///   3. Resolve the chosen hit's (often relative) `detail_url` against
 ///      `base_url` and fetch the detail page.
 ///
 /// Outcome mapping:

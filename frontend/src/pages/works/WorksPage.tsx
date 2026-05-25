@@ -146,7 +146,6 @@ export function WorksPage() {
   const [editorMode, setEditorMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deleteFiles, setDeleteFiles] = useState(false);
 
   const toggleEditorMode = useCallback(() => {
     setEditorMode((prev) => {
@@ -194,7 +193,7 @@ export function WorksPage() {
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds);
     const results = await Promise.allSettled(
-      ids.map((id) => deleteWork(id, deleteFiles)),
+      ids.map((id) => deleteWork(id)),
     );
     const succeeded = results.filter((r) => r.status === "fulfilled").length;
     const failed = results.filter((r) => r.status === "rejected").length;
@@ -206,7 +205,6 @@ export function WorksPage() {
       );
     }
     setSelectedIds(new Set());
-    setDeleteFiles(false);
     queryClient.invalidateQueries({ queryKey: ["works"] });
   };
 
@@ -473,21 +471,11 @@ export function WorksPage() {
         open={showDeleteModal}
         onOpenChange={setShowDeleteModal}
         title={`Delete ${selectedIds.size} work${selectedIds.size !== 1 ? "s" : ""}?`}
-        description="This action cannot be undone."
+        description={`Permanently delete ${selectedIds.size} work${selectedIds.size !== 1 ? "s" : ""} and all associated files on disk. This cannot be undone.`}
         confirmLabel="Delete"
         variant="danger"
         onConfirm={handleBulkDelete}
-      >
-        <label className="mt-4 flex items-center gap-2 text-sm text-zinc-300">
-          <input
-            type="checkbox"
-            checked={deleteFiles}
-            onChange={(e) => setDeleteFiles(e.target.checked)}
-            className="h-4 w-4 rounded border-border bg-zinc-900"
-          />
-          Also delete files from disk
-        </label>
-      </ConfirmModal>
+      />
     </>
   );
 }
