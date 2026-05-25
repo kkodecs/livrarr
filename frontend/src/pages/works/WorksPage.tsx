@@ -35,10 +35,25 @@ import { SortHeader } from "@/components/Page/SortHeader";
 import { formatRelativeDate } from "@/utils/format";
 import { MediaStatusRow } from "@/components/MediaStatusRow";
 import { BookCover } from "@/components/BookCover";
+import ProgressBar from "@/components/ProgressBar";
+import ProgressBadge from "@/components/ProgressBadge";
 import type {
   WorkDetailResponse,
+  LibraryItemResponse,
   MediaType,
 } from "@/types/api";
+
+function bestProgress(items: LibraryItemResponse[]): LibraryItemResponse | null {
+  let best: LibraryItemResponse | null = null;
+  for (const li of items) {
+    if (li.progressPct != null && li.progressPct > 0) {
+      if (!best || (li.progressPct > (best.progressPct ?? 0))) {
+        best = li;
+      }
+    }
+  }
+  return best;
+}
 
 const PAGE_SIZE = 50;
 
@@ -629,6 +644,9 @@ function TableView({
             <th className="hidden md:table-cell px-3 py-2 text-left text-xs font-medium uppercase text-muted">
               Library
             </th>
+            <th className="hidden md:table-cell px-3 py-2 text-left text-xs font-medium uppercase text-muted">
+              Progress
+            </th>
             <SortHeader field="addedAt" activeField={sort} dir={dir} onSort={onSort} className="hidden lg:table-cell">Added</SortHeader>
           </tr>
         </thead>
@@ -682,6 +700,28 @@ function TableView({
                 </td>
                 <td className="hidden md:table-cell px-3 py-2">
                   <MediaStatusRow work={work} activeGrabs={activeGrabs} />
+                </td>
+                <td className="hidden md:table-cell px-3 py-2">
+                  {(() => {
+                    const bp = bestProgress(work.libraryItems);
+                    if (!bp) return null;
+                    return (
+                      <div className="flex items-center gap-2">
+                        <div className="w-16 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-brand rounded-full"
+                            style={{ width: `${Math.min((bp.progressPct ?? 0) * 100, 100)}%` }}
+                          />
+                        </div>
+                        <ProgressBadge
+                          progressPct={bp.progressPct}
+                          mediaType={bp.mediaType}
+                          durationSeconds={bp.durationSeconds}
+                          finishedAt={bp.finishedAt}
+                        />
+                      </div>
+                    );
+                  })()}
                 </td>
                 <td className="hidden lg:table-cell px-3 py-2 text-muted">
                   {formatRelativeDate(work.addedAt)}
@@ -750,6 +790,7 @@ function PosterView({
                   iconSize={24}
                 />
                 <MediaOverlay work={work} />
+                <ProgressBar progressPct={bestProgress(work.libraryItems)?.progressPct ?? null} />
               </div>
               <div className="p-2.5 space-y-1">
                 <p className="truncate text-sm font-medium text-zinc-100">
@@ -767,6 +808,17 @@ function PosterView({
                     </Link>
                   ) : work.authorName}
                 </p>
+                {(() => {
+                  const bp = bestProgress(work.libraryItems);
+                  return bp ? (
+                    <ProgressBadge
+                      progressPct={bp.progressPct}
+                      mediaType={bp.mediaType}
+                      durationSeconds={bp.durationSeconds}
+                      finishedAt={bp.finishedAt}
+                    />
+                  ) : null;
+                })()}
                 <MediaStatusRow work={work} activeGrabs={activeGrabs} />
               </div>
             </div>
@@ -821,15 +873,18 @@ function OverviewView({
               </div>
             )}
             <div className="flex min-w-0 flex-1 gap-3 sm:gap-4">
-              <BookCover
-                workId={work.id}
-                title={work.title}
-                authorName={work.authorName}
-                coverVersion={work.coverMtime ?? undefined}
-                mediaType={coverMediaType}
-                className="h-20 w-14 sm:h-28 sm:w-20 flex-shrink-0"
-                iconSize={18}
-              />
+              <div className="relative flex-shrink-0">
+                <BookCover
+                  workId={work.id}
+                  title={work.title}
+                  authorName={work.authorName}
+                  coverVersion={work.coverMtime ?? undefined}
+                  mediaType={coverMediaType}
+                  className="h-20 w-14 sm:h-28 sm:w-20"
+                  iconSize={18}
+                />
+                <ProgressBar progressPct={bestProgress(work.libraryItems)?.progressPct ?? null} />
+              </div>
               <div className="min-w-0 flex-1">
                 <h3 className="font-medium text-zinc-100">
                   {work.title}
@@ -846,8 +901,19 @@ function OverviewView({
                     </Link>
                   ) : work.authorName}
                 </p>
-                <div className="mt-1.5">
+                <div className="mt-1.5 flex items-center gap-2">
                   <MediaStatusRow work={work} activeGrabs={activeGrabs} />
+                  {(() => {
+                    const bp = bestProgress(work.libraryItems);
+                    return bp ? (
+                      <ProgressBadge
+                        progressPct={bp.progressPct}
+                        mediaType={bp.mediaType}
+                        durationSeconds={bp.durationSeconds}
+                        finishedAt={bp.finishedAt}
+                      />
+                    ) : null;
+                  })()}
                 </div>
                 {work.description && (
                   <p className="mt-2 line-clamp-2 text-sm text-zinc-400">
@@ -867,6 +933,33 @@ function MediaOverlay({ work }: { work: WorkDetailResponse }) {
   const ebookItem = work.libraryItems?.find((li) => li.mediaType === "ebook");
   const audioItem = work.libraryItems?.find((li) => li.mediaType === "audiobook");
   if (!ebookItem && !audioItem) return null;
+
+  const isTouch = window.matchMedia("(pointer: coarse)").matches;
+
+  if (isTouch) {
+    return (
+      <div className="absolute bottom-2 right-2 flex gap-1.5 z-10">
+        {ebookItem && (
+          <Link
+            to={`/read/${ebookItem.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="rounded-full bg-black/60 backdrop-blur-sm p-2 text-zinc-200 hover:text-white min-h-[44px] min-w-[44px] flex items-center justify-center"
+          >
+            <BookOpen size={18} />
+          </Link>
+        )}
+        {audioItem && (
+          <Link
+            to={`/listen/${audioItem.id}?workId=${work.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="rounded-full bg-black/60 backdrop-blur-sm p-2 text-zinc-200 hover:text-white min-h-[44px] min-w-[44px] flex items-center justify-center"
+          >
+            <Headphones size={18} />
+          </Link>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="absolute inset-0 flex items-center justify-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity bg-black/40">

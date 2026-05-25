@@ -18,8 +18,7 @@ use crate::{
 };
 use livrarr_domain::services::{
     AuthorService, CreateNotificationRequest, EmailService, EnrichmentWorkflow, FileService,
-    IdentityResolver, NotificationService, SeriesQueryService, TagService, WorkDetailView,
-    WorkService,
+    IdentityResolver, NotificationService, SeriesQueryService, TagService, WorkService,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -50,23 +49,6 @@ pub fn validate_image_magic_bytes(data: &[u8]) -> Result<(), ApiError> {
     Err(ApiError::BadRequest(
         "unsupported image format: expected JPEG, PNG, or WebP".into(),
     ))
-}
-
-fn detail_from_view(view: WorkDetailView) -> WorkDetailResponse {
-    let mut detail =
-        crate::types::work::work_to_detail_with_cover_mtime(&view.work, view.cover_mtime);
-    detail.library_items = view
-        .library_items
-        .iter()
-        .map(|li| crate::LibraryItemResponse {
-            id: li.id,
-            path: li.path.clone(),
-            media_type: li.media_type,
-            file_size: li.file_size,
-            imported_at: li.imported_at.to_rfc3339(),
-        })
-        .collect();
-    detail
 }
 
 fn mime_for_ext(ext: &str) -> &'static str {
@@ -345,7 +327,7 @@ pub async fn add<
     }))
 }
 
-pub async fn list<S: HasWorkService>(
+pub async fn list<S: HasWorkService + HasFileService>(
     State(state): State<S>,
     ctx: AuthContext,
     Query(pq): Query<crate::PaginationQuery>,
@@ -362,7 +344,52 @@ pub async fn list<S: HasWorkService>(
         )
         .await?;
 
-    let items = view.works.into_iter().map(detail_from_view).collect();
+    let all_item_ids: Vec<i64> = view
+        .works
+        .iter()
+        .flat_map(|w| w.library_items.iter().map(|li| li.id))
+        .collect();
+
+    let progress_list = state
+        .file_service()
+        .get_progress_for_items(ctx.user.id, &all_item_ids)
+        .await
+        .unwrap_or_default();
+
+    let progress_map: std::collections::HashMap<i64, &livrarr_domain::services::ItemProgress> =
+        progress_list
+            .iter()
+            .map(|p| (p.library_item_id, p))
+            .collect();
+
+    let items = view
+        .works
+        .into_iter()
+        .map(|wv| {
+            let work_duration = wv.work.duration_seconds.map(|d| d as f64);
+            let mut detail =
+                crate::types::work::work_to_detail_with_cover_mtime(&wv.work, wv.cover_mtime);
+            detail.library_items = wv
+                .library_items
+                .iter()
+                .map(|li| {
+                    let prog = progress_map.get(&li.id);
+                    crate::LibraryItemResponse {
+                        id: li.id,
+                        path: li.path.clone(),
+                        media_type: li.media_type,
+                        file_size: li.file_size,
+                        imported_at: li.imported_at.to_rfc3339(),
+                        progress_pct: prog.map(|p| p.progress_pct),
+                        duration_seconds: li.duration_seconds.or(work_duration),
+                        finished_at: prog.and_then(|p| p.finished_at.map(|d| d.to_rfc3339())),
+                    }
+                })
+                .collect();
+            detail
+        })
+        .collect();
+
     Ok(Json(crate::PaginatedResponse {
         items,
         total: view.total,
@@ -371,13 +398,47 @@ pub async fn list<S: HasWorkService>(
     }))
 }
 
-pub async fn get<S: HasWorkService>(
+pub async fn get<S: HasWorkService + HasFileService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<WorkDetailResponse>, ApiError> {
     let view = state.work_service().get_detail(ctx.user.id, id).await?;
-    Ok(Json(detail_from_view(view)))
+
+    let item_ids: Vec<i64> = view.library_items.iter().map(|li| li.id).collect();
+    let progress_list = state
+        .file_service()
+        .get_progress_for_items(ctx.user.id, &item_ids)
+        .await
+        .unwrap_or_default();
+    let progress_map: std::collections::HashMap<i64, &livrarr_domain::services::ItemProgress> =
+        progress_list
+            .iter()
+            .map(|p| (p.library_item_id, p))
+            .collect();
+
+    let work_duration = view.work.duration_seconds.map(|d| d as f64);
+    let mut detail =
+        crate::types::work::work_to_detail_with_cover_mtime(&view.work, view.cover_mtime);
+    detail.library_items = view
+        .library_items
+        .iter()
+        .map(|li| {
+            let prog = progress_map.get(&li.id);
+            crate::LibraryItemResponse {
+                id: li.id,
+                path: li.path.clone(),
+                media_type: li.media_type,
+                file_size: li.file_size,
+                imported_at: li.imported_at.to_rfc3339(),
+                progress_pct: prog.map(|p| p.progress_pct),
+                duration_seconds: li.duration_seconds.or(work_duration),
+                finished_at: prog.and_then(|p| p.finished_at.map(|d| d.to_rfc3339())),
+            }
+        })
+        .collect();
+
+    Ok(Json(detail))
 }
 
 pub async fn update<S: HasWorkService>(

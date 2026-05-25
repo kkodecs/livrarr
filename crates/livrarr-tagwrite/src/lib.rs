@@ -1198,3 +1198,101 @@ fn write_mp3(
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// M4B Chapter Extraction (read-only)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct ExtractedChapter {
+    pub title: String,
+    pub start_time_secs: f64,
+}
+
+#[derive(Debug)]
+pub struct ChapterExtractionResult {
+    pub chapters: Vec<ExtractedChapter>,
+    pub duration_secs: Option<f64>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ChapterExtractionError {
+    #[error("I/O error reading M4B: {0}")]
+    IoError(String),
+    #[error("corrupt or unparseable M4B container: {0}")]
+    ParseError(String),
+}
+
+pub fn extract_m4b_chapters(
+    path: &Path,
+) -> Result<ChapterExtractionResult, ChapterExtractionError> {
+    let cfg = mp4ameta::ReadConfig {
+        read_chapter_track: true,
+        read_chapter_list: true,
+        read_image_data: false,
+        ..mp4ameta::ReadConfig::DEFAULT
+    };
+
+    let tag = mp4ameta::Tag::read_with_path(path, &cfg).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("No such file") || msg.contains("Permission denied") {
+            ChapterExtractionError::IoError(msg)
+        } else {
+            ChapterExtractionError::ParseError(msg)
+        }
+    })?;
+
+    let duration_secs = Some(tag.duration().as_secs_f64());
+
+    let mut chapters = Vec::new();
+
+    let track = tag.chapter_track();
+    if !track.is_empty() {
+        for ch in track {
+            chapters.push(ExtractedChapter {
+                title: ch.title.clone(),
+                start_time_secs: ch.start.as_secs_f64(),
+            });
+        }
+    }
+
+    if chapters.is_empty() {
+        let list = tag.chapter_list();
+        if !list.is_empty() {
+            for ch in list {
+                chapters.push(ExtractedChapter {
+                    title: ch.title.clone(),
+                    start_time_secs: ch.start.as_secs_f64(),
+                });
+            }
+        }
+    }
+
+    chapters.sort_by(|a, b| {
+        a.start_time_secs
+            .partial_cmp(&b.start_time_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if let Some(dur) = duration_secs {
+        let mut prev_end = 0.0_f64;
+        chapters.retain(|ch| {
+            if ch.start_time_secs < prev_end || ch.start_time_secs > dur {
+                tracing::warn!(
+                    start = ch.start_time_secs,
+                    title = ch.title,
+                    "discarding non-monotonic or out-of-range chapter"
+                );
+                false
+            } else {
+                prev_end = ch.start_time_secs;
+                true
+            }
+        });
+    }
+
+    Ok(ChapterExtractionResult {
+        chapters,
+        duration_secs,
+    })
+}

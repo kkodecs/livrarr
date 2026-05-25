@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::atomic_copy;
 use livrarr_db::{
-    ConfigDb, CreateHistoryEventDbRequest, CreateLibraryItemDbRequest, GrabDb, HistoryDb,
-    LibraryItemDb, RemotePathMappingDb, RootFolderDb, WorkDb,
+    ChapterDb, ConfigDb, CreateHistoryEventDbRequest, CreateLibraryItemDbRequest, GrabDb,
+    HistoryDb, LibraryItemDb, RemotePathMappingDb, RootFolderDb, WorkDb,
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::{
@@ -236,6 +236,104 @@ fn filter_preferred_formats(
 // Trait implementation
 // ---------------------------------------------------------------------------
 
+async fn try_extract_chapters<D: ChapterDb>(
+    item_id: livrarr_domain::LibraryItemId,
+    target: &Path,
+    media_type: MediaType,
+    db: &D,
+) {
+    let ext = target
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext.as_str() == "m4b" {
+        let path = target.to_path_buf();
+        let result =
+            tokio::task::spawn_blocking(move || livrarr_tagwrite::extract_m4b_chapters(&path))
+                .await;
+
+        match result {
+            Ok(Ok(extraction)) => {
+                let dur = extraction.duration_secs;
+                if extraction.chapters.is_empty() {
+                    let _ = db
+                        .update_chapter_scan_result(item_id, "no_chapters", dur)
+                        .await;
+                } else {
+                    let mut chapters = Vec::new();
+                    let extracted = &extraction.chapters;
+                    for (i, ch) in extracted.iter().enumerate() {
+                        let title = if ch.title.is_empty() {
+                            format!("Chapter {}", i + 1)
+                        } else {
+                            ch.title.clone()
+                        };
+                        let end_time = if i + 1 < extracted.len() {
+                            extracted[i + 1].start_time_secs
+                        } else {
+                            match dur {
+                                Some(d) if d > ch.start_time_secs => d,
+                                _ => {
+                                    tracing::warn!(
+                                        item_id,
+                                        "last chapter has no valid end time — dropping"
+                                    );
+                                    continue;
+                                }
+                            }
+                        };
+                        chapters.push(livrarr_domain::AudiobookChapter {
+                            id: 0,
+                            library_item_id: item_id,
+                            chapter_index: i as i32,
+                            title,
+                            start_time_secs: ch.start_time_secs,
+                            end_time_secs: end_time,
+                        });
+                    }
+                    if chapters.is_empty() {
+                        let _ = db
+                            .update_chapter_scan_result(item_id, "no_chapters", dur)
+                            .await;
+                    } else {
+                        match db.replace_chapters(item_id, &chapters).await {
+                            Ok(()) => {
+                                let _ =
+                                    db.update_chapter_scan_result(item_id, "scanned", dur).await;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    item_id,
+                                    error = %e,
+                                    "chapter extraction: replace_chapters failed — leaving scan_status NULL for retry"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Err(livrarr_tagwrite::ChapterExtractionError::ParseError(_))) => {
+                tracing::warn!(item_id, "corrupt M4B — marking parse_error");
+                let _ = db
+                    .update_chapter_scan_result(item_id, "parse_error", None)
+                    .await;
+            }
+            Ok(Err(livrarr_tagwrite::ChapterExtractionError::IoError(e))) => {
+                tracing::warn!(item_id, error = %e, "chapter extraction I/O error — will retry");
+            }
+            Err(e) => {
+                tracing::warn!(item_id, error = %e, "chapter extraction task panicked");
+            }
+        }
+    } else if media_type == MediaType::Audiobook {
+        let _ = db
+            .update_chapter_scan_result(item_id, "no_chapters", None)
+            .await;
+    }
+}
+
 impl<D> ImportWorkflow for ImportWorkflowImpl<D>
 where
     D: GrabDb
@@ -245,6 +343,7 @@ where
         + HistoryDb
         + RemotePathMappingDb
         + ConfigDb
+        + ChapterDb
         + Clone
         + Send
         + Sync
@@ -561,6 +660,7 @@ where
                             cwa_copied: false,
                         });
                         warnings.push(format!("adopted orphaned file: {}", target_path));
+                        try_extract_chapters(item.id, &target, media_type, &self.db).await;
                     }
                     Err(e) => {
                         failed_files.push(FailedFile {
@@ -613,6 +713,7 @@ where
                                 tags_written: false,
                                 cwa_copied: false,
                             });
+                            try_extract_chapters(item.id, &target, media_type, &self.db).await;
                         }
                         Err(e) => {
                             // File copied but DB failed — leave file on disk for retry recovery

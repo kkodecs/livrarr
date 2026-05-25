@@ -60,6 +60,7 @@ import {
   formatDuration,
 } from "@/utils/format";
 import { BookCover } from "@/components/BookCover";
+import ProgressBadge from "@/components/ProgressBadge";
 
 type ReleaseSortField = "title" | "indexer" | "size" | "seeders" | "leechers" | "publishDate";
 import type {
@@ -546,6 +547,9 @@ function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
               <th className="px-3 py-2 text-left text-xs font-medium uppercase text-muted">
                 Imported
               </th>
+              <th className="px-3 py-2 text-left text-xs font-medium uppercase text-muted">
+                Progress
+              </th>
               <th className="w-20 px-3 py-2" />
             </tr>
           </thead>
@@ -580,6 +584,24 @@ function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
                   </td>
                   <td className="px-3 py-2 text-muted">
                     {formatRelativeDate(item.importedAt)}
+                  </td>
+                  <td className="px-3 py-2">
+                    {item.progressPct != null && item.progressPct > 0 ? (
+                      <div className="flex items-center gap-2">
+                        <div className="w-16 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-brand rounded-full"
+                            style={{ width: `${Math.min(item.progressPct * 100, 100)}%` }}
+                          />
+                        </div>
+                        <ProgressBadge
+                          progressPct={item.progressPct}
+                          mediaType={item.mediaType}
+                          durationSeconds={item.durationSeconds}
+                          finishedAt={item.finishedAt}
+                        />
+                      </div>
+                    ) : null}
                   </td>
                   <td className="px-3 py-2 flex items-center justify-end gap-1">
                     {READABLE_FORMATS.has(ext) && (

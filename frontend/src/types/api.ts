@@ -237,6 +237,40 @@ export interface LibraryItemResponse {
   mediaType: MediaType;
   fileSize: number;
   importedAt: string;
+  progressPct: number | null;
+  durationSeconds: number | null;
+  finishedAt: string | null;
+}
+
+export interface ChapterResponse {
+  id: number;
+  chapterIndex: number;
+  title: string;
+  startTimeSecs: number;
+  endTimeSecs: number;
+}
+
+export interface BookmarkResponse {
+  id: number;
+  libraryItemId: number;
+  mediaType: string;
+  position: string;
+  sortKey: number;
+  name: string;
+  chapterTitle: string | null;
+  pairedBookmarkId: number | null;
+  createdAt: string;
+}
+
+export interface CreateBookmarkRequest {
+  position: string;
+  sortKey: number;
+  name: string;
+  chapterTitle?: string | null;
+}
+
+export interface RenameBookmarkRequest {
+  name: string;
 }
 
 export interface DeleteWorkResponse {

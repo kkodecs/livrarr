@@ -2,6 +2,9 @@
 //!
 //! Satisfies: JOBS-001, JOBS-002, JOBS-003, JOBS-004
 
+pub mod chapter_backfill;
+pub mod cover_backfill;
+
 use std::sync::Arc;
 use std::time::Duration;
 

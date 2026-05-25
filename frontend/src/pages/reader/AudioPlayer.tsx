@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   getStreamUrl,
   getPlaybackProgress,
   updatePlaybackProgress,
 } from "@/api";
+import { apiFetch } from "@/api/client";
 import {
   ArrowLeft,
   Play,
@@ -16,10 +18,18 @@ import {
   Settings,
   Maximize2,
   Minimize2,
+  List,
+  ChevronLeft,
+  ChevronRight,
+  Bookmark,
+  Check,
+  Pencil,
+  X,
 } from "lucide-react";
 import { useNavigate } from "react-router";
 import * as Popover from "@radix-ui/react-popover";
 import { cn } from "@/utils/cn";
+import type { ChapterResponse, BookmarkResponse, CreateBookmarkRequest } from "@/types/api";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
 const SLEEP_OPTIONS = [5, 10, 15, 30, 45, 60];
@@ -69,6 +79,55 @@ export function AudioPlayer({
     Number(localStorage.getItem("livrarr_skip_fwd") ?? "30"),
   );
 
+  // Chapters
+  const { data: chapters = [] } = useQuery<ChapterResponse[]>({
+    queryKey: ["chapters", libraryItemId],
+    queryFn: () => apiFetch(`/workfile/${libraryItemId}/chapters`),
+  });
+  const [chapterPanelOpen, setChapterPanelOpen] = useState(false);
+  const [sleepAtChapterEnd, setSleepAtChapterEnd] = useState(false);
+
+  const currentChapter = useMemo(() => {
+    if (chapters.length === 0) return null;
+    return chapters.find(
+      (c) => currentTime >= c.startTimeSecs && currentTime < c.endTimeSecs,
+    ) ?? null;
+  }, [chapters, currentTime]);
+
+  // Bookmarks
+  const queryClient = useQueryClient();
+  const { data: bookmarks = [] } = useQuery<BookmarkResponse[]>({
+    queryKey: ["bookmarks", libraryItemId],
+    queryFn: () => apiFetch(`/workfile/${libraryItemId}/bookmarks`),
+  });
+  const [bookmarkPanelOpen, setBookmarkPanelOpen] = useState(false);
+
+  const createBookmarkMut = useMutation({
+    mutationFn: (req: CreateBookmarkRequest) =>
+      apiFetch(`/workfile/${libraryItemId}/bookmarks`, {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bookmarks", libraryItemId] }),
+  });
+
+  const deleteBookmarkMut = useMutation({
+    mutationFn: (id: number) =>
+      apiFetch(`/bookmarks/${id}`, { method: "DELETE" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bookmarks", libraryItemId] }),
+  });
+
+  const renameBookmarkMut = useMutation({
+    mutationFn: ({ id, name }: { id: number; name: string }) =>
+      apiFetch(`/bookmarks/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bookmarks", libraryItemId] }),
+  });
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+
   // Sleep timer
   const [sleepMinutes, setSleepMinutes] = useState<number | null>(null);
   const [sleepRemaining, setSleepRemaining] = useState<number | null>(null);
@@ -104,7 +163,7 @@ export function AudioPlayer({
     (time: number, dur: number) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
-        const pct = dur > 0 ? time / dur : 0;
+        const pct = isFinite(dur) && dur > 0 ? time / dur : 0;
         updatePlaybackProgress(libraryItemId, String(time), pct).catch(
           () => {},
         );
@@ -151,21 +210,32 @@ export function AudioPlayer({
   const skip = useCallback(
     (seconds: number) => {
       if (!audioRef.current) return;
+      const cap = isFinite(duration) && duration > 0 ? duration : Number.MAX_SAFE_INTEGER;
       audioRef.current.currentTime = Math.max(
         0,
-        Math.min(audioRef.current.currentTime + seconds, duration),
+        Math.min(audioRef.current.currentTime + seconds, cap),
       );
     },
     [duration],
   );
 
   const onTimeUpdate = () => {
-    if (audioRef.current) setCurrentTime(audioRef.current.currentTime);
+    if (!audioRef.current) return;
+    const t = audioRef.current.currentTime;
+    setCurrentTime(t);
+
+    if (sleepAtChapterEnd && currentChapter && t >= currentChapter.endTimeSecs) {
+      audioRef.current.pause();
+      setPlaying(false);
+      setSleepAtChapterEnd(false);
+      saveProgress(t, audioRef.current.duration);
+    }
   };
 
   const onLoadedMetadata = () => {
     if (audioRef.current) {
-      setDuration(audioRef.current.duration);
+      const d = audioRef.current.duration;
+      setDuration(isFinite(d) && d > 0 ? d : 0);
       getPlaybackProgress(libraryItemId)
         .then((p) => {
           if (p?.position && audioRef.current) {
@@ -313,7 +383,7 @@ export function AudioPlayer({
   }, [togglePlay, skip, skipBack, skipFwd, toggleMute, cycleSpeed, toggleFullscreen]);
 
   const speed = SPEEDS[speedIdx] ?? 1;
-  const rawRemaining = duration - currentTime;
+  const rawRemaining = isFinite(duration) ? duration - currentTime : 0;
   const adjustedRemaining = rawRemaining / speed;
 
   return (
@@ -357,18 +427,68 @@ export function AudioPlayer({
           <p className="text-sm text-zinc-400">{authorName}</p>
         </div>
 
+        {/* Chapter bar */}
+        {chapters.length > 0 && currentChapter && (
+          <div className="w-full max-w-md flex items-center gap-2">
+            <span className="text-sm text-zinc-400 truncate flex-1">
+              {currentChapter.title}
+            </span>
+            <button
+              onClick={() => setChapterPanelOpen(!chapterPanelOpen)}
+              className="text-zinc-400 hover:text-zinc-100"
+              title="Chapter list"
+            >
+              <List size={16} />
+            </button>
+          </div>
+        )}
+
         {/* Seek bar */}
         <div className="w-full max-w-md">
-          <input
-            type="range"
-            min={0}
-            max={duration || 1}
-            step={0.1}
-            value={currentTime}
-            onChange={onSeek}
-            className="w-full accent-brand"
-          />
-          <div className="flex justify-between text-xs text-zinc-500">
+          <div className="relative">
+            <input
+              type="range"
+              min={0}
+              max={isFinite(duration) && duration > 0 ? duration : 1}
+              step={0.1}
+              value={currentTime}
+              onChange={onSeek}
+              className="w-full accent-brand"
+            />
+            {/* Chapter tick marks */}
+            {chapters.length > 0 && isFinite(duration) && duration > 0 && (
+              <div className="absolute top-0 left-0 right-0 h-full pointer-events-none">
+                {chapters.slice(1).map((ch) => (
+                  <div
+                    key={ch.id}
+                    className="absolute top-0 w-0.5 h-full bg-zinc-400"
+                    style={{ left: `${(ch.startTimeSecs / duration) * 100}%` }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+          {/* Chapter progress bar */}
+          {currentChapter && (() => {
+            const chElapsed = currentTime - currentChapter.startTimeSecs;
+            const chDuration = currentChapter.endTimeSecs - currentChapter.startTimeSecs;
+            const chPct = chDuration > 0 ? Math.min(100, (chElapsed / chDuration) * 100) : 0;
+            return (
+              <div className="mt-1">
+                <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-brand/60 rounded-full"
+                    style={{ width: `${chPct}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-xs text-zinc-500 mt-0.5">
+                  <span>Ch {currentChapter.chapterIndex + 1}/{chapters.length}</span>
+                  <span>{formatTime(chElapsed)} / {formatTime(chDuration)}</span>
+                </div>
+              </div>
+            );
+          })()}
+          <div className="flex justify-between text-sm text-zinc-500 mt-1">
             <span>{formatTime(currentTime)}</span>
             <span>
               -{formatTime(adjustedRemaining)}
@@ -380,14 +500,33 @@ export function AudioPlayer({
         </div>
 
         {/* Controls */}
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-4">
+          {chapters.length > 0 && (
+            <button
+              onClick={() => {
+                if (!audioRef.current || !currentChapter) return;
+                const timeInCh = currentTime - currentChapter.startTimeSecs;
+                if (timeInCh > 3) {
+                  audioRef.current.currentTime = currentChapter.startTimeSecs;
+                } else {
+                  const prevIdx = currentChapter.chapterIndex - 1;
+                  audioRef.current.currentTime =
+                    prevIdx >= 0 ? chapters[prevIdx]!.startTimeSecs : 0;
+                }
+              }}
+              className="text-zinc-400 hover:text-zinc-100"
+              title="Previous chapter"
+            >
+              <ChevronLeft size={20} />
+            </button>
+          )}
           <button
             onClick={() => skip(-skipBack)}
             className="relative text-zinc-400 hover:text-zinc-100"
             title={`Back ${skipBack}s`}
           >
             <SkipBack size={24} />
-            <span className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-[10px] text-zinc-500">
+            <span className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-xs text-zinc-500">
               {skipBack}
             </span>
           </button>
@@ -407,10 +546,26 @@ export function AudioPlayer({
             title={`Forward ${skipFwd}s`}
           >
             <SkipForward size={24} />
-            <span className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-[10px] text-zinc-500">
+            <span className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-xs text-zinc-500">
               {skipFwd}
             </span>
           </button>
+          {chapters.length > 0 && (
+            <button
+              onClick={() => {
+                if (!audioRef.current || !currentChapter) return;
+                const nextIdx = currentChapter.chapterIndex + 1;
+                if (nextIdx < chapters.length) {
+                  audioRef.current.currentTime = chapters[nextIdx]!.startTimeSecs;
+                }
+              }}
+              disabled={!currentChapter || currentChapter.chapterIndex >= chapters.length - 1}
+              className="text-zinc-400 hover:text-zinc-100 disabled:opacity-30"
+              title="Next chapter"
+            >
+              <ChevronRight size={20} />
+            </button>
+          )}
         </div>
 
         {/* Secondary controls */}
@@ -418,7 +573,7 @@ export function AudioPlayer({
           {/* Speed */}
           <button
             onClick={cycleSpeed}
-            className="rounded px-2 py-1 text-xs font-medium text-zinc-400 hover:text-zinc-100"
+            className="rounded px-2 py-1 text-sm font-medium text-zinc-400 hover:text-zinc-100"
             title="Playback speed (S)"
           >
             {speed}x
@@ -429,14 +584,14 @@ export function AudioPlayer({
             <Popover.Trigger asChild>
               <button
                 className={cn(
-                  "flex items-center gap-1 rounded px-2 py-1 text-xs",
+                  "flex items-center gap-1 rounded px-2 py-1 text-sm",
                   sleepMinutes
                     ? "text-brand"
                     : "text-zinc-400 hover:text-zinc-100",
                 )}
                 title="Sleep timer"
               >
-                <Timer size={14} />
+                <Timer size={16} />
                 {sleepRemaining != null && (
                   <span>{formatTime(sleepRemaining)}</span>
                 )}
@@ -446,10 +601,29 @@ export function AudioPlayer({
               className="rounded-lg border border-zinc-700 bg-zinc-900 p-2 shadow-xl z-50"
               sideOffset={8}
             >
+              {chapters.length > 0 && (
+                <button
+                  onClick={() => {
+                    cancelSleepTimer();
+                    setSleepAtChapterEnd(true);
+                  }}
+                  className={cn(
+                    "block w-full text-left text-sm rounded px-3 py-1.5 mb-1",
+                    sleepAtChapterEnd
+                      ? "text-brand bg-zinc-800"
+                      : "text-zinc-300 hover:bg-zinc-800",
+                  )}
+                >
+                  {sleepAtChapterEnd ? "Sleeping at chapter end" : "End of chapter"}
+                </button>
+              )}
               {SLEEP_OPTIONS.map((m) => (
                 <button
                   key={m}
-                  onClick={() => startSleepTimer(m)}
+                  onClick={() => {
+                    setSleepAtChapterEnd(false);
+                    startSleepTimer(m);
+                  }}
                   className="block w-full text-left text-sm text-zinc-300 hover:bg-zinc-800 rounded px-3 py-1.5"
                 >
                   {m} minutes
@@ -533,8 +707,156 @@ export function AudioPlayer({
               <Popover.Arrow className="fill-zinc-700" />
             </Popover.Content>
           </Popover.Root>
+
+          {/* Bookmark button */}
+          <button
+            onClick={() => {
+              const pos = String(currentTime);
+              const name = currentChapter
+                ? `${currentChapter.title} — ${formatTime(currentTime)}`
+                : formatTime(currentTime);
+              createBookmarkMut.mutate({
+                position: pos,
+                sortKey: currentTime,
+                name,
+                chapterTitle: currentChapter?.title ?? null,
+              });
+            }}
+            className="text-zinc-400 hover:text-zinc-100"
+            title="Add bookmark"
+          >
+            <Bookmark size={16} />
+          </button>
+          <button
+            onClick={() => setBookmarkPanelOpen(!bookmarkPanelOpen)}
+            className={cn(
+              "text-sm px-2 py-1 rounded",
+              bookmarkPanelOpen ? "text-brand" : "text-zinc-400 hover:text-zinc-100",
+            )}
+            title="Bookmarks"
+          >
+            {bookmarks.length > 0 ? `${bookmarks.length}` : "0"} bookmarks
+          </button>
         </div>
       </div>
+
+      {/* Chapter panel */}
+      {chapterPanelOpen && chapters.length > 0 && (
+        <div className="fixed right-0 top-0 bottom-0 w-80 bg-zinc-900 border-l border-zinc-700 z-50 overflow-y-auto">
+          <div className="flex items-center justify-between p-3 border-b border-zinc-700">
+            <span className="text-sm font-medium text-zinc-100">Chapters</span>
+            <button onClick={() => setChapterPanelOpen(false)} className="text-zinc-400 hover:text-zinc-100">
+              <X size={16} />
+            </button>
+          </div>
+          {chapters.map((ch) => {
+            const isCurrent = currentChapter?.id === ch.id;
+            const isPast = ch.endTimeSecs <= currentTime;
+            return (
+              <button
+                key={ch.id}
+                onClick={() => {
+                  if (audioRef.current) {
+                    audioRef.current.currentTime = ch.startTimeSecs;
+                    audioRef.current.play().catch(() => {});
+                    setPlaying(true);
+                  }
+                }}
+                className={cn(
+                  "block w-full text-left px-3 py-2 text-sm border-b border-zinc-800 hover:bg-zinc-800",
+                  isCurrent && "bg-zinc-800",
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="w-5 text-center">
+                    {isPast ? <Check size={12} className="text-green-500" /> : isCurrent ? <Play size={12} className="text-brand" /> : null}
+                  </span>
+                  <span className={cn("flex-1 truncate", isCurrent ? "text-zinc-100" : "text-zinc-400")}>
+                    {ch.chapterIndex + 1}. {ch.title}
+                  </span>
+                  <span className="text-xs text-zinc-500">{formatTime(ch.startTimeSecs)}</span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Bookmark panel */}
+      {bookmarkPanelOpen && (
+        <div className="fixed right-0 top-0 bottom-0 w-80 bg-zinc-900 border-l border-zinc-700 z-50 overflow-y-auto">
+          <div className="flex items-center justify-between p-3 border-b border-zinc-700">
+            <span className="text-sm font-medium text-zinc-100">Bookmarks</span>
+            <button onClick={() => setBookmarkPanelOpen(false)} className="text-zinc-400 hover:text-zinc-100">
+              <X size={16} />
+            </button>
+          </div>
+          {bookmarks.length === 0 ? (
+            <p className="p-4 text-sm text-zinc-500">No bookmarks yet</p>
+          ) : (
+            bookmarks.map((bm) => (
+              <div
+                key={bm.id}
+                className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 hover:bg-zinc-800 group cursor-pointer"
+                onClick={() => {
+                  if (renamingId !== bm.id && audioRef.current)
+                    audioRef.current.currentTime = parseFloat(bm.position);
+                }}
+              >
+                <div className="flex-1 min-w-0">
+                  {renamingId === bm.id ? (
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        renameBookmarkMut.mutate({ id: bm.id, name: renameValue });
+                        setRenamingId(null);
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        autoFocus
+                        className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-0.5 text-sm text-zinc-100"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onBlur={() => setRenamingId(null)}
+                        onKeyDown={(e) => { if (e.key === "Escape") setRenamingId(null); }}
+                      />
+                    </form>
+                  ) : (
+                    <>
+                      <p className="text-sm text-zinc-200 truncate">{bm.name}</p>
+                      {bm.chapterTitle && (
+                        <p className="text-xs text-zinc-500 truncate">{bm.chapterTitle}</p>
+                      )}
+                    </>
+                  )}
+                </div>
+                <span className="text-xs text-zinc-500">{formatTime(parseFloat(bm.position))}</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRenamingId(bm.id);
+                    setRenameValue(bm.name);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-zinc-200"
+                  title="Rename"
+                >
+                  <Pencil size={12} />
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteBookmarkMut.mutate(bm.id);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       {/* Hidden audio element */}
       <audio

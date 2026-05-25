@@ -1,0 +1,126 @@
+metadata:
+  feature: playback-enhancements
+  spec_ref: spec-playback-enhancements.md
+  ir_ref: ir-v1-playback-enhancements.yaml
+
+module_dependency:
+  - source: livrarr-handlers
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-tagwrite
+      - livrarr-library
+      - livrarr-metadata
+      - livrarr-download
+    rationale: >
+      Compile wall (Insight 9b). Handlers are generic over AppContext traits.
+      Chapter extraction, DB queries, and file I/O must go through service traits.
+
+  - source: livrarr-tagwrite
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-handlers
+      - livrarr-server
+    rationale: >
+      Tagwrite is a pure media-file library. No database access, no HTTP,
+      no application state. Chapter extraction is a file-only operation.
+
+  - source: livrarr-library
+    forbidden_targets:
+      - livrarr-handlers
+      - livrarr-server
+      - livrarr-metadata
+      - livrarr-download
+    rationale: >
+      Library crate handles file operations and import pipeline.
+      No handler, server, or metadata coupling.
+
+forbidden_pattern:
+  # All patterns are simple string/regex searches enforceable via grep/ripgrep.
+  # No lookahead, no multi-line assertions. Scoped by file path where needed.
+
+  # ── From System Truths ──
+
+  - pattern: 'INSERT OR REPLACE'
+    description: "INSERT OR REPLACE is banned in SQLite (Insight 20)"
+    severity: P0
+    scope: "crates/**/*.rs"
+    rationale: >
+      INSERT OR REPLACE is DELETE + INSERT in SQLite — changes rowid,
+      cascades FK deletes. Use INSERT ... ON CONFLICT ... DO UPDATE SET.
+
+  - pattern: 'paired_bookmark_id.*ON DELETE CASCADE'
+    description: "paired_bookmark_id must use ON DELETE SET NULL, not CASCADE (REQ-017)"
+    severity: P0
+    scope: "crates/livrarr-db/migrations/*.sql"
+    rationale: >
+      Deleting one bookmark in a KASH pair must unpair the other,
+      not cascade-delete it. ON DELETE CASCADE would destroy both bookmarks.
+
+  # ── From Architecture Invariants ──
+
+  - pattern: 'dyn (FileService|ChapterService|BookmarkService)'
+    description: "No dyn on async service traits (Insight 8)"
+    severity: P1
+    scope: "crates/**/*.rs"
+    rationale: >
+      trait_variant::make(Send) produces non-dyn-compatible traits.
+      Use generics/monomorphization exclusively.
+
+  - pattern: 'use async_trait'
+    description: "Use trait_variant::make(Send), not async-trait (Insight 8)"
+    severity: P1
+    scope: "crates/**/*.rs"
+    rationale: >
+      Project-wide: all async traits use trait_variant, not async-trait.
+
+  - pattern: 'OnceLock'
+    description: "Do not reintroduce OnceLock pattern (Insight 9d)"
+    severity: P1
+    scope: "crates/**/*.rs"
+    rationale: >
+      All OnceLocks were removed in the architecture-excellent sprint.
+      Use explicit constructor injection.
+
+  # ── From Design Decisions ──
+
+  - pattern: 'high_water|highwater|max_progress'
+    description: "No high-water mark for progress (0a: ABS-style lifecycle)"
+    severity: P1
+    scope: "crates/**/*.rs, frontend/**/*.ts, frontend/**/*.tsx"
+    rationale: >
+      Progress uses single position. No separate "furthest read" field.
+      Seeking backward naturally changes the progress bar.
+
+  - pattern: 'extract.*chapter.*(\.mp3|\.flac|\.ogg)'
+    description: "Chapter extraction is M4B only (0a)"
+    severity: P1
+    scope: "crates/**/*.rs"
+    rationale: >
+      Only M4B files contain embedded chapter markers.
+      MP3/FLAC/OGG chapter extraction is out of scope.
+
+  # ── Semantic checks (enforced by custom verify script, not regex) ──
+
+  - pattern: "SEMANTIC: duration guard"
+    description: "All uses of audio.duration in frontend must be guarded with isFinite() (ST-003)"
+    severity: P0
+    scope: "frontend/**/*.tsx"
+    rationale: >
+      ST-003: HTML5 Audio duration may be Infinity or NaN.
+      Enforced by manual review or custom AST check, not regex.
+
+  - pattern: "SEMANTIC: user_id on bookmark/progress functions"
+    description: "All bookmark and progress service/db functions must accept user_id (0a)"
+    severity: P1
+    scope: "crates/livrarr-domain/**/*.rs, crates/livrarr-db/**/*.rs"
+    rationale: >
+      All bookmark CRUD and progress operations must be user-scoped.
+      Enforced by trait signature review, not regex.
+
+  - pattern: "SEMANTIC: compile wall"
+    description: "livrarr-handlers must not depend on livrarr-db (Insight 9b)"
+    severity: P0
+    scope: "crates/livrarr-handlers/Cargo.toml"
+    rationale: >
+      Enforced by `cargo tree -p livrarr-handlers` — must not show livrarr-db,
+      livrarr-tagwrite, livrarr-metadata, or livrarr-download in output.

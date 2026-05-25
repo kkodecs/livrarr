@@ -1,23 +1,28 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { ReactReader } from "react-reader";
+import { ReactReader, ReactReaderStyle } from "react-reader";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Rendition = any;
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   getDownloadUrl,
   getPlaybackProgress,
   updatePlaybackProgress,
 } from "@/api";
+import { apiFetch } from "@/api/client";
 import {
   ArrowLeft,
   List,
   Settings,
   Maximize2,
   Minimize2,
+  Bookmark,
+  Pencil,
   X,
 } from "lucide-react";
 import { useNavigate } from "react-router";
 import * as Popover from "@radix-ui/react-popover";
 import { cn } from "@/utils/cn";
+import type { BookmarkResponse, CreateBookmarkRequest } from "@/types/api";
 
 interface TocItem {
   label: string;
@@ -62,6 +67,45 @@ export function EpubReader({ libraryItemId }: Props) {
 
   // Fullscreen
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Bookmarks
+  const queryClient = useQueryClient();
+  const { data: bookmarks = [] } = useQuery<BookmarkResponse[]>({
+    queryKey: ["bookmarks", libraryItemId],
+    queryFn: () => apiFetch(`/workfile/${libraryItemId}/bookmarks`),
+  });
+  const [bookmarkPanelOpen, setBookmarkPanelOpen] = useState(false);
+
+  const createBookmarkMut = useMutation({
+    mutationFn: (req: CreateBookmarkRequest) =>
+      apiFetch(`/workfile/${libraryItemId}/bookmarks`, {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["bookmarks", libraryItemId] }),
+  });
+
+  const deleteBookmarkMut = useMutation({
+    mutationFn: (id: number) =>
+      apiFetch(`/bookmarks/${id}`, { method: "DELETE" }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["bookmarks", libraryItemId] }),
+  });
+
+  const renameBookmarkMut = useMutation({
+    mutationFn: ({ id, name }: { id: number; name: string }) =>
+      apiFetch(`/bookmarks/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
+      }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["bookmarks", libraryItemId] }),
+  });
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+
+  const [currentPct, setCurrentPct] = useState(0);
 
   // Persist settings
   useEffect(() => {
@@ -122,14 +166,8 @@ export function EpubReader({ libraryItemId }: Props) {
   const onLocationChanged = useCallback(
     (loc: string) => {
       setLocation(loc);
-      if (renditionRef.current) {
-        const displayed = renditionRef.current.location;
-        if (displayed?.start?.percentage != null) {
-          saveProgress(loc, displayed.start.percentage);
-        }
-      }
     },
-    [saveProgress],
+    [],
   );
 
   const applyTheme = useCallback(
@@ -220,10 +258,20 @@ export function EpubReader({ libraryItemId }: Props) {
     <div
       ref={containerRef}
       className="flex h-screen flex-col"
-      style={{ background: darkTheme ? "#18181b" : "#fafaf9" }}
+      style={{
+        background: darkTheme ? "#18181b" : "#fafaf9",
+        color: darkTheme ? "#e4e4e7" : "#1c1917",
+      }}
     >
       {/* Toolbar */}
-      <div className="flex items-center gap-3 border-b border-zinc-700 bg-zinc-900 px-4 py-2">
+      <div
+        className={cn(
+          "flex items-center gap-3 border-b px-4 py-2",
+          darkTheme
+            ? "border-zinc-700 bg-zinc-900 text-zinc-100"
+            : "border-zinc-300 bg-zinc-100 text-zinc-900",
+        )}
+      >
         <button
           onClick={() => navigate(-1)}
           className="rounded p-1 text-zinc-400 hover:text-zinc-100"
@@ -241,6 +289,14 @@ export function EpubReader({ libraryItemId }: Props) {
         >
           <List size={20} />
         </button>
+        {currentPct > 0 && (
+          <span className={cn(
+            "text-xs tabular-nums",
+            darkTheme ? "text-zinc-500" : "text-zinc-400",
+          )}>
+            {Math.round(currentPct * 100)}%
+          </span>
+        )}
         <div className="flex-1" />
 
         {/* Settings popover */}
@@ -315,6 +371,37 @@ export function EpubReader({ libraryItemId }: Props) {
           </Popover.Content>
         </Popover.Root>
 
+        {/* Bookmark button */}
+        <button
+          onClick={() => {
+            const cfi = typeof location === "string" ? location : "";
+            const pct = currentPct;
+            const name = `${Math.round(pct * 100)}%`;
+            createBookmarkMut.mutate({
+              position: cfi,
+              sortKey: pct,
+              name,
+              chapterTitle: null,
+            });
+          }}
+          className="rounded p-1 text-zinc-400 hover:text-zinc-100"
+          title="Add bookmark"
+        >
+          <Bookmark size={16} />
+        </button>
+        <button
+          onClick={() => setBookmarkPanelOpen(!bookmarkPanelOpen)}
+          className={cn(
+            "rounded px-2 py-1 text-xs",
+            bookmarkPanelOpen
+              ? "text-brand"
+              : "text-zinc-400 hover:text-zinc-100",
+          )}
+          title="Bookmarks"
+        >
+          {bookmarks.length} bookmarks
+        </button>
+
         <button
           onClick={toggleFullscreen}
           className="rounded p-1 text-zinc-400 hover:text-zinc-100"
@@ -364,6 +451,101 @@ export function EpubReader({ libraryItemId }: Props) {
           </div>
         )}
 
+        {/* Bookmark panel */}
+        {bookmarkPanelOpen && (
+          <div className="absolute inset-0 z-40 flex justify-end">
+            <div
+              className="flex-1 bg-black/50"
+              onClick={() => setBookmarkPanelOpen(false)}
+            />
+            <div className="w-72 bg-zinc-900 border-l border-zinc-700 overflow-y-auto p-4">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-sm font-semibold text-zinc-200">
+                  Bookmarks
+                </h2>
+                <button
+                  onClick={() => setBookmarkPanelOpen(false)}
+                  className="text-zinc-400 hover:text-zinc-100"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              {bookmarks.length === 0 ? (
+                <p className="text-xs text-zinc-500">No bookmarks yet</p>
+              ) : (
+                bookmarks.map((bm) => (
+                  <div
+                    key={bm.id}
+                    className="flex items-center gap-2 px-2 py-2 rounded hover:bg-zinc-800 group cursor-pointer"
+                    onClick={() => {
+                      if (renamingId !== bm.id && bm.position)
+                        setLocation(bm.position);
+                    }}
+                  >
+                    <div className="flex-1 min-w-0">
+                      {renamingId === bm.id ? (
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            renameBookmarkMut.mutate({
+                              id: bm.id,
+                              name: renameValue,
+                            });
+                            setRenamingId(null);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            autoFocus
+                            className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-0.5 text-sm text-zinc-100"
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onBlur={() => setRenamingId(null)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Escape") setRenamingId(null);
+                            }}
+                          />
+                        </form>
+                      ) : (
+                        <>
+                          <p className="text-sm text-zinc-200 truncate">
+                            {bm.name}
+                          </p>
+                          {bm.chapterTitle && (
+                            <p className="text-xs text-zinc-500 truncate">
+                              {bm.chapterTitle}
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRenamingId(bm.id);
+                        setRenameValue(bm.name);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-zinc-200"
+                      title="Rename"
+                    >
+                      <Pencil size={12} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteBookmarkMut.mutate(bm.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Reader */}
         <ReactReader
           url={epubData}
@@ -381,9 +563,49 @@ export function EpubReader({ libraryItemId }: Props) {
           getRendition={(rendition: Rendition) => {
             renditionRef.current = rendition;
             applyTheme(rendition);
+            rendition.on("relocated", (loc: { start: { cfi: string; percentage: number } }) => {
+              const pct = loc.start.percentage ?? 0;
+              setCurrentPct(pct);
+              if (pct > 0) saveProgress(loc.start.cfi, pct);
+            });
+            rendition.book.ready.then(() => {
+              const key = `livrarr-locations-${libraryItemId}`;
+              const stored = localStorage.getItem(key);
+              if (stored) {
+                rendition.book.locations.load(stored);
+                return;
+              }
+              return rendition.book.locations.generate(1600).then(() => {
+                localStorage.setItem(key, rendition.book.locations.save());
+              });
+            });
           }}
+          readerStyles={darkTheme ? {
+            ...ReactReaderStyle,
+            container: { ...ReactReaderStyle.container, background: "#18181b" },
+            readerArea: { ...ReactReaderStyle.readerArea, background: "#18181b" },
+            reader: { ...ReactReaderStyle.reader, background: "#18181b" },
+            arrow: { ...ReactReaderStyle.arrow, color: "#a1a1aa" },
+            arrowHover: { ...ReactReaderStyle.arrowHover, color: "#e4e4e7" },
+            tocArea: { ...ReactReaderStyle.tocArea, background: "#18181b" },
+            tocButton: { ...ReactReaderStyle.tocButton, color: "#a1a1aa" },
+            tocButtonExpanded: { ...ReactReaderStyle.tocButtonExpanded, background: "#27272a" },
+          } : undefined}
         />
       </div>
+
+      {/* Reading progress bar */}
+      {currentPct > 0 && (
+        <div className={cn(
+          "h-1 w-full",
+          darkTheme ? "bg-zinc-800" : "bg-zinc-200",
+        )}>
+          <div
+            className="h-full bg-brand transition-all duration-300"
+            style={{ width: `${currentPct * 100}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 }

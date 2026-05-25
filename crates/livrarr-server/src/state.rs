@@ -83,6 +83,8 @@ pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceI
     livrarr_http::fetcher::HttpFetcherImpl,
 >;
 pub type LiveFileService = livrarr_library::file_service::FileServiceImpl<SqliteDb>;
+pub type LiveChapterService = livrarr_library::chapter_service::ChapterServiceImpl<SqliteDb>;
+pub type LiveBookmarkService = livrarr_library::bookmark_service::BookmarkServiceImpl<SqliteDb>;
 pub type LiveImportWorkflow = livrarr_library::import_workflow::ImportWorkflowImpl<SqliteDb>;
 pub type LiveListService = livrarr_metadata::list_service::ListServiceImpl<
     SqliteDb,
@@ -173,6 +175,8 @@ pub struct AppState {
     pub grab_service: Arc<LiveGrabService>,
     pub release_service: Arc<LiveReleaseService>,
     pub file_service: Arc<LiveFileService>,
+    pub chapter_service: Arc<LiveChapterService>,
+    pub bookmark_service: Arc<LiveBookmarkService>,
     pub import_workflow: Arc<LiveImportWorkflow>,
     pub list_service: Arc<LiveListService>,
     pub identity_conflict_service:
@@ -291,13 +295,13 @@ impl livrarr_handlers::accessors::CoverProxyCacheAccessor for CoverProxyCacheAcc
 // =============================================================================
 
 use livrarr_handlers::context::{
-    HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasCoverCache,
-    HasCoverService, HasDataDir, HasDownloadClientCredentialService,
-    HasDownloadClientSettingsService, HasEmailService, HasEnrichmentNotify, HasEnrichmentWorkflow,
-    HasFileService, HasGrabService, HasHistoryService, HasHmacKey, HasHttpClient,
-    HasIdentityConflictService, HasIdentityResolver, HasImportIoService, HasImportService,
-    HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService, HasListService,
-    HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
+    HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
+    HasBookmarkService, HasChapterService, HasCoverCache, HasCoverService, HasDataDir,
+    HasDownloadClientCredentialService, HasDownloadClientSettingsService, HasEmailService,
+    HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService,
+    HasHmacKey, HasHttpClient, HasIdentityConflictService, HasIdentityResolver, HasImportIoService,
+    HasImportService, HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService,
+    HasListService, HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
     HasNotificationService, HasProviderHealth, HasQueueService, HasReadarrImportWorkflow,
     HasReleaseService, HasRemotePathMappingService, HasRootFolderService, HasRssSync,
     HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem,
@@ -315,6 +319,20 @@ impl HasFileService for AppState {
     type FileSvc = LiveFileService;
     fn file_service(&self) -> &Self::FileSvc {
         &self.file_service
+    }
+}
+
+impl HasChapterService for AppState {
+    type ChapterSvc = LiveChapterService;
+    fn chapter_service(&self) -> &Self::ChapterSvc {
+        &self.chapter_service
+    }
+}
+
+impl HasBookmarkService for AppState {
+    type BookmarkSvc = LiveBookmarkService;
+    fn bookmark_service(&self) -> &Self::BookmarkSvc {
+        &self.bookmark_service
     }
 }
 

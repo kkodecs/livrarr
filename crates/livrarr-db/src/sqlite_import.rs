@@ -91,6 +91,12 @@ fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbEr
         imported_at: parse_dt(&imported_at_str)?,
         tag_status: livrarr_domain::TagStatus::Pending,
         tagged_at_generation: 0,
+        duration_seconds: row
+            .try_get::<Option<f64>, _>("duration_seconds")
+            .unwrap_or(None),
+        chapter_scan_status: row
+            .try_get::<Option<String>, _>("chapter_scan_status")
+            .unwrap_or(None),
     })
 }
 

@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use livrarr_db::{ConfigDb, LibraryItemDb, PlaybackProgressDb, RootFolderDb};
-use livrarr_domain::services::{EmailPayload, FileService, FileServiceError};
-use livrarr_domain::{DbError, LibraryItem, PlaybackProgress, UserId};
+use livrarr_domain::services::{EmailPayload, FileService, FileServiceError, ItemProgress};
+use livrarr_domain::{DbError, LibraryItem, LibraryItemId, MediaType, PlaybackProgress, UserId};
 
 /// Accepted file extensions for email delivery (mirrors handler constant).
 const ACCEPTED_EXTENSIONS: &[&str] = &["epub", "pdf", "docx", "doc", "rtf", "htm", "html", "txt"];
@@ -218,18 +218,51 @@ where
         position: &str,
         progress_pct: f64,
     ) -> Result<(), FileServiceError> {
-        // Validate the library item exists and belongs to the user.
-        let _item = self
+        let item = self
             .db
             .get_library_item(user_id, item_id)
             .await
             .map_err(map_db_err)?;
 
         let pct = progress_pct.clamp(0.0, 1.0);
-        self.db
-            .upsert_progress(user_id, item_id, position, pct)
+
+        let suppress_lifecycle = item.media_type == MediaType::Audiobook && {
+            let d = item.duration_seconds;
+            d.is_none() || !d.unwrap().is_finite() || d.unwrap() <= 0.0
+        };
+
+        if suppress_lifecycle {
+            self.db
+                .upsert_progress_no_lifecycle(user_id, item_id, position, pct)
+                .await
+                .map_err(FileServiceError::Db)
+        } else {
+            self.db
+                .upsert_progress(user_id, item_id, position, pct)
+                .await
+                .map_err(FileServiceError::Db)
+        }
+    }
+
+    async fn get_progress_for_items(
+        &self,
+        user_id: UserId,
+        library_item_ids: &[LibraryItemId],
+    ) -> Result<Vec<ItemProgress>, FileServiceError> {
+        let progress = self
+            .db
+            .get_progress_for_items(user_id, library_item_ids)
             .await
-            .map_err(FileServiceError::Db)
+            .map_err(FileServiceError::Db)?;
+
+        Ok(progress
+            .into_iter()
+            .map(|pp| ItemProgress {
+                library_item_id: pp.library_item_id,
+                progress_pct: pp.progress_pct,
+                finished_at: pp.finished_at,
+            })
+            .collect())
     }
 }
 

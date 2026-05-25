@@ -1,5 +1,7 @@
 mod app_config;
 mod author;
+mod bookmark;
+mod chapter;
 mod common;
 mod cover;
 mod download_client_credentials;
@@ -35,6 +37,8 @@ mod work_identity;
 
 pub use app_config::*;
 pub use author::*;
+pub use bookmark::*;
+pub use chapter::*;
 pub use common::*;
 pub use cover::*;
 pub use download_client_credentials::*;

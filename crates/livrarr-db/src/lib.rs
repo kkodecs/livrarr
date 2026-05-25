@@ -4,20 +4,22 @@ pub use livrarr_domain::settings::{
     EmailConfig, MediaManagementConfig, MetadataConfig, NamingConfig, ProwlarrConfig,
 };
 pub use livrarr_domain::{
-    ApplyMergeOutcome, Author, AuthorId, DbError, DownloadClient, DownloadClientId,
-    DownloadClientImplementation, EnrichmentStatus, EventType, ExternalIdRowId, ExternalIdType,
-    FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent, HistoryFilter, HistoryId, Import,
-    Indexer, IndexerConfig, IndexerId, IndexerRssState, LibraryItem, LibraryItemId, LlmProvider,
-    MediaType, MergeResolved, MetadataProvider, NarrationType, Notification, NotificationId,
-    NotificationType, OutcomeClass, PlaybackProgress, ProvenanceSetter, RemotePathMapping,
-    RemotePathMappingId, RootFolder, RootFolderId, Series, Session, TagStatus, User, UserId,
-    UserRole, Work, WorkField, WorkId,
+    ApplyMergeOutcome, AudiobookChapter, Author, AuthorId, Bookmark, DbError, DownloadClient,
+    DownloadClientId, DownloadClientImplementation, EnrichmentStatus, EventType, ExternalIdRowId,
+    ExternalIdType, FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent, HistoryFilter,
+    HistoryId, Import, Indexer, IndexerConfig, IndexerId, IndexerRssState, LibraryItem,
+    LibraryItemId, LlmProvider, MediaType, MergeResolved, MetadataProvider, NarrationType,
+    Notification, NotificationId, NotificationType, OutcomeClass, PlaybackProgress,
+    ProvenanceSetter, RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Series,
+    Session, TagStatus, User, UserId, UserRole, Work, WorkField, WorkId,
 };
 
 pub mod pool;
 pub mod sqlite;
 mod sqlite_author;
 mod sqlite_bibliography;
+mod sqlite_bookmarks;
+mod sqlite_chapters;
 pub(crate) mod sqlite_common;
 mod sqlite_config;
 mod sqlite_download_client;
@@ -44,6 +46,8 @@ mod sqlite_work_identity;
 
 #[cfg(test)]
 mod cross_user_isolation_tests;
+#[cfg(test)]
+mod playback_enhancement_tests;
 
 // =============================================================================
 // CRATE: livrarr-db
@@ -1528,7 +1532,7 @@ pub trait PlaybackProgressDb: Send + Sync {
         library_item_id: LibraryItemId,
     ) -> Result<Option<PlaybackProgress>, DbError>;
 
-    /// Insert or update playback progress.
+    /// Insert or update playback progress with finished_at lifecycle.
     async fn upsert_progress(
         &self,
         user_id: UserId,
@@ -1536,6 +1540,70 @@ pub trait PlaybackProgressDb: Send + Sync {
         position: &str,
         progress_pct: f64,
     ) -> Result<(), DbError>;
+
+    /// Insert or update progress without touching finished_at.
+    async fn upsert_progress_no_lifecycle(
+        &self,
+        user_id: UserId,
+        library_item_id: LibraryItemId,
+        position: &str,
+        progress_pct: f64,
+    ) -> Result<(), DbError>;
+
+    /// Batch fetch progress for multiple library items.
+    async fn get_progress_for_items(
+        &self,
+        user_id: UserId,
+        library_item_ids: &[LibraryItemId],
+    ) -> Result<Vec<PlaybackProgress>, DbError>;
+}
+
+/// Chapter data access.
+#[trait_variant::make(Send)]
+pub trait ChapterDb: Send + Sync {
+    async fn get_chapters(
+        &self,
+        library_item_id: LibraryItemId,
+    ) -> Result<Vec<AudiobookChapter>, DbError>;
+
+    async fn replace_chapters(
+        &self,
+        library_item_id: LibraryItemId,
+        chapters: &[AudiobookChapter],
+    ) -> Result<(), DbError>;
+
+    async fn has_chapters(&self, library_item_id: LibraryItemId) -> Result<bool, DbError>;
+
+    async fn list_unscanned_audiobook_items(&self)
+        -> Result<Vec<(LibraryItemId, String)>, DbError>;
+
+    async fn update_chapter_scan_result(
+        &self,
+        library_item_id: LibraryItemId,
+        chapter_scan_status: &str,
+        duration_seconds: Option<f64>,
+    ) -> Result<(), DbError>;
+}
+
+/// Bookmark data access.
+#[trait_variant::make(Send)]
+pub trait BookmarkDb: Send + Sync {
+    async fn list_bookmarks(
+        &self,
+        user_id: UserId,
+        library_item_id: LibraryItemId,
+    ) -> Result<Vec<Bookmark>, DbError>;
+
+    async fn create_bookmark(&self, bookmark: &Bookmark) -> Result<Bookmark, DbError>;
+
+    async fn rename_bookmark(
+        &self,
+        user_id: UserId,
+        bookmark_id: i64,
+        name: &str,
+    ) -> Result<(), DbError>;
+
+    async fn delete_bookmark(&self, user_id: UserId, bookmark_id: i64) -> Result<(), DbError>;
 }
 
 pub struct CreateImportDbRequest {

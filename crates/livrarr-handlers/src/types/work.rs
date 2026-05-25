@@ -254,6 +254,9 @@ pub struct LibraryItemResponse {
     pub media_type: MediaType,
     pub file_size: i64,
     pub imported_at: String,
+    pub progress_pct: Option<f64>,
+    pub duration_seconds: Option<f64>,
+    pub finished_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

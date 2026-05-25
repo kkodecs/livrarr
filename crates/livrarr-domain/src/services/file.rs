@@ -1,4 +1,6 @@
-use crate::{DbError, LibraryItem, MediaType, PlaybackProgress, UserId, WorkId};
+use chrono::{DateTime, Utc};
+
+use crate::{DbError, LibraryItem, LibraryItemId, MediaType, PlaybackProgress, UserId, WorkId};
 
 #[derive(Debug)]
 pub struct ScanResult {
@@ -79,4 +81,17 @@ pub trait FileService: Send + Sync {
         position: &str,
         progress_pct: f64,
     ) -> Result<(), FileServiceError>;
+
+    async fn get_progress_for_items(
+        &self,
+        user_id: UserId,
+        library_item_ids: &[LibraryItemId],
+    ) -> Result<Vec<ItemProgress>, FileServiceError>;
+}
+
+#[derive(Debug)]
+pub struct ItemProgress {
+    pub library_item_id: LibraryItemId,
+    pub progress_pct: f64,
+    pub finished_at: Option<DateTime<Utc>>,
 }

@@ -66,6 +66,9 @@ pub async fn get_detail<S: HasSeriesQueryService>(
                     media_type: li.media_type,
                     file_size: li.file_size,
                     imported_at: li.imported_at.to_rfc3339(),
+                    progress_pct: None,
+                    duration_seconds: li.duration_seconds,
+                    finished_at: None,
                 })
                 .collect();
             detail

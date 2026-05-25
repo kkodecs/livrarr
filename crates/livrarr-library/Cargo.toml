@@ -15,3 +15,7 @@ livrarr-db = { workspace = true }
 livrarr-tagwrite = { workspace = true }
 tempfile = "3"
 tracing = "0.1"
+
+[dev-dependencies]
+livrarr-db = { workspace = true, features = ["test-helpers"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

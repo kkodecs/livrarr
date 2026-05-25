@@ -576,7 +576,7 @@ export const listImportPreview = async (file: File): Promise<ListImportPreviewRe
     });
   }
   if (res.status === 401) {
-    const { clearToken, registerAuthClearedListener: _ } = await import("./client");
+    const { clearToken } = await import("./client");
     clearToken();
     throw new ApiError({ status: 401, error: "unauthorized", message: "Session expired" });
   }

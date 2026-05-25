@@ -1,6 +1,6 @@
 use livrarr_domain::services::{
-    AppConfigService, AuthorMonitorWorkflow, AuthorService, CoverService,
-    DownloadClientCredentialService, DownloadClientSettingsService, EmailService,
+    AppConfigService, AuthorMonitorWorkflow, AuthorService, BookmarkService, ChapterService,
+    CoverService, DownloadClientCredentialService, DownloadClientSettingsService, EmailService,
     EnrichmentWorkflow, FileService, GrabService, HistoryService, IdentityConflictService,
     IdentityResolver, ImportIoService, ImportService, ImportWorkflow, IndexerCredentialService,
     IndexerSettingsService, ListService, ManualImportService, MatchingService, NotificationService,
@@ -29,6 +29,16 @@ pub trait HasWorkService: Clone + Send + Sync + 'static {
 pub trait HasFileService: Clone + Send + Sync + 'static {
     type FileSvc: FileService + Send + Sync + 'static;
     fn file_service(&self) -> &Self::FileSvc;
+}
+
+pub trait HasChapterService: Clone + Send + Sync + 'static {
+    type ChapterSvc: ChapterService + Send + Sync + 'static;
+    fn chapter_service(&self) -> &Self::ChapterSvc;
+}
+
+pub trait HasBookmarkService: Clone + Send + Sync + 'static {
+    type BookmarkSvc: BookmarkService + Send + Sync + 'static;
+    fn bookmark_service(&self) -> &Self::BookmarkSvc;
 }
 
 pub trait HasAuthorService: Clone + Send + Sync + 'static {
@@ -246,6 +256,8 @@ pub trait HasHmacKey: Clone + Send + Sync + 'static {
 pub trait AppContext:
     HasWorkService
     + HasFileService
+    + HasChapterService
+    + HasBookmarkService
     + HasAuthorService
     + HasSeriesService
     + HasSeriesQueryService
@@ -294,6 +306,8 @@ pub trait AppContext:
 impl<T> AppContext for T where
     T: HasWorkService
         + HasFileService
+        + HasChapterService
+        + HasBookmarkService
         + HasAuthorService
         + HasSeriesService
         + HasSeriesQueryService

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, StatusCode};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::GovernorLayer;
@@ -468,6 +468,20 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/workfile/{id}/progress",
             get(livrarr_handlers::workfile::get_progress::<AppState>)
                 .put(livrarr_handlers::workfile::update_progress::<AppState>),
+        )
+        .route(
+            "/workfile/{id}/chapters",
+            get(livrarr_handlers::chapter::get_chapters::<AppState>),
+        )
+        .route(
+            "/workfile/{id}/bookmarks",
+            get(livrarr_handlers::bookmark::list_bookmarks::<AppState>)
+                .post(livrarr_handlers::bookmark::create_bookmark::<AppState>),
+        )
+        .route(
+            "/bookmarks/{id}",
+            patch(livrarr_handlers::bookmark::rename_bookmark::<AppState>)
+                .delete(livrarr_handlers::bookmark::delete_bookmark::<AppState>),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

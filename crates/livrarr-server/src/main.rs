@@ -552,6 +552,12 @@ async fn main() {
         file_service: Arc::new(livrarr_library::file_service::FileServiceImpl::new(
             svc_db.clone(),
         )),
+        chapter_service: Arc::new(livrarr_library::chapter_service::ChapterServiceImpl::new(
+            svc_db.clone(),
+        )),
+        bookmark_service: Arc::new(livrarr_library::bookmark_service::BookmarkServiceImpl::new(
+            svc_db.clone(),
+        )),
         import_workflow: import_workflow_arc.clone(),
         rss_sync_workflow: {
             let rs = Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
@@ -773,6 +779,12 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    tokio::spawn(livrarr_server::jobs::chapter_backfill::run_chapter_backfill(svc_db.clone()));
+    tokio::spawn(livrarr_server::jobs::cover_backfill::run_cover_backfill(
+        svc_db.clone(),
+        data_dir.join("covers"),
+    ));
 
     info!("Listening on {addr}");
 

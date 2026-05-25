@@ -456,6 +456,8 @@ pub struct LibraryItem {
     pub imported_at: DateTime<Utc>,
     pub tag_status: TagStatus,
     pub tagged_at_generation: i64,
+    pub duration_seconds: Option<f64>,
+    pub chapter_scan_status: Option<String>,
 }
 
 /// Playback progress — reading/listening position for a library item.
@@ -469,6 +471,32 @@ pub struct PlaybackProgress {
     /// 0.0 to 1.0.
     pub progress_pct: f64,
     pub updated_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudiobookChapter {
+    pub id: i64,
+    pub library_item_id: LibraryItemId,
+    pub chapter_index: i32,
+    pub title: String,
+    pub start_time_secs: f64,
+    pub end_time_secs: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub id: i64,
+    pub user_id: UserId,
+    pub work_id: WorkId,
+    pub library_item_id: LibraryItemId,
+    pub media_type: MediaType,
+    pub position: String,
+    pub sort_key: f64,
+    pub name: String,
+    pub chapter_title: Option<String>,
+    pub paired_bookmark_id: Option<i64>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Root folder.

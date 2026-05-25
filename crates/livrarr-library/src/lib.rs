@@ -1,3 +1,5 @@
+pub mod bookmark_service;
+pub mod chapter_service;
 pub mod file_service;
 pub mod import_workflow;
 
@@ -245,3 +247,6 @@ pub async fn atomic_copy(src: &std::path::Path, dst: &std::path::Path) -> std::i
     .await
     .expect("spawn_blocking panicked")
 }
+
+#[cfg(test)]
+mod playback_service_tests;
