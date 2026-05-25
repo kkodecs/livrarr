@@ -24,3 +24,5 @@ tools/
 *~
 .DS_Store
 .env
+.understand-anything/
+kash/
