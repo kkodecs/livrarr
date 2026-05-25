@@ -31,7 +31,7 @@ Top learnings a fresh CC session needs to know. For deeper coverage see linked w
 
 ## Metadata
 
-12. **Never use OpenLibrary for foreign language.** Period. See [metadata-sources](domain/metadata-sources.md).
+12. **Never use OpenLibrary for foreign language metadata enrichment.** OL IS used for foreign search/discovery (with language filter). Google Books provides the actual foreign-language metadata. See [metadata-sources](domain/metadata-sources.md).
 13. **LLM is a fallback.** Deterministic matching first. LLM resolves ambiguity only. Fully functional without LLM.
 14. **LLM privacy boundary:** public metadata OK. Filenames, paths, checksums, prefs, keys, IDs — never.
 15. **Identity locked at add-time.** LLM validator confirms provider match when work is added.

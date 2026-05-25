@@ -26,29 +26,40 @@ Which providers supply metadata, their priority, fallback behavior, and the fore
 
 ## Foreign Language Pipeline
 
-Foreign language works use completely different providers. The English enrichment pipeline is **skipped** for foreign works — it would overwrite native-language metadata with English data.
+Foreign works go through the same enrichment pipeline as English works but with different provider priority and an additional provider (Google Books).
 
-### SRU National Library Providers (structured API)
+### Search/Discovery
 
-| Language | Provider | Protocol | Format |
-|----------|----------|----------|--------|
-| Spanish | BNE (Biblioteca Nacional de España) | SRU 1.1 | MARC21 |
-| French | BnF (Bibliothèque nationale de France) | SRU | UNIMARC |
-| German | DNB (Deutsche Nationalbibliothek) | SRU 1.1 | RDF |
-| Dutch | KB (Koninklijke Bibliotheek) | SRU | Dublin Core |
-| Japanese | NDL (National Diet Library) | SRU | Dublin Core |
+Foreign lookup routes through **OpenLibrary first** (with `language=` filter using ISO 639-3 codes), falling back to **Goodreads** (HTML parsing). OL is used for discovery (finding the work, getting OLID + ISBN), not for metadata enrichment.
 
-### LLM Scrape Providers (HTML → LLM extraction)
+### Enrichment Providers
 
-| Language | Provider | Notes |
-|----------|----------|-------|
-| Polish | lubimyczytac.pl | Works well |
-| Korean | Kyobo | Works well |
-| Italian | OPAC SBN → replaced by OL language filter | SBN was client-rendered |
+| Provider | Role | API | Auth | Rate Limit |
+|----------|------|-----|------|------------|
+| **Google Books** | Primary foreign metadata | REST JSON | API key (X-Goog-Api-Key header) | 1 req/s |
+| **Goodreads** | Fallback metadata (LLM-dependent) | HTML scraping + LLM | None | 1 req/s |
+| **Audnexus** | Audiobook enrichment | REST | None | 0.5 req/s |
+
+### Foreign Priority Order
+
+GoogleBooks → Goodreads → Hardcover → Readarr → OpenLibrary (for content/description/cover fields)
+
+### Language Gate
+
+Non-English languages are selectable when EITHER `llm_configured` OR `google_books_configured` is true. The `requires_llm` field in SUPPORTED_LANGUAGES is display metadata only — not used for gating.
+
+### Google Books Details
+
+- ISBN lookup preferred (direct match, no scoring needed)
+- Title+author fallback with `langRestrict` and candidate scoring (Jaccard >= 0.75, author overlap >= 1)
+- All data is `reference_only` — display/cache, never contributed upstream
+- Cover URLs normalized: HTTPS, zoom=0, SSRF validated, embedded credentials rejected
+- Descriptions HTML-stripped before storage
+- CJK titles (Japanese, Korean) currently return NotFound due to Latin-centric tokenization (#54)
 
 ### Cover Resolution (foreign)
 
-Fallback chain: OL covers API by ISBN → Google Books thumbnail by ISBN → no cover.
+Google Books cover (from enrichment) → OL covers API by ISBN → no cover.
 
 ## Key Rules
 
