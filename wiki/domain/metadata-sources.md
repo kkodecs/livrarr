@@ -9,8 +9,10 @@ Which providers supply metadata, their priority, fallback behavior, and the fore
 | **Hardcover** | Primary metadata | GraphQL | Token (no Bearer prefix) | 1 req/s |
 | **OpenLibrary** | Fallback metadata | REST | None | Courtesy only |
 | **Audnexus** | Audiobook enrichment | REST | None | 0.5 req/s |
-| **Goodreads** | Series data, bibliography | HTML scraping | None | Courtesy only |
-| **LLM** | Ambiguity resolution | OpenAI-compatible | API key | Provider-dependent |
+| **Goodreads** | Cover quality, series data, bibliography (LLM-required) | HTML scraping + LLM | LLM API key | 1 req/s |
+| **LLM** | Ambiguity resolution (mandatory for GR) | OpenAI-compatible | API key | Provider-dependent |
+
+> **Goodreads is LLM-dependent by design.** GR is a hostile scraping target: anti-bot, HTML drift, noisy search hits (study guides, alt editions, foreign-language alternates). Naive first-hit matching is unreliable. Without an LLM configured, `GoodreadsClient` returns `NotFound` rather than guessing — this is intentional, not a bug. Use HC + OL for LLM-free English enrichment.
 
 ### Provider Priority
 
