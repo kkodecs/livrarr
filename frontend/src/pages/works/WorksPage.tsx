@@ -805,7 +805,9 @@ function PosterView({
                       durationSeconds={bp.durationSeconds}
                       finishedAt={bp.finishedAt}
                     />
-                  ) : null;
+                  ) : (
+                    <span className="text-xs text-zinc-500">Not started</span>
+                  );
                 })()}
                 <MediaStatusRow work={work} activeGrabs={activeGrabs} />
               </div>
