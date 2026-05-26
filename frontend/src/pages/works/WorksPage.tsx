@@ -19,7 +19,8 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { listWorks, refreshAllWorks, deleteWork, refreshWork, triggerRssSync, getQueue } from "@/api";
+import { listWorks, refreshAllWorks, deleteWork, refreshWork, triggerRssSync, getQueue, updateWork } from "@/api";
+import type { UpdateWorkRequest } from "@/types/api";
 import { computeTotalPages } from "@/utils/pagination";
 import type { WorkSortField } from "@/utils/works";
 import { useUIStore } from "@/stores/ui";
@@ -123,6 +124,25 @@ export function WorksPage() {
     onSuccess: () => toast.success("RSS sync started"),
     onError: () => toast.error("RSS sync already running"),
   });
+
+  const toggleMonitorMutation = useMutation({
+    mutationFn: ({ workId, field }: { workId: number; field: "monitorEbook" | "monitorAudiobook" }) => {
+      const work = works?.find((w) => w.id === workId);
+      if (!work) return Promise.reject(new Error("Work not found"));
+      return updateWork(workId, { [field]: !work[field] } as UpdateWorkRequest);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["works"] });
+    },
+    onError: () => toast.error("Failed to update monitoring"),
+  });
+
+  const handleToggleMonitor = useCallback(
+    (workId: number, field: "monitorEbook" | "monitorAudiobook") => {
+      toggleMonitorMutation.mutate({ workId, field });
+    },
+    [toggleMonitorMutation],
+  );
 
   const { data: queueItems } = useQuery({
     queryKey: ["queue"],
@@ -429,6 +449,7 @@ export function WorksPage() {
                 onToggleAll={toggleSelectAll}
                 activeGrabs={activeGrabs}
                 coverMediaType={mediaTypeFilter === "audiobook" ? "audiobook" as const : undefined}
+                onToggleMonitor={handleToggleMonitor}
               />
             )}
             {worksView === "poster" && (
@@ -440,6 +461,7 @@ export function WorksPage() {
                 columns={posterZoom}
                 activeGrabs={activeGrabs}
                 coverMediaType={mediaTypeFilter === "audiobook" ? "audiobook" as const : undefined}
+                onToggleMonitor={handleToggleMonitor}
               />
             )}
             {worksView === "overview" && (
@@ -450,6 +472,7 @@ export function WorksPage() {
                 onToggle={toggleSelection}
                 activeGrabs={activeGrabs}
                 coverMediaType={mediaTypeFilter === "audiobook" ? "audiobook" as const : undefined}
+                onToggleMonitor={handleToggleMonitor}
               />
             )}
 
@@ -602,6 +625,7 @@ function TableView({
   onToggleAll,
   activeGrabs,
   coverMediaType,
+  onToggleMonitor,
 }: {
   works: WorkDetailResponse[];
   sort: WorkSortField;
@@ -614,6 +638,7 @@ function TableView({
   onToggleAll: () => void;
   activeGrabs: Set<string>;
   coverMediaType?: "ebook" | "audiobook";
+  onToggleMonitor: (workId: number, field: "monitorEbook" | "monitorAudiobook") => void;
 }) {
   return (
     <div className="overflow-x-auto">
@@ -687,7 +712,7 @@ function TableView({
                   {work.year ?? "\u2014"}
                 </td>
                 <td className="hidden md:table-cell px-3 py-2">
-                  <MediaStatusRow work={work} activeGrabs={activeGrabs} />
+                  <MediaStatusRow work={work} activeGrabs={activeGrabs} onToggleMonitor={onToggleMonitor} />
                 </td>
                 <td className="hidden md:table-cell px-3 py-2">
                   {(() => {
@@ -734,6 +759,7 @@ function PosterView({
   columns,
   activeGrabs,
   coverMediaType,
+  onToggleMonitor,
 }: {
   works: WorkDetailResponse[];
   editorMode: boolean;
@@ -742,6 +768,7 @@ function PosterView({
   columns: number;
   activeGrabs: Set<string>;
   coverMediaType?: "ebook" | "audiobook";
+  onToggleMonitor: (workId: number, field: "monitorEbook" | "monitorAudiobook") => void;
 }) {
   const navigate = useNavigate();
 
@@ -809,7 +836,7 @@ function PosterView({
                     <span className="text-xs text-zinc-500">Not started</span>
                   );
                 })()}
-                <MediaStatusRow work={work} activeGrabs={activeGrabs} />
+                <MediaStatusRow work={work} activeGrabs={activeGrabs} onToggleMonitor={onToggleMonitor} />
               </div>
             </div>
           </div>
@@ -828,6 +855,7 @@ function OverviewView({
   onToggle,
   activeGrabs,
   coverMediaType,
+  onToggleMonitor,
 }: {
   works: WorkDetailResponse[];
   editorMode: boolean;
@@ -835,6 +863,7 @@ function OverviewView({
   onToggle: (id: number) => void;
   activeGrabs: Set<string>;
   coverMediaType?: "ebook" | "audiobook";
+  onToggleMonitor: (workId: number, field: "monitorEbook" | "monitorAudiobook") => void;
 }) {
   const navigate = useNavigate();
 
@@ -892,7 +921,7 @@ function OverviewView({
                   ) : work.authorName}
                 </p>
                 <div className="mt-1.5 flex items-center gap-2">
-                  <MediaStatusRow work={work} activeGrabs={activeGrabs} />
+                  <MediaStatusRow work={work} activeGrabs={activeGrabs} onToggleMonitor={onToggleMonitor} />
                   {(() => {
                     const bp = bestProgress(work.libraryItems);
                     return bp ? (

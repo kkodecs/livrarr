@@ -6,9 +6,11 @@ import type { WorkDetailResponse } from "@/types/api";
 export function MediaStatusRow({
   work,
   activeGrabs,
+  onToggleMonitor,
 }: {
   work: WorkDetailResponse;
   activeGrabs?: Set<string>;
+  onToggleMonitor?: (workId: number, field: "monitorEbook" | "monitorAudiobook") => void;
 }) {
   const grabs = activeGrabs ?? new Set<string>();
   const ebookItems =
@@ -45,16 +47,46 @@ export function MediaStatusRow({
     audioDownloading,
   );
 
+  const ebookChip = (
+    <span className="inline-flex items-center gap-1">
+      <Book size={12} className={ebook.color} />
+      <span className={ebook.color}>{ebook.label}</span>
+    </span>
+  );
+
+  const audioChip = (
+    <span className="inline-flex items-center gap-1">
+      <Headphones size={12} className={audio.color} />
+      <span className={audio.color}>{audio.label}</span>
+    </span>
+  );
+
   return (
     <div className="flex items-center gap-3 text-xs">
-      <span className="inline-flex items-center gap-1">
-        <Book size={12} className={ebook.color} />
-        <span className={ebook.color}>{ebook.label}</span>
-      </span>
-      <span className="inline-flex items-center gap-1">
-        <Headphones size={12} className={audio.color} />
-        <span className={audio.color}>{audio.label}</span>
-      </span>
+      {onToggleMonitor ? (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggleMonitor(work.id, "monitorEbook"); }}
+          className="hover:opacity-80 transition-opacity"
+          title={`Ebook: ${ebook.label}. Click to ${work.monitorEbook ? "stop" : "start"} monitoring.`}
+        >
+          {ebookChip}
+        </button>
+      ) : (
+        ebookChip
+      )}
+      {onToggleMonitor ? (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggleMonitor(work.id, "monitorAudiobook"); }}
+          className="hover:opacity-80 transition-opacity"
+          title={`Audiobook: ${audio.label}. Click to ${work.monitorAudiobook ? "stop" : "start"} monitoring.`}
+        >
+          {audioChip}
+        </button>
+      ) : (
+        audioChip
+      )}
       <Link
           to={`/work/${work.id}?tab=releases`}
           onClick={(e) => e.stopPropagation()}
