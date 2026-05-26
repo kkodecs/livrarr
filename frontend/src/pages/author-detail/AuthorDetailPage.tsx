@@ -268,7 +268,7 @@ function BibliographySection({
   });
 
   const addMutation = useMutation({
-    mutationFn: (entry: { olKey: string; title: string; year: number | null }) => {
+    mutationFn: (entry: { olKey: string | null; title: string; year: number | null }) => {
       setAddingKey(entry.title);
       return addWork({
         olKey: entry.olKey || null,
