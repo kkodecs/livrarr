@@ -385,16 +385,25 @@ where
     }
 }
 
-/// Best-effort torrent info_hash extraction before sending to qBit.
+/// Best-effort torrent info_hash extraction before sending to download client.
 /// Handles: direct magnet URIs, body-text magnets, .torrent file bytes.
-async fn fetch_and_extract_hash<H: HttpFetcher>(http: &H, download_url: &str) -> Option<String> {
+///
+/// Returns `(hash, Option<torrent_bytes>)`:
+/// - For magnets: hash extracted from URI, no bytes.
+/// - For .torrent URLs: hash extracted from file, bytes returned for reuse
+///   (avoids double-fetch when the download client also needs the file).
+async fn fetch_and_extract_hash<H: HttpFetcher>(
+    http: &H,
+    download_url: &str,
+) -> (Option<String>, Option<Vec<u8>>) {
     use crate::{extract_torrent_hash, TorrentSource};
 
     if download_url.starts_with("magnet:") {
-        return extract_torrent_hash(&TorrentSource::Magnet(download_url.to_string())).ok();
+        let hash = extract_torrent_hash(&TorrentSource::Magnet(download_url.to_string())).ok();
+        return (hash, None);
     }
 
-    let resp = http
+    let resp = match http
         .fetch(FetchRequest {
             url: download_url.to_string(),
             method: HttpMethod::Get,
@@ -407,35 +416,44 @@ async fn fetch_and_extract_hash<H: HttpFetcher>(http: &H, download_url: &str) ->
             user_agent: UserAgentProfile::Server,
         })
         .await
-        .ok()?;
+    {
+        Ok(r) => r,
+        Err(_) => return (None, None),
+    };
 
     if !(200..300).contains(&resp.status) {
-        return None;
+        return (None, None);
     }
 
+    // Some indexers return a magnet URI as the response body
     if let Ok(text) = std::str::from_utf8(&resp.body) {
         let trimmed = text.trim();
         if trimmed.starts_with("magnet:") {
-            return extract_torrent_hash(&TorrentSource::Magnet(trimmed.to_string())).ok();
+            let hash = extract_torrent_hash(&TorrentSource::Magnet(trimmed.to_string())).ok();
+            return (hash, None);
         }
     }
 
-    extract_torrent_hash(&TorrentSource::TorrentFile {
+    let hash = extract_torrent_hash(&TorrentSource::TorrentFile {
         filename: "download.torrent".to_string(),
-        data: resp.body,
+        data: resp.body.clone(),
     })
-    .ok()
+    .ok();
+    (hash, Some(resp.body))
 }
 
 /// Dispatch torrent to qBittorrent via HTTP API.
+///
+/// For magnet URIs: sends via `urls=` field (qBit handles natively).
+/// For .torrent URLs: fetches the file server-side and sends bytes via
+/// `torrents=` multipart field, so qBit doesn't need to reach the indexer.
 async fn dispatch_torrent<H: HttpFetcher>(
     http: &H,
     client: &DownloadClient,
     download_url: &str,
 ) -> Result<String, String> {
-    let download_id = fetch_and_extract_hash(http, download_url)
-        .await
-        .unwrap_or_else(|| "pending".to_string());
+    let (hash, torrent_bytes) = fetch_and_extract_hash(http, download_url).await;
+    let download_id = hash.unwrap_or_else(|| "pending".to_string());
 
     let scheme = if client.use_ssl { "https" } else { "http" };
     let url_base = client.url_base.as_deref().unwrap_or("");
@@ -484,14 +502,36 @@ async fn dispatch_torrent<H: HttpFetcher>(
         })
         .unwrap_or_default();
 
-    // Add torrent via URL
+    // Build multipart body: use `torrents=` for file bytes, `urls=` for magnets
     let add_url = format!("{base}/api/v2/torrents/add");
     let boundary = "----livrarr-boundary";
-    let safe_url = sanitize_multipart_value(download_url);
     let safe_category = sanitize_multipart_value(&client.category);
-    let body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"urls\"\r\n\r\n{safe_url}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\n{safe_category}\r\n--{boundary}--\r\n",
-    );
+
+    let body = if let Some(ref file_bytes) = torrent_bytes {
+        // Non-magnet: send .torrent file bytes via multipart file field
+        let mut buf = Vec::with_capacity(file_bytes.len() + 512);
+        buf.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"torrent.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        buf.extend_from_slice(file_bytes);
+        buf.extend_from_slice(
+            format!(
+                "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\n{safe_category}\r\n--{boundary}--\r\n"
+            )
+            .as_bytes(),
+        );
+        buf
+    } else {
+        // Magnet URI: send via urls= text field
+        let safe_url = sanitize_multipart_value(download_url);
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"urls\"\r\n\r\n{safe_url}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\n{safe_category}\r\n--{boundary}--\r\n",
+        )
+        .into_bytes()
+    };
 
     let add_resp = http
         .fetch(FetchRequest {
@@ -504,7 +544,7 @@ async fn dispatch_torrent<H: HttpFetcher>(
                 ),
                 ("Cookie".into(), sid),
             ],
-            body: Some(body.into_bytes()),
+            body: Some(body),
             timeout: Duration::from_secs(30),
             rate_bucket: RateBucket::None,
             max_body_bytes: 4096,
@@ -529,9 +569,8 @@ async fn dispatch_transmission<H: HttpFetcher>(
     client: &DownloadClient,
     download_url: &str,
 ) -> Result<String, String> {
-    let download_id = fetch_and_extract_hash(http, download_url)
-        .await
-        .unwrap_or_else(|| "pending".to_string());
+    let (hash, torrent_bytes) = fetch_and_extract_hash(http, download_url).await;
+    let download_id = hash.unwrap_or_else(|| "pending".to_string());
 
     let scheme = if client.use_ssl { "https" } else { "http" };
     let url_base = client.url_base.as_deref().unwrap_or("");
@@ -542,8 +581,12 @@ async fn dispatch_transmission<H: HttpFetcher>(
     let mut args = serde_json::json!({});
     if download_url.starts_with("magnet:") {
         args["filename"] = serde_json::Value::String(download_url.to_string());
+    } else if let Some(ref file_bytes) = torrent_bytes {
+        // Reuse bytes already fetched by fetch_and_extract_hash
+        use data_encoding::BASE64;
+        args["metainfo"] = serde_json::Value::String(BASE64.encode(file_bytes));
     } else {
-        // Download .torrent file and base64-encode it
+        // Fallback: fetch_and_extract_hash failed to get bytes, try direct fetch
         let torrent_resp = http
             .fetch(FetchRequest {
                 url: download_url.to_string(),
