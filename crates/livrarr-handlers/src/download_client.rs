@@ -3,7 +3,7 @@ use axum::Json;
 
 use crate::context::{
     HasDownloadClientCredentialService, HasDownloadClientSettingsService, HasHttpClient,
-    HasIndexerSettingsService,
+    HasIndexerSettingsService, HasTrustedOrigins,
 };
 use crate::middleware::RequireAdmin;
 use crate::{
@@ -105,7 +105,9 @@ pub async fn get<S: HasDownloadClientSettingsService>(
     Ok(Json(to_response(dc)))
 }
 
-pub async fn create<S: HasDownloadClientSettingsService>(
+pub async fn create<
+    S: HasDownloadClientSettingsService + HasIndexerSettingsService + HasTrustedOrigins,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<CreateDownloadClientApiRequest>,
@@ -144,10 +146,14 @@ pub async fn create<S: HasDownloadClientSettingsService>(
         })
         .await?;
 
+    crate::context::rebuild_trusted_origins(&state).await;
+
     Ok(Json(to_response(dc)))
 }
 
-pub async fn update<S: HasDownloadClientSettingsService>(
+pub async fn update<
+    S: HasDownloadClientSettingsService + HasIndexerSettingsService + HasTrustedOrigins,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
@@ -235,10 +241,14 @@ pub async fn update<S: HasDownloadClientSettingsService>(
         auto_promote_default(&state, dc.client_type(), dc.id).await;
     }
 
+    crate::context::rebuild_trusted_origins(&state).await;
+
     Ok(Json(to_response(dc)))
 }
 
-pub async fn delete<S: HasDownloadClientSettingsService>(
+pub async fn delete<
+    S: HasDownloadClientSettingsService + HasIndexerSettingsService + HasTrustedOrigins,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<i64>,
@@ -255,6 +265,8 @@ pub async fn delete<S: HasDownloadClientSettingsService>(
     if existing.is_default_for_protocol {
         auto_promote_default(&state, existing.client_type(), existing.id).await;
     }
+
+    crate::context::rebuild_trusted_origins(&state).await;
 
     Ok(())
 }
@@ -650,7 +662,10 @@ impl ProwlarrDownloadClient {
 }
 
 pub async fn import_from_prowlarr<
-    S: HasDownloadClientSettingsService + HasIndexerSettingsService + HasHttpClient,
+    S: HasDownloadClientSettingsService
+        + HasIndexerSettingsService
+        + HasTrustedOrigins
+        + HasHttpClient,
 >(
     State(state): State<S>,
     _admin: RequireAdmin,
@@ -862,6 +877,10 @@ pub async fn import_from_prowlarr<
                 enabled: Some(true),
             })
             .await;
+    }
+
+    if imported > 0 {
+        crate::context::rebuild_trusted_origins(&state).await;
     }
 
     Ok(Json(crate::ProwlarrImportResponse {

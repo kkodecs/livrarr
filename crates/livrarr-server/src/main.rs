@@ -754,6 +754,9 @@ async fn main() {
         enrichment_notify: Arc::new(tokio::sync::Notify::new()),
         cover_service,
         hmac_key,
+        trusted_origins_rebuilder: livrarr_server::state::TrustedOriginsRebuilderImpl(
+            trusted_origins_arc.clone(),
+        ),
     };
 
     // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).

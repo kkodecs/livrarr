@@ -67,3 +67,9 @@ pub trait CoverProxyCacheAccessor: Send + Sync {
         content_type: String,
     ) -> impl std::future::Future<Output = ()> + Send;
 }
+
+/// Trusted origins rebuilder -- rebuilds the SSRF trusted-origins
+/// allowlist from current indexer + download client URLs.
+pub trait TrustedOriginsRebuilder: Send + Sync {
+    fn rebuild(&self, urls: &[String]);
+}

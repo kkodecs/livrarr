@@ -208,6 +208,7 @@ pub struct AppState {
     pub enrichment_notify: Arc<tokio::sync::Notify>,
     pub cover_service: Arc<LiveCoverService>,
     pub hmac_key: Vec<u8>,
+    pub trusted_origins_rebuilder: TrustedOriginsRebuilderImpl,
 }
 
 // =============================================================================
@@ -290,6 +291,16 @@ impl livrarr_handlers::accessors::CoverProxyCacheAccessor for CoverProxyCacheAcc
     }
 }
 
+/// Wrapper for trusted origins — satisfies orphan rule.
+#[derive(Clone)]
+pub struct TrustedOriginsRebuilderImpl(pub Arc<livrarr_http::ssrf::TrustedOrigins>);
+
+impl livrarr_handlers::accessors::TrustedOriginsRebuilder for TrustedOriginsRebuilderImpl {
+    fn rebuild(&self, urls: &[String]) {
+        self.0.rebuild(urls);
+    }
+}
+
 // =============================================================================
 // AppContext impl — one Has* trait per capability
 // =============================================================================
@@ -305,7 +316,7 @@ use livrarr_handlers::context::{
     HasNotificationService, HasProviderHealth, HasQueueService, HasReadarrImportWorkflow,
     HasReleaseService, HasRemotePathMappingService, HasRootFolderService, HasRssSync,
     HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem,
-    HasTagService, HasWorkService,
+    HasTagService, HasTrustedOrigins, HasWorkService,
 };
 
 impl HasWorkService for AppState {
@@ -626,6 +637,13 @@ impl HasCoverService for AppState {
 impl HasHmacKey for AppState {
     fn hmac_key(&self) -> &[u8] {
         &self.hmac_key
+    }
+}
+
+impl HasTrustedOrigins for AppState {
+    type TrustedOrigins = TrustedOriginsRebuilderImpl;
+    fn trusted_origins(&self) -> &Self::TrustedOrigins {
+        &self.trusted_origins_rebuilder
     }
 }
 

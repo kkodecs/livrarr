@@ -249,6 +249,11 @@ pub trait HasHmacKey: Clone + Send + Sync + 'static {
     fn hmac_key(&self) -> &[u8];
 }
 
+pub trait HasTrustedOrigins: Clone + Send + Sync + 'static {
+    type TrustedOrigins: crate::accessors::TrustedOriginsRebuilder + Send + Sync + 'static;
+    fn trusted_origins(&self) -> &Self::TrustedOrigins;
+}
+
 // =============================================================================
 // AppContext — supertrait union of all capability traits
 // =============================================================================
@@ -300,6 +305,7 @@ pub trait AppContext:
     + HasEnrichmentNotify
     + HasCoverService
     + HasHmacKey
+    + HasTrustedOrigins
 {
 }
 
@@ -350,5 +356,34 @@ impl<T> AppContext for T where
         + HasEnrichmentNotify
         + HasCoverService
         + HasHmacKey
+        + HasTrustedOrigins
 {
+}
+
+/// Rebuild the SSRF trusted-origins allowlist from the current set of
+/// configured indexers and download clients. Called after any CRUD
+/// mutation on either entity so the allowlist stays in sync.
+pub async fn rebuild_trusted_origins<
+    S: HasIndexerSettingsService + HasDownloadClientSettingsService + HasTrustedOrigins,
+>(
+    state: &S,
+) {
+    use crate::accessors::TrustedOriginsRebuilder;
+    use livrarr_domain::services::{DownloadClientSettingsService, IndexerSettingsService};
+
+    let mut urls = Vec::new();
+    if let Ok(indexers) = state.indexer_settings_service().list_indexers().await {
+        urls.extend(indexers.iter().map(|i| i.url.clone()));
+    }
+    if let Ok(clients) = state
+        .download_client_settings_service()
+        .list_download_clients()
+        .await
+    {
+        for c in &clients {
+            let scheme = if c.use_ssl { "https" } else { "http" };
+            urls.push(format!("{}://{}:{}", scheme, c.host, c.port));
+        }
+    }
+    state.trusted_origins().rebuild(&urls);
 }

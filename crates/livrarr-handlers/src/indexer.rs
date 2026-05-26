@@ -5,7 +5,10 @@ use axum::Json;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-use crate::context::{HasHttpClient, HasIndexerCredentialService, HasIndexerSettingsService};
+use crate::context::{
+    HasDownloadClientSettingsService, HasHttpClient, HasIndexerCredentialService,
+    HasIndexerSettingsService, HasTrustedOrigins,
+};
 use crate::middleware::RequireAdmin;
 use crate::{
     ApiError, CreateIndexerApiRequest, IndexerResponse, TestIndexerApiRequest,
@@ -214,7 +217,9 @@ pub async fn get<S: HasIndexerSettingsService>(
     Ok(Json(indexer_to_response(&indexer)))
 }
 
-pub async fn create<S: HasIndexerSettingsService>(
+pub async fn create<
+    S: HasIndexerSettingsService + HasDownloadClientSettingsService + HasTrustedOrigins,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<CreateIndexerApiRequest>,
@@ -249,10 +254,14 @@ pub async fn create<S: HasIndexerSettingsService>(
         })
         .await?;
 
+    crate::context::rebuild_trusted_origins(&state).await;
+
     Ok(Json(indexer_to_response(&indexer)))
 }
 
-pub async fn update<S: HasIndexerSettingsService>(
+pub async fn update<
+    S: HasIndexerSettingsService + HasDownloadClientSettingsService + HasTrustedOrigins,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
@@ -304,15 +313,20 @@ pub async fn update<S: HasIndexerSettingsService>(
         )
         .await?;
 
+    crate::context::rebuild_trusted_origins(&state).await;
+
     Ok(Json(indexer_to_response(&indexer)))
 }
 
-pub async fn delete<S: HasIndexerSettingsService>(
+pub async fn delete<
+    S: HasIndexerSettingsService + HasDownloadClientSettingsService + HasTrustedOrigins,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Path(id): Path<IndexerId>,
 ) -> Result<(), ApiError> {
     state.indexer_settings_service().delete_indexer(id).await?;
+    crate::context::rebuild_trusted_origins(&state).await;
     Ok(())
 }
 
@@ -386,7 +400,12 @@ fn default_priority() -> i32 {
     25
 }
 
-pub async fn import_from_prowlarr<S: HasIndexerSettingsService + HasHttpClient>(
+pub async fn import_from_prowlarr<
+    S: HasIndexerSettingsService
+        + HasDownloadClientSettingsService
+        + HasTrustedOrigins
+        + HasHttpClient,
+>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<crate::ProwlarrImportRequest>,
@@ -500,6 +519,10 @@ pub async fn import_from_prowlarr<S: HasIndexerSettingsService + HasHttpClient>(
                 enabled: Some(true),
             })
             .await;
+    }
+
+    if imported > 0 {
+        crate::context::rebuild_trusted_origins(&state).await;
     }
 
     Ok(Json(crate::ProwlarrImportResponse {
