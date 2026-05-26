@@ -5,11 +5,35 @@
 //!   - the existing inline enrichment pipeline (still on the legacy direct path), and
 //!   - `ProviderClient::Audnexus`, the first real-network adapter wired through
 //!     `DefaultProviderQueue` (Phase 1.5 tracer).
-//!
-//! Behavior is unchanged from the original implementation. Only the location
-//! moves; existing call sites import from here.
 
 use livrarr_http::HttpClient;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+const CACHE_CAP: usize = 512;
+
+struct CachedResponse {
+    last_modified: String,
+    body: serde_json::Value,
+}
+
+#[derive(Clone)]
+pub struct AudnexusCache(Arc<Mutex<lru::LruCache<String, CachedResponse>>>);
+
+impl Default for AudnexusCache {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(lru::LruCache::new(
+            NonZeroUsize::new(CACHE_CAP).unwrap(),
+        ))))
+    }
+}
+
+impl AudnexusCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 /// Parsed subset of the Audnexus book detail response — narrators, runtime,
 /// and ASIN are the only fields the enrichment pipeline consumes today.
@@ -33,18 +57,15 @@ pub async fn query_audnexus(
     asin: Option<&str>,
     title: &str,
     author: &str,
+    cache: &AudnexusCache,
 ) -> Result<Option<AudnexusResult>, String> {
     let base = base_url.trim_end_matches('/');
 
     // Try by ASIN first.
     if let Some(asin) = asin {
         let url = format!("{base}/books/{asin}");
-        if let Ok(resp) = http.get(&url).send().await {
-            if resp.status().is_success() {
-                if let Ok(data) = resp.json::<serde_json::Value>().await {
-                    return Ok(Some(parse_audnexus(&data, Some(asin))));
-                }
-            }
+        if let Some(result) = cached_fetch(http, &url, cache).await? {
+            return Ok(Some(parse_audnexus(&result, Some(asin))));
         }
     }
 
@@ -54,28 +75,74 @@ pub async fn query_audnexus(
         urlencoding(title),
         urlencoding(author),
     );
-    let resp = http
-        .get(&url)
+    if let Some(result) = cached_fetch(http, &url, cache).await? {
+        let book = if result.is_array() {
+            result.as_array().and_then(|a| a.first()).cloned()
+        } else {
+            Some(result)
+        };
+        return match book {
+            Some(b) => Ok(Some(parse_audnexus(&b, None))),
+            None => Ok(None),
+        };
+    }
+
+    Ok(None)
+}
+
+async fn cached_fetch(
+    http: &HttpClient,
+    url: &str,
+    cache: &AudnexusCache,
+) -> Result<Option<serde_json::Value>, String> {
+    let cached_last_modified = {
+        let mut guard = cache.0.lock().await;
+        guard.get(url).map(|c| c.last_modified.clone())
+    };
+
+    let mut req = http.get(url);
+    if let Some(ref lm) = cached_last_modified {
+        req = req.header("If-Modified-Since", lm);
+    }
+
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
 
-    if !resp.status().is_success() {
+    if status.as_u16() == 304 {
+        let mut guard = cache.0.lock().await;
+        if let Some(cached) = guard.get(url) {
+            tracing::debug!(%url, "audnexus 304 — reusing cached response");
+            return Ok(Some(cached.body.clone()));
+        }
+    }
+
+    if !status.is_success() {
         return Ok(None);
     }
 
+    let last_modified = resp
+        .headers()
+        .get("Last-Modified")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let data: serde_json::Value = resp.json().await.map_err(|e| format!("parse: {e}"))?;
 
-    let book = if data.is_array() {
-        data.as_array().and_then(|a| a.first()).cloned()
-    } else {
-        Some(data)
-    };
-
-    match book {
-        Some(b) => Ok(Some(parse_audnexus(&b, None))),
-        None => Ok(None),
+    if let Some(lm) = last_modified {
+        let mut guard = cache.0.lock().await;
+        guard.put(
+            url.to_string(),
+            CachedResponse {
+                last_modified: lm,
+                body: data.clone(),
+            },
+        );
     }
+
+    Ok(Some(data))
 }
 
 /// Parse a single Audnexus book JSON object into `AudnexusResult`.

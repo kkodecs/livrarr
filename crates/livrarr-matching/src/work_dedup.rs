@@ -104,6 +104,27 @@ pub fn find_matching_work<'a>(
     })
 }
 
+/// Normalize a title for bibliography "already in library" matching.
+/// Strips subtitles (after `:` or ` - `), leading articles, punctuation,
+/// and collapses whitespace. More aggressive than `normalize` — designed
+/// for fuzzy cross-source comparison (e.g. OL bibliography vs GB bibliography).
+pub fn normalize_title_for_match(title: &str) -> String {
+    let t = title.to_lowercase();
+    let t = t.split(':').next().unwrap_or(&t);
+    let t = t.split(" - ").next().unwrap_or(t);
+    let t = t
+        .strip_prefix("the ")
+        .or_else(|| t.strip_prefix("a "))
+        .or_else(|| t.strip_prefix("an "))
+        .unwrap_or(t);
+    t.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +258,49 @@ mod tests {
         let works = vec![make_work("Dune", "Frank Herbert")];
         let result = find_matching_work(&works, "Dune", "Brian Herbert", &ProviderKeys::default());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn normalize_title_strips_subtitle() {
+        assert_eq!(
+            normalize_title_for_match("Dune: The Battle of Corrin"),
+            "dune"
+        );
+        assert_eq!(
+            normalize_title_for_match("Dune - The Battle of Corrin"),
+            "dune"
+        );
+    }
+
+    #[test]
+    fn normalize_title_strips_articles() {
+        assert_eq!(
+            normalize_title_for_match("The Great Gatsby"),
+            "great gatsby"
+        );
+        assert_eq!(
+            normalize_title_for_match("A Farewell to Arms"),
+            "farewell to arms"
+        );
+        assert_eq!(
+            normalize_title_for_match("An Inspector Calls"),
+            "inspector calls"
+        );
+    }
+
+    #[test]
+    fn normalize_title_strips_punctuation_and_collapses_whitespace() {
+        assert_eq!(
+            normalize_title_for_match("Harry Potter & the Philosopher's Stone"),
+            "harry potter the philosophers stone"
+        );
+    }
+
+    #[test]
+    fn normalize_title_case_insensitive() {
+        assert_eq!(
+            normalize_title_for_match("DUNE"),
+            normalize_title_for_match("dune")
+        );
     }
 }

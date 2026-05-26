@@ -5,7 +5,9 @@ use axum::response::{IntoResponse, Response};
 use crate::accessors::CoverProxyCacheAccessor;
 use crate::context::{HasCoverCache, HasHmacKey, HasHttpClient};
 
-const MAX_IMAGE_SIZE: usize = 500_000;
+// 5 MB — accommodates high-resolution covers from providers like Google Books.
+// TODO(alpha6+): reduce stored cover resolution to limit on-disk footprint.
+const MAX_IMAGE_SIZE: usize = 5 * 1024 * 1024;
 
 #[derive(serde::Deserialize)]
 pub struct CoverProxyQuery {

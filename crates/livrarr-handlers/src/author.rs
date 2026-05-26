@@ -284,6 +284,7 @@ fn bibliography_to_json(
             "year": e.year,
             "seriesName": e.series_name,
             "seriesPosition": e.series_position,
+            "alreadyInLibrary": e.already_in_library,
         })).collect::<Vec<_>>(),
         "llmFiltered": !result.raw_available || result.filtered_count != result.raw_count,
         "rawAvailable": result.raw_available,

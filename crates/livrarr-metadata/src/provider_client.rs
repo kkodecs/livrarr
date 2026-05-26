@@ -19,7 +19,7 @@ use chrono::Utc;
 use livrarr_domain::{MetadataProvider, Work};
 use livrarr_http::HttpClient;
 
-use crate::audnexus::query_audnexus;
+use crate::audnexus::{query_audnexus, AudnexusCache};
 use crate::goodreads::{self, GoodreadsDetailResult, GoodreadsFetchError, GOODREADS_BASE_URL};
 use crate::hardcover::query_hardcover;
 use crate::openlibrary::query_ol_detail;
@@ -146,6 +146,7 @@ pub struct AudnexusClient {
     http: HttpClient,
     base_url: String,
     retry_backoff_secs: i64,
+    cache: AudnexusCache,
 }
 
 impl AudnexusClient {
@@ -154,6 +155,7 @@ impl AudnexusClient {
             http,
             base_url: base_url.into(),
             retry_backoff_secs: 5 * 60,
+            cache: crate::audnexus::AudnexusCache::new(),
         }
     }
 
@@ -173,6 +175,7 @@ impl AudnexusClient {
             work.asin.as_deref(),
             &work.title,
             &work.author_name,
+            &self.cache,
         )
         .await;
 

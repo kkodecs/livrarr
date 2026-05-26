@@ -514,12 +514,12 @@ async fn dispatch_torrent<H: HttpFetcher>(
         .await
         .map_err(|e| format!("qBit add torrent failed: {e}"))?;
 
-    if add_resp.status == 200 {
-        Ok(download_id)
-    } else if add_resp.status == 403 {
-        Err("qBit auth expired".to_string())
-    } else {
-        Err(format!("qBit rejected torrent: HTTP {}", add_resp.status))
+    let body_text = String::from_utf8_lossy(&add_resp.body);
+    match add_resp.status {
+        200 if body_text.contains("Ok.") => Ok(download_id),
+        200 => Err(format!("qBit add failed: {}", body_text.trim())),
+        403 => Err("qBit auth expired".to_string()),
+        s => Err(format!("qBit rejected torrent: HTTP {s}")),
     }
 }
 

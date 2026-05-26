@@ -149,14 +149,15 @@ async fn main() {
         db.clone(),
         livrarr_server::auth_crypto::RealAuthCrypto,
     ));
+    let ua = livrarr_http::livrarr_user_agent();
     let http_client = livrarr_http::HttpClient::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent(&format!("Livrarr/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(&ua)
         .build()
         .expect("failed to build HTTP client");
     let http_client_safe = livrarr_http::HttpClient::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent(&format!("Livrarr/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(&ua)
         .ssrf_safe(true)
         .build()
         .expect("failed to build SSRF-safe HTTP client");

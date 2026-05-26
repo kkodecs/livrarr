@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use livrarr_db::{
-    AuthorBibliographyDb, AuthorDb, CreateAuthorDbRequest, UpdateAuthorDbRequest, WorkDb,
+    AuthorBibliographyDb, AuthorDb, ConfigDb, CreateAuthorDbRequest, UpdateAuthorDbRequest, WorkDb,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
@@ -21,7 +21,7 @@ impl<D, F, L> AuthorServiceImpl<D, F, L> {
 
 impl<D, F, L> AuthorService for AuthorServiceImpl<D, F, L>
 where
-    D: AuthorDb + WorkDb + AuthorBibliographyDb + Send + Sync,
+    D: AuthorDb + WorkDb + AuthorBibliographyDb + ConfigDb + Send + Sync,
     F: HttpFetcher + Send + Sync,
     L: LlmCaller + Send + Sync,
 {
@@ -280,15 +280,8 @@ where
         let cached = self.db.get_bibliography(author.id).await.ok().flatten();
 
         if cached.as_ref().is_none_or(|c| c.entries.is_empty()) {
-            let ol_key = match author.ol_key.as_deref() {
-                Some(k) => k.to_string(),
-                None => {
-                    let resolved = self.resolve_ol_key(user_id, &author).await?;
-                    resolved
-                }
-            };
+            let raw_entries = self.fetch_bibliography_entries(&author, user_id).await;
 
-            let raw_entries = self.fetch_ol_bibliography(&ol_key).await?;
             if !raw_entries.is_empty() {
                 let cleaned = self
                     .llm_clean_bibliography(&author.name, &raw_entries)
@@ -368,7 +361,7 @@ where
 // Private helper methods
 impl<D, F, L> AuthorServiceImpl<D, F, L>
 where
-    D: AuthorDb + WorkDb + AuthorBibliographyDb + Send + Sync,
+    D: AuthorDb + WorkDb + AuthorBibliographyDb + ConfigDb + Send + Sync,
     F: HttpFetcher + Send + Sync,
     L: LlmCaller + Send + Sync,
 {
@@ -407,6 +400,41 @@ where
             "auto-resolved OL key for '{}'", author.name
         );
         Ok(ol_key)
+    }
+
+    async fn fetch_bibliography_entries(
+        &self,
+        author: &Author,
+        user_id: UserId,
+    ) -> Vec<livrarr_db::BibliographyEntry> {
+        // Try OL first
+        let ol_result = async {
+            let ol_key = match author.ol_key.as_deref() {
+                Some(k) => k.to_string(),
+                None => self.resolve_ol_key(user_id, author).await?,
+            };
+            self.fetch_ol_bibliography(&ol_key).await
+        }
+        .await;
+
+        match ol_result {
+            Ok(entries) if !entries.is_empty() => return entries,
+            Ok(_) => {
+                tracing::info!(author = %author.name, "OL bibliography empty, trying GB");
+            }
+            Err(e) => {
+                tracing::warn!(author = %author.name, "OL bibliography failed ({e}), trying GB");
+            }
+        }
+
+        // Fallback to Google Books
+        match self.fetch_gb_bibliography(&author.name).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(author = %author.name, "GB bibliography also failed: {e}");
+                vec![]
+            }
+        }
     }
 
     async fn fetch_ol_bibliography(
@@ -457,7 +485,7 @@ where
                             .and_then(|s| s.get(..4))
                             .and_then(|y| y.parse().ok());
                         Some(livrarr_db::BibliographyEntry {
-                            ol_key,
+                            ol_key: Some(ol_key),
                             title: title.to_string(),
                             year,
                             series_name: None,
@@ -467,6 +495,68 @@ where
                     .collect()
             })
             .unwrap_or_default();
+
+        Ok(entries)
+    }
+
+    async fn fetch_gb_bibliography(
+        &self,
+        author_name: &str,
+    ) -> Result<Vec<livrarr_db::BibliographyEntry>, AuthorServiceError> {
+        let api_key = match self.db.get_metadata_config().await {
+            Ok(cfg) => match cfg
+                .google_books_api_key
+                .as_deref()
+                .filter(|s| !s.is_empty())
+            {
+                Some(k) => k.to_string(),
+                None => {
+                    return Err(AuthorServiceError::Provider(
+                        "no Google Books API key configured".into(),
+                    ));
+                }
+            },
+            Err(e) => {
+                return Err(AuthorServiceError::Db(e));
+            }
+        };
+
+        let query = format!("inauthor:\"{}\"", author_name);
+        let url = format!(
+            "https://www.googleapis.com/books/v1/volumes?q={}&maxResults=40",
+            urlencoding::encode(&query),
+        );
+
+        let volumes = crate::google_books::fetch_gb_volumes(&self.fetcher, &api_key, url)
+            .await
+            .map_err(AuthorServiceError::Provider)?;
+
+        let entries: Vec<livrarr_db::BibliographyEntry> = volumes
+            .iter()
+            .filter_map(|vol| {
+                let vi = vol.volume_info.as_ref()?;
+                let title = vi.title.as_ref()?.clone();
+                let year = vi
+                    .published_date
+                    .as_deref()
+                    .and_then(|d| d.get(..4))
+                    .and_then(|y| y.parse::<i32>().ok());
+
+                Some(livrarr_db::BibliographyEntry {
+                    ol_key: None,
+                    title,
+                    year,
+                    series_name: None,
+                    series_position: None,
+                })
+            })
+            .collect();
+
+        tracing::info!(
+            author = %author_name,
+            count = entries.len(),
+            "GB bibliography fetched"
+        );
 
         Ok(entries)
     }
@@ -513,19 +603,16 @@ where
         db_entries
             .into_iter()
             .map(|b| {
-                let ol = if b.ol_key.is_empty() {
-                    None
-                } else {
-                    Some(b.ol_key.clone())
-                };
+                let bib_norm = livrarr_matching::work_dedup::normalize_title_for_match(&b.title);
                 let already_in_library = works.iter().any(|w| {
-                    (!b.ol_key.is_empty() && w.ol_key.as_deref() == Some(&b.ol_key))
-                        || b.title.to_lowercase() == w.title.to_lowercase()
+                    (b.ol_key.is_some() && w.ol_key.as_deref() == b.ol_key.as_deref())
+                        || livrarr_matching::work_dedup::normalize_title_for_match(&w.title)
+                            == bib_norm
                 });
                 BibliographyEntry {
                     title: b.title,
                     year: b.year,
-                    ol_key: ol,
+                    ol_key: b.ol_key,
                     series_name: b.series_name,
                     series_position: b.series_position,
                     already_in_library,

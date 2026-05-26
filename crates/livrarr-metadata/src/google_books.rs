@@ -1,3 +1,8 @@
+use std::time::Duration;
+
+use livrarr_domain::services::{
+    FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+};
 use livrarr_domain::text_norm;
 use livrarr_http::HttpClient;
 use serde::Deserialize;
@@ -74,6 +79,50 @@ pub struct GbIdentifier {
     pub identifier_type: Option<String>,
     #[serde(default)]
     pub identifier: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Shared fetcher-based search (used by work_service + author_service)
+// ---------------------------------------------------------------------------
+
+/// Fetch Google Books volumes via the `HttpFetcher` abstraction.
+/// Callers build their own URL (different query shapes for search vs bibliography)
+/// and map the returned `GbVolume` vec to their own types.
+/// Returns `Ok(vec![])` on 403 (quota/invalid key) — non-fatal.
+pub async fn fetch_gb_volumes<F: HttpFetcher>(
+    fetcher: &F,
+    api_key: &str,
+    url: String,
+) -> Result<Vec<GbVolume>, String> {
+    let req = FetchRequest {
+        url,
+        method: HttpMethod::Get,
+        headers: vec![("X-Goog-Api-Key".into(), api_key.to_string())],
+        body: None,
+        timeout: Duration::from_secs(10),
+        rate_bucket: RateBucket::GoogleBooks,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+    };
+
+    let resp = fetcher
+        .fetch(req)
+        .await
+        .map_err(|e| format!("GoogleBooks request failed: {e}"))?;
+
+    if resp.status == 403 {
+        tracing::warn!("GoogleBooks returned 403 (likely quota exhaustion or invalid API key)");
+        return Ok(vec![]);
+    }
+    if resp.status >= 400 {
+        return Err(format!("GoogleBooks returned {}", resp.status));
+    }
+
+    let search: GbSearchResponse =
+        serde_json::from_slice(&resp.body).map_err(|e| format!("GoogleBooks parse error: {e}"))?;
+
+    Ok(search.items.unwrap_or_default())
 }
 
 // ---------------------------------------------------------------------------

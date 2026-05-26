@@ -159,8 +159,11 @@ const BACKGROUND_BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::fro
 /// ForegroundClient retry backoff: one delay before final attempt.
 const FOREGROUND_BACKOFF: [Duration; 1] = [Duration::from_secs(2)];
 
-fn livrarr_user_agent() -> String {
-    format!("Livrarr/{}", env!("CARGO_PKG_VERSION"))
+pub fn livrarr_user_agent() -> String {
+    format!(
+        "KkodecsBookBot/{} (Livrarr; kkodecs@proton.me; https://github.com/kkodecs/livrarr)",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 fn background_retry_disposition(error_kind: HttpErrorKind) -> RetryDisposition {

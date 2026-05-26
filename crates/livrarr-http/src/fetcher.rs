@@ -116,7 +116,7 @@ fn user_agent_string(profile: &UserAgentProfile) -> String {
              (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 .to_string()
         }
-        UserAgentProfile::Server => format!("Livrarr/{}", env!("CARGO_PKG_VERSION")),
+        UserAgentProfile::Server => crate::livrarr_user_agent(),
         UserAgentProfile::Custom(s) => s.clone(),
     }
 }

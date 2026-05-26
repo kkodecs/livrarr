@@ -269,9 +269,9 @@ function BibliographySection({
 
   const addMutation = useMutation({
     mutationFn: (entry: { olKey: string; title: string; year: number | null }) => {
-      setAddingKey(entry.olKey);
+      setAddingKey(entry.title);
       return addWork({
-        olKey: entry.olKey,
+        olKey: entry.olKey || null,
         title: entry.title,
         authorName: author.name,
         authorOlKey: author.olKey ?? null,
@@ -280,7 +280,7 @@ function BibliographySection({
       });
     },
     onSuccess: (data, entry) => {
-      setAddedKeys((prev) => new Set(prev).add(entry.olKey));
+      setAddedKeys((prev) => new Set(prev).add(entry.title));
       setAddingKey(null);
       queryClient.invalidateQueries({ queryKey: ["author", String(authorId)] });
       queryClient.invalidateQueries({ queryKey: ["works"] });
@@ -348,10 +348,10 @@ function BibliographySection({
         <table className="w-full text-sm">
           <tbody>
             {bib!.entries.map((entry) => {
-              const inLibrary = libraryOlKeys.has(entry.olKey) || addedKeys.has(entry.olKey);
+              const inLibrary = entry.alreadyInLibrary || (entry.olKey != null && libraryOlKeys.has(entry.olKey)) || addedKeys.has(entry.title);
               return (
                 <tr
-                  key={entry.olKey}
+                  key={`${entry.olKey ?? ''}-${entry.title}-${entry.year ?? ''}`}
                   className={cn(
                     "border-b border-border/50",
                     inLibrary ? "text-zinc-500" : "text-zinc-200",
@@ -367,12 +367,9 @@ function BibliographySection({
                       </span>
                     )}
                   </td>
-                  <td className="hidden sm:table-cell px-2 py-1.5 w-12 text-right text-xs text-zinc-500">
-                    {entry.year ?? ""}
-                  </td>
                   <td className="px-2 py-1.5 w-10 text-right">
                     {!inLibrary && (
-                      addingKey === entry.olKey ? (
+                      addingKey === entry.title ? (
                         <Loader2 size={12} className="inline animate-spin text-brand" />
                       ) : (
                         <button

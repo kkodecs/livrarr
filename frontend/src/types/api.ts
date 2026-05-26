@@ -314,11 +314,12 @@ export interface AuthorDetailResponse {
 
 // Author Bibliography
 export interface BibliographyEntry {
-  olKey: string;
+  olKey: string | null;
   title: string;
   year: number | null;
   seriesName?: string | null;
   seriesPosition?: number | null;
+  alreadyInLibrary?: boolean;
 }
 
 export interface AuthorBibliography {

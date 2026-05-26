@@ -37,6 +37,14 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 - [Test Doubles](patterns/test-doubles.md) — no InMemoryDb, test DB helpers, what gets stubbed
 - [Migration Pattern](patterns/migration-pattern.md) — SQLite migration rules, naming, enum serialization
 
+## Integrations
+
+- [OpenLibrary](integrations/openlibrary.md) — rate limits, anti-patterns, bulk dumps, contribution paths, current operational status
+- [Google Books](integrations/google-books.md) — API key, 1000/day quota, fields= and gzip, no contribution path
+- [Hardcover](integrations/hardcover.md) — 60/min, GraphQL depth ≤ 3, per-user token, beta API may break
+- [Audnexus](integrations/audnexus.md) — 300/min rate limit, 24h cache + 304 revalidation, self-hostable as fallback
+- [Goodreads](integrations/goodreads.md) — no API since 2020 (scraping); DataDome anti-bot; **we're currently 5-7x over the polite rate floor**
+
 ## Decisions
 
 - [Key Decisions](decisions/key-decisions.md) — hardlink policy, config, indexers, AppState, security

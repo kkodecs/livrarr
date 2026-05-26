@@ -916,7 +916,9 @@ where
         work_id: WorkId,
         bytes: &[u8],
     ) -> Result<(), WorkServiceError> {
-        const MAX_COVER_BYTES: usize = 1_024 * 1_024;
+        // 5 MB — accommodates high-resolution covers from providers like Google Books.
+        // TODO(alpha6+): reduce stored cover resolution to limit on-disk footprint.
+        const MAX_COVER_BYTES: usize = 5 * 1024 * 1024;
 
         if bytes.len() > MAX_COVER_BYTES {
             return Err(WorkServiceError::Enrichment(format!(
@@ -1020,15 +1022,28 @@ where
             )));
         }
 
-        // All languages: OpenLibrary search (OL finds works in any language).
-        // Foreign-language *metadata* comes from Google Books during enrichment,
-        // but OL is fine for discovery (title/author/OLID/ISBN).
-        let results = self.lookup_openlibrary(&term, lang).await?;
-        if !results.is_empty() {
-            return Ok(results);
+        // Step 1: OpenLibrary (primary). Errors are non-fatal — log and continue
+        // to the next provider so a degraded OL doesn't blank the entire search.
+        match self.lookup_openlibrary(&term, lang).await {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            Ok(_) => tracing::debug!(term = %term, lang = %lang, "OpenLibrary returned empty"),
+            Err(e) => tracing::warn!(
+                term = %term, lang = %lang, error = %e,
+                "OpenLibrary lookup failed; falling back to next provider"
+            ),
         }
 
-        // Fallback: Goodreads search for foreign languages (regex HTML parsing).
+        // Step 2: Google Books (fallback for any language).
+        match self.lookup_google_books(&term, lang).await {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            Ok(_) => tracing::debug!(term = %term, lang = %lang, "GoogleBooks returned empty"),
+            Err(e) => tracing::warn!(
+                term = %term, lang = %lang, error = %e,
+                "GoogleBooks lookup failed; falling back to next provider"
+            ),
+        }
+
+        // Step 3: Goodreads scrape (foreign-language only, as before).
         if lang != "en" {
             return self.lookup_goodreads(&term, lang).await;
         }
@@ -1431,6 +1446,83 @@ where
                     source: None,
                     source_type: None,
                     language: Some(lang.to_string()),
+                    detail_url: None,
+                    rating: None,
+                })
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    async fn lookup_google_books(
+        &self,
+        term: &str,
+        lang: &str,
+    ) -> Result<Vec<LookupResult>, WorkServiceError> {
+        let lang_norm = lang.split('-').next().unwrap_or(lang).to_lowercase();
+
+        let api_key = match self.db.get_metadata_config().await {
+            Ok(cfg) => match cfg
+                .google_books_api_key
+                .as_deref()
+                .filter(|s| !s.is_empty())
+            {
+                Some(k) => k.to_string(),
+                None => {
+                    tracing::debug!(term = %term, "GoogleBooks: no API key configured; skipping");
+                    return Ok(vec![]);
+                }
+            },
+            Err(_) => return Ok(vec![]),
+        };
+
+        let url = format!(
+            "https://www.googleapis.com/books/v1/volumes\
+             ?q={}&langRestrict={}&maxResults=20",
+            urlencoding::encode(term),
+            urlencoding::encode(&lang_norm),
+        );
+
+        let volumes = crate::google_books::fetch_gb_volumes(&self.http, &api_key, url)
+            .await
+            .map_err(WorkServiceError::Enrichment)?;
+
+        let results = volumes
+            .iter()
+            .filter_map(|vol| {
+                let vi = vol.volume_info.as_ref()?;
+                let title = vi.title.as_ref()?.clone();
+                let author_name = vi
+                    .authors
+                    .as_ref()
+                    .and_then(|a| a.first())
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let year = vi
+                    .published_date
+                    .as_deref()
+                    .and_then(|d| d.get(..4))
+                    .and_then(|y| y.parse::<i32>().ok());
+                let cover_url = vi
+                    .image_links
+                    .as_ref()
+                    .and_then(crate::google_books::normalize_cover_url);
+                let language = vi.language.clone().or_else(|| Some(lang_norm.clone()));
+
+                Some(LookupResult {
+                    ol_key: None,
+                    title,
+                    author_name,
+                    author_ol_key: None,
+                    year,
+                    cover_url,
+                    description: None,
+                    series_name: None,
+                    series_position: None,
+                    source: Some("google_books".into()),
+                    source_type: Some("search".into()),
+                    language,
                     detail_url: None,
                     rating: None,
                 })

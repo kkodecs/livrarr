@@ -1332,11 +1332,19 @@ pub struct UpdateIndexerDbRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BibliographyEntry {
-    pub ol_key: String,
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub ol_key: Option<String>,
     pub title: String,
     pub year: Option<i32>,
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
+}
+
+fn empty_string_as_none<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    Ok(s.filter(|v| !v.is_empty()))
 }
 
 /// Cached bibliography for an author.
