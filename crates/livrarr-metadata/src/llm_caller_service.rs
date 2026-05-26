@@ -76,6 +76,7 @@ impl LlmCaller for LlmCallerImpl {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or("gpt-4o");
+        let model = remap_deprecated_model(model);
 
         // 3. Render templates.
         let system_prompt = render_template(&req.system_template, &req.context);
@@ -196,5 +197,19 @@ fn stringify_value(value: &LlmValue) -> String {
         LlmValue::Text(s) => s.clone(),
         LlmValue::Number(n) => n.to_string(),
         LlmValue::TextList(items) => items.join(", "),
+    }
+}
+
+fn remap_deprecated_model(model: &str) -> &str {
+    match model {
+        "gemini-3.1-flash-lite-preview" => {
+            tracing::warn!(
+                old = model,
+                new = "gemini-3.1-flash-lite",
+                "deprecated LLM model name — using stable replacement"
+            );
+            "gemini-3.1-flash-lite"
+        }
+        other => other,
     }
 }
