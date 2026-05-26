@@ -6,6 +6,14 @@
 
 ---
 
+## 🚨 Known issue: search and metadata temporarily affected
+
+We apologize for the inconvenience. We have contacted OpenLibrary and requested assistance to deploy a fix.
+
+Track: [#83](https://github.com/kkodecs/livrarr/issues/83)
+
+---
+
 ## What it does
 
 - **Search** any Torznab or Newznab indexer (Prowlarr, NZBHydra2, Jackett, or direct) for ebooks and audiobooks
