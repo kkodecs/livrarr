@@ -205,6 +205,29 @@ export function EpubReader({ libraryItemId }: Props) {
     return () => document.removeEventListener("fullscreenchange", handler);
   }, []);
 
+  // Navigate forward, handling the cover page where rendition.next() is a no-op.
+  // When react-reader is at numeric location 0 (cover), epub.js hasn't resolved
+  // a CFI yet so currentLocation() is undefined and next() silently does nothing.
+  // Force-display the first spine section, which gives epub.js a real CFI, then
+  // call next() to advance past it.
+  const goNext = useCallback(() => {
+    const rendition = renditionRef.current;
+    if (!rendition) return;
+
+    if (location === 0) {
+      const spine = rendition.book?.spine;
+      if (spine) {
+        // Display the first spine section so epub.js resolves a CFI, then advance.
+        const first = spine.get(0);
+        if (first) {
+          rendition.display(first.href).then(() => rendition.next());
+          return;
+        }
+      }
+    }
+    rendition.next();
+  }, [location]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -219,7 +242,7 @@ export function EpubReader({ libraryItemId }: Props) {
           renditionRef.current?.prev();
           break;
         case "ArrowRight":
-          renditionRef.current?.next();
+          goNext();
           break;
         case "f":
           if (!e.ctrlKey && !e.metaKey) toggleFullscreen();
@@ -244,7 +267,7 @@ export function EpubReader({ libraryItemId }: Props) {
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [toggleFullscreen, tocOpen]);
+  }, [toggleFullscreen, tocOpen, goNext]);
 
   if (!initialLoaded || !epubData) {
     return (
