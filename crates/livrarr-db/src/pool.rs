@@ -99,6 +99,20 @@ pub fn check_data_dir_permissions(data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Check whether the given PID belongs to a running livrarr process.
+///
+/// Returns `true` only when the PID is alive AND `/proc/PID/comm` contains
+/// "livrarr". This prevents false positives in Docker containers where a
+/// fresh PID namespace can reuse the same PID number for an unrelated process.
+fn is_livrarr_process(pid: u32) -> bool {
+    let comm_path = format!("/proc/{pid}/comm");
+    match std::fs::read_to_string(&comm_path) {
+        Ok(comm) => comm.trim().contains("livrarr"),
+        // Process doesn't exist or /proc not readable — not a live livrarr.
+        Err(_) => false,
+    }
+}
+
 /// Write a PID lock file. Returns Err if a live instance is detected.
 ///
 /// Uses O_EXCL (create_new) in a loop to atomically create the lock file.
@@ -140,14 +154,13 @@ pub fn acquire_pid_lock(data_dir: &Path) -> Result<(), String> {
         match std::fs::read_to_string(&lock_path) {
             Ok(contents) => {
                 if let Ok(pid) = contents.trim().parse::<u32>() {
-                    let proc_path = format!("/proc/{pid}");
-                    if Path::new(&proc_path).exists() {
+                    if is_livrarr_process(pid) {
                         return Err(format!(
                             "another Livrarr instance (PID {pid}) is running. Remove {lock_path:?} if this is stale."
                         ));
                     }
                 }
-                // PID is dead or unreadable — remove and retry.
+                // PID is dead, not livrarr, or unreadable — remove and retry.
                 tracing::warn!("stale PID lock file detected, removing");
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

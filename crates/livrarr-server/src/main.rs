@@ -795,7 +795,9 @@ async fn main() {
 
     // Step 9: Serve with graceful shutdown on SIGTERM/Ctrl+C.
     // Cancel background jobs immediately when signal fires (before HTTP drain).
+    // Remove PID file early so a container restart doesn't deadlock on stale lock.
     let job_cancel = job_runner.cancel_token();
+    let shutdown_data_dir = data_dir.clone();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -804,6 +806,7 @@ async fn main() {
         shutdown_signal().await;
         info!("Cancelling background jobs");
         job_cancel.cancel();
+        livrarr_db::pool::release_pid_lock(&shutdown_data_dir);
     })
     .await
     .unwrap_or_else(|e| {
