@@ -687,8 +687,16 @@ impl LibraryFileApi for SecondaryApiImpl {
 
     async fn delete(&self, uid: UserId, id: LibraryItemId) -> Result<(), ApiError> {
         let item = self.db.delete_library_item(uid, id).await.map_err(db_err)?;
-        // Best-effort file delete
-        let _ = tokio::fs::remove_file(&item.path).await;
+        // Best-effort file delete — NotFound means the file is already gone (desired state)
+        match tokio::fs::remove_file(&item.path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(path = %item.path, "file already absent on delete");
+            }
+            Err(e) => {
+                tracing::warn!(path = %item.path, error = %e, "failed to delete library file");
+            }
+        }
         Ok(())
     }
 }

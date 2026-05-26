@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use livrarr_db::{CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest};
 use livrarr_domain::readarr::*;
@@ -278,16 +278,18 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             let mut deleted = 0i64;
             let mut skipped = 0i64;
             for (full_path, rel_path) in &undo_items {
-                if full_path.exists() {
-                    match std::fs::remove_file(full_path) {
-                        Ok(()) => {
-                            deleted += 1;
-                            info!(path = %rel_path, "Undo: deleted file");
-                        }
-                        Err(e) => {
-                            warn!(path = %rel_path, "Undo: failed to delete: {e}");
-                            skipped += 1;
-                        }
+                match std::fs::remove_file(full_path) {
+                    Ok(()) => {
+                        deleted += 1;
+                        info!(path = %rel_path, "Undo: deleted file");
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        deleted += 1;
+                        debug!(path = %rel_path, "Undo: file already absent");
+                    }
+                    Err(e) => {
+                        warn!(path = %rel_path, "Undo: failed to delete: {e}");
+                        skipped += 1;
                     }
                 }
             }
