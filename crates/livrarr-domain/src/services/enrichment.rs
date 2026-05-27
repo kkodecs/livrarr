@@ -22,6 +22,7 @@ pub struct EnrichmentResult {
     pub merge_deferred: bool,
     pub provider_outcomes: HashMap<MetadataProvider, OutcomeClass>,
     pub cover_resolution: Option<CoverResolution>,
+    pub audiobook_cover_resolution: Option<CoverResolution>,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -778,6 +778,7 @@ fn merge_output_success(title: &str) -> MergeOutput {
         enrichment_status: EnrichmentStatus::Enriched,
         enrichment_source: Some("goodreads".to_string()),
         cover_resolution: None,
+        audiobook_cover_resolution: None,
     }
 }
 
@@ -791,6 +792,7 @@ fn merge_output_conflict() -> MergeOutput {
         enrichment_status: EnrichmentStatus::Conflict,
         enrichment_source: None,
         cover_resolution: None,
+        audiobook_cover_resolution: None,
     }
 }
 

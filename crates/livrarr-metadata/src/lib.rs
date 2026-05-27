@@ -193,6 +193,7 @@ pub struct EnrichmentResult {
     /// TEMP(pk-tdd): compile-only scaffold — per-provider outcome classes.
     pub provider_outcomes: HashMap<livrarr_domain::MetadataProvider, livrarr_domain::OutcomeClass>,
     pub cover_resolution: Option<livrarr_domain::CoverResolution>,
+    pub audiobook_cover_resolution: Option<livrarr_domain::CoverResolution>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -536,6 +537,7 @@ pub struct MergeOutput {
     pub enrichment_status: EnrichmentStatus,
     pub enrichment_source: Option<String>,
     pub cover_resolution: Option<livrarr_domain::CoverResolution>,
+    pub audiobook_cover_resolution: Option<livrarr_domain::CoverResolution>,
 }
 
 /// TEMP(pk-tdd): error from MergeEngine::merge.
@@ -821,6 +823,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
             enrichment_status: EnrichmentStatus::Conflict,
             enrichment_source: None,
             cover_resolution: None,
+            audiobook_cover_resolution: None,
         });
     }
 
@@ -973,7 +976,15 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         .collect();
     let cover_resolution = cover_resolution::resolve_cover(
         &inputs.current_work,
+        livrarr_domain::CoverMediaType::Ebook,
         &pm.cover,
+        &eligible_providers,
+        &outcomes_ref,
+    );
+    let audiobook_cover_resolution = cover_resolution::resolve_cover(
+        &inputs.current_work,
+        livrarr_domain::CoverMediaType::Audiobook,
+        &pm.audio,
         &eligible_providers,
         &outcomes_ref,
     );
@@ -1060,6 +1071,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         enrichment_status,
         enrichment_source,
         cover_resolution,
+        audiobook_cover_resolution,
     })
 }
 
@@ -1224,6 +1236,7 @@ Return JSON only:\n\
             enrichment_status: EnrichmentStatus::Conflict,
             enrichment_source: None,
             cover_resolution: None,
+            audiobook_cover_resolution: None,
         });
     }
 
@@ -1633,6 +1646,7 @@ where
                 merge_deferred,
                 provider_outcomes,
                 cover_resolution: None,
+                audiobook_cover_resolution: None,
             });
         }
 
@@ -1803,6 +1817,7 @@ where
                 merge_deferred,
                 provider_outcomes,
                 cover_resolution: None,
+                audiobook_cover_resolution: None,
             });
         }
 
@@ -1932,6 +1947,7 @@ where
                         merge_deferred,
                         provider_outcomes,
                         cover_resolution: merge_output.cover_resolution,
+                        audiobook_cover_resolution: merge_output.audiobook_cover_resolution,
                     });
                 }
                 ApplyMergeOutcome::Superseded => {
@@ -2312,6 +2328,7 @@ pub mod tests {
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
+                    audiobook_cover_resolution: None,
                 }),
                 StubEnrichmentMode::Partial => Ok(EnrichmentResult {
                     enrichment_status: EnrichmentStatus::Unenriched,
@@ -2324,6 +2341,7 @@ pub mod tests {
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
+                    audiobook_cover_resolution: None,
                 }),
                 StubEnrichmentMode::AllFail => Ok(EnrichmentResult {
                     enrichment_status: EnrichmentStatus::Failed,
@@ -2340,6 +2358,7 @@ pub mod tests {
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
+                    audiobook_cover_resolution: None,
                 }),
                 StubEnrichmentMode::NotFound => Err(EnrichmentError::WorkNotFound),
                 StubEnrichmentMode::ManualCover => Ok(EnrichmentResult {
@@ -2353,6 +2372,7 @@ pub mod tests {
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
+                    audiobook_cover_resolution: None,
                 }),
                 StubEnrichmentMode::LlmFallback => Ok(EnrichmentResult {
                     enrichment_status: EnrichmentStatus::Enriched,
@@ -2362,6 +2382,7 @@ pub mod tests {
                     merge_deferred: false,
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
+                    audiobook_cover_resolution: None,
                 }),
             }
         }

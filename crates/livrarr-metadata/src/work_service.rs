@@ -176,6 +176,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
             merge_deferred: false,
             provider_outcomes: HashMap::new(),
             cover_resolution: None,
+            audiobook_cover_resolution: None,
         })
     }
 
@@ -1949,7 +1950,8 @@ where
         // (it already ran merge internally via EnrichmentServiceImpl).
         let final_status = enrich_result.enrichment_status;
 
-        // Step 4: Trust-aware cover upgrade (non-fatal)
+        // Step 4: Trust-aware cover upgrade (non-fatal). Ebook and audiobook
+        // covers are independent; upgrade each from its own resolution.
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
         match crate::cover_resolution::maybe_upgrade_cover(
             &post_enrich_work,
@@ -1979,6 +1981,36 @@ where
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(work_id, "cover upgrade failed: {e}");
+            }
+        }
+        match crate::cover_resolution::maybe_upgrade_cover(
+            &post_enrich_work,
+            enrich_result.audiobook_cover_resolution,
+            &covers_dir,
+            &self.http,
+        )
+        .await
+        {
+            Ok(Some(upgrade)) => {
+                if let Err(e) = self
+                    .db
+                    .update_audiobook_cover_metadata(
+                        user_id,
+                        work_id,
+                        Some(&upgrade.url),
+                        &upgrade.source,
+                        upgrade.trust,
+                        upgrade.width as i32,
+                        upgrade.height as i32,
+                    )
+                    .await
+                {
+                    tracing::warn!(work_id, "audiobook cover metadata update failed: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(work_id, "audiobook cover upgrade failed: {e}");
             }
         }
 

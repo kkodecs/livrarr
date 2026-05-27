@@ -202,6 +202,7 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
             merge_deferred: false,
             provider_outcomes: HashMap::new(),
             cover_resolution: None,
+            audiobook_cover_resolution: None,
         })
     }
 
