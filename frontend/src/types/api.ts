@@ -14,6 +14,7 @@ export type GrabStatus =
   | "removed"
   | "failed";
 export type EnrichmentStatus =
+  | "unenriched"
   | "pending"
   | "partial"
   | "enriched"
@@ -145,6 +146,14 @@ export interface WorkSearchResult {
   language?: string | null;
   detailUrl?: string | null;
   rating?: string | null;
+  isbn13?: string | null;
+}
+
+export interface PreaddCoverCandidate {
+  proxyUrl: string;
+  source: string;
+  title: string;
+  authorName: string;
 }
 
 export interface AddWorkRequest {
@@ -157,6 +166,8 @@ export interface AddWorkRequest {
   metadataSource?: string | null;
   language?: string | null;
   detailUrl?: string | null;
+  coverManual?: boolean;
+  isbn13?: string | null;
 }
 
 export interface AddWorkResponse {

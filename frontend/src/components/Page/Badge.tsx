@@ -2,6 +2,7 @@ import { cn } from "@/utils/cn";
 import type { EnrichmentStatus, NarrationType, QueueStatus } from "@/types/api";
 
 const enrichmentColors: Record<EnrichmentStatus, string> = {
+  unenriched: "bg-enrichment-pending/20 text-enrichment-pending",
   enriched: "bg-enrichment-enriched/20 text-enrichment-enriched",
   partial: "bg-enrichment-partial/20 text-enrichment-partial",
   pending: "bg-enrichment-pending/20 text-enrichment-pending",

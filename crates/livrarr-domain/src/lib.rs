@@ -891,6 +891,20 @@ pub fn decode_xml_entities(s: &str) -> String {
         .replace("&#x27;", "'")
 }
 
+/// Proxy an external cover URL through the internal cover proxy endpoint.
+/// URLs already starting with '/' are returned as-is (already local).
+pub fn proxy_cover_url(url: &str) -> String {
+    if url.starts_with('/') {
+        return url.to_string();
+    }
+    format!("/api/v1/coverproxy?url={}", urlencoding::encode(url))
+}
+
+/// Strip all non-alphanumeric characters from an ISBN (hyphens, spaces, etc.).
+pub fn normalize_isbn(isbn: &str) -> String {
+    isbn.chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
 // ---------------------------------------------------------------------------
 // TEMP(pk-tdd): compile-only scaffolding for metadata-overhaul behavioral tests
 // All types below are IR-aligned stubs. Remove TEMP tag when implemented.
@@ -909,6 +923,7 @@ pub enum MetadataProvider {
     /// input in the merge engine — ranked above OL, below GR.
     Readarr,
     GoogleBooks,
+    Audible,
 }
 
 /// Trust level for a work's cover image.

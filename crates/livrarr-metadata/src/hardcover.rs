@@ -455,3 +455,139 @@ async fn llm_disambiguate(
         }
     }
 }
+
+pub async fn query_hardcover_by_isbn(
+    http: &HttpClient,
+    isbn: &str,
+    token: &str,
+    _metadata_cfg: &livrarr_db::MetadataConfig,
+) -> Result<Option<HardcoverResult>, HardcoverError> {
+    let query = r#"query SearchBooks($query: String!) {
+        search(query: $query, query_type: "books", per_page: 10) {
+            results
+        }
+    }"#;
+
+    let body = serde_json::json!({
+        "query": query,
+        "variables": {"query": isbn}
+    });
+
+    let resp = http
+        .post(HARDCOVER_API_URL)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| HardcoverError::Http(format!("request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(HardcoverError::Http(format!("HTTP {}", resp.status())));
+    }
+
+    let data: Value = resp
+        .json()
+        .await
+        .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))?;
+
+    let hits = data
+        .pointer("/data/search/results/hits")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for hit in &hits {
+        let doc = match hit.get("document") {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let hit_isbns = doc
+            .get("isbns")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        if !hit_isbns.iter().any(|i| i == &isbn) {
+            continue;
+        }
+
+        let hc_title = doc
+            .get("title")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let hc_key = doc
+            .get("id")
+            .map(|v| v.to_string().trim_matches('"').to_string());
+
+        let description = doc
+            .get("description")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let series_name = doc
+            .pointer("/featured_series/series/name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let series_position = doc
+            .pointer("/featured_series/position")
+            .and_then(|v| v.as_f64());
+
+        let genres = doc.get("genres").and_then(|g| g.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter(|s| !s.contains('|'))
+                .take(5)
+                .collect()
+        });
+
+        let page_count = doc.get("pages").and_then(|v| v.as_i64()).map(|v| v as i32);
+        let publish_date = doc
+            .get("release_date")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let isbn_13 = doc.get("isbns").and_then(|v| v.as_array()).and_then(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .find(|s| s.len() == 13)
+                .map(|s| s.to_string())
+        });
+
+        let cover_url = doc
+            .pointer("/image/url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let rating = doc.get("rating").and_then(|v| v.as_f64());
+        let rating_count = doc
+            .get("ratings_count")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+
+        return Ok(Some(HardcoverResult {
+            title: hc_title,
+            subtitle: None,
+            original_title: None,
+            description,
+            series_name,
+            series_position,
+            genres,
+            page_count,
+            publisher: None,
+            publish_date,
+            hc_key,
+            isbn_13,
+            cover_url,
+            rating,
+            rating_count,
+        }));
+    }
+
+    Ok(None)
+}

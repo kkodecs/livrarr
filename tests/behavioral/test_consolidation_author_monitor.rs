@@ -369,6 +369,7 @@ async fn test_monitor_skips_existing_work() {
         isbn_13: None,
         asin: None,
         description: None,
+        cover_manual: false,
     })
     .await
     .unwrap();

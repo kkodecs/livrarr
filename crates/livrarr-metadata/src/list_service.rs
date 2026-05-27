@@ -213,6 +213,8 @@ where
             monitor_audiobook: None,
             provenance_setter: Some(ProvenanceSetter::Imported),
             import_id: None,
+            cover_manual: false,
+            skip_sync_enrichment: false,
         })
     }
 
@@ -347,6 +349,8 @@ where
             monitor_audiobook: None,
             provenance_setter: Some(ProvenanceSetter::Imported),
             import_id: None,
+            cover_manual: false,
+            skip_sync_enrichment: false,
         })
     }
 }

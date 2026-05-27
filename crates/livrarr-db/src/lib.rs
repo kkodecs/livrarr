@@ -362,14 +362,14 @@ pub trait WorkDb: Send + Sync {
     ) -> Result<(Vec<Work>, i64), DbError>;
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CreateWorkDbRequest {
-    pub user_id: UserId,
+    pub user_id: i64,
     pub title: String,
     pub author_name: String,
     pub normalized_title: String,
     pub normalized_author: String,
-    pub author_id: Option<AuthorId>,
+    pub author_id: Option<i64>,
     pub ol_key: Option<String>,
     pub gr_key: Option<String>,
     pub year: Option<i32>,
@@ -385,6 +385,7 @@ pub struct CreateWorkDbRequest {
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
     pub source_provider_json: Option<String>,
+    pub cover_manual: bool,
 }
 
 #[derive(Debug, Clone, Default)]

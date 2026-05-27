@@ -125,6 +125,7 @@ fn parse_candidate_id(
             CoverCandidateSource::Provider(MetadataProvider::OpenLibrary)
         }
         "audnexus" => CoverCandidateSource::Provider(MetadataProvider::Audnexus),
+        "audible" => CoverCandidateSource::Provider(MetadataProvider::Audible),
         "epub" => CoverCandidateSource::Epub,
         "isbn_ol" => CoverCandidateSource::IsbnOl,
         "isbn_amazon" => CoverCandidateSource::IsbnAmazon,

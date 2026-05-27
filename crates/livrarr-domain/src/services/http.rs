@@ -15,6 +15,7 @@ pub enum RateBucket {
     Audnexus,
     Goodreads,
     GoogleBooks,
+    Audible,
     Indexer(String),
     None,
 }

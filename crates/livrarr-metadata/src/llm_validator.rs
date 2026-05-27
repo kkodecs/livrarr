@@ -313,6 +313,7 @@ fn provider_key(p: MetadataProvider) -> &'static str {
         MetadataProvider::Llm => "llm",
         MetadataProvider::Readarr => "readarr",
         MetadataProvider::GoogleBooks => "google_books",
+        MetadataProvider::Audible => "audible",
     }
 }
 

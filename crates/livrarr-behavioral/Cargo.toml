@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 trait-variant = { workspace = true }
+urlencoding = "2"
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true, features = ["test-helpers"] }
 livrarr-metadata = { workspace = true }
@@ -211,3 +212,43 @@ name = "test_ewl_manual_import_scan"
 path = "../../tests/behavioral/test_ewl_manual_import_scan.rs"
 
 # --- End English work lifecycle behavioral test skeletons ---
+
+# --- Search fallback chain behavioral tests ---
+
+[[test]]
+name = "test_sfc_domain_extensions"
+path = "../../tests/behavioral/test_sfc_domain_extensions.rs"
+
+[[test]]
+name = "test_sfc_audible_provider"
+path = "../../tests/behavioral/test_sfc_audible_provider.rs"
+
+[[test]]
+name = "test_sfc_isbn_bridge"
+path = "../../tests/behavioral/test_sfc_isbn_bridge.rs"
+
+[[test]]
+name = "test_sfc_gb_first_discovery"
+path = "../../tests/behavioral/test_sfc_gb_first_discovery.rs"
+
+[[test]]
+name = "test_sfc_async_add_handler"
+path = "../../tests/behavioral/test_sfc_async_add_handler.rs"
+
+[[test]]
+name = "test_sfc_async_add_service"
+path = "../../tests/behavioral/test_sfc_async_add_service.rs"
+
+[[test]]
+name = "test_sfc_preadd_covers"
+path = "../../tests/behavioral/test_sfc_preadd_covers.rs"
+
+[[test]]
+name = "test_sfc_asin_fix"
+path = "../../tests/behavioral/test_sfc_asin_fix.rs"
+
+[[test]]
+name = "test_sfc_audible_integration"
+path = "../../tests/behavioral/test_sfc_audible_integration.rs"
+
+# --- End search fallback chain behavioral tests ---

@@ -1,0 +1,390 @@
+# IR v1 — Structural
+# System structure, module boundaries, types, and APIs.
+# No pseudocode, no implementation detail.
+
+metadata:
+  feature: search-fallback-chain
+  stage: v1-structural
+  spec_ref: spec-search-fallback-chain.md
+  version: 3
+
+system_architecture:
+  components:
+    - name: livrarr-domain
+      description: "Extended with Audible enum variant, RateBucket::Audible, set_cover_manual trait method, PreaddCoverService trait, isbn_13 on LookupResult, cover_manual on EnglishWorkCandidate"
+      type: library
+    - name: livrarr-metadata
+      description: "New AudibleCatalogClient provider, ISBN-first lookup in OL/HC/GR clients, GB-first discovery in lookup(), PreaddCoverService implementation"
+      type: library
+    - name: livrarr-handlers
+      description: "Replaced search page handler, new pre-add cover handler (generic over HasPreaddCoverService), cover_manual + isbn_13 wiring in add handler"
+      type: library
+    - name: livrarr-server
+      description: "Audible provider registration in queue builder, applicability rule update, PreaddCoverService wiring on AppState, route wiring"
+      type: application
+    - name: livrarr-http
+      description: "RateBucket::Audible rate interval (150ms)"
+      type: library
+    - name: livrarr-db
+      description: "Fix apply_enrichment_merge to faithfully write merge-engine resolved ASIN value"
+      type: library
+    - name: frontend
+      description: "Replaced search page with GB-first flow, cover picker component, enrichment polling on work detail, skeleton states"
+      type: spa
+
+  connections:
+    - from: frontend
+      to: livrarr-handlers
+      protocol: REST
+      description: "GET /api/v1/work/lookup (GB-first search), GET /api/v1/work/preadd-covers, POST /api/v1/work (add with cover_manual + isbn_13), GET /api/v1/work/{id} (enrichment polling)"
+    - from: livrarr-handlers
+      to: livrarr-domain
+      protocol: trait
+      description: "WorkService, PreaddCoverService, set_cover_manual via Has* bounds. No direct dependency on livrarr-metadata."
+    - from: livrarr-metadata
+      to: "external:google-books"
+      protocol: HTTPS/REST
+      description: "Discovery search (HttpFetcher) + ISBN lookup (HttpFetcher)"
+    - from: livrarr-metadata
+      to: "external:audible"
+      protocol: HTTPS/REST
+      description: "Enrichment: ASIN lookup + title+author search (HttpFetcher — fixed endpoint)"
+    - from: livrarr-metadata
+      to: "external:openlibrary"
+      protocol: HTTPS/REST
+      description: "Enrichment: ISBN lookup (/isbn/{isbn}.json) + existing OL key lookup"
+    - from: livrarr-metadata
+      to: "external:hardcover"
+      protocol: HTTPS/GraphQL
+      description: "Enrichment: ISBN search (free-text query) + existing title+author search"
+    - from: livrarr-metadata
+      to: "external:goodreads"
+      protocol: HTTPS/scraping
+      description: "Enrichment: ISBN search (/search?q=isbn:X) + existing scrape path"
+    - from: livrarr-server
+      to: livrarr-metadata
+      protocol: "direct (composition root)"
+      description: "Constructs AudibleCatalogClient, registers in DefaultProviderQueue, implements PreaddCoverService, wires Has* on AppState"
+    - from: livrarr-server
+      to: livrarr-http
+      protocol: "direct (composition root)"
+      description: "RateBucket::Audible interval configured in fetcher rate limiter"
+
+  deployment:
+    topology: "Single container, no change"
+    notes: "New external dependency (Audible API) — unauthenticated, no config required"
+
+languages:
+  - language: Rust
+    version: "1.94+"
+    usage: "Backend (all crates)"
+  - language: TypeScript
+    version: "6.0"
+    usage: "Frontend React SPA"
+
+frameworks:
+  - name: axum
+    version: "0.8"
+    usage: "HTTP server, route handlers"
+  - name: React
+    version: "19"
+    usage: "Frontend SPA"
+  - name: tanstack-query
+    version: "5"
+    usage: "Frontend data fetching, polling"
+
+approved_libraries:
+  - name: serde
+    version: workspace
+    usage: "Audible API response deserialization"
+  - name: urlencoding
+    version: "2"
+    usage: "Audible query parameter encoding"
+  - name: reqwest
+    version: "0.12"
+    usage: "HTTP client (via HttpFetcher abstraction)"
+
+modules:
+  # =========================================================================
+  # Module 1: Domain extensions
+  # =========================================================================
+  - name: livrarr-domain-extensions
+    responsibility: "Extend domain types for Audible provider, cover_manual wiring, PreaddCoverService trait, ISBN on LookupResult and AddWorkRequest"
+    dependencies: []
+    public_api:
+      types:
+        - kind: enum-variant
+          name: "MetadataProvider::Audible"
+          fields: []
+        - kind: enum-variant
+          name: "RateBucket::Audible"
+          fields: []
+        - kind: struct
+          name: PreaddCoverCandidate
+          fields:
+            - { name: proxy_url, type: String }
+            - { name: source, type: String }
+            - { name: title, type: String }
+            - { name: author_name, type: String }
+        - kind: enum
+          name: PreaddCoverError
+          fields:
+            - { name: "Provider(String)", type: variant }
+            - { name: Timeout, type: variant }
+        - kind: struct-field
+          name: "LookupResult.isbn_13"
+          fields:
+            - { name: isbn_13, type: "Option<String>" }
+        - kind: struct-field
+          name: "EnglishWorkCandidate.cover_manual"
+          fields:
+            - { name: cover_manual, type: bool }
+      functions:
+        - name: "WorkService::set_cover_manual"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: manual, type: bool }
+          output: "Result<(), WorkServiceError>"
+          errors: [NotFound, Db]
+        - name: "PreaddCoverService::fetch_cover_alternatives"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: title, type: "&str" }
+            - { name: author, type: "&str" }
+            - { name: lang, type: "&str" }
+            - { name: isbn_13, type: "Option<&str>" }
+          output: "Result<Vec<PreaddCoverCandidate>, PreaddCoverError>"
+          errors: [Provider, Timeout]
+
+  # =========================================================================
+  # Module 2: Audible provider client
+  # =========================================================================
+  - name: audible-provider
+    responsibility: "Audible catalog API client + enrichment provider integration. Fixed API endpoint uses HttpFetcher (not http_client_safe — the endpoint is hardcoded, not runtime-derived). Cover URLs returned by Audible are runtime-derived and must be converted to proxy URLs before crossing into handlers/frontend."
+    dependencies: [livrarr-domain, livrarr-http]
+    public_api:
+      types:
+        - kind: struct
+          name: AudibleCatalogClient
+          fields:
+            - { name: http, type: HttpClient }
+            - { name: retry_backoff_secs, type: i64 }
+        - kind: struct
+          name: AudibleProduct
+          fields:
+            - { name: asin, type: "Option<String>" }
+            - { name: title, type: "Option<String>" }
+            - { name: subtitle, type: "Option<String>" }
+            - { name: language, type: "Option<String>" }
+            - { name: runtime_length_min, type: "Option<i32>" }
+            - { name: authors, type: "Option<Vec<AudibleContributor>>" }
+            - { name: narrators, type: "Option<Vec<AudibleContributor>>" }
+            - { name: series, type: "Option<Vec<AudibleSeries>>" }
+            - { name: product_images, type: "Option<AudibleImages>" }
+      functions:
+        - name: "AudibleCatalogClient::fetch"
+          inputs:
+            - { name: work, type: "&Work" }
+            - { name: ctx, type: "&EnrichmentContext" }
+          output: "ProviderOutcome<NormalizedWorkDetail>"
+          errors: [WillRetry, NotFound]
+        - name: search_audible
+          inputs:
+            - { name: fetcher, type: "&impl HttpFetcher" }
+            - { name: title, type: "&str" }
+            - { name: author, type: "&str" }
+            - { name: max_results, type: u32 }
+          output: "Result<Vec<AudibleProduct>, String>"
+          errors: [request_failed, parse_error]
+        - name: lookup_audible_by_asin
+          inputs:
+            - { name: fetcher, type: "&impl HttpFetcher" }
+            - { name: asin, type: "&str" }
+          output: "Result<Option<AudibleProduct>, String>"
+          errors: [request_failed, parse_error]
+
+  # =========================================================================
+  # Module 3: ISBN bridge (provider client extensions)
+  # =========================================================================
+  - name: isbn-bridge
+    responsibility: "Add ISBN-first lookup to OL, HC, and GR provider clients. When work.isbn_13 is populated, try ISBN lookup first. If ISBN returns empty/NotFound, fall back to title+author search within the same fetch call. Audnexus and Audible do not support ISBN — they use ASIN/title+author only (REQ-017). ISBN fallback correctness enforced by behavioral tests per provider, not regex."
+    dependencies: [livrarr-domain, livrarr-http]
+    public_api:
+      types: []
+      functions:
+        - name: "OpenLibraryClient::fetch (modified)"
+          inputs:
+            - { name: work, type: "&Work" }
+            - { name: ctx, type: "&EnrichmentContext" }
+          output: "ProviderOutcome<NormalizedWorkDetail>"
+          errors: [WillRetry, NotFound]
+        - name: "HardcoverClient::fetch (modified)"
+          inputs:
+            - { name: work, type: "&Work" }
+            - { name: ctx, type: "&EnrichmentContext" }
+          output: "ProviderOutcome<NormalizedWorkDetail>"
+          errors: [WillRetry, NotFound, NotConfigured]
+        - name: "GoodreadsClient::fetch (modified)"
+          inputs:
+            - { name: work, type: "&Work" }
+            - { name: ctx, type: "&EnrichmentContext" }
+          output: "ProviderOutcome<NormalizedWorkDetail>"
+          errors: [WillRetry, NotFound]
+
+  # =========================================================================
+  # Module 4: Discovery (GB-first search)
+  # =========================================================================
+  - name: gb-first-discovery
+    responsibility: "Replace OL-first search with GB-first fallback chain in WorkService::lookup. GB results include isbn_13 when available (via existing extract_isbn13). LookupResult.source set to 'google_books'. LookupResult.isbn_13 populated from GB response."
+    dependencies: [livrarr-domain, livrarr-http]
+    public_api:
+      types: []
+      functions:
+        - name: "WorkServiceImpl::lookup (modified)"
+          inputs:
+            - { name: req, type: LookupRequest }
+          output: "Result<Vec<LookupResult>, WorkServiceError>"
+          errors: [Enrichment]
+
+  # =========================================================================
+  # Module 5a: Async add (handler layer — livrarr-handlers only)
+  # =========================================================================
+  - name: async-add-handler
+    responsibility: "Handler-layer changes for async add: read cover_manual and isbn_13 from AddWorkRequest, set them on EnglishWorkCandidate (cover_manual written atomically in the initial INSERT, not via a separate post-add call), pass skip_sync_enrichment=true for user-initiated adds. Depends only on livrarr-domain."
+    dependencies: [livrarr-domain]
+    public_api:
+      types:
+        - kind: struct-field
+          name: "handler AddWorkRequest.cover_manual"
+          fields:
+            - { name: cover_manual, type: bool }
+        - kind: struct-field
+          name: "handler AddWorkRequest.isbn_13"
+          fields:
+            - { name: isbn_13, type: "Option<String>" }
+      functions:
+        - name: "add handler (modified)"
+          inputs:
+            - { name: req, type: "Json<AddWorkRequest>" }
+            - { name: ctx, type: AuthContext }
+          output: "Json<AddWorkResponse>"
+          errors: [ApiError]
+
+  # =========================================================================
+  # Module 5b: Async add (service layer — livrarr-metadata + livrarr-db)
+  # =========================================================================
+  - name: async-add-service
+    responsibility: "Service-layer changes for async add: when skip_sync_enrichment=true, finish_created_work skips run_unified_enrichment (phase-1 cover download still runs). cover_manual propagated from EnglishWorkCandidate through CreateWorkDbRequest and written in the initial INSERT (atomic, no race). isbn_13 from EnglishSeedFields written to CreateWorkDbRequest."
+    dependencies: [livrarr-domain, livrarr-db]
+    public_api:
+      types:
+        - kind: struct-field
+          name: "EnglishWorkCandidate.skip_sync_enrichment"
+          fields:
+            - { name: skip_sync_enrichment, type: bool }
+        - kind: struct-field
+          name: "EnglishWorkCandidate.cover_manual"
+          fields:
+            - { name: cover_manual, type: bool }
+      functions:
+        - name: "WorkServiceImpl::finish_created_work (modified)"
+          inputs:
+            - { name: work, type: Work }
+            - { name: source_provider_data, type: "Option<SourceProviderData>" }
+          output: "Result<AddWorkResult, WorkServiceError>"
+          errors: [Db]
+
+  # =========================================================================
+  # Module 6: Pre-add cover search (trait + handler + impl)
+  # =========================================================================
+  - name: preadd-covers
+    responsibility: "Domain trait PreaddCoverService defined in livrarr-domain (takes user_id, title, author, lang, optional isbn_13). Implementation in livrarr-metadata (queries provider clients for covers, converts raw URLs to proxy URLs before returning). Handler in livrarr-handlers generic over HasPreaddCoverService, passes user_id from AuthContext. Wiring on AppState in livrarr-server."
+    dependencies: [livrarr-domain]
+    public_api:
+      types: []
+      functions:
+        - name: "preadd_cover_alternatives handler"
+          inputs:
+            - { name: title, type: String }
+            - { name: author, type: String }
+            - { name: lang, type: String }
+            - { name: isbn_13, type: "Option<String>" }
+            - { name: ctx, type: AuthContext }
+          output: "Json<Vec<PreaddCoverCandidate>>"
+          errors: [ApiError]
+
+  # =========================================================================
+  # Module 7: ASIN bug fix
+  # =========================================================================
+  - name: asin-fix
+    responsibility: "Fix apply_enrichment_merge to faithfully write the merge engine's resolved ASIN value. The merge engine already implements last-known-good fallback (preserves current value when no provider wins). The DB write must pass through the resolved value — not apply SQL-level COALESCE which would prevent intentional NULL writes. Correctness enforced by behavioral test (AC-013)."
+    dependencies: [livrarr-db]
+    public_api:
+      types: []
+      functions: []
+
+  # =========================================================================
+  # Module 8: Audible integration (merge priority + rate limiter + registration)
+  # =========================================================================
+  - name: audible-integration
+    responsibility: "Audible merge priority configuration in livrarr-metadata: highest for audio fields (Audible > Audnexus > HC), lower than HC/GR for content/description/cover. RateBucket::Audible interval at 150ms in livrarr-http/src/fetcher.rs. Audible provider registration in DefaultProviderQueue builder in livrarr-server/src/main.rs. Applicability rule updated to dispatch Audible for all works. Cover alternatives eligible_providers updated in livrarr-metadata to include Audible."
+    dependencies: [livrarr-domain-extensions, audible-provider, livrarr-http, livrarr-server, livrarr-metadata]
+    public_api:
+      types: []
+      functions: []
+
+  # =========================================================================
+  # Module 9: Frontend
+  # =========================================================================
+  - name: frontend-search-flow
+    responsibility: "GB-first search page (replaces /search), cover picker with proxy URLs only (never raw provider URLs), enrichment polling on work detail (poll GET /api/v1/work/{id} every 3s until enrichment_status transitions), skeleton states on empty fields. isbn_13 passed through addWork API call from LookupResult. coverManual passed when user actively selects a cover."
+    dependencies: []
+    public_api:
+      types: []
+      functions: []
+
+requirements_traceability:
+  REQ-001: gb-first-discovery
+  REQ-002: gb-first-discovery
+  REQ-003: gb-first-discovery
+  REQ-004: frontend-search-flow
+  REQ-005: preadd-covers
+  REQ-006: [preadd-covers, audible-integration]
+  REQ-007: frontend-search-flow
+  REQ-008: [async-add-handler, async-add-service]
+  REQ-009: [async-add-handler, async-add-service]
+  REQ-010: frontend-search-flow
+  REQ-011: [gb-first-discovery, async-add-handler, async-add-service, isbn-bridge, livrarr-domain-extensions]
+  REQ-012: isbn-bridge
+  REQ-013: audible-provider
+  REQ-014: audible-integration
+  REQ-015: audible-integration
+  REQ-016: asin-fix
+  REQ-017: isbn-bridge
+  REQ-018: [livrarr-domain-extensions, audible-integration]
+  REQ-019: [preadd-covers, audible-integration]
+
+dependency_graph:
+  # Crate-level edges (compile wall respected)
+  - { source: livrarr-handlers, target: livrarr-domain }
+  - { source: livrarr-metadata, target: livrarr-domain }
+  - { source: livrarr-metadata, target: livrarr-http }
+  - { source: livrarr-server, target: livrarr-metadata }
+  - { source: livrarr-server, target: livrarr-handlers }
+  - { source: livrarr-server, target: livrarr-domain }
+  - { source: livrarr-server, target: livrarr-db }
+  - { source: livrarr-server, target: livrarr-http }
+  # Module-level edges
+  - { source: audible-provider, target: livrarr-domain-extensions }
+  - { source: isbn-bridge, target: livrarr-domain-extensions }
+  - { source: gb-first-discovery, target: livrarr-domain-extensions }
+  - { source: async-add-handler, target: livrarr-domain-extensions }
+  - { source: async-add-service, target: livrarr-domain-extensions }
+  - { source: preadd-covers, target: livrarr-domain-extensions }
+  - { source: audible-integration, target: audible-provider }
+  - { source: audible-integration, target: livrarr-domain-extensions }
+  - { source: asin-fix, target: livrarr-domain-extensions }
+  - { source: frontend-search-flow, target: gb-first-discovery }
+  - { source: frontend-search-flow, target: async-add-handler }
+  - { source: frontend-search-flow, target: preadd-covers }

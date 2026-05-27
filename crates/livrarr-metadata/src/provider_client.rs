@@ -36,6 +36,7 @@ pub enum ProviderClient {
     OpenLibrary(OpenLibraryClient),
     Goodreads(GoodreadsClient),
     GoogleBooks(crate::google_books::GoogleBooksClient),
+    Audible(crate::audible::AudibleCatalogClient),
 }
 
 impl ProviderClient {
@@ -51,6 +52,7 @@ impl ProviderClient {
             Self::OpenLibrary(o) => o.fetch(work, ctx).await,
             Self::Goodreads(g) => g.fetch(work, ctx).await,
             Self::GoogleBooks(g) => g.fetch(work, ctx).await,
+            Self::Audible(a) => a.fetch(work, ctx).await,
         }
     }
 
@@ -62,19 +64,19 @@ impl ProviderClient {
             Self::OpenLibrary(_) => MetadataProvider::OpenLibrary,
             Self::Goodreads(_) => MetadataProvider::Goodreads,
             Self::GoogleBooks(_) => MetadataProvider::GoogleBooks,
+            Self::Audible(_) => MetadataProvider::Audible,
         }
     }
 
     pub fn call_count(&self) -> usize {
         match self {
             Self::Stub(s) => s.call_count(),
-            // Real network adapters don't track call counts — the queue tracks
-            // dispatch counts elsewhere; this accessor exists for stub-driven tests.
             Self::Audnexus(_)
             | Self::Hardcover(_)
             | Self::OpenLibrary(_)
             | Self::Goodreads(_)
-            | Self::GoogleBooks(_) => 0,
+            | Self::GoogleBooks(_)
+            | Self::Audible(_) => 0,
         }
     }
 }
@@ -290,6 +292,38 @@ impl HardcoverClient {
             None => return ProviderOutcome::NotConfigured,
         };
 
+        // ISBN-first path: query by ISBN, verify ISBN in hit's isbns array
+        if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
+            let normalized = livrarr_domain::normalize_isbn(isbn);
+            match crate::hardcover::query_hardcover_by_isbn(
+                &self.http,
+                &normalized,
+                &token,
+                cfg.as_ref(),
+            )
+            .await
+            {
+                Ok(Some(hc)) => {
+                    return self.build_success(hc, &token).await;
+                }
+                Ok(None) => {
+                    tracing::debug!(isbn = %normalized, "HC ISBN search: no verified match");
+                }
+                Err(crate::hardcover::HardcoverError::Http(e)) => {
+                    tracing::debug!(isbn = %normalized, error = %e, "HC ISBN search failed");
+                    return ProviderOutcome::WillRetry {
+                        reason: livrarr_domain::WillRetryReason::ServerError,
+                        next_attempt_at: Utc::now()
+                            + chrono::Duration::seconds(self.retry_backoff_secs),
+                    };
+                }
+                Err(_) => {
+                    tracing::debug!(isbn = %normalized, "HC ISBN search: no results");
+                }
+            }
+        }
+
+        // Title+author search (existing behavior)
         let result = query_hardcover(
             &self.http,
             &work.title,
@@ -300,68 +334,7 @@ impl HardcoverClient {
         .await;
 
         match result {
-            Ok(hc) => {
-                // Legacy parity: derive year from publish_date (YYYY prefix).
-                let year = hc
-                    .publish_date
-                    .as_deref()
-                    .and_then(|d| d.get(..4))
-                    .and_then(|y| y.parse::<i32>().ok());
-
-                // Legacy parity: when the search hit yielded an hc_key, fetch the
-                // editions list and prefer an English-language edition's ISBN-13
-                // over whatever the search result returned. The search result's
-                // ISBN often points at a non-English or sub-optimal edition.
-                let mut isbn_13 = hc.isbn_13.clone();
-                if let Some(ref hc_id) = hc.hc_key {
-                    if let Ok(Some(better_isbn)) =
-                        crate::hardcover::fetch_hardcover_editions(&self.http, hc_id, &token, "en")
-                            .await
-                    {
-                        isbn_13 = Some(better_isbn);
-                    }
-                }
-
-                let payload = NormalizedWorkDetail {
-                    title: hc.title,
-                    subtitle: hc.subtitle,
-                    original_title: hc.original_title,
-                    author_name: None,
-                    description: hc.description,
-                    year,
-                    series_name: hc.series_name,
-                    series_position: hc.series_position,
-                    genres: hc.genres,
-                    language: None,
-                    page_count: hc.page_count,
-                    duration_seconds: None,
-                    publisher: hc.publisher,
-                    publish_date: hc.publish_date,
-                    hc_key: hc.hc_key,
-                    gr_key: None,
-                    ol_key: None,
-                    isbn_13,
-                    asin: None,
-                    narrator: None,
-                    narration_type: None,
-                    abridged: None,
-                    rating: hc.rating,
-                    rating_count: hc.rating_count,
-                    cover_url: hc.cover_url,
-                    additional_isbns: Vec::new(),
-                    additional_asins: Vec::new(),
-                };
-                ProviderOutcome::Success(Box::new(payload))
-            }
-            // Discriminate HC's stringified errors. "No results" / "no exact
-            // match" mean HC genuinely doesn't have this book — those are
-            // NotFound, NOT a provider failure. Treating them as WillRetry
-            // counts them toward the breaker and trips it after 5 consecutive
-            // misses, suppressing HC for the rest of the bulk run. Real HTTP /
-            // network / parse errors stay WillRetry.
-            //
-            // Proper fix is typed errors out of query_hardcover; until then,
-            // string matching keeps the breaker honest.
+            Ok(hc) => self.build_success(hc, &token).await,
             Err(
                 crate::hardcover::HardcoverError::NoResults
                 | crate::hardcover::HardcoverError::NoMatch(_),
@@ -371,6 +344,58 @@ impl HardcoverClient {
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
             },
         }
+    }
+
+    async fn build_success(
+        &self,
+        hc: crate::hardcover::HardcoverResult,
+        token: &str,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        let year = hc
+            .publish_date
+            .as_deref()
+            .and_then(|d| d.get(..4))
+            .and_then(|y| y.parse::<i32>().ok());
+
+        let mut isbn_13 = hc.isbn_13.clone();
+        if let Some(ref hc_id) = hc.hc_key {
+            if let Ok(Some(better_isbn)) =
+                crate::hardcover::fetch_hardcover_editions(&self.http, hc_id, token, "en").await
+            {
+                isbn_13 = Some(better_isbn);
+            }
+        }
+
+        let payload = NormalizedWorkDetail {
+            title: hc.title,
+            subtitle: hc.subtitle,
+            original_title: hc.original_title,
+            author_name: None,
+            description: hc.description,
+            year,
+            series_name: hc.series_name,
+            series_position: hc.series_position,
+            genres: hc.genres,
+            language: None,
+            page_count: hc.page_count,
+            duration_seconds: None,
+            publisher: hc.publisher,
+            publish_date: hc.publish_date,
+            hc_key: hc.hc_key,
+            gr_key: None,
+            ol_key: None,
+            isbn_13,
+            asin: None,
+            narrator: None,
+            narration_type: None,
+            abridged: None,
+            rating: hc.rating,
+            rating_count: hc.rating_count,
+            cover_url: hc.cover_url,
+            additional_isbns: Vec::new(),
+            additional_asins: Vec::new(),
+        };
+        ProviderOutcome::Success(Box::new(payload))
     }
 }
 
@@ -402,48 +427,167 @@ impl OpenLibraryClient {
         work: &Work,
         _ctx: &EnrichmentContext,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
-        let ol_key = match work.ol_key.as_deref().filter(|s| !s.is_empty()) {
-            Some(k) => k,
-            None => return ProviderOutcome::NotFound,
-        };
-
-        match query_ol_detail(&self.http, ol_key).await {
-            Ok(detail) => {
-                let payload = NormalizedWorkDetail {
-                    title: None,
-                    subtitle: None,
-                    original_title: None,
-                    author_name: None,
-                    description: detail.description,
-                    year: None,
-                    series_name: None,
-                    series_position: None,
-                    genres: None,
-                    language: None,
-                    page_count: None,
-                    duration_seconds: None,
-                    publisher: None,
-                    publish_date: None,
-                    hc_key: None,
-                    gr_key: None,
-                    ol_key: Some(ol_key.to_string()),
-                    isbn_13: detail.isbn_13,
-                    asin: None,
-                    narrator: None,
-                    narration_type: None,
-                    abridged: None,
-                    rating: None,
-                    rating_count: None,
-                    cover_url: None,
-                    additional_isbns: Vec::new(),
-                    additional_asins: Vec::new(),
-                };
-                ProviderOutcome::Success(Box::new(payload))
+        // Tier 1: ISBN lookup
+        if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
+            let normalized = livrarr_domain::normalize_isbn(isbn);
+            match self.isbn_lookup(&normalized).await {
+                Ok(Some(ol_work_key)) => match query_ol_detail(&self.http, &ol_work_key).await {
+                    Ok(detail) => {
+                        return ProviderOutcome::Success(Box::new(
+                            self.build_payload(&ol_work_key, detail),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::debug!(isbn = %normalized, error = %e, "OL ISBN detail miss");
+                    }
+                },
+                Ok(None) => {
+                    tracing::debug!(isbn = %normalized, "OL ISBN lookup: no work found");
+                }
+                Err(e) => {
+                    tracing::debug!(isbn = %normalized, error = %e, "OL ISBN lookup failed");
+                }
             }
+        }
+
+        // Tier 2: ol_key direct lookup (existing behavior)
+        if let Some(ol_key) = work.ol_key.as_deref().filter(|s| !s.is_empty()) {
+            match query_ol_detail(&self.http, ol_key).await {
+                Ok(detail) => {
+                    return ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail)));
+                }
+                Err(e) => {
+                    tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail miss");
+                }
+            }
+        }
+
+        // Tier 3: title+author search fallback
+        match self.title_author_search(work).await {
+            Ok(Some(payload)) => ProviderOutcome::Success(Box::new(payload)),
+            Ok(None) => ProviderOutcome::NotFound,
             Err(_) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
             },
+        }
+    }
+
+    fn build_payload(
+        &self,
+        ol_key: &str,
+        detail: crate::openlibrary::OlDetailResult,
+    ) -> NormalizedWorkDetail {
+        NormalizedWorkDetail {
+            description: detail.description,
+            ol_key: Some(ol_key.to_string()),
+            isbn_13: detail.isbn_13,
+            ..Default::default()
+        }
+    }
+
+    async fn isbn_lookup(&self, isbn: &str) -> Result<Option<String>, String> {
+        let url = format!("https://openlibrary.org/isbn/{isbn}.json");
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("OL ISBN fetch failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("OL ISBN parse error: {e}"))?;
+
+        let ol_work_key = data
+            .get("works")
+            .and_then(|w| w.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|w| w.get("key"))
+            .and_then(|k| k.as_str())
+            .map(|k| k.strip_prefix("/works/").unwrap_or(k).to_string());
+
+        Ok(ol_work_key)
+    }
+
+    async fn title_author_search(
+        &self,
+        work: &Work,
+    ) -> Result<Option<NormalizedWorkDetail>, String> {
+        let query = format!("{} {}", work.title, work.author_name);
+        let url = format!(
+            "https://openlibrary.org/search.json?q={}&fields=key,title,author_name&limit=10",
+            urlencoding::encode(&query)
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("OL search failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("OL search returned {}", resp.status()));
+        }
+
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("OL search parse error: {e}"))?;
+
+        let docs = data
+            .get("docs")
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let candidates: Vec<(String, String)> = docs
+            .iter()
+            .filter_map(|doc| {
+                let title = doc.get("title")?.as_str()?.to_string();
+                let author = doc
+                    .get("author_name")
+                    .and_then(|a| a.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some((title, author))
+            })
+            .collect();
+
+        let best_idx = crate::audible::score_provider_candidates(
+            &work.title,
+            &work.author_name,
+            &candidates,
+            0.75,
+            1,
+        );
+
+        let idx = match best_idx {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+
+        let ol_key = docs[idx]
+            .get("key")
+            .and_then(|k| k.as_str())
+            .map(|k| k.strip_prefix("/works/").unwrap_or(k).to_string());
+
+        let ol_key = match ol_key {
+            Some(k) => k,
+            None => return Ok(None),
+        };
+
+        match query_ol_detail(&self.http, &ol_key).await {
+            Ok(detail) => Ok(Some(self.build_payload(&ol_key, detail))),
+            Err(_) => Ok(None),
         }
     }
 }
@@ -621,10 +765,52 @@ impl GoodreadsClient {
             return Ok(Some(goodreads::detail_url_for_gr_key(&self.base_url, key)));
         }
 
+        // 2. ISBN search — exact match via isbn: prefix query.
+        if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
+            let normalized = livrarr_domain::normalize_isbn(isbn);
+            let query = format!("isbn:{normalized}");
+            match goodreads::search_goodreads_by_query(&self.http, &self.base_url, &query).await {
+                Ok(hits) if !hits.is_empty() => {
+                    if let Some(live) = &self.live_config {
+                        let cfg = live.snapshot();
+                        match gr_llm_disambiguate(
+                            &self.http,
+                            cfg.as_ref(),
+                            &work.title,
+                            &work.author_name,
+                            &hits,
+                        )
+                        .await
+                        {
+                            Ok(Some(idx)) => {
+                                tracing::info!(isbn = %normalized, chosen_idx = idx, "LLM selected GR ISBN result");
+                                return Ok(Some(goodreads::resolve_detail_url(
+                                    &self.base_url,
+                                    &hits[idx].detail_url,
+                                )));
+                            }
+                            Ok(None) => {
+                                tracing::debug!(isbn = %normalized, "LLM declined all GR ISBN candidates");
+                            }
+                            Err(e) => {
+                                tracing::debug!(isbn = %normalized, error = %e, "GR ISBN LLM disambiguation failed");
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!(isbn = %isbn, "GR ISBN search: no results");
+                }
+                Err(e) => {
+                    tracing::debug!(isbn = %isbn, error = ?e, "GR ISBN search failed");
+                }
+            }
+        }
+
         let title = &work.title;
         let author = &work.author_name;
 
-        // 2. Ask LLM for the GR key directly — fast, no scraping.
+        // 3. Ask LLM for the GR key directly — fast, no scraping.
         if let Some(live) = &self.live_config {
             let cfg = live.snapshot();
             match gr_llm_key_lookup(&self.http, cfg.as_ref(), title, author).await {
@@ -641,7 +827,7 @@ impl GoodreadsClient {
             }
         }
 
-        // 3. Fallback: search GR by title+author + LLM disambiguation.
+        // 4. Fallback: search GR by title+author + LLM disambiguation.
         let mut hits =
             goodreads::search_goodreads(&self.http, &self.base_url, title, author).await?;
 

@@ -173,6 +173,7 @@ async fn seed_monitored_work(
         isbn_13: None,
         asin: None,
         description: None,
+        cover_manual: false,
     })
     .await
     .unwrap()

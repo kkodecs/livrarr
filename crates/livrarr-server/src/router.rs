@@ -226,6 +226,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             get(livrarr_handlers::work::lookup::<AppState>),
         )
         .route(
+            "/work/preadd-covers",
+            get(livrarr_handlers::work::preadd_cover_alternatives::<AppState>),
+        )
+        .route(
             "/work/refresh",
             post(livrarr_handlers::work::refresh_all::<AppState>),
         )

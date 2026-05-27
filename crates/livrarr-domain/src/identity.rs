@@ -256,4 +256,6 @@ pub struct EnglishWorkCandidate {
     pub monitor_audiobook: Option<bool>,
     pub provenance_setter: Option<crate::ProvenanceSetter>,
     pub import_id: Option<String>,
+    pub cover_manual: bool,
+    pub skip_sync_enrichment: bool,
 }

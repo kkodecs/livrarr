@@ -1224,6 +1224,8 @@ impl ImportRunner {
                 monitor_audiobook: Some(monitor_audiobook),
                 provenance_setter: Some(ProvenanceSetter::Import),
                 import_id: Some(self.import_id.clone()),
+                cover_manual: false,
+                skip_sync_enrichment: false,
             };
 
             preps.push(Prep {

@@ -102,7 +102,7 @@ export default function WorkDetailPage() {
     enabled: !!id,
     refetchInterval: (query) => {
       const status = query.state.data?.enrichmentStatus;
-      if (status === "pending") return 5_000;
+      if (status === "pending" || status === "unenriched") return 3_000;
       if (coverPollBaseline === undefined) return false;
       const current = query.state.data?.coverMtime ?? null;
       return current === coverPollBaseline ? 1_000 : false;
@@ -1116,6 +1116,7 @@ function MetadataTab({
   refreshing: boolean;
 }) {
   const statusLabel = {
+    unenriched: "Enriching…",
     pending: "Pending",
     partial: "Partial",
     enriched: "Enriched",
@@ -1125,6 +1126,7 @@ function MetadataTab({
   }[work.enrichmentStatus] ?? work.enrichmentStatus;
 
   const statusColor = {
+    unenriched: "text-zinc-400",
     enriched: "text-green-400",
     partial: "text-yellow-400",
     pending: "text-zinc-400",

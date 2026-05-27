@@ -103,6 +103,7 @@ mod tests {
                 isbn_13: None,
                 asin: None,
                 description: None,
+                cover_manual: false,
             })
             .await
             .expect("create work_a");
@@ -130,6 +131,7 @@ mod tests {
                 isbn_13: None,
                 asin: None,
                 description: None,
+                cover_manual: false,
             })
             .await
             .expect("create work_b");

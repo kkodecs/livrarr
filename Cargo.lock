@@ -1672,6 +1672,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "trait-variant",
+ "urlencoding",
 ]
 
 [[package]]
@@ -1709,6 +1710,7 @@ dependencies = [
  "tokio-util",
  "trait-variant",
  "unicode-normalization",
+ "urlencoding",
 ]
 
 [[package]]

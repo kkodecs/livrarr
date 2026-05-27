@@ -959,6 +959,8 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
+        cover_manual: false,
+        skip_sync_enrichment: false,
     };
 
     match state.work_service().add(user_id, candidate).await {

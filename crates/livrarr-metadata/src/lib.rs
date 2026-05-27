@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
+pub mod audible;
 pub mod audnexus;
 pub mod author_service;
 pub mod bulk_resolver;
@@ -39,6 +40,7 @@ pub mod normalize;
 pub mod ol_resolver_client;
 pub mod openlibrary;
 pub mod parsers;
+pub mod preadd_cover_service;
 pub mod provider_client;
 pub mod provider_queue;
 pub mod series_query_service;
@@ -443,18 +445,36 @@ pub struct PriorityModel {
 }
 
 impl PriorityModel {
-    /// English: HC → GR → Readarr → OL, Audio: Audnexus → HC.
+    /// English: HC → GR → Readarr → OL → Audible, Audio: Audible → Audnexus → HC.
     pub fn english() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
-            content: vec![P::Hardcover, P::Goodreads, P::Readarr, P::OpenLibrary],
-            description: vec![P::Hardcover, P::Goodreads, P::Readarr, P::OpenLibrary],
-            cover: vec![P::Hardcover, P::Goodreads, P::Readarr, P::OpenLibrary],
-            audio: vec![P::Audnexus, P::Hardcover],
+            content: vec![
+                P::Hardcover,
+                P::Goodreads,
+                P::Readarr,
+                P::OpenLibrary,
+                P::Audible,
+            ],
+            description: vec![
+                P::Hardcover,
+                P::Goodreads,
+                P::Readarr,
+                P::OpenLibrary,
+                P::Audible,
+            ],
+            cover: vec![
+                P::Hardcover,
+                P::Goodreads,
+                P::Readarr,
+                P::OpenLibrary,
+                P::Audible,
+            ],
+            audio: vec![P::Audible, P::Audnexus, P::Hardcover],
         }
     }
 
-    /// Foreign: GB → GR → HC → Readarr → OL, Audio: Audnexus → HC.
+    /// Foreign: GB → GR → HC → Readarr → OL → Audible, Audio: Audible → Audnexus → HC.
     pub fn foreign() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
@@ -464,6 +484,7 @@ impl PriorityModel {
                 P::Hardcover,
                 P::Readarr,
                 P::OpenLibrary,
+                P::Audible,
             ],
             description: vec![
                 P::GoogleBooks,
@@ -471,6 +492,7 @@ impl PriorityModel {
                 P::Hardcover,
                 P::Readarr,
                 P::OpenLibrary,
+                P::Audible,
             ],
             cover: vec![
                 P::GoogleBooks,
@@ -478,8 +500,9 @@ impl PriorityModel {
                 P::Hardcover,
                 P::Readarr,
                 P::OpenLibrary,
+                P::Audible,
             ],
-            audio: vec![P::Audnexus, P::Hardcover],
+            audio: vec![P::Audible, P::Audnexus, P::Hardcover],
         }
     }
 
@@ -736,6 +759,7 @@ fn provider_name(p: livrarr_domain::MetadataProvider) -> &'static str {
         livrarr_domain::MetadataProvider::Llm => "llm",
         livrarr_domain::MetadataProvider::Readarr => "readarr",
         livrarr_domain::MetadataProvider::GoogleBooks => "google_books",
+        livrarr_domain::MetadataProvider::Audible => "audible",
     }
 }
 

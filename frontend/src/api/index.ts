@@ -14,6 +14,7 @@ import type {
   LookupResponse,
   AddWorkRequest,
   AddWorkResponse,
+  PreaddCoverCandidate,
   WorkDetailResponse,
   UpdateWorkRequest,
   RefreshWorkResponse,
@@ -134,6 +135,17 @@ export const addWork = (req: AddWorkRequest) =>
     method: "POST",
     body: JSON.stringify(req),
   });
+export const fetchPreaddCovers = (
+  title: string,
+  author: string,
+  lang?: string,
+  isbn13?: string | null,
+) => {
+  const sp = new URLSearchParams({ title, author });
+  if (lang) sp.set("lang", lang);
+  if (isbn13) sp.set("isbn_13", isbn13);
+  return apiFetch<PreaddCoverCandidate[]>(`/work/preadd-covers?${sp}`);
+};
 export const listWorks = (params?: {
   page?: number;
   pageSize?: number;

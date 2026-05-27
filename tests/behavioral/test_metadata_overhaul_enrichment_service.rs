@@ -2171,7 +2171,8 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Hardcover,
                     MetadataProvider::Goodreads,
                     MetadataProvider::Readarr,
-                    MetadataProvider::OpenLibrary
+                    MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audible,
                 ]
             );
             assert_eq!(
@@ -2180,7 +2181,8 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Hardcover,
                     MetadataProvider::Goodreads,
                     MetadataProvider::Readarr,
-                    MetadataProvider::OpenLibrary
+                    MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audible,
                 ]
             );
             assert_eq!(
@@ -2189,7 +2191,8 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Hardcover,
                     MetadataProvider::Goodreads,
                     MetadataProvider::Readarr,
-                    MetadataProvider::OpenLibrary
+                    MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audible,
                 ]
             );
         }
@@ -2241,7 +2244,8 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Goodreads,
                     MetadataProvider::Hardcover,
                     MetadataProvider::Readarr,
-                    MetadataProvider::OpenLibrary
+                    MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audible,
                 ]
             );
             assert_eq!(
@@ -2251,7 +2255,8 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Goodreads,
                     MetadataProvider::Hardcover,
                     MetadataProvider::Readarr,
-                    MetadataProvider::OpenLibrary
+                    MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audible,
                 ]
             );
             assert_eq!(
@@ -2261,7 +2266,8 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Goodreads,
                     MetadataProvider::Hardcover,
                     MetadataProvider::Readarr,
-                    MetadataProvider::OpenLibrary
+                    MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audible,
                 ]
             );
         }

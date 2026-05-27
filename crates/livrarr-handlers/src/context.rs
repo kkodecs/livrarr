@@ -245,6 +245,11 @@ pub trait HasCoverService: Clone + Send + Sync + 'static {
     fn cover_service(&self) -> &Self::CoverSvc;
 }
 
+pub trait HasPreaddCoverService: Clone + Send + Sync + 'static {
+    type PreaddCoverSvc: livrarr_domain::services::PreaddCoverService + Send + Sync + 'static;
+    fn preadd_cover_service(&self) -> &Self::PreaddCoverSvc;
+}
+
 pub trait HasHmacKey: Clone + Send + Sync + 'static {
     fn hmac_key(&self) -> &[u8];
 }
@@ -304,6 +309,7 @@ pub trait AppContext:
     + HasCoverCache
     + HasEnrichmentNotify
     + HasCoverService
+    + HasPreaddCoverService
     + HasHmacKey
     + HasTrustedOrigins
 {
@@ -355,6 +361,7 @@ impl<T> AppContext for T where
         + HasCoverCache
         + HasEnrichmentNotify
         + HasCoverService
+        + HasPreaddCoverService
         + HasHmacKey
         + HasTrustedOrigins
 {

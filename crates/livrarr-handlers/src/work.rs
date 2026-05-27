@@ -77,6 +77,41 @@ pub struct StreamQuery {
     pub token: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+pub struct PreaddCoverQuery {
+    pub title: String,
+    pub author: Option<String>,
+    pub lang: Option<String>,
+    pub isbn_13: Option<String>,
+}
+
+pub async fn preadd_cover_alternatives<S>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Query(q): Query<PreaddCoverQuery>,
+) -> Result<Json<Vec<livrarr_domain::services::PreaddCoverCandidate>>, ApiError>
+where
+    S: crate::context::HasPreaddCoverService,
+{
+    if q.title.trim().is_empty() {
+        return Err(ApiError::BadRequest("title is required".into()));
+    }
+    let author = q.author.as_deref().unwrap_or("");
+    let lang = q.lang.as_deref().unwrap_or("en");
+    let svc = state.preadd_cover_service();
+    let candidates = livrarr_domain::services::PreaddCoverService::fetch_cover_alternatives(
+        svc,
+        ctx.user.id,
+        q.title.trim(),
+        author,
+        lang,
+        q.isbn_13.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("cover alternatives: {e}")))?;
+    Ok(Json(candidates))
+}
+
 pub async fn lookup<S: HasWorkService>(
     State(state): State<S>,
     _ctx: AuthContext,
@@ -142,44 +177,53 @@ pub async fn add<
         .map(livrarr_domain::normalize_language)
         .unwrap_or_else(|| "en".to_string());
 
-    let seed = EnglishSeed {
-        title: req.title.clone(),
-        author_name: req.author_name.clone(),
-        isbn: None,
-        user_confirmed_ol_key: req.ol_key.clone(),
-    };
-    let resolution = state.identity_resolver().resolve(&seed).await;
+    let cover_is_manual = req.cover_manual && req.cover_url.is_some();
 
-    let identity = match resolution {
-        IdentityResolution::Confirmed {
-            ol_key,
-            method,
-            score,
-        } => IdentityState::Confirmed {
-            ol_key,
-            method,
-            score: Some(score),
-        },
-        IdentityResolution::Pending {
-            reason,
-            top_candidates,
-        } => IdentityState::Pending {
-            reason,
-            top_candidates,
-        },
-        IdentityResolution::Conflict {
-            existing_work_id, ..
-        } => {
-            let work = state
-                .work_service()
-                .get(ctx.user.id, existing_work_id)
-                .await?;
-            let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None);
-            return Ok(Json(AddWorkResponse {
-                work: detail,
-                author_created: false,
-                messages: vec!["identity conflict: existing work has a different OL key".into()],
-            }));
+    let identity = if req.ol_key.is_some() {
+        let seed = EnglishSeed {
+            title: req.title.clone(),
+            author_name: req.author_name.clone(),
+            isbn: req.isbn_13.clone(),
+            user_confirmed_ol_key: req.ol_key.clone(),
+        };
+        let resolution = state.identity_resolver().resolve(&seed).await;
+        match resolution {
+            IdentityResolution::Confirmed {
+                ol_key,
+                method,
+                score,
+            } => IdentityState::Confirmed {
+                ol_key,
+                method,
+                score: Some(score),
+            },
+            IdentityResolution::Pending {
+                reason,
+                top_candidates,
+            } => IdentityState::Pending {
+                reason,
+                top_candidates,
+            },
+            IdentityResolution::Conflict {
+                existing_work_id, ..
+            } => {
+                let work = state
+                    .work_service()
+                    .get(ctx.user.id, existing_work_id)
+                    .await?;
+                let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None);
+                return Ok(Json(AddWorkResponse {
+                    work: detail,
+                    author_created: false,
+                    messages: vec!["identity conflict: existing work has a different OL key".into()],
+                }));
+            }
+        }
+    } else {
+        use livrarr_domain::identity::PendingReason;
+        IdentityState::Pending {
+            reason: PendingReason::NoCandidates,
+            top_candidates: vec![],
         }
     };
 
@@ -192,7 +236,7 @@ pub async fn add<
             year: req.year,
             cover_url: req.cover_url,
             detail_url: req.detail_url,
-            isbn: None,
+            isbn: req.isbn_13,
             asin: None,
             description: None,
             series_name: None,
@@ -208,6 +252,8 @@ pub async fn add<
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
+        cover_manual: cover_is_manual,
+        skip_sync_enrichment: true,
     };
 
     let result = state.work_service().add(ctx.user.id, candidate).await?;

@@ -17,16 +17,21 @@ fn is_english_work(work: &Work) -> bool {
     work.language.as_deref() == Some("en") || work.language.is_none()
 }
 
-fn eligible_providers(work: &Work) -> Vec<MetadataProvider> {
+pub fn eligible_providers_for_work(work: &Work) -> Vec<MetadataProvider> {
     if is_english_work(work) {
         vec![
             MetadataProvider::Hardcover,
             MetadataProvider::Goodreads,
             MetadataProvider::OpenLibrary,
             MetadataProvider::Audnexus,
+            MetadataProvider::Audible,
         ]
     } else {
-        vec![MetadataProvider::GoogleBooks, MetadataProvider::Audnexus]
+        vec![
+            MetadataProvider::GoogleBooks,
+            MetadataProvider::Audnexus,
+            MetadataProvider::Audible,
+        ]
     }
 }
 
@@ -50,7 +55,7 @@ fn extract_cover_info(
 
 fn media_type_for_provider(provider: MetadataProvider) -> CoverMediaType {
     match provider {
-        MetadataProvider::Audnexus => CoverMediaType::Audiobook,
+        MetadataProvider::Audnexus | MetadataProvider::Audible => CoverMediaType::Audiobook,
         _ => CoverMediaType::Ebook,
     }
 }
@@ -60,7 +65,7 @@ pub async fn fetch_internal_alternatives(
     clients: &HashMap<MetadataProvider, ProviderClient>,
     http: &livrarr_http::HttpClient,
 ) -> Vec<InternalCoverCandidate> {
-    let eligible = eligible_providers(work);
+    let eligible = eligible_providers_for_work(work);
     let mut candidates = Vec::new();
 
     let ctx = EnrichmentContext {
@@ -145,32 +150,37 @@ mod tests {
             language: Some("en".to_string()),
             ..Default::default()
         };
-        let providers = eligible_providers(&work);
-        assert_eq!(providers.len(), 4);
+        let providers = eligible_providers_for_work(&work);
+        assert_eq!(providers.len(), 5);
         assert!(providers.contains(&MetadataProvider::Hardcover));
         assert!(providers.contains(&MetadataProvider::Goodreads));
         assert!(providers.contains(&MetadataProvider::OpenLibrary));
         assert!(providers.contains(&MetadataProvider::Audnexus));
+        assert!(providers.contains(&MetadataProvider::Audible));
     }
 
     #[test]
-    fn eligible_foreign_only_audnexus() {
+    fn eligible_foreign_includes_audible() {
         let work = Work {
             language: Some("ko".to_string()),
             ..Default::default()
         };
-        let providers = eligible_providers(&work);
+        let providers = eligible_providers_for_work(&work);
         assert_eq!(
             providers,
-            vec![MetadataProvider::GoogleBooks, MetadataProvider::Audnexus]
+            vec![
+                MetadataProvider::GoogleBooks,
+                MetadataProvider::Audnexus,
+                MetadataProvider::Audible,
+            ]
         );
     }
 
     #[test]
     fn eligible_no_language_defaults_english() {
         let work = Work::default();
-        let providers = eligible_providers(&work);
-        assert_eq!(providers.len(), 4);
+        let providers = eligible_providers_for_work(&work);
+        assert_eq!(providers.len(), 5);
     }
 
     #[test]

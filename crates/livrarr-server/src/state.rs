@@ -207,6 +207,7 @@ pub struct AppState {
     pub readarr_import_wf: Arc<crate::readarr_import_workflow::LiveReadarrImportWorkflow>,
     pub enrichment_notify: Arc<tokio::sync::Notify>,
     pub cover_service: Arc<LiveCoverService>,
+    pub preadd_cover_service: Arc<livrarr_metadata::preadd_cover_service::LivePreaddCoverService>,
     pub hmac_key: Vec<u8>,
     pub trusted_origins_rebuilder: TrustedOriginsRebuilderImpl,
 }
@@ -313,10 +314,10 @@ use livrarr_handlers::context::{
     HasHmacKey, HasHttpClient, HasIdentityConflictService, HasIdentityResolver, HasImportIoService,
     HasImportService, HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService,
     HasListService, HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
-    HasNotificationService, HasProviderHealth, HasQueueService, HasReadarrImportWorkflow,
-    HasReleaseService, HasRemotePathMappingService, HasRootFolderService, HasRssSync,
-    HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem,
-    HasTagService, HasTrustedOrigins, HasWorkService,
+    HasNotificationService, HasPreaddCoverService, HasProviderHealth, HasQueueService,
+    HasReadarrImportWorkflow, HasReleaseService, HasRemotePathMappingService, HasRootFolderService,
+    HasRssSync, HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime,
+    HasSystem, HasTagService, HasTrustedOrigins, HasWorkService,
 };
 
 impl HasWorkService for AppState {
@@ -631,6 +632,13 @@ impl HasCoverService for AppState {
     type CoverSvc = LiveCoverService;
     fn cover_service(&self) -> &Self::CoverSvc {
         &self.cover_service
+    }
+}
+
+impl HasPreaddCoverService for AppState {
+    type PreaddCoverSvc = livrarr_metadata::preadd_cover_service::LivePreaddCoverService;
+    fn preadd_cover_service(&self) -> &Self::PreaddCoverSvc {
+        &self.preadd_cover_service
     }
 }
 

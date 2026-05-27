@@ -181,6 +181,8 @@ pub struct LookupResult {
     pub detail_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rating: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isbn_13: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

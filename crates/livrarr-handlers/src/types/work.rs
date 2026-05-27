@@ -100,6 +100,10 @@ pub struct AddWorkRequest {
     pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail_url: Option<String>,
+    #[serde(default)]
+    pub cover_manual: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isbn_13: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

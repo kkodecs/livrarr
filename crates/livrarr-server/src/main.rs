@@ -280,6 +280,16 @@ async fn main() {
             queue_cfg(P::GoogleBooks),
         );
 
+        // Audible — always registered. Unauthenticated API, no config needed.
+        builder = builder.add_provider(
+            P::Audible,
+            m::ProviderClient::Audible(m::audible::AudibleCatalogClient::new(
+                http_client.clone(),
+                5 * 60,
+            )),
+            queue_cfg(P::Audible),
+        );
+
         builder = builder.with_applicability_rule(Arc::new(|provider, work| {
             if matches!(
                 m::language::provider_priority(work.language.as_deref()),
@@ -287,7 +297,10 @@ async fn main() {
             ) {
                 return !matches!(provider, P::GoogleBooks);
             }
-            matches!(provider, P::Goodreads | P::Audnexus | P::GoogleBooks)
+            matches!(
+                provider,
+                P::Goodreads | P::Audnexus | P::GoogleBooks | P::Audible
+            )
         }));
 
         let db_arc = Arc::new(db.clone());
@@ -480,6 +493,13 @@ async fn main() {
                 live_metadata_config.clone(),
             )),
         );
+        clients.insert(
+            P::Audible,
+            m::ProviderClient::Audible(m::audible::AudibleCatalogClient::new(
+                http_client.clone(),
+                5 * 60,
+            )),
+        );
         Arc::new(livrarr_server::cover_service::LiveCoverService::new(
             db.clone(),
             http_client.clone(),
@@ -493,7 +513,7 @@ async fn main() {
     let state = AppState {
         db,
         auth_service,
-        http_client,
+        http_client: http_client.clone(),
         http_client_safe,
         config: Arc::new(config.clone()),
         data_dir: data_dir_arc.clone(),
@@ -753,6 +773,46 @@ async fn main() {
         ),
         enrichment_notify: Arc::new(tokio::sync::Notify::new()),
         cover_service,
+        preadd_cover_service: {
+            use livrarr_domain::MetadataProvider as P;
+            use livrarr_metadata as m;
+            let mut preadd_clients = std::collections::HashMap::new();
+            preadd_clients.insert(
+                P::Hardcover,
+                m::ProviderClient::Hardcover(m::HardcoverClient::new(
+                    http_client.clone(),
+                    live_metadata_config.clone(),
+                )),
+            );
+            preadd_clients.insert(
+                P::OpenLibrary,
+                m::ProviderClient::OpenLibrary(m::OpenLibraryClient::new(http_client.clone())),
+            );
+            preadd_clients.insert(
+                P::Goodreads,
+                m::ProviderClient::Goodreads(
+                    m::GoodreadsClient::production(http_client.clone())
+                        .with_live_config(live_metadata_config.clone()),
+                ),
+            );
+            preadd_clients.insert(
+                P::Audnexus,
+                m::ProviderClient::Audnexus(m::AudnexusClient::new(
+                    http_client.clone(),
+                    live_metadata_config.snapshot().audnexus_url.clone(),
+                )),
+            );
+            preadd_clients.insert(
+                P::Audible,
+                m::ProviderClient::Audible(m::audible::AudibleCatalogClient::new(
+                    http_client.clone(),
+                    5 * 60,
+                )),
+            );
+            Arc::new(m::preadd_cover_service::LivePreaddCoverService::new(
+                preadd_clients,
+            ))
+        },
         hmac_key,
         trusted_origins_rebuilder: livrarr_server::state::TrustedOriginsRebuilderImpl(
             trusted_origins_arc.clone(),

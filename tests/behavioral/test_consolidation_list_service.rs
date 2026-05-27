@@ -146,6 +146,8 @@ async fn test_list_preview_existing_works_marked_already_exists() {
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
+        cover_manual: false,
+        skip_sync_enrichment: false,
     };
     svc.work_service.add(USER, candidate).await.unwrap();
 
@@ -291,6 +293,8 @@ async fn test_list_undo_returns_removed_and_skipped_counts() {
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
+        cover_manual: false,
+        skip_sync_enrichment: false,
     };
     let work_result = svc.work_service.add(USER, candidate).await.unwrap();
 
@@ -371,6 +375,8 @@ async fn test_list_undo_already_undone_returns_conflict() {
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
+        cover_manual: false,
+        skip_sync_enrichment: false,
     };
     let work_result = svc.work_service.add(USER, candidate).await.unwrap();
 

@@ -423,7 +423,8 @@ where
                             isbn_13: candidate.fields.isbn.clone(),
                             asin: candidate.fields.asin.clone(),
                             description: candidate.fields.description.clone(),
-                            ..Default::default()
+                            source_provider_json: None,
+                            cover_manual: candidate.cover_manual,
                         },
                         ol_key,
                         anchor_setter,
@@ -451,6 +452,7 @@ where
                     author_created,
                     author_id,
                     candidate.source_provider_data,
+                    candidate.skip_sync_enrichment,
                 )
                 .await
             }
@@ -511,7 +513,8 @@ where
                         isbn_13: candidate.fields.isbn.clone(),
                         asin: candidate.fields.asin.clone(),
                         description: candidate.fields.description.clone(),
-                        ..Default::default()
+                        source_provider_json: None,
+                        cover_manual: candidate.cover_manual,
                     })
                     .await
                     .map_err(WorkServiceError::Db)?;
@@ -562,6 +565,7 @@ where
                     author_created,
                     author_id,
                     candidate.source_provider_data,
+                    candidate.skip_sync_enrichment,
                 )
                 .await
             }
@@ -1022,18 +1026,7 @@ where
             )));
         }
 
-        // Step 1: OpenLibrary (primary). Errors are non-fatal — log and continue
-        // to the next provider so a degraded OL doesn't blank the entire search.
-        match self.lookup_openlibrary(&term, lang).await {
-            Ok(results) if !results.is_empty() => return Ok(results),
-            Ok(_) => tracing::debug!(term = %term, lang = %lang, "OpenLibrary returned empty"),
-            Err(e) => tracing::warn!(
-                term = %term, lang = %lang, error = %e,
-                "OpenLibrary lookup failed; falling back to next provider"
-            ),
-        }
-
-        // Step 2: Google Books (fallback for any language).
+        // Step 1: Google Books (primary).
         match self.lookup_google_books(&term, lang).await {
             Ok(results) if !results.is_empty() => return Ok(results),
             Ok(_) => tracing::debug!(term = %term, lang = %lang, "GoogleBooks returned empty"),
@@ -1043,7 +1036,27 @@ where
             ),
         }
 
-        // Step 3: Goodreads scrape (foreign-language only, as before).
+        // Step 2: OpenLibrary (fallback).
+        match self.lookup_openlibrary(&term, lang).await {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            Ok(_) => tracing::debug!(term = %term, lang = %lang, "OpenLibrary returned empty"),
+            Err(e) => tracing::warn!(
+                term = %term, lang = %lang, error = %e,
+                "OpenLibrary lookup failed; falling back to next provider"
+            ),
+        }
+
+        // Step 3: Hardcover (if token configured).
+        match self.lookup_hardcover(&term, lang).await {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            Ok(_) => tracing::debug!(term = %term, lang = %lang, "Hardcover returned empty"),
+            Err(e) => tracing::warn!(
+                term = %term, lang = %lang, error = %e,
+                "Hardcover lookup failed; falling back to next provider"
+            ),
+        }
+
+        // Step 4: Goodreads scrape (foreign-language only).
         if lang != "en" {
             return self.lookup_goodreads(&term, lang).await;
         }
@@ -1341,6 +1354,7 @@ where
                     language: Some(lang_owned.clone()),
                     detail_url: validated_url,
                     rating: r.rating,
+                    isbn_13: None,
                 }
             })
             .collect();
@@ -1448,6 +1462,7 @@ where
                     language: Some(lang.to_string()),
                     detail_url: None,
                     rating: None,
+                    isbn_13: None,
                 })
             })
             .collect();
@@ -1525,6 +1540,130 @@ where
                     language,
                     detail_url: None,
                     rating: None,
+                    isbn_13: crate::google_books::extract_isbn13(&vi.industry_identifiers),
+                })
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    async fn lookup_hardcover(
+        &self,
+        term: &str,
+        _lang: &str,
+    ) -> Result<Vec<LookupResult>, WorkServiceError> {
+        let cfg = match self.db.get_metadata_config().await {
+            Ok(c) => c,
+            Err(_) => return Ok(vec![]),
+        };
+
+        if !cfg.hardcover_enabled {
+            return Ok(vec![]);
+        }
+
+        let token = match cfg
+            .hardcover_api_token
+            .as_deref()
+            .map(|t| {
+                t.trim()
+                    .trim_start_matches("Bearer ")
+                    .trim_start_matches("bearer ")
+            })
+            .filter(|t| !t.is_empty())
+        {
+            Some(t) => t.to_string(),
+            None => return Ok(vec![]),
+        };
+
+        let query = r#"query SearchBooks($query: String!) {
+            search(query: $query, query_type: "books", per_page: 15) {
+                results
+            }
+        }"#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": {"query": term}
+        });
+
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| WorkServiceError::Enrichment(format!("HC serialize: {e}")))?;
+
+        let resp = self
+            .http
+            .fetch(livrarr_domain::services::FetchRequest {
+                url: crate::hardcover::HARDCOVER_API_URL.to_string(),
+                method: livrarr_domain::services::HttpMethod::Post,
+                headers: vec![
+                    ("Authorization".into(), format!("Bearer {token}")),
+                    ("Content-Type".into(), "application/json".into()),
+                ],
+                body: Some(body_bytes),
+                timeout: std::time::Duration::from_secs(10),
+                rate_bucket: livrarr_domain::services::RateBucket::Hardcover,
+                max_body_bytes: 2 * 1024 * 1024,
+                anti_bot_check: false,
+                user_agent: livrarr_domain::services::UserAgentProfile::Server,
+            })
+            .await
+            .map_err(|e| WorkServiceError::Enrichment(format!("HC search: {e}")))?;
+
+        if resp.status >= 400 {
+            return Err(WorkServiceError::Enrichment(format!(
+                "HC search HTTP {}",
+                resp.status
+            )));
+        }
+
+        let data: serde_json::Value = serde_json::from_slice(&resp.body)
+            .map_err(|e| WorkServiceError::Enrichment(format!("HC parse: {e}")))?;
+
+        let hits = data
+            .pointer("/data/search/results/hits")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let results: Vec<LookupResult> = hits
+            .iter()
+            .filter_map(|hit| {
+                let doc = hit.get("document")?;
+                let title = doc.get("title")?.as_str()?.to_string();
+                let author_name = doc
+                    .get("author_names")
+                    .and_then(|a| a.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                let isbn_13 = doc.get("isbns").and_then(|v| v.as_array()).and_then(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .find(|s| s.len() == 13 && (s.starts_with("978") || s.starts_with("979")))
+                        .map(|s| s.to_string())
+                });
+                let cover_url = doc
+                    .pointer("/image/url")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                Some(LookupResult {
+                    ol_key: None,
+                    title,
+                    author_name,
+                    author_ol_key: None,
+                    year: None,
+                    cover_url,
+                    description: None,
+                    series_name: None,
+                    series_position: None,
+                    source: Some("hardcover".into()),
+                    source_type: Some("search".into()),
+                    language: None,
+                    detail_url: None,
+                    rating: None,
+                    isbn_13,
                 })
             })
             .collect();
@@ -1655,9 +1794,9 @@ where
         author_created: bool,
         author_id: Option<i64>,
         source_provider_data: Option<SourceProviderData>,
+        skip_sync_enrichment: bool,
     ) -> Result<AddWorkResult, WorkServiceError> {
         // Phase 1: synchronous cover download within 3s budget (REQ-010).
-        // Downloads the cover to disk immediately so the UI shows an image right away.
         let is_user_initiated = source_provider_data.is_none();
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
         let phase1_mtime = crate::cover::fetch_phase1_cover(
@@ -1689,6 +1828,30 @@ where
                     0,
                 )
                 .await;
+        }
+
+        // Skip sync enrichment: return Unenriched immediately (REQ-009).
+        // Background retry job will pick up works with Unenriched status.
+        // Readarr imports (source_provider_data.is_some()) still get sync enrichment.
+        if skip_sync_enrichment && source_provider_data.is_none() {
+            let updated_work = self
+                .db
+                .get_work(user_id, work.id)
+                .await
+                .map_err(WorkServiceError::Db)?;
+            let cover_mtime =
+                crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
+                    crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
+                });
+            return Ok(AddWorkResult {
+                work: updated_work,
+                created: true,
+                author_created,
+                author_id,
+                messages: vec![],
+                cover_mtime,
+                enrichment_status: EnrichmentStatus::Unenriched,
+            });
         }
 
         let enrichment_status = self

@@ -904,6 +904,7 @@ impl SecondaryApiImpl {
                 isbn_13: None,
                 asin: None,
                 description: None,
+                cover_manual: false,
             })
             .await
             .unwrap();
@@ -974,6 +975,7 @@ impl SecondaryApiImpl {
                 isbn_13: None,
                 asin: None,
                 description: None,
+                cover_manual: false,
             })
             .await
             .unwrap();

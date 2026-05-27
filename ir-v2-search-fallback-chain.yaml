@@ -1,0 +1,715 @@
+# IR v2 — Operational
+# Extends IR v1 with pseudocode, annotations, conditions, and TDD directives.
+# Does NOT duplicate structural content from IR v1.
+
+metadata:
+  feature: search-fallback-chain
+  stage: v2-operational
+  spec_ref: spec-search-fallback-chain.md
+  ir_v1_ref: ir-v1-search-fallback-chain.yaml
+  version: 3
+
+modules:
+  # =========================================================================
+  # Module 1: Domain extensions
+  # =========================================================================
+  - name: livrarr-domain-extensions
+    responsibility: "Extend domain types for Audible provider, cover_manual, PreaddCoverService, ISBN on LookupResult, shared helpers"
+    dependencies: []
+
+    capability_survey:
+      - capability: "MetadataProvider enum extension"
+        existing_source: "crates/livrarr-domain/src/lib.rs:902"
+        reuse_decision: reuse
+        rationale: "Add variant to existing enum"
+      - capability: "RateBucket enum extension"
+        existing_source: "crates/livrarr-domain/src/services/http.rs:12"
+        reuse_decision: reuse
+        rationale: "Add variant to existing enum"
+      - capability: "WorkService trait extension"
+        existing_source: "crates/livrarr-domain/src/services/work.rs:214"
+        reuse_decision: reuse
+        rationale: "Add set_cover_manual method to existing trait"
+      - capability: "PreaddCoverService trait"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "New trait following existing Has* pattern"
+      - capability: "Cover proxy URL generation"
+        existing_source: "crates/livrarr-handlers/src/work.rs:proxy_cover_url (private)"
+        reuse_decision: rewrite
+        rationale: "Extract to livrarr-domain as shared helper — both handlers and metadata need it"
+      - capability: "ISBN normalization"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "Strip hyphens/spaces from ISBN before use in provider URLs"
+
+    public_api:
+      functions:
+        - name: "PreaddCoverService::fetch_cover_alternatives"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: title, type: "&str" }
+            - { name: author, type: "&str" }
+            - { name: lang, type: "&str" }
+            - { name: isbn_13, type: "Option<&str>" }
+          output: "Result<Vec<PreaddCoverCandidate>, PreaddCoverError>"
+          errors: [Provider, Timeout]
+          pseudocode:
+            - "trait method — no default implementation"
+            - "implementation in livrarr-metadata (Module 6: LivePreaddCoverService)"
+          call_annotations:
+            - { call: "LivePreaddCoverService::fetch_cover_alternatives", type: NEW, target: "crates/livrarr-metadata (Module 6)" }
+          tdd_directives:
+            - "test: PreaddCoverCandidate serializes to camelCase JSON with proxy_url field"
+
+        - name: "proxy_cover_url (shared helper)"
+          inputs:
+            - { name: raw_url, type: "&str" }
+          output: "String"
+          errors: []
+          pseudocode:
+            - "1. If url starts with '/': return as-is"
+            - "2. Return format!('/api/v1/coverproxy?url={}', urlencoding::encode(raw_url))"
+          call_annotations:
+            - { call: "urlencoding::encode", type: EXISTING, target: "urlencoding (workspace dep)" }
+          tdd_directives:
+            - "test: external URL gets proxied"
+            - "test: URL starting with / returned unchanged"
+
+        - name: "normalize_isbn (shared helper)"
+          inputs:
+            - { name: isbn, type: "&str" }
+          output: "String"
+          errors: []
+          pseudocode:
+            - "1. Strip all non-alphanumeric characters (hyphens, spaces, etc.)"
+            - "2. Return the cleaned string"
+          call_annotations:
+            - { call: "char::is_alphanumeric", type: STDLIB, target: "std" }
+          tdd_directives:
+            - "test: '978-0-441-01359-3' → '9780441013593'"
+            - "test: '978 0441013593' → '9780441013593'"
+            - "test: already clean ISBN unchanged"
+
+  # =========================================================================
+  # Module 2: Audible provider client
+  # =========================================================================
+  - name: audible-provider
+    responsibility: "Audible catalog API client + enrichment provider"
+    dependencies: [livrarr-domain, livrarr-http]
+
+    capability_survey:
+      - capability: "Audible catalog search"
+        existing_source: "crates/livrarr-metadata/src/audible.rs (prototype)"
+        reuse_decision: reuse
+        rationale: "Prototype client has typed structs + search/lookup functions"
+      - capability: "Candidate scoring"
+        existing_source: "crates/livrarr-domain/src/text_norm.rs:title_tokens, author_tokens, jaccard"
+        reuse_decision: reuse
+        rationale: "Use existing text_norm primitives via shared scoring helper"
+      - capability: "NormalizedWorkDetail mapping"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "Audible fields differ from all other providers"
+
+    public_api:
+      functions:
+        - name: "score_provider_candidates (shared helper)"
+          inputs:
+            - { name: seed_title, type: "&str" }
+            - { name: seed_author, type: "&str" }
+            - { name: candidates, type: "&[(String, String)]" }
+            - { name: min_title_jaccard, type: f64 }
+            - { name: min_author_overlap, type: u32 }
+          output: "Option<usize>"
+          errors: []
+          pseudocode:
+            - "1. Compute seed_title_tokens = text_norm::title_tokens(seed_title)"
+            - "2. Compute seed_author_tokens = text_norm::author_tokens(seed_author)"
+            - "3. For each (candidate_title, candidate_author) in candidates:"
+            - "   a. hit_title_tokens = text_norm::title_tokens(candidate_title)"
+            - "   b. title_jaccard = text_norm::jaccard(&seed_title_tokens, &hit_title_tokens)"
+            - "   c. hit_author_tokens = text_norm::author_tokens(candidate_author)"
+            - "   d. author_overlap = seed_author_tokens.intersection(&hit_author_tokens).count()"
+            - "   e. If title_jaccard >= min_title_jaccard AND author_overlap >= min_author_overlap: record (index, jaccard, overlap)"
+            - "4. Sort by jaccard desc, then overlap desc"
+            - "5. Return first index, or None"
+          call_annotations:
+            - { call: "text_norm::title_tokens", type: EXISTING, target: "crates/livrarr-domain/src/text_norm.rs" }
+            - { call: "text_norm::author_tokens", type: EXISTING, target: "crates/livrarr-domain/src/text_norm.rs" }
+            - { call: "text_norm::jaccard", type: EXISTING, target: "crates/livrarr-domain/src/text_norm.rs" }
+          decisions:
+            - key: "Shared helper instead of per-provider scoring"
+              value: "Generic over (title, author) pairs"
+              rationale: "GB, Audible, and HC discovery all need the same Jaccard+overlap scoring. Candidates provide title+author as string pairs; the helper handles tokenization."
+          tdd_directives:
+            - "test: exact match returns Some(0)"
+            - "test: best candidate selected by jaccard then overlap"
+            - "test: all below threshold returns None"
+            - "test: empty candidates returns None"
+            - "test: missing author still scores on title"
+
+        - name: "AudibleCatalogClient::fetch"
+          inputs:
+            - { name: work, type: "&Work" }
+            - { name: ctx, type: "&EnrichmentContext" }
+          output: "ProviderOutcome<NormalizedWorkDetail>"
+          errors: [WillRetry, NotFound]
+          pseudocode:
+            - "1. If work.asin is populated, call lookup_audible_by_asin(http, asin)"
+            - "   - On Ok(Some(product)):"
+            - "     - Build candidate pair: (product.title, first author name)"
+            - "     - Score via score_provider_candidates(work.title, work.author_name, [(title, author)], 0.75, 1)"
+            - "     - If match: map_audible_to_detail(product), return Success"
+            - "     - If no match: log mismatch, fall through to search"
+            - "   - On Ok(None): fall through to search"
+            - "   - On Err: return WillRetry(ServerError, now + retry_backoff)"
+            - "2. Call search_audible(http, work.title, work.author_name, 10)"
+            - "   - On Err: return WillRetry(ServerError, now + retry_backoff)"
+            - "   - On Ok(empty): return NotFound"
+            - "3. Build candidate pairs: Vec<(title, author)> from products"
+            - "4. Score via score_provider_candidates(work.title, work.author_name, &pairs, 0.75, 1)"
+            - "5. If best candidate: map_audible_to_detail(&products[idx]), return Success"
+            - "6. Otherwise: return NotFound"
+          call_annotations:
+            - { call: "lookup_audible_by_asin", type: EXISTING, target: "crates/livrarr-metadata/src/audible.rs" }
+            - { call: "search_audible", type: EXISTING, target: "crates/livrarr-metadata/src/audible.rs" }
+            - { call: "score_provider_candidates", type: NEW, target: "shared helper (this module)" }
+            - { call: "map_audible_to_detail", type: NEW, target: "crates/livrarr-metadata/src/provider_client.rs" }
+          tdd_directives:
+            - "test: ASIN direct lookup returns Success when match is good"
+            - "test: ASIN lookup miss falls through to title+author search"
+            - "test: ASIN lookup title mismatch falls through to search"
+            - "test: title+author search returns best-scored candidate"
+            - "test: no candidates above threshold returns NotFound"
+            - "test: network error returns WillRetry"
+
+        - name: "map_audible_to_detail"
+          inputs:
+            - { name: product, type: "&AudibleProduct" }
+          output: "NormalizedWorkDetail"
+          errors: []
+          pseudocode:
+            - "1. title = product.title.clone()"
+            - "2. author_name = product.authors.as_ref().and_then(|a| a.first()).and_then(|a| a.name.clone())"
+            - "3. narrator = product.narrators.as_ref().map(|ns| ns.iter().filter_map(|n| n.name.as_deref()).map(String::from).collect::<Vec<_>>()).filter(|v| !v.is_empty())"
+            - "4. duration_seconds = product.runtime_length_min.map(|m| m * 60)"
+            - "5. series: product.series.as_ref().and_then(|s| s.first()) → extract:"
+            - "   series_name = entry.title.clone()"
+            - "   series_position = entry.sequence.as_deref().and_then(|s| s.parse::<f64>().ok())"
+            - "6. cover_url = product.product_images.as_ref().and_then(|i| i.large.as_ref().or(i.medium.as_ref())).cloned()"
+            - "   If starts with 'http://': replace with 'https://'"
+            - "7. publisher = product.publisher_name.clone()"
+            - "8. asin = product.asin.clone()"
+            - "9. language = product.language.as_deref().map(normalize_language)"
+            - "10. All other NormalizedWorkDetail fields None/default"
+          call_annotations:
+            - { call: "normalize_language", type: EXISTING, target: "crates/livrarr-domain/src/lib.rs" }
+          tdd_directives:
+            - "test: maps all fields from canned AudibleProduct JSON"
+            - "test: handles None authors, narrators, series, images (no panic)"
+            - "test: duration converts minutes to seconds"
+            - "test: http:// cover URL upgraded to https://"
+            - "test: empty narrators list → narrator = None (not empty vec)"
+
+  # =========================================================================
+  # Module 3: ISBN bridge
+  # =========================================================================
+  - name: isbn-bridge
+    responsibility: "ISBN-first lookup in OL, HC, GR with title+author fallback"
+    dependencies: [livrarr-domain, livrarr-http]
+
+    capability_survey:
+      - capability: "OL ISBN lookup"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "New: /isbn/{isbn}.json → extract work key → query_ol_detail"
+      - capability: "OL title+author search for enrichment"
+        existing_source: "crates/livrarr-metadata/src/openlibrary.rs + work_service.rs:lookup_openlibrary"
+        reuse_decision: wrap
+        rationale: "Reuse OL search.json pattern for enrichment fallback within OL client"
+      - capability: "HC ISBN search"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "New query_hardcover_by_isbn — ISBN as query, verify ISBN in hit isbns list"
+      - capability: "GR ISBN search"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "New search_goodreads_by_query — raw query string"
+
+    public_api:
+      functions:
+        - name: "OpenLibraryClient::fetch (modified)"
+          inputs:
+            - { name: work, type: "&Work" }
+            - { name: ctx, type: "&EnrichmentContext" }
+          output: "ProviderOutcome<NormalizedWorkDetail>"
+          errors: [WillRetry, NotFound]
+          pseudocode:
+            - "1. If work.isbn_13 is populated:"
+            - "   a. normalized = normalize_isbn(work.isbn_13)"
+            - "   b. Fetch /isbn/{normalized}.json via http"
+            - "   c. If 200: extract 'works' array → first → strip '/works/' → ol_work_key"
+            - "   d. Call query_ol_detail(http, ol_work_key)"
+            - "   e. If Success: return Success"
+            - "   f. If error/NotFound: log 'OL ISBN miss', fall through"
+            - "2. If work.ol_key is populated:"
+            - "   a. Call query_ol_detail(http, ol_key) (existing behavior)"
+            - "   b. If Success: return Success"
+            - "   c. If error: log, fall through"
+            - "3. Title+author search fallback:"
+            - "   a. Build OL search URL: search.json?q={title}+{author}&fields=key,title,author_name"
+            - "   b. Fetch and parse results"
+            - "   c. Score via score_provider_candidates(work.title, work.author_name, pairs, 0.75, 1)"
+            - "   d. If match: extract ol_key, call query_ol_detail(http, ol_key)"
+            - "   e. Return result (Success or NotFound)"
+          call_annotations:
+            - { call: "normalize_isbn", type: NEW, target: "livrarr-domain shared helper" }
+            - { call: "http.get(/isbn/{isbn}.json)", type: NEW, target: "inline" }
+            - { call: "query_ol_detail", type: EXISTING, target: "crates/livrarr-metadata/src/openlibrary.rs" }
+            - { call: "http.get(search.json)", type: NEW, target: "inline (pattern from lookup_openlibrary)" }
+            - { call: "score_provider_candidates", type: NEW, target: "shared helper (Module 2)" }
+          forbidden_behaviors:
+            - "Must not return NotFound without trying all three paths (ISBN → ol_key → title+author)"
+          tdd_directives:
+            - "test: ISBN → ISBN lookup succeeds → Success"
+            - "test: ISBN → ISBN 404 → ol_key succeeds → Success"
+            - "test: ISBN → ISBN 404 → no ol_key → title+author succeeds → Success"
+            - "test: all three fail → NotFound"
+            - "test: no ISBN, has ol_key → existing behavior"
+            - "test: no ISBN, no ol_key → title+author search"
+            - "test: ISBN with hyphens is normalized before URL"
+
+        - name: "HardcoverClient::fetch (modified)"
+          inputs:
+            - { name: work, type: "&Work" }
+            - { name: ctx, type: "&EnrichmentContext" }
+          output: "ProviderOutcome<NormalizedWorkDetail>"
+          errors: [WillRetry, NotFound, NotConfigured]
+          pseudocode:
+            - "1. Check hardcover_enabled + token (existing guard)"
+            - "2. If work.isbn_13 is populated:"
+            - "   a. normalized = normalize_isbn(work.isbn_13)"
+            - "   b. Call query_hardcover_by_isbn(http, normalized, token, cfg)"
+            - "      NEW function that:"
+            - "      i.   Sends ISBN as GraphQL search query"
+            - "      ii.  Does NOT apply title exact-match filter"
+            - "      iii. Verifies ISBN appears in hit's 'isbns' array"
+            - "      iv.  Returns first verified hit (or None)"
+            - "   c. If hit found: proceed with existing edition fetch + mapping"
+            - "   d. If no hit: fall through"
+            - "3. Existing: query_hardcover(http, work.title, work.author_name, token, cfg)"
+          call_annotations:
+            - { call: "normalize_isbn", type: NEW, target: "livrarr-domain shared helper" }
+            - { call: "query_hardcover_by_isbn", type: NEW, target: "crates/livrarr-metadata/src/hardcover.rs" }
+            - { call: "query_hardcover", type: EXISTING, target: "crates/livrarr-metadata/src/hardcover.rs" }
+            - { call: "fetch_hardcover_editions", type: EXISTING, target: "crates/livrarr-metadata/src/hardcover.rs" }
+          tdd_directives:
+            - "test: ISBN → HC finds match with ISBN in isbns → Success"
+            - "test: ISBN → HC no match → falls back to title+author"
+            - "test: no ISBN → existing behavior"
+            - "test: HC not configured → NotConfigured"
+
+        - name: "GoodreadsClient::fetch (modified)"
+          inputs:
+            - { name: work, type: "&Work" }
+            - { name: ctx, type: "&EnrichmentContext" }
+          output: "ProviderOutcome<NormalizedWorkDetail>"
+          errors: [WillRetry, NotFound]
+          pseudocode:
+            - "1. If work.gr_key is populated: try direct detail URL lookup (existing)"
+            - "   - If Success: return"
+            - "2. If work.isbn_13 is populated (and step 1 didn't succeed):"
+            - "   a. normalized = normalize_isbn(work.isbn_13)"
+            - "   b. Call search_goodreads_by_query(http, base_url, format!('isbn:{}', normalized))"
+            - "      NEW function: takes raw query string, builds URL: {base}/search?q={query}"
+            - "   c. If results: proceed to detail fetch + LLM disambiguation"
+            - "   d. If empty: fall through"
+            - "3. Existing LLM-based key resolution (if LLM configured):"
+            - "   - LLM may resolve gr_key from context — existing path"
+            - "4. Title+author search: search_goodreads(http, base_url, title, author)"
+            - "   - LLM disambiguation as before"
+          call_annotations:
+            - { call: "normalize_isbn", type: NEW, target: "livrarr-domain shared helper" }
+            - { call: "search_goodreads_by_query", type: NEW, target: "crates/livrarr-metadata/src/goodreads.rs" }
+            - { call: "search_goodreads", type: EXISTING, target: "crates/livrarr-metadata/src/goodreads.rs" }
+            - { call: "fetch_goodreads_detail", type: EXISTING, target: "crates/livrarr-metadata/src/goodreads.rs" }
+          decisions:
+            - key: "Full GR resolution chain order"
+              value: "gr_key direct → ISBN search → LLM key resolution → title+author search"
+              rationale: "gr_key is most precise, ISBN is exact, LLM key is existing path, title+author is broadest fallback"
+          tdd_directives:
+            - "test: has gr_key → direct lookup, ISBN not tried"
+            - "test: no gr_key, has ISBN → ISBN search finds result"
+            - "test: no gr_key, has ISBN → ISBN empty → falls back to title+author"
+            - "test: no gr_key, no ISBN → title+author search as before"
+
+  # =========================================================================
+  # Module 4: GB-first discovery
+  # =========================================================================
+  - name: gb-first-discovery
+    responsibility: "GB-first fallback chain in WorkService::lookup"
+    dependencies: [livrarr-domain, livrarr-http]
+
+    capability_survey:
+      - capability: "GB search"
+        existing_source: "crates/livrarr-metadata/src/work_service.rs:lookup_google_books"
+        reuse_decision: reuse
+        rationale: "Existing, reorder to first, add ISBN extraction"
+      - capability: "OL search"
+        existing_source: "crates/livrarr-metadata/src/work_service.rs:lookup_openlibrary"
+        reuse_decision: reuse
+        rationale: "Existing, becomes second"
+      - capability: "HC discovery search"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "New: raw HC GraphQL search returning multiple LookupResults without exact-match filtering"
+      - capability: "ISBN extraction"
+        existing_source: "crates/livrarr-metadata/src/google_books.rs:extract_isbn13"
+        reuse_decision: reuse
+        rationale: "Existing"
+
+    public_api:
+      functions:
+        - name: "WorkServiceImpl::lookup (modified)"
+          inputs:
+            - { name: req, type: LookupRequest }
+          output: "Result<Vec<LookupResult>, WorkServiceError>"
+          errors: [Enrichment]
+          pseudocode:
+            - "1. Trim term, resolve default lang from config"
+            - "2. GB (primary) → OL → HC → GR (foreign only)"
+            - "   Each step: match result, return on non-empty, log+fallthrough on empty/error"
+            - "3. Return Ok(vec![]) if all fail"
+          call_annotations:
+            - { call: "self.lookup_google_books", type: EXISTING, target: "work_service.rs" }
+            - { call: "self.lookup_openlibrary", type: EXISTING, target: "work_service.rs" }
+            - { call: "self.lookup_hardcover", type: NEW, target: "work_service.rs" }
+            - { call: "self.lookup_goodreads", type: EXISTING, target: "work_service.rs" }
+          tdd_directives:
+            - "test: GB returns results → returns immediately"
+            - "test: GB empty → OL returns → OL results"
+            - "test: GB+OL empty → HC returns → HC results"
+            - "test: all empty → empty vec"
+            - "test: GB error → falls through to OL"
+
+        - name: "WorkServiceImpl::lookup_google_books (modified)"
+          inputs:
+            - { name: term, type: "&str" }
+            - { name: lang, type: "&str" }
+          output: "Result<Vec<LookupResult>, WorkServiceError>"
+          errors: [Enrichment]
+          pseudocode:
+            - "1. Existing: fetch_gb_volumes + map to LookupResult"
+            - "2. NEW: extract isbn_13 via extract_isbn13(&vol.volume_info.industry_identifiers)"
+            - "3. Set LookupResult.isbn_13 = extracted ISBN"
+            - "4. Set LookupResult.source = Some('google_books')"
+          call_annotations:
+            - { call: "google_books::extract_isbn13", type: EXISTING, target: "google_books.rs" }
+          tdd_directives:
+            - "test: GB result with ISBN-13 → isbn_13 populated"
+            - "test: GB result with ISBN-10 only → isbn_13 via conversion"
+            - "test: no identifiers → isbn_13 is None"
+
+        - name: "WorkServiceImpl::lookup_hardcover"
+          inputs:
+            - { name: term, type: "&str" }
+            - { name: lang, type: "&str" }
+          output: "Result<Vec<LookupResult>, WorkServiceError>"
+          errors: [Enrichment]
+          pseudocode:
+            - "1. Read metadata config, check hardcover_enabled + token"
+            - "   If not configured: return Ok(vec![]) (silent skip)"
+            - "2. Send raw GraphQL search query (same query shape as query_hardcover)"
+            - "   but do NOT apply Tier 1 exact title match filter"
+            - "3. Parse search response hits directly"
+            - "4. For each hit document:"
+            - "   a. title = doc.title"
+            - "   b. author_name = first author from doc.author_names"
+            - "   c. isbn_13 = first ISBN-13 from doc.isbns (filter len==13, starts with 978/979)"
+            - "   d. cover_url from doc.image if available"
+            - "   e. Map to LookupResult { source: 'hardcover', isbn_13, ... }"
+            - "5. Return mapped results (may be empty)"
+          call_annotations:
+            - { call: "self.db.get_metadata_config", type: EXISTING, target: "ConfigDb" }
+            - { call: "self.http_client.post (GraphQL)", type: EXISTING, target: "livrarr_http::HttpClient" }
+          decisions:
+            - key: "Raw search without exact-match filter"
+              value: "Parse hits directly, no query_hardcover reuse"
+              rationale: "query_hardcover applies title exact-match (doc_title != title_lower → skip) which kills discovery. Discovery needs multiple fuzzy results."
+            - key: "Silent skip when not configured"
+              value: "Return empty vec, not error"
+              rationale: "Discovery chain degrades gracefully"
+          tdd_directives:
+            - "test: HC configured → returns mapped results with isbn_13"
+            - "test: HC not configured → empty vec"
+            - "test: HC error → Err propagated for fallback"
+
+  # =========================================================================
+  # Module 5a: Async add (handler layer)
+  # =========================================================================
+  - name: async-add-handler
+    responsibility: "Handler-layer changes for async add"
+    dependencies: [livrarr-domain]
+
+    capability_survey:
+      - capability: "AddWorkRequest DTO extension"
+        existing_source: "crates/livrarr-handlers/src/types/work.rs:92"
+        reuse_decision: reuse
+        rationale: "Add cover_manual and isbn_13 fields"
+
+    public_api:
+      functions:
+        - name: "add handler (modified)"
+          inputs:
+            - { name: req, type: "Json<AddWorkRequest>" }
+            - { name: ctx, type: AuthContext }
+          output: "Json<AddWorkResponse>"
+          errors: [ApiError]
+          pseudocode:
+            - "1. Extract cover_is_manual = req.cover_manual && req.cover_url.is_some()"
+            - "2. Build EnglishSeed with seed.isbn = req.isbn_13.clone()"
+            - "3. Resolve identity (existing)"
+            - "4. Build EnglishWorkCandidate with:"
+            - "   - fields.isbn = req.isbn_13"
+            - "   - cover_manual = cover_is_manual"
+            - "   - skip_sync_enrichment = source_provider_data.is_none()"
+            - "5. Call state.work_service().add(user_id, candidate).await"
+            - "   - cover_manual written atomically in CREATE INSERT (no race)"
+            - "   - When skip_sync_enrichment: returns with enrichment_status = Unenriched"
+            - "6. Existing background spawns (bibliography, GR author)"
+            - "7. Existing background enrichment spawn (tokio::spawn)"
+            - "   - Creates provider_retry_state rows (durable)"
+            - "   - If spawn doesn't run (crash), the existing background retry job"
+            - "     finds works with status=Unenriched and no retry state, and enqueues them"
+            - "     (see wiki/architecture/metadata-pathway.md: Background Retry Job)"
+            - "8. Return AddWorkResponse"
+          call_annotations:
+            - { call: "state.work_service().add", type: EXISTING, target: "WorkService" }
+          decisions:
+            - key: "cover_manual in atomic INSERT, not post-add"
+              value: "Passed through EnglishWorkCandidate → CreateWorkDbRequest → INSERT"
+              rationale: "Post-add set_cover_manual has a race with background enrichment"
+            - key: "Durability via existing retry job, not new enqueue mechanism"
+              value: "Rely on background retry job's Unenriched scan"
+              rationale: "The existing retry job already finds unenriched works with no retry state and runs enrichment. This is the documented restart recovery path. Adding a new durable enqueue would duplicate existing infrastructure."
+          tdd_directives:
+            - "test: cover_manual=true → work.cover_manual=true in DB after add"
+            - "test: cover_manual=false → work.cover_manual=false"
+            - "test: isbn_13 from request → work.isbn_13 in DB"
+            - "test: isbn_13 from request → EnglishSeed.isbn populated for identity resolver"
+            - "test: user-initiated add returns Unenriched status"
+
+  # =========================================================================
+  # Module 5b: Async add (service layer)
+  # =========================================================================
+  - name: async-add-service
+    responsibility: "Service-layer changes for async add"
+    dependencies: [livrarr-domain, livrarr-db]
+
+    capability_survey:
+      - capability: "Skip sync enrichment"
+        existing_source: "crates/livrarr-metadata/src/work_service.rs:finish_created_work"
+        reuse_decision: reuse
+        rationale: "Add skip_sync_enrichment parameter"
+      - capability: "cover_manual in CreateWorkDbRequest"
+        existing_source: "crates/livrarr-db/src/lib.rs:CreateWorkDbRequest"
+        reuse_decision: reuse
+        rationale: "Add field, write in same INSERT"
+
+    public_api:
+      functions:
+        - name: "WorkServiceImpl::finish_created_work (modified)"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: work, type: Work }
+            - { name: author_created, type: bool }
+            - { name: author_id, type: "Option<i64>" }
+            - { name: source_provider_data, type: "Option<SourceProviderData>" }
+            - { name: skip_sync_enrichment, type: bool }
+          output: "Result<AddWorkResult, WorkServiceError>"
+          errors: [Db]
+          pseudocode:
+            - "1. Phase 1 cover download (existing, 3s budget)"
+            - "2. Cover trust assignment (existing)"
+            - "3. If skip_sync_enrichment AND source_provider_data.is_none():"
+            - "   a. Reload work from DB (captures phase-1 cover metadata writes)"
+            - "   b. Compute cover_mtime from cover files"
+            - "   c. Return AddWorkResult with enrichment_status = Unenriched"
+            - "4. ELSE: existing behavior (run_unified_enrichment, reload, return)"
+          call_annotations:
+            - { call: "crate::cover::fetch_phase1_cover", type: EXISTING, target: "cover.rs" }
+            - { call: "self.db.get_work", type: EXISTING, target: "WorkDb" }
+            - { call: "self.run_unified_enrichment", type: EXISTING, target: "work_service.rs" }
+          decisions:
+            - key: "Always reload work from DB, even on skip path"
+              value: "self.db.get_work after phase-1 cover"
+              rationale: "Phase-1 cover download may have written cover metadata. Returning the original work object would miss those updates."
+            - key: "Readarr imports still get sync enrichment"
+              value: "Skip only when no source_provider_data"
+              rationale: "Readarr imports have rich source data that should merge immediately"
+          tdd_directives:
+            - "test: skip=true, no source data → Unenriched, enrichment not called, work reloaded from DB"
+            - "test: skip=true, has source data → enrichment runs (Readarr path)"
+            - "test: skip=false → existing behavior"
+
+  # =========================================================================
+  # Module 6: Pre-add cover search
+  # =========================================================================
+  - name: preadd-covers
+    responsibility: "PreaddCoverService impl + handler"
+    dependencies: [livrarr-domain]
+
+    capability_survey:
+      - capability: "Cover alternatives from providers"
+        existing_source: "crates/livrarr-metadata/src/cover_alternatives.rs:fetch_internal_alternatives"
+        reuse_decision: wrap
+        rationale: "Similar fan-out pattern, operates on title+author instead of Work"
+      - capability: "Cover proxy URL generation"
+        existing_source: "livrarr-domain::proxy_cover_url (Module 1 shared helper)"
+        reuse_decision: reuse
+        rationale: "Shared helper in domain"
+      - capability: "ISBN cover resolution"
+        existing_source: "crates/livrarr-metadata/src/cover.rs:resolve_cover_english, resolve_cover_foreign"
+        reuse_decision: reuse
+        rationale: "Existing ISBN→cover functions"
+
+    public_api:
+      functions:
+        - name: "LivePreaddCoverService::fetch_cover_alternatives"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: title, type: "&str" }
+            - { name: author, type: "&str" }
+            - { name: lang, type: "&str" }
+            - { name: isbn_13, type: "Option<&str>" }
+          output: "Result<Vec<PreaddCoverCandidate>, PreaddCoverError>"
+          errors: [Provider, Timeout]
+          pseudocode:
+            - "1. Build temporary Work::default() with title, author_name, language, isbn_13 overrides"
+            - "2. Determine eligible providers (English: HC,OL,GR,Audnexus,Audible; Foreign: GB,Audnexus,Audible)"
+            - "3. Fan out to eligible provider clients in parallel (tokio::time::timeout 10s per provider)"
+            - "   - Per-provider timeout: log and omit (NOT error)"
+            - "   - Per-provider error: log and omit (NOT error)"
+            - "4. For each Success with cover_url:"
+            - "   a. proxy_url = domain::proxy_cover_url(&raw_url)"
+            - "   b. Create PreaddCoverCandidate { proxy_url, source, title, author_name }"
+            - "5. If isbn_13: fetch ISBN covers via resolve_cover_english / resolve_cover_foreign"
+            - "   a. Convert those to proxy URLs too"
+            - "6. Deduplicate by proxy_url"
+            - "7. Return Ok(candidates) — always Ok, partial results on provider failures"
+          call_annotations:
+            - { call: "provider_client.fetch", type: EXISTING, target: "provider_client.rs" }
+            - { call: "domain::proxy_cover_url", type: NEW, target: "livrarr-domain (Module 1)" }
+            - { call: "resolve_cover_english", type: EXISTING, target: "crates/livrarr-metadata/src/cover.rs" }
+            - { call: "resolve_cover_foreign", type: EXISTING, target: "crates/livrarr-metadata/src/cover.rs" }
+          decisions:
+            - key: "Always Ok, never Err for partial failures"
+              value: "Log and omit failed providers"
+              rationale: "One slow/failing provider should not blank the cover picker"
+          tdd_directives:
+            - "test: returns covers from multiple providers"
+            - "test: all URLs are proxy URLs (/api/v1/coverproxy...)"
+            - "test: one provider timeout → others still returned"
+            - "test: one provider error → others still returned"
+            - "test: all fail → Ok(empty vec)"
+            - "test: deduplicates identical URLs"
+            - "test: isbn_13 provided → ISBN covers included"
+
+        - name: "preadd_cover_alternatives handler"
+          inputs:
+            - { name: query, type: "Query<PreaddCoverQuery>" }
+            - { name: ctx, type: AuthContext }
+          output: "Json<Vec<PreaddCoverCandidate>>"
+          errors: [ApiError]
+          pseudocode:
+            - "1. Extract title, author, lang, isbn_13 from PreaddCoverQuery struct"
+            - "2. Validate title not empty → 400"
+            - "3. Call state.preadd_cover_service().fetch_cover_alternatives(ctx.user.id, ...)"
+            - "4. Map Ok to Json, Err to ApiError"
+          call_annotations:
+            - { call: "state.preadd_cover_service()", type: NEW, target: "HasPreaddCoverService trait" }
+          tdd_directives:
+            - "test: 400 for empty title"
+            - "test: user_id from auth context passed through"
+
+  # =========================================================================
+  # Module 7: ASIN bug fix
+  # =========================================================================
+  - name: asin-fix
+    responsibility: "Fix apply_enrichment_merge ASIN write"
+    dependencies: [livrarr-db]
+
+    capability_survey:
+      - capability: "Merge-resolved ASIN write"
+        existing_source: "crates/livrarr-db/src/sqlite_work.rs:apply_enrichment_merge"
+        reuse_decision: reuse
+        rationale: "Ensure bind passes merge-resolved value faithfully"
+
+    public_api:
+      functions: []
+      # Internal fix — behavioral test AC-013 verifies correctness.
+
+  # =========================================================================
+  # Module 8: Audible integration
+  # =========================================================================
+  - name: audible-integration
+    responsibility: "Merge priority, rate limiter, registration, applicability, cover eligibility"
+    dependencies: [livrarr-domain-extensions, audible-provider, livrarr-http, livrarr-server, livrarr-metadata]
+
+    capability_survey:
+      - capability: "Merge priority"
+        existing_source: "crates/livrarr-metadata/src/lib.rs:PriorityModel"
+        reuse_decision: reuse
+        rationale: "Add Audible to priority vectors"
+      - capability: "Rate bucket"
+        existing_source: "crates/livrarr-http/src/fetcher.rs:interval_for"
+        reuse_decision: reuse
+        rationale: "Add Audible → 150ms"
+      - capability: "Provider registration"
+        existing_source: "crates/livrarr-server/src/main.rs:DefaultProviderQueueBuilder"
+        reuse_decision: reuse
+        rationale: "builder.add_provider() pattern"
+      - capability: "Applicability rule"
+        existing_source: "crates/livrarr-server/src/main.rs:applicability_rule"
+        reuse_decision: reuse
+        rationale: "Add Audible to English + foreign lists"
+      - capability: "Cover eligibility"
+        existing_source: "crates/livrarr-metadata/src/cover_alternatives.rs:eligible_providers"
+        reuse_decision: reuse
+        rationale: "Add Audible to both lists"
+
+    public_api:
+      functions: []
+
+  # =========================================================================
+  # Module 9: Frontend
+  # =========================================================================
+  - name: frontend-search-flow
+    responsibility: "GB-first search, cover picker, enrichment polling, skeleton states"
+    dependencies: []
+
+    capability_survey:
+      - capability: "Search page"
+        existing_source: "frontend/src/pages/search/SearchPage.tsx"
+        reuse_decision: rewrite
+        rationale: "Replace with GB-first AddWorkPage"
+      - capability: "Cover picker"
+        existing_source: "prototype/gb-first-search:AddWorkPage.tsx"
+        reuse_decision: reuse
+        rationale: "Prototype, needs fixes"
+      - capability: "Enrichment polling"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "useQuery with refetchInterval until enrichment_status terminal"
+      - capability: "Skeleton states"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "Shimmer placeholders for empty fields"
+      - capability: "addWork API"
+        existing_source: "frontend/src/api/index.ts:addWork"
+        reuse_decision: reuse
+        rationale: "Add coverManual and isbn13 fields"
+
+    public_api:
+      functions: []

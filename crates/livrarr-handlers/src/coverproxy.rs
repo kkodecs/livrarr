@@ -141,6 +141,7 @@ fn is_allowed_cover_source(url: &str) -> bool {
         "books.google.com",
         "contents.kyobobook.co.kr",
         "i.gr-assets.com",
+        "assets.hardcover.app",
     ];
 
     if ALLOWED_HOSTS.iter().any(|h| *h == host) {

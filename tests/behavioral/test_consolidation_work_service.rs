@@ -103,6 +103,8 @@ fn make_candidate(title: &str, author: &str, ol_key: Option<&str>) -> EnglishWor
         monitor_audiobook: None,
         provenance_setter: None,
         import_id: None,
+        cover_manual: false,
+        skip_sync_enrichment: false,
     }
 }
 

@@ -841,7 +841,7 @@ impl WorkDb for SqliteDb {
                  description = ?, year = ?, series_name = ?, series_position = ?, \
                  genres = ?, language = ?, page_count = ?, duration_seconds = ?, \
                  publisher = ?, publish_date = ?, hc_key = ?, gr_key = ?, ol_key = ?, \
-                 isbn_13 = ?, asin = ?, narrator = ?, narration_type = ?, \
+                 isbn_13 = ?, asin = COALESCE(?, asin), narrator = ?, narration_type = ?, \
                  abridged = ?, rating = ?, rating_count = ?, cover_url = ?, \
                  enrichment_source = ?, enrichment_status = ?, enriched_at = ?, \
                  merge_generation = merge_generation + 1 \
@@ -1087,8 +1087,8 @@ impl crate::WorkDbCreate for SqliteDb {
             "INSERT INTO works (user_id, title, author_name, normalized_title, normalized_author, \
              author_id, ol_key, gr_key, year, cover_url, enrichment_status, added_at, \
              language, import_id, series_id, series_name, series_position, \
-             monitor_ebook, monitor_audiobook, isbn_13, asin, description) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             monitor_ebook, monitor_audiobook, isbn_13, asin, description, cover_manual) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(user_id, normalized_title, normalized_author) DO NOTHING",
         )
         .bind(req.user_id)
@@ -1102,7 +1102,7 @@ impl crate::WorkDbCreate for SqliteDb {
         .bind(req.year)
         .bind(&req.cover_url)
         .bind(&now)
-        .bind(&req.language)
+        .bind(req.language.as_deref())
         .bind(&req.import_id)
         .bind(req.series_id)
         .bind(&req.series_name)
@@ -1112,6 +1112,7 @@ impl crate::WorkDbCreate for SqliteDb {
         .bind(&req.isbn_13)
         .bind(&req.asin)
         .bind(&req.description)
+        .bind(req.cover_manual)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?;
