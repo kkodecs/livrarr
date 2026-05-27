@@ -137,7 +137,7 @@ Built in Rust (backend) + React (frontend). Ships as a single Docker image — n
 
 ## Community
 
-- **Discord:** [Join the Livrarr Discord](https://discord.gg/y3FnTUJM) — help, discussion, feature requests
+- **Discord:** [Join the Livrarr Discord](https://discord.gg/PJDsgjEvCV) — help, discussion, feature requests
 - **GitHub Issues:** [Report bugs or request features](https://github.com/kkodecs/livrarr/issues)
 
 ---
