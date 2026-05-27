@@ -211,7 +211,7 @@ pub async fn add<
                     .work_service()
                     .get(ctx.user.id, existing_work_id)
                     .await?;
-                let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None);
+                let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None, None);
                 return Ok(Json(AddWorkResponse {
                     work: detail,
                     author_created: false,
@@ -358,8 +358,11 @@ pub async fn add<
         });
     }
 
-    let detail =
-        crate::types::work::work_to_detail_with_cover_mtime(&result.work, result.cover_mtime);
+    let detail = crate::types::work::work_to_detail_with_cover_mtime(
+        &result.work,
+        result.cover_mtime,
+        result.audiobook_cover_mtime,
+    );
     Ok(Json(AddWorkResponse {
         work: detail,
         author_created: result.author_created,
@@ -408,8 +411,11 @@ pub async fn list<S: HasWorkService + HasFileService>(
         .into_iter()
         .map(|wv| {
             let work_duration = wv.work.duration_seconds.map(|d| d as f64);
-            let mut detail =
-                crate::types::work::work_to_detail_with_cover_mtime(&wv.work, wv.cover_mtime);
+            let mut detail = crate::types::work::work_to_detail_with_cover_mtime(
+                &wv.work,
+                wv.cover_mtime,
+                wv.audiobook_cover_mtime,
+            );
             detail.library_items = wv
                 .library_items
                 .iter()
@@ -459,8 +465,11 @@ pub async fn get<S: HasWorkService + HasFileService>(
             .collect();
 
     let work_duration = view.work.duration_seconds.map(|d| d as f64);
-    let mut detail =
-        crate::types::work::work_to_detail_with_cover_mtime(&view.work, view.cover_mtime);
+    let mut detail = crate::types::work::work_to_detail_with_cover_mtime(
+        &view.work,
+        view.cover_mtime,
+        view.audiobook_cover_mtime,
+    );
     detail.library_items = view
         .library_items
         .iter()

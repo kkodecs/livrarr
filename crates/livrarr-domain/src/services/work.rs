@@ -68,6 +68,7 @@ pub struct AddWorkResult {
     pub author_id: Option<i64>,
     pub messages: Vec<String>,
     pub cover_mtime: Option<i64>,
+    pub audiobook_cover_mtime: Option<i64>,
     /// Final enrichment status after synchronous enrichment attempt.
     pub enrichment_status: EnrichmentStatus,
 }
@@ -96,6 +97,7 @@ pub struct WorkDetailView {
     pub work: Work,
     pub library_items: Vec<LibraryItem>,
     pub cover_mtime: Option<i64>,
+    pub audiobook_cover_mtime: Option<i64>,
 }
 
 #[derive(Debug)]

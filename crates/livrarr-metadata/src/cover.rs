@@ -409,7 +409,19 @@ async fn fast_hc_cover_search(
 }
 
 pub fn cover_file_mtime(covers_dir: &std::path::Path, work_id: i64) -> Option<i64> {
-    let path = covers_dir.join(format!("{work_id}.jpg"));
+    cover_file_mtime_with_suffix(covers_dir, work_id, "")
+}
+
+pub fn audiobook_cover_file_mtime(covers_dir: &std::path::Path, work_id: i64) -> Option<i64> {
+    cover_file_mtime_with_suffix(covers_dir, work_id, "_audio")
+}
+
+fn cover_file_mtime_with_suffix(
+    covers_dir: &std::path::Path,
+    work_id: i64,
+    suffix: &str,
+) -> Option<i64> {
+    let path = covers_dir.join(format!("{work_id}{suffix}.jpg"));
     std::fs::metadata(&path)
         .ok()
         .and_then(|m| m.modified().ok())

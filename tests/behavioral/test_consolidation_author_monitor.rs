@@ -69,6 +69,7 @@ impl WorkService for StubWorkService {
             author_id: None,
             messages: vec![],
             cover_mtime: None,
+            audiobook_cover_mtime: None,
             enrichment_status: EnrichmentStatus::Enriched,
         })
     }
@@ -86,6 +87,7 @@ impl WorkService for StubWorkService {
             work: Work::default(),
             library_items: vec![],
             cover_mtime: None,
+            audiobook_cover_mtime: None,
         })
     }
 

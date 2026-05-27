@@ -88,7 +88,7 @@ export default function WorkDetailPage() {
   const initialTab = searchParams.get("tab") ?? "files";
 
   const [coverPollBaseline, setCoverPollBaseline] = useState<
-    number | null | undefined
+    { ebook: number | null; audiobook: number | null } | undefined
   >(undefined);
 
   const {
@@ -104,8 +104,12 @@ export default function WorkDetailPage() {
       const status = query.state.data?.enrichmentStatus;
       if (status === "pending" || status === "unenriched") return 3_000;
       if (coverPollBaseline === undefined) return false;
-      const current = query.state.data?.coverMtime ?? null;
-      return current === coverPollBaseline ? 1_000 : false;
+      const ebook = query.state.data?.coverMtime ?? null;
+      const audiobook = query.state.data?.audiobookCoverMtime ?? null;
+      const unchanged =
+        ebook === coverPollBaseline.ebook &&
+        audiobook === coverPollBaseline.audiobook;
+      return unchanged ? 1_000 : false;
     },
   });
 
@@ -114,18 +118,26 @@ export default function WorkDetailPage() {
 
   useEffect(() => {
     if (coverPollBaseline === undefined) return;
-    const current = work?.coverMtime ?? null;
-    if (current !== coverPollBaseline) {
+    const ebook = work?.coverMtime ?? null;
+    const audiobook = work?.audiobookCoverMtime ?? null;
+    if (
+      ebook !== coverPollBaseline.ebook ||
+      audiobook !== coverPollBaseline.audiobook
+    ) {
       setCoverPollBaseline(undefined);
     }
-  }, [work?.coverMtime, coverPollBaseline]);
+  }, [work?.coverMtime, work?.audiobookCoverMtime, coverPollBaseline]);
 
   const refreshMutation = useMutation({
     mutationFn: () => refreshWork(Number(id)),
     onSuccess: () => {
       toast.success("Work refreshed");
-      setCoverPollBaseline(work?.coverMtime ?? null);
+      setCoverPollBaseline({
+        ebook: work?.coverMtime ?? null,
+        audiobook: work?.audiobookCoverMtime ?? null,
+      });
       queryClient.invalidateQueries({ queryKey: ["work", id] });
+      queryClient.invalidateQueries({ queryKey: ["works"] });
     },
     onError: () => toast.error("Failed to refresh work"),
   });

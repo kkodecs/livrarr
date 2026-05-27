@@ -280,6 +280,7 @@ where
                         author_id: None,
                         messages: vec![],
                         cover_mtime: None,
+                        audiobook_cover_mtime: None,
                         enrichment_status,
                     });
                 }
@@ -335,6 +336,7 @@ where
                         author_id: None,
                         messages: vec![],
                         cover_mtime: None,
+                        audiobook_cover_mtime: None,
                         enrichment_status,
                     });
                 }
@@ -377,6 +379,7 @@ where
                         author_id: None,
                         messages: vec![],
                         cover_mtime: None,
+                        audiobook_cover_mtime: None,
                         enrichment_status,
                     });
                 }
@@ -477,6 +480,7 @@ where
                         author_id: None,
                         messages: vec![],
                         cover_mtime: None,
+                        audiobook_cover_mtime: None,
                         enrichment_status,
                     });
                 }
@@ -594,14 +598,15 @@ where
             .list_library_items_by_work(user_id, work_id)
             .await
             .map_err(WorkServiceError::Db)?;
-        let cover_mtime = {
-            let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-            crate::cover::cover_file_mtime(&covers_dir, work_id)
-        };
+        let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
+        let cover_mtime = crate::cover::cover_file_mtime(&covers_dir, work_id);
+        let audiobook_cover_mtime =
+            crate::cover::audiobook_cover_file_mtime(&covers_dir, work_id);
         Ok(WorkDetailView {
             work,
             library_items,
             cover_mtime,
+            audiobook_cover_mtime,
         })
     }
 
@@ -706,6 +711,7 @@ where
                     work: w,
                     library_items: work_items,
                     cover_mtime: None,
+                    audiobook_cover_mtime: None,
                 }
             })
             .collect();
@@ -1787,6 +1793,7 @@ where
             author_id,
             messages: vec![],
             cover_mtime: None,
+            audiobook_cover_mtime: None,
             enrichment_status,
         })
     }
@@ -1847,6 +1854,15 @@ where
                 crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
                     crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
                 });
+            let audiobook_cover_mtime =
+                crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id).or_else(
+                    || {
+                        crate::cover::audiobook_cover_file_mtime(
+                            &self.data_dir.join("covers"),
+                            updated_work.id,
+                        )
+                    },
+                );
             return Ok(AddWorkResult {
                 work: updated_work,
                 created: true,
@@ -1854,6 +1870,7 @@ where
                 author_id,
                 messages: vec![],
                 cover_mtime,
+                audiobook_cover_mtime,
                 enrichment_status: EnrichmentStatus::Unenriched,
             });
         }
@@ -1871,6 +1888,13 @@ where
             crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
                 crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
             });
+        let audiobook_cover_mtime =
+            crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
+                crate::cover::audiobook_cover_file_mtime(
+                    &self.data_dir.join("covers"),
+                    updated_work.id,
+                )
+            });
         Ok(AddWorkResult {
             work: updated_work,
             created: true,
@@ -1878,6 +1902,7 @@ where
             author_id,
             messages: vec![],
             cover_mtime,
+            audiobook_cover_mtime,
             enrichment_status,
         })
     }

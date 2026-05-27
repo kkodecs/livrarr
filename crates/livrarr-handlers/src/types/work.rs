@@ -195,10 +195,14 @@ pub struct WorkDetailResponse {
 /// Convert a domain `Work` into a `WorkDetailResponse` (with empty `library_items`).
 /// Use this shared mapper instead of duplicating the field-by-field conversion.
 pub fn work_to_detail(w: &Work) -> WorkDetailResponse {
-    work_to_detail_with_cover_mtime(w, None)
+    work_to_detail_with_cover_mtime(w, None, None)
 }
 
-pub fn work_to_detail_with_cover_mtime(w: &Work, cover_mtime: Option<i64>) -> WorkDetailResponse {
+pub fn work_to_detail_with_cover_mtime(
+    w: &Work,
+    cover_mtime: Option<i64>,
+    audiobook_cover_mtime: Option<i64>,
+) -> WorkDetailResponse {
     WorkDetailResponse {
         id: w.id,
         title: w.title.clone(),
@@ -246,7 +250,7 @@ pub fn work_to_detail_with_cover_mtime(w: &Work, cover_mtime: Option<i64>) -> Wo
         added_at: w.added_at.to_rfc3339(),
         library_items: vec![],
         cover_mtime,
-        audiobook_cover_mtime: None,
+        audiobook_cover_mtime,
     }
 }
 
