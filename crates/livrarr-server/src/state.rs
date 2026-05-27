@@ -258,6 +258,12 @@ impl livrarr_handlers::accessors::RssSyncAccessor for RssSyncState {
         self.last_run
             .store(ts, std::sync::atomic::Ordering::Relaxed);
     }
+    fn is_running(&self) -> bool {
+        self.running.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn last_run_at(&self) -> i64 {
+        self.last_run.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Wrapper combining LogBuffer + LogLevelHandle for the SystemAccessor trait.

@@ -365,6 +365,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/system/logs/level",
             put(livrarr_handlers::system::set_log_level::<AppState>),
         )
+        .route(
+            "/system/health-summary",
+            get(livrarr_handlers::system::health_summary::<AppState>),
+        )
         // Filesystem browse
         .route(
             "/filesystem",

@@ -772,6 +772,46 @@ export interface SystemStatus {
   logLevel: string;
 }
 
+export interface HealthSummaryResponse {
+  llm: LlmStatusInfo;
+  indexers: InfraItemStatus[];
+  downloadClients: InfraItemStatus[];
+  rssSync: RssSyncStatus;
+  metadataProviders: ProviderStatusInfo[];
+  library: LibraryStats;
+}
+
+export interface LlmStatusInfo {
+  configured: boolean;
+  enabled: boolean;
+  provider: string | null;
+  model: string | null;
+}
+
+export interface InfraItemStatus {
+  id: number;
+  name: string;
+  implementation: string;
+  enabled: boolean;
+}
+
+export interface RssSyncStatus {
+  running: boolean;
+  lastRunAt: string | null;
+}
+
+export interface ProviderStatusInfo {
+  name: string;
+  status: "ok" | "error";
+  lastError: string | null;
+}
+
+export interface LibraryStats {
+  workCount: number;
+  libraryItemCount: number;
+  totalSizeBytes: number;
+}
+
 // Unmapped Files
 export interface ScanResult {
   matched: number;
