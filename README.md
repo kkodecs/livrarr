@@ -6,11 +6,34 @@
 
 ---
 
-## 🚨 Known issue: search and metadata temporarily affected
+## 🚨 OpenLibrary lookups affected on alpha4 and earlier — upgrade to alpha5
 
-We apologize for the inconvenience. We have contacted OpenLibrary and requested assistance to deploy a fix.
+**TL;DR — if you're having trouble adding works, upgrade to alpha5 immediately. Honestly, you should do that regardless.**
 
-Track: [#83](https://github.com/kkodecs/livrarr/issues/83)
+### What happened
+
+OpenLibrary started returning HTTP 403 to Livrarr's User-Agent. Search, enrichment, author monitor, and cover backfill all silently broke. Many reports of "OL is down" were actually "OL is blocking us."
+
+### Diagnosis
+
+Per [OpenLibrary's published API policy](https://openlibrary.org/developers/api), bulk clients must use a User-Agent that identifies the app *and* includes a contact (email or URL). Livrarr's UA on alpha4 (`Livrarr/0.1.0-alpha4`) had the app name but no contact field — flagged as identifiable bulk traffic without policy compliance, penalized harder than fully-anonymous requests.
+
+### What we did
+
+- Filed [#83](https://github.com/kkodecs/livrarr/issues/83) with the empirical evidence and the two-line fix
+- Sent an apology email to OpenLibrary's contact address explaining the gap and confirming our intent to comply
+- No response yet — but as of 2026-05-27, OL appears to have lifted the block on the old UA
+
+### Current status
+
+- OL is currently returning 200 to alpha4's UA from multiple test hosts. So lookups are working again **for now**.
+- But every alpha4 request is still **technically out of compliance** with OL's policy. The block could come back at any time, and the next round of enforcement may be more aggressive (IP-level instead of UA-level).
+
+### The fix
+
+**alpha5 ships a fully policy-compliant UA** — app name + version + contact email + contact URL — earning the higher rate limit (3 req/s vs 1 req/s) and getting out of the penalty bucket entirely.
+
+**Recommendation: upgrade to alpha5 as soon as it's released.** It also bundles a stack of metadata fixes (audiobook cover pipeline, OpenLibrary cover extraction, UI cache invalidation on metadata refresh, PID-deadlock-on-restart bug) that are worth the upgrade on their own.
 
 ---
 
