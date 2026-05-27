@@ -19,6 +19,14 @@ export const TOUR_STEPS: Step[] = [
     data: { route: "/settings/metadata" },
   },
   {
+    target: "[data-tour='google-books-section']",
+    content:
+      "Google Books is a free metadata source that's especially important for foreign-language books, and a useful fallback in general. An API key is required — the keyless quota is effectively zero. Go to console.cloud.google.com → APIs & Services → Credentials, create an API key, enable the Books API for your project, paste the key here, click Save Changes, then click Next.",
+    placement: "right",
+    skipBeacon: true,
+    data: { route: "/settings/metadata" },
+  },
+  {
     target: "[data-tour='llm-section']",
     content:
       "Optional and Recommended: Add an LLM to assist with search results and metadata. Livrarr only sends publicly available information to LLMs; file names, system information, and personal data are not sent. Google Gemini offers a free tier that is recommended and has been tested. Please follow the instructions to obtain an API key, click Save Changes, and click Next to continue.",

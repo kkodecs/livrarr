@@ -253,7 +253,7 @@ export default function MetadataPage() {
           </section>
 
           {/* ── Google Books ── */}
-          <section>
+          <section data-tour="google-books-section">
             <div className="flex items-center gap-2 mb-4">
               <BookOpen size={18} className="text-muted" />
               <h2 className="text-base font-semibold text-zinc-100">
