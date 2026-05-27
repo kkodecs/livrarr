@@ -20,6 +20,10 @@ pub trait RssSyncAccessor: Send + Sync {
     fn release(&self);
     /// Store last-run timestamp (unix seconds).
     fn set_last_run(&self, ts: i64);
+    /// Read the running flag.
+    fn is_running(&self) -> bool;
+    /// Read last-run timestamp (unix seconds, 0 = never).
+    fn last_run_at(&self) -> i64;
 }
 
 /// System observability — log buffer + log level control.

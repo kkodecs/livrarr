@@ -1,4 +1,4 @@
-import { NavLink, useLocation } from "react-router";
+import { Link, NavLink, useLocation } from "react-router";
 import {
   BookOpen,
   Library,
@@ -30,9 +30,12 @@ import {
   Info,
   X,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/utils/cn";
 import { useAuthStore } from "@/stores/auth";
 import { useUIStore } from "@/stores/ui";
+import { getHealthSummary } from "@/api";
+import { formatRelativeDate } from "@/utils/format";
 import { useState, useEffect, type ReactNode } from "react";
 
 interface NavItem {
@@ -363,6 +366,105 @@ function useVersionCheck() {
   return { currentVersion, latestVersion, latestUrl, hasUpdate };
 }
 
+function HealthIndicator({ collapsed }: { collapsed: boolean }) {
+  const { data: summary } = useQuery({
+    queryKey: ["health-summary"],
+    queryFn: getHealthSummary,
+    refetchInterval: 60_000,
+    retry: false,
+  });
+
+  if (!summary) return null;
+
+  const providerErrors = summary.metadataProviders.filter(
+    (p) => p.status === "error",
+  ).length;
+  const disabledClients = summary.downloadClients.filter(
+    (dc) => !dc.enabled,
+  ).length;
+  const disabledIndexers = summary.indexers.filter((ix) => !ix.enabled).length;
+  const hasIssue =
+    providerErrors > 0 ||
+    !summary.llm.configured ||
+    summary.downloadClients.length === 0 ||
+    summary.indexers.length === 0 ||
+    disabledClients === summary.downloadClients.length ||
+    disabledIndexers === summary.indexers.length;
+
+  const items: { label: string; ok: boolean; detail?: string }[] = [
+    {
+      label: "LLM",
+      ok: summary.llm.configured,
+      detail: summary.llm.configured
+        ? summary.llm.provider ?? undefined
+        : "not configured",
+    },
+    {
+      label: "Indexers",
+      ok: summary.indexers.length > 0 && disabledIndexers < summary.indexers.length,
+      detail: `${summary.indexers.length - disabledIndexers}/${summary.indexers.length}`,
+    },
+    {
+      label: "DL Clients",
+      ok: summary.downloadClients.length > 0 && disabledClients < summary.downloadClients.length,
+      detail: `${summary.downloadClients.length - disabledClients}/${summary.downloadClients.length}`,
+    },
+    {
+      label: "RSS",
+      ok: true,
+      detail: summary.rssSync.running
+        ? "running"
+        : summary.rssSync.lastRunAt
+          ? formatRelativeDate(summary.rssSync.lastRunAt)
+          : "never",
+    },
+    {
+      label: "Providers",
+      ok: providerErrors === 0,
+      detail:
+        providerErrors > 0
+          ? `${providerErrors} error${providerErrors > 1 ? "s" : ""}`
+          : `${summary.metadataProviders.length} ok`,
+    },
+  ];
+
+  if (collapsed) {
+    return (
+      <Link
+        to="/system/status"
+        className="flex flex-col items-center gap-1 border-t border-border py-2 hover:bg-surface-hover transition-colors"
+        title={hasIssue ? "Infrastructure issues detected" : "All systems ok"}
+      >
+        <span
+          className={cn(
+            "inline-block h-2.5 w-2.5 rounded-full",
+            hasIssue ? "bg-amber-400" : "bg-green-400",
+          )}
+        />
+      </Link>
+    );
+  }
+
+  return (
+    <Link to="/system/status" className="block border-t border-border px-2 py-2 space-y-0.5 hover:bg-surface-hover transition-colors">
+      {items.map((item) => (
+        <div key={item.label} className="flex items-center gap-2 py-0.5">
+          <span
+            className={cn(
+              "inline-block h-1.5 w-1.5 rounded-full flex-shrink-0",
+              item.ok ? "bg-green-400" : "bg-red-400",
+            )}
+          />
+          <span className="text-[11px] text-zinc-400 flex-1">{item.label}</span>
+          {item.detail && (
+            <span className="text-[10px] text-zinc-600">{item.detail}</span>
+          )}
+        </div>
+      ))}
+    </Link>
+  );
+}
+
 function VersionFooter({ collapsed }: { collapsed: boolean }) {
   const { currentVersion, latestVersion, latestUrl, hasUpdate } =
     useVersionCheck();
@@ -480,6 +582,7 @@ export function Sidebar() {
             />
           ))}
         </nav>
+        <HealthIndicator collapsed={false} />
         <VersionFooter collapsed={false} />
       </aside>
 
@@ -495,6 +598,7 @@ export function Sidebar() {
             <SidebarGroup key={group.label} group={group} />
           ))}
         </nav>
+        <HealthIndicator collapsed={collapsed} />
         <VersionFooter collapsed={collapsed} />
       </aside>
     </>

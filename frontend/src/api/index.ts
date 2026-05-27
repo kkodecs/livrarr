@@ -83,6 +83,7 @@ import type {
   ListImportConfirmResponse,
   ListImportSummary,
   ListImportUndoResponse,
+  HealthSummaryResponse,
 } from "@/types/api";
 
 // Setup
@@ -446,7 +447,8 @@ export const triggerRssSync = () =>
 
 // System
 export const getHealth = () => apiFetch<HealthCheckResult[]>("/health");
-export const getSystemStatus = () => apiFetch<SystemStatus>("/system/status");
+export const getSystemStatus = () => apiFetch<SystemStatus>("/system/status"),
+  getHealthSummary = () => apiFetch<HealthSummaryResponse>("/system/health-summary");
 export const getLogTail = (lines = 30) =>
   apiFetch<string[]>(`/system/logs/tail?lines=${lines}`);
 export const setLogLevel = (level: string) =>
