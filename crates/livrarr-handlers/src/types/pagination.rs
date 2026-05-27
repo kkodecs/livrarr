@@ -9,6 +9,7 @@ pub struct PaginationQuery {
     pub sort_by: Option<WorkSortField>,
     pub sort_dir: Option<SortDirection>,
     pub media_type: Option<MediaType>,
+    pub language: Option<String>,
 }
 
 impl PaginationQuery {

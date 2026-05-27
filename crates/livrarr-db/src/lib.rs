@@ -201,6 +201,7 @@ pub trait WorkDb: Send + Sync {
     ) -> Result<Vec<Work>, DbError>;
 
     /// List works for a user, paginated with server-side sort.
+    #[allow(clippy::too_many_arguments)]
     async fn list_works_paginated(
         &self,
         user_id: UserId,
@@ -209,6 +210,7 @@ pub trait WorkDb: Send + Sync {
         sort_by: &str,
         sort_dir: &str,
         media_type: Option<MediaType>,
+        language: Option<&str>,
     ) -> Result<(Vec<Work>, i64), DbError>;
 
     /// Update work (enrichment fields -- overwrites).

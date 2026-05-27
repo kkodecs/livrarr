@@ -304,7 +304,7 @@ function WorkHeader({
               className="h-full w-full rounded-lg shadow-lg"
               iconSize={32}
             />
-            {(ebookItems.length > 0 || audioItems.length > 0) && (
+            {(ebookItems.length > 0 || (audioItems.length > 0 && !showSeparateAudioCover)) && (
               <div className="absolute inset-0 flex items-center justify-center gap-4 opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 rounded-lg">
                 {ebookItems[0] && (
                   <Link
@@ -314,7 +314,7 @@ function WorkHeader({
                     <BookOpen size={24} />
                   </Link>
                 )}
-                {audioItems[0] && (
+                {audioItems[0] && !showSeparateAudioCover && (
                   <Link
                     to={`/listen/${audioItems[0].id}?workId=${work.id}`}
                     className="rounded-full bg-black/60 p-3 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
@@ -336,7 +336,7 @@ function WorkHeader({
         </div>
         {showSeparateAudioCover && (
           <div className="hidden sm:flex flex-col items-center gap-1">
-            <div className="relative h-[200px] w-[133px] sm:h-[300px] sm:w-[200px]">
+            <div className="relative group h-[200px] w-[133px] sm:h-[300px] sm:w-[200px]">
               <BookCover
                 workId={work.id}
                 title={work.title}
@@ -345,6 +345,16 @@ function WorkHeader({
                 className="h-full w-full rounded-lg shadow-lg"
                 iconSize={32}
               />
+              {audioItems[0] && (
+                <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 rounded-lg">
+                  <Link
+                    to={`/listen/${audioItems[0].id}?workId=${work.id}`}
+                    className="rounded-full bg-black/60 p-3 text-zinc-200 hover:text-white hover:bg-brand/80 transition-colors"
+                  >
+                    <Headphones size={24} />
+                  </Link>
+                </div>
+              )}
             </div>
             <span className="text-[10px] text-zinc-500">Audiobook Cover</span>
             <button

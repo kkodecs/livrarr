@@ -298,6 +298,7 @@ impl WorkDb for SqliteDb {
         sort_by: &str,
         sort_dir: &str,
         media_type: Option<MediaType>,
+        language: Option<&str>,
     ) -> Result<(Vec<Work>, i64), DbError> {
         let media_clause = match media_type {
             Some(MediaType::Ebook) => " AND monitor_ebook = 1",
@@ -305,9 +306,19 @@ impl WorkDb for SqliteDb {
             None => "",
         };
 
-        let count_sql = format!("SELECT COUNT(*) FROM works WHERE user_id = ?{media_clause}");
-        let total: i64 = sqlx::query_scalar(&count_sql)
-            .bind(user_id)
+        let lang_clause = if language.is_some() {
+            " AND language = ?"
+        } else {
+            ""
+        };
+
+        let count_sql =
+            format!("SELECT COUNT(*) FROM works WHERE user_id = ?{media_clause}{lang_clause}");
+        let mut count_query = sqlx::query_scalar(&count_sql).bind(user_id);
+        if let Some(lang) = language {
+            count_query = count_query.bind(lang);
+        }
+        let total: i64 = count_query
             .fetch_one(self.pool())
             .await
             .map_err(map_db_err)?;
@@ -329,12 +340,15 @@ impl WorkDb for SqliteDb {
             }
         };
         let sql = format!(
-            "SELECT * FROM works WHERE user_id = ?{media_clause} ORDER BY {order_clause} LIMIT ? OFFSET ?"
+            "SELECT * FROM works WHERE user_id = ?{media_clause}{lang_clause} ORDER BY {order_clause} LIMIT ? OFFSET ?"
         );
 
         let offset = (page.saturating_sub(1) * per_page) as i64;
-        let rows = sqlx::query(&sql)
-            .bind(user_id)
+        let mut query = sqlx::query(&sql).bind(user_id);
+        if let Some(lang) = language {
+            query = query.bind(lang);
+        }
+        let rows = query
             .bind(per_page as i64)
             .bind(offset)
             .fetch_all(self.pool())

@@ -152,6 +152,7 @@ export const listWorks = (params?: {
   sortBy?: string;
   sortDir?: string;
   mediaType?: string;
+  language?: string;
 }) => {
   const sp = new URLSearchParams();
   sp.set("page", String(params?.page ?? 1));
@@ -159,6 +160,7 @@ export const listWorks = (params?: {
   sp.set("sort_by", String(params?.sortBy ?? "date_added"));
   sp.set("sort_dir", String(params?.sortDir ?? "desc"));
   if (params?.mediaType) sp.set("media_type", params.mediaType);
+  if (params?.language) sp.set("language", params.language);
   return apiFetch<PaginatedResponse<WorkDetailResponse>>(`/work?${sp}`);
 };
 export const getWork = (id: number) =>

@@ -72,6 +72,7 @@ function toCreateDCRequest(
 interface MetadataForm {
   hardcoverApiToken: string;
   audnexusUrl: string;
+  googleBooksApiKey: string;
 }
 
 const SETUP_STATE_KEY = "livrarr_setup_state";
@@ -605,6 +606,15 @@ function MetadataStep({
       >
         <input type="password" {...register("hardcoverApiToken")} className="input-field" />
       </Field>
+      <Field
+        label="Google Books API Key"
+        error={errors.googleBooksApiKey?.message}
+      >
+        <input type="password" {...register("googleBooksApiKey")} className="input-field" />
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Optional but recommended. Required for foreign-language enrichment. Get a key from console.cloud.google.com → APIs & Services → Credentials.
+        </p>
+      </Field>
       <Field label="Audnexus URL" error={errors.audnexusUrl?.message}>
         <input {...register("audnexusUrl")} className="input-field" />
       </Field>
@@ -660,7 +670,14 @@ function SummaryStep({
         />
         <SummaryRow
           label="Metadata"
-          value={config.metadata?.hardcoverApiToken ? "Configured" : "Skipped"}
+          value={
+            config.metadata?.hardcoverApiToken || config.metadata?.googleBooksApiKey
+              ? [
+                  config.metadata?.hardcoverApiToken && "Hardcover",
+                  config.metadata?.googleBooksApiKey && "Google Books",
+                ].filter(Boolean).join(" + ")
+              : "Skipped"
+          }
         />
       </dl>
       {apiKey && (

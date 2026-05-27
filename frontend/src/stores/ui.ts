@@ -15,6 +15,7 @@ interface UIState {
   authorsSortDir: "asc" | "desc";
   worksFilter: string;
   worksMediaFilter: string;
+  worksLanguageFilter: string;
   posterZoom: number;
   relativeDates: boolean;
   dateFormat: string;
@@ -31,6 +32,7 @@ interface UIState {
   setAuthorsSort: (field: string, dir: "asc" | "desc") => void;
   setWorksFilter: (filter: string) => void;
   setWorksMediaFilter: (filter: string) => void;
+  setWorksLanguageFilter: (filter: string) => void;
   setPosterZoom: (zoom: number) => void;
   setRelativeDates: (value: boolean) => void;
   setDateFormat: (fmt: string) => void;
@@ -53,6 +55,7 @@ export const useUIStore = create<UIState>()(
       authorsSortDir: "asc",
       worksFilter: "",
       worksMediaFilter: "",
+      worksLanguageFilter: "",
       posterZoom: 5,
       relativeDates: true,
       dateFormat: "MMM d, yyyy",
@@ -72,6 +75,7 @@ export const useUIStore = create<UIState>()(
         set({ authorsSort: field, authorsSortDir: dir }),
       setWorksFilter: (filter) => set({ worksFilter: filter }),
       setWorksMediaFilter: (filter) => set({ worksMediaFilter: filter }),
+      setWorksLanguageFilter: (filter) => set({ worksLanguageFilter: filter }),
       setPosterZoom: (zoom) => set({ posterZoom: zoom }),
       setRelativeDates: (value) => set({ relativeDates: value }),
       setDateFormat: (fmt) => set({ dateFormat: fmt }),

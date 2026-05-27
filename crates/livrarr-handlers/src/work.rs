@@ -381,6 +381,7 @@ pub async fn list<S: HasWorkService + HasFileService>(
             pq.sort_by(),
             pq.sort_dir(),
             pq.media_type,
+            pq.language.as_deref(),
         )
         .await?;
 

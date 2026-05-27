@@ -231,6 +231,7 @@ pub trait WorkService: Send + Sync {
         user_id: UserId,
         filter: WorkFilter,
     ) -> Result<Vec<Work>, WorkServiceError>;
+    #[allow(clippy::too_many_arguments)]
     async fn list_paginated(
         &self,
         user_id: UserId,
@@ -239,6 +240,7 @@ pub trait WorkService: Send + Sync {
         sort_by: WorkSortField,
         sort_dir: SortDirection,
         media_type: Option<MediaType>,
+        language: Option<&str>,
     ) -> Result<PaginatedWorksView, WorkServiceError>;
     async fn update(
         &self,
