@@ -105,6 +105,7 @@ impl WorkService for StubWorkService {
         _sort_by: WorkSortField,
         _sort_dir: SortDirection,
         _media_type: Option<MediaType>,
+        _language: Option<&str>,
     ) -> Result<PaginatedWorksView, WorkServiceError> {
         Ok(PaginatedWorksView {
             works: vec![],

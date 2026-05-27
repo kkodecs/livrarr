@@ -18,6 +18,7 @@ import {
   CheckSquare,
   ZoomIn,
   ZoomOut,
+  Star,
 } from "lucide-react";
 import { listWorks, refreshAllWorks, deleteWork, refreshWork, triggerRssSync, getQueue, updateWork } from "@/api";
 import type { UpdateWorkRequest } from "@/types/api";
@@ -33,7 +34,7 @@ import { ConfirmModal } from "@/components/Page/ConfirmModal";
 import { Pagination } from "@/components/Page/Pagination";
 import { cn } from "@/utils/cn";
 import { SortHeader } from "@/components/Page/SortHeader";
-import { formatRelativeDate } from "@/utils/format";
+import { formatRelativeDate, formatDuration } from "@/utils/format";
 import { MediaStatusRow } from "@/components/MediaStatusRow";
 import { BookCover } from "@/components/BookCover";
 import ProgressBar from "@/components/ProgressBar";
@@ -43,6 +44,7 @@ import type {
   LibraryItemResponse,
   MediaType,
 } from "@/types/api";
+import { SUPPORTED_LANGUAGES } from "@/types/api";
 
 function bestProgress(items: LibraryItemResponse[]): LibraryItemResponse | null {
   let best: LibraryItemResponse | null = null;
@@ -89,6 +91,8 @@ export function WorksPage() {
   const setPosterZoom = useUIStore((s) => s.setPosterZoom);
   const mediaTypeFilter = useUIStore((s) => s.worksMediaFilter) as MediaType | "";
   const setMediaTypeFilter = useUIStore((s) => s.setWorksMediaFilter);
+  const languageFilter = useUIStore((s) => s.worksLanguageFilter);
+  const setLanguageFilter = useUIStore((s) => s.setWorksLanguageFilter);
 
   const {
     data: worksData,
@@ -96,7 +100,7 @@ export function WorksPage() {
     error,
     refetch,
   } = useQuery({
-    queryKey: ["works", page, worksSort, worksSortDir, mediaTypeFilter],
+    queryKey: ["works", page, worksSort, worksSortDir, mediaTypeFilter, languageFilter],
     queryFn: () =>
       listWorks({
         page,
@@ -104,6 +108,7 @@ export function WorksPage() {
         sortBy: SORT_FIELD_MAP[worksSort] ?? "date_added",
         sortDir: worksSortDir,
         mediaType: mediaTypeFilter || undefined,
+        language: languageFilter || undefined,
       }),
     refetchInterval: 60_000,
     placeholderData: (prev) => prev,
@@ -396,6 +401,21 @@ export function WorksPage() {
             <option value="">All Media</option>
             <option value="ebook">Ebook</option>
             <option value="audiobook">Audiobook</option>
+          </select>
+          <select
+            value={languageFilter}
+            onChange={(e) => {
+              setLanguageFilter(e.target.value);
+              setPage(1);
+            }}
+            className="h-8 rounded border border-border bg-zinc-800 px-2 text-sm text-zinc-100"
+          >
+            <option value="">All Languages</option>
+            {SUPPORTED_LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code}>
+                {lang.flag} {lang.englishName}
+              </option>
+            ))}
           </select>
           <SortDropdown
             active={worksSort}
@@ -919,7 +939,30 @@ function OverviewView({
                       {work.authorName}
                     </Link>
                   ) : work.authorName}
+                  {work.seriesName && (
+                    <span className="ml-2 text-zinc-500">
+                      {work.seriesName}
+                      {work.seriesPosition != null && ` #${work.seriesPosition}`}
+                    </span>
+                  )}
                 </p>
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-zinc-500">
+                  {work.rating != null && (
+                    <span className="inline-flex items-center gap-0.5">
+                      <Star size={11} className="text-amber-400 fill-amber-400" />
+                      {work.rating.toFixed(1)}
+                    </span>
+                  )}
+                  {work.pageCount != null && (
+                    <span>{work.pageCount}p</span>
+                  )}
+                  {work.durationSeconds != null && (
+                    <span>{formatDuration(work.durationSeconds)}</span>
+                  )}
+                  {work.narrator && work.narrator.length > 0 && (
+                    <span>Narrated by {work.narrator.slice(0, 2).join(", ")}</span>
+                  )}
+                </div>
                 <div className="mt-1.5 flex items-center gap-2">
                   <MediaStatusRow work={work} activeGrabs={activeGrabs} onToggleMonitor={onToggleMonitor} />
                   {(() => {
@@ -934,6 +977,15 @@ function OverviewView({
                     ) : null;
                   })()}
                 </div>
+                {work.genres && work.genres.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {work.genres.slice(0, 3).map((g) => (
+                      <span key={g} className="rounded bg-zinc-700/60 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                        {g}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {work.description && (
                   <p className="mt-2 line-clamp-2 text-sm text-zinc-400">
                     {work.description}

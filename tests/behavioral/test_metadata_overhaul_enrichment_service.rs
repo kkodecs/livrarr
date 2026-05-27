@@ -266,9 +266,12 @@ impl WorkDb for SequencedApplyDb {
         sort_by: &str,
         sort_dir: &str,
         media_type: Option<MediaType>,
+        language: Option<&str>,
     ) -> Result<(Vec<Work>, i64), DbError> {
         self.inner
-            .list_works_paginated(user_id, page, per_page, sort_by, sort_dir, media_type)
+            .list_works_paginated(
+                user_id, page, per_page, sort_by, sort_dir, media_type, language,
+            )
             .await
     }
 

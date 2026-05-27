@@ -276,6 +276,7 @@ pub async fn recent<S: OpdsHandlerContext>(
             WorkSortField::DateAdded,
             SortDirection::Desc,
             None,
+            None,
         )
         .await
         .map_err(api_err_to_response)?;
