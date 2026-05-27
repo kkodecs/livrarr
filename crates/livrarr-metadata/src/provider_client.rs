@@ -219,7 +219,7 @@ impl AudnexusClient {
                     abridged: None,
                     rating: None,
                     rating_count: None,
-                    cover_url: None,
+                    cover_url: audnexus.cover_url.clone(),
                     additional_isbns: Vec::new(),
                     additional_asins: Vec::new(),
                 };
@@ -478,10 +478,14 @@ impl OpenLibraryClient {
         ol_key: &str,
         detail: crate::openlibrary::OlDetailResult,
     ) -> NormalizedWorkDetail {
+        let cover_url = detail
+            .cover_id
+            .map(|id| format!("https://covers.openlibrary.org/b/id/{id}-L.jpg"));
         NormalizedWorkDetail {
             description: detail.description,
             ol_key: Some(ol_key.to_string()),
             isbn_13: detail.isbn_13,
+            cover_url,
             ..Default::default()
         }
     }

@@ -36,13 +36,14 @@ impl AudnexusCache {
 }
 
 /// Parsed subset of the Audnexus book detail response — narrators, runtime,
-/// and ASIN are the only fields the enrichment pipeline consumes today.
+/// ASIN, and cover URL.
 #[derive(Debug, Clone)]
 pub struct AudnexusResult {
     pub narrators: Vec<String>,
     pub narrators_empty: bool,
     pub duration_seconds: Option<i32>,
     pub asin: Option<String>,
+    pub cover_url: Option<String>,
 }
 
 /// Query Audnexus, preferring lookup by ASIN and falling back to title+author search.
@@ -173,6 +174,12 @@ pub fn parse_audnexus(data: &serde_json::Value, asin_hint: Option<&str>) -> Audn
         .map(|s| s.to_string())
         .or_else(|| asin_hint.map(|s| s.to_string()));
 
+    let cover_url = data
+        .get("image")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     let narrators_empty = narrators.is_empty();
 
     AudnexusResult {
@@ -180,6 +187,7 @@ pub fn parse_audnexus(data: &serde_json::Value, asin_hint: Option<&str>) -> Audn
         narrators_empty,
         duration_seconds,
         asin,
+        cover_url,
     }
 }
 

@@ -11,6 +11,7 @@ use livrarr_http::HttpClient;
 pub struct OlDetailResult {
     pub description: Option<String>,
     pub isbn_13: Option<String>,
+    pub cover_id: Option<i64>,
 }
 
 /// Fetch work detail + first edition ISBN for an OpenLibrary work key.
@@ -41,6 +42,12 @@ pub async fn query_ol_detail(http: &HttpClient, ol_key: &str) -> Result<OlDetail
         })
     });
 
+    let cover_id = data
+        .get("covers")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.iter().find_map(|v| v.as_i64()))
+        .filter(|&id| id > 0);
+
     // Fetch editions for ISBN.
     let mut isbn_13 = None;
     let editions_url = format!("https://openlibrary.org/works/{key}/editions.json?limit=10");
@@ -62,5 +69,6 @@ pub async fn query_ol_detail(http: &HttpClient, ol_key: &str) -> Result<OlDetail
     Ok(OlDetailResult {
         description,
         isbn_13,
+        cover_id,
     })
 }
