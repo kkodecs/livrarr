@@ -6,24 +6,34 @@
 
 ---
 
-## 🚀 alpha5 is out — upgrade now
+## 🚨 OpenLibrary lookups affected on alpha4 and earlier — upgrade to alpha5
 
-**If you're on alpha4 or earlier, upgrade ASAP.** alpha5 fixes the OpenLibrary 403 block, the audiobook cover pipeline, a container-restart deadlock, and a stack of UI bugs.
+**TL;DR — if you're having trouble adding works, upgrade to alpha5 immediately. Honestly, you should do that regardless.**
 
-Bump your compose tag:
-```yaml
-image: ghcr.io/kkodecs/livrarr:0.1.0-alpha5
-```
+### What happened
 
-Then `docker compose pull && docker compose up -d`.
+OpenLibrary started returning HTTP 403 to Livrarr's User-Agent. Search, enrichment, author monitor, and cover backfill all silently broke. Many reports of "OL is down" were actually "OL is blocking us."
 
-[Full release notes](https://github.com/kkodecs/livrarr/releases/tag/v0.1.0-alpha5) · [What was the OL 403 about? (#83)](https://github.com/kkodecs/livrarr/issues/83)
+### Diagnosis
 
-### Why this is urgent
+Per [OpenLibrary's published API policy](https://openlibrary.org/developers/api), bulk clients must use a User-Agent that identifies the app *and* includes a contact (email or URL). Livrarr's UA on alpha4 (`Livrarr/0.1.0-alpha4`) had the app name but no contact field — flagged as identifiable bulk traffic without policy compliance, penalized harder than fully-anonymous requests.
 
-alpha4's User-Agent (`Livrarr/0.1.0-alpha4`) didn't include the contact field that [OpenLibrary's API policy](https://openlibrary.org/developers/api) requires from bulk clients. That triggered an HTTP 403 block that silently broke search, enrichment, author monitor, and cover backfill — lots of "OL is down" reports were actually "OL is blocking us." alpha5 ships a fully policy-compliant UA, earns the higher rate limit, and gets out of the penalty bucket.
+### What we did
 
-OL appears to have lifted the alpha4 block as of 2026-05-27, but every alpha4 request is still technically non-compliant. The block could come back any time, possibly more aggressively (IP-level).
+- Filed [#83](https://github.com/kkodecs/livrarr/issues/83) with the empirical evidence and the two-line fix
+- Sent an apology email to OpenLibrary's contact address explaining the gap and confirming our intent to comply
+- No response yet — but as of 2026-05-27, OL appears to have lifted the block on the old UA
+
+### Current status
+
+- OL is currently returning 200 to alpha4's UA from multiple test hosts. So lookups are working again **for now**.
+- But every alpha4 request is still **technically out of compliance** with OL's policy. The block could come back at any time, and the next round of enforcement may be more aggressive (IP-level instead of UA-level).
+
+### The fix
+
+**alpha5 ships a fully policy-compliant UA** — app name + version + contact email + contact URL — earning the higher rate limit (3 req/s vs 1 req/s) and getting out of the penalty bucket entirely.
+
+**Recommendation: upgrade to alpha5 as soon as it's released.** It also bundles a stack of metadata fixes (audiobook cover pipeline, OpenLibrary cover extraction, UI cache invalidation on metadata refresh, PID-deadlock-on-restart bug) that are worth the upgrade on their own.
 
 ---
 
