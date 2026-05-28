@@ -29,11 +29,15 @@ Per [OpenLibrary's published API policy](https://openlibrary.org/developers/api)
 - OL is currently returning 200 to alpha4's UA from multiple test hosts. So lookups are working again **for now**.
 - But every alpha4 request is still **technically out of compliance** with OL's policy. The block could come back at any time, and the next round of enforcement may be more aggressive (IP-level instead of UA-level).
 
-### The fix
+### The fix — alpha5 is now released
 
-**alpha5 ships a fully policy-compliant UA** — app name + version + contact email + contact URL — earning the higher rate limit (3 req/s vs 1 req/s) and getting out of the penalty bucket entirely.
+**alpha5 ships a fully policy-compliant UA** — app name + version + contact email + contact URL — earning the higher rate limit (3 req/s vs 1 req/s) and getting out of the penalty bucket entirely. It also bundles a stack of metadata fixes (audiobook cover pipeline, OpenLibrary cover extraction, UI cache invalidation on metadata refresh) and stability fixes (PID self-deadlock on Docker restart, OOM guard for tag writes on large audiobooks).
 
-**Recommendation: upgrade to alpha5 as soon as it's released.** It also bundles a stack of metadata fixes (audiobook cover pipeline, OpenLibrary cover extraction, UI cache invalidation on metadata refresh, PID-deadlock-on-restart bug) that are worth the upgrade on their own.
+Upgrade:
+
+```
+docker compose pull livrarr && docker compose up -d
+```
 
 ---
 
