@@ -170,14 +170,11 @@ fn write_tags_sync(
             write_epub(path, metadata, cover)?;
             Ok(TagWriteStatus::Written)
         }
-        "m4b" => {
-            write_m4b(path, metadata, cover)?;
-            Ok(TagWriteStatus::Written)
-        }
-        "mp3" => {
-            write_mp3(path, metadata, cover)?;
-            Ok(TagWriteStatus::Written)
-        }
+        // m4b/mp3: upstream tag writers (mp4ameta, id3) buffer the shifted
+        // media region in RAM when metadata atoms grow — OOMs on multi-GB
+        // audiobooks. Audiobook players read from their own metadata DBs, so
+        // embedded tags here are not load-bearing.
+        "m4b" | "mp3" => Ok(TagWriteStatus::Unsupported),
         _ => Ok(TagWriteStatus::Unsupported),
     }
 }
@@ -1025,6 +1022,10 @@ fn update_opf_metadata(
 // M4B (via mp4ameta)
 // ---------------------------------------------------------------------------
 
+// Currently unreached — dispatch in `write_tags_sync` returns Unsupported for
+// m4b. Preserved so we can revive it if the upstream OOM in `mp4ameta` is fixed
+// (see the comment in the m4b/mp3 arm of `write_tags_sync`).
+#[allow(dead_code)]
 fn write_m4b(
     path: &Path,
     metadata: &TagMetadata,
@@ -1090,6 +1091,9 @@ fn write_m4b(
 // MP3 (via id3)
 // ---------------------------------------------------------------------------
 
+// Currently unreached — dispatch in `write_tags_sync` returns Unsupported for
+// mp3. Preserved in case we revive it (e.g., switch to a streaming ID3 writer).
+#[allow(dead_code)]
 fn write_mp3(
     path: &Path,
     metadata: &TagMetadata,
