@@ -99,12 +99,17 @@ pub fn check_data_dir_permissions(data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Check whether the given PID belongs to a running livrarr process.
+/// Check whether the given PID belongs to a different running livrarr process.
 ///
-/// Returns `true` only when the PID is alive AND `/proc/PID/comm` contains
-/// "livrarr". This prevents false positives in Docker containers where a
-/// fresh PID namespace can reuse the same PID number for an unrelated process.
+/// Returns `true` only when the PID is alive, distinct from our own, and
+/// `/proc/PID/comm` contains "livrarr". This prevents false positives in
+/// Docker containers where a fresh PID namespace can reuse the same PID
+/// number for an unrelated process, and avoids self-match when a stale PID
+/// file lists our own PID.
 fn is_livrarr_process(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return false;
+    }
     let comm_path = format!("/proc/{pid}/comm");
     match std::fs::read_to_string(&comm_path) {
         Ok(comm) => comm.trim().contains("livrarr"),
