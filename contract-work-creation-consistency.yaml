@@ -1,0 +1,48 @@
+# Architectural Contract — work-creation-consistency
+# Machine-checkable rules enforced by the compliance gate. Minimal by design.
+
+metadata:
+  feature: work-creation-consistency
+  spec_ref: spec-work-creation-consistency.md
+  ir_ref: ir-v1-work-creation-consistency.yaml
+
+module_dependency:
+  - source: livrarr-handlers
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-tagwrite
+    rationale: "Compile wall (insight 9b). The Add Work / manual-import seams reach the resolver only via HasIdentityResolver (the existing capability trait in context.rs), never by importing metadata. This rule also structurally prevents metadata payload types (NormalizedWorkDetail) from leaking into handlers."
+
+  - source: livrarr-domain
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-metadata
+      - livrarr-matching
+      - livrarr-download
+      - livrarr-tagwrite
+      - livrarr-handlers
+      - livrarr-server
+    rationale: "Domain is the leaf foundation (insight 1). The generalized identity types, the (existing) IdentityResolver trait, and the normalization module add ZERO outward deps. This is what keeps provider payloads (NormalizedWorkDetail/ProviderWorkDetail) out of the domain trait signature (D-005, insight 9e) — domain cannot name a metadata type because it cannot depend on metadata."
+
+forbidden_pattern:
+  - pattern: "INSERT OR REPLACE"
+    description: "Use INSERT ... ON CONFLICT (...) DO UPDATE SET — applies to the new federated-anchor and conflict-store writes."
+    severity: P1
+    rationale: "Insight 20: INSERT OR REPLACE is DELETE+INSERT in SQLite (rowid churn, FK cascade)."
+
+  - pattern: "use livrarr_db|use livrarr_metadata|use livrarr_tagwrite|use livrarr_download"
+    description: "livrarr-handlers must not import walled-off crates."
+    severity: P0
+    rationale: "Compile wall (insight 9b)."
+
+  - pattern: "CHECK\\s*\\(.+\\bIN\\b\\s*\\("
+    description: "New migration 052 (conflict-store rebuild) must NOT introduce CHECK-IN enum constraints. Enum validity is enforced in Rust. (The bare-numeric backfill is a Rust one-shot step, NOT a .sql migration — r4 C-R010. Existing pre-rule migrations are exempt — this targets the new file.)"
+    severity: P1
+    rationale: "migration-pattern.md: altering a CHECK requires a full table rebuild (impractical on Pi). Migration 040 predates the rule and is being rebuilt specifically to drop its CHECKs."
+
+  - pattern: "gr_key.{0,40}[0-9]+[-./]"
+    description: "gr_key must be persisted bare-numeric (^[0-9]+$). Digits followed by ANY slug punctuation — dot ('12345.The_Title'), hyphen ('12345-The_Title'), or slash (a URL path) — indicate a normalization bypass. Route every gr_key through livrarr-domain::normalization::normalize_gr_key before persist or provider query. (Regex is a smell-catcher; the load-bearing check is the write-time ^[0-9]+$ invariant + normalization tests for dot/hyphen/slash/empty/nonnumeric forms.)"
+    severity: P2
+    rationale: "REQ-002 / REQ-029 / AC-003 (pre-existing slug AND hyphen rows). The scraper MAY keep a slug-form URL for fetching, but the persisted identity key must be bare-numeric."

@@ -1,0 +1,689 @@
+# IR v2 — Design (operational detail)
+# Feature: work-creation-consistency
+#
+# EXTENDS IR v1 (v6). IR v1 is authoritative for: shared_types, the full type
+# definitions (struct fields / enum variants), the dependency_graph, the system
+# architecture, and decisions D-001..D-012. This artifact ADDS the design layer:
+# per-function pseudocode, call annotations (NEW/EXISTING/LIBRARY/STDLIB),
+# preconditions/invariants, a per-module capability survey (DRY check vs the
+# existing identity subsystem), and TDD directives. It does NOT re-list IR v1's
+# types — read ir-v1-work-creation-consistency.yaml alongside this file.
+#
+# Grounding: every EXISTING call annotation cites a real symbol verified against
+# /mnt/opt/livrarr this cycle (Serena + code-index; never the scryer sibling).
+# Authoring note: this text is scanned by the compliance gate against the
+# contract forbidden_pattern regexes; phrasing avoids those literals deliberately.
+
+metadata:
+  feature: work-creation-consistency
+  stage: v2-design
+  spec_ref: spec-work-creation-consistency.md
+  ir_v1_ref: ir-v1-work-creation-consistency.yaml
+  contract_ref: contract-work-creation-consistency.yaml
+  version: 1   # IR v2, design round 1
+
+# Copied from IR v1 so the compliance gate can validate LIBRARY call annotations.
+# This is NOT an expansion of the approved set — identical to IR v1 (D-012: no new deps).
+approved_libraries:
+  - { name: serde, version: "1", usage: "Serialization (existing)" }
+  - { name: sqlx, version: "0.8", usage: "DB queries + migrations (existing)" }
+  - { name: chrono, version: "0.4", usage: "DateTime (existing)" }
+  - { name: tokio, version: "1", usage: "Async runtime, spawn_blocking, time::timeout (existing)" }
+  - { name: reqwest, version: "0.12", usage: "Provider HTTP via livrarr-http clients (existing)" }
+  - { name: quick-xml, version: "0.37", usage: "EPUB OPF parsing to harvest dc:identifier ISBN (existing)" }
+  - { name: trait-variant, version: "0.1", usage: "Send async traits (existing)" }
+  - { name: thiserror, version: "2", usage: "Typed error enums (existing)" }
+  - { name: uuid, version: "1", usage: "v4 CandidateId — already a DIRECT dep of livrarr-metadata" }
+
+# ---------------------------------------------------------------------------
+# Design-stage decisions (continue IR v1's D-001..D-012). PO-CONFIRM items are
+# flagged for the PO's review; CC proceeded per delegated-internals authority and
+# the cross-family review gate.
+# ---------------------------------------------------------------------------
+design_decisions:
+  - id: D-013
+    resolves: Q-001
+    topic: "LLM identity-validation: synchronous gate vs background verify"
+    choice: "BACKGROUND + CONDITIONAL. The synchronous create path resolves identity DETERMINISTICALLY only (shared-anchor / normalized title+author quorum, REQ-018) — no LLM call, so interactive paths return fully-formed without network latency (REQ-015, REQ-023, principle 15). LLM identity-validation runs as a background verify pass (in metadata-async-resolver), triggered ONLY when (a) an LLM is configured AND (b) the deterministic layer could not disambiguate (no shared anchor to compare, cross-axis reconcile, or a payload whose identity is suspect). If the background verify finds a mismatch it raises a Conflict (REQ-018/020) on the already-created Work, which pauses further automatic enrichment (REQ-025)."
+    rationale: "Matches the PO's stated lean (Q-001: 'background + conditional, only when harvested anchors disagree'). REQ-017 mandates deterministic merge without an LLM; REQ-018 already says the LLM is consulted only for ambiguity the deterministic rules cannot resolve; blocking an interactive add on an LLM network call would violate REQ-015/023 and principle 15 (RPi4 floor). Consistent with the cover fast-then-upgrade pattern."
+    po_confirm: true
+    po_confirm_note: "UX tradeoff: a Work can briefly display as confirmed-identity before a rare background LLM verify flags it Conflict (only when anchors were deterministically ambiguous). Acceptable per fast-then-upgrade, but it is a user-visible behavior — confirm."
+  - id: D-014
+    resolves: Q-003
+    topic: "gr_key bare-numeric backfill migration: ship with feature or separate"
+    choice: "SEPARATE backfill STEP, SAME feature PR. The schema federation is the conflict-store rebuild migration (052). The bare-numeric backfill is a separate Rust one-shot step ordered AFTER the schema migrations — NOT a .sql file, because SQL cannot call the domain normalize_gr_key helper and a SQL reimplementation would fork the single normalization authority (r3 C-R010). Both ship with this feature and run once at deploy."
+    rationale: "REQ-002 makes the backfill mandatory, so it ships with the feature. A dedicated, append-only file keeps the data-repair auditable and independently revertible, and does not muddy the schema migration's intent (insight 19: migrations are immutable once applied). Drifted-row volume is small (~19), so no maintenance-window gating is needed."
+    po_confirm: true
+    po_confirm_note: "Low-stakes; confirm you do not want the backfill deferred to a separate maintenance step."
+  - id: D-015
+    resolves: Q-004
+    topic: "Provenance granularity for harvested fields"
+    choice: "PRESERVE PER-PROVIDER PROVENANCE — do not flatten to a single source tag. The candidate_id payload cache (D-005) stores per-provider payloads as a map keyed by MetadataProvider; WorkService::add feeds that map directly into the existing merge engine's MergeInput.provider_results (which is already a HashMap<MetadataProvider, ReconstructedOutcome>). The merge engine already derives per-field FieldProvenance from the winning provider, so no new provenance machinery is added; the legacy single-blob source_provider_data rail is retained only for genuinely single-source paths (e.g. a Readarr record with no multi-provider harvest)."
+    rationale: "REQ-016 demands per-field provenance fidelity (User > Provider > System). The merge engine already operates per-provider (verified: lib.rs MergeInput.provider_results). Caching per-provider payloads is already required by D-005. So per-provider provenance is the no-extra-cost outcome; flattening would DISCARD fidelity the engine already supports."
+    po_confirm: true
+    po_confirm_note: "IR-internal mechanics; flagged for awareness only."
+  - id: D-016
+    topic: "Foundation principle #6 wording vs the M9 carve-out (D-002)"
+    choice: "HONOR the PO-approved M9 carve-out (interactive paths synchronous + fully-formed; batch/monitor paths create identity-pending works that converge async, terminal needs-review for the unresolvable). DO NOT edit build/foundation/principles.md — it is the highest-authority document and editing it is a PO decision."
+    rationale: "principles.md #6 ('Metadata enrichment is synchronous at add time ... Nothing blocks') predates D-002. Its INTENT — partial metadata beats a spinner/error, nothing blocks — is preserved: identity-pending creation does not block and degrades gracefully. But the literal 'synchronous at add time' is in tension with batch identity-pending creation. Per project rule, conflicts with principles must be surfaced, never silently overridden."
+    po_confirm: true
+    po_confirm_note: "Decide: reword principle #6 to scope 'synchronous' to interactive paths, OR affirm the M9 carve-out as a documented scoped exception. D-002 already flagged this ('harmonize later?')."
+  - id: D-017
+    topic: "Stage-5 review fixes (Layer 0-2 model-attribution audit, 2026-05-29): conflict-source param + series/narrator deferral"
+    choice: "(a) detect_conflicting_anchors gains a `source: ConflictSource` parameter so a conflict raised on a non-manual path (Readarr / list / series-monitor) is attributed to that path instead of the previously hardcoded ManualAdd; the db-anchors signature below is updated to match. (b) Embedded series/narrator harvest in matching-embedded-harvest (extract_epub calibre series; extract_m4b narrator/series) is DEFERRED. extract_epub DOES now harvest the publication year from dc:date."
+    rationale: "Reviewing the Layer 0-2 code (accidentally authored on Sonnet 4.6, Opus 4.8 restored) surfaced a conflict-source mis-attribution: REQ-020 observability was correct but raised_by was wrong for non-manual paths, and the IR had not threaded a source so correct attribution was impossible. Series/narrator deferral: no codebase convention exists to mirror (series/narrator are provider-sourced — Audible/Audnexus/HC), and rbook calibre-series + m4b narrator/series atom conventions are unverified; implementing without prototyping against real fixtures would risk a silent no-op or wrong-field extraction (project rule: prototype parsers first). Non-identity-critical: the feature core is isbn/asin/anchors (#97); AC-011 permits narrator to complete in the background."
+    po_confirm: true
+    po_confirm_note: "PO approved both the source-param fix and the series/narrator deferral on 2026-05-29."
+
+# ---------------------------------------------------------------------------
+# MODULES — design detail. Types referenced here are defined in IR v1.
+# Dependencies mirror IR v1 (acyclic; verified by verify_architecture).
+# ---------------------------------------------------------------------------
+modules:
+
+  # ════════════════════════════ livrarr-domain ════════════════════════════
+  - name: domain-identity-federate
+    component: livrarr-domain
+    responsibility: "Federate the identity types + the IdentityResolver/WorkService contracts (see IR v1 module of same name). This module is the leaf foundation: ZERO outward deps; names no metadata payload type (compile wall, insight 9e)."
+    req_ids: [REQ-001, REQ-003, REQ-008, REQ-009, REQ-010, REQ-011, REQ-014, REQ-015, REQ-018, REQ-019, REQ-020, REQ-022, REQ-023, REQ-025, REQ-028]
+    dependencies: [domain-normalization]
+    capability_survey:
+      - { capability: "Federated anchor storage", status: EXISTS-REUSE, location: "identity.rs:11-37 WorkIdentityAnchor + AnchorType(String) newtype with consts", note: "AnchorType is already a string newtype; adding GR_WORK is one const. No anchor-table migration (value column is free-form). DO NOT build a new anchor type." }
+      - { capability: "Resolver trait", status: EXISTS-GENERALIZE, location: "services/identity_resolver.rs:2-5 IdentityResolver::resolve(&EnglishSeed)->IdentityResolution", note: "Generalize the EXISTING trait signature (add user_id+tier+Result+federated Resolution). Do NOT invent a parallel resolver (r1 R-003)." }
+      - { capability: "Repository trait + error", status: EXISTS-GENERALIZE, location: "services/work_identity.rs WorkIdentityRepository + WorkIdentityError; find_work_by_anchor already takes AnchorType", note: "find_work_by_anchor is ALREADY anchor-type-generic — gr_work lookups work unchanged." }
+      - { capability: "Creation contract", status: EXISTS-GENERALIZE, location: "identity.rs:230-261 EnglishSeedFields + EnglishWorkCandidate", note: "Rename to WorkSeedFields/WorkCandidate; drop standalone gr_key (R-010) + fields.isbn/asin (R-011); add candidate_id; anchors live solely in identity." }
+      - { capability: "Identifier normalization", status: NEW, location: "domain-normalization (this feature)", note: "WorkSeed entry calls it; see that module." }
+      - { capability: "Opaque payload handle", status: NEW, location: "CandidateId (uuid v4)", note: "New; user-scoped consume-once cache key (D-005)." }
+    public_api:
+      functions:
+        - name: "WorkSeed::sanitized"
+          signature: "fn sanitized(raw: RawHarvest) -> Result<WorkSeed, WorkIdentityError>"
+          pseudocode:
+            - "Run each raw identifier through domain-normalization: isbn_13 via normalize_isbn13; asin via normalize_asin (AsinNorm: Isbn13 folds into isbn_13 and clears asin per REQ-004; Asin retained; Invalid dropped); gr_key via normalize_gr_key; language via normalize_language."
+            - "Drop any identifier that normalizes to None/Invalid — a malformed identifier is treated as absent (REQ-029); it is neither persisted nor sent to a provider."
+            - "If, after normalization, the seed carries no usable signal at all (no identifier, no title+author), return Err(WorkIdentityError::EmptySeed)."
+            - "Set user_confirmed from the caller (true only for an explicit Add-Work user pick, REQ-019)."
+            - "Return the validated WorkSeed."
+          call_annotations:
+            - { type: NEW, call: "normalize_isbn13(raw.isbn)", target: "livrarr-domain::normalization::normalize_isbn13" }
+            - { type: NEW, call: "normalize_asin(raw.asin)", target: "livrarr-domain::normalization::normalize_asin" }
+            - { type: NEW, call: "normalize_gr_key(raw.gr)", target: "livrarr-domain::normalization::normalize_gr_key" }
+            - { type: NEW, call: "normalize_language(raw.lang)", target: "livrarr-domain::normalization::normalize_language" }
+            - { type: NEW, call: "WorkIdentityError::EmptySeed", target: "livrarr-domain::work_identity::WorkIdentityError (new variant)" }
+          preconditions: ["raw is whatever a path harvested; fields may be malformed or absent"]
+          invariants: ["Output identifiers are canonical-or-absent (REQ-029). No identifier is ever the empty string."]
+          tdd:
+            - "RED (AC-037): a malformed/empty isbn_13 in raw → WorkSeed.isbn_13 is None (treated absent)."
+            - "RED (AC-004/AC-029): an ISBN-10-shaped asin that passes checksum → isbn_13 set, asin None; one that FAILS checksum → asin retained."
+            - "RED (REQ-029): a seed with no identifier and no title+author → Err(EmptySeed)."
+        - name: "CapturedIdentity::merge_missing"
+          signature: "fn merge_missing(&mut self, incoming: &CapturedIdentity)"
+          pseudocode:
+            - "For each anchor/bridge slot (ol_key, gr_key, hc_key, isbn_13, asin): if self's slot is None and incoming's is Some, copy it in."
+            - "Never overwrite a slot self already holds (REQ-028 — convergence adds, never clobbers)."
+          call_annotations:
+            - { type: STDLIB, call: "Option::is_none / get_or_insert", target: "std::option::Option" }
+          invariants: ["Monotonic: anchors only added, never removed or changed (feeds REQ-022 convergence + REQ-028 anchor-merge-on-match)."]
+          tdd: ["RED (AC-028): existing CapturedIdentity lacking gr_key merged with incoming carrying gr_key → gr_key present; an existing ol_key is NOT overwritten."]
+        - name: "IdentityResolver::resolve (trait contract — GENERALIZED)"
+          signature: "async fn resolve(&self, user_id: UserId, seed: &WorkSeed, tier: LatencyTier) -> Result<Resolution, WorkIdentityError>"
+          pseudocode:
+            - "CONTRACT (impl lives in metadata-identity-resolver): given a user scope, a harvested seed, and a latency tier, return a Resolution."
+            - "A provider that abstains (timeout/unreachable) MUST NOT turn into Err and MUST NOT count as quorum disagreement (REQ-025) — it yields Unresolved, not Err."
+            - "Err is reserved for programmer/db faults (e.g. EmptySeed, Db)."
+            - "Whenever the impl fetched provider payloads, the returned payload-bearing variant carries a CandidateId (D-005)."
+          call_annotations:
+            - { type: NEW, call: "-> Resolution", target: "livrarr-domain::identity::Resolution (new enum, generalizes IdentityResolution)" }
+            - { type: EXISTING, call: "trait_variant::make(Send) on the trait", target: "trait-variant (existing macro on IdentityResolver)" }
+            - { type: EXISTING, call: "UserId / WorkId domain ids", target: "livrarr-domain::{UserId,WorkId}" }
+          invariants: ["Total over provider failure (REQ-025): provider down ⇒ Unresolved, never Err.", "Tier-agnostic identity result (REQ-022): tier changes DEPTH/latency, not the identity rule."]
+          tdd: ["RED (AC-018): Interactive resolve returns without awaiting a background-only provider.", "RED (AC-022): one provider times out → Resolution still built from responders; no Conflict from the abstainer."]
+        - name: "WorkService::add (CHANGED — impl is WorkServiceImpl in livrarr-metadata)"
+          signature: "async fn add(&self, user_id: UserId, candidate: WorkCandidate) -> Result<AddWorkResult, WorkServiceError>"
+          pseudocode:
+            - "If candidate.candidate_id is Some, take the cached per-provider payloads for (user_id, candidate_id) from the transport cache and REVALIDATE that the captured anchors in candidate.identity match the cached result; on mismatch / cache-miss / TTL-expiry, fall back to network enrichment (the exceptional path, D-005)."
+            - "Derive the persisted identifiers SOLELY from candidate.identity (CapturedIdentity in IdentityState::Confirmed) — never from descriptive fields (R-010/R-011). isbn_13/asin are identity, not fields."
+            - "Dedup, preserving today's control flow (work_service.rs add): (1) anchor match via find_work_by_anchor over EACH present anchor type incl. gr_work; (2) adopt path — an anchorless existing normalized-title+author match absorbs the incoming anchors via merge_missing_anchors (REQ-028) instead of only confirm_ol_anchor; (3) normalized-match dedup."
+            - "CONFLICT PREFLIGHT (generalizes the warn-only step-3e site to ALL match paths — r3 C-R009): on EVERY match (anchor-match, adopt, normalized-dedup, race-loser), BEFORE merging, call detect_conflicting_anchors(existing_work_id, incoming.identity). For each anchor type the existing work has CONFIRMED with a DIFFERENT incoming value, raise NewIdentityConflict of the matching federated kind (REQ-020) — not only the normalized-title ol_key case. This closes the unwired conflict path AND stops merge_missing_anchors from silently dropping a conflicting anchor."
+            - "On create, persist every present anchor through confirm_anchor(anchor_type, value, setter). On any match (AFTER the conflict preflight above), call merge_missing_anchors — ADDITIVE-ONLY: it fills anchor types the existing work LACKS so no harvested anchor is dropped (REQ-028), and never overwrites a confirmed anchor (conflicts were already raised by the preflight — r3 C-R009)."
+            - "BRIDGE-ANCHOR mismatch policy (r4 C-R011): a Work stores at most one isbn_13 and one asin (spec Non-Req). When a match carries a DIFFERENT incoming bridge value than the existing confirmed one, KEEP the existing (never overwrite a confirmed anchor, REQ-028) and RECORD the divergence via a structured tracing::warn — observable in logs, the minimal 'not silent' (reusing the existing step-3e warn pattern); a DURABLE user-facing surface is NOT required by any REQ (edition variance is expected + low-stakes) and is deferred as a small optional follow-up (r5 C-R011 P3). This is NOT a silent skip and NOT an identity Conflict (a different edition's ISBN is edition variance, not an identity dispute; REQ-020 covers only ol/gr/hc). merge_missing_anchors still fills a bridge the existing work LACKS."
+            - "Feed the (revalidated) cached payloads to the merge engine in-process via metadata-merge-reuse (no network re-query, REQ-014/015); then evict the cache entry."
+          call_annotations:
+            - { type: EXISTING, call: "db.find_work_by_anchor(user_id, &AnchorType, value)", target: "livrarr-domain::services::work_identity::WorkIdentityRepository::find_work_by_anchor (already anchor-type-generic)" }
+            - { type: EXISTING, call: "db.find_normalized_match_no_anchor_for_user(...)", target: "livrarr-metadata::work_service adopt path (work_service.rs ~:290-309)" }
+            - { type: EXISTING, call: "db.find_by_normalized_match(...)", target: "livrarr-metadata::work_service (work_service.rs ~:345)" }
+            - { type: EXISTING, call: "handle_race_loser(...)", target: "livrarr-metadata::work_service::handle_race_loser (~:1476)" }
+            - { type: NEW, call: "confirm_anchor(work_id, anchor_type, value, setter)", target: "livrarr-db::anchors::confirm_anchor (generalizes confirm_ol_anchor)" }
+            - { type: NEW, call: "detect_conflicting_anchors(existing_work_id, incoming, source)", target: "livrarr-db::anchors::detect_conflicting_anchors (source = the calling path's ConflictSource, D-017)" }
+            - { type: NEW, call: "merge_missing_anchors(work_id, captured)", target: "livrarr-db::anchors::merge_missing_anchors" }
+            - { type: NEW, call: "raise_identity_conflict(new_conflict)", target: "livrarr-db::conflicts::raise_identity_conflict (wires the conflict preflight + step-3e)" }
+            - { type: NEW, call: "transport_cache.take(user_id, candidate_id)", target: "livrarr-metadata::transport_cache::cache_take" }
+            - { type: EXISTING, call: "tracing::warn! to record a bridge-anchor divergence (r5 C-R011)", target: "livrarr-metadata work_service logging (the existing step-3e warn pattern)" }
+          preconditions: ["candidate.identity is the sole identifier authority (R-010/R-011).", "user_id scopes both the work and the cache lookup (Principle 4 multi-user)."]
+          invariants: ["No harvested anchor is silently discarded on ANY match path (REQ-028).", "A different same-type anchor on a title+author match is terminal Conflict, not a silent merge (REQ-018/020)."]
+          tdd:
+            - "RED (AC-002): Readarr-sourced candidate with gr_key+isbn+asin in identity → all persisted; hc_key filled once HC resolves the ISBN."
+            - "RED (AC-015/AC-034/AC-035): same normalized title+author, different ol_key (or gr_key/hc_key) → observable Conflict row, not warn-only."
+            - "RED (AC-010/AC-024): add with a valid candidate_id issues ZERO provider network calls (provider spy)."
+            - "RED (AC-028): match to an anchorless existing work merges the incoming anchor onto it."
+            - "RED (r5 C-R011): a match with a DIFFERENT incoming isbn_13 or asin keeps the existing bridge, emits a structured warn (observable), and does NOT raise an identity Conflict (edition variance)."
+
+  - name: domain-normalization
+    component: livrarr-domain
+    responsibility: "Single authority for identifier + language normalization/validation (see IR v1). Leaf; zero outward deps."
+    req_ids: [REQ-002, REQ-004, REQ-005, REQ-029]
+    dependencies: []
+    capability_survey:
+      - { capability: "ISBN-10 → ISBN-13 conversion", status: EXISTS-GENERALIZE, location: "metadata google_books.rs::isbn10_to_isbn13", note: "MOVE the existing converter into domain (D-009); google_books delegates back. Do NOT reimplement the checksum (insight: ecosystem-crate / existing-logic reuse)." }
+      - { capability: "Language normalization", status: EXISTS-GENERALIZE, location: "metadata lib.rs normalize_language (names + 3-letter; inline split('-') in google_books)", note: "Extend with primary-subtag strip; metadata delegates here (DRY)." }
+      - { capability: "ASIN shape-guard", status: NEW, location: "this module (AsinNorm)", note: "No normalize_asin exists today (verified)." }
+      - { capability: "gr_key bare-numeric", status: NEW, location: "this module", note: "No normalize for it exists; extract_gr_key keeps the full slug form today." }
+    public_api:
+      functions:
+        - name: normalize_isbn13
+          signature: "fn normalize_isbn13(raw: &str) -> Option<String>"
+          pseudocode:
+            - "Strip non-alphanumerics; uppercase a trailing check char."
+            - "If 10 chars: validate the ISBN-10 mod-11 checksum; on pass convert to ISBN-13 (978 prefix + mod-10 check) using the relocated converter; on fail return None."
+            - "If 13 chars: validate the ISBN-13 mod-10 checksum; pass → return; fail → None."
+            - "Any other length → None (REQ-029: validation is length + checksum, not mere stripping)."
+          call_annotations:
+            - { type: EXISTING, call: "isbn10_to_isbn13(s)", target: "livrarr-metadata::google_books::isbn10_to_isbn13 (relocated into this module per D-009)" }
+            - { type: STDLIB, call: "char::is_ascii_digit / str manipulation", target: "std::primitive::char" }
+          tdd: ["RED (AC-037): bad checksum / 11-char input → None.", "RED: valid ISBN-10 → 13-digit ISBN-13."]
+        - name: normalize_asin
+          signature: "fn normalize_asin(raw: &str) -> AsinNorm"
+          pseudocode:
+            - "Trim/uppercase. If empty → AsinNorm::Invalid."
+            - "If the value matches the ISBN-10 shape (9 digits + digit-or-X) AND passes the ISBN-10 checksum, return AsinNorm::Isbn13(converted) — a print-book ASIN is really an ISBN-10 (ST-006); store as isbn_13, not asin (REQ-004)."
+            - "If it matches the shape but FAILS the checksum, it is a genuine Amazon ASIN — return AsinNorm::Asin(value) so audiobook lookups still work."
+            - "A B-prefixed (Kindle/Audible) value or other valid ASIN form → AsinNorm::Asin(value). Otherwise AsinNorm::Invalid (REQ-029)."
+          call_annotations:
+            - { type: NEW, call: "normalize_isbn13(raw) for the checksum/convert", target: "livrarr-domain::normalization::normalize_isbn13" }
+            - { type: STDLIB, call: "regex-free shape test on bytes", target: "std::primitive::str" }
+          invariants: ["An ISBN-10-shaped, checksum-VALID value never lands in an asin slot (REQ-004)."]
+          tdd: ["RED (AC-004): '0439139600' (valid ISBN-10) in asin → Isbn13.", "RED (AC-029): ISBN-10-shaped but checksum-invalid → Asin (retained)."]
+        - name: normalize_gr_key
+          signature: "fn normalize_gr_key(raw: &str) -> Option<String>"
+          pseudocode:
+            - "Take the leading run of ASCII digits from the input."
+            - "Drop everything from the first non-digit onward (slug suffixes introduced by a dot, hyphen, or slash path are discarded)."
+            - "Return the leading digit run if non-empty; otherwise None (a value with no leading digits is not a usable key, REQ-002/REQ-029)."
+          call_annotations:
+            - { type: STDLIB, call: "take_while(is_ascii_digit)", target: "std::primitive::char" }
+          invariants: ["Output matches the bare-numeric form required by the contract; the persisted key never carries a slug. (The scraper MAY keep a slug-form URL for fetching — that is separate from the persisted key, REQ-002.)"]
+          tdd: ["RED (AC-003): a dotted slug form normalizes to its leading digits; a hyphenated slug form likewise; a non-numeric value → None."]
+        - name: normalize_language
+          signature: "fn normalize_language(raw: &str) -> Option<String>"
+          pseudocode:
+            - "Lowercase. Split on '-' or '_' and keep the primary subtag ('en-US' → 'en', 'pt-BR' → 'pt'); REQ-005."
+            - "Map any full language name or 3-letter code to its ISO 639-1 2-letter code using the existing table."
+            - "Return the 2-letter code, or None if unrecognized."
+          call_annotations:
+            - { type: EXISTING, call: "existing name/3-letter table", target: "livrarr-metadata::lib::normalize_language (logic folded in here; metadata delegates)" }
+            - { type: STDLIB, call: "str::split / to_lowercase", target: "std::primitive::str" }
+          tdd: ["RED (AC-005): 'en-US' → 'en'; 'pt-BR' → 'pt'."]
+
+  - name: domain-states
+    component: livrarr-domain
+    responsibility: "Add EnrichmentStatus::NeedsReview; generalize IdentityPending semantics (see IR v1)."
+    req_ids: [REQ-026]
+    dependencies: []
+    capability_survey:
+      - { capability: "EnrichmentStatus enum", status: EXISTS-GENERALIZE, location: "livrarr-domain lib.rs:73-91 (Unenriched/Enriched/Failed/Conflict/IdentityPending)", note: "Add NeedsReview variant. IdentityPending already exists — drop its English/OL scoping note." }
+      - { capability: "No-migration check", status: EXISTS-REUSE, location: "migrations 001 works.enrichment_status (NO CHECK constraint, verified); parsed in code at db sqlite_work.rs::parse_enrichment_status", note: "Adding a variant needs NO migration — only the enum + parse_enrichment_status arm. D-010 verification CONFIRMED: no CHECK on the column." }
+
+  # ════════════════════════════ livrarr-db ════════════════════════════
+  - name: db-conflicts-migration
+    component: livrarr-db
+    responsibility: "Migration 052: data-preserving rebuild of work_identity_conflicts (federated kinds + SeriesMonitor + ReplaceAnchor, drop forbidden enum constraints). Repo: raise + list + resolve for any federated kind (see IR v1)."
+    req_ids: [REQ-020]
+    dependencies: [domain-identity-federate]
+    capability_survey:
+      - { capability: "Conflict store table", status: EXISTS-GENERALIZE, location: "migrations 040_work_identity_conflicts.sql (kind/raised_by/status/resolution_action enum constraints; OL-only kinds; no series_monitor source)", note: "Rebuild data-preservingly; the existing enum constraints are the reason for the rebuild." }
+      - { capability: "Conflict domain types", status: EXISTS-GENERALIZE, location: "identity.rs IdentityConflict/NewIdentityConflict/IncomingConflictPayload/IdentityConflictKind/ConflictSource/ConflictResolutionAction", note: "Add IncomingDifferentGrKey/IncomingDifferentHcKey/QuorumTie; add ConflictSource::SeriesMonitor; rename ReplaceOlKey→ReplaceAnchor; federate IncomingConflictPayload anchors." }
+      - { capability: "Conflict raise/list/resolve repo", status: EXISTS-GENERALIZE, location: "context.rs HasIdentityConflictService exists (handler capability already present); raise() unwired at work_service step-3e", note: "Wire the existing capability; the raise call site is the only missing link." }
+      - { capability: "FK integrity harness", status: EXISTS-REUSE, location: "startup pre/post FK-check harness", note: "Rely on it after the table swap (R-005)." }
+    public_api:
+      functions:
+        - name: "migration_052_federate_conflicts"
+          signature: "-- SQL migration (sqlx); plus a no-CHECK rebuild"
+          pseudocode:
+            - "In one transaction: create a NEW conflicts table whose enum columns carry NO database-level constraint (validity is enforced in Rust; the contract forbids new enum constraints of that form)."
+            - "Copy every existing row with INSERT ... SELECT, preserving ALL columns explicitly — id/user_id/existing_work_id/kind/incoming_payload_json/raised_at/raised_by/raised_source_path/status/resolved_at/resolution_notes — AND resolution_action mapped INLINE in the same SELECT: CASE resolution_action WHEN 'replace_ol_key' THEN 'replace_anchor' ELSE resolution_action END. user_id is NOT NULL and resolution_action holds existing resolution decisions — dropping either breaks the rebuild (cR-001, r2-R-001)."
+            - "No separate mapping pass: the resolution_action CASE above is the only value transform; every other column copies verbatim."
+            - "Drop the old table; rename the new one into place; recreate both indexes (user+status, existing_work_id)."
+            - "Let the startup FK-check harness validate integrity post-swap."
+          call_annotations:
+            - { type: LIBRARY, call: "sqlx.query (migration runner)", target: "sqlx.migrate" }
+          invariants: ["Row-count preserved across the rebuild (R-005 data-preserving).", "No enum check-constraint of the forbidden form is introduced (contract P1)."]
+          tdd: ["RED: seed pre-migration conflict rows for at least TWO users with the OL-key replace action; after 052 every row survives with its user_id, existing_work_id, status, the mapped replace_anchor value, and the total row count preserved (cR-001)."]
+        - name: raise_identity_conflict
+          signature: "async fn raise_identity_conflict(&self, conflict: NewIdentityConflict) -> Result<i64, WorkIdentityError>"
+          pseudocode:
+            - "Serialize the federated IncomingConflictPayload (now carrying ol/gr/hc anchors) to JSON."
+            - "INSERT a new open conflict row for any federated kind; return the new id."
+            - "Idempotency: if an open conflict for the same (user, existing_work, kind, incoming-anchor) already exists, return it rather than duplicating."
+          call_annotations:
+            - { type: LIBRARY, call: "sqlx.query_scalar insert returning id", target: "sqlx.query" }
+            - { type: LIBRARY, call: "serde_json serialize payload", target: "serde.json" }
+          tdd: ["RED (AC-035): a title+author match with a conflicting gr_key (or hc_key) persists an observable conflict row of the new kind."]
+
+  - name: db-anchors
+    component: livrarr-db
+    responsibility: "Generalize WorkIdentityRepository from OL-scoped to federated; add anchor-merge-on-match + the conflict preflight; the bare-numeric backfill is a Rust one-shot startup step (backfill_gr_numeric), NOT a .sql migration (r4 C-R010; see D-014)."
+    req_ids: [REQ-001, REQ-002, REQ-003, REQ-028]
+    dependencies: [domain-identity-federate]
+    capability_survey:
+      - { capability: "Anchor upsert", status: EXISTS-GENERALIZE, location: "WorkIdentityRepository::confirm_ol_anchor (OL-specific name)", note: "Generalize to confirm_anchor(anchor_type, value, setter). The anchor table + uniq_primary_confirmed_anchor partial index already support any type." }
+      - { capability: "Anchor lookup", status: EXISTS-REUSE, location: "find_work_by_anchor(user_id, &AnchorType, value) + list_anchors(work_id)", note: "Already generic over AnchorType — reuse unchanged for gr_work/hc_work." }
+      - { capability: "Anchor-merge-on-match", status: NEW, location: "this module (merge_missing_anchors)", note: "REQ-028; built on list_anchors + confirm_anchor." }
+      - { capability: "Upsert idiom", status: EXISTS-REUSE, location: "existing ON CONFLICT ... DO UPDATE pattern in db", note: "Insight 20 / contract P1: must use ON CONFLICT upsert, never the banned replace idiom." }
+    public_api:
+      functions:
+        - name: "confirm_anchor (GENERALIZES confirm_ol_anchor)"
+          signature: "async fn confirm_anchor(&self, work_id: WorkId, anchor_type: AnchorType, value: &str, setter: AnchorSetter) -> Result<(), WorkIdentityError>"
+          pseudocode:
+            - "Validate value is non-empty + canonical for its type (else WorkIdentityError::InvalidAnchorValue, REQ-029)."
+            - "Upsert the (work_id, anchor_type, value) row with confidence=confirmed via INSERT ... ON CONFLICT (...) DO UPDATE SET — honoring the uniq_primary_confirmed_anchor partial index; the banned replace idiom is NOT used (contract P1, insight 20)."
+            - "Preserve the existing confirm_ol_anchor SQL shape; only the type is now a parameter rather than hardcoded to the OL anchor."
+          call_annotations:
+            - { type: LIBRARY, call: "sqlx.query upsert", target: "sqlx.query" }
+            - { type: EXISTING, call: "AnchorType / AnchorSetter", target: "livrarr-domain::identity::{AnchorType,AnchorSetter}" }
+          tdd: ["RED (AC-002): confirm_anchor(HC_WORK, ...) then find_work_by_anchor(HC_WORK,...) returns the work.", "RED (REQ-003): hc_key writable at create (not only via enrichment)."]
+        - name: merge_missing_anchors
+          signature: "async fn merge_missing_anchors(&self, work_id: WorkId, incoming: &CapturedIdentity) -> Result<(), WorkIdentityError>"
+          pseudocode:
+            - "list_anchors(work_id) → the set of types already confirmed on the work."
+            - "For each anchor present in `incoming` whose type is NOT already confirmed on the work, confirm_anchor it (setter reflecting the merge origin)."
+            - "Never supersede or overwrite an already-confirmed anchor (REQ-028) — additive only."
+          call_annotations:
+            - { type: EXISTING, call: "self.list_anchors(work_id)", target: "livrarr-domain::services::work_identity::WorkIdentityRepository::list_anchors" }
+            - { type: NEW, call: "self.confirm_anchor(work_id, ty, val, setter)", target: "livrarr-db::anchors::confirm_anchor" }
+          invariants: ["Convergence-safe: only fills gaps; an existing confirmed anchor is immutable here (REQ-022/028)."]
+          tdd: ["RED (AC-028): work with ol_key only + incoming gr_key → both anchors present afterward; the ol_key is unchanged."]
+        - name: detect_conflicting_anchors
+          signature: "async fn detect_conflicting_anchors(&self, existing_work_id: WorkId, incoming: &CapturedIdentity, source: ConflictSource) -> Result<Vec<NewIdentityConflict>, WorkIdentityError>  // source attributes the raised conflict to the creation path (D-017)"
+          pseudocode:
+            - "list_anchors(existing_work_id); for each WORK-ANCHOR type — ol_work / gr_work / hc_work ONLY (the identity anchors REQ-020 names) — that the existing work has CONFIRMED, compare its value to the incoming value of that type. Edition BRIDGES (isbn_13 / asin) are NOT identity conflicts here; they are handled by the bridge policy in add (r4 C-R011)."
+            - "If an incoming value is present AND differs from the existing confirmed value, build a NewIdentityConflict of the matching federated kind (IncomingDifferentOlKey / IncomingDifferentGrKey / IncomingDifferentHcKey) for that type (REQ-020)."
+            - "An anchor type the existing work LACKS is a gap for merge_missing_anchors, NOT a conflict. Return all detected conflicts (usually zero or one)."
+          call_annotations:
+            - { type: EXISTING, call: "self.list_anchors(existing_work_id)", target: "livrarr-domain::services::work_identity::WorkIdentityRepository::list_anchors" }
+            - { type: EXISTING, call: "AnchorType consts + IdentityConflictKind + NewIdentityConflict", target: "livrarr-domain::identity (federated kinds + existing conflict structs)" }
+          invariants: ["Conflict iff same-type, both present, different value (REQ-020). A missing type is a gap, never a conflict (additive merge handles it)."]
+          tdd: ["RED (AC-015/AC-034/AC-035): a match by isbn anchor where the existing ol_key differs from the incoming ol_key detects a conflict on ALL match paths (anchor-match / adopt / race-loser), not only the normalized-title branch (r3 C-R009)."]
+        - name: "backfill_gr_numeric (Rust one-shot backfill step — NOT a .sql migration; r3 C-R010)"
+          signature: "async fn backfill_gr_numeric(&self) -> Result<(), WorkIdentityError>  // runs once at startup, ordered AFTER the schema migrations (like the FK-check harness)"
+          pseudocode:
+            - "Run as a Rust startup step ordered AFTER the schema migrations — NOT a pure .sql migration: SQL cannot call normalize_gr_key, and reimplementing the leading-numeric rule in SQL would fork the single normalization authority (REQ-002/REQ-005, r3 C-R010)."
+            - "PRIMARY: read each works row whose Goodreads-key column carries a non-numeric slug suffix; rewrite it to normalize_gr_key(value); already-bare values are skipped (idempotent)."
+            - "Then backfill the goodreads work anchor rows from the normalized column via an idempotent INSERT ... SELECT FROM works WHERE the column is non-empty AND NOT EXISTS a matching anchor row — this step is plain SQL (it only copies the already-normalized value)."
+            - "Second pass: normalize any goodreads work anchor rows already written by feature code, for completeness."
+          call_annotations:
+            - { type: NEW, call: "normalize_gr_key(value) for each drifted row", target: "livrarr-domain::normalization::normalize_gr_key" }
+            - { type: LIBRARY, call: "sqlx.query for the read-write loop + the anchor backfill INSERT...SELECT", target: "sqlx.query" }
+          invariants: ["Single normalization authority: the rewrite calls the domain normalize_gr_key, never a SQL reimplementation (r3 C-R010). Post-backfill, BOTH the works Goodreads-key column AND every goodreads-work anchor value are bare-numeric (contract P2)."]
+          tdd: ["RED (AC-003): a pre-existing slug-form value in the works column is rewritten to bare numeric via the domain normalizer AND yields a matching bare-numeric anchor row; an already-bare value is unchanged."]
+
+  # ════════════════════════════ livrarr-matching ════════════════════════════
+  - name: matching-embedded-harvest
+    component: livrarr-matching
+    responsibility: "Harvest embedded ISBN/ASIN/series/year from EPUB/M4B; carry them on ParsedFile (see IR v1)."
+    req_ids: [REQ-006]
+    dependencies: [domain-normalization]
+    capability_survey:
+      - { capability: "Embedded extraction wiring", status: EXISTS-REUSE, location: "manual_import scan calls MatchingService::extract_and_reconcile (M1 embedded + path parse + reconcile)", note: "Already wired — extraction is UNDERused, not unused. Do NOT add a parallel extractor." }
+      - { capability: "EPUB/M4B extractors", status: EXISTS-GENERALIZE, location: "m1_embedded.rs extract_epub (isbn None :49, asin None :54) / extract_m4b (isbn :80, asin :85)", note: "Stop hardcoding None; populate the Extraction fields that already exist." }
+      - { capability: "Extraction struct fields", status: EXISTS-REUSE, location: "matching types.rs:30-42 Extraction has isbn/asin/year/series already", note: "No struct change needed for L1 — just populate." }
+      - { capability: "OPF parsing", status: EXISTS-REUSE, location: "quick-xml (approved)", note: "dc:identifier read with the existing XML reader." }
+      - { capability: "ParsedFile carry-through (L2)", status: NEW, location: "handlers manual_import.rs ParsedFile:98-105 (no isbn/asin/year) + server manual_import_scan_service.rs constructor", note: "Add isbn/asin/year so harvested ids survive the cluster→ParsedFile narrowing (the L2 loss)." }
+    public_api:
+      functions:
+        - name: "extract_epub (CHANGED)"
+          signature: "fn extract_epub(path: &Path) -> Option<Extraction>"
+          pseudocode:
+            - "Parse the OPF with the existing XML reader; read dc:title/dc:creator/dc:language as today."
+            - "Read dc:identifier elements; for one whose scheme is ISBN (or whose value normalizes as an ISBN), set Extraction.isbn via normalize_isbn13 — replacing the current hardcoded None."
+            - "Normalize dc:language via normalize_language. Harvest the publication year from dc:date (first 4-digit run). Series harvest from calibre meta is DEFERRED (D-017): rbook's exposure of calibre series is unverified and series is provider-sourced."
+          call_annotations:
+            - { type: LIBRARY, call: "quick-xml Reader over the OPF", target: "quick-xml.Reader" }
+            - { type: NEW, call: "normalize_isbn13(identifier)", target: "livrarr-domain::normalization::normalize_isbn13" }
+            - { type: NEW, call: "normalize_language(lang)", target: "livrarr-domain::normalization::normalize_language" }
+          tdd: ["RED (AC-006): an EPUB whose OPF declares an ISBN yields Extraction.isbn = that ISBN (before any search)."]
+        - name: "extract_m4b (CHANGED)"
+          signature: "fn extract_m4b(path: &Path) -> Option<Extraction>"
+          pseudocode:
+            - "Read M4B/M4A atoms (title/author/year) as today."
+            - "Read the embedded ASIN tag; pass it through normalize_asin → on AsinNorm::Isbn13 set Extraction.isbn, on AsinNorm::Asin set Extraction.asin (replacing the current hardcoded None); on Invalid leave both None (REQ-004/029)."
+            - "Narrator/series harvest is DEFERRED (D-017): no verified m4b atom convention exists and both are provider-sourced (Audible/Audnexus). Year is already harvested via tag.year()."
+          call_annotations:
+            - { type: EXISTING, call: "existing M4B atom reader", target: "livrarr-matching::m1_embedded (mp4 tag read)" }
+            - { type: NEW, call: "normalize_asin(asin_tag)", target: "livrarr-domain::normalization::normalize_asin" }
+          tdd: ["RED (REQ-006): an M4B with an embedded ASIN yields Extraction.asin (or isbn if the ASIN is really an ISBN-10)."]
+
+  # ════════════════════════════ livrarr-metadata ════════════════════════════
+  - name: metadata-identity-resolver
+    component: livrarr-metadata
+    responsibility: "The #97 fix: generalize english_identity_resolver into the tier-scoped multi-provider IdentityResolver impl (see IR v1)."
+    req_ids: [REQ-007, REQ-008, REQ-009, REQ-010, REQ-011, REQ-013, REQ-018, REQ-019, REQ-021, REQ-023, REQ-024, REQ-025, REQ-027]
+    dependencies: [domain-identity-federate, domain-normalization]
+    capability_survey:
+      - { capability: "Resolver impl to generalize", status: EXISTS-GENERALIZE, location: "english_identity_resolver.rs LiveEnglishIdentityResolver::resolve (OL-only, single provider)", note: "Today it is single-provider OL; generalize to a fan-out. This is the #97 locus (OL-absent ⇒ zero candidates)." }
+      - { capability: "Provider fetch + clients", status: EXISTS-REUSE, location: "provider_client.rs ProviderClient::fetch(work: &Work, ctx: &EnrichmentContext) -> ProviderOutcome<NormalizedWorkDetail>; per-provider clients (OL/HC/GB/GR/Audnexus/Audible)", note: "Reuse the existing dispatch + clients; fetch takes &Work (NOT a seed, cR-004) — see the seed-to-transient-Work adapter below." }
+      - { capability: "Seed-to-transient-Work adapter", status: NEW, location: "this module (build_transient_work_from_seed)", note: "cR-004: pre-create discovery has no persisted Work; build a transient Work from the WorkSeed to drive ProviderClient::fetch — the cover fan-out already passes a Work the same way." }
+      - { capability: "ISBN bridges", status: EXISTS-REUSE, location: "OpenLibraryClient::isbn_lookup (ISBN→ol_key); hardcover::query_hardcover_by_isbn (ISBN→hc_key)", note: "Bridges already fire inside fetch — capture their results instead of discarding." }
+      - { capability: "GR resolution", status: EXISTS-REUSE, location: "GoodreadsClient::resolve_detail_url (gr_key direct / isbn-scrape+LLM / title+author+LLM)", note: "Reuse; gate behind LLM availability (ST-001). 202 anti-bot ⇒ treat as abstain/unverified (gotcha)." }
+      - { capability: "Audiobook lookups", status: EXISTS-REUSE, location: "lookup_audible_by_asin; query_audnexus", note: "Audible interactive-eligible; Audnexus background-only (REQ-021). NOTE gotcha: Audnexus currently returns REGION_UNAVAILABLE for all ASINs — the background path is correct but a no-op until that service issue clears (not a design defect)." }
+      - { capability: "Parallel fan-out + payload retention", status: EXISTS-GENERALIZE, location: "cover_alternatives.rs::fetch_internal_alternatives (join_all over providers under a 10s timeout) — DISCARDS all but cover_url+title at :38-54", note: "Promote this fan-out to keep the FULL NormalizedWorkDetail payloads (D-004). Reuse the timeout+join mechanism; stop discarding." }
+      - { capability: "candidate_id mint + cache", status: NEW, location: "metadata-transport-cache (this feature)", note: "uuid v4 + per-(user,candidate) cache." }
+      - { capability: "Quorum + verify + provider-select", status: NEW, location: "this module", note: "REQ-018/024/008 logic — no existing equivalent." }
+      - { capability: "Resolver-discovery semantics (suppress fuzzy fallback + payload-inspection gr-verify)", status: NEW, location: "this module + an EnrichmentContext discovery flag honored by the provider fetch fallback branches", note: "r2-R006/R007 + r3-C-R006/G-R009: existing fetch fuzzy-falls-back to title/author across ALL THREE providers — HC query_hardcover, OL title_author_search, AND GoodreadsClient::resolve_detail_url (gr_llm_key_lookup + search_goodreads). The resolver suppresses ALL of them for hard-id seeds (REQ-010/AC-024). A non-harvested Goodreads key is verified by INSPECTING the already-returned payload (title+author present and matching the seed) — no extra network (REQ-014); otherwise the key is stripped." }
+    public_api:
+      functions:
+        - name: "resolve (impl of IdentityResolver::resolve)"
+          signature: "async fn resolve(&self, user_id: UserId, seed: &WorkSeed, tier: LatencyTier) -> Result<Resolution, WorkIdentityError>"
+          pseudocode:
+            - "Guard: if seed has no usable signal → Err(EmptySeed)."
+            - "providers = self.select_providers(seed, tier) — the REQ-008 matrix scoped by seed, tier, and language (REQ-027), excluding any provider lacking its prerequisite (GB-key / LLM / Audnexus-tier), read from resolver-held config (r2-R-008)."
+            - "Build a transient (unpersisted) Work from the seed via build_transient_work_from_seed(seed, user_id) — cR-004: ProviderClient::fetch takes &Work and there is no persisted Work pre-create. Fan out to providers in parallel, passing that transient Work + an EnrichmentContext (reuse the cover_alternatives timeout+join mechanism); each yields ProviderOutcome<NormalizedWorkDetail>. A timeout/unreachable provider is recorded as an ABSTENTION, not a result (REQ-025)."
+            - "For a seed carrying a resolving HARD id, set the EnrichmentContext discovery flag that SUPPRESSES each provider's built-in title/author fuzzy fallback (r2-R-006: HardcoverClient::fetch otherwise calls query_hardcover(title,author) after an ISBN miss; OpenLibraryClient::fetch otherwise calls title_author_search). REQ-010/AC-024 require a resolving id to issue NO fuzzy search — so a hard-id miss becomes an abstention and falls to the EXPLICIT Tier B/C NeedsConfirmation step (REQ-013), never an implicit fuzzy search inside the fan-out."
+            - "Bridge: capture ol_key from OL's isbn_lookup and hc_key from HC's isbn path (they already fire inside fetch); GB contributes edition metadata only — never a work anchor (ST-002, REQ-009)."
+            - "gr_key: GR runs INSIDE the fan-out (no separate scrape-search — r3 G-R009 avoids the redundant network/LLM call). For a hard-id seed, the discovery flag ALSO suppresses GoodreadsClient::resolve_detail_url's title/author fuzzy fallbacks — gr_llm_key_lookup(title,author) and search_goodreads(title,author) — leaving only a directly-harvested seed key or the isbn: search path (r3 C-R006; REQ-010, AC-024). A non-harvested key from the GR payload is captured ONLY if verify_gr_payload confirms the already-returned NormalizedWorkDetail has a populated title AND its title/author match the RESOLVED identity (captured) — the seed's, or for an ISBN-only seed the consensus from the providers that resolved the hard id (r4 G-R011; REQ-024); a minimal/anti-bot payload (title None, the 202 case) or a mismatch strips the key (ST-001). A directly-harvested seed key skips the gate."
+            - "Run quorum (REQ-018): group responders by shared RETURNED anchor or normalized title+author (NOT by shared seed); an anchorless provider (GB) corroborates the edition unless its title diverges beyond the similarity threshold (then it dissents and its metadata is rejected). Majority wins, outliers dropped; a 1-vs-1 no-majority split → Conflict{QuorumTie}; two providers agreeing on title+author but returning different same-type anchors → terminal Conflict (REQ-020). seed.user_confirmed counts as the strongest vote (REQ-019)."
+            - "If any payloads were fetched: mint candidate_id (uuid v4) and cache_put the per-provider payload map under (user_id, candidate_id) (D-005, all tiers, D-015 per-provider provenance)."
+            - "Build the Resolution: a resolving hard id (incl. GB-only ISBN, REQ-011 Tier A) → Resolved{captured, method, candidate_id}; no resolving hard id → NeedsConfirmation{candidates each with their candidate_id}; conflict → Conflict{conflict, captured} (no candidate_id); all relevant providers abstained → Unresolved{captured, reason, candidate_id?} (REQ-025). NO LLM identity-validation here — that is the background verify pass (D-013/Q-001)."
+          call_annotations:
+            - { type: EXISTING, call: "ProviderClient::fetch(&transient_work, ctx)", target: "livrarr-metadata::provider_client::ProviderClient::fetch (takes &Work — fed the transient Work)" }
+            - { type: NEW, call: "build_transient_work_from_seed(seed, user_id)", target: "livrarr-metadata::identity_resolver::build_transient_work_from_seed" }
+            - { type: EXISTING, call: "OpenLibraryClient::isbn_lookup / query_hardcover_by_isbn", target: "livrarr-metadata::provider_client (ISBN bridges)" }
+            - { type: EXISTING, call: "GoodreadsClient::resolve_detail_url", target: "livrarr-metadata::provider_client::GoodreadsClient::resolve_detail_url" }
+            - { type: EXISTING, call: "parallel fan-out under timeout (reuse)", target: "livrarr-metadata::cover_alternatives fan-out mechanism (timeout+join, payloads kept)" }
+            - { type: NEW, call: "select_providers(seed, tier)", target: "livrarr-metadata::identity_resolver::select_providers" }
+            - { type: NEW, call: "verify_gr_payload(gr_payload, captured)", target: "livrarr-metadata::identity_resolver::verify_gr_payload (payload-inspection vs resolved identity, no extra network — r3 G-R009 / r4 G-R011)" }
+            - { type: NEW, call: "run_quorum(responders, seed)", target: "livrarr-metadata::identity_resolver::run_quorum" }
+            - { type: NEW, call: "cache_put(user_id, candidate_id, payloads)", target: "livrarr-metadata::transport_cache::cache_put" }
+            - { type: LIBRARY, call: "uuid v4 mint", target: "uuid.Uuid::new_v4" }
+            - { type: LIBRARY, call: "per-provider await timeout", target: "tokio.time::timeout" }
+          preconditions: ["seed has been sanitized (REQ-029) by WorkSeed::sanitized."]
+          invariants: ["Never narrows a multi-provider-eligible seed to one provider (REQ-008, the #97 guard).", "Provider failure ⇒ abstain, never Err and never quorum-dissent (REQ-025)."]
+          tdd:
+            - "RED (AC-001): file with HC-resolvable ISBN absent from OL → NeedsConfirmation/Resolved includes the HC-sourced candidate (not zero)."
+            - "RED (AC-030): no-GB-key / no-LLM-GR / Audnexus-interactive excluded; discovery still multi-provider."
+            - "RED (AC-032): ISBN resolving only to GB → Resolved Tier-A (ISBN identity, no work anchor), not identity-pending."
+            - "RED (AC-020/AC-033): two providers, same ISBN, different works → Conflict; an edition-variant title corroborates."
+        - name: select_providers
+          signature: "fn select_providers(&self, seed: &WorkSeed, tier: LatencyTier) -> Vec<MetadataProvider>  // method on the resolver — reads resolver-held ProviderEligibility (r2-R-008), NOT DefaultMergeEngine internals"
+          pseudocode:
+            - "ISBN seed → OL + HC + GB (+ GR when an LLM is configured), subject to language routing (REQ-027: a foreign-identified work excludes OL/HC from METADATA contribution, but an anchor may still be captured)."
+            - "ASIN seed → Audible (Audnexus excluded from interactive/bulk; background-only, REQ-021)."
+            - "Native key seed (ol_key/gr_key) → the owning provider, then bridge via any resolved ISBN."
+            - "Title/author only → the enabled English providers (or GB/GR for foreign)."
+            - "Exclude any provider lacking its prerequisite: GB without an API key (ST-009), GR without an LLM (ST-001), Audnexus on a non-background tier (REQ-021)."
+          call_annotations:
+            - { type: NEW, call: "read resolver-held ProviderEligibility (GB-key present, LLM configured, enabled providers, tier capability)", target: "livrarr-metadata::identity_resolver ResolverConfig/ProviderEligibility (r2-R-008 — explicit config, not DefaultMergeEngine private state)" }
+            - { type: EXISTING, call: "MetadataProvider enum", target: "livrarr-domain::MetadataProvider" }
+          tdd: ["RED (AC-030): prerequisite-lacking providers excluded; never narrowed to one for a multi-eligible seed."]
+        - name: "verify_gr_payload (was verify_gr_key — payload-inspection, NO extra network, r3 G-R009)"
+          signature: "fn verify_gr_payload(payload: &NormalizedWorkDetail, captured: &CapturedIdentity) -> bool  // 'captured' = the title/author resolved THIS fan-out (seed's if it carried them, else the consensus from the providers that resolved the hard id) — r4 G-R011"
+          pseudocode:
+            - "A non-harvested Goodreads key is trusted ONLY by inspecting the payload GoodreadsClient::fetch ALREADY returned — no second network call (r3 G-R009; REQ-014; Principle 5)."
+            - "ALWAYS require the payload to have a populated title — a minimal/anti-bot payload (title None, the 202 case) fails and the key is stripped."
+            - "Compare the payload title+author against captured's title/author (the RESOLVED identity, not the raw seed — r4 G-R011: an ISBN-only seed has no title to match, but OL/HC resolved one). Return true iff they match beyond the similarity threshold (REQ-024 — GR is LLM-disambiguated even via the isbn: path per ST-001, so the match check is mandatory; ~12.5% LLM exact-match)."
+            - "If NO title/author is available anywhere to compare against, the key cannot be verified → false (conservative; never persist an unverifiable LLM key)."
+            - "A directly-harvested seed key skips this gate (authored by the source, not LLM-resolved)."
+          call_annotations:
+            - { type: EXISTING, call: "normalized title/author similarity compare", target: "livrarr-metadata normalized title compare" }
+            - { type: STDLIB, call: "Option::is_some checks on payload fields", target: "std::option::Option" }
+          invariants: ["No network IO in verification (the fetch already did it) — REQ-014."]
+          tdd: ["RED (AC-021): a GR payload whose title+author mismatch the seed is not captured; a matching populated payload is captured; a title-None anti-bot payload has its key stripped."]
+        - name: build_transient_work_from_seed
+          signature: "fn build_transient_work_from_seed(seed: &WorkSeed, user_id: UserId) -> Work"
+          pseudocode:
+            - "Construct an in-memory (unpersisted) Work whose discovery-relevant fields come from the seed: title, author_name, language, isbn_13, asin, ol_key, gr_key — the fields ProviderClient::fetch + the per-provider clients read to drive ISBN / ASIN / native-key lookups (cR-004)."
+            - "All other Work fields take safe defaults (no DB id; never saved). The transient Work exists only to satisfy the &Work parameter of the existing fetch path — the same shape the cover fan-out already passes."
+          call_annotations:
+            - { type: EXISTING, call: "construct Work { .. }", target: "livrarr-domain::Work (existing struct)" }
+            - { type: NEW, call: "map WorkSeed fields onto Work fields", target: "livrarr-metadata::identity_resolver (seed-to-work field mapping)" }
+          invariants: ["The transient Work is NEVER written to the DB; it carries only discovery inputs (REQ-008/014)."]
+          tdd: ["RED (cR-004/AC-024): a provider spy confirms ISBN/ASIN/native-key discovery uses the seed identifiers via the transient Work, with no persisted Work."]
+
+  - name: metadata-transport-cache
+    component: livrarr-metadata
+    responsibility: "Server-side per-provider payload cache keyed on (user_id, candidate_id); consume-once; all tiers (see IR v1)."
+    req_ids: [REQ-007, REQ-014, REQ-015]
+    dependencies: [domain-identity-federate]
+    capability_survey:
+      - { capability: "Short-TTL cache idiom", status: EXISTS-REUSE, location: "existing lookup_cache pattern in metadata", note: "Reuse the established cache idiom; do not hand-roll a new cache type from scratch." }
+      - { capability: "Per-provider payload map", status: NEW, location: "this module", note: "Map<MetadataProvider, NormalizedWorkDetail> stored opaque under (user_id, candidate_id) — enables D-015 per-provider provenance." }
+      - { capability: "Compile-wall containment", status: EXISTS-REUSE, location: "insight 9e", note: "NormalizedWorkDetail stays inside metadata; domain/handlers only ever see CandidateId." }
+    public_api:
+      functions:
+        - name: cache_put
+          signature: "fn cache_put(&self, user_id: UserId, id: CandidateId, payloads: HashMap<MetadataProvider, NormalizedWorkDetail>)"
+          pseudocode:
+            - "Store payloads under the (user_id, id) key with a short TTL, using the existing cache idiom."
+            - "Entry is opaque and consume-once (a later cache_take removes it)."
+          call_annotations:
+            - { type: EXISTING, call: "lookup_cache insert idiom", target: "livrarr-metadata lookup_cache pattern" }
+            - { type: STDLIB, call: "HashMap keyed by (UserId, CandidateId)", target: "std::collections::HashMap" }
+          invariants: ["Keyed by user_id (Principle 4) — never cross-user readable (closes r1 R-001)."]
+          tdd: ["RED (REQ-014): after cache_put + cache_take, a second cache_take returns None (consume-once)."]
+        - name: cache_take
+          signature: "fn cache_take(&self, user_id: UserId, id: CandidateId) -> Option<HashMap<MetadataProvider, NormalizedWorkDetail>>"
+          pseudocode:
+            - "Look up (user_id, id); if present and unexpired, remove and return the payload map; else None."
+            - "A None result is the signal for the caller (add) to fall back to network enrichment (the exceptional path)."
+          call_annotations:
+            - { type: EXISTING, call: "lookup_cache remove idiom", target: "livrarr-metadata lookup_cache pattern" }
+          tdd: ["RED (REQ-015): cache_take returns the stored payloads so add merges with zero network calls (AC-010)."]
+
+  - name: metadata-async-resolver
+    component: livrarr-metadata
+    responsibility: "Background-tier convergence + the conditional LLM identity-verify (D-013/Q-001); generalize bulk_resolver + enrichment-retry (see IR v1)."
+    req_ids: [REQ-022, REQ-025, REQ-026]
+    dependencies: [domain-identity-federate, metadata-identity-resolver]
+    capability_survey:
+      - { capability: "Async convergence machinery", status: EXISTS-GENERALIZE, location: "existing bulk_resolver + enrichment-retry job", note: "Generalize to call resolve(.., Background) for identity-pending works; reuse the retry/backoff machinery (no re-architecture, spec Non-Req)." }
+      - { capability: "Pending state", status: EXISTS-REUSE, location: "set_identity_pending + EnrichmentStatus::IdentityPending", note: "Reuse; add the NeedsReview terminal transition." }
+      - { capability: "Conditional LLM verify", status: NEW, location: "this module (D-013)", note: "Background only, only when LLM configured AND deterministic ambiguity remained." }
+    public_api:
+      functions:
+        - name: converge_identity_pending
+          signature: "async fn converge_identity_pending(&self, user_id: UserId, work: &Work) -> Result<(), WorkServiceError>"
+          pseudocode:
+            - "Rebuild a WorkSeed from the work's stored anchors + descriptive fields; resolve(user_id, seed, Background)."
+            - "Apply the result via merge_missing_anchors + the merge engine; a Resolved/Unresolved-with-progress advances the work toward the full anchor set (REQ-022)."
+            - "A transient Unresolved (provider abstained, REQ-025) leaves the work identity-pending for a later pass — bounded retry/backoff via the existing machinery."
+            - "If the work is Tier-B (no resolving hard id) and the resolver still cannot deterministically match after the bounded passes, transition EnrichmentStatus → NeedsReview (REQ-026) — surfaced, not an infinite loop or silent orphan."
+            - "If the work already has a user-resolved/interacted Conflict, do NOT silently change its identity (REQ-025)."
+            - "When an LLM is configured AND the deterministic resolve left identity ambiguous (a Confirmed reached WITHOUT anchor corroboration — single-provider or title+author-only), invoke llm_identity_verify(user_id, work, captured) (r3 G-R010 — this is the D-013/Q-001 background verify; NEVER called on the synchronous interactive path). If it returns a NewIdentityConflict, raise it and pause further auto-enrichment (REQ-018/020/025)."
+          call_annotations:
+            - { type: EXISTING, call: "bulk_resolver / enrichment-retry tick", target: "livrarr-metadata async resolver job" }
+            - { type: EXISTING, call: "resolve(user_id, seed, Background)", target: "livrarr-metadata::identity_resolver::resolve" }
+            - { type: NEW, call: "set status NeedsReview", target: "livrarr-domain::EnrichmentStatus::NeedsReview" }
+            - { type: NEW, call: "merge_missing_anchors(work_id, captured)", target: "livrarr-db::anchors::merge_missing_anchors" }
+            - { type: NEW, call: "self.llm_identity_verify(user_id, work, captured)", target: "livrarr-metadata::async_resolver::llm_identity_verify (r3 G-R010 — wired here)" }
+            - { type: NEW, call: "raise_identity_conflict(conflict)", target: "livrarr-db::conflicts::raise_identity_conflict" }
+          invariants: ["No infinite retry: a Tier-B dead-end becomes NeedsReview (REQ-026).", "User-resolved conflicts are not re-litigated by background passes (REQ-025)."]
+          tdd:
+            - "RED (AC-023): an author-monitored work (ol_key) and series-monitored work (gr_key) for the same book converge to one work carrying both anchors."
+            - "RED (AC-036): a non-interactive Tier-B item the resolver cannot match transitions to NeedsReview."
+            - "RED (AC-038): a partial failure does not clear already-resolved anchors; after user-resolution, background passes don't re-change identity."
+        - name: llm_identity_verify
+          signature: "async fn llm_identity_verify(&self, user_id: UserId, work: &Work, captured: &CapturedIdentity) -> Option<NewIdentityConflict>"
+          pseudocode:
+            - "Invoked from converge_identity_pending (r3 G-R010). Runs ONLY when an LLM is configured AND the deterministic layer flagged ambiguity (no shared anchor to compare / cross-axis reconcile) — D-013/Q-001."
+            - "Call LlmCaller::call with an LlmCallRequest whose purpose is identity validation (cR-005 — LlmCaller exposes call(req), there is no validate method); parse the response. On a confident mismatch, construct a NewIdentityConflict to raise (REQ-018/020); otherwise None."
+            - "This never blocks an interactive create; it runs in the background and can flag a Conflict after the fact (which pauses further auto-enrichment, REQ-025)."
+          call_annotations:
+            - { type: EXISTING, call: "LlmCaller::call(LlmCallRequest)", target: "livrarr-domain::services::llm::LlmCaller::call" }
+            - { type: EXISTING, call: "construct NewIdentityConflict", target: "livrarr-domain::identity::NewIdentityConflict (existing struct)" }
+          tdd: ["RED (D-013): with no LLM configured, llm_identity_verify is never invoked and create still succeeds deterministically (REQ-017)."]
+
+  - name: metadata-merge-reuse
+    component: livrarr-metadata
+    responsibility: "Reuse the merge engine UNCHANGED, fed pre-fetched payloads (network-free); language-aware field protection. Surfaces the merge engine's deterministic REQ-018 conflict OUTCOME; the REQ-020 identity-anchor raise lives in WorkService::add's preflight, NOT here (r5 C-R012)."
+    req_ids: [REQ-014, REQ-016, REQ-017, REQ-020, REQ-027, REQ-028]
+    dependencies: [domain-identity-federate, metadata-transport-cache]
+    capability_survey:
+      - { capability: "Merge engine", status: EXISTS-REUSE, location: "lib.rs DefaultMergeEngine::merge (gate :606: if llm_configured merge_impl_llm else merge_impl)", note: "Reuse UNCHANGED. Both already take ALREADY-FETCHED payloads — no network in the merge." }
+      - { capability: "Merge input shape", status: EXISTS-REUSE, location: "lib.rs MergeInput { provider_results: HashMap<MetadataProvider, ReconstructedOutcome{payload: Option<NormalizedWorkDetail>}>, priority_model, .. }", note: "Adapter target: build provider_results FROM the cached payload map. The map shape already matches (D-015 per-provider provenance free)." }
+      - { capability: "Provider priority + language routing", status: EXISTS-GENERALIZE, location: "lib.rs PriorityModel::english()/foreign()/for_language() — foreign() content/description/cover STILL list Hardcover + OpenLibrary as lower-priority fallbacks (verified lib.rs:482-505)", note: "cR-003: reordering via PriorityModel::foreign is NOT sufficient for REQ-027 — OL/HC can still WIN a foreign field when GB/GR lack it. The feature must EXPLICITLY exclude OL/HC metadata for foreign works (see merge_from_cached). Observation: foreign() listing OL/HC may itself be a latent REQ-027 gap in existing enrichment — flagged for PO/code-stage; the feature enforces the exclusion regardless." }
+      - { capability: "Deterministic-without-LLM + conflict block", status: EXISTS-REUSE, location: "merge_impl synchronous; OutcomeClass::Conflict early-return :810-828; LLM identity_valid block :1224", note: "REQ-016/017 already satisfied by merge_impl. Reuse." }
+    public_api:
+      functions:
+        - name: merge_from_cached
+          signature: "async fn merge_from_cached(&self, work: Work, payloads: HashMap<MetadataProvider, NormalizedWorkDetail>, language: Option<&str>) -> Result<MergeOutput, MergeError>"
+          pseudocode:
+            - "Wrap each cached per-provider payload as a ReconstructedOutcome (class=Success, payload=Some(detail)) and assemble MergeInput.provider_results — preserving per-provider identity (D-015)."
+            - "For a NON-ENGLISH work, DROP OpenLibrary + Hardcover entries from provider_results BEFORE the merge (REQ-027) — PriorityModel::foreign still lists OL/HC as fallbacks (cR-003), so reordering alone is insufficient; explicit exclusion is required. Anchor capture is unaffected (anchors were captured separately — REQ-027's anchor-vs-metadata distinction)."
+            - "Select PriorityModel::for_language(language) to order the REMAINING (language-compatible) providers; combined with the exclusion above, no OL/HC English metadata can win a foreign field."
+            - "Call DefaultMergeEngine::merge(input) — NO network, since the payloads are already in hand (REQ-014/015). The engine's existing deterministic path applies provider priority + the user/non-null protections (REQ-016/017)."
+            - "Return MergeOutput; a deterministic OutcomeClass::Conflict surfaces as the engine's existing conflict result (feeds REQ-020 raise at the call site)."
+          call_annotations:
+            - { type: EXISTING, call: "DefaultMergeEngine::merge(input)", target: "livrarr-metadata::DefaultMergeEngine::merge" }
+            - { type: EXISTING, call: "PriorityModel::for_language(lang)", target: "livrarr-metadata::PriorityModel::for_language" }
+            - { type: EXISTING, call: "wrap as ReconstructedOutcome", target: "livrarr-metadata::ReconstructedOutcome" }
+          preconditions: ["payloads came from cache_take for this create (REQ-014)."]
+          invariants: ["Zero provider network calls in this path (REQ-014/015).", "Merge correctness identical to today's enrichment — only the FEED changed (spec Non-Req: no merge re-architecture)."]
+          tdd:
+            - "RED (AC-010): merge_from_cached issues no provider HTTP (spy)."
+            - "RED (AC-012): no LLM → higher-priority provider's value wins; a null never clears a populated field."
+            - "RED (AC-027): a foreign work does not take OL/HC English metadata for its fields."
+
+  - name: metadata-path-seams-bulk
+    component: livrarr-metadata
+    responsibility: "list_service + series/author monitor seams: harvest source ids, resolve at the right tier, converge (see IR v1)."
+    req_ids: [REQ-006, REQ-008, REQ-022, REQ-023, REQ-026]
+    dependencies: [domain-identity-federate, metadata-identity-resolver]
+    capability_survey:
+      - { capability: "List import flow", status: EXISTS-GENERALIZE, location: "list_service.rs confirm (per-row ol_lookup → work_service.add); ol_lookup is OL-only", note: "Route through resolve(.., Bulk); keep the Goodreads Book Id (dropped today)." }
+      - { capability: "CSV parser", status: EXISTS-GENERALIZE, location: "parsers.rs ImportRow (no book-id field); parse_goodreads_csv reads 'book id' only for source detection", note: "Add goodreads_book_id to ImportRow; populate it." }
+      - { capability: "Series monitor builder", status: EXISTS-REUSE, location: "series_query_service.rs candidate (gr_key Some, identity Pending)", note: "Already seeds gr_key; route through resolve(.., Background) for convergence; gr_key value is unnormalized today — normalize on the way in." }
+      - { capability: "Author monitor builder", status: EXISTS-REUSE, location: "author_monitor_workflow.rs candidate (identity Confirmed{ol_key})", note: "Already seeds ol_key; route through resolve(.., Background) to enrich beyond the single anchor (REQ-022)." }
+    public_api:
+      functions:
+        - name: "list_confirm_row (CHANGED)"
+          signature: "async fn list_confirm_row(&self, user_id: UserId, row: ImportRow) -> Result<AddWorkResult, WorkServiceError>"
+          pseudocode:
+            - "Build a WorkSeed: isbn_13 from row.isbn_13.or(row.isbn_10); gr_key from row.goodreads_book_id via normalize_gr_key; title/author/year (REQ-006 — harvest before any search)."
+            - "resolve(user_id, seed, Bulk), then handle ALL Resolution variants (Bulk has no per-item prompt — REQ-026; r4 G-R013): Resolved → WorkService::add with candidate_id (payloads reused, no re-query); Unresolved (transient) → create identity-pending, converges later; NeedsConfirmation (no resolving hard id) → create identity-pending seeded from the WorkSeed's identity (bulk CANNOT prompt); Conflict → create identity-pending AND record the conflict."
+            - "NO variant is dropped, NO batch failure, NO fabricated match (REQ-013/026); the match over Resolution is exhaustive (Rust requires it)."
+          call_annotations:
+            - { type: EXISTING, call: "ListService::confirm loop", target: "livrarr-metadata::list_service::confirm" }
+            - { type: EXISTING, call: "WorkService::add(user_id, candidate)", target: "livrarr-domain::services::work::WorkService::add" }
+            - { type: NEW, call: "resolve(user_id, seed, Bulk)", target: "livrarr-metadata::identity_resolver::resolve" }
+            - { type: NEW, call: "normalize_gr_key(row.goodreads_book_id)", target: "livrarr-domain::normalization::normalize_gr_key" }
+          tdd:
+            - "RED (AC-007): a GR CSV row with Book Id + ISBN produces a work carrying the normalized isbn_13 + gr_key."
+            - "RED (AC-026): an unresolved row → identity-pending, not a fabricated match nor a batch failure."
+        - name: "parse_goodreads_csv (CHANGED)"
+          signature: "fn parse_goodreads_csv(...) -> Vec<ImportRow>"
+          pseudocode:
+            - "In addition to title/author/isbn/year, extract the 'Book Id' column into ImportRow.goodreads_book_id (it is read today only for source detection, then dropped)."
+          call_annotations:
+            - { type: EXISTING, call: "existing CSV parse + detect_csv_source", target: "livrarr-metadata::parsers::parse_goodreads_csv" }
+          tdd: ["RED (AC-007): the parsed ImportRow carries the Book Id."]
+        - name: "monitor_seed_and_converge (series + author)"
+          signature: "async fn monitor_seed_and_converge(&self, user_id: UserId, seed: WorkSeed) -> Result<(), WorkServiceError>"
+          pseudocode:
+            - "Series: seed gr_key (normalized) at create with identity-pending; Author: seed ol_key at create."
+            - "Convergence runs via the background async_resolver, NOT a direct resolve call here (r4 G-R014 — resolve is pure and does not mutate; calling + discarding would not converge). The identity-pending work is picked up by converge_identity_pending (metadata-async-resolver), which runs resolve(.., Background) AND APPLIES the result (merge + anchor-merge) to reach the full anchor set beyond the single source anchor (REQ-022/023). Monitors do NO synchronous multi-provider discovery at create (REQ-006)."
+          call_annotations:
+            - { type: EXISTING, call: "series_query_service / author_monitor_workflow candidate build", target: "livrarr-metadata::{series_query_service,author_monitor_workflow}" }
+            - { type: EXISTING, call: "converge_identity_pending picks up the identity-pending work", target: "livrarr-metadata::async_resolver::converge_identity_pending (the background job applies the resolution — r4 G-R014)" }
+            - { type: NEW, call: "normalize_gr_key(book.gr_key)", target: "livrarr-domain::normalization::normalize_gr_key" }
+          tdd: ["RED (AC-025): monitors persist their native anchor at create; (AC-023) convergence to a single work with both anchors."]
+
+  # ════════════════════════════ livrarr-handlers ════════════════════════════
+  - name: handlers-interactive-seams
+    component: livrarr-handlers
+    responsibility: "Add Work + manual_import seams: harvest→resolve(Interactive)→Tier A/B/C; thread candidate_id across the wire (see IR v1). Compile wall: resolver via HasIdentityResolver only — no metadata import."
+    req_ids: [REQ-006, REQ-007, REQ-011, REQ-012, REQ-013, REQ-014, REQ-015, REQ-019]
+    dependencies: [domain-identity-federate]
+    capability_survey:
+      - { capability: "Resolver capability", status: EXISTS-REUSE, location: "context.rs:79-82 HasIdentityResolver (identity_resolver())", note: "Already exists — bind it; do NOT import metadata (compile wall, contract P0)." }
+      - { capability: "Conflict capability", status: EXISTS-REUSE, location: "context.rs:74-77 HasIdentityConflictService (identity_conflict_service())", note: "Already exists — reuse for surfacing conflicts/needs-review." }
+      - { capability: "Wire types", status: EXISTS-GENERALIZE, location: "types/work.rs WorkSearchResult (no isbn_13), AddWorkRequest (isbn_13 only, no gr/asin)", note: "Add candidate_id + hc_key/asin/isbn_13/gr_key so identity round-trips; LookupResult already has isbn_13 (services/work.rs)." }
+    public_api:
+      functions:
+        - name: "add + search seam (CHANGED — handlers/src/work.rs)"
+          signature: "pub async fn add<S>(State(state): State<S>, ctx: AuthContext, Json(req): Json<AddWorkRequest>) -> Result<Json<AddWorkResponse>, ApiError> where S: HasWorkService + HasAuthorService + HasSeriesQueryService + HasEnrichmentNotify + HasEnrichmentWorkflow + HasIdentityResolver"
+          pseudocode:
+            - "user_id comes from ctx (AuthContext), not invented (gR-001); the handler's bounds already include HasIdentityResolver, so no new bound is added. Search/cover step: build a WorkSeed from the selected result's harvested identifiers BEFORE any title/author search (REQ-006/007) — the cover/identity step becomes the harvest, promoted from the fan-out that exists for covers today."
+            - "resolve(user_id, seed, Interactive) via HasIdentityResolver: Tier-A Resolved → present as auto-matched (no confirmation), surfaced + reversible in one action (REQ-011/012); NeedsConfirmation → return candidates for the confirm UI; a hard id that resolves to nothing → fall through to confirm, never error (REQ-013)."
+            - "Carry candidate_id from Resolved/each Candidate onto WorkSearchResult; the client echoes it in AddWorkRequest; the handler maps it (plus the captured anchors) into WorkCandidate.candidate_id (R-002/R-009)."
+            - "Call WorkService::add(user_id, candidate); the domain reuses the cached payloads (no re-query, REQ-014/015)."
+          call_annotations:
+            - { type: EXISTING, call: "s.identity_resolver().resolve(user_id, seed, Interactive)", target: "livrarr-handlers::context::HasIdentityResolver::identity_resolver" }
+            - { type: EXISTING, call: "s.work_service().add(user_id, candidate)", target: "livrarr-domain::services::work::WorkService::add (via Has* bound)" }
+            - { type: NEW, call: "build WorkSeed from selected result", target: "livrarr-domain::identity::WorkSeed::sanitized" }
+            - { type: NEW, call: "map candidate_id + anchors into WorkCandidate", target: "livrarr-handlers::types::work (WorkCandidate mapping)" }
+          preconditions: ["Handler is generic over narrow Has* bounds (insight 9h); never names a walled crate (contract P0)."]
+          invariants: ["No metadata payload type crosses into handlers (insight 9e) — only CandidateId + domain types.", "Interactive never blocks on background-only providers (REQ-023)."]
+          tdd:
+            - "RED (AC-008): manual-import file with a resolving embedded ISBN shows auto-matched, no prompt, with a one-click override."
+            - "RED (AC-009): embedded ISBN resolving to nothing falls through to search+confirm without error and without an identity-less work."
+            - "RED (AC-014): user's explicit pick overrides a provider majority."
+            - "RED (AC-024): a resolving ISBN issues no title/author fuzzy-search (provider spy)."
+
+  # ════════════════════════════ livrarr-server ════════════════════════════
+  - name: server-readarr-and-wiring
+    component: livrarr-server
+    responsibility: "Readarr seam (foreign_book_id→gr_key, isbn/asin); compose the generalized resolver into AppState + expose the resolver/conflict-service capabilities. The identity-conflict RAISE is NOT wired here — it lives in WorkService::add's preflight (metadata); r5 C-R012."
+    req_ids: [REQ-006, REQ-020, REQ-026]
+    dependencies: [handlers-interactive-seams, metadata-identity-resolver]
+    capability_survey:
+      - { capability: "Readarr workflow", status: EXISTS-GENERALIZE, location: "readarr_import_workflow.rs process_works (gr_key None :1221, identity Pending); readarr_client.rs RdBook.foreign_book_id :129 deserialized-but-UNUSED", note: "Read foreign_book_id → gr_key; build WorkSeed; resolve(.., Bulk). The id is already on the wire — just stop dropping it." }
+      - { capability: "AppState composition", status: EXISTS-GENERALIZE, location: "server AppState construction; LiveEnglishIdentityResolver wiring", note: "Compose the generalized resolver; wire HasIdentityResolver + HasIdentityConflictService." }
+      - { capability: "Resolver/conflict-service composition", status: EXISTS-REUSE, location: "server AppState; HasIdentityResolver + HasIdentityConflictService (context.rs)", note: "Server only COMPOSES the resolver and exposes the capabilities (r5 C-R012). The identity-conflict raise is wired in WorkService::add's preflight (metadata) — NOT in server (that would be a cross-component reach)." }
+    public_api:
+      functions:
+        - name: "process_works (CHANGED — Readarr)"
+          signature: "async fn process_works(&self, user_id: UserId, books: Vec<RdBook>) -> Result<...>"
+          pseudocode:
+            - "For each RdBook: read foreign_book_id (the GR work id) → normalize_gr_key; read isbn/asin when present on the selected edition; build a WorkSeed (REQ-006)."
+            - "resolve(user_id, seed, Bulk), handling ALL Resolution variants exhaustively (r4 G-R013): Resolved → add with candidate_id; Unresolved / NeedsConfirmation / Conflict → create identity-pending seeded from the WorkSeed (Conflict also records the conflict). Bulk never prompts, never drops, never fails the batch (REQ-013/026, AC-031). A book with no foreign_book_id still imports via ISBN/ASIN or identity-pending."
+          call_annotations:
+            - { type: EXISTING, call: "process_works loop + RdBook", target: "livrarr-server::readarr_import_workflow::process_works" }
+            - { type: NEW, call: "normalize_gr_key(book.foreign_book_id)", target: "livrarr-domain::normalization::normalize_gr_key" }
+            - { type: NEW, call: "resolve(user_id, seed, Bulk)", target: "livrarr-metadata::identity_resolver::resolve" }
+          tdd:
+            - "RED (AC-002/AC-031): Readarr book with foreign_book_id persists the canonicalized gr_key; absent → still imports via ISBN/ASIN or identity-pending."
+        - name: "compose_resolver_and_wire_conflict"
+          signature: "fn build_app_state(...) -> AppState"
+          pseudocode:
+            - "Construct the generalized IdentityResolver impl and inject it into AppState; satisfy HasIdentityResolver + HasIdentityConflictService."
+            - "The conflict RAISE is NOT wired here (r4 G-R012): it lives in WorkService::add's CONFLICT PREFLIGHT (in livrarr-metadata), which covers all match paths. Wiring it at the work_service step-3e site from livrarr-server would be a cross-component boundary violation AND duplicate the preflight. Server only composes the resolver and exposes the conflict-service capability."
+          call_annotations:
+            - { type: EXISTING, call: "AppState construction", target: "livrarr-server::state build_app_state" }
+            - { type: EXISTING, call: "expose HasIdentityResolver + HasIdentityConflictService on AppState", target: "livrarr-handlers::context (capabilities already defined)" }
+          invariants: ["No OnceLock reintroduced (insight 9d) — resolver injected by explicit constructor.", "No cross-component reach into metadata's work_service internals (r4 G-R012)."]
+          tdd: ["RED: AppState composes the generalized resolver + conflict-service capability with no OnceLock; the conflict raise itself is tested at WorkService::add's preflight (AC-015), not here."]
+
+  # ════════════════════════════ frontend ════════════════════════════
+  - name: frontend-surfacing
+    component: frontend
+    responsibility: "Manual-import auto-matched vs needs-attention split; needs-review queue + identity-pending/conflict badges; fix divergent EnrichmentStatus type; thread candidate_id (see IR v1)."
+    req_ids: [REQ-012, REQ-020, REQ-026]
+    dependencies: []
+    capability_survey:
+      - { capability: "Manual-import scan view", status: EXISTS-GENERALIZE, location: "frontend manual-import scan page (React 19 + TanStack Query)", note: "Split rows into auto-matched (Tier-A) vs needs-attention; reuse existing table + HelpTip (per feedback) for the override affordance." }
+      - { capability: "EnrichmentStatus TS type", status: EXISTS-GENERALIZE, location: "frontend src/types/api.ts EnrichmentStatus (divergent from domain enum)", note: "Add NeedsReview; align with the domain enum (the divergent type is a known defect)." }
+      - { capability: "candidate_id round-trip", status: NEW, location: "frontend add flow", note: "Carry candidate_id from search result → add request (browser-safe opaque string)." }
+    public_api:
+      functions:
+        - name: "ScanView row classification"
+          signature: "tsx: <ScanResults rows={...} />"
+          pseudocode:
+            - "Render a row as auto-matched when it carries a Tier-A resolution (labelled 'matched from file'), with a single-action control to reject the auto-match and search instead (REQ-011/012)."
+            - "Group needs-attention rows (no resolving identifier) separately; show identity-pending and conflict badges (REQ-020/026); add a needs-review queue entry point."
+            - "Thread candidate_id from the selected search result into the add mutation payload."
+          call_annotations:
+            - { type: EXISTING, call: "scan results query + table components", target: "frontend manual-import components" }
+            - { type: EXISTING, call: "HelpTip for the override affordance", target: "frontend HelpTip component" }
+            - { type: NEW, call: "include candidate_id in add payload", target: "frontend add-work API client" }
+          tdd:
+            - "RED (AC-008): a Tier-A row renders as auto-matched with a one-click override."
+            - "RED (AC-036): a needs-review item surfaces in the queue with the correct badge."

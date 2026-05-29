@@ -9,9 +9,7 @@
 use livrarr_behavioral::stubs::StubHttpFetcher;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{ListImportDb, WorkDb};
-use livrarr_domain::identity::{
-    EnglishSeedFields, EnglishWorkCandidate, IdentityState, PendingReason,
-};
+use livrarr_domain::identity::{IdentityState, PendingReason, WorkCandidate, WorkSeedFields};
 use livrarr_domain::services::*;
 use livrarr_metadata::list_service::{ListServiceImpl, NoOpBibliographyTrigger};
 use livrarr_metadata::work_service::WorkServiceImpl;
@@ -118,8 +116,8 @@ async fn test_list_preview_existing_works_marked_already_exists() {
     let svc = make_service().await;
 
     // Add a work that matches by ISBN.
-    let candidate = EnglishWorkCandidate {
-        fields: EnglishSeedFields {
+    let candidate = WorkCandidate {
+        fields: WorkSeedFields {
             title: "The Great Gatsby".into(),
             author_name: "F. Scott Fitzgerald".into(),
             language: "en".into(),
@@ -127,8 +125,6 @@ async fn test_list_preview_existing_works_marked_already_exists() {
             year: None,
             cover_url: None,
             detail_url: None,
-            isbn: None,
-            asin: None,
             description: None,
             series_name: None,
             series_position: None,
@@ -137,10 +133,10 @@ async fn test_list_preview_existing_works_marked_already_exists() {
             reason: PendingReason::NoCandidates,
             top_candidates: vec![],
         },
+        candidate_id: None,
         source_provider_data: None,
         file_path: None,
         delete_existing_after_import: false,
-        gr_key: None,
         series_id: None,
         monitor_ebook: None,
         monitor_audiobook: None,
@@ -265,8 +261,8 @@ async fn test_list_undo_returns_removed_and_skipped_counts() {
 
     // Since StubHttpFetcher has no responses, confirm will fail OL lookup.
     // We need to add works manually and tag them.
-    let candidate = EnglishWorkCandidate {
-        fields: EnglishSeedFields {
+    let candidate = WorkCandidate {
+        fields: WorkSeedFields {
             title: "Dune".into(),
             author_name: "Frank Herbert".into(),
             language: "en".into(),
@@ -274,8 +270,6 @@ async fn test_list_undo_returns_removed_and_skipped_counts() {
             year: None,
             cover_url: None,
             detail_url: None,
-            isbn: None,
-            asin: None,
             description: None,
             series_name: None,
             series_position: None,
@@ -284,10 +278,10 @@ async fn test_list_undo_returns_removed_and_skipped_counts() {
             reason: PendingReason::NoCandidates,
             top_candidates: vec![],
         },
+        candidate_id: None,
         source_provider_data: None,
         file_path: None,
         delete_existing_after_import: false,
-        gr_key: None,
         series_id: None,
         monitor_ebook: None,
         monitor_audiobook: None,
@@ -347,8 +341,8 @@ async fn test_list_undo_already_undone_returns_conflict() {
     let svc = make_service().await;
 
     // Create a completed import with a tagged work.
-    let candidate = EnglishWorkCandidate {
-        fields: EnglishSeedFields {
+    let candidate = WorkCandidate {
+        fields: WorkSeedFields {
             title: "Dune".into(),
             author_name: "Frank Herbert".into(),
             language: "en".into(),
@@ -356,8 +350,6 @@ async fn test_list_undo_already_undone_returns_conflict() {
             year: None,
             cover_url: None,
             detail_url: None,
-            isbn: None,
-            asin: None,
             description: None,
             series_name: None,
             series_position: None,
@@ -366,10 +358,10 @@ async fn test_list_undo_already_undone_returns_conflict() {
             reason: PendingReason::NoCandidates,
             top_candidates: vec![],
         },
+        candidate_id: None,
         source_provider_data: None,
         file_path: None,
         delete_existing_after_import: false,
-        gr_key: None,
         series_id: None,
         monitor_ebook: None,
         monitor_audiobook: None,

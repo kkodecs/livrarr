@@ -168,7 +168,8 @@ pub async fn add<
 ) -> Result<Json<AddWorkResponse>, ApiError> {
     let author_name_for_gr = req.author_name.clone();
     use livrarr_domain::identity::{
-        EnglishSeed, EnglishSeedFields, EnglishWorkCandidate, IdentityResolution, IdentityState,
+        IdentityState, LatencyTier, PendingReason, Resolution, WorkCandidate, WorkSeed,
+        WorkSeedFields,
     };
 
     let language = req
@@ -180,55 +181,62 @@ pub async fn add<
     let cover_is_manual = req.cover_manual && req.cover_url.is_some();
 
     let identity = if req.ol_key.is_some() {
-        let seed = EnglishSeed {
-            title: req.title.clone(),
-            author_name: req.author_name.clone(),
-            isbn: req.isbn_13.clone(),
-            user_confirmed_ol_key: req.ol_key.clone(),
+        let seed = WorkSeed {
+            ol_key: req.ol_key.clone(),
+            gr_key: None,
+            hc_key: None,
+            isbn_13: req.isbn_13.clone(),
+            asin: None,
+            title: Some(req.title.clone()),
+            author_name: Some(req.author_name.clone()),
+            language: Some(language.clone()),
+            series_name: None,
+            year: req.year,
+            user_confirmed: true,
         };
-        let resolution = state.identity_resolver().resolve(&seed).await;
+        let resolution = state
+            .identity_resolver()
+            .resolve(ctx.user.id, &seed, LatencyTier::Interactive)
+            .await
+            .map_err(|e| ApiError::Internal(format!("identity resolve: {e}")))?;
         match resolution {
-            IdentityResolution::Confirmed {
-                ol_key,
-                method,
-                score,
+            Resolution::Resolved {
+                identity, method, ..
             } => IdentityState::Confirmed {
-                ol_key,
+                anchors: identity,
                 method,
-                score: Some(score),
+                score: None,
             },
-            IdentityResolution::Pending {
-                reason,
-                top_candidates,
-            } => IdentityState::Pending {
-                reason,
-                top_candidates,
+            Resolution::NeedsConfirmation { candidates } => IdentityState::Pending {
+                reason: PendingReason::LowConfidence,
+                top_candidates: candidates,
             },
-            IdentityResolution::Conflict {
-                existing_work_id, ..
-            } => {
+            Resolution::Unresolved { reason, .. } => IdentityState::Pending {
+                reason,
+                top_candidates: vec![],
+            },
+            Resolution::Conflict { conflict, .. } => {
                 let work = state
                     .work_service()
-                    .get(ctx.user.id, existing_work_id)
+                    .get(ctx.user.id, conflict.existing_work_id)
                     .await?;
                 let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None, None);
                 return Ok(Json(AddWorkResponse {
                     work: detail,
                     author_created: false,
-                    messages: vec!["identity conflict: existing work has a different OL key".into()],
+                    messages: vec!["identity conflict: existing work has a different anchor".into()],
                 }));
             }
         }
     } else {
-        use livrarr_domain::identity::PendingReason;
         IdentityState::Pending {
             reason: PendingReason::NoCandidates,
             top_candidates: vec![],
         }
     };
 
-    let candidate = EnglishWorkCandidate {
-        fields: EnglishSeedFields {
+    let candidate = WorkCandidate {
+        fields: WorkSeedFields {
             title: req.title,
             author_name: req.author_name,
             language,
@@ -236,17 +244,15 @@ pub async fn add<
             year: req.year,
             cover_url: req.cover_url,
             detail_url: req.detail_url,
-            isbn: req.isbn_13,
-            asin: None,
             description: None,
             series_name: None,
             series_position: None,
         },
         identity,
+        candidate_id: None,
         source_provider_data: None,
         file_path: None,
         delete_existing_after_import: false,
-        gr_key: None,
         series_id: None,
         monitor_ebook: None,
         monitor_audiobook: None,

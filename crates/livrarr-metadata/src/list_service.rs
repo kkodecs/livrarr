@@ -52,7 +52,7 @@ where
         title: &str,
         author: &str,
         year: Option<i32>,
-    ) -> Result<livrarr_domain::identity::EnglishWorkCandidate, String> {
+    ) -> Result<livrarr_domain::identity::WorkCandidate, String> {
         let isbn = isbn_13.or(isbn_10);
         if let Some(isbn) = isbn {
             if let Some(candidate) = self.ol_isbn_lookup(isbn).await {
@@ -62,10 +62,7 @@ where
         self.ol_search(title, author, year).await
     }
 
-    async fn ol_isbn_lookup(
-        &self,
-        isbn: &str,
-    ) -> Option<livrarr_domain::identity::EnglishWorkCandidate> {
+    async fn ol_isbn_lookup(&self, isbn: &str) -> Option<livrarr_domain::identity::WorkCandidate> {
         let url = format!("https://openlibrary.org/isbn/{isbn}.json");
         let req = FetchRequest {
             url,
@@ -182,32 +179,39 @@ where
             .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
 
         use livrarr_domain::identity::{
-            EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState,
+            IdentityMethod, IdentityState, WorkCandidate, WorkSeedFields,
         };
-        Some(EnglishWorkCandidate {
-            fields: EnglishSeedFields {
-                title,
-                author_name,
+        Some(WorkCandidate {
+            fields: WorkSeedFields {
+                title: title.clone(),
+                author_name: author_name.clone(),
                 language: "en".into(),
                 author_ol_key,
                 year,
                 cover_url,
                 detail_url: None,
-                isbn: Some(isbn.to_string()),
-                asin: None,
                 description: None,
                 series_name: None,
                 series_position: None,
             },
             identity: IdentityState::Confirmed {
-                ol_key,
+                anchors: livrarr_domain::identity::CapturedIdentity {
+                    ol_key: Some(ol_key),
+                    gr_key: None,
+                    hc_key: None,
+                    isbn_13: Some(isbn.to_string()),
+                    asin: None,
+                    title,
+                    author_name,
+                    language: None,
+                },
                 method: IdentityMethod::IsbnDirect,
                 score: None,
             },
+            candidate_id: None,
             source_provider_data: None,
             file_path: None,
             delete_existing_after_import: false,
-            gr_key: None,
             series_id: None,
             monitor_ebook: None,
             monitor_audiobook: None,
@@ -223,7 +227,7 @@ where
         title: &str,
         author: &str,
         csv_year: Option<i32>,
-    ) -> Result<livrarr_domain::identity::EnglishWorkCandidate, String> {
+    ) -> Result<livrarr_domain::identity::WorkCandidate, String> {
         let search_term = format!("{title} {author}");
         let encoded = urlencoding::encode(&search_term);
         let url = format!(
@@ -318,32 +322,39 @@ where
             .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
 
         use livrarr_domain::identity::{
-            EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState,
+            IdentityMethod, IdentityState, WorkCandidate, WorkSeedFields,
         };
-        Ok(EnglishWorkCandidate {
-            fields: EnglishSeedFields {
-                title: result_title,
-                author_name,
+        Ok(WorkCandidate {
+            fields: WorkSeedFields {
+                title: result_title.clone(),
+                author_name: author_name.clone(),
                 language: "en".into(),
                 author_ol_key,
                 year,
                 cover_url,
                 detail_url: None,
-                isbn: None,
-                asin: None,
                 description: None,
                 series_name: None,
                 series_position: None,
             },
             identity: IdentityState::Confirmed {
-                ol_key,
+                anchors: livrarr_domain::identity::CapturedIdentity {
+                    ol_key: Some(ol_key),
+                    gr_key: None,
+                    hc_key: None,
+                    isbn_13: None,
+                    asin: None,
+                    title: result_title,
+                    author_name,
+                    language: None,
+                },
                 method: IdentityMethod::TitleAuthorSearch,
                 score: None,
             },
+            candidate_id: None,
             source_provider_data: None,
             file_path: None,
             delete_existing_after_import: false,
-            gr_key: None,
             series_id: None,
             monitor_ebook: None,
             monitor_audiobook: None,

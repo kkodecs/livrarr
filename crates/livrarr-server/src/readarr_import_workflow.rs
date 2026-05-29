@@ -1100,7 +1100,7 @@ impl ImportRunner {
         struct Prep {
             rd_book_id: i64,
             title: String,
-            candidate: livrarr_domain::identity::EnglishWorkCandidate,
+            candidate: livrarr_domain::identity::WorkCandidate,
         }
         let mut preps: Vec<Prep> = Vec::with_capacity(active_books.len());
         let mut skip_errors: Vec<String> = Vec::new();
@@ -1194,10 +1194,10 @@ impl ImportRunner {
             };
 
             use livrarr_domain::identity::{
-                EnglishSeedFields, EnglishWorkCandidate, IdentityState, PendingReason,
+                IdentityState, PendingReason, WorkCandidate, WorkSeedFields,
             };
-            let candidate = EnglishWorkCandidate {
-                fields: EnglishSeedFields {
+            let candidate = WorkCandidate {
+                fields: WorkSeedFields {
                     title: title.to_string(),
                     author_name: author_name.to_string(),
                     language: language.unwrap_or_else(|| "en".to_string()),
@@ -1205,8 +1205,6 @@ impl ImportRunner {
                     year,
                     cover_url,
                     detail_url: None,
-                    isbn: source_data.isbn.clone(),
-                    asin: source_data.asin.clone(),
                     description: source_data.description.clone(),
                     series_name,
                     series_position: series_position_f64,
@@ -1215,10 +1213,10 @@ impl ImportRunner {
                     reason: PendingReason::NoCandidates,
                     top_candidates: vec![],
                 },
+                candidate_id: None,
                 source_provider_data: Some(source_data),
                 file_path: None,
                 delete_existing_after_import: false,
-                gr_key: None,
                 series_id: None,
                 monitor_ebook: Some(monitor_ebook),
                 monitor_audiobook: Some(monitor_audiobook),

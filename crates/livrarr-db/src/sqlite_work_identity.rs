@@ -1,26 +1,42 @@
 use chrono::Utc;
 use livrarr_domain::identity::*;
+use livrarr_domain::normalization::{normalize_asin, normalize_gr_key, normalize_isbn13, AsinNorm};
 use livrarr_domain::services::{WorkIdentityError, WorkIdentityRepository};
 use livrarr_domain::WorkId;
 
 use crate::sqlite::SqliteDb;
 
 impl WorkIdentityRepository for SqliteDb {
-    async fn confirm_ol_anchor(
+    async fn confirm_anchor(
         &self,
         work_id: WorkId,
-        ol_key: &str,
+        anchor_type: AnchorType,
+        value: &str,
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError> {
-        if ol_key.trim().is_empty() {
+        if value.trim().is_empty() {
             return Err(WorkIdentityError::InvalidAnchorValue);
         }
-
+        // Defense in depth (REQ-029): a typed identifier must already be in its
+        // canonical form before it is persisted. Callers normalize via
+        // WorkSeed::sanitized, but validating here means a malformed value can
+        // never reach a row regardless of the call path.
+        let canonical = match anchor_type.as_str() {
+            AnchorType::ISBN_13 => normalize_isbn13(value).as_deref() == Some(value),
+            AnchorType::GR_WORK => normalize_gr_key(value).as_deref() == Some(value),
+            AnchorType::ASIN => matches!(normalize_asin(value), AsinNorm::Asin(a) if a == value),
+            // ol_work / hc_work have no canonical form beyond the non-empty check.
+            _ => true,
+        };
+        if !canonical {
+            return Err(WorkIdentityError::InvalidAnchorValue);
+        }
         let now = Utc::now().to_rfc3339();
         let setter_str = serde_json::to_value(setter)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "user".to_string());
+        let anchor_type_str = anchor_type.as_str().to_string();
 
         let mut tx = self
             .pool()
@@ -30,28 +46,43 @@ impl WorkIdentityRepository for SqliteDb {
 
         sqlx::query(
             "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
-             VALUES (?1, 'ol_work', ?2, 'confirmed', ?3, ?4, (SELECT user_id FROM works WHERE id = ?1))
+             VALUES (?1, ?2, ?3, 'confirmed', ?4, ?5, (SELECT user_id FROM works WHERE id = ?1))
              ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
                  confidence = 'confirmed',
-                 setter = ?3,
-                 set_at = ?4,
+                 setter = ?4,
+                 set_at = ?5,
                  superseded_by = NULL,
-                 user_id = (SELECT user_id FROM works WHERE id = ?1)"
+                 user_id = (SELECT user_id FROM works WHERE id = ?1)",
         )
         .bind(work_id)
-        .bind(ol_key)
+        .bind(&anchor_type_str)
+        .bind(value)
         .bind(&setter_str)
         .bind(&now)
         .execute(&mut *tx)
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
-        sqlx::query("UPDATE works SET ol_key = ?1 WHERE id = ?2")
-            .bind(ol_key)
-            .bind(work_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        // Keep the legacy denormalized column in sync for OL and GR anchor types
+        match anchor_type.as_str() {
+            AnchorType::OL_WORK => {
+                sqlx::query("UPDATE works SET ol_key = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::GR_WORK => {
+                sqlx::query("UPDATE works SET gr_key = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            _ => {}
+        }
 
         tx.commit()
             .await
@@ -59,15 +90,15 @@ impl WorkIdentityRepository for SqliteDb {
         Ok(())
     }
 
-    async fn supersede_ol_anchor(
+    async fn supersede_anchor(
         &self,
         work_id: WorkId,
-        old_ol_key: &str,
-        new_ol_key: &str,
+        anchor_type: AnchorType,
+        old_value: &str,
+        new_value: &str,
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError> {
-        if old_ol_key.trim().is_empty() || new_ol_key.trim().is_empty() || old_ol_key == new_ol_key
-        {
+        if old_value.trim().is_empty() || new_value.trim().is_empty() || old_value == new_value {
             return Err(WorkIdentityError::InvalidAnchorValue);
         }
         let now = Utc::now().to_rfc3339();
@@ -75,6 +106,7 @@ impl WorkIdentityRepository for SqliteDb {
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "redirect".to_string());
+        let anchor_type_str = anchor_type.as_str().to_string();
 
         let mut tx = self
             .pool()
@@ -84,11 +116,12 @@ impl WorkIdentityRepository for SqliteDb {
 
         let rows = sqlx::query(
             "UPDATE work_identity_anchors SET confidence = 'superseded', superseded_by = ?1
-             WHERE work_id = ?2 AND anchor_type = 'ol_work' AND anchor_value = ?3 AND confidence = 'confirmed'"
+             WHERE work_id = ?2 AND anchor_type = ?3 AND anchor_value = ?4 AND confidence = 'confirmed'",
         )
-        .bind(new_ol_key)
+        .bind(new_value)
         .bind(work_id)
-        .bind(old_ol_key)
+        .bind(&anchor_type_str)
+        .bind(old_value)
         .execute(&mut *tx)
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
@@ -99,33 +132,153 @@ impl WorkIdentityRepository for SqliteDb {
 
         sqlx::query(
             "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
-             VALUES (?1, 'ol_work', ?2, 'confirmed', ?3, ?4, (SELECT user_id FROM works WHERE id = ?1))
+             VALUES (?1, ?2, ?3, 'confirmed', ?4, ?5, (SELECT user_id FROM works WHERE id = ?1))
              ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
                  confidence = 'confirmed',
-                 setter = ?3,
-                 set_at = ?4,
+                 setter = ?4,
+                 set_at = ?5,
                  superseded_by = NULL,
-                 user_id = (SELECT user_id FROM works WHERE id = ?1)"
+                 user_id = (SELECT user_id FROM works WHERE id = ?1)",
         )
         .bind(work_id)
-        .bind(new_ol_key)
+        .bind(&anchor_type_str)
+        .bind(new_value)
         .bind(&setter_str)
         .bind(&now)
         .execute(&mut *tx)
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
-        sqlx::query("UPDATE works SET ol_key = ?1 WHERE id = ?2")
-            .bind(new_ol_key)
-            .bind(work_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        match anchor_type.as_str() {
+            AnchorType::OL_WORK => {
+                sqlx::query("UPDATE works SET ol_key = ?1 WHERE id = ?2")
+                    .bind(new_value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::GR_WORK => {
+                sqlx::query("UPDATE works SET gr_key = ?1 WHERE id = ?2")
+                    .bind(new_value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            _ => {}
+        }
 
         tx.commit()
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
         Ok(())
+    }
+
+    async fn merge_missing_anchors(
+        &self,
+        work_id: WorkId,
+        incoming: &CapturedIdentity,
+    ) -> Result<(), WorkIdentityError> {
+        let existing = self.list_anchors(work_id).await?;
+        let confirmed_types: std::collections::HashSet<String> = existing
+            .iter()
+            .filter(|a| a.confidence == AnchorConfidence::Confirmed)
+            .map(|a| a.anchor_type.as_str().to_string())
+            .collect();
+
+        let anchors: &[(&str, Option<&str>)] = &[
+            (AnchorType::OL_WORK, incoming.ol_key.as_deref()),
+            (AnchorType::GR_WORK, incoming.gr_key.as_deref()),
+            (AnchorType::HC_WORK, incoming.hc_key.as_deref()),
+            (AnchorType::ISBN_13, incoming.isbn_13.as_deref()),
+            (AnchorType::ASIN, incoming.asin.as_deref()),
+        ];
+
+        for &(anchor_type_str, maybe_value) in anchors {
+            if let Some(value) = maybe_value {
+                if !confirmed_types.contains(anchor_type_str) {
+                    self.confirm_anchor(
+                        work_id,
+                        AnchorType::new(anchor_type_str),
+                        value,
+                        AnchorSetter::Import,
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn detect_conflicting_anchors(
+        &self,
+        existing_work_id: WorkId,
+        incoming: &CapturedIdentity,
+        source: ConflictSource,
+    ) -> Result<Vec<NewIdentityConflict>, WorkIdentityError> {
+        let existing = self.list_anchors(existing_work_id).await?;
+        let user_id: i64 = sqlx::query_scalar("SELECT user_id FROM works WHERE id = ?")
+            .bind(existing_work_id)
+            .fetch_one(self.pool())
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        let confirmed: std::collections::HashMap<String, String> = existing
+            .iter()
+            .filter(|a| a.confidence == AnchorConfidence::Confirmed)
+            .map(|a| (a.anchor_type.as_str().to_string(), a.anchor_value.clone()))
+            .collect();
+
+        let mut conflicts = Vec::new();
+        let checks: &[(&str, Option<&str>, IdentityConflictKind)] = &[
+            (
+                AnchorType::OL_WORK,
+                incoming.ol_key.as_deref(),
+                IdentityConflictKind::IncomingDifferentOlKey,
+            ),
+            (
+                AnchorType::GR_WORK,
+                incoming.gr_key.as_deref(),
+                IdentityConflictKind::IncomingDifferentGrKey,
+            ),
+            (
+                AnchorType::HC_WORK,
+                incoming.hc_key.as_deref(),
+                IdentityConflictKind::IncomingDifferentHcKey,
+            ),
+        ];
+
+        for &(anchor_type_str, incoming_value, kind) in checks {
+            if let Some(incoming_val) = incoming_value {
+                if let Some(existing_val) = confirmed.get(anchor_type_str) {
+                    if incoming_val != existing_val.as_str() {
+                        conflicts.push(NewIdentityConflict {
+                            user_id,
+                            existing_work_id,
+                            kind,
+                            incoming: IncomingConflictPayload {
+                                ol_key: incoming.ol_key.clone(),
+                                gr_key: incoming.gr_key.clone(),
+                                hc_key: incoming.hc_key.clone(),
+                                isbn_13: incoming.isbn_13.clone(),
+                                asin: incoming.asin.clone(),
+                                title: incoming.title.clone(),
+                                author_name: incoming.author_name.clone(),
+                                year: None,
+                                cover_url: None,
+                                top_candidates: Vec::new(),
+                            },
+                            raised_by: source,
+                            raised_source_path: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(conflicts)
     }
 
     async fn set_identity_pending(
@@ -282,5 +435,57 @@ impl WorkIdentityRepository for SqliteDb {
             });
         }
         Ok(anchors)
+    }
+
+    async fn backfill_gr_numeric(&self) -> Result<(), WorkIdentityError> {
+        let rows: Vec<(i64, i64, String)> = sqlx::query_as(
+            "SELECT id, user_id, gr_key FROM works WHERE gr_key IS NOT NULL AND gr_key != ''",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        for (work_id, user_id, raw_key) in &rows {
+            let Some(normalized) = normalize_gr_key(raw_key) else {
+                continue;
+            };
+
+            if normalized != *raw_key {
+                sqlx::query("UPDATE works SET gr_key = ? WHERE id = ?")
+                    .bind(&normalized)
+                    .bind(work_id)
+                    .execute(self.pool())
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+
+            // Idempotent anchor backfill: insert the bare-numeric GR anchor only
+            // when the work has no confirmed gr_work anchor yet. The
+            // INSERT ... SELECT ... WHERE NOT EXISTS guard respects the
+            // uniq_primary_confirmed_anchor partial index (one confirmed anchor
+            // per type) — a plain VALUES insert of a value differing from an
+            // already-confirmed gr_work anchor would violate that index and abort
+            // the whole startup backfill. set_at uses RFC3339 to match the format
+            // confirm_anchor writes (list_anchors parses it as RFC3339).
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO work_identity_anchors \
+                 (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+                 SELECT ?1, 'gr_work', ?2, 'confirmed', 'import', ?4, ?3 \
+                 WHERE NOT EXISTS ( \
+                     SELECT 1 FROM work_identity_anchors \
+                     WHERE work_id = ?1 AND anchor_type = 'gr_work' AND confidence = 'confirmed' \
+                 )",
+            )
+            .bind(work_id)
+            .bind(&normalized)
+            .bind(user_id)
+            .bind(&now)
+            .execute(self.pool())
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        }
+
+        Ok(())
     }
 }

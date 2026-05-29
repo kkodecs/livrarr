@@ -182,6 +182,7 @@ fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
         "exhausted" | "skipped" => Ok(EnrichmentStatus::Failed),
         "conflict" => Ok(EnrichmentStatus::Conflict),
         "identity_pending" => Ok(EnrichmentStatus::IdentityPending),
+        "needs_review" => Ok(EnrichmentStatus::NeedsReview),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown enrichment status: {s}"),
         }),
@@ -195,6 +196,7 @@ fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
         EnrichmentStatus::Failed => "failed",
         EnrichmentStatus::Conflict => "conflict",
         EnrichmentStatus::IdentityPending => "identity_pending",
+        EnrichmentStatus::NeedsReview => "needs_review",
     }
 }
 
@@ -1161,11 +1163,18 @@ impl crate::WorkDbCreate for SqliteDb {
 
         let (work, created) = self.create_work(req).await?;
         if created {
-            self.confirm_ol_anchor(work.id, ol_key, anchor_setter)
-                .await
-                .map_err(|e| DbError::Constraint {
-                    message: format!("anchor write failed: {e}"),
-                })?;
+            self.confirm_anchor(
+                work.id,
+                livrarr_domain::identity::AnchorType::new(
+                    livrarr_domain::identity::AnchorType::OL_WORK,
+                ),
+                ol_key,
+                anchor_setter,
+            )
+            .await
+            .map_err(|e| DbError::Constraint {
+                message: format!("anchor write failed: {e}"),
+            })?;
             let work = self.get_work(work.user_id, work.id).await?;
             Ok((work, true))
         } else {

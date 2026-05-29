@@ -34,11 +34,18 @@ Public metadata (titles, authors, descriptions, series names) can and should be 
 
 Source data (Readarr, CSV, search result, monitor detection) seeds identity — title, author, provider keys for matching. Livrarr's enrichment pipeline is the authority on final metadata. We always run our own enrichment regardless of how rich the source data is. Source metadata is a starting point, not a substitute.
 
-## M9: Works enter the system fully formed
+## M9: Works enter the system fully formed — by path tier
 
-Enrichment is synchronous — part of work creation, not a background afterthought. A work is not "created" until enrichment has completed (or explicitly failed). No deferred enrichment, no "eventually consistent" metadata. The user sees progress and gets a complete result.
+A work's creation completes **synchronously where the user is watching, and converges in the background where they are not.** "Consistency" here means *same destination, not same clock.*
 
-For bulk operations (Readarr import, list import, series monitor), multiple `add()` calls run with bounded concurrency (`buffer_unordered(5)`). Each individual work is still fully enriched before its `add()` returns — the concurrency is between works, not within a single work's enrichment. Rate limiters throttle provider calls naturally. ~30 works/minute sustained throughput.
+- **Interactive paths (Add Work, manual-import per-file review):** synchronous and fully-formed. The work is returned already populated with every field derivable from data in hand (REQ-015); only genuinely async work — cover bytes, Audnexus narrator/duration — completes afterward.
+- **Batch / background paths (list import, Readarr import, series/author monitors):** MAY create a work in an `identity-pending` state that converges to full identity via the shared async resolver (REQ-022, REQ-026). An item the resolver cannot deterministically resolve transitions to a terminal, **surfaced** `needs-review` state — never silent limbo, never an indefinite retry loop.
+
+**Binding invariant:** every path converges on the same identity and metadata for the same work (REQ-022). This is *stricter* than the prior state, where single-anchor works created by different paths could diverge permanently.
+
+**Rationale:** synchronous-complete creation was an ideal for simplicity, not an architectural necessity — the CAS/retry machinery already supports incremental updates, and the providers already preclude it (cover download is async; Goodreads is anti-bot + LLM-gated; a timed-out provider must abstain and converge later, REQ-025). The split keeps interactive simplicity where it is user-visible and confines eventual-consistency complexity to background paths the user does not watch.
+
+For bulk operations, multiple `add()` calls run with bounded concurrency (`buffer_unordered(5)`); rate limiters throttle provider calls naturally (~30 works/minute sustained).
 
 ## M10: No special cases by language
 

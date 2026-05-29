@@ -1,0 +1,417 @@
+# IR v1 — Structural
+# Feature: work-creation-consistency
+# Framing: GENERALIZES the existing (English/OL-scoped) identity subsystem in
+# livrarr-domain::identity + ::services::{identity_resolver, work_identity} +
+# livrarr-metadata to a federated, multi-provider, all-language, all-path model.
+# Reuses & widens (NOT replaces): WorkIdentityAnchor, AnchorType, AnchorConfidence,
+# IdentityResolver trait, WorkIdentityError, WorkIdentityRepository trait, mig 039/040.
+#
+# v2: folded review r1 (Codex R-001..R-005).
+# v3: folded review r2 (Codex R-002 thread candidate_id through the DOMAIN boundary;
+#     R-006 stale contract resolver names; R-007 CandidateId via uuid not getrandom).
+# v4: folded review r3 (Codex R-008: resolve seam takes (user_id, seed, tier)).
+# v5: folded review r4 (R-009 P1 BOTH families + R-010 P2 gemini) — HOLISTIC pass on
+#     the payload mechanism: candidate_id is now the UNIVERSAL payload handle on every
+#     payload-bearing Resolution variant (Resolved + each Candidate + Unresolved),
+#     cached (user_id, candidate_id) for ALL tiers (not Interactive-only) so Tier-A
+#     auto-match + bulk reuse payloads instead of re-fetching (REQ-014/015). IdentityState
+#     federated to hold CapturedIdentity = the SINGLE anchor home; WorkCandidate's
+#     standalone gr_key/hc_key removed (R-010).
+# v6 (2026-05-29): folded review r5 (Codex R-011 P2) — anchor-home consolidation now
+#     covers EDITION BRIDGES: WorkSeedFields drops isbn/asin, so identity's CapturedIdentity
+#     is the SOLE authority for ALL identifiers (anchors + bridges); add() persists
+#     identifiers only from identity. Payload-transport thread (R-001/002/008/009)
+#     confirmed CLOSED — r5 raised nothing on it. (Gemini r5 returned empty/UNKNOWN.)
+
+metadata:
+  feature: work-creation-consistency
+  stage: v1-structural
+  spec_ref: spec-work-creation-consistency.md
+  version: 6
+
+system_architecture:
+  components:
+    - name: livrarr-domain
+      type: library
+      description: "Generalize the `identity` module + the existing `IdentityResolver`/`WorkIdentityRepository` traits from OL-scoped to federated (GR anchor; federated Resolution/Candidate/WorkSeed/WorkCandidate/IdentityState/Conflict; LatencyTier; opaque CandidateId). New `normalization` module (REQ-005). Extend WorkIdentityError. EnrichmentStatus::NeedsReview."
+    - name: livrarr-db
+      type: library
+      description: "Migrations: data-preserving rebuild of work_identity_conflicts (federated kinds + SeriesMonitor + drop forbidden CHECKs, copy all rows); gr_key bare-numeric backfill. Generalize WorkIdentityRepository impl (federated anchors incl. gr_work; conflict raise; anchor-merge-on-match, REQ-028)."
+    - name: livrarr-matching
+      type: library
+      description: "m1_embedded extractor stops hardcoding isbn/asin/series=None — harvests EPUB OPF dc:identifier + M4B ASIN. ParsedFile carries isbn/asin/year."
+    - name: livrarr-metadata
+      type: library
+      description: "Generalize english_identity_resolver → tier-scoped multi-provider IdentityResolver impl (the #97 fix). Mints CandidateId (uuid v4) + caches payloads for ALL tiers. Generalize the async/bulk resolver (Background tier = convergence). Retire the sequential WorkService::lookup chain. Provider selection by seed+tier+language. Merge engine reused unchanged."
+    - name: livrarr-handlers
+      type: library
+      description: "Add Work + manual_import seams: build a federated WorkSeed, carry candidate_id + captured anchors across the HTTP boundary into the domain WorkCandidate, render Tier-A auto-match vs Tier-B/C confirmation, surface conflicts/needs-review. HasIdentityResolver capability."
+    - name: livrarr-server
+      type: service
+      description: "readarr_import_workflow seam (foreign_book_id→gr_key, isbn/asin). Compose the generalized IdentityResolver into AppState + expose the conflict-service capability. (The identity-conflict raise is wired in WorkService::add's preflight, not server — see IR v2 r5 C-R012.)"
+    - name: frontend
+      type: frontend
+      description: "Manual-import auto-matched vs needs-attention split; needs-review queue + identity-pending/conflict badges; fix divergent EnrichmentStatus type."
+  connections:
+    - { from: livrarr-handlers, to: livrarr-domain, protocol: in-process, description: "IdentityResolver + WorkService via Has* bounds; identity/normalization types; candidate_id" }
+    - { from: livrarr-metadata, to: livrarr-domain, protocol: in-process, description: "Implements IdentityResolver + WorkIdentityRepository; consumes identity/normalization types" }
+    - { from: livrarr-matching, to: livrarr-domain, protocol: in-process, description: "ParsedFile + normalization types" }
+    - { from: livrarr-db, to: livrarr-domain, protocol: in-process, description: "Anchor/conflict types for queries" }
+    - { from: livrarr-server, to: livrarr-metadata, protocol: in-process, description: "Resolver + WorkService composition" }
+    - { from: livrarr-server, to: livrarr-handlers, protocol: in-process, description: "Route + capability wiring on AppState" }
+    - { from: frontend, to: livrarr-handlers, protocol: HTTP, description: "REST API (candidate_id round-trips here)" }
+  deployment:
+    topology: single-process
+    notes: "All Rust crates compile to one binary; frontend is a static SPA served by the same process. No new crates, no new third-party dependencies, no compile-wall change."
+
+languages:
+  - { language: Rust, version: "1.80+", usage: primary backend }
+  - { language: TypeScript, version: "5.x", usage: frontend (React SPA) }
+
+frameworks:
+  - { name: axum, version: "0.8", usage: HTTP framework (existing) }
+  - { name: React, version: "19", usage: frontend UI (existing) }
+  - { name: TanStack Query, version: "5", usage: frontend data fetching (existing) }
+
+approved_libraries:
+  - { name: serde, version: "1", usage: "Serialization (existing)" }
+  - { name: sqlx, version: "0.8", usage: "DB queries + migrations (existing)" }
+  - { name: chrono, version: "0.4", usage: "DateTime (existing)" }
+  - { name: tokio, version: "1", usage: "Async runtime, spawn_blocking (existing)" }
+  - { name: reqwest, version: "0.12", usage: "Provider HTTP via livrarr-http clients (existing)" }
+  - { name: quick-xml, version: "0.37", usage: "EPUB OPF parsing to harvest dc:identifier ISBN (existing)" }
+  - { name: trait-variant, version: "0.1", usage: "Send async traits (existing)" }
+  - { name: thiserror, version: "2", usage: "Typed error enums (existing)" }
+  - { name: uuid, version: "1", usage: "CSPRNG-backed v4 CandidateId — already a DIRECT dep of livrarr-metadata (R-007)" }
+
+# ---------------------------------------------------------------------------
+decisions:
+  - id: D-001
+    topic: "Generalize the existing identity subsystem; do not build parallel types/traits"
+    choice: "Reuse and WIDEN, not replace: livrarr-domain::identity (WorkIdentityAnchor, AnchorType, AnchorConfidence/Setter, IdentityResolution, IdentityState, IdentityConflict*, ConsistencyDivergence), the existing `IdentityResolver` trait, `WorkIdentityError` + `WorkIdentityRepository`, and the metadata-side english_identity_resolver. New names ONLY where no existing surface fits (LatencyTier, WorkSeed, Candidate, CandidateId, AsinNorm)."
+    rationale: "Federated-anchor + resolver + repository infra already exists (OL/English-scoped). r1 R-003 caught invented names (WorkIdentityResolver/IdentityError) duplicating IdentityResolver/WorkIdentityError — corrected. Handler capability is the existing `HasIdentityResolver`."
+  - id: D-002
+    topic: "M9 carve-out — eventual convergence by path tier (PO-approved 2026-05-29)"
+    choice: "Interactive paths synchronous + fully-formed; batch/monitor paths may create identity-pending works that converge via the async resolver, terminal needs-review for the unresolvable. Documented in wiki/domain/metadata-principles.md (M9)."
+    rationale: "Strict M9 was an ideal, not a necessity; REQ-025 (timeout=abstain) already requires eventual convergence. Consistency = same destination, not same clock."
+  - id: D-003
+    topic: "One resolver core, three latency tiers"
+    choice: "The generalized `IdentityResolver` serves all paths; LatencyTier (Interactive|Bulk|Background) parameterizes discovery depth, provider eligibility, and blocking. Background tier IS the async convergence resolver (REQ-022). Reuses provider_queue + the merge engine."
+    rationale: "Spec premise: the six paths differ only in seed and tier, not in how identity resolves."
+  - id: D-004
+    topic: "Retire the sequential WorkService::lookup chain (#97 root cause)"
+    choice: "Replace the GB→OL→HC→GR first-hit chain with the resolver's tier-scoped multi-provider fan-out. Promote the preadd_cover_service fan-out (keep the payloads). Add Work's search box becomes a thin front-end on the same fan-out."
+    rationale: "Single-provider-first-hit is why an OL-absent book yields zero candidates (#97). Fan-out + keep-payloads fixes #97 and the discover-then-re-query waste — see D-005 for the keep-payloads mechanism."
+  - id: D-005
+    topic: "candidate_id = the UNIVERSAL payload handle, user-scoped, all tiers (v2 R-001, v3 R-002, v4 R-008, v5 R-009)"
+    choice: "The resolver seam takes `user_id`: `resolve(user_id, seed, tier)`. WHENEVER it fetches provider payloads (ANY tier — Tier-A interactive, bulk, background), it mints an opaque `CandidateId` (uuid v4) and caches that result's NormalizedWorkDetail payloads server-side under (user_id, candidate_id), consume-once, short TTL. candidate_id is surfaced on EVERY payload-bearing Resolution variant: `Resolved.candidate_id` (Tier-A auto-match), each `Candidate.candidate_id` (Tier-B/C), `Unresolved.candidate_id: Option` (transient, if any payload fetched). `Conflict` carries none (terminal). The token threads: Resolution → WorkSearchResult/LookupResult (+ per-Candidate) → wire AddWorkRequest → handler maps into domain `WorkCandidate.candidate_id` → `WorkService::add(user_id, candidate)` looks up (user_id, candidate_id), REVALIDATES captured anchors match, injects payloads to the merge engine in-process, evicts. The SAME user_id is held by add(); bulk/background callers (all user-scoped, Principle 4) pass it identically. Cache miss / TTL-expiry / anchor-mismatch ⇒ network enrichment — the EXCEPTIONAL fallback, not the normal path. Payload types (NormalizedWorkDetail) never cross the domain trait (insight 9e) — handlers see only CandidateId + Candidate."
+    rationale: "v1 keyed the cache on title+author+lang (R-001 cross-user leak). v2 added the token to the wire types only (R-002: never reached the domain add). v4 added user_id at the seam (R-008). v5 (R-009, both families): Tier-A `Resolved` and bulk paths had NO payload handle and caching was Interactive-only, so the COMMON auto-match path + every bulk item re-fetched from the network — breaking REQ-014/015 and D-004's whole point. Making candidate_id universal + tier-agnostic closes the thread."
+  - id: D-006
+    topic: "Federate the OL-scoped resolution types (incl. IdentityState — R-010)"
+    choice: "Add AnchorType::GR_WORK ('gr_work'). Generalize OlCandidate→Candidate (provider-agnostic, +candidate_id); EnglishSeed→WorkSeed (+gr/hc/asin + LatencyTier); IdentityResolution::Confirmed{ol_key}→Confirmed{anchors: CapturedIdentity}; **IdentityState::Confirmed{ol_key}→Confirmed{anchors: CapturedIdentity}** so IdentityState is the SINGLE federated anchor home on WorkCandidate (R-010); IncomingConflictPayload to federated anchors."
+    rationale: "REQ-001/008/018: identity is the union of provider anchors, not OL alone. R-010: federating IdentityState removes the standalone gr_key/hc_key duplication on WorkCandidate (one source of truth for the DB layer)."
+  - id: D-007
+    topic: "Generalize + wire the conflict store (data-preserving)"
+    choice: "Add IdentityConflictKind::{IncomingDifferentGrKey, IncomingDifferentHcKey, QuorumTie}; add ConflictSource::SeriesMonitor; rename ConflictResolutionAction::ReplaceOlKey→ReplaceAnchor. Migration 052 rebuilds work_identity_conflicts DATA-PRESERVINGLY (db-conflicts-migration). Wire the currently-unwired raise() (work_service.rs step-3e TODO)."
+    rationale: "REQ-020: conflicts of any federated anchor kind must be observable state. R-005: the rebuild must copy existing rows."
+  - id: D-008
+    topic: "Rename the English-scoped creation contract to general"
+    choice: "EnglishWorkCandidate→WorkCandidate, EnglishSeed→WorkSeed, EnglishSeedFields→WorkSeedFields; WorkCandidate gains candidate_id, and its anchors live in `identity` (federated IdentityState, R-010) — standalone gr_key/hc_key removed. Mechanical rename across all 6 path call-sites + WorkService::add + IdentityResolver::resolve."
+    rationale: "THE shared creation contract for all six paths and all languages; the 'English' prefix is historical/misleading. (Sizeable rename — flagged for reviewer scrutiny.)"
+  - id: D-009
+    topic: "Normalization + validation authority in livrarr-domain"
+    choice: "New livrarr-domain::normalization module: isbn (len+checksum, isbn10→isbn13 MOVED from google_books.rs), asin (shape-guard → AsinNorm, REQ-004), gr_key (bare-numeric, REQ-002), language (ISO-639-1 subtag strip, REQ-005). metadata's existing `normalize`/`language` delegate here. Enforced at WorkSeed entry: malformed → None (REQ-029)."
+    rationale: "REQ-005 mandates a single authority in the foundation crate."
+  - id: D-010
+    topic: "Work states"
+    choice: "Add EnrichmentStatus::NeedsReview (terminal-surfaced, REQ-026). Generalize the existing IdentityPending beyond English/OL. Verify enrichment_status column has no CHECK before relying on a no-migration variant add."
+    rationale: "REQ-026: unresolvable non-interactive items must surface for the user, never silent limbo or infinite retry."
+  - id: D-011
+    topic: "Three distinct unresolved lifecycles in the resolution outcome"
+    choice: "Resolution separates transient Unresolved (provider abstained/timeout — REQ-025) from terminal Conflict (REQ-018/020) from no-hard-id NeedsConfirmation (REQ-011)."
+    rationale: "Different convergence fates; collapsing them loses REQ-025 vs REQ-026 behavior."
+  - id: D-012
+    topic: "Scope guards"
+    choice: "No new crates; no new third-party dependencies (CandidateId uses uuid, already direct in livrarr-metadata); no compile-wall change; merge engine + retry/CAS machinery reused as-is."
+    rationale: "Spec Non-Requirements: no provider-set change, no enrichment re-architecture."
+
+# ---------------------------------------------------------------------------
+modules:
+  # ── livrarr-domain ──
+  - name: domain-identity-federate
+    responsibility: "Widen livrarr-domain::identity + the existing `IdentityResolver` trait from OL-scoped to federated. Add GR anchor; Candidate (+candidate_id); WorkSeed; opaque CandidateId; WorkCandidate (the WorkService::add input; +candidate_id; anchors in federated IdentityState — R-010); federate IdentityState + IdentityResolution to hold CapturedIdentity; federated conflict kinds/sources. Extend WorkIdentityError. Rename English*→general (D-008)."
+    req_ids: [REQ-001, REQ-003, REQ-008, REQ-009, REQ-010, REQ-011, REQ-014, REQ-015, REQ-018, REQ-019, REQ-020, REQ-022, REQ-023, REQ-025, REQ-028]
+    dependencies: []
+    public_api:
+      types:
+        - kind: enum
+          name: LatencyTier
+          variants:
+            - { name: Interactive, description: "Add Work, manual-import review — non-blocking on background-only providers; unresolved ⇒ confirm" }
+            - { name: Bulk, description: "list / Readarr import — per-item seconds; unresolved ⇒ identity-pending, no prompt" }
+            - { name: Background, description: "monitors + async convergence resolver — unbounded" }
+        - kind: struct
+          name: CandidateId
+          description: "Opaque uuid-v4 token (browser-safe). The universal payload-cache handle; user-scoped, consume-once, minted by the metadata resolver whenever it fetches payloads (any tier) (D-005)."
+          fields:
+            - { name: "0", type: String }
+        - kind: struct
+          name: WorkSeed
+          description: "Generalizes EnglishSeed. Harvested signal a path carries; identifier fields normalized+validated on entry (malformed→None)."
+          fields:
+            - { name: ol_key, type: "Option<String>" }
+            - { name: gr_key, type: "Option<String>" }
+            - { name: hc_key, type: "Option<String>" }
+            - { name: isbn_13, type: "Option<String>" }
+            - { name: asin, type: "Option<String>" }
+            - { name: title, type: "Option<String>" }
+            - { name: author_name, type: "Option<String>" }
+            - { name: language, type: "Option<String>" }
+            - { name: series_name, type: "Option<String>" }
+            - { name: year, type: "Option<i32>" }
+            - { name: user_confirmed, type: bool, description: "user's explicit pick = strongest vote (REQ-019)" }
+        - kind: struct
+          name: CapturedIdentity
+          description: "Federated anchor set; materializes as WorkIdentityAnchor rows (mig 039). The payload of IdentityState::Confirmed (R-010) and IdentityResolution::Confirmed."
+          fields:
+            - { name: ol_key, type: "Option<String>" }
+            - { name: gr_key, type: "Option<String>" }
+            - { name: hc_key, type: "Option<String>" }
+            - { name: isbn_13, type: "Option<String>" }
+            - { name: asin, type: "Option<String>" }
+            - { name: title, type: String }
+            - { name: author_name, type: String }
+            - { name: language, type: "Option<String>" }
+        - kind: struct
+          name: Candidate
+          description: "Generalizes OlCandidate (the #97 fix): provider-agnostic, from ALL enabled providers. Carries candidate_id binding it to its cached payloads."
+          fields:
+            - { name: candidate_id, type: CandidateId }
+            - { name: anchors, type: CapturedIdentity }
+            - { name: cover_url, type: "Option<String>" }
+            - { name: sources, type: "Vec<MetadataProvider>" }
+            - { name: score, type: ResolutionScore }
+            - { name: existing_work_id, type: "Option<WorkId>" }
+        - kind: struct
+          name: "WorkCandidate (renames + extends EnglishWorkCandidate — the WorkService::add input; R-002/R-010/R-011)"
+          fields:
+            - { name: "+ candidate_id", type: "Option<CandidateId>", description: "echoed from the chosen Candidate / Resolved result; lets add() reuse cached payloads (R-002/R-009). None ⇒ network enrich." }
+            - { name: "identity (FEDERATED — SOLE identifier home)", type: "IdentityState", description: "IdentityState::Confirmed holds CapturedIdentity = the ONLY authoritative home for ALL identifiers on the candidate: work anchors ol/gr/hc AND edition bridges isbn_13/asin. WorkService::add persists identifiers ONLY from here (after candidate_id payload revalidation). Standalone gr_key/hc_key (R-010) AND fields.isbn/asin (R-011) removed/non-authoritative." }
+            - { name: "(existing, carried over)", type: "fields: WorkSeedFields (DESCRIPTIVE only — title/author/year/cover_url/series/description/language; isbn/asin REMOVED per R-011), source_provider_data, series_id, monitor_ebook/audiobook, provenance_setter, import_id, ...", description: "from EnglishWorkCandidate; NO identifier lives here — identifiers are solely in identity (R-010/R-011)" }
+        - kind: enum
+          name: "IdentityState (CHANGED — federated, R-010)"
+          variants:
+            - { name: "Confirmed { anchors: CapturedIdentity, method: IdentityMethod, score: Option<ResolutionScore> }", description: "was Confirmed{ol_key,...}; now holds the full federated anchor set" }
+            - { name: "Pending { reason: PendingReason, top_candidates: Vec<Candidate> }", description: "top_candidates generalized OlCandidate→Candidate" }
+        - kind: enum
+          name: Resolution
+          description: "Generalizes IdentityResolution. The resolver's verdict; caller acts per its tier. candidate_id is the payload handle on every payload-bearing variant (D-005)."
+          variants:
+            - { name: "Resolved { identity: CapturedIdentity, method: IdentityMethod, candidate_id: CandidateId }", description: "Tier A — hard id fixed identity; auto-match. candidate_id = handle to payloads fetched this resolve, for add() reuse (R-009; REQ-010/011/012/014/015)" }
+            - { name: "NeedsConfirmation { candidates: Vec<Candidate> }", description: "Tier B/C — no resolving hard id; each Candidate carries its own candidate_id (REQ-011/026)" }
+            - { name: "Conflict { conflict: NewIdentityConflict, captured: CapturedIdentity }", description: "Terminal — quorum tie or conflicting same-kind anchor; no candidate_id (REQ-018/020)" }
+            - { name: "Unresolved { captured: CapturedIdentity, reason: PendingReason, candidate_id: Option<CandidateId> }", description: "Transient — provider abstained; Some(candidate_id) if any payload was fetched so the create still reuses it; converge later (REQ-025/022)" }
+        - kind: enum
+          name: "AnchorType (CHANGED — add const)"
+          variants:
+            - { name: "+ GR_WORK = \"gr_work\"", description: "gr_key as a federated anchor (was absent)" }
+        - kind: enum
+          name: "WorkIdentityError (CHANGED — extend existing)"
+          variants:
+            - { name: "+ EmptySeed", description: "seed carried no usable signal (REQ-029 guard)" }
+            - { name: "(existing) InvalidAnchorValue, AnchorNotFound, Db(String)", description: "reused as-is" }
+        - kind: enum
+          name: "IdentityConflictKind (CHANGED)"
+          variants:
+            - { name: "+ IncomingDifferentGrKey", description: "REQ-020" }
+            - { name: "+ IncomingDifferentHcKey", description: "REQ-020" }
+            - { name: "+ QuorumTie", description: "1-vs-1 no-majority standoff (REQ-018)" }
+        - kind: enum
+          name: "ConflictSource (CHANGED)"
+          variants:
+            - { name: "+ SeriesMonitor", description: "was missing; series monitor can raise (REQ-020)" }
+      functions:
+        - name: "IdentityResolver::resolve (GENERALIZED — existing trait)"
+          inputs:
+            - { name: user_id, type: UserId, description: "user scope for the discovery-cache mint (R-008); all six paths have it (Principle 4)" }
+            - { name: seed, type: WorkSeed }
+            - { name: tier, type: LatencyTier }
+          output: "Result<Resolution, WorkIdentityError>"
+          errors: [WorkIdentityError]
+          description: "Generalizes `IdentityResolver::resolve(&EnglishSeed) -> IdentityResolution` — adds user_id + tier + Result + federated Resolution. The single seam all six paths call. Tier-scoped multi-provider discovery → bridge → quorum → Tier A/B/C (REQ-008/009/010/011/018/023). Mints+caches payloads under (user_id, candidate_id) on every payload-bearing outcome (D-005). Provider failure ⇒ Unresolved, never Err (REQ-025). Non-harvested gr_key verified before capture (REQ-024)."
+        - name: "WorkService::add (CHANGED input — R-002/D-008)"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: candidate, type: WorkCandidate }
+          output: "Result<AddWorkResult, WorkServiceError>"
+          errors: [WorkServiceError]
+          description: "Existing trait method; input renames EnglishWorkCandidate→WorkCandidate (+candidate_id; anchors in federated identity). Looks up cached payloads by (user_id, candidate_id), revalidates anchors, injects to merge, evicts (D-005)."
+
+  - name: domain-normalization
+    responsibility: "Single authority for identifier + language normalization/validation. ISBN (len+checksum, isbn10→isbn13 moved from google_books.rs), ASIN shape-guard (REQ-004), gr_key bare-numeric (REQ-002), language ISO-639-1 (REQ-005). Malformed → absent (REQ-029)."
+    req_ids: [REQ-002, REQ-004, REQ-005, REQ-029]
+    dependencies: []
+    public_api:
+      types:
+        - kind: enum
+          name: AsinNorm
+          description: "Result of ASIN shape-guard (REQ-004)."
+          variants:
+            - { name: "Isbn13(String)", description: "ISBN-10-shaped + checksum-valid → folded to ISBN-13; store as isbn_13, not asin" }
+            - { name: "Asin(String)", description: "genuine Amazon ASIN — retain" }
+            - { name: "Invalid", description: "malformed — treat as absent (REQ-029)" }
+      functions:
+        - { name: normalize_isbn13, inputs: [{name: raw, type: "&str"}], output: "Option<String>", errors: [], description: "Validate len+checksum; ISBN-10→13. None if invalid (REQ-029)." }
+        - { name: normalize_asin, inputs: [{name: raw, type: "&str"}], output: "AsinNorm", errors: [], description: "ISBN-10-shaped + checksum-valid ⇒ Isbn13; else Asin or Invalid (REQ-004)." }
+        - { name: normalize_gr_key, inputs: [{name: raw, type: "&str"}], output: "Option<String>", errors: [], description: "Leading numeric segment ('123.Slug'→'123', '123-Slug'→'123'). None if no leading digits (REQ-002)." }
+        - { name: normalize_language, inputs: [{name: raw, type: "&str"}], output: "Option<String>", errors: [], description: "ISO-639-1, strip region subtag ('en-US'→'en') (REQ-005)." }
+
+  - name: domain-states
+    responsibility: "EnrichmentStatus::NeedsReview variant (REQ-026). Generalize IdentityPending semantics (drop the English/OL scoping note)."
+    req_ids: [REQ-026]
+    dependencies: []
+    public_api:
+      types:
+        - kind: enum
+          name: "EnrichmentStatus (CHANGED)"
+          variants:
+            - { name: "+ NeedsReview", description: "async resolver exhausted a Tier-B item; surfaced for user (REQ-026)" }
+
+  # ── livrarr-db ──
+  - name: db-conflicts-migration
+    responsibility: "Migration 052: DATA-PRESERVING rebuild of work_identity_conflicts. Algorithm (R-005): in one transaction — create new table WITHOUT CHECK-IN constraints; INSERT...SELECT every existing row preserving id/existing_work_id/incoming_payload_json/raised_at/raised_by/raised_source_path/status/resolved_at/resolution_notes; map resolution_action 'replace_ol_key'→'replace_anchor'; drop old, rename new; recreate the two indexes; rely on the startup pre/post FK-check harness. Repo: raise_identity_conflict + list/resolve for any federated kind."
+    req_ids: [REQ-020]
+    dependencies: [domain-identity-federate]
+    public_api:
+      functions:
+        - { name: raise_identity_conflict, inputs: [{name: conflict, type: NewIdentityConflict}], output: "Result<i64, WorkIdentityError>", errors: [WorkIdentityError], description: "Insert observable conflict for any federated anchor kind (REQ-020)." }
+  - name: db-anchors
+    responsibility: "Generalize the existing `WorkIdentityRepository` (services/work_identity.rs) from OL-scoped to federated: confirm_ol_anchor→confirm_anchor(anchor_type, value); supersede; set_identity_pending; find_work_by_anchor; list_anchors — over any AnchorType incl. gr_work. Add anchor-merge-on-match: a matched/adopted/race-loser work absorbs any incoming anchor it lacks (REQ-028, never overwrite a confirmed anchor). bare-numeric backfill is a Rust one-shot startup step, not a .sql migration (see IR v2 D-014 / r4 C-R010)."
+    req_ids: [REQ-001, REQ-002, REQ-003, REQ-028]
+    dependencies: [domain-identity-federate]
+    public_api:
+      functions:
+        - { name: "confirm_anchor (GENERALIZES confirm_ol_anchor)", inputs: [{name: work_id, type: WorkId}, {name: anchor_type, type: AnchorType}, {name: value, type: "&str"}, {name: setter, type: AnchorSetter}], output: "Result<(), WorkIdentityError>", errors: [WorkIdentityError], description: "Persist a federated anchor at create (REQ-001/003)." }
+        - { name: merge_missing_anchors, inputs: [{name: work_id, type: WorkId}, {name: incoming, type: CapturedIdentity}], output: "Result<(), WorkIdentityError>", errors: [WorkIdentityError], description: "Add anchors the existing work lacks; never overwrite a confirmed anchor (REQ-028)." }
+
+  # ── livrarr-matching ──
+  - name: matching-embedded-harvest
+    responsibility: "m1_embedded: extract_epub reads OPF dc:identifier ISBN (was isbn:None); extract_m4b reads embedded ASIN (was asin:None); year populated (epub dc:date + m4b tag.year()); series/narrator harvest DEFERRED (ir-v2 D-017). ParsedFile carries isbn/asin/year."
+    req_ids: [REQ-006]
+    dependencies: [domain-normalization]
+    public_api:
+      types:
+        - kind: struct
+          name: "ParsedFile (CHANGED)"
+          fields:
+            - { name: "+ isbn", type: "Option<String>" }
+            - { name: "+ asin", type: "Option<String>" }
+            - { name: "+ year", type: "Option<i32>" }
+
+  # ── livrarr-metadata ──
+  - name: metadata-identity-resolver
+    responsibility: "Generalize english_identity_resolver into the IdentityResolver impl: tier-scoped multi-provider discovery fan-out (REQ-008), ISBN/ASIN bridging (REQ-009), quorum (REQ-018), gr_key verification (REQ-024), Tier A/B/C (REQ-011), user-pick-wins (REQ-019). Whenever it fetches payloads (ANY tier), mints candidate_id (uuid v4) + caches under (user_id, candidate_id) for add() reuse (D-005, R-009). Retires the sequential WorkService::lookup chain (#97). Audnexus excluded from interactive tiers (REQ-021); language-aware provider selection (REQ-027)."
+    req_ids: [REQ-007, REQ-008, REQ-009, REQ-010, REQ-011, REQ-013, REQ-018, REQ-019, REQ-021, REQ-023, REQ-024, REQ-025, REQ-027]
+    dependencies: [domain-identity-federate, domain-normalization]
+    public_api:
+      functions:
+        - { name: "IdentityResolver::resolve (impl)", inputs: [{name: user_id, type: UserId}, {name: seed, type: WorkSeed}, {name: tier, type: LatencyTier}], output: "Result<Resolution, WorkIdentityError>", errors: [WorkIdentityError], description: "See domain-identity-federate. Mints candidate_id (uuid v4) + caches payloads under (user_id, candidate_id) for EVERY tier when payloads were fetched (R-009)." }
+        - { name: select_providers, inputs: [{name: seed, type: "&WorkSeed"}, {name: tier, type: LatencyTier}], output: "Vec<MetadataProvider>", errors: [], description: "REQ-008 matrix: providers relevant to seed + tier + language; excludes prerequisite-lacking (no GB key, no LLM for GR, Audnexus interactive)." }
+  - name: metadata-transport-cache
+    responsibility: "Server-side cache of harvested per-provider NormalizedWorkDetail payloads keyed on (user_id, candidate_id) — opaque, consume-once, short TTL, ALL tiers (Tier-A auto-match, bulk, background — R-009). WorkService::add looks up by the echoed candidate_id, revalidates captured anchors match, feeds the merge engine in-process, evicts. Cache miss / expiry / anchor-mismatch ⇒ network enrichment (exceptional fallback)."
+    req_ids: [REQ-007, REQ-014, REQ-015]
+    dependencies: [domain-identity-federate]
+    public_api: {}
+  - name: metadata-async-resolver
+    responsibility: "Background-tier convergence: generalize bulk_resolver + enrichment-retry job to re-run resolve(user_id, seed, Background) for identity-pending works. Transient (REQ-025) retries & converges; a Tier-B item it cannot match transitions to NeedsReview (REQ-026). Once a user resolves a conflict, background passes do not silently re-change identity (REQ-025)."
+    req_ids: [REQ-022, REQ-025, REQ-026]
+    dependencies: [domain-identity-federate, metadata-identity-resolver]
+    public_api: {}
+  - name: metadata-merge-reuse
+    responsibility: "Reuse the existing merge engine UNCHANGED, fed pre-fetched payloads (network-free). Deterministic per-field provider priority; user-set/non-null protection; works without LLM; foreign-language metadata must not win a field (REQ-027). (The REQ-020 identity-anchor raise is in WorkService::add's preflight — see IR v2 r5 C-R012; this module surfaces the merge engine's REQ-018 conflict outcome.)"
+    req_ids: [REQ-014, REQ-016, REQ-017, REQ-020, REQ-027, REQ-028]
+    dependencies: [domain-identity-federate, metadata-transport-cache]
+    public_api: {}
+  - name: metadata-path-seams-bulk
+    responsibility: "list_service: parser keeps Goodreads Book Id (→gr_key) + ISBN; build WorkSeed; resolve(user_id, …, Bulk); identity-pending on unresolved (REQ-026); reuse cached payloads via candidate_id (R-009). series_query_service + author_monitor_workflow: seed native anchor, resolve(…, Background), converge (REQ-022/023)."
+    req_ids: [REQ-006, REQ-008, REQ-022, REQ-023, REQ-026]
+    dependencies: [domain-identity-federate, metadata-identity-resolver]
+    public_api:
+      types:
+        - kind: struct
+          name: "ImportRow (CHANGED)"
+          fields:
+            - { name: "+ goodreads_book_id", type: "Option<String>", description: "GR Book Id from CSV (was dropped at the parser)" }
+
+  # ── livrarr-handlers ──
+  - name: handlers-interactive-seams
+    responsibility: "Add Work + manual_import: build a federated WorkSeed (harvest before search, REQ-006); resolve(user_id, …, Interactive); Tier-A ⇒ auto-match (no prompt) surfaced + one-click reversible (REQ-011/012); Tier-B/C ⇒ confirmation; hard-id-no-resolve ⇒ fall through (REQ-013). Carry candidate_id from Resolved/Candidate → WorkSearchResult → AddWorkRequest → WorkCandidate.candidate_id so the token + anchors reach WorkService::add (R-002/R-009). HasIdentityResolver capability."
+    req_ids: [REQ-006, REQ-007, REQ-011, REQ-012, REQ-013, REQ-014, REQ-015, REQ-019]
+    dependencies: [domain-identity-federate]
+    public_api:
+      types:
+        - kind: struct
+          name: "WorkSearchResult (CHANGED — wire, crates/livrarr-handlers/src/types/work.rs)"
+          fields:
+            - { name: "+ candidate_id", type: CandidateId, description: "from Resolved/Candidate; binds this result to its cached payloads (R-001/R-002/R-009)" }
+            - { name: "+ hc_key", type: "Option<String>" }
+            - { name: "+ gr_key", type: "Option<String>" }
+            - { name: "+ isbn_13", type: "Option<String>" }
+            - { name: "+ asin", type: "Option<String>" }
+        - kind: struct
+          name: "AddWorkRequest (CHANGED — wire, crates/livrarr-handlers/src/types/work.rs)"
+          fields:
+            - { name: "+ candidate_id", type: "Option<CandidateId>", description: "echoed from the selected result; handler maps it into WorkCandidate.candidate_id (R-002)" }
+            - { name: "+ hc_key", type: "Option<String>" }
+            - { name: "+ gr_key", type: "Option<String>" }
+            - { name: "+ isbn_13", type: "Option<String>" }
+            - { name: "+ asin", type: "Option<String>" }
+        - kind: struct
+          name: "LookupResult (CHANGED — domain, services/work.rs; has isbn_13 already; R-002)"
+          fields:
+            - { name: "+ candidate_id", type: "Option<CandidateId>", description: "discovery output carries the token so the handler can populate WorkSearchResult (R-002/R-009)" }
+            - { name: "+ hc_key", type: "Option<String>" }
+            - { name: "+ gr_key", type: "Option<String>" }
+            - { name: "+ asin", type: "Option<String>" }
+
+  # ── livrarr-server ──
+  - name: server-readarr-and-wiring
+    responsibility: "readarr_import_workflow: read foreign_book_id (→gr_key, normalized), isbn/asin; build WorkSeed; resolve(user_id, …, Bulk) (REQ-006/026, AC-031). Compose the generalized IdentityResolver into AppState + expose the conflict-service capability. (The identity-conflict raise is wired in WorkService::add's preflight, not server — see IR v2 r5 C-R012.)"
+    req_ids: [REQ-006, REQ-020, REQ-026]
+    dependencies: [handlers-interactive-seams, metadata-identity-resolver]
+    public_api: {}
+
+  # ── frontend ──
+  - name: frontend-surfacing
+    responsibility: "Manual-import scan view: auto-matched rows vs needs-attention rows (REQ-011/012); carry candidate_id through select→add. Needs-review queue + identity-pending/conflict badges (REQ-026/020). Fix the divergent EnrichmentStatus TS type to match the domain enum."
+    req_ids: [REQ-012, REQ-020, REQ-026]
+    dependencies: []
+    public_api: {}
+
+# ---------------------------------------------------------------------------
+shared_types:
+  - { kind: enum, name: LatencyTier, note: "see domain-identity-federate" }
+  - { kind: struct, name: CandidateId, note: "opaque user-scoped consume-once uuid-v4 payload handle (D-005)" }
+  - { kind: struct, name: WorkSeed, note: "generalizes EnglishSeed" }
+  - { kind: struct, name: WorkCandidate, note: "generalizes EnglishWorkCandidate; WorkService::add input; +candidate_id; anchors in federated identity (R-010)" }
+  - { kind: struct, name: CapturedIdentity, note: "federated anchor set; persists as WorkIdentityAnchor rows; payload of IdentityState::Confirmed" }
+  - { kind: struct, name: Candidate, note: "generalizes OlCandidate (the #97 fix); +candidate_id" }
+  - { kind: enum, name: IdentityState, note: "federated — Confirmed holds CapturedIdentity (single anchor home, R-010)" }
+  - { kind: enum, name: Resolution, note: "generalizes IdentityResolution; candidate_id on every payload-bearing variant" }
+  - { kind: enum, name: AsinNorm, note: "ASIN shape-guard result (domain-normalization)" }
+  - { kind: enum, name: WorkIdentityError, note: "EXISTING (services/work_identity.rs) — extended with EmptySeed; reused as the resolver error" }
+
+dependency_graph:
+  - { source: domain-identity-federate, target: domain-normalization }
+  - { source: db-conflicts-migration, target: domain-identity-federate }
+  - { source: db-anchors, target: domain-identity-federate }
+  - { source: matching-embedded-harvest, target: domain-normalization }
+  - { source: metadata-identity-resolver, target: domain-identity-federate }
+  - { source: metadata-identity-resolver, target: domain-normalization }
+  - { source: metadata-transport-cache, target: domain-identity-federate }
+  - { source: metadata-async-resolver, target: metadata-identity-resolver }
+  - { source: metadata-merge-reuse, target: metadata-transport-cache }
+  - { source: metadata-path-seams-bulk, target: metadata-identity-resolver }
+  - { source: handlers-interactive-seams, target: domain-identity-federate }
+  - { source: server-readarr-and-wiring, target: handlers-interactive-seams }
+  - { source: server-readarr-and-wiring, target: metadata-identity-resolver }

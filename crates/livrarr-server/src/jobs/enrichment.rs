@@ -137,42 +137,70 @@ pub async fn enrichment_retry_tick(
     };
 
     if !pending.is_empty() {
-        use livrarr_domain::identity::{AnchorSetter, EnglishSeed, IdentityResolution};
+        use livrarr_domain::identity::{AnchorSetter, Resolution, WorkSeed};
         use livrarr_domain::services::IdentityResolver;
 
         for work in &pending {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            let seed = EnglishSeed {
-                title: work.title.clone(),
-                author_name: work.author_name.clone(),
-                isbn: work.isbn_13.clone(),
-                user_confirmed_ol_key: None,
+            let seed = WorkSeed {
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                isbn_13: work.isbn_13.clone(),
+                asin: None,
+                title: Some(work.title.clone()),
+                author_name: Some(work.author_name.clone()),
+                language: None,
+                series_name: None,
+                year: None,
+                user_confirmed: false,
             };
-            let resolution = state.identity_resolver.resolve(&seed).await;
+            let resolution = match state
+                .identity_resolver
+                .resolve(
+                    work.user_id,
+                    &seed,
+                    livrarr_domain::identity::LatencyTier::Background,
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    debug!(work_id = work.id, error = %e, "enrichment_retry: resolve failed, skipping");
+                    continue;
+                }
+            };
             match resolution {
-                IdentityResolution::Confirmed {
-                    ol_key, method: _, ..
-                } => {
-                    info!(
-                        work_id = work.id,
-                        ol_key = %ol_key,
-                        "enrichment_retry: identity resolved, promoting anchor"
-                    );
-                    let _ = state
-                        .db
-                        .confirm_ol_anchor(work.id, &ol_key, AnchorSetter::AutoSearch)
-                        .await;
+                Resolution::Resolved { identity, .. } => {
+                    if let Some(ol_key) = identity.ol_key.as_deref() {
+                        info!(
+                            work_id = work.id,
+                            ol_key = %ol_key,
+                            "enrichment_retry: identity resolved, promoting anchor"
+                        );
+                        let _ = state
+                            .db
+                            .confirm_anchor(
+                                work.id,
+                                livrarr_domain::identity::AnchorType::new(
+                                    livrarr_domain::identity::AnchorType::OL_WORK,
+                                ),
+                                ol_key,
+                                AnchorSetter::AutoSearch,
+                            )
+                            .await;
+                    }
                     dispatch_enrich(&state, work.user_id, work.id, &mut total_dispatched).await;
                 }
-                IdentityResolution::Pending { .. } => {
+                Resolution::NeedsConfirmation { .. } | Resolution::Unresolved { .. } => {
                     debug!(
                         work_id = work.id,
                         "enrichment_retry: identity still pending, skipping"
                     );
                 }
-                IdentityResolution::Conflict { .. } => {
+                Resolution::Conflict { .. } => {
                     debug!(
                         work_id = work.id,
                         "enrichment_retry: identity conflict detected, skipping"

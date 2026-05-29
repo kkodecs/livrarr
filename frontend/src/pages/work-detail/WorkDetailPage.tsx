@@ -102,7 +102,7 @@ export default function WorkDetailPage() {
     enabled: !!id,
     refetchInterval: (query) => {
       const status = query.state.data?.enrichmentStatus;
-      if (status === "pending" || status === "unenriched") return 3_000;
+      if (status === "identity_pending" || status === "unenriched") return 3_000;
       if (coverPollBaseline === undefined) return false;
       const ebook = query.state.data?.coverMtime ?? null;
       const audiobook = query.state.data?.audiobookCoverMtime ?? null;
@@ -1139,22 +1139,20 @@ function MetadataTab({
 }) {
   const statusLabel = {
     unenriched: "Enriching…",
-    pending: "Pending",
-    partial: "Partial",
     enriched: "Enriched",
     failed: "Failed",
-    exhausted: "Exhausted",
-    skipped: "Skipped",
+    conflict: "Conflict",
+    identity_pending: "Identity Pending",
+    needs_review: "Needs Review",
   }[work.enrichmentStatus] ?? work.enrichmentStatus;
 
   const statusColor = {
     unenriched: "text-zinc-400",
     enriched: "text-green-400",
-    partial: "text-yellow-400",
-    pending: "text-zinc-400",
     failed: "text-red-400",
-    exhausted: "text-orange-400",
-    skipped: "text-zinc-400",
+    conflict: "text-red-400",
+    identity_pending: "text-yellow-400",
+    needs_review: "text-orange-400",
   }[work.enrichmentStatus] ?? "text-muted";
 
   return (

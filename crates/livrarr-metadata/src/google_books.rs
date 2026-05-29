@@ -424,34 +424,15 @@ pub fn strip_html_tags(html: &str) -> String {
     RE_WS.replace_all(decoded.trim(), " ").to_string()
 }
 
+/// Convert a checksum-valid ISBN-10 to its canonical ISBN-13.
+///
+/// Thin alias over the single normalization authority
+/// [`livrarr_domain::normalization::normalize_isbn13`] (D-009): there is exactly
+/// one implementation of the length+checksum+conversion rule in the workspace.
+/// Note this now validates the ISBN-10 checksum (a malformed input yields `None`
+/// rather than a fabricated ISBN-13).
 pub fn isbn10_to_isbn13(isbn10: &str) -> Option<String> {
-    let digits: String = isbn10.chars().filter(|c| *c != '-').collect();
-    if digits.len() != 10 {
-        return None;
-    }
-    let body = &digits[..9];
-    if !body.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    let last = digits.chars().nth(9)?;
-    if !last.is_ascii_digit() && last != 'X' && last != 'x' {
-        return None;
-    }
-    let prefix = format!("978{body}");
-    let sum: u32 = prefix
-        .chars()
-        .enumerate()
-        .map(|(i, c)| {
-            let d = c.to_digit(10).unwrap();
-            if i % 2 == 0 {
-                d
-            } else {
-                d * 3
-            }
-        })
-        .sum();
-    let check = (10 - (sum % 10)) % 10;
-    Some(format!("{prefix}{check}"))
+    livrarr_domain::normalization::normalize_isbn13(isbn10)
 }
 
 pub fn extract_isbn13(identifiers: &Option<Vec<GbIdentifier>>) -> Option<String> {

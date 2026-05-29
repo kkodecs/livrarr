@@ -4,22 +4,30 @@ import type { EnrichmentStatus, NarrationType, QueueStatus } from "@/types/api";
 const enrichmentColors: Record<EnrichmentStatus, string> = {
   unenriched: "bg-enrichment-pending/20 text-enrichment-pending",
   enriched: "bg-enrichment-enriched/20 text-enrichment-enriched",
-  partial: "bg-enrichment-partial/20 text-enrichment-partial",
-  pending: "bg-enrichment-pending/20 text-enrichment-pending",
   failed: "bg-enrichment-failed/20 text-enrichment-failed",
-  exhausted: "bg-enrichment-exhausted/20 text-enrichment-exhausted",
-  skipped: "bg-zinc-700/30 text-zinc-400",
+  conflict: "bg-enrichment-failed/20 text-enrichment-failed",
+  identity_pending: "bg-enrichment-partial/20 text-enrichment-partial",
+  needs_review: "bg-enrichment-partial/20 text-enrichment-partial",
+};
+
+const enrichmentLabels: Record<EnrichmentStatus, string> = {
+  unenriched: "Unenriched",
+  enriched: "Enriched",
+  failed: "Failed",
+  conflict: "Conflict",
+  identity_pending: "Identity Pending",
+  needs_review: "Needs Review",
 };
 
 export function EnrichmentBadge({ status }: { status: EnrichmentStatus }) {
   return (
     <span
       className={cn(
-        "inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize",
+        "inline-flex rounded-full px-2 py-0.5 text-xs font-medium",
         enrichmentColors[status],
       )}
     >
-      {status}
+      {enrichmentLabels[status] ?? status}
     </span>
   );
 }

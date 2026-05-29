@@ -8,7 +8,7 @@
 use livrarr_behavioral::stubs::{create_second_test_user, create_test_user, StubHttpFetcher};
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::*;
-use livrarr_domain::identity::EnglishWorkCandidate;
+use livrarr_domain::identity::WorkCandidate;
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl;
@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 // =============================================================================
 
 struct StubWorkService {
-    add_calls: Mutex<Vec<(UserId, EnglishWorkCandidate)>>,
+    add_calls: Mutex<Vec<(UserId, WorkCandidate)>>,
     should_fail: bool,
 }
 
@@ -47,7 +47,7 @@ impl StubWorkService {
         self.add_calls.lock().await.len()
     }
 
-    async fn add_calls_snapshot(&self) -> Vec<(UserId, EnglishWorkCandidate)> {
+    async fn add_calls_snapshot(&self) -> Vec<(UserId, WorkCandidate)> {
         self.add_calls.lock().await.drain(..).collect()
     }
 }
@@ -56,7 +56,7 @@ impl WorkService for StubWorkService {
     async fn add(
         &self,
         user_id: UserId,
-        candidate: EnglishWorkCandidate,
+        candidate: WorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError> {
         self.add_calls.lock().await.push((user_id, candidate));
         if self.should_fail {

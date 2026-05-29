@@ -638,14 +638,14 @@ where
 
             // No match — create new work via WorkService::add() (M2 single creation gate).
             use livrarr_domain::identity::{
-                EnglishSeedFields, EnglishWorkCandidate, IdentityState, PendingReason,
+                IdentityState, PendingReason, WorkCandidate, WorkSeedFields,
             };
             match self
                 .work_service
                 .add(
                     author.user_id,
-                    EnglishWorkCandidate {
-                        fields: EnglishSeedFields {
+                    WorkCandidate {
+                        fields: WorkSeedFields {
                             title: book.title.clone(),
                             author_name: author.name.clone(),
                             language: "en".into(),
@@ -653,8 +653,6 @@ where
                             year: book.year,
                             cover_url: None,
                             detail_url: None,
-                            isbn: None,
-                            asin: None,
                             description: None,
                             series_name: Some(series_name.clone()),
                             series_position: book.position,
@@ -663,10 +661,10 @@ where
                             reason: PendingReason::NoCandidates,
                             top_candidates: vec![],
                         },
+                        candidate_id: None,
                         source_provider_data: None,
                         file_path: None,
                         delete_existing_after_import: false,
-                        gr_key: Some(book.gr_key.clone()),
                         series_id: Some(series_id),
                         monitor_ebook: Some(monitor_ebook),
                         monitor_audiobook: Some(monitor_audiobook),

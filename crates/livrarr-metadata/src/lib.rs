@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
+pub mod async_resolver;
 pub mod audible;
 pub mod audnexus;
 pub mod author_service;
@@ -46,6 +47,7 @@ pub mod provider_queue;
 pub mod series_query_service;
 pub mod series_service;
 pub mod title_cleanup;
+pub mod transport_cache;
 pub mod work_service;
 
 pub mod author_monitor_workflow;
@@ -568,6 +570,23 @@ pub struct DefaultMergeEngine<L = crate::llm_caller_service::LlmCallerImpl> {
     /// Kept to satisfy the old `new(priority_model)` call sites during transition.
     /// The priority model per merge is taken from `MergeInput` — this field is unused.
     _priority_model: PriorityModel,
+}
+
+impl<L> DefaultMergeEngine<L> {
+    /// Merge from already-fetched per-provider payloads — zero provider network
+    /// calls (REQ-014/015). Wraps each payload as a ReconstructedOutcome, drops
+    /// OpenLibrary + Hardcover for non-English works (REQ-027), and runs the
+    /// existing deterministic merge unchanged (REQ-016/017). See ir-v2
+    /// metadata-merge-reuse.
+    pub async fn merge_from_cached(
+        &self,
+        work: Work,
+        payloads: HashMap<livrarr_domain::MetadataProvider, NormalizedWorkDetail>,
+        language: Option<&str>,
+    ) -> Result<MergeOutput, MergeError> {
+        let _ = (work, payloads, language);
+        todo!()
+    }
 }
 
 impl DefaultMergeEngine<crate::llm_caller_service::LlmCallerImpl> {

@@ -23,6 +23,8 @@ pub fn extract_embedded(
 }
 
 fn extract_epub(path: &Path) -> Option<Extraction> {
+    use livrarr_domain::normalization::{normalize_isbn13, normalize_language};
+
     let book = rbook::Epub::new(path).ok()?;
     let metadata = book.metadata();
 
@@ -36,6 +38,29 @@ fn extract_epub(path: &Path) -> Option<Extraction> {
     let title = raw_title.and_then(|t| sanitize_title(&t, path))?;
     let author = raw_author.and_then(|a| sanitize_author(&a));
 
+    // Harvest ISBN from dc:identifier elements, stripping common URI prefixes
+    let isbn = metadata.get("identifier").iter().find_map(|el| {
+        let raw = el.value();
+        let stripped = raw
+            .strip_prefix("ISBN:")
+            .or_else(|| raw.strip_prefix("isbn:"))
+            .or_else(|| raw.strip_prefix("urn:isbn:"))
+            .or_else(|| raw.strip_prefix("URN:ISBN:"))
+            .unwrap_or(raw);
+        normalize_isbn13(stripped)
+    });
+
+    // Harvest the publication year from dc:date (best-effort; first 4-digit run).
+    let year = metadata
+        .get("date")
+        .iter()
+        .find_map(|el| parse_year(el.value()));
+
+    // Normalize through the single authority; an unrecognized language is left
+    // absent rather than stored raw (REQ-005). The widened ISO-639-1 table makes
+    // the previous raw fallback unnecessary and avoids leaking a subtagged value.
+    let language = raw_language.as_deref().and_then(normalize_language);
+
     let confidence = if author.is_some() {
         Confidence::High
     } else {
@@ -45,9 +70,9 @@ fn extract_epub(path: &Path) -> Option<Extraction> {
     Some(Extraction {
         title: Some(title),
         author,
-        year: None,
-        isbn: None,
-        language: raw_language,
+        year,
+        isbn,
+        language,
         series: None,
         series_position: None,
         narrator: None,
@@ -58,6 +83,9 @@ fn extract_epub(path: &Path) -> Option<Extraction> {
 }
 
 fn extract_m4b(path: &Path) -> Option<Extraction> {
+    use livrarr_domain::normalization::{normalize_asin, AsinNorm};
+    use mp4ameta::FreeformIdent;
+
     let tag = mp4ameta::Tag::read_from_path(path).ok()?;
 
     let raw_title = tag.title().map(|s| s.to_string());
@@ -66,6 +94,19 @@ fn extract_m4b(path: &Path) -> Option<Extraction> {
 
     let title = raw_title.and_then(|t| sanitize_title(&t, path))?;
     let author = raw_author.and_then(|a| sanitize_author(&a));
+
+    // Harvest ASIN from the iTunes freeform ----:com.apple.iTunes:ASIN atom
+    let asin_ident = FreeformIdent::new_static("com.apple.iTunes", "ASIN");
+    let raw_asin = tag.strings_of(&asin_ident).next().map(str::to_string);
+
+    let (isbn, asin) = match raw_asin.as_deref() {
+        Some(a) => match normalize_asin(a) {
+            AsinNorm::Isbn13(isbn13) => (Some(isbn13), None),
+            AsinNorm::Asin(a) => (None, Some(a)),
+            AsinNorm::Invalid => (None, None),
+        },
+        None => (None, None),
+    };
 
     let confidence = if author.is_some() {
         Confidence::High
@@ -77,12 +118,12 @@ fn extract_m4b(path: &Path) -> Option<Extraction> {
         title: Some(title),
         author,
         year: raw_year,
-        isbn: None,
+        isbn,
         language: None,
         series: None,
         series_position: None,
         narrator: None,
-        asin: None,
+        asin,
         confidence,
         source: ExtractionSource::Embedded,
     })
@@ -242,4 +283,14 @@ fn most_common<T: Eq + std::hash::Hash>(values: &[T]) -> Option<&T> {
         *counts.entry(v).or_insert(0u32) += 1;
     }
     counts.into_iter().max_by_key(|(_, c)| *c).map(|(v, _)| v)
+}
+
+/// Best-effort publication year from a date string: the first standalone run of
+/// exactly four ASCII digits (handles `"2021"`, `"2021-03-01"`, `"March 2021"`).
+/// Mirrors the OpenLibrary `first_publish_date` parsing convention.
+fn parse_year(raw: &str) -> Option<i32> {
+    raw.split(|c: char| !c.is_ascii_digit())
+        .find(|tok| tok.len() == 4)
+        .and_then(|tok| tok.parse::<i32>().ok())
+        .filter(|y| (1000..=2999).contains(y))
 }

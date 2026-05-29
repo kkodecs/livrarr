@@ -316,10 +316,10 @@ where
 
                     if author_ref.monitor_new_items {
                         use livrarr_domain::identity::{
-                            EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState,
+                            IdentityMethod, IdentityState, WorkCandidate, WorkSeedFields,
                         };
-                        let candidate = EnglishWorkCandidate {
-                            fields: EnglishSeedFields {
+                        let candidate = WorkCandidate {
+                            fields: WorkSeedFields {
                                 title: work_title.clone(),
                                 author_name: cleaned_author_ref.clone(),
                                 language: "en".into(),
@@ -327,21 +327,28 @@ where
                                 year: Some(year),
                                 cover_url: None,
                                 detail_url: None,
-                                isbn: None,
-                                asin: None,
                                 description: None,
                                 series_name: None,
                                 series_position: None,
                             },
                             identity: IdentityState::Confirmed {
-                                ol_key: stripped_ol_key.clone(),
+                                anchors: livrarr_domain::identity::CapturedIdentity {
+                                    ol_key: Some(stripped_ol_key.clone()),
+                                    gr_key: None,
+                                    hc_key: None,
+                                    isbn_13: None,
+                                    asin: None,
+                                    title: work_title.clone(),
+                                    author_name: cleaned_author_ref.clone(),
+                                    language: None,
+                                },
                                 method: IdentityMethod::TitleAuthorSearch,
                                 score: None,
                             },
+                            candidate_id: None,
                             source_provider_data: None,
                             file_path: None,
                             delete_existing_after_import: false,
-                            gr_key: None,
                             series_id: None,
                             monitor_ebook: None,
                             monitor_audiobook: None,

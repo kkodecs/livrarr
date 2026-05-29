@@ -102,6 +102,15 @@ pub struct ParsedFile {
     pub series_position: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Embedded identifiers harvested from the file (EPUB OPF / M4B atoms)
+    /// before any search (REQ-006), carried through the cluster→ParsedFile
+    /// narrowing so the seam can seed identity. Populated during implementation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,6 +358,9 @@ pub async fn scan<S: ManualImportHandlerContext>(
             series: c.series,
             series_position: c.series_position,
             language: c.language,
+            isbn: None,
+            asin: None,
+            year: None,
         });
         parsed_files.push(parsed);
     }
@@ -914,11 +926,21 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
     };
 
     use livrarr_domain::identity::{
-        EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState, PendingReason,
+        CapturedIdentity, IdentityMethod, IdentityState, PendingReason, WorkCandidate,
+        WorkSeedFields,
     };
     let identity = if !item.ol_key.is_empty() {
         IdentityState::Confirmed {
-            ol_key: item.ol_key.clone(),
+            anchors: CapturedIdentity {
+                ol_key: Some(item.ol_key.clone()),
+                gr_key: None,
+                hc_key: None,
+                isbn_13: item.isbn.clone(),
+                asin: None,
+                title: item.title.clone(),
+                author_name: item.author.clone(),
+                language: None,
+            },
             method: IdentityMethod::UserSelected,
             score: None,
         }
@@ -934,8 +956,8 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
         .map(livrarr_domain::normalize_language)
         .unwrap_or_else(|| "en".to_string());
     let author_ol_key = item.author_ol_key.clone().or(author_ol_key);
-    let candidate = EnglishWorkCandidate {
-        fields: EnglishSeedFields {
+    let candidate = WorkCandidate {
+        fields: WorkSeedFields {
             title: item.title.clone(),
             author_name: item.author.clone(),
             language,
@@ -943,17 +965,15 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
             year: item.year,
             cover_url: item.cover_url.clone(),
             detail_url: None,
-            isbn: item.isbn.clone(),
-            asin: None,
             description: item.description.clone(),
             series_name: item.series_name.clone(),
             series_position: item.series_position,
         },
         identity,
+        candidate_id: None,
         source_provider_data: None,
         file_path: None,
         delete_existing_after_import: false,
-        gr_key: None,
         series_id: None,
         monitor_ebook: None,
         monitor_audiobook: None,

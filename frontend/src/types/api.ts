@@ -15,12 +15,11 @@ export type GrabStatus =
   | "failed";
 export type EnrichmentStatus =
   | "unenriched"
-  | "pending"
-  | "partial"
   | "enriched"
   | "failed"
-  | "exhausted"
-  | "skipped";
+  | "conflict"
+  | "identity_pending"
+  | "needs_review";
 export type QueueStatus =
   | "downloading"
   | "queued"

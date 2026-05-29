@@ -44,7 +44,14 @@ pub async fn run_repair(db: &SqliteDb, user_id: UserId, work_ids: Vec<WorkId>) -
             if !has_confirmed {
                 if let Some(ref ol_key) = work.ol_key {
                     match db
-                        .confirm_ol_anchor(work_id, ol_key, AnchorSetter::Import)
+                        .confirm_anchor(
+                            work_id,
+                            livrarr_domain::identity::AnchorType::new(
+                                livrarr_domain::identity::AnchorType::OL_WORK,
+                            ),
+                            ol_key,
+                            AnchorSetter::Import,
+                        )
                         .await
                     {
                         Ok(()) => {

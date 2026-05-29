@@ -1,5 +1,6 @@
 pub mod identity;
 pub mod keyed_mutex;
+pub mod normalization;
 pub mod readarr;
 pub mod services;
 pub mod settings;
@@ -85,9 +86,12 @@ pub enum EnrichmentStatus {
     /// LLM identity validation detected a provider mismatch. Terminal until
     /// user resolves. Only reachable when LLM is configured.
     Conflict,
-    /// OL identity could not be confidently resolved at add-time. Background
-    /// job will retry resolution. Only for English works.
+    /// Identity could not be confidently resolved at add-time. A background job
+    /// will retry resolution.
     IdentityPending,
+    /// A non-interactive path exhausted resolution for a work that has no
+    /// resolving identifier. Surfaced for the user; terminal until reviewed.
+    NeedsReview,
 }
 
 /// Per-file tag sync status. Tracked on LibraryItem, not on Work.
@@ -833,37 +837,16 @@ pub fn normalize_for_matching(s: &str) -> String {
     result.to_lowercase()
 }
 
-/// Normalize a language value to ISO 639-1 two-letter code.
-/// Handles full English names (from Goodreads JSON-LD), three-letter codes,
-/// and passes through already-correct two-letter codes.
+/// Normalize a language value to an ISO 639-1 two-letter code.
+///
+/// Delegates to [`crate::normalization::normalize_language`] — the single
+/// normalization authority (REQ-005) — and falls back to the trimmed,
+/// lower-cased input for a value that authority does not recognize, preserving
+/// this function's historical pass-through contract for its enrichment callers.
+/// (Unlike the previous local table, this now also strips region subtags from
+/// recognized languages, e.g. `"en-US"` → `"en"`.)
 pub fn normalize_language(lang: &str) -> String {
-    let lower = lang.trim().to_lowercase();
-    match lower.as_str() {
-        "english" | "eng" => "en",
-        "french" | "français" | "fra" | "fre" => "fr",
-        "german" | "deutsch" | "deu" | "ger" => "de",
-        "spanish" | "español" | "spa" => "es",
-        "polish" | "polski" | "pol" => "pl",
-        "dutch" | "nederlands" | "nld" | "dut" => "nl",
-        "italian" | "italiano" | "ita" => "it",
-        "portuguese" | "português" | "por" => "pt",
-        "japanese" | "日本語" | "jpn" => "ja",
-        "korean" | "한국어" | "kor" => "ko",
-        "chinese" | "中文" | "zho" | "chi" => "zh",
-        "russian" | "русский" | "rus" => "ru",
-        "swedish" | "svenska" | "swe" => "sv",
-        "norwegian" | "norsk" | "nor" => "no",
-        "danish" | "dansk" | "dan" => "da",
-        "finnish" | "suomi" | "fin" => "fi",
-        "czech" | "čeština" | "ces" | "cze" => "cs",
-        "turkish" | "türkçe" | "tur" => "tr",
-        "arabic" | "العربية" | "ara" => "ar",
-        "hindi" | "हिन्दी" | "hin" => "hi",
-        "romanian" | "română" | "ron" | "rum" => "ro",
-        "hungarian" | "magyar" | "hun" => "hu",
-        other => return other.to_string(),
-    }
-    .to_string()
+    crate::normalization::normalize_language(lang).unwrap_or_else(|| lang.trim().to_lowercase())
 }
 
 /// Normalize an optional language value.

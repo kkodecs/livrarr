@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Livrarr is a 10-crate Rust workspace with a React/TypeScript frontend. All dependency arrows point toward `livrarr-domain`. `livrarr-server` is the composition root — it depends on everything, nothing depends on it.
+Livrarr is a 13-crate Rust workspace (10 core application crates + `livrarr-jobs`, `livrarr-cli`, `livrarr-behavioral`) with a React/TypeScript frontend. All dependency arrows point toward `livrarr-domain`. `livrarr-server` is the composition root — it depends on everything, nothing depends on it. Authoritative member list: `Cargo.toml` `[workspace].members`.
 
 ## Crate Dependency Graph
 
@@ -12,14 +12,17 @@ livrarr-domain (foundation — entities, traits, enums, errors)
 ├── livrarr-library     → domain (import pipeline, file layout, CWA copy)
 │                         (renamed from livrarr-organize in Phase 5)
 ├── livrarr-tagwrite    → domain (EPUB/M4B/MP3 metadata tag writing)
+├── livrarr-matching    → domain (M1-M4 matching engine, extract/reconcile)
+├── livrarr-jobs        → domain (JobService trait ONLY — compile-wall-safe job
+│                         triggering; job impls live in livrarr-server)
 │
-├── livrarr-handlers    → domain, http (ALL route handlers, generic over AppContext)
+├── livrarr-handlers    → domain, http, matching (ALL route handlers, generic over AppContext)
 │                         COMPILE WALL: must NOT depend on db, metadata, tagwrite, download
 ├── livrarr-metadata    → domain, http (enrichment pipeline, provider clients, LLM)
 ├── livrarr-download    → domain, http (Prowlarr, qBit, indexer clients)
-├── livrarr-matching    → domain (M1-M4 matching engine, extract/reconcile)
 │
 ├── livrarr-behavioral  → domain, db, metadata, download, library, tagwrite (cross-crate tests)
+├── livrarr-cli         → domain (thin HTTP API client — stub binary)
 │
 ├── livrarr-server      → ALL (composition root: axum, AppState, jobs, service impls)
 │                         Zero route handlers — all routing delegates to livrarr-handlers

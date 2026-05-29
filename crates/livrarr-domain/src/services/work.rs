@@ -185,6 +185,16 @@ pub struct LookupResult {
     pub rating: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isbn_13: Option<String>,
+    /// Handle to the cached per-provider payloads fetched during discovery, so
+    /// the add path can reuse them without re-querying (R-002/R-009; REQ-014/015).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<crate::identity::CandidateId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hc_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gr_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -220,7 +230,7 @@ pub trait WorkService: Send + Sync {
     async fn add(
         &self,
         user_id: UserId,
-        candidate: crate::identity::EnglishWorkCandidate,
+        candidate: crate::identity::WorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError>;
     async fn get(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError>;
     async fn get_detail(

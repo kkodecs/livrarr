@@ -1664,6 +1664,7 @@ dependencies = [
  "livrarr-download",
  "livrarr-http",
  "livrarr-library",
+ "livrarr-matching",
  "livrarr-metadata",
  "serde",
  "serde_json",

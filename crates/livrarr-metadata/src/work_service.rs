@@ -232,7 +232,7 @@ where
     async fn add(
         &self,
         user_id: UserId,
-        candidate: livrarr_domain::identity::EnglishWorkCandidate,
+        candidate: livrarr_domain::identity::WorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError> {
         use livrarr_domain::identity::{AnchorSetter, AnchorType, IdentityState};
 
@@ -247,11 +247,8 @@ where
         let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
 
         match &candidate.identity {
-            IdentityState::Confirmed {
-                ol_key,
-                method: _,
-                score: _,
-            } => {
+            IdentityState::Confirmed { anchors, .. } => {
+                let ol_key = anchors.ol_key.as_deref().unwrap_or("");
                 let anchor_type = AnchorType::new(AnchorType::OL_WORK);
                 if let Ok(Some(existing_id)) = self
                     .db
@@ -306,7 +303,12 @@ where
                         _ => AnchorSetter::AutoSearch,
                     };
                     self.db
-                        .confirm_ol_anchor(existing.id, ol_key, anchor_setter)
+                        .confirm_anchor(
+                            existing.id,
+                            AnchorType::new(AnchorType::OL_WORK),
+                            ol_key,
+                            anchor_setter,
+                        )
                         .await
                         .map_err(|e| {
                             WorkServiceError::Validation(format!("adopt anchor write failed: {e}"))
@@ -412,7 +414,7 @@ where
                             normalized_author,
                             author_id,
                             ol_key: None,
-                            gr_key: candidate.gr_key.clone(),
+                            gr_key: candidate.identity.anchors().and_then(|a| a.gr_key.clone()),
                             year: candidate.fields.year,
                             cover_url: candidate.fields.cover_url.clone(),
                             language: Some(livrarr_domain::normalize_language(
@@ -424,8 +426,8 @@ where
                             monitor_audiobook: candidate.monitor_audiobook.unwrap_or(true),
                             import_id: candidate.import_id.clone(),
                             series_id: candidate.series_id,
-                            isbn_13: candidate.fields.isbn.clone(),
-                            asin: candidate.fields.asin.clone(),
+                            isbn_13: candidate.identity.anchors().and_then(|a| a.isbn_13.clone()),
+                            asin: candidate.identity.anchors().and_then(|a| a.asin.clone()),
                             description: candidate.fields.description.clone(),
                             source_provider_json: None,
                             cover_manual: candidate.cover_manual,
@@ -503,7 +505,7 @@ where
                         normalized_author,
                         author_id,
                         ol_key: None,
-                        gr_key: candidate.gr_key.clone(),
+                        gr_key: candidate.identity.anchors().and_then(|a| a.gr_key.clone()),
                         year: candidate.fields.year,
                         cover_url: candidate.fields.cover_url.clone(),
                         language: Some(livrarr_domain::normalize_language(
@@ -515,8 +517,8 @@ where
                         monitor_audiobook: candidate.monitor_audiobook.unwrap_or(true),
                         import_id: candidate.import_id.clone(),
                         series_id: candidate.series_id,
-                        isbn_13: candidate.fields.isbn.clone(),
-                        asin: candidate.fields.asin.clone(),
+                        isbn_13: candidate.identity.anchors().and_then(|a| a.isbn_13.clone()),
+                        asin: candidate.identity.anchors().and_then(|a| a.asin.clone()),
                         description: candidate.fields.description.clone(),
                         source_provider_json: None,
                         cover_manual: candidate.cover_manual,
@@ -1364,6 +1366,10 @@ where
                     detail_url: validated_url,
                     rating: r.rating,
                     isbn_13: None,
+                    candidate_id: None,
+                    hc_key: None,
+                    gr_key: None,
+                    asin: None,
                 }
             })
             .collect();
@@ -1472,6 +1478,10 @@ where
                     detail_url: None,
                     rating: None,
                     isbn_13: None,
+                    candidate_id: None,
+                    hc_key: None,
+                    gr_key: None,
+                    asin: None,
                 })
             })
             .collect();
@@ -1550,6 +1560,10 @@ where
                     detail_url: None,
                     rating: None,
                     isbn_13: crate::google_books::extract_isbn13(&vi.industry_identifiers),
+                    candidate_id: None,
+                    hc_key: None,
+                    gr_key: None,
+                    asin: None,
                 })
             })
             .collect();
@@ -1673,6 +1687,10 @@ where
                     detail_url: None,
                     rating: None,
                     isbn_13,
+                    candidate_id: None,
+                    hc_key: None,
+                    gr_key: None,
+                    asin: None,
                 })
             })
             .collect();

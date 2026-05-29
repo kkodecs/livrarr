@@ -4,11 +4,25 @@ The metadata enrichment system resolves book identity and populates work metadat
 
 ## Provider Stack
 
-1. **Hardcover** — primary metadata provider. GraphQL API. Deterministic + fuzzy queries.
-2. **Open Library** — secondary provider. REST API. English-language works only (never for foreign language).
-3. **Audnexus** — audiobook-specific enrichment. REST API. Narration metadata, ASIN mapping.
-4. **GoodReads** — supplementary. HTML scraping (no public API).
-5. **LLM Validator** — resolves ambiguous Hardcover matches. OpenAI-compatible chat completions. Fully optional.
+Six **network providers** dispatched through the `ProviderClient` enum by `DefaultProviderQueue` (all registered in `livrarr-server/src/main.rs`), plus one synthetic source provider and an optional validator. (Note: only `OpenLibraryProvider` and `LlmScraperProvider` implement the legacy `MetadataProvider` trait — the queue dispatches via `ProviderClient::fetch`, not that trait.)
+
+1. **Hardcover** — primary English metadata. GraphQL API. Deterministic + fuzzy queries. **Excluded for foreign-language works** (applicability rule below).
+2. **Open Library** — secondary. REST API. English only — **excluded for foreign-language works**. Does not emit a `cover_url` in normalized output.
+3. **Goodreads** — supplementary. HTML scraping (no public API). LLM-disambiguated; returns `NotFound` without an LLM. Runs for English **and** foreign.
+4. **Audnexus** — audiobook enrichment. REST API. Narration/duration, keyed on ASIN.
+5. **Google Books** — **foreign-language metadata provider**. REST API, **requires an API key** (keyless quota is zero). **Excluded for English works; included for foreign** — it is the primary foreign-language metadata source (insights #12).
+6. **Audible** — audiobook-axis provider. Catalog search + ASIN lookup (unauthenticated).
+7. **Readarr** — *synthetic* provider, not a network client: built from injected `SourceProviderData` and arbitrated by the merge engine like any other provider.
+8. **LLM Validator** — identity validation (rejects mismatched payloads). OpenAI-compatible chat completions. Fully optional — merge is deterministic without it.
+
+### Language applicability rule
+
+The queue applies a per-work applicability rule (`main.rs` → `with_applicability_rule`) **before** dispatch:
+
+- **English (or unresolved) language:** every registered provider runs **except Google Books**.
+- **Foreign language:** **only** Goodreads, Audnexus, Google Books, and Audible run — **OpenLibrary and Hardcover are excluded** (English-language metadata leaking into a foreign record is a known corruption; insights #12/#16).
+
+> The provider set consulted during interactive **discovery** (Add Work search, the pre-add cover picker) is wired *separately* from the enrichment queue (`LivePreaddCoverService` / `LiveCoverService` client maps in `main.rs`) and is not identical to it. See [metadata-pathway](metadata-pathway.md) for the authoritative current add → enrich → merge flow.
 
 ## Enrichment Modes
 
@@ -26,7 +40,7 @@ After consolidation, `EnrichmentWorkflow` is the single implementation. `WorkSer
 
 1. Work added (via search, RSS, or manual import)
 2. Identity locked at add-time using LLM validator (if configured)
-3. Provider dispatch (scatter-gather): Hardcover, OL, Audnexus queried based on mode
+3. Provider dispatch (scatter-gather): the applicable providers (per the language rule above) queried based on mode
 4. Normalize results via `NormalizedWorkDetail`
 5. MergeEngine applies provider results with provenance tracking (pure — no DB calls)
 6. Merge output includes: field updates, provenance upserts/deletes, external ID updates, conflict detection

@@ -1,9 +1,10 @@
 use livrarr_domain::identity::*;
-use livrarr_domain::text_norm;
+use livrarr_domain::services::WorkIdentityError;
+use livrarr_domain::UserId;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use livrarr_domain::identity::EnglishSeed;
+pub use livrarr_domain::identity::WorkSeed;
 
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
@@ -63,138 +64,62 @@ pub struct LiveEnglishIdentityResolver<O> {
 }
 
 impl<O: OpenLibraryClient> EnglishIdentityResolver for LiveEnglishIdentityResolver<O> {
-    async fn resolve(&self, seed: &EnglishSeed) -> IdentityResolution {
-        if let Some(ref ol_key) = seed.user_confirmed_ol_key {
-            return IdentityResolution::Confirmed {
-                ol_key: ol_key.clone(),
-                method: IdentityMethod::UserSelected,
-                score: ResolutionScore {
-                    title_jaccard: 1.0,
-                    author_overlap: 0,
-                    runner_up_delta: 1.0,
-                },
-            };
-        }
-
-        if self.ol.circuit_state() == CircuitState::Open {
-            return IdentityResolution::Pending {
-                reason: PendingReason::OlUnavailable,
-                top_candidates: Vec::new(),
-            };
-        }
-
-        if let Some(ref isbn) = seed.isbn {
-            match tokio::time::timeout(self.config.call_timeout, self.ol.isbn_to_work(isbn)).await {
-                Ok(Ok(Some(ol_key))) => {
-                    return IdentityResolution::Confirmed {
-                        ol_key,
-                        method: IdentityMethod::IsbnDirect,
-                        score: ResolutionScore {
-                            title_jaccard: 1.0,
-                            author_overlap: 0,
-                            runner_up_delta: 1.0,
-                        },
-                    };
-                }
-                Ok(Ok(None)) => {}
-                Ok(Err(OlError::CircuitOpen)) => {
-                    return IdentityResolution::Pending {
-                        reason: PendingReason::OlUnavailable,
-                        top_candidates: Vec::new(),
-                    };
-                }
-                Ok(Err(OlError::Transient(_))) => {}
-                Err(_timeout) => {}
-            }
-        }
-
-        let search_result = tokio::time::timeout(
-            self.config.call_timeout,
-            self.ol.search_works(&seed.title, &seed.author_name, 10),
-        )
-        .await;
-
-        let hits = match search_result {
-            Ok(Ok(hits)) => hits,
-            Ok(Err(_)) | Err(_) => {
-                return IdentityResolution::Pending {
-                    reason: PendingReason::OlUnavailable,
-                    top_candidates: Vec::new(),
-                };
-            }
-        };
-
-        if hits.is_empty() {
-            return IdentityResolution::Pending {
-                reason: PendingReason::NoCandidates,
-                top_candidates: Vec::new(),
-            };
-        }
-
-        let mut candidates: Vec<OlCandidate> =
-            hits.iter().map(|hit| score_candidate(seed, hit)).collect();
-
-        candidates.sort_by(|a, b| {
-            b.title_jaccard
-                .partial_cmp(&a.title_jaccard)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.author_overlap.cmp(&a.author_overlap))
-        });
-        candidates.truncate(3);
-
-        let top = &candidates[0];
-
-        if top.title_jaccard.is_nan() || top.title_jaccard < self.config.confirm_title_jaccard {
-            return IdentityResolution::Pending {
-                reason: PendingReason::LowConfidence,
-                top_candidates: candidates,
-            };
-        }
-
-        if top.author_overlap < 1 {
-            return IdentityResolution::Pending {
-                reason: PendingReason::LowConfidence,
-                top_candidates: candidates,
-            };
-        }
-
-        let runner_up_jaccard = candidates.get(1).map(|c| c.title_jaccard).unwrap_or(0.0);
-        let runner_up_delta = top.title_jaccard - runner_up_jaccard;
-
-        if runner_up_delta >= self.config.confirm_runner_up_delta {
-            IdentityResolution::Confirmed {
-                ol_key: top.ol_key.clone(),
-                method: IdentityMethod::TitleAuthorSearch,
-                score: ResolutionScore {
-                    title_jaccard: top.title_jaccard,
-                    author_overlap: top.author_overlap,
-                    runner_up_delta,
-                },
-            }
-        } else {
-            IdentityResolution::Pending {
-                reason: PendingReason::LowConfidence,
-                top_candidates: candidates,
-            }
-        }
+    async fn resolve(
+        &self,
+        user_id: UserId,
+        seed: &WorkSeed,
+        tier: LatencyTier,
+    ) -> Result<Resolution, WorkIdentityError> {
+        let _ = (user_id, seed, tier);
+        todo!()
     }
 }
 
-pub fn score_candidate(seed: &EnglishSeed, raw: &OlSearchHit) -> OlCandidate {
-    let seed_title_tokens = text_norm::title_tokens(&seed.title);
-    let hit_title_tokens = text_norm::title_tokens(&raw.title);
-    let title_jaccard = text_norm::jaccard(&seed_title_tokens, &hit_title_tokens);
-
-    let seed_author_tokens = text_norm::author_tokens(&seed.author_name);
-    let hit_author_tokens = text_norm::author_tokens(&raw.author_combined);
-    let author_overlap = seed_author_tokens.intersection(&hit_author_tokens).count() as u32;
-
-    OlCandidate {
-        ol_key: raw.ol_key.clone(),
-        title: raw.title.clone(),
-        author: raw.author_combined.clone(),
-        year: raw.first_publish_year,
-        title_jaccard,
-        author_overlap,
+impl<O> LiveEnglishIdentityResolver<O> {
+    /// REQ-008 provider matrix scoped by seed + tier + language; excludes any
+    /// provider lacking its prerequisite (GB key / LLM / Audnexus tier) and
+    /// never narrows a multi-eligible seed to a single provider (the #97 guard).
+    pub fn select_providers(
+        &self,
+        seed: &WorkSeed,
+        tier: LatencyTier,
+    ) -> Vec<livrarr_domain::MetadataProvider> {
+        let _ = (seed, tier);
+        todo!()
     }
+}
+
+/// Build an in-memory, never-persisted Work from the seed to drive
+/// ProviderClient::fetch (which takes &Work) during pre-create discovery (cR-004).
+pub fn build_transient_work_from_seed(seed: &WorkSeed, user_id: UserId) -> livrarr_domain::Work {
+    let _ = (seed, user_id);
+    todo!()
+}
+
+/// Trust a non-harvested Goodreads key only by inspecting the payload the fetch
+/// already returned (no extra network, REQ-014): require a populated title that
+/// matches the resolved identity beyond the similarity threshold (REQ-024);
+/// otherwise the key is stripped.
+pub fn verify_gr_payload(
+    payload: &crate::NormalizedWorkDetail,
+    captured: &CapturedIdentity,
+) -> bool {
+    let _ = (payload, captured);
+    todo!()
+}
+
+/// Group responders by shared returned anchor / normalized title+author:
+/// majority wins, a 1-vs-1 split is a QuorumTie, two providers agreeing on
+/// title+author but returning different same-type anchors are a terminal
+/// Conflict (REQ-018/020). Provisional signature — no standalone TDD directive;
+/// refined during implementation.
+pub fn run_quorum(
+    responders: &std::collections::HashMap<
+        livrarr_domain::MetadataProvider,
+        crate::NormalizedWorkDetail,
+    >,
+    seed: &WorkSeed,
+) -> Resolution {
+    let _ = (responders, seed);
+    todo!()
 }

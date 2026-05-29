@@ -17,7 +17,7 @@ use livrarr_db::{
     UserDb, WorkDb,
 };
 use livrarr_domain::identity::{
-    EnglishSeedFields, EnglishWorkCandidate, IdentityMethod, IdentityState, PendingReason,
+    IdentityMethod, IdentityState, PendingReason, WorkCandidate, WorkSeedFields,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::{ProvenanceSetter, UserRole, WorkField};
@@ -67,9 +67,9 @@ fn no_filter() -> WorkFilter {
     }
 }
 
-fn make_candidate(title: &str, author: &str, ol_key: Option<&str>) -> EnglishWorkCandidate {
-    EnglishWorkCandidate {
-        fields: EnglishSeedFields {
+fn make_candidate(title: &str, author: &str, ol_key: Option<&str>) -> WorkCandidate {
+    WorkCandidate {
+        fields: WorkSeedFields {
             title: title.into(),
             author_name: author.into(),
             language: "en".into(),
@@ -77,15 +77,22 @@ fn make_candidate(title: &str, author: &str, ol_key: Option<&str>) -> EnglishWor
             year: None,
             cover_url: None,
             detail_url: None,
-            isbn: None,
-            asin: None,
             description: None,
             series_name: None,
             series_position: None,
         },
         identity: match ol_key {
             Some(k) => IdentityState::Confirmed {
-                ol_key: k.into(),
+                anchors: livrarr_domain::identity::CapturedIdentity {
+                    ol_key: Some(k.into()),
+                    gr_key: None,
+                    hc_key: None,
+                    isbn_13: None,
+                    asin: None,
+                    title: title.into(),
+                    author_name: author.into(),
+                    language: None,
+                },
                 method: IdentityMethod::UserSelected,
                 score: None,
             },
@@ -94,10 +101,10 @@ fn make_candidate(title: &str, author: &str, ol_key: Option<&str>) -> EnglishWor
                 top_candidates: vec![],
             },
         },
+        candidate_id: None,
         source_provider_data: None,
         file_path: None,
         delete_existing_after_import: false,
-        gr_key: None,
         series_id: None,
         monitor_ebook: None,
         monitor_audiobook: None,
@@ -119,7 +126,7 @@ async fn test_work_add_happy_path_creates_with_provenance() {
     let user_id = setup_user(&db).await;
     let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
 
-    let candidate = EnglishWorkCandidate {
+    let candidate = WorkCandidate {
         provenance_setter: Some(ProvenanceSetter::Import),
         import_id: None,
         source_provider_data: Some(SourceProviderData {

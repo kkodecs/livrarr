@@ -22,6 +22,7 @@ urlencoding = "2"
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true, features = ["test-helpers"] }
 livrarr-metadata = { workspace = true }
+livrarr-matching = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
 livrarr-http = { workspace = true }
@@ -252,3 +253,55 @@ name = "test_sfc_audible_integration"
 path = "../../tests/behavioral/test_sfc_audible_integration.rs"
 
 # --- End search fallback chain behavioral tests ---
+
+# --- Work creation consistency behavioral tests ---
+
+[[test]]
+name = "test_wcc_normalization"
+path = "../../tests/behavioral/test_wcc_normalization.rs"
+
+[[test]]
+name = "test_wcc_seed_identity"
+path = "../../tests/behavioral/test_wcc_seed_identity.rs"
+
+[[test]]
+name = "test_wcc_anchors"
+path = "../../tests/behavioral/test_wcc_anchors.rs"
+
+[[test]]
+name = "test_wcc_conflict_migration"
+path = "../../tests/behavioral/test_wcc_conflict_migration.rs"
+
+[[test]]
+name = "test_wcc_resolver"
+path = "../../tests/behavioral/test_wcc_resolver.rs"
+
+[[test]]
+name = "test_wcc_transport_cache"
+path = "../../tests/behavioral/test_wcc_transport_cache.rs"
+
+[[test]]
+name = "test_wcc_merge_reuse"
+path = "../../tests/behavioral/test_wcc_merge_reuse.rs"
+
+[[test]]
+name = "test_wcc_async_resolver"
+path = "../../tests/behavioral/test_wcc_async_resolver.rs"
+
+[[test]]
+name = "test_wcc_add"
+path = "../../tests/behavioral/test_wcc_add.rs"
+
+[[test]]
+name = "test_wcc_path_seams"
+path = "../../tests/behavioral/test_wcc_path_seams.rs"
+
+[[test]]
+name = "test_wcc_work_service"
+path = "../../tests/behavioral/test_wcc_work_service.rs"
+
+[[test]]
+name = "test_wcc_matching"
+path = "../../tests/behavioral/test_wcc_matching.rs"
+
+# --- End work creation consistency behavioral tests ---
