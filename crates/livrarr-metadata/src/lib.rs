@@ -38,7 +38,6 @@ pub mod llm_ewl;
 pub mod llm_scraper;
 pub mod llm_validator;
 pub mod normalize;
-pub mod ol_resolver_client;
 pub mod openlibrary;
 pub mod parsers;
 pub mod preadd_cover_service;
@@ -572,7 +571,10 @@ pub struct DefaultMergeEngine<L = crate::llm_caller_service::LlmCallerImpl> {
     _priority_model: PriorityModel,
 }
 
-impl<L> DefaultMergeEngine<L> {
+impl<L> DefaultMergeEngine<L>
+where
+    L: livrarr_domain::services::LlmCaller + Send + Sync,
+{
     /// Merge from already-fetched per-provider payloads — zero provider network
     /// calls (REQ-014/015). Wraps each payload as a ReconstructedOutcome, drops
     /// OpenLibrary + Hardcover for non-English works (REQ-027), and runs the
@@ -584,8 +586,37 @@ impl<L> DefaultMergeEngine<L> {
         payloads: HashMap<livrarr_domain::MetadataProvider, NormalizedWorkDetail>,
         language: Option<&str>,
     ) -> Result<MergeOutput, MergeError> {
-        let _ = (work, payloads, language);
-        todo!()
+        use livrarr_domain::MetadataProvider as P;
+        // REQ-027: a non-English work must not take OpenLibrary/Hardcover English
+        // metadata. PriorityModel::foreign() still lists them as fallbacks, so
+        // reordering is insufficient — drop them from the inputs before merging.
+        let is_foreign = matches!(
+            crate::language::provider_priority(language),
+            crate::language::ProviderPriority::Foreign
+        );
+        let provider_results = payloads
+            .into_iter()
+            .filter(|(provider, _)| {
+                !(is_foreign && matches!(provider, P::OpenLibrary | P::Hardcover))
+            })
+            .map(|(provider, detail)| {
+                (
+                    provider,
+                    ReconstructedOutcome {
+                        class: livrarr_domain::OutcomeClass::Success,
+                        payload: Some(detail),
+                    },
+                )
+            })
+            .collect();
+        let input = MergeInput {
+            current_work: work,
+            current_provenance: Vec::new(),
+            provider_results,
+            mode: EnrichmentMode::Manual,
+            priority_model: PriorityModel::for_language(language),
+        };
+        self.merge(input).await
     }
 }
 

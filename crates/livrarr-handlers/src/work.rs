@@ -114,7 +114,7 @@ where
 
 pub async fn lookup<S: HasWorkService>(
     State(state): State<S>,
-    _ctx: AuthContext,
+    ctx: AuthContext,
     Query(q): Query<LookupQuery>,
 ) -> Result<Json<LookupApiResponse>, ApiError> {
     let req = livrarr_domain::services::LookupRequest {
@@ -123,7 +123,10 @@ pub async fn lookup<S: HasWorkService>(
     };
     let raw = q.raw.unwrap_or(false);
 
-    let resp = state.work_service().lookup_filtered(req, raw).await?;
+    let resp = state
+        .work_service()
+        .lookup_filtered(ctx.user.id, req, raw)
+        .await?;
 
     let results = resp
         .results
@@ -209,10 +212,14 @@ pub async fn add<
             },
             Resolution::NeedsConfirmation { candidates } => IdentityState::Pending {
                 reason: PendingReason::LowConfidence,
+                seed_anchors: None,
                 top_candidates: candidates,
             },
-            Resolution::Unresolved { reason, .. } => IdentityState::Pending {
+            Resolution::Unresolved {
+                reason, captured, ..
+            } => IdentityState::Pending {
                 reason,
+                seed_anchors: Some(captured),
                 top_candidates: vec![],
             },
             Resolution::Conflict { conflict, .. } => {
@@ -231,6 +238,7 @@ pub async fn add<
     } else {
         IdentityState::Pending {
             reason: PendingReason::NoCandidates,
+            seed_anchors: None,
             top_candidates: vec![],
         }
     };

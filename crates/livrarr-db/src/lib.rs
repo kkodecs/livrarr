@@ -1635,6 +1635,7 @@ pub struct ListImportPreviewRow {
     pub author: String,
     pub isbn_13: Option<String>,
     pub isbn_10: Option<String>,
+    pub goodreads_book_id: Option<String>,
     pub year: Option<i32>,
 }
 
@@ -1668,6 +1669,7 @@ pub trait ListImportDb: Send + Sync {
         author: &str,
         isbn_13: Option<&str>,
         isbn_10: Option<&str>,
+        goodreads_book_id: Option<&str>,
         year: Option<i32>,
         source_status: Option<&str>,
         source_rating: Option<f32>,

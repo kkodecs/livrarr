@@ -284,6 +284,7 @@ pub trait WorkService: Send + Sync {
     async fn lookup(&self, req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError>;
     async fn lookup_filtered(
         &self,
+        user_id: UserId,
         req: LookupRequest,
         raw: bool,
     ) -> Result<LookupResponse, WorkServiceError>;

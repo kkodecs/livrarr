@@ -90,6 +90,8 @@ pub struct StubProviderClient {
     outcome: Arc<Mutex<ProviderOutcome<NormalizedWorkDetail>>>,
     panic_on_call: bool,
     call_count: Arc<AtomicUsize>,
+    /// Optional fetch delay so tests can drive the resolver's per-call timeout.
+    delay: Option<std::time::Duration>,
 }
 
 impl StubProviderClient {
@@ -99,6 +101,7 @@ impl StubProviderClient {
             outcome: Arc::new(Mutex::new(outcome)),
             panic_on_call: false,
             call_count: Arc::new(AtomicUsize::new(0)),
+            delay: None,
         }
     }
 
@@ -109,7 +112,15 @@ impl StubProviderClient {
             outcome: Arc::new(Mutex::new(ProviderOutcome::NotFound)),
             panic_on_call: true,
             call_count: Arc::new(AtomicUsize::new(0)),
+            delay: None,
         }
+    }
+
+    /// Make `fetch` sleep before returning, so a test can exceed the resolver's
+    /// `call_timeout` and exercise the abstention path (REQ-025).
+    pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
+        self.delay = Some(delay);
+        self
     }
 
     pub fn call_count(&self) -> usize {
@@ -122,6 +133,9 @@ impl StubProviderClient {
         _ctx: &EnrichmentContext,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
         if self.panic_on_call {
             panic!(
                 "StubProviderClient panic-on-call: provider={:?}",

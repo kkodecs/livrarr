@@ -40,6 +40,8 @@ pub struct ImportRow {
     pub author: String,
     pub isbn_13: Option<String>,
     pub isbn_10: Option<String>,
+    /// Goodreads "Book Id" — the GR work id, carried forward to seed gr_key (REQ-006).
+    pub goodreads_book_id: Option<String>,
     pub year: Option<i32>,
     pub status: Option<ImportStatus>,
     pub rating: Option<f32>,
@@ -99,6 +101,7 @@ pub fn parse_goodreads_csv(bytes: &[u8]) -> Result<Vec<ImportRow>, ParseError> {
     let year_idx = col.get("original publication year");
     let shelf_idx = col.get("exclusive shelf");
     let rating_idx = col.get("my rating");
+    let book_id_idx = col.get("book id");
 
     let mut rows = Vec::new();
     for (i, result) in rdr.records().enumerate() {
@@ -111,6 +114,7 @@ pub fn parse_goodreads_csv(bytes: &[u8]) -> Result<Vec<ImportRow>, ParseError> {
                     author: String::new(),
                     isbn_13: None,
                     isbn_10: None,
+                    goodreads_book_id: None,
                     year: None,
                     status: None,
                     rating: None,
@@ -151,12 +155,19 @@ pub fn parse_goodreads_csv(bytes: &[u8]) -> Result<Vec<ImportRow>, ParseError> {
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|&r| r > 0.0);
 
+        // Goodreads "Book Id" — the GR work id, seeded as gr_key downstream (REQ-006).
+        let goodreads_book_id = book_id_idx
+            .and_then(|idx| get_field(&record, *idx))
+            .map(|v| strip_excel_wrapper(&v))
+            .filter(|v| !v.is_empty());
+
         rows.push(ImportRow {
             row_index: i,
             title,
             author,
             isbn_13,
             isbn_10,
+            goodreads_book_id,
             year,
             status,
             rating,
@@ -199,6 +210,7 @@ pub fn parse_hardcover_csv(bytes: &[u8]) -> Result<Vec<ImportRow>, ParseError> {
                     author: String::new(),
                     isbn_13: None,
                     isbn_10: None,
+                    goodreads_book_id: None,
                     year: None,
                     status: None,
                     rating: None,
@@ -240,6 +252,7 @@ pub fn parse_hardcover_csv(bytes: &[u8]) -> Result<Vec<ImportRow>, ParseError> {
             author,
             isbn_13,
             isbn_10,
+            goodreads_book_id: None,
             year: None, // Hardcover CSV doesn't include year
             status,
             rating,

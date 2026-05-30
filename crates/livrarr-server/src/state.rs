@@ -63,11 +63,7 @@ pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::Series
 >;
 pub type LiveTagServiceImpl = crate::tag_service::LiveTagService<LiveImportIoService>;
 pub type LiveIdentityResolver =
-    livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver<
-        livrarr_metadata::ol_resolver_client::LiveOlResolverClient<
-            livrarr_http::fetcher::HttpFetcherImpl,
-        >,
-    >;
+    livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver;
 
 pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     SqliteDb,

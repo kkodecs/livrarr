@@ -1,16 +1,37 @@
-use livrarr_domain::identity::*;
-use livrarr_domain::services::WorkIdentityError;
-use livrarr_domain::UserId;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use livrarr_domain::identity::*;
+use livrarr_domain::services::WorkIdentityError;
+use livrarr_domain::{MetadataProvider, UserId, Work};
+use uuid::Uuid;
+
+use crate::provider_client::ProviderClient;
+use crate::transport_cache::TransportCache;
+use crate::{
+    EnrichmentContext, EnrichmentMode, NormalizedWorkDetail, ProviderOutcome, RequestPriority,
+};
+
 pub use livrarr_domain::identity::WorkSeed;
+pub use livrarr_domain::services::IdentityResolver as EnglishIdentityResolver;
+
+/// Minimum normalized-title Jaccard for two provider results (or a Goodreads
+/// payload vs the resolved identity) to count as the same work. Edition variants
+/// ("Dune" vs "Dune (Illustrated Edition)") normalize to the same tokens and pass;
+/// a different work ("Dune" vs "Dune Messiah") falls below it.
+const TITLE_MATCH_JACCARD: f64 = 0.75;
 
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
     pub confirm_title_jaccard: f64,
     pub confirm_runner_up_delta: f64,
+    /// Per-provider call budget; a provider exceeding it abstains (REQ-025).
     pub call_timeout: Duration,
+    /// A Google Books API key is configured (ST-009) — gates GB selection.
+    pub gb_key_present: bool,
+    /// An LLM is configured (ST-001) — gates Goodreads selection.
+    pub llm_configured: bool,
 }
 
 impl Default for ResolverConfig {
@@ -19,107 +40,484 @@ impl Default for ResolverConfig {
             confirm_title_jaccard: 0.75,
             confirm_runner_up_delta: 0.10,
             call_timeout: Duration::from_secs(10),
+            gb_key_present: false,
+            llm_configured: false,
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct OlSearchHit {
-    pub ol_key: String,
-    pub title: String,
-    pub author_combined: String,
-    pub first_publish_year: Option<i32>,
-    pub isbn: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub enum OlError {
-    Transient(String),
-    CircuitOpen,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CircuitState {
-    Closed,
-    Open,
-}
-
-#[trait_variant::make(Send)]
-pub trait OpenLibraryClient: Send + Sync {
-    fn circuit_state(&self) -> CircuitState;
-    async fn isbn_to_work(&self, isbn: &str) -> Result<Option<String>, OlError>;
-    async fn search_works(
-        &self,
-        title: &str,
-        author: &str,
-        limit: u32,
-    ) -> Result<Vec<OlSearchHit>, OlError>;
-}
-
-pub use livrarr_domain::services::IdentityResolver as EnglishIdentityResolver;
-
-pub struct LiveEnglishIdentityResolver<O> {
-    pub ol: Arc<O>,
+/// Tier-scoped, multi-provider identity resolver. Fans out to every provider
+/// relevant to the seed (the #97 fix — never a single hardcoded provider),
+/// keeps the full per-provider payloads (cached under a fresh `candidate_id` for
+/// `add()` to reuse), and resolves identity by deterministic quorum.
+pub struct LiveEnglishIdentityResolver {
+    /// Provider clients keyed by provider — the same shape `fetch_internal_alternatives`
+    /// uses. Tests inject `ProviderClient::Stub` variants.
+    pub clients: HashMap<MetadataProvider, ProviderClient>,
+    /// Server-side payload cache; populated on every resolve that fetched payloads.
+    pub cache: Arc<TransportCache>,
     pub config: ResolverConfig,
 }
 
-impl<O: OpenLibraryClient> EnglishIdentityResolver for LiveEnglishIdentityResolver<O> {
+impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
     async fn resolve(
         &self,
         user_id: UserId,
         seed: &WorkSeed,
         tier: LatencyTier,
     ) -> Result<Resolution, WorkIdentityError> {
-        let _ = (user_id, seed, tier);
-        todo!()
+        if !seed_has_signal(seed) {
+            return Err(WorkIdentityError::EmptySeed);
+        }
+
+        let providers = self.select_providers(seed, tier);
+        let work = build_transient_work_from_seed(seed, user_id);
+        let ctx = EnrichmentContext {
+            priority: RequestPriority::Normal,
+            mode: EnrichmentMode::Manual,
+        };
+
+        // Fan out to the eligible providers in parallel, each under the per-call
+        // timeout. A timeout or any non-Success outcome is an abstention — it
+        // neither errors the resolve nor counts as quorum disagreement (REQ-025).
+        let mut futures = Vec::new();
+        for provider in providers {
+            if let Some(client) = self.clients.get(&provider) {
+                let client = client.clone();
+                let work = work.clone();
+                let ctx = ctx.clone();
+                let timeout = self.config.call_timeout;
+                futures.push(async move {
+                    match tokio::time::timeout(timeout, client.fetch(&work, &ctx)).await {
+                        Ok(ProviderOutcome::Success(detail)) => Some((provider, *detail)),
+                        _ => None,
+                    }
+                });
+            }
+        }
+        let mut responders: HashMap<MetadataProvider, NormalizedWorkDetail> =
+            futures::future::join_all(futures)
+                .await
+                .into_iter()
+                .flatten()
+                .collect();
+
+        // REQ-024: a Goodreads key the seed did NOT carry is trusted only if the
+        // payload Goodreads already returned matches the resolved identity — no
+        // extra network. Strip it otherwise (anti-bot / LLM-misresolved edition).
+        if seed.gr_key.is_none() {
+            if let Some(gr) = responders.get(&MetadataProvider::Goodreads) {
+                if gr.gr_key.is_some() && !verify_gr_payload(gr, &captured_from_seed(seed)) {
+                    if let Some(gr) = responders.get_mut(&MetadataProvider::Goodreads) {
+                        gr.gr_key = None;
+                    }
+                }
+            }
+        }
+
+        // Mint a handle and cache the harvested payloads for in-process reuse by
+        // WorkService::add (D-005). An empty harvest caches nothing — add() will
+        // cache-miss and enrich from the network (the exceptional path).
+        let candidate_id = CandidateId(Uuid::new_v4().to_string());
+        if !responders.is_empty() {
+            self.cache
+                .cache_put(user_id, candidate_id.clone(), responders.clone());
+        }
+
+        // No provider responded. A hard-identifier seed still resolves Tier-A by
+        // its own identifier (REQ-011, incl. the GB-only ISBN case); a title-only
+        // seed is transiently unresolved and converges on a later pass (REQ-025).
+        if responders.is_empty() {
+            let captured = captured_from_seed(seed);
+            if seed_has_hard_id(seed) {
+                return Ok(Resolution::Resolved {
+                    identity: captured,
+                    method: method_for_seed(seed),
+                    candidate_id,
+                });
+            }
+            return Ok(Resolution::Unresolved {
+                captured,
+                reason: PendingReason::NoCandidates,
+                candidate_id: None,
+            });
+        }
+
+        let mut resolution = run_quorum(&responders, seed);
+
+        // Tier-B downgrade (REQ-011): a clear quorum winner that rests on no
+        // resolving hard identifier is still a guess — require confirmation rather
+        // than auto-committing it (unless the user explicitly picked it).
+        if let Resolution::Resolved { identity, .. } = &resolution {
+            if !seed_has_hard_id(seed) && !identity_has_anchor(identity) && !seed.user_confirmed {
+                resolution = Resolution::NeedsConfirmation {
+                    candidates: candidates_from_responders(&responders, seed, &candidate_id),
+                };
+            }
+        }
+
+        attach_candidate_id(&mut resolution, candidate_id, user_id);
+        Ok(resolution)
     }
 }
 
-impl<O> LiveEnglishIdentityResolver<O> {
-    /// REQ-008 provider matrix scoped by seed + tier + language; excludes any
-    /// provider lacking its prerequisite (GB key / LLM / Audnexus tier) and
-    /// never narrows a multi-eligible seed to a single provider (the #97 guard).
-    pub fn select_providers(
-        &self,
-        seed: &WorkSeed,
-        tier: LatencyTier,
-    ) -> Vec<livrarr_domain::MetadataProvider> {
-        let _ = (seed, tier);
-        todo!()
+impl LiveEnglishIdentityResolver {
+    /// REQ-008 provider matrix scoped by seed + tier + prerequisites; never narrows
+    /// a multi-eligible seed to a single provider (the #97 guard). Excludes any
+    /// provider lacking its prerequisite (GB key per ST-009, LLM for GR per ST-001,
+    /// Audnexus on a non-background tier per REQ-021).
+    pub fn select_providers(&self, seed: &WorkSeed, tier: LatencyTier) -> Vec<MetadataProvider> {
+        let mut out = Vec::new();
+
+        // Ebook / print axis: an ISBN, a native ebook key, or title+author reaches
+        // OpenLibrary + Hardcover (work anchors), Google Books (edition metadata),
+        // and Goodreads (LLM-verified). Foreign-language metadata is excluded at the
+        // merge layer (REQ-027), not here — anchor capture is language-agnostic.
+        let ebook_axis = seed.isbn_13.is_some()
+            || seed.ol_key.is_some()
+            || seed.gr_key.is_some()
+            || seed.hc_key.is_some()
+            || (seed.title.is_some() && seed.author_name.is_some());
+        if ebook_axis {
+            out.push(MetadataProvider::OpenLibrary);
+            out.push(MetadataProvider::Hardcover);
+            if self.config.gb_key_present {
+                out.push(MetadataProvider::GoogleBooks);
+            }
+            if self.config.llm_configured {
+                out.push(MetadataProvider::Goodreads);
+            }
+        }
+
+        // Audiobook axis: an ASIN reaches Audible interactively; Audnexus is
+        // background-only (REQ-021).
+        if seed.asin.is_some() {
+            out.push(MetadataProvider::Audible);
+            if tier == LatencyTier::Background {
+                out.push(MetadataProvider::Audnexus);
+            }
+        }
+
+        out
     }
 }
 
-/// Build an in-memory, never-persisted Work from the seed to drive
-/// ProviderClient::fetch (which takes &Work) during pre-create discovery (cR-004).
-pub fn build_transient_work_from_seed(seed: &WorkSeed, user_id: UserId) -> livrarr_domain::Work {
-    let _ = (seed, user_id);
-    todo!()
+// ---------------------------------------------------------------------------
+// Discovery helpers (module-level free functions; the resolver calls them and
+// the behavioral tests target them directly).
+// ---------------------------------------------------------------------------
+
+/// Build an in-memory, never-persisted `Work` from the seed to drive
+/// `ProviderClient::fetch` (which takes `&Work`) during pre-create discovery
+/// (cR-004). It carries only discovery inputs and is never written to the DB.
+pub fn build_transient_work_from_seed(seed: &WorkSeed, user_id: UserId) -> Work {
+    Work {
+        user_id,
+        title: seed.title.clone().unwrap_or_default(),
+        author_name: seed.author_name.clone().unwrap_or_default(),
+        language: seed.language.clone(),
+        isbn_13: seed.isbn_13.clone(),
+        asin: seed.asin.clone(),
+        ol_key: seed.ol_key.clone(),
+        gr_key: seed.gr_key.clone(),
+        hc_key: seed.hc_key.clone(),
+        series_name: seed.series_name.clone(),
+        year: seed.year,
+        ..Default::default()
+    }
 }
 
 /// Trust a non-harvested Goodreads key only by inspecting the payload the fetch
 /// already returned (no extra network, REQ-014): require a populated title that
 /// matches the resolved identity beyond the similarity threshold (REQ-024);
-/// otherwise the key is stripped.
-pub fn verify_gr_payload(
-    payload: &crate::NormalizedWorkDetail,
-    captured: &CapturedIdentity,
-) -> bool {
-    let _ = (payload, captured);
-    todo!()
+/// otherwise the key is not trusted. A title-less anti-bot payload always fails.
+pub fn verify_gr_payload(payload: &NormalizedWorkDetail, captured: &CapturedIdentity) -> bool {
+    let payload_title = match payload.title.as_deref() {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => return false,
+    };
+    if captured.title.trim().is_empty() {
+        return false;
+    }
+    let payload_author = payload.author_name.as_deref().unwrap_or("");
+    title_matches(payload_title, &captured.title)
+        && author_matches(payload_author, &captured.author_name)
 }
 
-/// Group responders by shared returned anchor / normalized title+author:
-/// majority wins, a 1-vs-1 split is a QuorumTie, two providers agreeing on
-/// title+author but returning different same-type anchors are a terminal
-/// Conflict (REQ-018/020). Provisional signature — no standalone TDD directive;
-/// refined during implementation.
+/// Group responders by shared returned anchor or normalized title+author:
+/// a majority cluster wins, a 1-vs-1 split with no majority is a `QuorumTie`,
+/// and a single responder resolves trivially (REQ-018/020). The returned
+/// `Resolved`/`Conflict` carries a placeholder `candidate_id`; `resolve` injects
+/// the real one.
 pub fn run_quorum(
-    responders: &std::collections::HashMap<
-        livrarr_domain::MetadataProvider,
-        crate::NormalizedWorkDetail,
-    >,
+    responders: &HashMap<MetadataProvider, NormalizedWorkDetail>,
     seed: &WorkSeed,
 ) -> Resolution {
-    let _ = (responders, seed);
-    todo!()
+    let items: Vec<&NormalizedWorkDetail> = responders.values().collect();
+    if items.is_empty() {
+        return Resolution::Unresolved {
+            captured: captured_from_seed(seed),
+            reason: PendingReason::NoCandidates,
+            candidate_id: None,
+        };
+    }
+
+    // Transitive-closure clustering by the agreement relation (cheap for the
+    // small provider set).
+    let n = items.len();
+    let mut assigned = vec![false; n];
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    for i in 0..n {
+        if assigned[i] {
+            continue;
+        }
+        assigned[i] = true;
+        let mut members = vec![i];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (j, done) in assigned.iter_mut().enumerate() {
+                if !*done && members.iter().any(|&m| agree(items[m], items[j])) {
+                    *done = true;
+                    members.push(j);
+                    changed = true;
+                }
+            }
+        }
+        clusters.push(members);
+    }
+
+    clusters.sort_by_key(|m| std::cmp::Reverse(m.len()));
+    let top = &clusters[0];
+    let no_majority = items.len() > 1 && clusters.len() > 1 && clusters[1].len() == top.len();
+    if no_majority {
+        let rep = items[top[0]];
+        return Resolution::Conflict {
+            conflict: quorum_tie_conflict(rep, seed),
+            captured: captured_from_detail(rep, seed),
+        };
+    }
+
+    // The winning cluster's representative is its most-anchored member; merge any
+    // anchors the other members contribute (convergence adds, never clobbers).
+    let rep_idx = *top
+        .iter()
+        .max_by_key(|&&idx| anchor_count(items[idx]))
+        .expect("non-empty cluster");
+    let mut captured = captured_from_detail(items[rep_idx], seed);
+    for &idx in top {
+        captured.merge_missing(&captured_from_detail(items[idx], seed));
+    }
+    Resolution::Resolved {
+        identity: captured,
+        method: method_for_seed(seed),
+        candidate_id: CandidateId(String::new()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+fn seed_has_hard_id(seed: &WorkSeed) -> bool {
+    seed.isbn_13.is_some()
+        || seed.asin.is_some()
+        || seed.ol_key.is_some()
+        || seed.gr_key.is_some()
+        || seed.hc_key.is_some()
+}
+
+fn seed_has_signal(seed: &WorkSeed) -> bool {
+    seed_has_hard_id(seed) || (seed.title.is_some() && seed.author_name.is_some())
+}
+
+fn identity_has_anchor(c: &CapturedIdentity) -> bool {
+    c.ol_key.is_some() || c.gr_key.is_some() || c.hc_key.is_some()
+}
+
+fn method_for_seed(seed: &WorkSeed) -> IdentityMethod {
+    if seed.user_confirmed {
+        IdentityMethod::UserSelected
+    } else if seed_has_hard_id(seed) {
+        IdentityMethod::IsbnDirect
+    } else {
+        IdentityMethod::TitleAuthorSearch
+    }
+}
+
+fn anchor_count(d: &NormalizedWorkDetail) -> usize {
+    d.ol_key.is_some() as usize + d.gr_key.is_some() as usize + d.hc_key.is_some() as usize
+}
+
+/// Two provider results agree if they returned the same work anchor of any type,
+/// or the same normalized title + a shared author token (edition variance
+/// corroborates; a genuinely different work does not — REQ-018).
+fn agree(a: &NormalizedWorkDetail, b: &NormalizedWorkDetail) -> bool {
+    if opt_eq(&a.ol_key, &b.ol_key) || opt_eq(&a.gr_key, &b.gr_key) || opt_eq(&a.hc_key, &b.hc_key)
+    {
+        return true;
+    }
+    let at = a.title.as_deref().unwrap_or("");
+    let bt = b.title.as_deref().unwrap_or("");
+    let aa = a.author_name.as_deref().unwrap_or("");
+    let ba = b.author_name.as_deref().unwrap_or("");
+    title_matches(at, bt) && author_matches(aa, ba)
+}
+
+fn opt_eq(a: &Option<String>, b: &Option<String>) -> bool {
+    matches!((a, b), (Some(x), Some(y)) if x == y)
+}
+
+fn captured_from_seed(seed: &WorkSeed) -> CapturedIdentity {
+    CapturedIdentity {
+        ol_key: seed.ol_key.clone(),
+        gr_key: seed.gr_key.clone(),
+        hc_key: seed.hc_key.clone(),
+        isbn_13: seed.isbn_13.clone(),
+        asin: seed.asin.clone(),
+        title: seed.title.clone().unwrap_or_default(),
+        author_name: seed.author_name.clone().unwrap_or_default(),
+        language: seed.language.clone(),
+    }
+}
+
+fn captured_from_detail(d: &NormalizedWorkDetail, seed: &WorkSeed) -> CapturedIdentity {
+    CapturedIdentity {
+        ol_key: d.ol_key.clone(),
+        gr_key: d.gr_key.clone(),
+        hc_key: d.hc_key.clone(),
+        isbn_13: d.isbn_13.clone().or_else(|| seed.isbn_13.clone()),
+        asin: d.asin.clone().or_else(|| seed.asin.clone()),
+        title: d
+            .title
+            .clone()
+            .or_else(|| seed.title.clone())
+            .unwrap_or_default(),
+        author_name: d
+            .author_name
+            .clone()
+            .or_else(|| seed.author_name.clone())
+            .unwrap_or_default(),
+        language: d.language.clone().or_else(|| seed.language.clone()),
+    }
+}
+
+fn incoming_from_detail(d: &NormalizedWorkDetail, seed: &WorkSeed) -> IncomingConflictPayload {
+    let c = captured_from_detail(d, seed);
+    IncomingConflictPayload {
+        ol_key: c.ol_key,
+        gr_key: c.gr_key,
+        hc_key: c.hc_key,
+        isbn_13: c.isbn_13,
+        asin: c.asin,
+        title: c.title,
+        author_name: c.author_name,
+        year: d.year.or(seed.year),
+        cover_url: d.cover_url.clone(),
+        top_candidates: Vec::new(),
+    }
+}
+
+/// A provider quorum tie predates any existing Work, so `existing_work_id`/`user_id`
+/// are placeholders here; `resolve` fills in the real `user_id`.
+fn quorum_tie_conflict(rep: &NormalizedWorkDetail, seed: &WorkSeed) -> NewIdentityConflict {
+    NewIdentityConflict {
+        user_id: 0,
+        existing_work_id: 0,
+        kind: IdentityConflictKind::QuorumTie,
+        incoming: incoming_from_detail(rep, seed),
+        raised_by: ConflictSource::ManualAdd,
+        raised_source_path: None,
+    }
+}
+
+fn candidates_from_responders(
+    responders: &HashMap<MetadataProvider, NormalizedWorkDetail>,
+    seed: &WorkSeed,
+    candidate_id: &CandidateId,
+) -> Vec<Candidate> {
+    responders
+        .iter()
+        .map(|(provider, detail)| Candidate {
+            candidate_id: candidate_id.clone(),
+            anchors: captured_from_detail(detail, seed),
+            cover_url: detail.cover_url.clone(),
+            sources: vec![*provider],
+            score: ResolutionScore {
+                title_jaccard: 1.0,
+                author_overlap: 0,
+                runner_up_delta: 0.0,
+            },
+            existing_work_id: None,
+        })
+        .collect()
+}
+
+/// Inject the real cache handle into a verdict produced before the id was minted,
+/// and stamp the real `user_id` onto a quorum-tie conflict.
+fn attach_candidate_id(resolution: &mut Resolution, candidate_id: CandidateId, user_id: UserId) {
+    match resolution {
+        Resolution::Resolved {
+            candidate_id: c, ..
+        } => *c = candidate_id,
+        Resolution::Unresolved {
+            candidate_id: c, ..
+        } => *c = Some(candidate_id),
+        Resolution::NeedsConfirmation { candidates } => {
+            for c in candidates.iter_mut() {
+                c.candidate_id = candidate_id.clone();
+            }
+        }
+        Resolution::Conflict { conflict, .. } => conflict.user_id = user_id,
+    }
+}
+
+fn normalize_match_title(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let mut out = String::new();
+    let mut depth = 0i32;
+    for ch in lower.chars() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = (depth - 1).max(0),
+            ':' => break,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn token_set(s: &str) -> HashSet<String> {
+    s.split_whitespace().map(|t| t.to_string()).collect()
+}
+
+fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count() as f64;
+    let union = a.union(b).count() as f64;
+    inter / union
+}
+
+fn title_matches(a: &str, b: &str) -> bool {
+    let na = normalize_match_title(a);
+    let nb = normalize_match_title(b);
+    if na.is_empty() || nb.is_empty() {
+        return false;
+    }
+    if na == nb {
+        return true;
+    }
+    jaccard(&token_set(&na), &token_set(&nb)) >= TITLE_MATCH_JACCARD
+}
+
+fn author_matches(a: &str, b: &str) -> bool {
+    let sa = token_set(&a.to_lowercase());
+    let sb = token_set(&b.to_lowercase());
+    if sa.is_empty() || sb.is_empty() {
+        return false;
+    }
+    sa.intersection(&sb).next().is_some()
 }

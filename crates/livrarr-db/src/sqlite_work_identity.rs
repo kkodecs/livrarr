@@ -63,7 +63,9 @@ impl WorkIdentityRepository for SqliteDb {
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
-        // Keep the legacy denormalized column in sync for OL and GR anchor types
+        // Keep the legacy denormalized work column in sync with the confirmed
+        // anchor across every federated type (REQ-022 convergence reads these
+        // columns; an OL/GR-only sync leaves hc_key/isbn_13/asin stale).
         match anchor_type.as_str() {
             AnchorType::OL_WORK => {
                 sqlx::query("UPDATE works SET ol_key = ?1 WHERE id = ?2")
@@ -75,6 +77,30 @@ impl WorkIdentityRepository for SqliteDb {
             }
             AnchorType::GR_WORK => {
                 sqlx::query("UPDATE works SET gr_key = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::HC_WORK => {
+                sqlx::query("UPDATE works SET hc_key = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::ISBN_13 => {
+                sqlx::query("UPDATE works SET isbn_13 = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::ASIN => {
+                sqlx::query("UPDATE works SET asin = ?1 WHERE id = ?2")
                     .bind(value)
                     .bind(work_id)
                     .execute(&mut *tx)
@@ -281,6 +307,44 @@ impl WorkIdentityRepository for SqliteDb {
         Ok(conflicts)
     }
 
+    async fn raise_identity_conflict(
+        &self,
+        conflict: NewIdentityConflict,
+    ) -> Result<i64, WorkIdentityError> {
+        let kind_str = serde_json::to_value(conflict.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        // Idempotency (REQ-020): one open conflict per (work, kind). A repeated
+        // converge/add pass must not duplicate an already-surfaced conflict.
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM work_identity_conflicts
+             WHERE existing_work_id = ?1 AND kind = ?2 AND status = 'open'
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(conflict.existing_work_id)
+        .bind(&kind_str)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+        let incoming_json = serde_json::to_string(&conflict.incoming)
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        self.create_identity_conflict(
+            conflict.user_id,
+            conflict.existing_work_id,
+            conflict.kind,
+            &incoming_json,
+            Utc::now(),
+            conflict.raised_by,
+            conflict.raised_source_path.as_deref(),
+        )
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))
+    }
+
     async fn set_identity_pending(
         &self,
         work_id: WorkId,
@@ -325,6 +389,15 @@ impl WorkIdentityRepository for SqliteDb {
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
         tx.commit()
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn set_needs_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
+        sqlx::query("UPDATE works SET enrichment_status = 'needs_review' WHERE id = ?1")
+            .bind(work_id)
+            .execute(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
         Ok(())

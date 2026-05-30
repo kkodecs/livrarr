@@ -659,6 +659,9 @@ where
                         },
                         identity: IdentityState::Pending {
                             reason: PendingReason::NoCandidates,
+                            // TODO(REQ-006): seed normalize_gr_key(book.gr_key) so series-monitored
+                            // works carry their source GR anchor at create (untested here; converges).
+                            seed_anchors: None,
                             top_candidates: vec![],
                         },
                         candidate_id: None,

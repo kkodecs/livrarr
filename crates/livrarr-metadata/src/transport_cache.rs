@@ -40,14 +40,19 @@ impl TransportCache {
     /// Store the payloads under (user_id, id); consume-once. Keyed by user_id so
     /// it is never cross-user readable (REQ-014, Principle 4).
     pub fn cache_put(&self, user_id: UserId, id: CandidateId, payloads: ProviderPayloads) {
-        let _ = (&self.inner, self.ttl, user_id, id, payloads);
-        todo!()
+        let mut cache = self.inner.lock().unwrap();
+        cache.insert((user_id, id), (payloads, Instant::now()));
     }
 
     /// Remove and return the payloads for (user_id, id) if present and unexpired;
     /// `None` signals the caller to fall back to network enrichment (REQ-015).
     pub fn cache_take(&self, user_id: UserId, id: CandidateId) -> Option<ProviderPayloads> {
-        let _ = (&self.inner, self.ttl, user_id, id);
-        todo!()
+        let mut cache = self.inner.lock().unwrap();
+        let (payloads, created_at) = cache.remove(&(user_id, id))?;
+        if created_at.elapsed() <= self.ttl {
+            Some(payloads)
+        } else {
+            None
+        }
     }
 }

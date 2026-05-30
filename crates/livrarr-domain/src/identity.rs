@@ -256,6 +256,10 @@ pub enum IdentityState {
     },
     Pending {
         reason: PendingReason,
+        /// Source anchors seeded at create for a bulk/monitor path not yet
+        /// cross-provider-resolved — persisted now (REQ-001/006), converged later
+        /// (REQ-022). `None` for a genuinely identifier-less pending work.
+        seed_anchors: Option<CapturedIdentity>,
         top_candidates: Vec<Candidate>,
     },
 }
@@ -266,6 +270,16 @@ impl IdentityState {
         match self {
             IdentityState::Confirmed { anchors, .. } => Some(anchors),
             IdentityState::Pending { .. } => None,
+        }
+    }
+
+    /// The anchors to persist at create: a Confirmed work's full set, or a
+    /// Pending work's seed anchors (a bulk/monitor path that carries source
+    /// identifiers but is not yet cross-provider-resolved). `None` when neither.
+    pub fn seed_or_confirmed_anchors(&self) -> Option<&CapturedIdentity> {
+        match self {
+            IdentityState::Confirmed { anchors, .. } => Some(anchors),
+            IdentityState::Pending { seed_anchors, .. } => seed_anchors.as_ref(),
         }
     }
 }

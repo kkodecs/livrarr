@@ -87,14 +87,18 @@ impl AudibleCatalogClient {
         if let Some(asin) = work.asin.as_deref().filter(|s| !s.is_empty()) {
             match lookup_audible_by_asin(&self.http, asin).await {
                 Ok(Some(product)) => {
-                    let title = product.title.clone().unwrap_or_default();
                     let author = product
                         .authors
                         .as_ref()
                         .and_then(|a| a.first())
                         .and_then(|a| a.name.clone())
                         .unwrap_or_default();
-                    let candidates = vec![(title, author)];
+                    // Score every title variant (raw, series-stripped, subtitle)
+                    // so a series-prefixed catalog title still matches the seed.
+                    let candidates: Vec<(String, String)> = audible_title_variants(&product)
+                        .into_iter()
+                        .map(|t| (t, author.clone()))
+                        .collect();
                     if score_provider_candidates(
                         &work.title,
                         &work.author_name,
@@ -127,25 +131,31 @@ impl AudibleCatalogClient {
         match search_audible(&self.http, &work.title, &work.author_name, 10).await {
             Ok(products) if products.is_empty() => crate::ProviderOutcome::NotFound,
             Ok(products) => {
-                let candidates: Vec<(String, String)> = products
-                    .iter()
-                    .map(|p| {
-                        let t = p.title.clone().unwrap_or_default();
-                        let a = p
-                            .authors
-                            .as_ref()
-                            .and_then(|au| au.first())
-                            .and_then(|au| au.name.clone())
-                            .unwrap_or_default();
-                        (t, a)
-                    })
-                    .collect();
+                // Feed multiple title variants per product (raw, series-stripped,
+                // subtitle) into the strict matcher so a series-prefixed catalog
+                // title still matches a bare seed title; track which product each
+                // variant came from to map the winner back.
+                let mut candidates: Vec<(String, String)> = Vec::new();
+                let mut variant_to_product: Vec<usize> = Vec::new();
+                for (pi, p) in products.iter().enumerate() {
+                    let author = p
+                        .authors
+                        .as_ref()
+                        .and_then(|au| au.first())
+                        .and_then(|au| au.name.clone())
+                        .unwrap_or_default();
+                    for title in audible_title_variants(p) {
+                        candidates.push((title, author.clone()));
+                        variant_to_product.push(pi);
+                    }
+                }
 
-                if let Some(idx) =
+                if let Some(vidx) =
                     score_provider_candidates(&work.title, &work.author_name, &candidates, 0.75, 1)
                 {
+                    let pi = variant_to_product[vidx];
                     return crate::ProviderOutcome::Success(Box::new(map_audible_to_detail(
-                        &products[idx],
+                        &products[pi],
                     )));
                 }
 
@@ -257,6 +267,46 @@ pub fn score_provider_candidates(
                 .then(a.2.cmp(&b.2))
         })
         .map(|(idx, _, _)| idx)
+}
+
+/// Title variants Audible may use for a product, fed to the (strict, shared)
+/// matcher so a series-prefixed catalog title still matches a bare seed title.
+/// Produces: the series-stripped title (when the title begins with the
+/// structured series name), the raw title, and the subtitle — deduped, in that
+/// preference order. The shared scorer stays strict, so a sequel like "Dune
+/// Messiah" still fails to match a "Dune" seed (no variant is contained-only).
+fn audible_title_variants(product: &AudibleProduct) -> Vec<String> {
+    let mut variants: Vec<String> = Vec::new();
+    let raw = product.title.clone().unwrap_or_default();
+
+    // Series-prefix strip: Audible titles series books as "<series>: <title>"
+    // or "<series>, Book N: <title>". When the title begins with the structured
+    // series name, drop everything up to and including the first ": ".
+    if let Some(series) = product
+        .series
+        .as_ref()
+        .and_then(|s| s.first())
+        .and_then(|s| s.title.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        if raw.to_lowercase().starts_with(&series.to_lowercase()) {
+            if let Some(pos) = raw.find(": ") {
+                let stripped = raw[pos + 2..].trim().to_string();
+                if !stripped.is_empty() {
+                    variants.push(stripped);
+                }
+            }
+        }
+    }
+
+    for candidate in [Some(raw), product.subtitle.clone()].into_iter().flatten() {
+        let candidate = candidate.trim().to_string();
+        if !candidate.is_empty() && !variants.contains(&candidate) {
+            variants.push(candidate);
+        }
+    }
+
+    variants
 }
 
 // ─── Mapping ─────────────────────────────────────────────────────────────

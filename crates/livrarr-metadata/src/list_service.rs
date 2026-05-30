@@ -3,8 +3,6 @@
 //! 5-step workflow: preview -> confirm (batched) -> complete -> undo -> list.
 //! All business logic lives here. Handlers: validate -> call ONE service -> map result.
 
-use std::time::Duration;
-
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use tracing::{info, warn};
@@ -38,331 +36,67 @@ impl<D, W, H, B> ListServiceImpl<D, W, H, B> {
 }
 
 // ---------------------------------------------------------------------------
-// OL lookup helpers (private)
+// Row -> identity-pending candidate (Bulk-tier seed)
 // ---------------------------------------------------------------------------
 
-impl<D, W, H, B> ListServiceImpl<D, W, H, B>
-where
-    H: HttpFetcher + Send + Sync,
-{
-    async fn ol_lookup(
-        &self,
-        isbn_13: Option<&str>,
-        isbn_10: Option<&str>,
-        title: &str,
-        author: &str,
-        year: Option<i32>,
-    ) -> Result<livrarr_domain::identity::WorkCandidate, String> {
-        let isbn = isbn_13.or(isbn_10);
-        if let Some(isbn) = isbn {
-            if let Some(candidate) = self.ol_isbn_lookup(isbn).await {
-                return Ok(candidate);
-            }
-        }
-        self.ol_search(title, author, year).await
-    }
+/// Build an identity-pending `WorkCandidate` from a confirmed preview row,
+/// harvesting the row's identifiers (Goodreads Book Id -> gr_key, ISBN bridge)
+/// as seed anchors. Multi-provider resolution is deferred to the background
+/// async resolver (M9 carve-out, REQ-006/026); the retired OL-only synchronous
+/// lookup was the #97 single-provider locus (D-004).
+fn pending_candidate_from_row(
+    row: &livrarr_db::ListImportPreviewRow,
+) -> livrarr_domain::identity::WorkCandidate {
+    use livrarr_domain::identity::{
+        CapturedIdentity, IdentityState, PendingReason, WorkCandidate, WorkSeedFields,
+    };
+    use livrarr_domain::normalization::{normalize_gr_key, normalize_isbn13};
 
-    async fn ol_isbn_lookup(&self, isbn: &str) -> Option<livrarr_domain::identity::WorkCandidate> {
-        let url = format!("https://openlibrary.org/isbn/{isbn}.json");
-        let req = FetchRequest {
-            url,
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: None,
-            timeout: Duration::from_secs(10),
-            rate_bucket: RateBucket::OpenLibrary,
-            max_body_bytes: 1024 * 1024,
-            anti_bot_check: false,
-            user_agent: UserAgentProfile::Server,
-        };
+    let gr_key = row.goodreads_book_id.as_deref().and_then(normalize_gr_key);
+    let isbn_13 = row
+        .isbn_13
+        .as_deref()
+        .or(row.isbn_10.as_deref())
+        .and_then(normalize_isbn13);
 
-        let resp = self.http.fetch(req).await.ok()?;
-        if resp.status != 200 {
-            return None;
-        }
-
-        let data: serde_json::Value = serde_json::from_slice(&resp.body).ok()?;
-
-        // ISBN endpoint returns an edition — follow the works link.
-        let works_key = data
-            .get("works")
-            .and_then(|w| w.as_array())
-            .and_then(|a| a.first())
-            .and_then(|w| w.get("key"))
-            .and_then(|k| k.as_str())?;
-
-        let ol_key = works_key.trim_start_matches("/works/").to_string();
-
-        // Fetch the work record for title/author.
-        let work_url = format!("https://openlibrary.org{works_key}.json");
-        let work_req = FetchRequest {
-            url: work_url,
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: None,
-            timeout: Duration::from_secs(10),
-            rate_bucket: RateBucket::OpenLibrary,
-            max_body_bytes: 1024 * 1024,
-            anti_bot_check: false,
-            user_agent: UserAgentProfile::Server,
-        };
-
-        let work_resp = self.http.fetch(work_req).await.ok()?;
-        let work_data: serde_json::Value = serde_json::from_slice(&work_resp.body).ok()?;
-
-        let title = work_data
-            .get("title")
-            .and_then(|t| t.as_str())
-            .unwrap_or("Unknown")
-            .to_string();
-
-        // Get author from the work's authors array.
-        let author_keys = work_data
-            .get("authors")
-            .and_then(|a| a.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let (author_name, author_ol_key) = if let Some(first) = author_keys.first() {
-            let author_key = first
-                .get("author")
-                .and_then(|a| a.get("key"))
-                .or_else(|| first.get("key"))
-                .and_then(|k| k.as_str())
-                .unwrap_or("");
-
-            let author_ol = author_key.trim_start_matches("/authors/").to_string();
-
-            // Fetch author name from OL author endpoint.
-            let name = if !author_key.is_empty() {
-                let author_url = format!("https://openlibrary.org{author_key}.json");
-                let author_req = FetchRequest {
-                    url: author_url,
-                    method: HttpMethod::Get,
-                    headers: vec![],
-                    body: None,
-                    timeout: Duration::from_secs(5),
-                    rate_bucket: RateBucket::OpenLibrary,
-                    max_body_bytes: 1024 * 1024,
-                    anti_bot_check: false,
-                    user_agent: UserAgentProfile::Server,
-                };
-                match self.http.fetch(author_req).await {
-                    Ok(resp) => serde_json::from_slice::<serde_json::Value>(&resp.body)
-                        .ok()
-                        .and_then(|v| v.get("name")?.as_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "Unknown".to_string()),
-                    Err(_) => "Unknown".to_string(),
-                }
-            } else {
-                "Unknown".to_string()
-            };
-
-            (name, Some(author_ol).filter(|s| !s.is_empty()))
-        } else {
-            ("Unknown".to_string(), None)
-        };
-
-        let year = data
-            .get("publish_date")
-            .and_then(|d| d.as_str())
-            .and_then(|d| {
-                d.split_whitespace()
-                    .find_map(|w| w.parse::<i32>().ok().filter(|&y| y > 1000 && y < 3000))
-            });
-
-        let cover_url = data
-            .get("covers")
-            .and_then(|c| c.as_array())
-            .and_then(|a| a.first())
-            .and_then(|c| c.as_i64())
-            .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
-
-        use livrarr_domain::identity::{
-            IdentityMethod, IdentityState, WorkCandidate, WorkSeedFields,
-        };
-        Some(WorkCandidate {
-            fields: WorkSeedFields {
-                title: title.clone(),
-                author_name: author_name.clone(),
-                language: "en".into(),
-                author_ol_key,
-                year,
-                cover_url,
-                detail_url: None,
-                description: None,
-                series_name: None,
-                series_position: None,
-            },
-            identity: IdentityState::Confirmed {
-                anchors: livrarr_domain::identity::CapturedIdentity {
-                    ol_key: Some(ol_key),
-                    gr_key: None,
-                    hc_key: None,
-                    isbn_13: Some(isbn.to_string()),
-                    asin: None,
-                    title,
-                    author_name,
-                    language: None,
-                },
-                method: IdentityMethod::IsbnDirect,
-                score: None,
-            },
-            candidate_id: None,
-            source_provider_data: None,
-            file_path: None,
-            delete_existing_after_import: false,
-            series_id: None,
-            monitor_ebook: None,
-            monitor_audiobook: None,
-            provenance_setter: Some(ProvenanceSetter::Imported),
-            import_id: None,
-            cover_manual: false,
-            skip_sync_enrichment: false,
-        })
-    }
-
-    async fn ol_search(
-        &self,
-        title: &str,
-        author: &str,
-        csv_year: Option<i32>,
-    ) -> Result<livrarr_domain::identity::WorkCandidate, String> {
-        let search_term = format!("{title} {author}");
-        let encoded = urlencoding::encode(&search_term);
-        let url = format!(
-            "https://openlibrary.org/search.json?q={encoded}&limit=5&fields=key,title,author_name,author_key,first_publish_year,cover_i"
-        );
-
-        let req = FetchRequest {
-            url,
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: None,
-            timeout: Duration::from_secs(10),
-            rate_bucket: RateBucket::OpenLibrary,
-            max_body_bytes: 2 * 1024 * 1024,
-            anti_bot_check: false,
-            user_agent: UserAgentProfile::Server,
-        };
-
-        let resp = self
-            .http
-            .fetch(req)
-            .await
-            .map_err(|e| format!("OpenLibrary request failed: {e}"))?;
-
-        if resp.status != 200 {
-            return Err(format!("OpenLibrary returned {}", resp.status));
-        }
-
-        let data: serde_json::Value = serde_json::from_slice(&resp.body)
-            .map_err(|e| format!("OpenLibrary parse error: {e}"))?;
-
-        let docs = data
-            .get("docs")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| "no results from OpenLibrary".to_string())?;
-
-        let doc = docs
-            .iter()
-            .map(|d| {
-                let d_title = d.get("title").and_then(|t| t.as_str()).unwrap_or("");
-                let d_author = d
-                    .get("author_name")
-                    .and_then(|a| a.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("");
-                let title_sim = livrarr_matching::string_similarity(d_title, title);
-                let author_sim = livrarr_matching::string_similarity(d_author, author);
-                (title_sim * 0.7 + author_sim * 0.3, d)
-            })
-            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-            .filter(|(score, _)| *score >= 0.4)
-            .map(|(_, d)| d)
-            .ok_or_else(|| format!("no OpenLibrary results for '{title}' by '{author}'"))?;
-
-        let key = doc
-            .get("key")
-            .and_then(|k| k.as_str())
-            .ok_or_else(|| "missing key in OL result".to_string())?;
-        let ol_key = key.trim_start_matches("/works/").to_string();
-
-        let result_title = doc
-            .get("title")
-            .and_then(|t| t.as_str())
-            .unwrap_or(title)
-            .to_string();
-
-        let author_name = doc
-            .get("author_name")
-            .and_then(|a| a.as_array())
-            .and_then(|a| a.first())
-            .and_then(|a| a.as_str())
-            .unwrap_or(author)
-            .to_string();
-
-        let author_ol_key = doc
-            .get("author_key")
-            .and_then(|a| a.as_array())
-            .and_then(|a| a.first())
-            .and_then(|a| a.as_str())
-            .map(|k| k.trim_start_matches("/authors/").to_string());
-
-        let year = doc
-            .get("first_publish_year")
-            .and_then(|y| y.as_i64())
-            .map(|y| y as i32)
-            .or(csv_year);
-
-        let cover_url = doc
-            .get("cover_i")
-            .and_then(|c| c.as_i64())
-            .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
-
-        use livrarr_domain::identity::{
-            IdentityMethod, IdentityState, WorkCandidate, WorkSeedFields,
-        };
-        Ok(WorkCandidate {
-            fields: WorkSeedFields {
-                title: result_title.clone(),
-                author_name: author_name.clone(),
-                language: "en".into(),
-                author_ol_key,
-                year,
-                cover_url,
-                detail_url: None,
-                description: None,
-                series_name: None,
-                series_position: None,
-            },
-            identity: IdentityState::Confirmed {
-                anchors: livrarr_domain::identity::CapturedIdentity {
-                    ol_key: Some(ol_key),
-                    gr_key: None,
-                    hc_key: None,
-                    isbn_13: None,
-                    asin: None,
-                    title: result_title,
-                    author_name,
-                    language: None,
-                },
-                method: IdentityMethod::TitleAuthorSearch,
-                score: None,
-            },
-            candidate_id: None,
-            source_provider_data: None,
-            file_path: None,
-            delete_existing_after_import: false,
-            series_id: None,
-            monitor_ebook: None,
-            monitor_audiobook: None,
-            provenance_setter: Some(ProvenanceSetter::Imported),
-            import_id: None,
-            cover_manual: false,
-            skip_sync_enrichment: false,
-        })
+    WorkCandidate {
+        fields: WorkSeedFields {
+            title: row.title.clone(),
+            author_name: row.author.clone(),
+            language: "en".into(),
+            author_ol_key: None,
+            year: row.year,
+            cover_url: None,
+            detail_url: None,
+            description: None,
+            series_name: None,
+            series_position: None,
+        },
+        identity: IdentityState::Pending {
+            reason: PendingReason::NoCandidates,
+            seed_anchors: Some(CapturedIdentity {
+                ol_key: None,
+                gr_key,
+                hc_key: None,
+                isbn_13,
+                asin: None,
+                title: row.title.clone(),
+                author_name: row.author.clone(),
+                language: None,
+            }),
+            top_candidates: vec![],
+        },
+        candidate_id: None,
+        source_provider_data: None,
+        file_path: None,
+        delete_existing_after_import: false,
+        series_id: None,
+        monitor_ebook: None,
+        monitor_audiobook: None,
+        provenance_setter: Some(ProvenanceSetter::Imported),
+        import_id: None,
+        cover_manual: false,
+        skip_sync_enrichment: false,
     }
 }
 
@@ -463,6 +197,7 @@ where
                     &row.author,
                     row.isbn_13.as_deref(),
                     row.isbn_10.as_deref(),
+                    row.goodreads_book_id.as_deref(),
                     row.year,
                     row.status.map(|s| format!("{s:?}")).as_deref(),
                     row.rating,
@@ -609,29 +344,12 @@ where
                     }
                 };
 
-                let add_req = match self
-                    .ol_lookup(
-                        row.isbn_13.as_deref(),
-                        row.isbn_10.as_deref(),
-                        &row.title,
-                        &row.author,
-                        row.year,
-                    )
-                    .await
-                {
-                    Ok(req) => req,
-                    Err(msg) => {
-                        return RowOutcome {
-                            result: ListConfirmRowResult {
-                                row_index: row_idx,
-                                status: "lookup_error".into(),
-                                message: Some(msg),
-                            },
-                            works_created: false,
-                            new_author_id: None,
-                        };
-                    }
-                };
+                // Harvest the row's identifiers (Goodreads Book Id -> gr_key,
+                // ISBN bridge) and seed an identity-pending work. Bulk-tier paths
+                // create identity-pending and converge via the background async
+                // resolver (M9 carve-out, REQ-006/026) rather than the retired
+                // OL-only synchronous lookup (D-004, the #97 single-provider locus).
+                let add_req = pending_candidate_from_row(&row);
 
                 match self.work_service.add(user_id, add_req).await {
                     Ok(add_result) if !add_result.created => RowOutcome {

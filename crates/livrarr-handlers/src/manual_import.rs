@@ -947,6 +947,7 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
     } else {
         IdentityState::Pending {
             reason: PendingReason::NoCandidates,
+            seed_anchors: None,
             top_candidates: vec![],
         }
     };

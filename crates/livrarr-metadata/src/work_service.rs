@@ -61,6 +61,11 @@ pub struct WorkServiceImpl<
     refresh_locks: KeyedMutex<(UserId, WorkId)>,
     bulk_refresh_users: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
     lookup_cache: Arc<std::sync::Mutex<HashMap<(String, String), CachedLookup>>>,
+    /// Optional multi-provider identity resolver. When present, `lookup_filtered`
+    /// routes discovery through the federated fan-out (the #97 path) instead of
+    /// the legacy sequential lookup chain. `None` keeps the legacy chain
+    /// (back-compat until the resolver is composed in the server).
+    resolver: Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
 }
 
 impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm, crate::DefaultMergeEngine, StubTagService> {
@@ -79,6 +84,7 @@ impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm, crate::DefaultMergeEngine, Stu
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            resolver: None,
         }
     }
 }
@@ -101,6 +107,7 @@ impl<D, E, H, L> WorkServiceImpl<D, E, H, L, crate::DefaultMergeEngine, StubTagS
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            resolver: None,
         }
     }
 }
@@ -131,7 +138,19 @@ impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T> {
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            resolver: None,
         }
+    }
+
+    /// Inject the multi-provider identity resolver so `lookup_filtered` routes
+    /// discovery through the federated fan-out (the #97 path) instead of the
+    /// legacy sequential lookup chain.
+    pub fn with_resolver(
+        mut self,
+        resolver: Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>,
+    ) -> Self {
+        self.resolver = Some(resolver);
+        self
     }
 }
 
@@ -156,6 +175,7 @@ impl<D, H> WorkServiceImpl<D, (), H> {
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            resolver: None,
         }
     }
 }
@@ -211,6 +231,145 @@ impl livrarr_domain::services::TagService for StubTagService {
     }
 }
 
+/// Map a candidate's provenance to the conflict-attribution source so a raised
+/// identity conflict reflects the creation path that produced it (REQ-020, D-017).
+fn conflict_source_for(setter: ProvenanceSetter) -> livrarr_domain::identity::ConflictSource {
+    use livrarr_domain::identity::ConflictSource;
+    match setter {
+        ProvenanceSetter::User => ConflictSource::ManualAdd,
+        ProvenanceSetter::Import => ConflictSource::ReadarrImport,
+        ProvenanceSetter::Imported => ConflictSource::ListImport,
+        ProvenanceSetter::AutoAdded => ConflictSource::AuthorMonitor,
+        ProvenanceSetter::Provider | ProvenanceSetter::System => ConflictSource::ManualAdd,
+    }
+}
+
+/// Parse a `lookup_filtered` search term into a discovery WorkSeed. An `isbn:`
+/// prefix with a valid ISBN seeds the bridge; anything else seeds the title.
+fn lookup_term_to_seed(term: &str, lang: &str) -> livrarr_domain::identity::WorkSeed {
+    let isbn_13 = term
+        .strip_prefix("isbn:")
+        .and_then(|rest| livrarr_domain::normalization::normalize_isbn13(rest.trim()));
+    let title = if isbn_13.is_some() {
+        None
+    } else {
+        Some(term.to_string())
+    };
+    livrarr_domain::identity::WorkSeed {
+        ol_key: None,
+        gr_key: None,
+        hc_key: None,
+        isbn_13,
+        asin: None,
+        title,
+        author_name: None,
+        language: Some(lang.to_string()),
+        series_name: None,
+        year: None,
+        user_confirmed: false,
+    }
+}
+
+/// True when a search term resolved to a hard identifier (e.g. an `isbn:`
+/// lookup) — the signal the identity resolver needs. A bare-title term carries
+/// none and is served as a free-text discovery search by the legacy chain.
+fn seed_carries_identifier(seed: &livrarr_domain::identity::WorkSeed) -> bool {
+    seed.isbn_13.is_some()
+        || seed.asin.is_some()
+        || seed.ol_key.is_some()
+        || seed.gr_key.is_some()
+        || seed.hc_key.is_some()
+}
+
+/// Map a resolved/confirmable identity into a wire `LookupResult`, carrying the
+/// federated anchors + the `candidate_id` payload handle (REQ-014/R-009).
+fn lookup_result_from_captured(
+    captured: livrarr_domain::identity::CapturedIdentity,
+    candidate_id: Option<livrarr_domain::identity::CandidateId>,
+    cover_url: Option<String>,
+) -> LookupResult {
+    LookupResult {
+        ol_key: captured.ol_key,
+        title: captured.title,
+        author_name: captured.author_name,
+        author_ol_key: None,
+        year: None,
+        cover_url,
+        description: None,
+        series_name: None,
+        series_position: None,
+        source: None,
+        source_type: None,
+        language: captured.language,
+        detail_url: None,
+        rating: None,
+        isbn_13: captured.isbn_13,
+        candidate_id,
+        hc_key: captured.hc_key,
+        gr_key: captured.gr_key,
+        asin: captured.asin,
+    }
+}
+
+/// Convert a resolver `Resolution` into wire lookup results: a Resolved identity
+/// is a single auto-matched result; NeedsConfirmation becomes the candidate list;
+/// Unresolved/Conflict yield no results.
+fn lookup_results_from_resolution(
+    resolution: livrarr_domain::identity::Resolution,
+) -> Vec<LookupResult> {
+    use livrarr_domain::identity::Resolution;
+    match resolution {
+        Resolution::Resolved {
+            identity,
+            candidate_id,
+            ..
+        } => vec![lookup_result_from_captured(
+            identity,
+            Some(candidate_id),
+            None,
+        )],
+        Resolution::NeedsConfirmation { candidates } => candidates
+            .into_iter()
+            .map(|c| lookup_result_from_captured(c.anchors, Some(c.candidate_id), c.cover_url))
+            .collect(),
+        Resolution::Unresolved { .. } | Resolution::Conflict { .. } => Vec::new(),
+    }
+}
+
+impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>
+where
+    D: livrarr_domain::services::WorkIdentityRepository + Send + Sync,
+{
+    /// Conflict preflight + additive anchor merge for a matched/adopted work:
+    /// raise an observable conflict for any work-anchor type whose existing
+    /// confirmed value differs from the incoming one (REQ-018/020), then fill
+    /// the anchor types the existing work lacks (REQ-028, additive only — a
+    /// conflicting same-type anchor is never overwritten by the merge).
+    async fn preflight_and_merge_anchors(
+        &self,
+        existing_work_id: livrarr_domain::WorkId,
+        incoming: &livrarr_domain::identity::CapturedIdentity,
+        source: livrarr_domain::identity::ConflictSource,
+    ) -> Result<(), WorkServiceError> {
+        let conflicts = self
+            .db
+            .detect_conflicting_anchors(existing_work_id, incoming, source)
+            .await
+            .map_err(|e| WorkServiceError::Validation(format!("conflict detection failed: {e}")))?;
+        for conflict in conflicts {
+            self.db
+                .raise_identity_conflict(conflict)
+                .await
+                .map_err(|e| WorkServiceError::Validation(format!("conflict raise failed: {e}")))?;
+        }
+        self.db
+            .merge_missing_anchors(existing_work_id, incoming)
+            .await
+            .map_err(|e| WorkServiceError::Validation(format!("anchor merge failed: {e}")))?;
+        Ok(())
+    }
+}
+
 impl<D, E, H, L, M, T> WorkService for WorkServiceImpl<D, E, H, L, M, T>
 where
     D: WorkDb
@@ -248,13 +407,39 @@ where
 
         match &candidate.identity {
             IdentityState::Confirmed { anchors, .. } => {
-                let ol_key = anchors.ol_key.as_deref().unwrap_or("");
-                let anchor_type = AnchorType::new(AnchorType::OL_WORK);
-                if let Ok(Some(existing_id)) = self
-                    .db
-                    .find_work_by_anchor(user_id, &anchor_type, ol_key)
-                    .await
-                {
+                // Step 1: anchor match over the work-anchor types the candidate
+                // carries (ol/gr/hc). Bridges (isbn/asin) are edition-level and
+                // are not used to dedup works here (bridge-anchor policy).
+                let mut anchor_match: Option<livrarr_domain::WorkId> = None;
+                for (anchor_ty, value) in [
+                    (AnchorType::OL_WORK, anchors.ol_key.as_deref()),
+                    (AnchorType::GR_WORK, anchors.gr_key.as_deref()),
+                    (AnchorType::HC_WORK, anchors.hc_key.as_deref()),
+                ] {
+                    let Some(value) = value.filter(|v| !v.is_empty()) else {
+                        continue;
+                    };
+                    if let Ok(Some(existing_id)) = self
+                        .db
+                        .find_work_by_anchor(user_id, &AnchorType::new(anchor_ty), value)
+                        .await
+                    {
+                        anchor_match = Some(existing_id);
+                        break;
+                    }
+                }
+                if let Some(existing_id) = anchor_match {
+                    // Conflict preflight + additive anchor merge BEFORE returning
+                    // the matched work (REQ-018/020/028).
+                    let setter = candidate
+                        .provenance_setter
+                        .unwrap_or(ProvenanceSetter::User);
+                    self.preflight_and_merge_anchors(
+                        existing_id,
+                        anchors,
+                        conflict_source_for(setter),
+                    )
+                    .await?;
                     let work = self
                         .db
                         .get_work(user_id, existing_id)
@@ -294,25 +479,24 @@ where
                     .await
                     .map_err(WorkServiceError::Db)?
                 {
+                    // Adopt: an anchorless normalized match absorbs the incoming
+                    // anchors (REQ-028); the preflight raises a conflict if the
+                    // existing work already holds a different confirmed anchor
+                    // (REQ-018/020).
                     let setter = candidate
                         .provenance_setter
                         .unwrap_or(ProvenanceSetter::User);
-                    let anchor_setter = match setter {
-                        ProvenanceSetter::User => AnchorSetter::User,
-                        ProvenanceSetter::Import => AnchorSetter::Import,
-                        _ => AnchorSetter::AutoSearch,
-                    };
-                    self.db
-                        .confirm_anchor(
-                            existing.id,
-                            AnchorType::new(AnchorType::OL_WORK),
-                            ol_key,
-                            anchor_setter,
-                        )
+                    self.preflight_and_merge_anchors(
+                        existing.id,
+                        anchors,
+                        conflict_source_for(setter),
+                    )
+                    .await?;
+                    let existing = self
+                        .db
+                        .get_work(user_id, existing.id)
                         .await
-                        .map_err(|e| {
-                            WorkServiceError::Validation(format!("adopt anchor write failed: {e}"))
-                        })?;
+                        .map_err(WorkServiceError::Db)?;
                     let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
                         let status = self
                             .run_unified_enrichment(
@@ -350,16 +534,20 @@ where
                     .await
                     .map_err(WorkServiceError::Db)?;
                 if let Some(work) = existing.into_iter().next() {
-                    if work.ol_key.is_some() && work.ol_key.as_deref() != Some(ol_key) {
-                        // Step 3e: same normalized identity, different OL anchor.
-                        // TODO: call identity_conflict_service.raise() once wired.
-                        tracing::warn!(
-                            work_id = work.id,
-                            existing_key = ?work.ol_key,
-                            incoming_key = ol_key,
-                            "race-loser: normalized match has different OL anchor"
-                        );
-                    }
+                    // Step 3e (now wired, REQ-020): conflict preflight + additive
+                    // anchor merge on the normalized-identity match — replaces the
+                    // former warn-only TODO. A differing confirmed work anchor
+                    // (ol/gr/hc) raises an observable conflict (REQ-018).
+                    let setter = candidate
+                        .provenance_setter
+                        .unwrap_or(ProvenanceSetter::User);
+                    self.preflight_and_merge_anchors(work.id, anchors, conflict_source_for(setter))
+                        .await?;
+                    let work = self
+                        .db
+                        .get_work(user_id, work.id)
+                        .await
+                        .map_err(WorkServiceError::Db)?;
                     let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
                         let status = self
                             .run_unified_enrichment(
@@ -405,36 +593,41 @@ where
 
                 let (work, actually_created) = self
                     .db
-                    .create_work_with_anchor(
-                        CreateWorkDbRequest {
-                            user_id,
-                            title: cleaned_title,
-                            author_name: cleaned_author,
-                            normalized_title,
-                            normalized_author,
-                            author_id,
-                            ol_key: None,
-                            gr_key: candidate.identity.anchors().and_then(|a| a.gr_key.clone()),
-                            year: candidate.fields.year,
-                            cover_url: candidate.fields.cover_url.clone(),
-                            language: Some(livrarr_domain::normalize_language(
-                                &candidate.fields.language,
-                            )),
-                            series_name: candidate.fields.series_name.clone(),
-                            series_position: candidate.fields.series_position,
-                            monitor_ebook: candidate.monitor_ebook.unwrap_or(true),
-                            monitor_audiobook: candidate.monitor_audiobook.unwrap_or(true),
-                            import_id: candidate.import_id.clone(),
-                            series_id: candidate.series_id,
-                            isbn_13: candidate.identity.anchors().and_then(|a| a.isbn_13.clone()),
-                            asin: candidate.identity.anchors().and_then(|a| a.asin.clone()),
-                            description: candidate.fields.description.clone(),
-                            source_provider_json: None,
-                            cover_manual: candidate.cover_manual,
-                        },
-                        ol_key,
-                        anchor_setter,
-                    )
+                    .create_work(CreateWorkDbRequest {
+                        user_id,
+                        title: cleaned_title,
+                        author_name: cleaned_author,
+                        normalized_title,
+                        normalized_author,
+                        author_id,
+                        ol_key: None,
+                        gr_key: candidate
+                            .identity
+                            .seed_or_confirmed_anchors()
+                            .and_then(|a| a.gr_key.clone()),
+                        year: candidate.fields.year,
+                        cover_url: candidate.fields.cover_url.clone(),
+                        language: Some(livrarr_domain::normalize_language(
+                            &candidate.fields.language,
+                        )),
+                        series_name: candidate.fields.series_name.clone(),
+                        series_position: candidate.fields.series_position,
+                        monitor_ebook: candidate.monitor_ebook.unwrap_or(true),
+                        monitor_audiobook: candidate.monitor_audiobook.unwrap_or(true),
+                        import_id: candidate.import_id.clone(),
+                        series_id: candidate.series_id,
+                        isbn_13: candidate
+                            .identity
+                            .seed_or_confirmed_anchors()
+                            .and_then(|a| a.isbn_13.clone()),
+                        asin: candidate
+                            .identity
+                            .seed_or_confirmed_anchors()
+                            .and_then(|a| a.asin.clone()),
+                        description: candidate.fields.description.clone(),
+                        source_provider_json: None,
+                        cover_manual: candidate.cover_manual,
+                    })
                     .await
                     .map_err(WorkServiceError::Db)?;
 
@@ -450,6 +643,39 @@ where
                         .await;
                 }
 
+                // Persist every work-anchor + bridge the candidate carries as a
+                // confirmed anchor row (REQ-001/003) — not only the OL key. A
+                // resolving-id candidate may have no ol_key (e.g. Readarr gr+isbn).
+                for (anchor_ty, value) in [
+                    (AnchorType::OL_WORK, anchors.ol_key.as_deref()),
+                    (AnchorType::GR_WORK, anchors.gr_key.as_deref()),
+                    (AnchorType::HC_WORK, anchors.hc_key.as_deref()),
+                    (AnchorType::ISBN_13, anchors.isbn_13.as_deref()),
+                    (AnchorType::ASIN, anchors.asin.as_deref()),
+                ] {
+                    if let Some(value) = value.filter(|v| !v.is_empty()) {
+                        self.db
+                            .confirm_anchor(
+                                work.id,
+                                AnchorType::new(anchor_ty),
+                                value,
+                                anchor_setter,
+                            )
+                            .await
+                            .map_err(|e| {
+                                WorkServiceError::Validation(format!("anchor write failed: {e}"))
+                            })?;
+                    }
+                }
+
+                // Reload so add-time provenance sees the anchor-synced identifier
+                // columns (ol/gr/hc/isbn/asin), matching the prior
+                // create_work_with_anchor reload semantics.
+                let work = self
+                    .db
+                    .get_work(user_id, work.id)
+                    .await
+                    .map_err(WorkServiceError::Db)?;
                 write_addtime_provenance(&self.db, user_id, &work, setter).await;
 
                 self.finish_created_work(
@@ -462,10 +688,7 @@ where
                 )
                 .await
             }
-            IdentityState::Pending {
-                reason: _,
-                top_candidates: _,
-            } => {
+            IdentityState::Pending { .. } => {
                 if let Some((work, enrichment_status)) = self
                     .try_dedup_by_normalized(
                         user_id,
@@ -505,7 +728,10 @@ where
                         normalized_author,
                         author_id,
                         ol_key: None,
-                        gr_key: candidate.identity.anchors().and_then(|a| a.gr_key.clone()),
+                        gr_key: candidate
+                            .identity
+                            .seed_or_confirmed_anchors()
+                            .and_then(|a| a.gr_key.clone()),
                         year: candidate.fields.year,
                         cover_url: candidate.fields.cover_url.clone(),
                         language: Some(livrarr_domain::normalize_language(
@@ -517,8 +743,14 @@ where
                         monitor_audiobook: candidate.monitor_audiobook.unwrap_or(true),
                         import_id: candidate.import_id.clone(),
                         series_id: candidate.series_id,
-                        isbn_13: candidate.identity.anchors().and_then(|a| a.isbn_13.clone()),
-                        asin: candidate.identity.anchors().and_then(|a| a.asin.clone()),
+                        isbn_13: candidate
+                            .identity
+                            .seed_or_confirmed_anchors()
+                            .and_then(|a| a.isbn_13.clone()),
+                        asin: candidate
+                            .identity
+                            .seed_or_confirmed_anchors()
+                            .and_then(|a| a.asin.clone()),
                         description: candidate.fields.description.clone(),
                         source_provider_json: None,
                         cover_manual: candidate.cover_manual,
@@ -543,11 +775,7 @@ where
                     .unwrap_or(ProvenanceSetter::User);
                 write_addtime_provenance(&self.db, user_id, &work, setter).await;
 
-                if let IdentityState::Pending {
-                    reason,
-                    top_candidates: _,
-                } = &candidate.identity
-                {
+                if let IdentityState::Pending { reason, .. } = &candidate.identity {
                     let anchor_setter = match setter {
                         ProvenanceSetter::User => AnchorSetter::User,
                         ProvenanceSetter::Import => AnchorSetter::Import,
@@ -1077,6 +1305,7 @@ where
 
     async fn lookup_filtered(
         &self,
+        user_id: UserId,
         req: LookupRequest,
         raw: bool,
     ) -> Result<LookupResponse, WorkServiceError> {
@@ -1094,6 +1323,38 @@ where
             .lang_override
             .clone()
             .unwrap_or_else(|| "en".to_string());
+
+        // Resolver path (#97 fix): route through the multi-provider fan-out ONLY
+        // when the term identifies a specific book (an `isbn:` lookup or another
+        // provider key). A bare-title term is a free-text discovery search — it
+        // carries no identifier for the resolver to act on (resolve() abstains as
+        // EmptySeed), so it falls through to the legacy provider search below.
+        let seed = lookup_term_to_seed(&term, &lang);
+        if seed_carries_identifier(&seed) {
+            if let Some(resolver) = self.resolver.clone() {
+                use livrarr_domain::services::IdentityResolver;
+                let resolution = resolver
+                    .resolve(
+                        user_id,
+                        &seed,
+                        livrarr_domain::identity::LatencyTier::Interactive,
+                    )
+                    .await
+                    .map_err(|e| WorkServiceError::Validation(format!("resolve failed: {e}")))?;
+                let mut results = lookup_results_from_resolution(resolution);
+                for r in &mut results {
+                    r.title = crate::title_cleanup::title_case(&r.title);
+                }
+                let count = results.len();
+                return Ok(LookupResponse {
+                    results,
+                    filtered_count: count,
+                    raw_count: count,
+                    raw_available: false,
+                });
+            }
+        }
+
         let cache_key = (term.clone(), lang.clone());
 
         // Check cache (15 min TTL)

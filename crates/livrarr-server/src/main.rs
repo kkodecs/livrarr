@@ -414,50 +414,9 @@ async fn main() {
     // chose the endpoint).
     let http_client_for_readarr = http_client.clone();
     // Pre-construct WorkService Arc so series_query_service and readarr_import_wf can share it.
-    let work_service_arc: Arc<livrarr_server::state::LiveWorkService> = {
-        let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
-            svc_enrichment.clone(),
-            svc_db.clone(),
-        );
-        let ws_merge_engine = {
-            let cfg = live_metadata_config.snapshot();
-            let llm_configured = cfg.llm_enabled
-                && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
-                && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
-            let llm_caller = livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
-                live_metadata_config.clone(),
-                livrarr_http::HttpClient::builder()
-                    .build()
-                    .expect("LLM HttpClient for work service merge engine"),
-            );
-            livrarr_metadata::DefaultMergeEngine::new_with_llm(
-                livrarr_metadata::PriorityModel::english(),
-                llm_caller,
-                llm_configured,
-            )
-        };
-        Arc::new(
-            livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
-                svc_db.clone(),
-                ew,
-                livrarr_http::fetcher::HttpFetcherImpl::new()
-                    .expect("HttpFetcherImpl construction for work service"),
-                http_client.clone(),
-                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
-                    live_metadata_config.clone(),
-                    livrarr_http::HttpClient::builder()
-                        .build()
-                        .expect("LLM HttpClient for work service"),
-                ),
-                data_dir.clone(),
-                ws_merge_engine,
-                tag_service_arc.clone(),
-            ),
-        )
-    };
-    // Cover service + HMAC key
-    let hmac_key = livrarr_server::cover_service::generate_hmac_key();
-    let cover_service = {
+    // Shared provider-client map: one set of per-provider clients reused by the
+    // cover service and the identity resolver's multi-provider fan-out.
+    let provider_clients = {
         use livrarr_domain::MetadataProvider as P;
         use livrarr_metadata as m;
         let mut clients = std::collections::HashMap::new();
@@ -500,6 +459,81 @@ async fn main() {
                 5 * 60,
             )),
         );
+        clients
+    };
+    // Multi-provider identity resolver. A single instance is shared between the
+    // Add-Work handler's resolve() (AppState.identity_resolver) and the search
+    // box's lookup_filtered (WorkService), so both route through the federated
+    // fan-out and share one payload transport cache.
+    let identity_resolver_arc = Arc::new(
+        livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver {
+            clients: provider_clients.clone(),
+            cache: Arc::new(livrarr_metadata::transport_cache::TransportCache::new(
+                std::time::Duration::from_secs(300),
+            )),
+            config: {
+                let cfg = live_metadata_config.snapshot();
+                let llm_configured = cfg.llm_enabled
+                    && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
+                    && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
+                let gb_key_present = cfg
+                    .google_books_api_key
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty());
+                livrarr_metadata::english_identity_resolver::ResolverConfig {
+                    gb_key_present,
+                    llm_configured,
+                    ..Default::default()
+                }
+            },
+        },
+    );
+    let work_service_arc: Arc<livrarr_server::state::LiveWorkService> = {
+        let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+            svc_enrichment.clone(),
+            svc_db.clone(),
+        );
+        let ws_merge_engine = {
+            let cfg = live_metadata_config.snapshot();
+            let llm_configured = cfg.llm_enabled
+                && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
+                && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
+            let llm_caller = livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                live_metadata_config.clone(),
+                livrarr_http::HttpClient::builder()
+                    .build()
+                    .expect("LLM HttpClient for work service merge engine"),
+            );
+            livrarr_metadata::DefaultMergeEngine::new_with_llm(
+                livrarr_metadata::PriorityModel::english(),
+                llm_caller,
+                llm_configured,
+            )
+        };
+        Arc::new(
+            livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
+                svc_db.clone(),
+                ew,
+                livrarr_http::fetcher::HttpFetcherImpl::new()
+                    .expect("HttpFetcherImpl construction for work service"),
+                http_client.clone(),
+                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    livrarr_http::HttpClient::builder()
+                        .build()
+                        .expect("LLM HttpClient for work service"),
+                ),
+                data_dir.clone(),
+                ws_merge_engine,
+                tag_service_arc.clone(),
+            )
+            .with_resolver(identity_resolver_arc.clone()),
+        )
+    };
+    // Cover service + HMAC key
+    let hmac_key = livrarr_server::cover_service::generate_hmac_key();
+    let cover_service = {
+        let clients = provider_clients.clone();
         Arc::new(livrarr_server::cover_service::LiveCoverService::new(
             db.clone(),
             http_client.clone(),
@@ -651,17 +685,7 @@ async fn main() {
                 svc_db.clone(),
             ),
         ),
-        identity_resolver: Arc::new(
-            livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver {
-                ol: Arc::new(
-                    livrarr_metadata::ol_resolver_client::LiveOlResolverClient::new(
-                        livrarr_http::fetcher::HttpFetcherImpl::new()
-                            .expect("HttpFetcherImpl for identity resolver"),
-                    ),
-                ),
-                config: Default::default(),
-            },
-        ),
+        identity_resolver: identity_resolver_arc,
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
                 svc_enrichment.clone(),
