@@ -12,24 +12,26 @@ Livrarr is a self-hosted ebook and audiobook library manager, similar to Sonarr 
 - Multi-user with per-user library isolation
 - Integrates with the *arr ecosystem: Prowlarr, qBittorrent, SABnzbd
 - Integrates with downstream readers: Calibre-Web Automated (CWA), Audiobookshelf, Kavita
-- Metadata from OpenLibrary + Hardcover (English) and Goodreads via LLM scraping (foreign languages)
+- Metadata from OpenLibrary + Hardcover + Google Books (English and foreign languages); Goodreads via LLM scraping (foreign languages, when available)
 
 **Stack:** Rust backend, React/TypeScript frontend, SQLite database, Docker deployment
 
 ## How It Works
 
-1. **Search** — User searches by title. Livrarr queries metadata providers (OpenLibrary, Hardcover for English; Goodreads via LLM for foreign languages).
+1. **Search** — User searches by title. Livrarr queries metadata providers (OpenLibrary, Hardcover for English; Google Books + Goodreads via LLM for foreign languages).
 2. **Add** — User adds the work. Livrarr enriches it with description, genres, series info, covers, ratings.
 3. **Find releases** — User searches indexers (Torznab/Newznab) for downloadable files.
 4. **Download** — Livrarr sends the grab to qBittorrent (torrents) or SABnzbd (usenet).
-5. **Import** — When download completes, poller detects it, copies files to organized library, writes metadata tags (EPUB/M4B/MP3), creates DB records, optionally hardlinks to CWA.
+5. **Import** — When download completes, poller detects it, copies files to organized library, writes metadata tags (EPUB only — see note below), creates DB records, optionally hardlinks to CWA.
 
 ## Supported File Formats
 
-| Type | Formats |
-|------|---------|
-| Ebook | EPUB, MOBI, AZW3, PDF |
-| Audiobook | M4B, MP3, M4A, FLAC, OGG, WMA |
+| Type | Formats | Tag writing |
+|------|---------|-------------|
+| Ebook | EPUB, MOBI, AZW3, PDF | EPUB only (OPF metadata rewrite) |
+| Audiobook | M4B, MP3, M4A, FLAC, OGG, WMA | Disabled — see note |
+
+> **Note on audiobook tag writing:** M4B and MP3 tag writing is currently disabled. The upstream tag writers buffer the shifted media region in RAM, which causes OOM crashes on large audiobook files. Audiobook players (Audiobookshelf, Plex) use their own metadata databases and do not rely on embedded tags, so imports work correctly without them.
 
 ## Setup Requirements
 
@@ -41,6 +43,7 @@ All configured through the web UI at `http://<host>:8789`:
 | Download client | Settings > Download Clients | Yes — qBittorrent or SABnzbd |
 | Indexers | Settings > Indexers | Yes — Torznab/Newznab URLs (or import from Prowlarr) |
 | Hardcover token | Settings > Metadata | Recommended — free API token from hardcover.app |
+| Google Books API key | Settings > Metadata | Recommended — required for foreign language enrichment |
 | LLM endpoint | Settings > Metadata | Optional — OpenAI-compatible API for foreign language support |
 | Audnexus | Settings > Metadata | Optional — audiobook narrator data (default public instance) |
 
@@ -65,7 +68,7 @@ Root folders tell Livrarr where to store imported files. You need at least one.
 - Port: qBit WebUI port (default 8080)
 - Username/password: qBit WebUI credentials
 - Category: `livrarr` (create this category in qBittorrent first). Livrarr only monitors downloads in this category.
-- Test the connection — Livrarr checks API reachability, auth, and category existence.
+- Test the connection — Livrarr checks API reachability and authentication.
 
 **SABnzbd (usenet):**
 - Host: SABnzbd address (e.g., `http://sabnzbd`)
@@ -99,7 +102,7 @@ Hardcover provides rich book metadata: descriptions, series info, ratings, high-
 
 ### Step 5: LLM for Foreign Language Search (Settings > Metadata) — Optional
 
-Required only if you want to search for books in non-English languages. Livrarr uses an LLM to extract structured data from Goodreads HTML pages.
+Required only if you want to search for books in non-English languages. Livrarr uses an LLM to extract structured data from Goodreads HTML pages and to disambiguate foreign language search results.
 
 **Using Groq (free tier available):**
 1. Sign up at https://console.groq.com
@@ -205,7 +208,7 @@ Everything else (download clients, indexers, metadata providers, root folders) i
 ```yaml
 services:
   livrarr:
-    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha4
+    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha5
     container_name: livrarr
     ports:
       - "8789:8789"
@@ -241,7 +244,7 @@ Separate root folders are required for ebooks and audiobooks. Author and title n
 ### Works
 The primary entity. A work = a book title, independent of format. Each work has:
 - Metadata (title, author, description, series, genres, cover)
-- Enrichment status (pending → enriched/partial/failed/exhausted)
+- Enrichment status (see below)
 - Library items (imported files)
 - Monitoring status (for author-based new release detection)
 
@@ -259,12 +262,12 @@ Sent → Confirmed → Importing → Imported
 ### Enrichment Status
 | Status | Meaning |
 |--------|---------|
-| `pending` | Not yet enriched (just added) |
-| `enriched` | All providers succeeded |
-| `partial` | Some providers worked, some failed |
-| `failed` | All providers failed — will retry up to 3 times |
-| `exhausted` | 3 retries failed — no more automatic attempts |
-| `skipped` | Foreign language work without enrichment URL |
+| `unenriched` | Not yet enriched (just added, or crash recovery state) |
+| `enriched` | Enrichment completed successfully |
+| `failed` | Transient enrichment error — background job will retry |
+| `conflict` | LLM identity validation rejected all provider matches; terminal until user resets via manual refresh |
+| `identity_pending` | Identity could not be resolved at add-time; background job will retry |
+| `needs_review` | Resolution exhausted for a work with no resolving identifier; user must act |
 
 ### Remote Path Mappings
 When the download client (e.g., qBittorrent) reports a file at `/downloads/book.epub` but Livrarr sees it at `/mnt/downloads/book.epub`, a remote path mapping bridges the gap. Configure in Settings > Download Clients.
@@ -274,7 +277,10 @@ When the download client (e.g., qBittorrent) reports a file at `/downloads/book.
 | Job | Interval | Function |
 |-----|----------|----------|
 | `download_poller` | 60s | Checks qBit/SABnzbd for completed downloads, triggers import |
-| `enrichment_retry` | 5 min | Retries failed enrichments (up to 3 attempts) |
+| `rss_sync` | 60s | Polls all enabled RSS-capable indexers for new releases matching monitored works |
+| `enrichment_retry` | 5 min | Retries failed/pending enrichments |
+| `tag_convergence` | 60s | Writes missing tags to already-imported files |
+| `state_map_cleanup` | 30 min | Evicts expired in-memory state entries |
 | `session_cleanup` | 1 hour | Removes expired login sessions |
 | `author_monitor` | 24 hours | Checks OpenLibrary for new works by monitored authors |
 
@@ -287,9 +293,10 @@ When the download client (e.g., qBittorrent) reports a file at `/downloads/book.
 - **Foreign languages** — Requires LLM configured in Settings > Metadata. Language must be enabled in the language list.
 
 ### Enrichment issues
-- **"failed" / "exhausted"** — Check Hardcover API token validity in Settings > Metadata. Test button available.
-- **"partial"** — Hardcover failed but OpenLibrary succeeded. Less metadata but functional. Hardcover is the primary source; check token and network.
-- **"skipped"** — Foreign language work without a detail URL. Normal for some search results.
+- **`failed`** — Transient error; background job retries automatically. Check Hardcover API token and network in Settings > Metadata.
+- **`conflict`** — LLM rejected all provider matches for this work. Use "Manual Refresh" on the work detail page to reset and retry.
+- **`identity_pending`** — Normal transitional state; the background job will resolve it shortly.
+- **`needs_review`** — No provider could be matched confidently. Open the work and use the search/manual match flow.
 - **Blurry covers** — Use "Refresh" on work detail to re-fetch. High-res covers require Hardcover or foreign language detail page enrichment.
 
 ### Downloads not importing
@@ -306,7 +313,7 @@ When the download client (e.g., qBittorrent) reports a file at `/downloads/book.
 
 ### qBittorrent connection issues
 - Verify host, port, and credentials in Settings > Download Clients.
-- Test button checks version API and category existence.
+- Test button checks API reachability and authentication only — it does not verify the category exists.
 - Livrarr only monitors downloads in its configured category (default: "livrarr"). Ensure the category exists in qBittorrent.
 - If behind Docker, ensure qBit's host is reachable from the Livrarr container.
 
@@ -319,7 +326,7 @@ When the download client (e.g., qBittorrent) reports a file at `/downloads/book.
 - Requires an LLM endpoint configured in Settings > Metadata (any OpenAI-compatible API — Groq, Gemini, OpenAI, or custom).
 - Language must be added to the enabled languages list on the Metadata settings page.
 - Supported: French, German, Spanish, Dutch, Italian, Japanese, Korean, Polish.
-- Uses Goodreads HTML scraping + LLM extraction. Results depend on LLM quality.
+- Foreign language enrichment uses Google Books as the primary metadata source, with Goodreads HTML scraping + LLM extraction as a secondary path. Results depend on LLM quality and provider availability.
 
 ## Log Interpretation
 
@@ -336,7 +343,7 @@ Logs are viewable at System > Logs in the UI, or in the file `{data_dir}/logs/li
 | `poller: source not yet available` | Download completed but files not accessible yet — will retry |
 | `poller: orphaned grab` | Grab not found in download client after 24h — marked failed |
 | `enrichment retry: work N enriched successfully` | Background retry succeeded |
-| `enrichment retry: timeout` | Provider took >30s — will retry later |
+| `enrichment_retry: enrich_work(...) timed out` | Enrichment exceeded 30s — will retry later |
 | `author monitor: new work detected` | OpenLibrary has a new work by a monitored author |
 | `OL 429` | OpenLibrary rate limit hit — backs off 60s automatically |
 | `tag write failed` | Metadata couldn't be embedded in the file — file imported without tags |
@@ -387,20 +394,18 @@ List endpoints accept `page` and `page_size` query parameters:
 - Maximum: `page_size=500`
 - Response: `{ items: [...], total: N, page: N, pageSize: N }`
 
-### Rate limiting
+### Login protection
 
-- Login: 5 attempts per 60 seconds per IP
-- Global: 100 requests per second per IP
-- Exceeding limits returns HTTP 429
+Login attempts are lockout-protected per username — after 5 consecutive failures, the account is locked for a period. There is no per-IP global rate limit.
 
 ## Architecture (for advanced troubleshooting)
 
-- **13 Rust crates:** livrarr-server (composition root), livrarr-handlers (route handlers, compile-walled), livrarr-jobs (job triggering trait), livrarr-db (SQLite), livrarr-domain (types/traits), livrarr-metadata (providers), livrarr-http (HTTP client), livrarr-download (torrent/NZB), livrarr-matching (file matching), livrarr-library (import/layout), livrarr-tagwrite (EPUB/M4B/MP3 tags), livrarr-behavioral (test harness), livrarr-cli (stub)
+- **13 Rust crates:** livrarr-server (composition root), livrarr-handlers (route handlers, compile-walled), livrarr-jobs (job triggering trait), livrarr-db (SQLite), livrarr-domain (types/traits), livrarr-metadata (providers), livrarr-http (HTTP client), livrarr-download (torrent/NZB), livrarr-matching (file matching), livrarr-library (import/layout), livrarr-tagwrite (EPUB tags), livrarr-behavioral (test harness), livrarr-cli (stub)
 - **Database:** SQLite via sqlx with versioned migrations
-- **Enrichment pipeline:** Hardcover GraphQL → OpenLibrary JSON → Audnexus REST (English); Goodreads HTML → LLM extraction (foreign)
-- **Import pipeline:** Poller detects completion → copies to .tmp → writes tags → atomic rename to final path → creates DB record → optional CWA hardlink
-- **Tag writing:** EPUB via quick-xml (OPF metadata rewrite), M4B via mp4ameta, MP3 via id3 crate
-- **SSRF protection:** User-supplied URLs are fetched through a safe HTTP client with DNS-level private IP filtering
+- **Enrichment pipeline:** Hardcover GraphQL → OpenLibrary JSON → Audnexus REST (English); Google Books → Goodreads HTML → LLM extraction (foreign)
+- **Import pipeline:** Poller detects completion → copies to .tmp → writes tags (EPUB only) → atomic rename to final path → creates DB record → optional CWA hardlink
+- **Tag writing:** EPUB via quick-xml (OPF metadata rewrite). M4B and MP3 tag writing is currently disabled due to OOM constraints with large audiobook files.
+- **SSRF protection:** Admin-configured infrastructure (download clients, indexers, LLM endpoints) uses an unrestricted HTTP client; runtime-derived URLs (cover fetches, scraped content) use a safe HTTP client with DNS-level private IP filtering
 
 ## Getting Help
 
