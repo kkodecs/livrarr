@@ -485,20 +485,23 @@ async fn dispatch_torrent<H: HttpFetcher>(
         .await
         .map_err(|e| format!("qBit auth failed: {e}"))?;
 
-    if auth_resp.status != 200 {
+    if !(200..300).contains(&auth_resp.status) {
         return Err("qBit auth failed".to_string());
     }
 
-    // Extract SID cookie
-    let sid = auth_resp
+    let auth_cookie = auth_resp
         .headers
         .iter()
-        .find(|(k, _)| k.to_lowercase() == "set-cookie")
+        .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
         .and_then(|(_, v)| {
-            v.split(';')
-                .next()
-                .filter(|c| c.starts_with("SID="))
-                .map(|c| c.to_string())
+            let cookie = v.split(';').next()?.trim();
+            let name = cookie.split('=').next()?;
+
+            if name == "SID" || name == "QBT_SID" || name.starts_with("QBT_SID_") {
+                Some(cookie.to_string())
+            } else {
+                None
+            }
         })
         .unwrap_or_default();
 
@@ -542,7 +545,7 @@ async fn dispatch_torrent<H: HttpFetcher>(
                     "Content-Type".into(),
                     format!("multipart/form-data; boundary={boundary}"),
                 ),
-                ("Cookie".into(), sid),
+                ("Cookie".into(), auth_cookie),
             ],
             body: Some(body),
             timeout: Duration::from_secs(30),
@@ -555,11 +558,14 @@ async fn dispatch_torrent<H: HttpFetcher>(
         .map_err(|e| format!("qBit add torrent failed: {e}"))?;
 
     let body_text = String::from_utf8_lossy(&add_resp.body);
+
+    if (200..300).contains(&add_resp.status) {
+        return Ok(download_id);
+    }
+
     match add_resp.status {
-        200 if body_text.contains("Ok.") => Ok(download_id),
-        200 => Err(format!("qBit add failed: {}", body_text.trim())),
         403 => Err("qBit auth expired".to_string()),
-        s => Err(format!("qBit rejected torrent: HTTP {s}")),
+        s => Err(format!("qBit rejected torrent: HTTP {s}: {}", body_text.trim())),
     }
 }
 
