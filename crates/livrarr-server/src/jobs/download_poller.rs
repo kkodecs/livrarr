@@ -97,7 +97,7 @@ async fn poll_qbittorrent(
         .http_client
         .get(&info_url)
         .query(&[("filter", "all"), ("category", client.category.as_str())])
-        .header("Cookie", format!("SID={sid}"))
+        .header("Cookie", sid)
         .send()
         .await
         .map_err(|e| format!("qBit request: {e}"))?;

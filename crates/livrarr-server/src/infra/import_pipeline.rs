@@ -18,7 +18,7 @@ pub async fn fetch_qbit_content_path(
     let resp = http_client
         .get(&info_url)
         .query(&[("hashes", hash)])
-        .header("Cookie", format!("SID={sid}"))
+        .header("Cookie", sid)
         .send()
         .await
         .map_err(|e| ApiError::BadGateway(format!("qBittorrent request failed: {e}")))?;
