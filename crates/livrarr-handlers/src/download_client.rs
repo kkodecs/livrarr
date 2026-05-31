@@ -464,12 +464,12 @@ async fn test_qbittorrent<S: HasHttpClient>(
             .get("set-cookie")
             .and_then(|v| v.to_str().ok())
         {
-            if let Some(s) = cookie
-                .split(';')
-                .next()
-                .and_then(|c| c.strip_prefix("SID="))
-            {
-                sid = Some(s.to_string());
+            if let Some(cookie_pair) = cookie.split(';').next().map(str::trim) {
+                let name = cookie_pair.split('=').next().unwrap_or("");
+
+                if name == "SID" || name == "QBT_SID" || name.starts_with("QBT_SID_") {
+                    sid = Some(cookie_pair.to_string());
+                }
             }
         }
         let body = resp.text().await.unwrap_or_default();
@@ -483,7 +483,7 @@ async fn test_qbittorrent<S: HasHttpClient>(
     let version_url = format!("{base_url}/api/v2/app/webapiVersion");
     let mut version_req = state.http_client().get(&version_url);
     if let Some(ref s) = sid {
-        version_req = version_req.header("Cookie", format!("SID={s}"));
+        version_req = version_req.header("Cookie", s);
     }
     let resp = version_req.send().await.map_err(|e| {
         ApiError::BadGateway(format!(
