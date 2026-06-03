@@ -4,7 +4,7 @@
 # EXTENDS IR v1. IR v1 is authoritative for: the crate decomposition, the full
 # dependency_graph (acyclic, one-way), the seam_map, shared_types, and decisions
 # D-001..D-007. This artifact ADDS the design layer: the ORDERED extraction sequence
-# (Track 0/1/2 with build-green checkpoints), the livrarr-providers PORT design
+# (Track 0/1/2 with build-green checkpoints), the livrarr-external-data PORT design
 # (the two surfaces + the relocated contract types), per-seam CUT pseudocode
 # (discovery / cover / status / bug#2), and the FALSIFIABLE CANARY as build step 1.
 # It does NOT re-list IR v1's crate map — read ir-v1-metadata-modularization.yaml alongside.
@@ -32,8 +32,8 @@ approved_libraries:
   - { name: quick-xml, version: "0.37", usage: "EPUB OPF parsing (existing)" }
   - { name: trait-variant, version: "0.1", usage: "Send async traits (existing)" }
   - { name: thiserror, version: "2", usage: "Typed error enums (existing)" }
-  - { name: uuid, version: "1", usage: "v4 token (existing direct dep; moves with providers)" }
-  - { name: governor, version: "0.10", usage: "GCRA rate limiter (existing; moves into providers)" }
+  - { name: uuid, version: "1", usage: "v4 token (existing direct dep; moves with external-data)" }
+  - { name: governor, version: "0.10", usage: "GCRA rate limiter (existing; moves into external-data)" }
 
 # ---------------------------------------------------------------------------
 # Design-stage decisions (continue IR v1's D-001..D-007). Per feedback_arch_internals_delegated,
@@ -42,13 +42,13 @@ approved_libraries:
 # ---------------------------------------------------------------------------
 design_decisions:
   - id: D-008
-    topic: "Extraction ORDER — providers (canary), then contract+traits, then materialize, then the 3 feature-cuts (REORDERED — REVIEW-FIX r1)"
-    choice: "Track 1 order: (1) extract livrarr-providers [THE CANARY — REQ-011]; (2) promote the EstablishedIdentity contract + IdentityContradiction event + the 3 service traits into domain [REORDERED before materialize — materialize impls MaterializeService; REVIEW-FIX r1, both families]; (3) extract livrarr-materialize [pure downstream, low coupling]. THEN Track 2 feature-cuts, in risk order: (4) status two-state-machine split [unblocks the one-way violation seam #2]; (5) discovery re-home + GR ladder [the #97 + seam #5/#6, incl. the seam #6 cache leak]; (6) cover-decouple [seam #3/#7]. Each step ends at cargo build + cargo test GREEN before the next begins (REQ-009)."
+    topic: "Extraction ORDER — external-data (canary), then contract+traits, then materialize, then the 3 feature-cuts (REORDERED — REVIEW-FIX r1)"
+    choice: "Track 1 order: (1) extract livrarr-external-data [THE CANARY — REQ-011]; (2) promote the EstablishedIdentity contract + IdentityContradiction event + the 3 service traits into domain [REORDERED before materialize — materialize impls MaterializeService; REVIEW-FIX r1, both families]; (3) extract livrarr-materialize [pure downstream, low coupling]. THEN Track 2 feature-cuts, in risk order: (4) status two-state-machine split [unblocks the one-way violation seam #2]; (5) discovery re-home + GR ladder [the #97 + seam #5/#6, incl. the seam #6 cache leak]; (6) cover-decouple [seam #3/#7]. Each step ends at cargo build + cargo test GREEN before the next begins (REQ-009)."
     rationale: "Providers first because it is the falsifiable canary — if it fails, nothing else should start. Contract+traits SECOND (was third) because step 3 materialize implements MaterializeService and step 4 status needs identity state in domain — a later step cannot supply a trait an earlier step implements (REVIEW-FIX r1). Materialize third — LEAST coupled (domain/db/tagwrite/http — D-003). Status before discovery because seam #2 is the active one-way VIOLATION. Cover last — lowest risk, decoupled by the generation counter. NOTE: seam #6 (concrete cache leak) is closed in step 5, NOT the canary — the canary GO does not assume it."
     po_confirm: false
   - id: D-009
-    topic: "providers port shape — TWO traits (ProviderDiscovery + ProviderFetch), not one god-trait"
-    choice: "livrarr-providers exposes two SEPARATE traits: ProviderDiscovery (search by seed -> Vec<NormalizedWorkDetail>, warms cache) and ProviderFetch (fetch(&Work,&req) -> ProviderOutcome<NormalizedWorkDetail>, the existing enrichment shape). A provider client impls whichever surface(s) it supports. trait_variant::make(Send); non-dyn -> enum dispatch over the provider set (insight 8)."
+    topic: "external-data port shape — TWO traits (ProviderDiscovery + ProviderFetch), not one god-trait"
+    choice: "livrarr-external-data exposes two SEPARATE traits: ProviderDiscovery (search by seed -> Vec<NormalizedWorkDetail>, warms cache) and ProviderFetch (fetch(&Work,&req) -> ProviderOutcome<NormalizedWorkDetail>, the existing enrichment shape). A provider client impls whichever surface(s) it supports. trait_variant::make(Send); non-dyn -> enum dispatch over the provider set (insight 8)."
     rationale: "Decision brief §6.2: the discovery shape != the fetch shape. Two narrow traits keep each consumer bound only to the surface it uses (insight 9h capability-narrowing applied at the crate boundary). A single trait with both methods would force discovery-only consumers to depend on the fetch surface and vice-versa."
     po_confirm: false
   - id: D-010
@@ -60,11 +60,11 @@ design_decisions:
   - id: D-011
     topic: "Materialize trigger + COVER DATA CONTRACT (REVIEW-FIX r1 — cover selection vs fetch split; bg job covers too)"
     choice: "SPLIT cover candidate SELECTION (which URL — provider-payload-driven, lives enrichment/identity-side) from cover artifact FETCH+STORE (the bytes — lives in materialize). The merge persists the chosen cover reference to a DB column (`selected_cover_url` / CoverRef on the work) BEFORE materialize runs. MaterializeService::materialize_cover(work_id) then reads that resolved ref from the DB (no provider/enrichment payload coupling — materialize never re-runs selection). REVIEW-FIX r1 (codex BLOCKER): work_id alone was insufficient; the resolved CoverRef must exist in the DB first. Trigger: after a merge bumps merge_generation, a server-composed materialize JOB (existing bg tick) scans `merge_generation > tag_generation` and projects BOTH artifacts — materialize_tags AND a cover refresh when the persisted cover ref changed/absent (REVIEW-FIX r1, gemini MAJOR: else background cover upgrades are lost). The SYNC materialize_cover is also called by the ADD path so a cover is present at creation. No livrarr-enrichment -> livrarr-materialize crate edge (D-003)."
-    rationale: "codex BLOCKER: a sync materialize_cover(work_id) with no data contract would force materialize to re-query DB/cache and reimplement provider-priority selection — re-coupling it to enrichment/providers. Persisting the resolved CoverRef pre-call keeps materialize a pure projector. gemini MAJOR: the generation-delta job only doing tags loses cover upgrades found by background enrichment — so the job must evaluate the cover ref too. REQ-021 idempotency (generation guard) + REQ-003 isolation (no crate edge) preserved."
+    rationale: "codex BLOCKER: a sync materialize_cover(work_id) with no data contract would force materialize to re-query DB/cache and reimplement provider-priority selection — re-coupling it to enrichment/external-data. Persisting the resolved CoverRef pre-call keeps materialize a pure projector. gemini MAJOR: the generation-delta job only doing tags loses cover upgrades found by background enrichment — so the job must evaluate the cover ref too. REQ-021 idempotency (generation guard) + REQ-003 isolation (no crate edge) preserved."
     po_confirm: false
   - id: D-012
     topic: "Canary NO-GO fallback — PREDECLARED allowed relocations + a hard scope cap (REVIEW-FIX r1, codex)"
-    choice: "The canary's allowed back-edge resolutions are PREDECLARED + BOUNDED so 'relocate and retry' cannot expand scope until it 'passes': (a) ALLOWED relocation — a genuinely PURE value type (e.g. LookupResult, a provider-key newtype) may move into livrarr-domain (leaf) and retry; HARD CAP: at most ~3 such type relocations, all pure data, no behavior. (b) EnrichmentContext is NOT allowed to move to domain — REVIEW-FIX r1 (codex BLOCKER): it encodes enrichment POLICY (mode/priority), so relocating it to the leaf hides the cycle instead of removing it. Instead providers' fetch takes a providers-local mechanical FetchRequest (just the provider + key + language it needs); EnrichmentContext/mode/priority stay enrichment-side and are mapped to FetchRequest at the call site. (c) provider_queue / its retry traits are NOT relocated — they stay in enrichment (REVIEW-FIX r1 #1). (d) If, after the capped pure-type relocations, ANY back-edge remains (providers needing EnrichmentContext, a queue trait, livrarr-db, or to CALL BACK into metadata) -> NO-GO: stop, leave the worktree, write 'CANARY NO-GO' with the exact edge, fall back to plan A."
+    choice: "The canary's allowed back-edge resolutions are PREDECLARED + BOUNDED so 'relocate and retry' cannot expand scope until it 'passes': (a) ALLOWED relocation — a genuinely PURE value type (e.g. LookupResult, a provider-key newtype) may move into livrarr-domain (leaf) and retry; HARD CAP: at most ~3 such type relocations, all pure data, no behavior. (b) EnrichmentContext is NOT allowed to move to domain — REVIEW-FIX r1 (codex BLOCKER): it encodes enrichment POLICY (mode/priority), so relocating it to the leaf hides the cycle instead of removing it. Instead external-data's fetch takes a external-data-local mechanical FetchRequest (just the provider + key + language it needs); EnrichmentContext/mode/priority stay enrichment-side and are mapped to FetchRequest at the call site. (c) provider_queue / its retry traits are NOT relocated — they stay in enrichment (REVIEW-FIX r1 #1). (d) If, after the capped pure-type relocations, ANY back-edge remains (external-data needing EnrichmentContext, a queue trait, livrarr-db, or to CALL BACK into metadata) -> NO-GO: stop, leave the worktree, write 'CANARY NO-GO' with the exact edge, fall back to plan A."
     rationale: "codex: 'relocate to domain and retry' described as always-expected made the experiment non-binary (it could keep expanding until green). Predeclaring the allowed set (pure data only, capped) + explicitly forbidding the impure relocations (EnrichmentContext, queue) restores falsifiability: the canary either fits within the cap or it's a NO-GO."
     po_confirm: false
   - id: D-013
@@ -81,7 +81,7 @@ design_decisions:
     po_confirm_note: "User-visible: the single status badge splits into TWO badges (identity track + enrichment track). The backfill is anchor-derived (work-anchor->Confirmed, ISBN-only->Provisional, none->Pending, open-conflict->Conflict) with an audit query for ambiguous rows. Confirm the badge split + this anchor-derived mapping before this Track-2 step lands."
   - id: D-014
     topic: "Migration choreography for FOUR new crates — re-export shim during extraction, delete after"
-    choice: "During each Track-1 extraction, livrarr-metadata keeps a `pub use livrarr_providers::*;` (etc.) re-export shim so the ~37 dependent modules compile UNCHANGED mid-migration; the shim is deleted only after all consumers are switched to import directly from the new crate. This makes each extraction a small, independently-green commit rather than one big-bang rewrite (REQ-009). REVIEW-FIX r1 (codex MAJOR) — DELETION GATE: each extraction SLICE is not complete until its re-export shim is removed; enforced by AC-021 (a check that livrarr-metadata exposes NO `pub use livrarr_{providers,materialize}::` re-exports at slice end) + a direct-import scan. The shim is a TRANSIENT migration scaffold, never a permanent facade through which new code may import."
+    choice: "During each Track-1 extraction, livrarr-metadata keeps a `pub use livrarr_external_data::*;` (etc.) re-export shim so the ~37 dependent modules compile UNCHANGED mid-migration; the shim is deleted only after all consumers are switched to import directly from the new crate. This makes each extraction a small, independently-green commit rather than one big-bang rewrite (REQ-009). REVIEW-FIX r1 (codex MAJOR) — DELETION GATE: each extraction SLICE is not complete until its re-export shim is removed; enforced by AC-021 (a check that livrarr-metadata exposes NO `pub use livrarr_{external_data,materialize}::` re-exports at slice end) + a direct-import scan. The shim is a TRANSIENT migration scaffold, never a permanent facade through which new code may import."
     rationale: "A re-export shim is the standard Rust crate-split idiom: it decouples 'move the code' from 'update the imports', so each is a separately-revertible green step. codex MAJOR: without a deletion gate the monolith remains a permanent re-export facade and new code keeps importing through it — defeating the wall. The gate (AC-021) forces the shim gone before the slice counts as done."
     po_confirm: false
 
@@ -97,9 +97,9 @@ extraction_sequence:
     green_gate: "cargo build (DONE — exit 0, 50.9s)"
   - step: 1
     track: 1
-    name: "Extract livrarr-providers  [THE CANARY — REQ-011]"
-    action: "New crate; relocate the substrate modules + the contract types out of metadata lib.rs (see providers-port-design below); leave lookup_filtered + enrich_work as consumers; re-export shim (D-014)."
-    green_gate: "cargo build + cargo test green AND `cargo tree -p livrarr-providers` shows NO edge to metadata/identity/enrichment. GO -> step 2. NO-GO -> D-012 fallback + STOP."
+    name: "Extract livrarr-external-data  [THE CANARY — REQ-011]"
+    action: "New crate; relocate the substrate modules + the contract types out of metadata lib.rs (see external-data-port-design below); leave lookup_filtered + enrich_work as consumers; re-export shim (D-014)."
+    green_gate: "cargo build + cargo test green AND `cargo tree -p livrarr-external-data` shows NO edge to metadata/identity/enrichment. GO -> step 2. NO-GO -> D-012 fallback + STOP."
     canary: true
   - step: 2
     track: 1
@@ -119,7 +119,7 @@ extraction_sequence:
   - step: 5
     track: 2
     name: "Discovery re-home + GR ladder  [seam #5/#6 — REQ-016/018, #97]"
-    action: "Re-home lookup_filtered into livrarr-identity as the discovery policy over ProviderDiscovery; cut seam #6 (replace the concrete transport_cache reach with the providers cache capability — kills BT-004); build the GR access ladder (DiscoveryRung). Relocate english/async/bulk resolvers + llm_validator into livrarr-identity. Identity & enrichment are now non-dependent siblings (D-002) — verify by cargo tree."
+    action: "Re-home lookup_filtered into livrarr-identity as the discovery policy over ProviderDiscovery; cut seam #6 (replace the concrete transport_cache reach with the external-data cache capability — kills BT-004); build the GR access ladder (DiscoveryRung). Relocate english/async/bulk resolvers + llm_validator into livrarr-identity. Identity & enrichment are now non-dependent siblings (D-002) — verify by cargo tree."
     green_gate: "cargo build + cargo test green; `cargo tree` confirms identity ⊥ enrichment."
   - step: 6
     track: 2
@@ -128,18 +128,18 @@ extraction_sequence:
     green_gate: "cargo build + cargo test green; AC-015 (OL-anchored, cover-less work is Enriched + tagged) green."
 
 # ---------------------------------------------------------------------------
-# THE livrarr-providers PORT DESIGN (the canary's content) — REQ-005/008/011.
+# THE livrarr-external-data PORT DESIGN (the canary's content) — REQ-005/008/011.
 # ---------------------------------------------------------------------------
-providers_port_design:
-  new_crate: "crates/livrarr-providers"
+external_data_port_design:
+  new_crate: "crates/livrarr-external-data"
   cargo_deps: [livrarr-domain, livrarr-http, reqwest, serde, serde_json, governor, uuid, thiserror, tokio, chrono, quick-xml]
   relocate_out_of_metadata_lib_rs:
-    - { type: NormalizedWorkDetail, from: "livrarr-metadata/src/lib.rs", to: "livrarr-providers/src/types.rs", note: "THE canary type #1 (BT-003). Every consumer imports it from providers." }
-    - { type: ProviderOutcome, from: "livrarr-metadata/src/lib.rs", to: "livrarr-providers/src/types.rs", note: "THE canary type #2. Relocates with NormalizedWorkDetail." }
+    - { type: NormalizedWorkDetail, from: "livrarr-metadata/src/lib.rs", to: "livrarr-external-data/src/types.rs", note: "THE canary type #1 (BT-003). Every consumer imports it from external-data." }
+    - { type: ProviderOutcome, from: "livrarr-metadata/src/lib.rs", to: "livrarr-external-data/src/types.rs", note: "THE canary type #2. Relocates with NormalizedWorkDetail." }
   relocate_modules:
     [provider_client, openlibrary, hardcover, google_books, goodreads, audnexus, audible, llm_caller, transport_cache, language, parsers, normalize]
   NOT_relocated_REVIEW_FIX_r1:
-    - "provider_queue -> STAYS in livrarr-enrichment (DB-stateful: provider_queue.rs:33 imports livrarr_db::{DbError, ProviderRetryStateDb}; durable provider_retry_state). Moving it here would force providers->db and doom the canary (BLOCKER, both families)."
+    - "provider_queue -> STAYS in livrarr-enrichment (DB-stateful: provider_queue.rs:33 imports livrarr_db::{DbError, ProviderRetryStateDb}; durable provider_retry_state). Moving it here would force external-data->db and doom the canary (BLOCKER, both families)."
     - "llm_scraper -> livrarr-identity (GR scrape policy + prompts; not dumb-pipe mechanism — gemini #1)."
     - "title_cleanup -> livrarr-identity (matching heuristic; not dumb-pipe mechanism — gemini #1)."
   surfaces:
@@ -161,42 +161,42 @@ providers_port_design:
 # ---------------------------------------------------------------------------
 modules:
 
-  - name: canary-extract-providers
-    component: livrarr-providers
+  - name: canary-extract-external-data
+    component: livrarr-external-data
     responsibility: "Build step 1 — the falsifiable canary (REQ-011). Relocate the substrate + contract types; verify no back-edge."
     req_ids: [REQ-005, REQ-006, REQ-008, REQ-011]
     dependencies: [domain-established-identity]
     capability_survey:
-      - { capability: "Provider clients + dispatch", status: RELOCATE, location: "metadata provider_client.rs (ProviderClient::fetch), 6 client modules", note: "Move wholesale; behavior-preserving. The enum dispatch over providers (insight 8) moves with it." }
-      - { capability: "Contract types", status: RELOCATE, location: "metadata lib.rs NormalizedWorkDetail + ProviderOutcome", note: "THE canary. Move to providers/src/types.rs; metadata re-exports during migration (D-014)." }
+      - { capability: "Provider clients + dispatch", status: RELOCATE, location: "metadata provider_client.rs (ProviderClient::fetch), 6 client modules", note: "Move wholesale; behavior-preserving. The enum dispatch over external-data (insight 8) moves with it." }
+      - { capability: "Contract types", status: RELOCATE, location: "metadata lib.rs NormalizedWorkDetail + ProviderOutcome", note: "THE canary. Move to external-data/src/types.rs; metadata re-exports during migration (D-014)." }
       - { capability: "Discovery fan-out mechanism", status: EXISTS-RELOCATE, location: "metadata cover_alternatives.rs::fetch_internal_alternatives (join_all under 10s timeout, DISCARDS all but cover_url+title :38-54)", note: "REVIEW-FIX r1 (codex BLOCKER): the CANARY MOVES THIS CODE AS-IS (behavior-preserving, REQ-009) — it does NOT change the discard behavior. Generalizing the fan-out to KEEP the full NormalizedWorkDetail (stop discarding, REQ-017) is a Track-2 DISCOVERY-FEATURE change deferred to extraction step 5, not the canary." }
-      - { capability: "Rate limit + breaker", status: RELOCATE, location: "governor GCRA limiter + the circuit breaker", note: "Move into providers; both consumers share them (REQ-022)." }
+      - { capability: "Rate limit + breaker", status: RELOCATE, location: "governor GCRA limiter + the circuit breaker", note: "Move into external-data; both consumers share them (REQ-022)." }
     public_api:
       functions:
-        - name: "providers-extraction (the canary procedure)"
+        - name: "external-data-extraction (the canary procedure)"
           signature: "-- workspace surgery, not a runtime fn"
           pseudocode:
-            - "Create crates/livrarr-providers (Cargo.toml: deps per providers_port_design.cargo_deps). Add to the workspace members."
-            - "MOVE NormalizedWorkDetail + ProviderOutcome from metadata/src/lib.rs -> providers/src/types.rs."
-            - "MOVE the relocate_modules list -> providers/src/. Fix their internal imports (now intra-providers)."
-            - "In metadata/src/lib.rs add `pub use livrarr_providers::{NormalizedWorkDetail, ProviderOutcome, ...};` re-export shim (D-014) so lookup_filtered/enrich_work and the other ~37 modules compile UNCHANGED."
-            - "cargo build. If a back-edge is forced (providers wants LookupResult/EnrichmentContext/a queue trait from metadata): RELOCATE that type to livrarr-domain (D-012 (a)) and retry — expected, not failure."
-            - "GO GATE: cargo build + cargo test green AND `cargo tree -p livrarr-providers` lists NONE of livrarr-metadata, livrarr-identity, livrarr-enrichment, OR livrarr-db (REVIEW-FIX r2: livrarr-db MUST be in the forbidden set — a providers->db edge is the canary-killer). -> commit 'extract livrarr-providers (canary GO)'."
-            - "NO-GO: a genuine logic cycle remains (providers must CALL metadata) -> STOP, leave worktree, write 'CANARY NO-GO' + the exact edge, recommend plan-A (D-012 (b))."
+            - "Create crates/livrarr-external-data (Cargo.toml: deps per external_data_port_design.cargo_deps). Add to the workspace members."
+            - "MOVE NormalizedWorkDetail + ProviderOutcome from metadata/src/lib.rs -> external-data/src/types.rs."
+            - "MOVE the relocate_modules list -> external-data/src/. Fix their internal imports (now intra-external-data)."
+            - "In metadata/src/lib.rs add `pub use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome, ...};` re-export shim (D-014) so lookup_filtered/enrich_work and the other ~37 modules compile UNCHANGED."
+            - "cargo build. If a back-edge is forced (external-data wants LookupResult/EnrichmentContext/a queue trait from metadata): RELOCATE that type to livrarr-domain (D-012 (a)) and retry — expected, not failure."
+            - "GO GATE: cargo build + cargo test green AND `cargo tree -p livrarr-external-data` lists NONE of livrarr-metadata, livrarr-identity, livrarr-enrichment, OR livrarr-db (REVIEW-FIX r2: livrarr-db MUST be in the forbidden set — a external-data->db edge is the canary-killer). -> commit 'extract livrarr-external-data (canary GO)'."
+            - "NO-GO: a genuine logic cycle remains (external-data must CALL metadata) -> STOP, leave worktree, write 'CANARY NO-GO' + the exact edge, recommend plan-A (D-012 (b))."
           call_annotations:
-            - { type: RELOCATE, call: "ProviderClient::fetch + the 6 clients", target: "livrarr-metadata::provider_client -> livrarr-providers" }
-            - { type: RELOCATE, call: "NormalizedWorkDetail / ProviderOutcome", target: "livrarr-metadata::lib -> livrarr-providers::types" }
-          invariants: ["Behavior-preserving: no logic edited, only relocated (REQ-009).", "No providers->{metadata,identity,enrichment} edge (REQ-006) — the GO condition."]
+            - { type: RELOCATE, call: "ProviderClient::fetch + the 6 clients", target: "livrarr-metadata::provider_client -> livrarr-external-data" }
+            - { type: RELOCATE, call: "NormalizedWorkDetail / ProviderOutcome", target: "livrarr-metadata::lib -> livrarr-external-data::types" }
+          invariants: ["Behavior-preserving: no logic edited, only relocated (REQ-009).", "No external-data->{metadata,identity,enrichment} edge (REQ-006) — the GO condition."]
           tdd:
-            - "RED->GREEN (AC-004): a test in livrarr-enrichment does `use livrarr_providers::NormalizedWorkDetail;` and compiles; the reverse import in providers does NOT exist."
-            - "RED->GREEN (AC-005): `cargo tree -p livrarr-providers | grep -E 'livrarr-(metadata|identity|enrichment|db)'` is EMPTY (the canary assertion — db INCLUDED, REVIEW-FIX r2)."
+            - "RED->GREEN (AC-004): a test in livrarr-enrichment does `use livrarr_external_data::NormalizedWorkDetail;` and compiles; the reverse import in external-data does NOT exist."
+            - "RED->GREEN (AC-005): `cargo tree -p livrarr-external-data | grep -E 'livrarr-(metadata|identity|enrichment|db)'` is EMPTY (the canary assertion — db INCLUDED, REVIEW-FIX r2)."
             - "GREEN (AC-007): the pre-extraction test set stays green post-extraction."
 
   - name: cut-status-two-state-machines
     component: livrarr-enrichment
     responsibility: "Cut seams #2 + #4 (REQ-014/019). Split the overloaded EnrichmentStatus into an identity track (domain IdentityState) + an enrichment track (Unenriched/Enriched/Thin). Heal the one-way violation: enrich_work stops writing identity-Conflict. Relocate the merge engine into livrarr-enrichment."
     req_ids: [REQ-002, REQ-014, REQ-019]
-    dependencies: [domain-established-identity, providers-substrate]
+    dependencies: [domain-established-identity, external-data-substrate]
     capability_survey:
       - { capability: "Overloaded status enum", status: EXISTS-SPLIT, location: "metadata lib.rs EnrichmentStatus (Unenriched/Enriched/Failed/Conflict/IdentityPending) + merge_impl step-6 (lib.rs:886) classification", note: "Split: Conflict+IdentityPending -> domain IdentityState (identity track); keep Unenriched/Enriched; ADD Thin. Cut cover from the Enriched test (REQ-019)." }
       - { capability: "One-way violation site (seam #2)", status: EXISTS-CUT, location: "enrich_work -> EnrichmentStatus::Conflict writeback", note: "REVIEW-FIX r1 (both families BLOCKER): enrichment STILL DETECTS remote contradictions but must not WRITE identity state. Replacement path: EnrichmentService::enrich returns EnrichOutcome::Contradiction(IdentityContradiction) (domain event); livrarr-server catches it and invokes DiscoveryService (identity) to set state->Conflict transactionally. Without this path, conflicts would be silently dropped. Enrichment's own track emits only Enriched/Thin." }
@@ -219,12 +219,12 @@ modules:
 
   - name: cut-discovery-and-gr-ladder
     component: livrarr-identity
-    responsibility: "Cut seams #5 + #6 (REQ-016/018, #97). Re-home lookup_filtered as the identity discovery policy over ProviderDiscovery; replace the concrete transport_cache reach (BT-004) with the providers cache capability; build the GR access ladder. Relocate english/async/bulk resolvers + llm_validator."
+    responsibility: "Cut seams #5 + #6 (REQ-016/018, #97). Re-home lookup_filtered as the identity discovery policy over ProviderDiscovery; replace the concrete transport_cache reach (BT-004) with the external-data cache capability; build the GR access ladder. Relocate english/async/bulk resolvers + llm_validator."
     req_ids: [REQ-008, REQ-016, REQ-018]
-    dependencies: [domain-established-identity, providers-substrate]
+    dependencies: [domain-established-identity, external-data-substrate]
     capability_survey:
       - { capability: "Inline discovery (seam #5)", status: EXISTS-REHOME, location: "work_service.rs:1378-1564 lookup_filtered (concrete self.lookup_google_books/openlibrary/hardcover/goodreads)", note: "Re-home into livrarr-identity; the concrete self.lookup_* calls become ProviderDiscovery::discover. THE #97 fix (single-provider-first-hit -> fan-out)." }
-      - { capability: "Concrete cache reach (seam #6, BT-004)", status: EXISTS-CUT, location: "work_service.rs:2640 transport_cache() = self.resolver...cache (Option<Arc<LiveEnglishIdentityResolver>>)", note: "Replace the concrete-resolver reach with providers' cache_warm/cache_take (REQ-008) — the leaky boundary becomes a clean capability." }
+      - { capability: "Concrete cache reach (seam #6, BT-004)", status: EXISTS-CUT, location: "work_service.rs:2640 transport_cache() = self.resolver...cache (Option<Arc<LiveEnglishIdentityResolver>>)", note: "Replace the concrete-resolver reach with external-data's cache_warm/cache_take (REQ-008) — the leaky boundary becomes a clean capability." }
       - { capability: "GR resolution", status: EXISTS-GENERALIZE, location: "provider_client.rs:766-807 GR scrape-search + LLM disambiguation; is_anti_bot_page", note: "Build the DiscoveryRung ladder around it; auto_complete JSON rung first; Blocked transient not terminal (REQ-018); verify gr_key via /book/show." }
     public_api:
       functions:
@@ -232,14 +232,14 @@ modules:
           signature: "async fn discover_candidates(&self, user_id: UserId, seed: &WorkSeed, tier: LatencyTier) -> Vec<Candidate>"
           pseudocode:
             - "Select providers per seed+tier+language (the existing REQ-008 matrix, now in identity)."
-            - "Fan out via ProviderDiscovery::discover (NOT the old concrete self.lookup_* — seam #5 cut). Each result warms providers' cache_warm (REQ-008/017) — NO concrete transport_cache reach (seam #6 cut)."
+            - "Fan out via ProviderDiscovery::discover (NOT the old concrete self.lookup_* — seam #5 cut). Each result warms external-data's cache_warm (REQ-008/017) — NO concrete transport_cache reach (seam #6 cut)."
             - "For Goodreads, walk the DiscoveryRung ladder: auto_complete JSON -> HTML /search -> LLM-locator -> give-up; Blocked escalates (transient, REQ-018); persist gr_key only after /book/show verify (REQ-024 carried)."
             - "De-facto identity (REQ-016): an ISBN resolving to >=1 provider but no work anchor -> settle PROVISIONAL by isbn_13 (REVIEW-FIX r2 — Provisional, not Confirmed; upgrades to Confirmed when a work anchor appears), NOT Pending."
           call_annotations:
             - { type: RELOCATE, call: "lookup_filtered body", target: "livrarr-metadata work_service.rs:1378-1564 -> livrarr-identity" }
-            - { type: NEW, call: "providers.cache_warm(provider, key, payload)", target: "livrarr-providers cache (replaces seam #6 concrete reach)" }
+            - { type: NEW, call: "external_data.cache_warm(provider, key, payload)", target: "livrarr-external-data cache (replaces seam #6 concrete reach)" }
             - { type: NEW, call: "DiscoveryRung ladder", target: "livrarr-identity (the GR forcing function)" }
-          invariants: ["#97: discovery is multi-provider fan-out, never single-provider-first-hit.", "No concrete resolver-cache reach (BT-004 healed) — cache is the providers capability (REQ-008)."]
+          invariants: ["#97: discovery is multi-provider fan-out, never single-provider-first-hit.", "No concrete resolver-cache reach (BT-004 healed) — cache is the external-data capability (REQ-008)."]
           tdd:
             - "RED (AC-001 carried / #97): a book on HC but not OL, imported by ISBN, yields a candidate (not zero)."
             - "RED (AC-012): an ISBN resolving only to Google Books -> Provisional by isbn_13 (REVIEW-FIX r2), not Pending, not Confirmed (REQ-016)."
@@ -292,17 +292,17 @@ modules:
 # ---------------------------------------------------------------------------
 # Self-check targets (the plan's 'every REQ maps to a module').
 req_coverage_note: >
-  REQ-001/002/006 -> canary-extract-providers + the dependency_graph (IR v1).
+  REQ-001/002/006 -> canary-extract-external-data + the dependency_graph (IR v1).
   REQ-003 -> cut-cover-decouple + D-003/D-011 (materialize decoupled).
-  REQ-004/005/008 -> providers_port_design + canary-extract-providers.
+  REQ-004/005/008 -> external_data_port_design + canary-extract-external-data.
   REQ-007 -> domain-established-identity (IR v1) + D-010.
-  REQ-009/010/011 -> extraction_sequence + canary-extract-providers.
+  REQ-009/010/011 -> extraction_sequence + canary-extract-external-data.
   REQ-012/013 -> domain-established-identity (monotonic anchors) [Track-2 EDIT path detail design-stage].
   REQ-014/019 -> cut-status-two-state-machines + cut-cover-decouple.
   REQ-015/016 -> cut-discovery-and-gr-ladder (gating + de-facto identity).
-  REQ-017 -> providers_port_design.cache (warm/take).
+  REQ-017 -> external_data_port_design.cache (warm/take).
   REQ-018 -> cut-discovery-and-gr-ladder (DiscoveryRung).
   REQ-020 -> cut-bug2-id-invalidation.
   REQ-021 -> cut-cover-decouple (generation-delta).
-  REQ-022 -> canary-extract-providers (GCRA+breaker relocate).
+  REQ-022 -> canary-extract-external-data (GCRA+breaker relocate).
   REQ-023/024 -> design-stage (cache retention; clean-overwrite) — flagged spec Q-002 + noted in enrichment-spine.
