@@ -28,7 +28,7 @@ Estimated: a focused half-day. Steps 1–2 are trivial; step 3 is the real work;
 
 - **`llm_scraper` must be SPLIT**, not moved wholesale to identity — its mechanical helpers are provider substrate (ir-v1/v2 module map should reflect mechanism→providers, policy→identity).
 - **`MetadataConfig` is already a domain type** (`livrarr_domain::settings`) — the providers crate consumes it from `domain`, no relocation needed. (Strengthens REQ-006: the apparent db edge was a re-export artifact.)
-- **`ProviderClient::fetch`'s `EnrichmentContext` param is mostly unused** (`_ctx`) — confirms D-012's `FetchRequest` swap is low-risk behaviorally.
+- **`EnrichmentContext` is "theater" for identity's purposes** (PO-confirmed 2026-06-03). Its only functional field is `mode` (Background/Manual/HardRefresh), and every site that *reads* it is **merge logic** — merge-deferral + immediate-vs-deferred + hard-refresh-overwrite (`lib.rs:858-859`, `lib.rs:1652`, `provider_queue.rs:544-545`). That is an **enrichment** concern, not a fetch/identity one; the provider clients themselves take it as `_ctx` (discarded). So: `FetchRequest` carries only **{provider, key, language}**; `mode` **STAYS in enrichment** (it must NOT move to providers or domain — that would scatter enrichment logic into the foundation, the reason to reject D-012 option (b)). `priority` is labeled a "hint" and nothing branches on it — likely droppable. This makes the Step-3 refactor *behavior-preserving* for identity and confined to enrichment's call sites.
 - `transport_cache` is already clean (only `livrarr_domain` + `NormalizedWorkDetail`) — moves with zero edits once the contract types relocate.
 
 ## Why not built tonight (honest)

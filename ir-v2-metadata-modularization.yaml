@@ -154,7 +154,7 @@ providers_port_design:
   cache:
     key: "(MetadataProvider, provider_key: String)   # NOT work_id (REQ-008)"
     api: ["cache_warm(provider, key, payload)", "cache_take(provider, key) -> Option<NormalizedWorkDetail>"]
-    retention: "TTL or reference-count eviction (REQ-023) — mechanics design-stage (spec Q-002)."
+    retention: "CONSUME-ONCE / pass-scoped (PO 2026-06-03): evict on consume (canonical data persisted to the Work DB); short safety TTL reaps abandoned passes. No long-lived cache (REQ-023, spec Q-002 resolved)."
 
 # ---------------------------------------------------------------------------
 # PER-SEAM CUT PSEUDOCODE (the Track-2 forcing functions).

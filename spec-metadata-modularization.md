@@ -77,10 +77,10 @@ This feature makes the boundaries **explicit and compiler-enforced**: four crate
 
 - **REQ-012**: **Identity anchors are monotonic.** ADD (auto) appends a *new* anchor type and never touches an existing one; CONFLICT (auto) raises a contradicting anchor for the user and never silently changes an established one; EDIT (user) is the **only** path that mutates an established anchor. (Generalizes WCC REQ-028 / REQ-020 to the crate boundary.)
 - **REQ-013**: **A user ID-edit re-fires enrichment.** The EDIT path is the operational sequence: (1) the user changes an established anchor; (2) `livrarr-identity` validates + writes the new anchor (the only sanctioned mutation of an established anchor) and **bumps the identity `generation`**; (3) the generation bump re-fires the enrichment gate (REQ-015) so enrichment re-runs against the corrected identity (the old metadata may belong to the wrong book); (4) the re-merge **preserves user-set field values** (Principle: User > Provider > System) — a provider value never overwrites a user-set field, even on a forced re-enrichment. ADD/CONFLICT (the auto paths) MUST NOT bump generation in a way that mutates an established anchor — only EDIT does (REQ-012). *(This operational design backs AC-009; the full user-ID-edit UX is a Track-2 feature.)*
-- **REQ-014**: **Two independent state machines replace the one overloaded `EnrichmentStatus`.** **Identity:** `Pending → { Confirmed | Provisional | Conflict | NeedsReview }`. **Enrichment:** `Unenriched → { Enriched | Thin }`. This structurally kills the conflation between *identity*-NeedsReview ("which book is this?") and *enrichment*-Thin ("we know the book, found no info") — two different problems, two different user actions, two tracks. (Re-homes WCC REQ-026/030 status work as the **two-state-machine** split.)
+- **REQ-014**: **Two independent state machines replace the one overloaded `EnrichmentStatus`.** **Identity:** `Pending → { Confirmed | Provisional | Conflict | NeedsReview }`. **Enrichment:** `Unenriched → { Enriched | Thin }`. This structurally kills the conflation between *identity*-NeedsReview ("which book is this?") and *enrichment*-Thin ("we know the book, found no info") — two different problems, two different user actions, two tracks. (Re-homes WCC REQ-026/030 status work as the **two-state-machine** split.) **User-facing labels + the "Book Information" tab layout: see §3.**
 - **REQ-015**: **Enrichment gates on a deterministic addressing key (Q4 gating).** Display (best-in-hand) is always shown and never gated; **enrich** (the provider fan-out) runs per the Identity-state table: **Confirmed → enrich; Provisional (ISBN resolved, no work anchor) → enrich; Pending (fuzzy title+author, no key) → hold (converge first); Conflict → pause (user resolves); NeedsReview → hold (user resolves).** Enrichment re-fires on an identity `generation` bump (a new anchor → better providers; a user edit → redo). This makes BT-005 (today's "enrich Pending works") an explicit, corrected behavior delta.
 - **REQ-016**: **De-facto identity — an ISBN-only resolution is Tier-A `Provisional` identity, not Pending.** An ISBN that resolves to ≥1 provider but yields no work anchor (e.g. only Google Books — no work anchor, ST/AC-019 intact) MUST settle as a **`Provisional`** identity keyed on `isbn_13` (Tier-A, no confirmation prompt — `Provisional` is exactly "ISBN resolved, no work anchor" per REQ-015, and it enriches), NOT a `Pending`/identity-pending limbo. Background convergence **upgrades it to `Confirmed`** when a work anchor later appears. A GB `volumeId` is **never** an identity. (Re-homes WCC D-018; round-2 review: aligned to `Provisional` so REQ-015/REQ-016/D-013 agree.)
-- **REQ-017**: **Payloads are never discarded; Enrichment tops up only what's missing.** Identity's discovery fan-out warms the `(provider, provider-key)` cache (REQ-008); Enrichment reads it and issues a network query only for fields not already in hand — discovery and enrichment MUST NOT each independently re-fetch the same provider for the same data. (Generalizes WCC REQ-014/015 across the new crate seam.)
+- **REQ-017**: **Payloads are retained for the pass; Enrichment tops up only what's missing.** Identity's discovery fan-out warms the `(provider, provider-key)` cache (REQ-008); Enrichment reads it and issues a network query only for fields not already in hand — discovery and enrichment MUST NOT each independently re-fetch the same provider for the same data within a pass. Payloads are not discarded *prematurely* (not before enrichment consumes them); once the pass persists the canonical data they are evicted (REQ-023). (Generalizes WCC REQ-014/015 across the new crate seam.)
 
 ### Track-2 feature seams (the forcing functions)
 
@@ -92,16 +92,27 @@ This feature makes the boundaries **explicit and compiler-enforced**: four crate
 ### Provider substrate retention
 
 - **REQ-022**: **The resilience machinery is reused, not rewritten** (Principle 5), and partitioned by statefulness: the **stateless** GCRA rate-limiter and circuit-breaker live in `livrarr-providers` (the substrate exposes them; consumers do not re-implement pacing or breaking). The **stateful, DB-backed** retry queue (`provider_queue`, durable `provider_retry_state`) and the CAS-merge mechanics live in `livrarr-enrichment`/`livrarr-db` — NOT in the substrate (round-1 review: their `livrarr-db` dependency must not enter `livrarr-providers`, REQ-006).
-- **REQ-023**: **Cache retention is bounded.** "Never discard payloads" (REQ-017) requires a retention policy: stale, unreferenced `(provider, provider-key)` entries MUST be evictable (TTL or reference-count) so the cache cannot grow without bound. (Mechanics are design-stage.)
+- **REQ-023**: **The payload cache is consume-once / pass-scoped** (PO-clarified 2026-06-03). Its sole purpose is to avoid repeated provider lookups *within a single identity→enrichment pass*: discovery warms it, enrichment consumes it, and once the pass persists the canonical data to the Work's DB record the entry MUST be **evicted** (the "good" data now lives in the DB, not the cache). A short safety **TTL** reaps entries from passes that abandon before consuming. There is therefore **no long-lived cache and no unbounded-growth problem** — the cache holds only in-flight passes. (Resolves the former design-stage retention question.)
 - **REQ-024**: **Provisional write-amplification is a clean overwrite.** Enriching a `Provisional` Work fills an edition record that may later upgrade to `Confirmed`; when the identity `generation` bumps, the merge MUST do a **clean overwrite** (no orphaned provenance rows) rather than accreting stale provenance. (Mechanics are design-stage.)
 
 ## 3. UI/Interface Design
 
-This feature is overwhelmingly an internal re-architecture; the user-visible surface is inherited from the folded Track-2 features, not new:
+The two-state-machine split (REQ-014) gets a concrete home (PO-decided 2026-06-03): the book detail view's **"Book Information"** tab — **renamed from "Metadata"** so the word "metadata" disappears from the user's view. It carries **two stacked sections**, each owning its own status badge shown **in context under its header** (the header supplies the "what is Pending/Confirmed" that a bare floating badge lacks):
 
-- The **two-state-machine** split (REQ-014) surfaces an identity track (pending/confirmed/provisional/conflict/needs-review badges) distinct from an enrichment track (unenriched/enriched/thin) — replacing the single conflated `EnrichmentStatus` badge.
-- The **cover-decouple** (REQ-019) means a cover may populate *after* a Work already shows as `Enriched` — the fast-then-upgrade pattern, already established.
-- No new screens. UI mockups deferred to the design stage only if the two-track badge surface needs visual definition.
+- **Identity** section — IDs / edition / match info, with the identity-track badge:
+  - **Pending** — still matching; only a fuzzy title/author guess so far
+  - **Confirmed** — locked to a master catalog record
+  - **Provisional** — identified by ISBN (barcode); no master record yet, may later upgrade to Confirmed
+  - **Conflict** — sources disagree; needs the user
+  - **Needs Review** — couldn't match; needs the user
+- **Details** section — description / genres / series / cover, with the details-track badge:
+  - **Pending** — details not fetched yet
+  - **Enriched** — real info present (≥1 meaningful field; the cover is a separate lazy asset per REQ-019, so "Enriched" does **not** require a cover)
+  - **Sparse** — known book, but providers returned almost nothing (a *settled* outcome, not "still loading")
+
+"Pending" intentionally appears in **both** tracks — the section header disambiguates it (PO design call). These badge strings are the canonical **user-facing** labels; internal enum names may differ (e.g. the details-track `Unenriched`→"Pending", `Thin`→"Sparse").
+
+The cover-decouple (REQ-019) means a cover may populate *after* the Details badge already reads "Enriched" (fast-then-upgrade). No other new screens; an HTML mockup of the two-section tab is the one design-stage UI artifact to produce.
 
 ## 4. Non-Requirements
 
@@ -119,7 +130,7 @@ Explicit scope exclusions:
 | ID | Question | Status | Resolution |
 |----|----------|--------|------------|
 | Q-001 | Does `livrarr-identity` own the convergence (async/bulk) resolver, or does that stay a Background-tier service composed in `livrarr-server`? (Bears on whether the resolver-cache leak BT-004 is cut at the identity boundary or the server boundary.) | open | PO leaning: identity owns it (convergence is an identity concern, Decision 1). |
-| Q-002 | Cache retention policy (REQ-023): TTL, reference-count, or LRU-bounded? | open | (design-stage) |
+| Q-002 | Cache retention policy (REQ-023): TTL, reference-count, or LRU-bounded? | resolved | PO 2026-06-03: none of those — the cache is **consume-once / pass-scoped**. Evict on consume (canonical data persisted to DB); short safety TTL for abandoned passes. No long-lived cache. |
 | Q-003 | Does `EstablishedIdentity` live as a brand-new type in `domain`, or is the existing `IdentityState`/`CapturedIdentity` (already federated by WCC) promoted to *be* the contract? | open | Leaning: promote the existing federated `CapturedIdentity` (avoids a parallel type — DRY, WCC D-001). |
 | Q-004 | Sequencing of the three Track-2 feature-cuts relative to each other (discovery-first vs cover-first) once the canary is GO. | open | (post-canary) |
 
@@ -129,7 +140,7 @@ Explicit scope exclusions:
 - **[CANARY]** — provable by the first move (the `livrarr-providers` extraction). The ONLY acceptance this cycle commits to landing: **AC-004, AC-005, AC-007**.
 - **[TRACK-1]** — the behavior-preserving foundation extractions (materialize, contract): **AC-001, AC-002, AC-003, AC-006, AC-018, AC-021**.
 - **[TRACK-2]** — delivered incrementally as each feature-cut lands (status / discovery / cover): **AC-008..AC-017**.
-- **[DEFERRED]** — design-stage; explicitly out of Phase-1 acceptance: **AC-019** (cache retention) and **AC-020** (clean-overwrite) — see REQ-023/024.
+- **[DEFERRED]** — design-stage; explicitly out of Phase-1 acceptance: **AC-020** (clean-overwrite) — see REQ-024. *(AC-019 resolved 2026-06-03 → now TRACK-2.)*
 
 - [ ] **AC-001** [TRACK-1] (REQ-001): The workspace contains four new library crates — `livrarr-providers`, `livrarr-identity`, `livrarr-enrichment`, `livrarr-materialize` — and an `EstablishedIdentity` contract type in `livrarr-domain`; each compiles as a workspace member.
 - [ ] **AC-002** [CANARY/TRACK-1] (REQ-002, REQ-006): `cargo tree -p livrarr-identity` does not list `livrarr-enrichment`, and `cargo tree -p livrarr-enrichment` does not list `livrarr-identity`; `cargo tree -p livrarr-providers` lists **none** of `livrarr-metadata`, `livrarr-identity`, `livrarr-enrichment`, **or `livrarr-db`**. The one-way graph is machine-verified.
@@ -149,6 +160,6 @@ Explicit scope exclusions:
 - [ ] **AC-016** (REQ-020): A Work whose `asin` is resolved by Hardcover/Google Books *after* Audnexus terminally returned `NotFound` re-queries Audnexus on the next background pass and converges — with no manual refresh.
 - [ ] **AC-017** (REQ-021): A materialize pass rewrites a file only when `merge_generation > tag_generation`; a second pass with no generation change is a no-op.
 - [ ] **AC-018** (REQ-022): The GCRA rate-limiter and circuit-breaker live in `livrarr-providers` and are invoked by both Identity discovery and Enrichment fetch — neither consumer re-implements pacing.
-- [ ] **AC-019** [DEFERRED — design-stage, out of Phase-1 acceptance] (REQ-023): A stale, unreferenced `(provider, provider-key)` cache entry is evicted by the retention policy; the cache size is bounded under sustained discovery load (verified by a retention test).
+- [ ] **AC-019** [TRACK-2] (REQ-023): A cache entry is evicted once its identity→enrichment pass consumes it (canonical data persisted to the Work); an entry from a pass that abandons before consuming is reaped by the safety TTL — so the cache holds only in-flight passes (verified by a consume-once + TTL test).
 - [ ] **AC-020** [DEFERRED — design-stage, out of Phase-1 acceptance] (REQ-024): Re-enriching a `Provisional` Work after its `generation` bumps to `Confirmed` leaves no orphaned provenance rows (clean overwrite).
 - [ ] **AC-021** [TRACK-1] (REQ-010, D-014 deletion gate): At the end of each extraction slice, `livrarr-metadata` exposes **no** `pub use livrarr_{providers,materialize,identity,enrichment}::` re-export shims (verified by a direct-import scan) — the migration scaffold is removed, not left as a permanent facade.
