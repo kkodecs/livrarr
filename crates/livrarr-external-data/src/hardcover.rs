@@ -4,7 +4,7 @@
 //! can serve the legacy direct path AND `ProviderClient::Hardcover` behind
 //! `DefaultProviderQueue`. Behavior unchanged from the original.
 
-use livrarr_db::MetadataConfig;
+use livrarr_domain::settings::MetadataConfig;
 use livrarr_http::HttpClient;
 use serde_json::Value;
 
@@ -460,7 +460,7 @@ pub async fn query_hardcover_by_isbn(
     http: &HttpClient,
     isbn: &str,
     token: &str,
-    _metadata_cfg: &livrarr_db::MetadataConfig,
+    _metadata_cfg: &livrarr_domain::settings::MetadataConfig,
 ) -> Result<Option<HardcoverResult>, HardcoverError> {
     let query = r#"query SearchBooks($query: String!) {
         search(query: $query, query_type: "books", per_page: 10) {

@@ -43,13 +43,8 @@ impl PreaddCoverService for LivePreaddCoverService {
                 let work = temp_work.clone();
                 let provider = *provider;
                 handles.push(tokio::spawn(async move {
-                    let ctx = crate::EnrichmentContext {
-                        mode: crate::EnrichmentMode::Background,
-                        priority: livrarr_domain::RequestPriority::Normal,
-                    };
                     let result =
-                        tokio::time::timeout(Duration::from_secs(10), client.fetch(&work, &ctx))
-                            .await;
+                        tokio::time::timeout(Duration::from_secs(10), client.fetch(&work)).await;
                     (provider, result)
                 }));
             }

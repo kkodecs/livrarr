@@ -81,7 +81,6 @@ impl AudibleCatalogClient {
     pub async fn fetch(
         &self,
         work: &livrarr_domain::Work,
-        _ctx: &crate::EnrichmentContext,
     ) -> crate::ProviderOutcome<NormalizedWorkDetail> {
         // ASIN direct lookup
         if let Some(asin) = work.asin.as_deref().filter(|s| !s.is_empty()) {

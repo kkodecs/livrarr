@@ -1583,7 +1583,7 @@ where
 
         let raw_html = String::from_utf8_lossy(&resp.body);
 
-        if crate::llm_scraper::is_anti_bot_page(&raw_html) {
+        if crate::provider_util::is_anti_bot_page(&raw_html) {
             tracing::warn!("Goodreads search: anti-bot page detected");
             return Ok(vec![]);
         }

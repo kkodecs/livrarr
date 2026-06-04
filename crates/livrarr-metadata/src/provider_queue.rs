@@ -426,14 +426,12 @@ where
         // bucket BEFORE invoking client.fetch. Permit drops on task return / panic.
         let mut set: JoinSet<(MetadataProvider, DispatchedOutcome)> = JoinSet::new();
         let work_arc = Arc::new(work.clone());
-        let ctx_arc = Arc::new(context.clone());
         for d in &to_dispatch {
             let provider = d.provider;
             let client = d.client.clone();
             let rate_limiter = d.rate_limiter.clone();
             let concurrency = d.concurrency.clone();
             let work_arc = work_arc.clone();
-            let ctx_arc = ctx_arc.clone();
             set.spawn(async move {
                 // Concurrency permit first (held for the full call duration).
                 let _permit = concurrency.acquire_owned().await;
@@ -447,7 +445,7 @@ where
                         }),
                     );
                 }
-                let outcome = client.fetch(&work_arc, &ctx_arc).await;
+                let outcome = client.fetch(&work_arc).await;
                 (provider, DispatchedOutcome::Returned(outcome))
             });
         }

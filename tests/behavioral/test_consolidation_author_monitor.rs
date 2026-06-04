@@ -172,6 +172,7 @@ impl WorkService for StubWorkService {
 
     async fn lookup_filtered(
         &self,
+        _user_id: UserId,
         req: LookupRequest,
         _raw: bool,
     ) -> Result<LookupResponse, WorkServiceError> {
@@ -183,6 +184,14 @@ impl WorkService for StubWorkService {
             raw_count: count,
             raw_available: false,
         })
+    }
+
+    async fn eager_match_by_author(
+        &self,
+        _user_id: UserId,
+        _queries: Vec<EagerQuery>,
+    ) -> Result<Vec<(usize, LookupResult)>, WorkServiceError> {
+        Ok(vec![])
     }
 
     async fn search_works(

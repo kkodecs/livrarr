@@ -13,11 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-
 pub mod async_resolver;
-pub mod audible;
-pub mod audnexus;
 pub mod author_service;
 pub mod bulk_resolver;
 pub mod cover;
@@ -26,40 +22,40 @@ pub mod cover_gate;
 pub mod cover_resolution;
 pub mod english_identity_resolver;
 pub mod enrichment_workflow_service;
-pub mod goodreads;
-pub mod google_books;
-pub mod hardcover;
 pub mod http_llm;
-pub mod language;
 pub mod list_service;
-pub mod live_config;
-pub mod llm_caller_service;
 pub mod llm_ewl;
 pub mod llm_scraper;
 pub mod llm_validator;
-pub mod normalize;
-pub mod openlibrary;
-pub mod parsers;
 pub mod preadd_cover_service;
-pub mod provider_client;
 pub mod provider_queue;
 pub mod series_query_service;
 pub mod series_service;
 pub mod title_cleanup;
-pub mod transport_cache;
 pub mod work_service;
 
 pub mod author_monitor_workflow;
 pub mod provenance;
 pub mod rss_sync_workflow;
 
-pub use google_books::GoogleBooksClient;
-pub use provider_client::{
-    AudnexusClient, GoodreadsClient, HardcoverClient, OpenLibraryClient, ProviderClient,
-    StubProviderClient,
-};
+#[cfg(test)]
+mod provider_queue_tracer_tests;
+
 pub use provider_queue::{
     ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
+};
+
+// Compatibility shim (D-014): re-export `livrarr-external-data`'s public surface
+// under the paths dependents currently import from `livrarr_metadata`. Removed
+// once consumers import from `livrarr_external_data` directly (AC-021).
+pub use livrarr_external_data::{
+    audible, audnexus, goodreads, google_books, hardcover, language, live_config,
+    llm_caller_service, normalize, openlibrary, parsers, provider_client, provider_util,
+    transport_cache,
+};
+pub use livrarr_external_data::{
+    AudnexusClient, GoodreadsClient, GoogleBooksClient, HardcoverClient, NormalizedWorkDetail,
+    OpenLibraryClient, ProviderClient, ProviderOutcome, StubProviderClient,
 };
 
 // =============================================================================
@@ -234,118 +230,6 @@ pub enum EnrichmentMode {
     Background,
     Manual,
     HardRefresh,
-}
-
-/// TEMP(pk-tdd): normalized provider output — common schema for all metadata providers.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct NormalizedWorkDetail {
-    pub title: Option<String>,
-    pub subtitle: Option<String>,
-    pub original_title: Option<String>,
-    pub author_name: Option<String>,
-    pub description: Option<String>,
-    pub year: Option<i32>,
-    pub series_name: Option<String>,
-    pub series_position: Option<f64>,
-    pub genres: Option<Vec<String>>,
-    pub language: Option<String>,
-    pub page_count: Option<i32>,
-    pub duration_seconds: Option<i32>,
-    pub publisher: Option<String>,
-    pub publish_date: Option<String>,
-    pub hc_key: Option<String>,
-    pub gr_key: Option<String>,
-    pub ol_key: Option<String>,
-    pub isbn_13: Option<String>,
-    pub asin: Option<String>,
-    pub narrator: Option<Vec<String>>,
-    pub narration_type: Option<NarrationType>,
-    pub abridged: Option<bool>,
-    pub rating: Option<f64>,
-    pub rating_count: Option<i32>,
-    pub cover_url: Option<String>,
-    pub additional_isbns: Vec<String>,
-    pub additional_asins: Vec<String>,
-}
-
-impl From<livrarr_domain::services::SourceProviderData> for NormalizedWorkDetail {
-    fn from(src: livrarr_domain::services::SourceProviderData) -> Self {
-        Self {
-            title: None,
-            subtitle: None,
-            original_title: None,
-            author_name: None,
-            description: src.description,
-            year: None,
-            series_name: src.series_name,
-            series_position: src.series_position.and_then(|s| s.parse::<f64>().ok()),
-            genres: src.genres,
-            language: None,
-            page_count: src.page_count,
-            duration_seconds: None,
-            publisher: src.publisher,
-            publish_date: None,
-            hc_key: None,
-            gr_key: None,
-            ol_key: None,
-            isbn_13: src.isbn,
-            asin: src.asin,
-            narrator: None,
-            narration_type: None,
-            abridged: None,
-            rating: src.rating,
-            rating_count: src.rating_count,
-            cover_url: src.cover_url,
-            additional_isbns: vec![],
-            additional_asins: vec![],
-        }
-    }
-}
-
-/// TEMP(pk-tdd): per-provider outcome with typed payload for Success.
-#[derive(Debug, Clone)]
-pub enum ProviderOutcome<T> {
-    Success(Box<T>),
-    NotFound,
-    NotConfigured,
-    WillRetry {
-        reason: WillRetryReason,
-        next_attempt_at: DateTime<Utc>,
-    },
-    PermanentFailure {
-        reason: PermanentFailureReason,
-    },
-    Conflict {
-        detail: String,
-    },
-    Suppressed {
-        until: DateTime<Utc>,
-    },
-}
-
-impl<T> ProviderOutcome<T> {
-    pub fn class(&self) -> livrarr_domain::OutcomeClass {
-        match self {
-            Self::Success(_) => livrarr_domain::OutcomeClass::Success,
-            Self::NotFound => livrarr_domain::OutcomeClass::NotFound,
-            Self::NotConfigured => livrarr_domain::OutcomeClass::NotConfigured,
-            Self::WillRetry { .. } => livrarr_domain::OutcomeClass::WillRetry,
-            Self::PermanentFailure { .. } => livrarr_domain::OutcomeClass::PermanentFailure,
-            Self::Conflict { .. } => livrarr_domain::OutcomeClass::Conflict,
-            Self::Suppressed { .. } => livrarr_domain::OutcomeClass::Suppressed,
-        }
-    }
-
-    /// TEMP(pk-tdd): returns true if this outcome is eligible for merge in background mode.
-    pub fn can_merge(&self) -> bool {
-        self.class().can_merge()
-    }
-
-    /// TEMP(pk-tdd): returns true if this outcome is eligible for merge in manual/hard-refresh mode.
-    /// Manual mode coerces WillRetry and Suppressed; only Conflict still blocks.
-    pub fn can_merge_manual(&self) -> bool {
-        !matches!(self, Self::Conflict { .. })
-    }
 }
 
 /// TEMP(pk-tdd): output of scatter-gather provider dispatch.

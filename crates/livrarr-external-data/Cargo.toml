@@ -1,5 +1,5 @@
 [package]
-name = "livrarr-metadata"
+name = "livrarr-external-data"
 version = "0.1.0-alpha5"
 edition = "2021"
 license = "GPL-3.0-only"
@@ -13,9 +13,6 @@ tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 livrarr-domain = { workspace = true }
-livrarr-matching = { workspace = true }
-livrarr-db = { workspace = true }
-livrarr-external-data = { workspace = true }
 livrarr-http = { workspace = true }
 unicode-normalization = "0.1"
 tracing = "0.1"
@@ -26,8 +23,6 @@ csv = "1"
 uuid = { version = "1", features = ["v4"] }
 lru = "0.12"
 futures = "0.3"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]
-livrarr-db = { workspace = true, features = ["test-helpers"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

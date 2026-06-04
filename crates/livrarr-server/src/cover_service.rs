@@ -414,15 +414,9 @@ impl LiveCoverService {
             CoverServiceError::Internal(format!("no client for provider {provider:?}"))
         })?;
 
-        let ctx = livrarr_metadata::EnrichmentContext {
-            priority: livrarr_domain::RequestPriority::Normal,
-            mode: livrarr_metadata::EnrichmentMode::Manual,
-        };
-
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(10), client.fetch(work, &ctx))
-                .await
-                .map_err(|_| CoverServiceError::Internal("provider timeout".into()))?;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), client.fetch(work))
+            .await
+            .map_err(|_| CoverServiceError::Internal("provider timeout".into()))?;
 
         match outcome {
             livrarr_metadata::ProviderOutcome::Success(detail) => Ok(detail.cover_url.clone()),

@@ -29,7 +29,7 @@ impl LlmCallerImpl {
 
     /// Convenience constructor for no-LLM mode (tests / unconfigured).
     pub fn not_configured() -> Self {
-        use livrarr_db::MetadataConfig;
+        use livrarr_domain::settings::MetadataConfig;
         Self {
             live_config: LiveMetadataConfig::new(MetadataConfig {
                 hardcover_enabled: false,

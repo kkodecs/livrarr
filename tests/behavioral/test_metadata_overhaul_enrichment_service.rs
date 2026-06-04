@@ -207,6 +207,22 @@ impl MergeEngine for StubMergeEngine {
             .pop_front()
             .expect("test merge output missing")
     }
+
+    async fn merge_from_cached(
+        &self,
+        _work: Work,
+        _payloads: std::collections::HashMap<
+            livrarr_domain::MetadataProvider,
+            NormalizedWorkDetail,
+        >,
+        _language: Option<&str>,
+    ) -> Result<MergeOutput, MergeError> {
+        self.outputs
+            .lock()
+            .await
+            .pop_front()
+            .expect("test merge output missing")
+    }
 }
 
 #[derive(Clone)]

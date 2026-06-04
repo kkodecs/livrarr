@@ -17,7 +17,7 @@
 //! config to the DB AND calls `LiveMetadataConfig::replace(new)` on the
 //! shared instance. Next enrichment call sees the new credentials.
 
-use livrarr_db::MetadataConfig;
+use livrarr_domain::settings::MetadataConfig;
 use std::sync::{Arc, RwLock};
 
 /// Shared, mutable snapshot of `MetadataConfig`. Cheap to clone (Arc bump).

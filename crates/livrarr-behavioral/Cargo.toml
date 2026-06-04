@@ -26,6 +26,7 @@ livrarr-matching = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
 livrarr-http = { workspace = true }
+livrarr-external-data = { workspace = true }
 axum = "0.8"
 assert_matches = "1"
 futures = "0.3"
@@ -56,13 +57,19 @@ path = "../../tests/behavioral/test_metadata_overhaul_external_id_db.rs"
 name = "test_metadata_overhaul_merge_engine"
 path = "../../tests/behavioral/test_metadata_overhaul_merge_engine.rs"
 
-[[test]]
-name = "test_metadata_overhaul_enrichment_service"
-path = "../../tests/behavioral/test_metadata_overhaul_enrichment_service.rs"
+# EXCLUDED from the d612465 canary baseline: depends on uncommitted WCC code
+# (MergeEngine::merge_from_cached, not in this baseline). Restore when that code lands.
+# [[test]]
+# name = "test_metadata_overhaul_enrichment_service"
+# path = "../../tests/behavioral/test_metadata_overhaul_enrichment_service.rs"
 
 [[test]]
 name = "test_metadata_overhaul_provider_queue"
 path = "../../tests/behavioral/test_metadata_overhaul_provider_queue.rs"
+
+[[test]]
+name = "test_canary_external_data_boundary"
+path = "../../tests/behavioral/test_canary_external_data_boundary.rs"
 
 # --- Consolidation behavioral tests ---
 
@@ -118,9 +125,11 @@ path = "../../tests/behavioral/test_consolidation_enrichment_workflow.rs"
 name = "test_consolidation_rss_sync"
 path = "../../tests/behavioral/test_consolidation_rss_sync.rs"
 
-[[test]]
-name = "test_consolidation_author_monitor"
-path = "../../tests/behavioral/test_consolidation_author_monitor.rs"
+# EXCLUDED from the d612465 canary baseline: depends on uncommitted WCC code
+# (WorkService::eager_match_by_author + EagerQuery, not in this baseline). Restore when that code lands.
+# [[test]]
+# name = "test_consolidation_author_monitor"
+# path = "../../tests/behavioral/test_consolidation_author_monitor.rs"
 
 [[test]]
 name = "test_consolidation_dto"

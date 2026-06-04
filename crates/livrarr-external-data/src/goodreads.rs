@@ -479,7 +479,7 @@ pub async fn fetch_goodreads_html(
         .text()
         .await
         .map_err(|e| GoodreadsFetchError::Network(format!("GR body: {e}")))?;
-    if crate::llm_scraper::is_anti_bot_page(&html) {
+    if crate::provider_util::is_anti_bot_page(&html) {
         return Err(GoodreadsFetchError::AntiBot);
     }
     Ok(html)
@@ -604,7 +604,7 @@ pub async fn extract_with_llm(
     raw_html: &str,
     language_hint: &str,
 ) -> Result<crate::NormalizedWorkDetail, GoodreadsFetchError> {
-    let cleaned = crate::llm_scraper::clean_html_for_llm(raw_html);
+    let cleaned = crate::provider_util::clean_html_for_llm(raw_html);
     if cleaned.is_empty() {
         return Err(GoodreadsFetchError::Parse);
     }
@@ -665,7 +665,7 @@ pub async fn extract_with_llm(
     let cover_url = result
         .cover_url
         .as_deref()
-        .and_then(|u| crate::llm_scraper::validate_cover_url(u, ""));
+        .and_then(|u| crate::provider_util::validate_cover_url(u, ""));
 
     Ok(crate::NormalizedWorkDetail {
         title: result.title.map(|s| nfc(&s)),

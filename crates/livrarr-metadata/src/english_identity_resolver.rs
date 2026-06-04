@@ -9,9 +9,7 @@ use uuid::Uuid;
 
 use crate::provider_client::ProviderClient;
 use crate::transport_cache::TransportCache;
-use crate::{
-    EnrichmentContext, EnrichmentMode, NormalizedWorkDetail, ProviderOutcome, RequestPriority,
-};
+use crate::{NormalizedWorkDetail, ProviderOutcome};
 
 pub use livrarr_domain::identity::WorkSeed;
 pub use livrarr_domain::services::IdentityResolver as EnglishIdentityResolver;
@@ -72,10 +70,6 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
 
         let providers = self.select_providers(seed, tier);
         let work = build_transient_work_from_seed(seed, user_id);
-        let ctx = EnrichmentContext {
-            priority: RequestPriority::Normal,
-            mode: EnrichmentMode::Manual,
-        };
 
         // Fan out to the eligible providers in parallel, each under the per-call
         // timeout. A timeout or any non-Success outcome is an abstention — it
@@ -85,10 +79,9 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
             if let Some(client) = self.clients.get(&provider) {
                 let client = client.clone();
                 let work = work.clone();
-                let ctx = ctx.clone();
                 let timeout = self.config.call_timeout;
                 futures.push(async move {
-                    match tokio::time::timeout(timeout, client.fetch(&work, &ctx)).await {
+                    match tokio::time::timeout(timeout, client.fetch(&work)).await {
                         Ok(ProviderOutcome::Success(detail)) => Some((provider, *detail)),
                         _ => None,
                     }

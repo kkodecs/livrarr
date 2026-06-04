@@ -1,5 +1,7 @@
 use livrarr_http::HttpClient;
 
+use crate::provider_util::upscale_cover_url;
+
 /// Validate that an ISBN string contains only digits and an optional trailing X.
 /// Rejects any input that could be used for URL injection.
 fn is_valid_isbn(isbn: &str) -> bool {
@@ -160,19 +162,6 @@ fn classify_cover_url(url: &str) -> &'static str {
     }
 }
 
-use std::sync::LazyLock;
-
-static RE_GR_SIZE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"\._S[A-Z0-9_,]+_\.").unwrap());
-
-pub fn upscale_cover_url(url: &str) -> String {
-    if url.contains("gr-assets.com") || url.contains("goodreads.com") {
-        RE_GR_SIZE.replace(url, ".").into_owned()
-    } else {
-        url.to_string()
-    }
-}
-
 /// Try to get a cover on disk within 3 seconds. Returns the cover file mtime on success.
 ///
 /// Branch A: download existing URL immediately (any host, with GR upscaling).
@@ -194,7 +183,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
     let unproxied = request_cover_url.map(crate::work_service::unproxy_cover_url);
     let valid_url = unproxied
         .as_deref()
-        .filter(|u| crate::llm_scraper::validate_cover_url(u, "").is_some());
+        .filter(|u| crate::provider_util::validate_cover_url(u, "").is_some());
 
     // Branch A: download existing URL directly (any provider)
     if let Some(url) = valid_url {
