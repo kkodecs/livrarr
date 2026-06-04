@@ -81,6 +81,10 @@ pub enum EnrichmentStatus {
     Unenriched,
     /// Enrichment completed. DB metadata is authoritative.
     Enriched,
+    /// Confirmed identity but no meaningful text metadata was found
+    /// (REQ-014/019): "we know the book, found no info." Distinct from
+    /// `Unenriched` (not yet attempted) and from any identity problem.
+    Thin,
     /// Enrichment attempted, transient error. Background job retries.
     Failed,
     /// LLM identity validation detected a provider mismatch. Terminal until
@@ -91,6 +95,31 @@ pub enum EnrichmentStatus {
     IdentityPending,
     /// A non-interactive path exhausted resolution for a work that has no
     /// resolving identifier. Surfaced for the user; terminal until reviewed.
+    NeedsReview,
+}
+
+/// Persisted identity-confidence badge — the identity track of the two-state
+/// split (REQ-014). This is the flat, stored, user-facing status; it is
+/// distinct from the rich resolution-time [`identity::IdentityState`]
+/// (`Confirmed{..}`/`Pending{..}`) and is derived from a work's anchors
+/// (D-013 backfill): a work anchor → `Confirmed`; an ISBN/ASIN bridge with no
+/// work anchor → `Provisional`; none → `Pending`; an open identity conflict →
+/// `Conflict`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityStatus {
+    /// No confident identity yet (fuzzy title+author, no resolving key).
+    #[default]
+    Pending,
+    /// Resolved to a work anchor (OL/GR/HC work key).
+    Confirmed,
+    /// De-facto identity (REQ-016): an ISBN/ASIN bridge resolved but no work
+    /// anchor. Enriches; upgrades to `Confirmed` when a work anchor appears.
+    Provisional,
+    /// An identity contradiction is open (a differing confirmed anchor).
+    /// Terminal until the user resolves it.
+    Conflict,
+    /// A non-interactive path exhausted resolution; surfaced for the user.
     NeedsReview,
 }
 
@@ -388,6 +417,10 @@ pub struct Work {
     pub rating: Option<f64>,
     pub rating_count: Option<i32>,
     pub enrichment_status: EnrichmentStatus,
+    /// Identity-confidence track of the two-state split (REQ-014). Backfilled
+    /// anchor-derived (D-013); see [`IdentityStatus`].
+    #[serde(default)]
+    pub identity_status: IdentityStatus,
     /// v2.1 — persisted retry counter for enrichment retry queue.
     /// Satisfies: IMPL-JOBS-005
     #[serde(default)]

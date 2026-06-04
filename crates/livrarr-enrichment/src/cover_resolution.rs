@@ -634,6 +634,7 @@ mod tests {
     #[test]
     fn resolve_cover_rejects_study_guide_edition() {
         let work = Work {
+            identity_status: Default::default(),
             title: "The Great Gatsby".to_string(),
             cover_trust: CoverTrust::Unvalidated,
             ..Default::default()
@@ -664,6 +665,7 @@ mod tests {
     #[test]
     fn resolve_cover_allows_study_guide_work_own_covers() {
         let work = Work {
+            identity_status: Default::default(),
             title: "CliffsNotes: The Great Gatsby".to_string(),
             cover_trust: CoverTrust::Unvalidated,
             ..Default::default()

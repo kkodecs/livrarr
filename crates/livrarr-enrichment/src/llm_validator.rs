@@ -562,6 +562,7 @@ mod tests {
 
     fn fake_work(title: &str, author: &str, language: Option<&str>) -> Work {
         Work {
+            identity_status: Default::default(),
             id: 0,
             user_id: 0,
             title: title.to_string(),

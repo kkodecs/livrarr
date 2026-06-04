@@ -48,6 +48,7 @@ fn resolved(output: &MergeOutput) -> &livrarr_db::UpdateWorkEnrichmentDbRequest 
 
 fn work_with(subtitle: Option<&str>, description: Option<&str>, cover_url: Option<&str>) -> Work {
     Work {
+        identity_status: Default::default(),
         id: WORK_ID,
         user_id: USER_ID,
         subtitle: subtitle.map(str::to_owned),
@@ -892,6 +893,7 @@ async fn test_merge_engine_hard_refresh_suppressed_preserves_last_known_good_val
 
     let input = MergeInput {
         current_work: Work {
+            identity_status: Default::default(),
             id: WORK_ID,
             user_id: USER_ID,
             title: "current title".to_string(),
@@ -1066,6 +1068,7 @@ async fn test_merge_engine_audio_fields_use_audio_priority_model_not_content_pri
 
     let input = MergeInput {
         current_work: Work {
+            identity_status: Default::default(),
             id: WORK_ID,
             user_id: USER_ID,
             ..Default::default()
@@ -1139,6 +1142,7 @@ async fn test_merge_engine_cover_manual_bypasses_provider_cover_logic() {
 
     let input = MergeInput {
         current_work: Work {
+            identity_status: Default::default(),
             id: WORK_ID,
             user_id: USER_ID,
             cover_url: Some("https://example.test/manual-cover.jpg".to_string()),
@@ -1248,6 +1252,7 @@ async fn test_merge_engine_empty_audio_priority_model_returns_error_for_audio_fi
     let result = engine
         .merge(MergeInput {
             current_work: Work {
+                identity_status: Default::default(),
                 id: WORK_ID,
                 user_id: USER_ID,
                 ..Default::default()

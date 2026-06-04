@@ -60,6 +60,7 @@ impl LlmCaller for JsonLlmCaller {
 
 fn work() -> Work {
     Work {
+        identity_status: Default::default(),
         id: WORK_ID,
         user_id: USER_ID,
         title: "Current Title".to_string(),
@@ -70,6 +71,7 @@ fn work() -> Work {
 
 fn current_work_with_description(description: &str) -> Work {
     Work {
+        identity_status: Default::default(),
         description: Some(description.to_string()),
         ..work()
     }

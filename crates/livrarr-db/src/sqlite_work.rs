@@ -120,6 +120,12 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
             .try_get("rating_count")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         enrichment_status: parse_enrichment_status(&enrichment_status_str)?,
+        identity_status: row
+            .try_get::<String, _>("identity_status")
+            .ok()
+            .map(|s| parse_identity_status(&s))
+            .transpose()?
+            .unwrap_or_default(),
         enrichment_retry_count: row
             .try_get::<i32, _>("enrichment_retry_count")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -177,6 +183,7 @@ fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
         // Legacy values migrated to unenriched by migration 035
         "pending" | "partial" => Ok(EnrichmentStatus::Unenriched),
         "enriched" => Ok(EnrichmentStatus::Enriched),
+        "thin" => Ok(EnrichmentStatus::Thin),
         "failed" => Ok(EnrichmentStatus::Failed),
         // Legacy exhausted/skipped mapped to failed — migration handles DB rows
         "exhausted" | "skipped" => Ok(EnrichmentStatus::Failed),
@@ -193,10 +200,37 @@ fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
     match s {
         EnrichmentStatus::Unenriched => "unenriched",
         EnrichmentStatus::Enriched => "enriched",
+        EnrichmentStatus::Thin => "thin",
         EnrichmentStatus::Failed => "failed",
         EnrichmentStatus::Conflict => "conflict",
         EnrichmentStatus::IdentityPending => "identity_pending",
         EnrichmentStatus::NeedsReview => "needs_review",
+    }
+}
+
+fn parse_identity_status(s: &str) -> Result<livrarr_domain::IdentityStatus, DbError> {
+    use livrarr_domain::IdentityStatus;
+    match s {
+        "pending" => Ok(IdentityStatus::Pending),
+        "confirmed" => Ok(IdentityStatus::Confirmed),
+        "provisional" => Ok(IdentityStatus::Provisional),
+        "conflict" => Ok(IdentityStatus::Conflict),
+        "needs_review" => Ok(IdentityStatus::NeedsReview),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown identity status: {s}"),
+        }),
+    }
+}
+
+#[allow(dead_code)] // wired by create/update paths in 4b step 4
+fn identity_status_str(s: livrarr_domain::IdentityStatus) -> &'static str {
+    use livrarr_domain::IdentityStatus;
+    match s {
+        IdentityStatus::Pending => "pending",
+        IdentityStatus::Confirmed => "confirmed",
+        IdentityStatus::Provisional => "provisional",
+        IdentityStatus::Conflict => "conflict",
+        IdentityStatus::NeedsReview => "needs_review",
     }
 }
 
