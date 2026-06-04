@@ -512,6 +512,67 @@ pub async fn search_goodreads_by_query(
     Ok(parse_search_html(&html))
 }
 
+/// A candidate from Goodreads' `/book/auto_complete` JSON endpoint.
+///
+/// Unlike `/search` (AWS-WAF 202-challenged, effectively dead — measured
+/// 2026-06-01), this endpoint is unguarded and returns structured JSON. We keep
+/// only the fields needed to identify the canonical book; the full metadata is
+/// read from the `/book/show` detail page, which also verifies the id.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrAutocompleteHit {
+    /// Relative detail path, e.g. `/book/show/5907.The_Hobbit_or_There_and_Back_Again`.
+    #[serde(default)]
+    pub book_url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub author: Option<GrAutocompleteHitAuthor>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrAutocompleteHitAuthor {
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Query the Goodreads `/book/auto_complete` JSON endpoint and return the
+/// structured candidates.
+///
+/// Outcome discipline: an empty `Ok(vec![])` is a *genuine miss*; a non-200
+/// status or a non-JSON body is a transient **block** surfaced as `Err`, which
+/// the caller escalates to the next discovery rung rather than treating as a
+/// terminal NotFound (the Goodreads anti-bot access ladder).
+pub async fn search_goodreads_autocomplete(
+    http: &HttpClient,
+    base_url: &str,
+    query: &str,
+) -> Result<Vec<GrAutocompleteHit>, GoodreadsFetchError> {
+    let base = base_url.trim_end_matches('/');
+    let encoded = urlencoding::encode(query.trim());
+    let url = format!("{base}/book/auto_complete?format=json&q={encoded}");
+    let resp = http
+        .get(&url)
+        .header("User-Agent", GOODREADS_USER_AGENT)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete request: {e}")))?;
+    // 200 is the only "door is open" status; a 202 challenge / 403 / 429 / 5xx
+    // are all transient blocks the caller escalates past.
+    if resp.status().as_u16() != 200 {
+        return Err(GoodreadsFetchError::HttpStatus(resp.status().as_u16()));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete body: {e}")))?;
+    // A 200 that isn't the JSON array we expect is a WAF interstitial or a
+    // format change — a block, not a real empty.
+    serde_json::from_str::<Vec<GrAutocompleteHit>>(&body).map_err(|_| GoodreadsFetchError::AntiBot)
+}
+
 /// Fetch and parse a Goodreads detail page. Returns `Err(Parse)` if the page
 /// loads but yields no useful fields.
 pub async fn fetch_goodreads_detail(
