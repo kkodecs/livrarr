@@ -313,4 +313,8 @@ path = "../../tests/behavioral/test_wcc_work_service.rs"
 name = "test_wcc_matching"
 path = "../../tests/behavioral/test_wcc_matching.rs"
 
+[[test]]
+name = "test_wcc_discovery_fanout"
+path = "../../tests/behavioral/test_wcc_discovery_fanout.rs"
+
 # --- End work creation consistency behavioral tests ---

@@ -1265,42 +1265,40 @@ where
             )));
         }
 
-        // Step 1: Google Books (primary).
-        match self.lookup_google_books(&term, lang).await {
-            Ok(results) if !results.is_empty() => return Ok(results),
-            Ok(_) => tracing::debug!(term = %term, lang = %lang, "GoogleBooks returned empty"),
-            Err(e) => tracing::warn!(
-                term = %term, lang = %lang, error = %e,
-                "GoogleBooks lookup failed; falling back to next provider"
-            ),
+        // #97: query every eligible provider in parallel and merge, instead of
+        // returning the first one that answers. A book present only on a provider
+        // the cascade never reached (e.g. Hardcover, behind a non-empty Google
+        // Books) was silently dropped from the results.
+        let (gb, ol, hc) = tokio::join!(
+            self.lookup_google_books(&term, lang),
+            self.lookup_openlibrary(&term, lang),
+            self.lookup_hardcover(&term, lang),
+        );
+
+        let mut merged: Vec<LookupResult> = Vec::new();
+        for (provider, result) in [("GoogleBooks", gb), ("OpenLibrary", ol), ("Hardcover", hc)] {
+            match result {
+                Ok(results) => merged.extend(results),
+                Err(e) => tracing::warn!(
+                    term = %term, lang = %lang, provider,
+                    error = %e, "provider lookup failed; continuing with the others"
+                ),
+            }
         }
 
-        // Step 2: OpenLibrary (fallback).
-        match self.lookup_openlibrary(&term, lang).await {
-            Ok(results) if !results.is_empty() => return Ok(results),
-            Ok(_) => tracing::debug!(term = %term, lang = %lang, "OpenLibrary returned empty"),
-            Err(e) => tracing::warn!(
-                term = %term, lang = %lang, error = %e,
-                "OpenLibrary lookup failed; falling back to next provider"
-            ),
+        // Goodreads is scrape-only — keep it as the non-English fallback so a
+        // foreign-language term with no structured-provider hit still resolves,
+        // without scraping it on every query.
+        if lang != "en" && merged.is_empty() {
+            match self.lookup_goodreads(&term, lang).await {
+                Ok(results) => merged.extend(results),
+                Err(e) => tracing::warn!(
+                    term = %term, lang = %lang, error = %e, "Goodreads lookup failed"
+                ),
+            }
         }
 
-        // Step 3: Hardcover (if token configured).
-        match self.lookup_hardcover(&term, lang).await {
-            Ok(results) if !results.is_empty() => return Ok(results),
-            Ok(_) => tracing::debug!(term = %term, lang = %lang, "Hardcover returned empty"),
-            Err(e) => tracing::warn!(
-                term = %term, lang = %lang, error = %e,
-                "Hardcover lookup failed; falling back to next provider"
-            ),
-        }
-
-        // Step 4: Goodreads scrape (foreign-language only).
-        if lang != "en" {
-            return self.lookup_goodreads(&term, lang).await;
-        }
-
-        Ok(vec![])
+        Ok(dedupe_lookup_results(merged))
     }
 
     async fn lookup_filtered(
@@ -2376,6 +2374,32 @@ async fn write_addtime_provenance<D: ProvenanceDb>(
     crate::provenance::write_addtime_provenance(db, user_id, work, setter).await;
 }
 
+/// Collapse duplicate works merged from multiple discovery providers. Prefers an
+/// ISBN-13 match; otherwise keys on normalized title + author. First occurrence
+/// wins, so provider order (Google Books, OpenLibrary, Hardcover) breaks ties.
+fn dedupe_lookup_results(results: Vec<LookupResult>) -> Vec<LookupResult> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        let key = match r
+            .isbn_13
+            .as_deref()
+            .and_then(livrarr_domain::normalization::normalize_isbn13)
+        {
+            Some(isbn) => format!("isbn:{isbn}"),
+            None => format!(
+                "ta:{}|{}",
+                r.title.trim().to_lowercase(),
+                r.author_name.trim().to_lowercase()
+            ),
+        };
+        if seen.insert(key) {
+            out.push(r);
+        }
+    }
+    out
+}
+
 pub fn unproxy_cover_url(url: &str) -> String {
     if let Some(rest) = url.strip_prefix("/api/v1/coverproxy?url=") {
         urlencoding::decode(rest)
@@ -2473,4 +2497,52 @@ fn is_supported_image(bytes: &[u8]) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn lr(title: &str, author: &str, isbn: Option<&str>) -> LookupResult {
+        LookupResult {
+            ol_key: None,
+            title: title.into(),
+            author_name: author.into(),
+            author_ol_key: None,
+            year: None,
+            cover_url: None,
+            description: None,
+            series_name: None,
+            series_position: None,
+            source: None,
+            source_type: None,
+            language: None,
+            detail_url: None,
+            rating: None,
+            isbn_13: isbn.map(|s| s.into()),
+            candidate_id: None,
+            hc_key: None,
+            gr_key: None,
+            asin: None,
+        }
+    }
+
+    #[test]
+    fn dedupe_keeps_distinct_works_from_all_providers() {
+        // A Hardcover-only book must survive a merge where Google Books already
+        // returned results (the #97 regression); duplicates collapse to one.
+        let merged = dedupe_lookup_results(vec![
+            lr("Google Result", "Author A", Some("9780000000001")),
+            lr("Hardcover Only", "Author B", Some("9780000000002")),
+            lr("Google Result", "Author A", Some("9780000000001")), // dup by isbn
+            lr("No ISBN Book", "Author C", None),
+            lr("No ISBN Book", "Author C", None), // dup by title+author
+        ]);
+        let titles: Vec<&str> = merged.iter().map(|r| r.title.as_str()).collect();
+        assert!(
+            titles.contains(&"Hardcover Only"),
+            "HC-only book was dropped"
+        );
+        assert_eq!(merged.len(), 3, "expected 3 distinct works after dedupe");
+    }
 }
