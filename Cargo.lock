@@ -1736,6 +1736,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "livrarr-enrichment"
+version = "0.1.0-alpha5"
+dependencies = [
+ "chrono",
+ "image",
+ "livrarr-db",
+ "livrarr-domain",
+ "livrarr-external-data",
+ "livrarr-http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "trait-variant",
+]
+
+[[package]]
 name = "livrarr-external-data"
 version = "0.1.0-alpha5"
 dependencies = [
@@ -1870,6 +1889,7 @@ dependencies = [
  "image",
  "livrarr-db",
  "livrarr-domain",
+ "livrarr-enrichment",
  "livrarr-external-data",
  "livrarr-http",
  "livrarr-identity",

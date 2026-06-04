@@ -7,6 +7,7 @@ members = [
     "crates/livrarr-matching",
     "crates/livrarr-external-data",
     "crates/livrarr-identity",
+    "crates/livrarr-enrichment",
     "crates/livrarr-metadata",
     "crates/livrarr-download",
     "crates/livrarr-library",
@@ -34,6 +35,7 @@ livrarr-http = { path = "crates/livrarr-http" }
 livrarr-db = { path = "crates/livrarr-db" }
 livrarr-external-data = { path = "crates/livrarr-external-data" }
 livrarr-identity = { path = "crates/livrarr-identity" }
+livrarr-enrichment = { path = "crates/livrarr-enrichment" }
 livrarr-metadata = { path = "crates/livrarr-metadata" }
 livrarr-download = { path = "crates/livrarr-download" }
 livrarr-library = { path = "crates/livrarr-library" }
