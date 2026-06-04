@@ -405,6 +405,10 @@ where
         let normalized_title = livrarr_domain::normalize_for_matching(&cleaned_title);
         let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
 
+        // The persisted identity badge derived from the candidate's anchors
+        // (REQ-014/016, D-013) — written at create and used to gate enrichment.
+        let derived_identity = candidate.identity.derived_identity_status();
+
         match &candidate.identity {
             IdentityState::Confirmed { anchors, .. } => {
                 // Step 1: anchor match over the work-anchor types the candidate
@@ -685,6 +689,7 @@ where
                     author_id,
                     candidate.source_provider_data,
                     candidate.skip_sync_enrichment,
+                    derived_identity,
                 )
                 .await
             }
@@ -791,9 +796,10 @@ where
                         })?;
                 }
 
-                // Enrichment runs even for Pending works — providers search
-                // by title/author and don't need a confirmed OL key. Identity
-                // resolution is orthogonal; the retry job handles that.
+                // Identity gate (REQ-015): a Pending identity HOLDS the enrich
+                // fan-out — finish_created_work skips enrichment for held identity
+                // states. Display/cover (best-in-hand) is still materialized and
+                // never gated; the retry job converges identity, then enriches.
                 self.finish_created_work(
                     user_id,
                     work,
@@ -801,6 +807,7 @@ where
                     author_id,
                     candidate.source_provider_data,
                     candidate.skip_sync_enrichment,
+                    derived_identity,
                 )
                 .await
             }
@@ -2078,6 +2085,7 @@ where
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn finish_created_work(
         &self,
         user_id: UserId,
@@ -2086,7 +2094,17 @@ where
         author_id: Option<i64>,
         source_provider_data: Option<SourceProviderData>,
         skip_sync_enrichment: bool,
+        derived_identity: livrarr_domain::IdentityStatus,
     ) -> Result<AddWorkResult, WorkServiceError> {
+        use livrarr_domain::IdentityStatus;
+
+        // Persist the identity-confidence badge derived at resolution time
+        // (REQ-014/D-013) — independent of enrichment, written once at create.
+        self.db
+            .set_identity_status(user_id, work.id, derived_identity)
+            .await
+            .map_err(WorkServiceError::Db)?;
+
         // Phase 1: synchronous cover download within 3s budget (REQ-010).
         let is_user_initiated = source_provider_data.is_none();
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
@@ -2155,9 +2173,59 @@ where
             });
         }
 
+        // Identity gate (REQ-015): the enrich fan-out runs only for a settled
+        // identity (Confirmed/Provisional). A held identity (Pending/Conflict/
+        // NeedsReview) does not enrich here — the cover above is never gated, but
+        // the provider fan-out waits for identity convergence.
+        if matches!(
+            derived_identity,
+            IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
+        ) {
+            let updated_work = self
+                .db
+                .get_work(user_id, work.id)
+                .await
+                .map_err(WorkServiceError::Db)?;
+            let cover_mtime =
+                crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
+                    crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
+                });
+            let audiobook_cover_mtime =
+                crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id).or_else(
+                    || {
+                        crate::cover::audiobook_cover_file_mtime(
+                            &self.data_dir.join("covers"),
+                            updated_work.id,
+                        )
+                    },
+                );
+            return Ok(AddWorkResult {
+                work: updated_work,
+                created: true,
+                author_created,
+                author_id,
+                messages: vec![],
+                cover_mtime,
+                audiobook_cover_mtime,
+                enrichment_status: EnrichmentStatus::IdentityPending,
+            });
+        }
+
         let enrichment_status = self
             .run_unified_enrichment(user_id, &work, source_provider_data)
             .await;
+
+        // Seam-2 (REQ-002/D-013): enrichment signals an identity contradiction by
+        // returning Conflict; the caller — not enrichment — writes the identity
+        // badge (the interim seam: no EstablishedIdentity contract). Production-only,
+        // reachable when an LLM rejects all payloads as a different book.
+        if enrichment_status == EnrichmentStatus::Conflict {
+            self.db
+                .set_identity_status(user_id, work.id, IdentityStatus::Conflict)
+                .await
+                .map_err(WorkServiceError::Db)?;
+        }
+
         let updated_work = self
             .db
             .get_work(user_id, work.id)

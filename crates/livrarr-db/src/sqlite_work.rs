@@ -222,7 +222,6 @@ fn parse_identity_status(s: &str) -> Result<livrarr_domain::IdentityStatus, DbEr
     }
 }
 
-#[allow(dead_code)] // wired by create/update paths in 4b step 4
 fn identity_status_str(s: livrarr_domain::IdentityStatus) -> &'static str {
     use livrarr_domain::IdentityStatus;
     match s {
@@ -555,6 +554,27 @@ impl WorkDb for SqliteDb {
             .execute(self.pool())
             .await
             .map_err(map_db_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound { entity: "work" });
+        }
+        Ok(())
+    }
+
+    async fn set_identity_status(
+        &self,
+        user_id: UserId,
+        id: WorkId,
+        status: livrarr_domain::IdentityStatus,
+    ) -> Result<(), DbError> {
+        let result =
+            sqlx::query("UPDATE works SET identity_status = ? WHERE id = ? AND user_id = ?")
+                .bind(identity_status_str(status))
+                .bind(id)
+                .bind(user_id)
+                .execute(self.pool())
+                .await
+                .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound { entity: "work" });

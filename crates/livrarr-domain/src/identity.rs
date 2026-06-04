@@ -282,6 +282,27 @@ impl IdentityState {
             IdentityState::Pending { seed_anchors, .. } => seed_anchors.as_ref(),
         }
     }
+
+    /// Derive the persisted identity-confidence badge ([`crate::IdentityStatus`])
+    /// from this resolution state's confirmed anchors (REQ-014/016, D-013): a work
+    /// anchor (OL/GR/HC work key) is `Confirmed`; an ISBN/ASIN bridge with no work
+    /// anchor is the de-facto `Provisional`; otherwise `Pending`. A `Pending`
+    /// resolution stays `Pending` even when it carries unresolved seed anchors —
+    /// only a `Confirmed` resolution yields a settled badge. `Conflict` and
+    /// `NeedsReview` are written by their own paths (an open conflict row;
+    /// resolution exhaustion), not derived from a fresh candidate.
+    pub fn derived_identity_status(&self) -> crate::IdentityStatus {
+        let nonempty = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.is_empty());
+        match self.anchors() {
+            Some(a) if nonempty(&a.ol_key) || nonempty(&a.gr_key) || nonempty(&a.hc_key) => {
+                crate::IdentityStatus::Confirmed
+            }
+            Some(a) if nonempty(&a.isbn_13) || nonempty(&a.asin) => {
+                crate::IdentityStatus::Provisional
+            }
+            _ => crate::IdentityStatus::Pending,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

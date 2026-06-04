@@ -317,6 +317,15 @@ impl WorkDb for SequencedApplyDb {
         self.inner.set_cover_manual(user_id, id, manual).await
     }
 
+    async fn set_identity_status(
+        &self,
+        user_id: UserId,
+        id: WorkId,
+        status: livrarr_domain::IdentityStatus,
+    ) -> Result<(), DbError> {
+        self.inner.set_identity_status(user_id, id, status).await
+    }
+
     async fn delete_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError> {
         self.inner.delete_work(user_id, id).await
     }
