@@ -546,8 +546,8 @@ async fn test_merge_engine_status_enriched_when_description_and_cover_present() 
 }
 
 #[tokio::test]
-async fn test_merge_engine_status_unenriched_when_only_one_of_description_or_cover_is_present() {
-    // REQ-ID: R-02, R-14 | Contract: MergeEngine::merge | Behavior: status is Unenriched when exactly one of description or cover_url is present
+async fn test_merge_engine_status_enriched_when_description_present_without_cover() {
+    // REQ-ID: REQ-019 | Contract: MergeEngine::merge | Behavior: description present (no cover) classifies Enriched — cover never gates
     let engine = make_engine();
 
     let input = MergeInput {
@@ -564,11 +564,11 @@ async fn test_merge_engine_status_unenriched_when_only_one_of_description_or_cov
 
     let output = merge(&engine, input).await;
 
-    assert_eq!(output.enrichment_status, EnrichmentStatus::Unenriched);
+    assert_eq!(output.enrichment_status, EnrichmentStatus::Enriched);
     assert_eq!(
         resolved(&output).description.as_deref(),
         Some("description only"),
-        "partial metadata should be preserved even though the collapsed Phase 1 status is Unenriched"
+        "description metadata should be preserved when it classifies the merge as Enriched"
     );
     assert!(
         resolved(&output).cover_url.is_none(),
@@ -577,8 +577,8 @@ async fn test_merge_engine_status_unenriched_when_only_one_of_description_or_cov
 }
 
 #[tokio::test]
-async fn test_merge_engine_status_failed_when_neither_description_nor_cover_is_present() {
-    // REQ-ID: R-02, R-14 | Contract: MergeEngine::merge | Behavior: status is Failed when neither description nor cover_url is present
+async fn test_merge_engine_status_thin_when_no_meaningful_text_present() {
+    // REQ-ID: REQ-019/REQ-014 | Contract: MergeEngine::merge | Behavior: a successful textless merge is Thin, not Failed
     let engine = make_engine();
 
     let input = MergeInput {
@@ -595,7 +595,7 @@ async fn test_merge_engine_status_failed_when_neither_description_nor_cover_is_p
 
     let output = merge(&engine, input).await;
 
-    assert_eq!(output.enrichment_status, EnrichmentStatus::Failed);
+    assert_eq!(output.enrichment_status, EnrichmentStatus::Thin);
 }
 
 #[tokio::test]

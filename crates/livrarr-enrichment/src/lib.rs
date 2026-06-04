@@ -818,13 +818,19 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         &eligible_providers,
         &outcomes_ref,
     );
-    let has_cover = cover_resolution.is_some() || inputs.current_work.cover_url.is_some();
-
-    // 6. Status classification (R-14).
-    let enrichment_status = match (merged_description.is_some(), has_cover) {
-        (true, true) => EnrichmentStatus::Enriched,
-        (true, false) | (false, true) => EnrichmentStatus::Unenriched,
-        (false, false) => EnrichmentStatus::Failed,
+    // 6. Status classification (REQ-019): Enriched iff >=1 meaningful text field
+    // is present; otherwise Thin ("we know the book, found no info"). The cover
+    // is a lazy backfill asset and never gates completion; title/author are
+    // identity (present from creation) and are not an enrichment signal.
+    let has_meaningful_text = merged_description.is_some()
+        || get_str(WorkField::Subtitle).is_some()
+        || get_str(WorkField::SeriesName).is_some()
+        || get_strings(WorkField::Genres).is_some_and(|g| !g.is_empty())
+        || get_str(WorkField::Publisher).is_some();
+    let enrichment_status = if has_meaningful_text {
+        EnrichmentStatus::Enriched
+    } else {
+        EnrichmentStatus::Thin
     };
 
     // 7. enrichment_source: comma-joined lowercased provider names.
@@ -1191,13 +1197,17 @@ Return JSON only:\n\
             req.author_name = Some(cleaned);
         }
 
-        // Re-classify enrichment status after LLM patching.
-        let has_desc = req.description.is_some();
-        let has_cover = req.cover_url.is_some();
-        output.enrichment_status = match (has_desc, has_cover) {
-            (true, true) => EnrichmentStatus::Enriched,
-            (true, false) | (false, true) => EnrichmentStatus::Unenriched,
-            (false, false) => EnrichmentStatus::Failed,
+        // Re-classify enrichment status after LLM patching (REQ-019): text-only,
+        // cover never gates. Enriched iff >=1 meaningful text field is present.
+        let has_meaningful_text = req.description.is_some()
+            || req.subtitle.is_some()
+            || req.series_name.is_some()
+            || req.genres.as_ref().is_some_and(|g| !g.is_empty())
+            || req.publisher.is_some();
+        output.enrichment_status = if has_meaningful_text {
+            EnrichmentStatus::Enriched
+        } else {
+            EnrichmentStatus::Thin
         };
         req.enrichment_status = output.enrichment_status;
     }
