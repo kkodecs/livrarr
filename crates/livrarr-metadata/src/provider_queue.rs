@@ -36,12 +36,12 @@ use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use tokio::task::JoinSet;
 use tracing::warn;
 
-use crate::provider_client::ProviderClient;
 use crate::{
     CircuitBreakerConfig, CircuitState, EnrichmentContext, EnrichmentMode, NormalizedWorkDetail,
     ProviderOutcome, ProviderQueue, ProviderQueueConfig, ProviderQueueError, ScatterGatherResult,
     WillRetryReason,
 };
+use livrarr_external_data::provider_client::ProviderClient;
 
 /// Initial circuit state for a provider. Used by `DefaultProviderQueueBuilder` to
 /// inject a known state for behavioral tests (`CircuitStateSnapshot`,

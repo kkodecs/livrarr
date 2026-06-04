@@ -30,11 +30,8 @@ use livrarr_domain::{
     MetadataProvider, NarrationType, OutcomeClass, PermanentFailureReason, ProvenanceSetter,
     UserId, UserRole, Work, WorkField, WorkId,
 };
-use livrarr_metadata::{
-    CircuitState, EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentService,
-    MergeEngine, MergeError, MergeInput, MergeOutput, NormalizedWorkDetail, ProviderOutcome,
-    ProviderQueue, ProviderQueueError, ScatterGatherResult,
-};
+use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
+use livrarr_metadata::{CircuitState, EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentService, MergeEngine, MergeError, MergeInput, MergeOutput, ProviderQueue, ProviderQueueError, ScatterGatherResult};
 use tokio::sync::{Mutex, Notify};
 
 #[async_trait]

@@ -7,9 +7,9 @@ use livrarr_domain::services::WorkIdentityError;
 use livrarr_domain::{MetadataProvider, UserId, Work};
 use uuid::Uuid;
 
-use crate::provider_client::ProviderClient;
-use crate::transport_cache::TransportCache;
 use crate::{NormalizedWorkDetail, ProviderOutcome};
+use livrarr_external_data::provider_client::ProviderClient;
+use livrarr_external_data::transport_cache::TransportCache;
 
 pub use livrarr_domain::identity::WorkSeed;
 pub use livrarr_domain::services::IdentityResolver as EnglishIdentityResolver;

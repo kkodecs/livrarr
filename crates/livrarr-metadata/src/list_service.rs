@@ -11,7 +11,7 @@ use livrarr_db::ListImportDb;
 use livrarr_domain::services::*;
 use livrarr_domain::{ProvenanceSetter, UserId};
 
-use crate::parsers::{self, CsvSource, ParseError};
+use livrarr_external_data::parsers::{self, CsvSource, ParseError};
 
 // ---------------------------------------------------------------------------
 // ListServiceImpl

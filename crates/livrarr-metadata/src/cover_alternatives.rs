@@ -6,8 +6,8 @@ use livrarr_domain::{
 };
 
 use crate::cover_resolution::should_reject_cover;
-use crate::provider_client::ProviderClient;
 use crate::{NormalizedWorkDetail, ProviderOutcome};
+use livrarr_external_data::provider_client::ProviderClient;
 
 const ALTERNATIVE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 

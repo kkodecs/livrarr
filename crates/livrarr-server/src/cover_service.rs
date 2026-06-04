@@ -12,10 +12,10 @@ use livrarr_domain::{
     CoverCandidate, CoverCandidateSource, CoverMediaType, CoverTrust, InternalCoverCandidate,
     MetadataProvider, UserId, Work, WorkId,
 };
+use livrarr_external_data::provider_client::ProviderClient;
 use livrarr_http::fetcher::HttpFetcherImpl;
 use livrarr_http::HttpClient;
 use livrarr_metadata::cover_resolution::measure_dimensions;
-use livrarr_metadata::provider_client::ProviderClient;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -419,7 +419,7 @@ impl LiveCoverService {
             .map_err(|_| CoverServiceError::Internal("provider timeout".into()))?;
 
         match outcome {
-            livrarr_metadata::ProviderOutcome::Success(detail) => Ok(detail.cover_url.clone()),
+            livrarr_external_data::ProviderOutcome::Success(detail) => Ok(detail.cover_url.clone()),
             _ => Ok(None),
         }
     }

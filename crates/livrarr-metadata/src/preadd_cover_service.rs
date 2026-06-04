@@ -4,7 +4,7 @@ use std::time::Duration;
 use livrarr_domain::services::{PreaddCoverCandidate, PreaddCoverError, PreaddCoverService};
 use livrarr_domain::{MetadataProvider, UserId, Work};
 
-use crate::provider_client::ProviderClient;
+use livrarr_external_data::provider_client::ProviderClient;
 
 #[derive(Clone)]
 pub struct LivePreaddCoverService {

@@ -1894,6 +1894,7 @@ dependencies = [
  "livrarr-db",
  "livrarr-domain",
  "livrarr-download",
+ "livrarr-external-data",
  "livrarr-handlers",
  "livrarr-http",
  "livrarr-library",

@@ -146,12 +146,15 @@ impl LlmValidator for NoOpLlmValidator {
 #[derive(Clone)]
 pub struct LiveLlmValidator {
     http: HttpClient,
-    live_config: crate::live_config::LiveMetadataConfig,
+    live_config: livrarr_external_data::live_config::LiveMetadataConfig,
     timeout: Duration,
 }
 
 impl LiveLlmValidator {
-    pub fn new(http: HttpClient, live_config: crate::live_config::LiveMetadataConfig) -> Self {
+    pub fn new(
+        http: HttpClient,
+        live_config: livrarr_external_data::live_config::LiveMetadataConfig,
+    ) -> Self {
         Self {
             http,
             live_config,

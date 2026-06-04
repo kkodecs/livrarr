@@ -1259,7 +1259,7 @@ where
             .unwrap_or_else(|| "en".to_string());
         let lang = req.lang_override.as_deref().unwrap_or(&default_lang);
 
-        if lang != "en" && !crate::language::is_supported_language(lang) {
+        if lang != "en" && !livrarr_external_data::language::is_supported_language(lang) {
             return Err(WorkServiceError::Enrichment(format!(
                 "unsupported language: {lang}"
             )));
@@ -1583,12 +1583,12 @@ where
 
         let raw_html = String::from_utf8_lossy(&resp.body);
 
-        if crate::provider_util::is_anti_bot_page(&raw_html) {
+        if livrarr_external_data::provider_util::is_anti_bot_page(&raw_html) {
             tracing::warn!("Goodreads search: anti-bot page detected");
             return Ok(vec![]);
         }
 
-        let parsed = crate::goodreads::parse_search_html(&raw_html);
+        let parsed = livrarr_external_data::goodreads::parse_search_html(&raw_html);
 
         if parsed.is_empty() && raw_html.contains("itemtype=\"http") {
             tracing::warn!(
@@ -1606,11 +1606,12 @@ where
                 } else {
                     r.detail_url.clone()
                 };
-                let validated_url = if crate::goodreads::validate_detail_url(&full_url) {
-                    Some(full_url)
-                } else {
-                    None
-                };
+                let validated_url =
+                    if livrarr_external_data::goodreads::validate_detail_url(&full_url) {
+                        Some(full_url)
+                    } else {
+                        None
+                    };
                 LookupResult {
                     ol_key: None,
                     title: r.title,
@@ -1779,9 +1780,10 @@ where
             urlencoding::encode(&lang_norm),
         );
 
-        let volumes = crate::google_books::fetch_gb_volumes(&self.http, &api_key, url)
-            .await
-            .map_err(WorkServiceError::Enrichment)?;
+        let volumes =
+            livrarr_external_data::google_books::fetch_gb_volumes(&self.http, &api_key, url)
+                .await
+                .map_err(WorkServiceError::Enrichment)?;
 
         let results = volumes
             .iter()
@@ -1802,7 +1804,7 @@ where
                 let cover_url = vi
                     .image_links
                     .as_ref()
-                    .and_then(crate::google_books::normalize_cover_url);
+                    .and_then(livrarr_external_data::google_books::normalize_cover_url);
                 let language = vi.language.clone().or_else(|| Some(lang_norm.clone()));
 
                 Some(LookupResult {
@@ -1820,7 +1822,9 @@ where
                     language,
                     detail_url: None,
                     rating: None,
-                    isbn_13: crate::google_books::extract_isbn13(&vi.industry_identifiers),
+                    isbn_13: livrarr_external_data::google_books::extract_isbn13(
+                        &vi.industry_identifiers,
+                    ),
                     candidate_id: None,
                     hc_key: None,
                     gr_key: None,
@@ -1877,7 +1881,7 @@ where
         let resp = self
             .http
             .fetch(livrarr_domain::services::FetchRequest {
-                url: crate::hardcover::HARDCOVER_API_URL.to_string(),
+                url: livrarr_external_data::hardcover::HARDCOVER_API_URL.to_string(),
                 method: livrarr_domain::services::HttpMethod::Post,
                 headers: vec![
                     ("Authorization".into(), format!("Bearer {token}")),

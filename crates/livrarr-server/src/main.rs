@@ -190,7 +190,7 @@ async fn main() {
                 google_books_api_key: None,
             }
         });
-        livrarr_metadata::live_config::LiveMetadataConfig::new(initial)
+        livrarr_external_data::live_config::LiveMetadataConfig::new(initial)
     };
 
     // Warn at startup if the configured LLM endpoint is invalid (but don't fail).
@@ -233,17 +233,21 @@ async fn main() {
         // small follow-up (same LiveMetadataConfig pattern).
         builder = builder.add_provider(
             P::Audnexus,
-            m::ProviderClient::Audnexus(m::AudnexusClient::new(
-                http_client.clone(),
-                cfg_snapshot.audnexus_url.clone(),
-            )),
+            livrarr_external_data::ProviderClient::Audnexus(
+                livrarr_external_data::AudnexusClient::new(
+                    http_client.clone(),
+                    cfg_snapshot.audnexus_url.clone(),
+                ),
+            ),
             queue_cfg(P::Audnexus),
         );
 
         // OpenLibrary — always available, no credentials needed.
         builder = builder.add_provider(
             P::OpenLibrary,
-            m::ProviderClient::OpenLibrary(m::OpenLibraryClient::new(http_client.clone())),
+            livrarr_external_data::ProviderClient::OpenLibrary(
+                livrarr_external_data::OpenLibraryClient::new(http_client.clone()),
+            ),
             queue_cfg(P::OpenLibrary),
         );
 
@@ -253,47 +257,53 @@ async fn main() {
         // via the UI takes effect on the next enrichment.
         builder = builder.add_provider(
             P::Hardcover,
-            m::ProviderClient::Hardcover(m::HardcoverClient::new(
-                http_client.clone(),
-                live_metadata_config.clone(),
-            )),
+            livrarr_external_data::ProviderClient::Hardcover(
+                livrarr_external_data::HardcoverClient::new(
+                    http_client.clone(),
+                    live_metadata_config.clone(),
+                ),
+            ),
             queue_cfg(P::Hardcover),
         );
 
         // Goodreads — always registered. The LLM extraction fallback for
         // foreign-language pages reads live config per-fetch.
-        let gr_client = m::GoodreadsClient::production(http_client.clone())
+        let gr_client = livrarr_external_data::GoodreadsClient::production(http_client.clone())
             .with_live_config(live_metadata_config.clone());
         builder = builder.add_provider(
             P::Goodreads,
-            m::ProviderClient::Goodreads(gr_client),
+            livrarr_external_data::ProviderClient::Goodreads(gr_client),
             queue_cfg(P::Goodreads),
         );
 
         // Google Books — always registered. Reads API key from live config per-fetch.
         builder = builder.add_provider(
             P::GoogleBooks,
-            m::ProviderClient::GoogleBooks(m::GoogleBooksClient::new(
-                http_client.clone(),
-                live_metadata_config.clone(),
-            )),
+            livrarr_external_data::ProviderClient::GoogleBooks(
+                livrarr_external_data::GoogleBooksClient::new(
+                    http_client.clone(),
+                    live_metadata_config.clone(),
+                ),
+            ),
             queue_cfg(P::GoogleBooks),
         );
 
         // Audible — always registered. Unauthenticated API, no config needed.
         builder = builder.add_provider(
             P::Audible,
-            m::ProviderClient::Audible(m::audible::AudibleCatalogClient::new(
-                http_client.clone(),
-                5 * 60,
-            )),
+            livrarr_external_data::ProviderClient::Audible(
+                livrarr_external_data::audible::AudibleCatalogClient::new(
+                    http_client.clone(),
+                    5 * 60,
+                ),
+            ),
             queue_cfg(P::Audible),
         );
 
         builder = builder.with_applicability_rule(Arc::new(|provider, work| {
             if matches!(
-                m::language::provider_priority(work.language.as_deref()),
-                m::language::ProviderPriority::English
+                livrarr_external_data::language::provider_priority(work.language.as_deref()),
+                livrarr_external_data::language::ProviderPriority::English
             ) {
                 return !matches!(provider, P::GoogleBooks);
             }
@@ -314,7 +324,7 @@ async fn main() {
             let llm_configured = cfg.llm_enabled
                 && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
                 && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
-            let llm_caller = m::llm_caller_service::LlmCallerImpl::new(
+            let llm_caller = livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                 live_metadata_config.clone(),
                 http_client.clone(),
             );
@@ -334,7 +344,7 @@ async fn main() {
             live_metadata_config.clone(),
         );
 
-        let llm_caller = m::llm_caller_service::LlmCallerImpl::new(
+        let llm_caller = livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
             live_metadata_config.clone(),
             http_client.clone(),
         );
@@ -418,46 +428,55 @@ async fn main() {
     // cover service and the identity resolver's multi-provider fan-out.
     let provider_clients = {
         use livrarr_domain::MetadataProvider as P;
-        use livrarr_metadata as m;
         let mut clients = std::collections::HashMap::new();
         clients.insert(
             P::Audnexus,
-            m::ProviderClient::Audnexus(m::AudnexusClient::new(
-                http_client.clone(),
-                live_metadata_config.snapshot().audnexus_url.clone(),
-            )),
+            livrarr_external_data::ProviderClient::Audnexus(
+                livrarr_external_data::AudnexusClient::new(
+                    http_client.clone(),
+                    live_metadata_config.snapshot().audnexus_url.clone(),
+                ),
+            ),
         );
         clients.insert(
             P::OpenLibrary,
-            m::ProviderClient::OpenLibrary(m::OpenLibraryClient::new(http_client.clone())),
+            livrarr_external_data::ProviderClient::OpenLibrary(
+                livrarr_external_data::OpenLibraryClient::new(http_client.clone()),
+            ),
         );
         clients.insert(
             P::Hardcover,
-            m::ProviderClient::Hardcover(m::HardcoverClient::new(
-                http_client.clone(),
-                live_metadata_config.clone(),
-            )),
+            livrarr_external_data::ProviderClient::Hardcover(
+                livrarr_external_data::HardcoverClient::new(
+                    http_client.clone(),
+                    live_metadata_config.clone(),
+                ),
+            ),
         );
         clients.insert(
             P::Goodreads,
-            m::ProviderClient::Goodreads(
-                m::GoodreadsClient::production(http_client.clone())
+            livrarr_external_data::ProviderClient::Goodreads(
+                livrarr_external_data::GoodreadsClient::production(http_client.clone())
                     .with_live_config(live_metadata_config.clone()),
             ),
         );
         clients.insert(
             P::GoogleBooks,
-            m::ProviderClient::GoogleBooks(m::GoogleBooksClient::new(
-                http_client.clone(),
-                live_metadata_config.clone(),
-            )),
+            livrarr_external_data::ProviderClient::GoogleBooks(
+                livrarr_external_data::GoogleBooksClient::new(
+                    http_client.clone(),
+                    live_metadata_config.clone(),
+                ),
+            ),
         );
         clients.insert(
             P::Audible,
-            m::ProviderClient::Audible(m::audible::AudibleCatalogClient::new(
-                http_client.clone(),
-                5 * 60,
-            )),
+            livrarr_external_data::ProviderClient::Audible(
+                livrarr_external_data::audible::AudibleCatalogClient::new(
+                    http_client.clone(),
+                    5 * 60,
+                ),
+            ),
         );
         clients
     };
@@ -468,7 +487,7 @@ async fn main() {
     let identity_resolver_arc = Arc::new(
         livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver {
             clients: provider_clients.clone(),
-            cache: Arc::new(livrarr_metadata::transport_cache::TransportCache::new(
+            cache: Arc::new(livrarr_external_data::transport_cache::TransportCache::new(
                 std::time::Duration::from_secs(300),
             )),
             config: {
@@ -498,7 +517,7 @@ async fn main() {
             let llm_configured = cfg.llm_enabled
                 && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
                 && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
-            let llm_caller = livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+            let llm_caller = livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                 live_metadata_config.clone(),
                 livrarr_http::HttpClient::builder()
                     .build()
@@ -517,7 +536,7 @@ async fn main() {
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for work service"),
                 http_client.clone(),
-                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
                         .build()
@@ -575,7 +594,7 @@ async fn main() {
             svc_db.clone(),
             livrarr_http::fetcher::HttpFetcherImpl::new()
                 .expect("HttpFetcherImpl construction for author service"),
-            livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+            livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                 live_metadata_config.clone(),
                 livrarr_http::HttpClient::builder()
                     .build()
@@ -591,7 +610,7 @@ async fn main() {
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for series query service"),
                 work_service_arc.clone(),
-                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
                         .build()
@@ -647,7 +666,7 @@ async fn main() {
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for list work service"),
                 http_client_for_services.clone(),
-                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
                         .build()
@@ -661,7 +680,7 @@ async fn main() {
                         && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
                     livrarr_metadata::DefaultMergeEngine::new_with_llm(
                         livrarr_metadata::PriorityModel::english(),
-                        livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                        livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                             live_metadata_config.clone(),
                             livrarr_http::HttpClient::builder()
                                 .build()
@@ -703,7 +722,7 @@ async fn main() {
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for author monitor work service"),
                 http_client_for_services.clone(),
-                livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
                         .build()
@@ -717,7 +736,7 @@ async fn main() {
                         && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
                     livrarr_metadata::DefaultMergeEngine::new_with_llm(
                         livrarr_metadata::PriorityModel::english(),
-                        livrarr_metadata::llm_caller_service::LlmCallerImpl::new(
+                        livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                             live_metadata_config.clone(),
                             livrarr_http::HttpClient::builder()
                                 .build()
@@ -803,35 +822,43 @@ async fn main() {
             let mut preadd_clients = std::collections::HashMap::new();
             preadd_clients.insert(
                 P::Hardcover,
-                m::ProviderClient::Hardcover(m::HardcoverClient::new(
-                    http_client.clone(),
-                    live_metadata_config.clone(),
-                )),
+                livrarr_external_data::ProviderClient::Hardcover(
+                    livrarr_external_data::HardcoverClient::new(
+                        http_client.clone(),
+                        live_metadata_config.clone(),
+                    ),
+                ),
             );
             preadd_clients.insert(
                 P::OpenLibrary,
-                m::ProviderClient::OpenLibrary(m::OpenLibraryClient::new(http_client.clone())),
+                livrarr_external_data::ProviderClient::OpenLibrary(
+                    livrarr_external_data::OpenLibraryClient::new(http_client.clone()),
+                ),
             );
             preadd_clients.insert(
                 P::Goodreads,
-                m::ProviderClient::Goodreads(
-                    m::GoodreadsClient::production(http_client.clone())
+                livrarr_external_data::ProviderClient::Goodreads(
+                    livrarr_external_data::GoodreadsClient::production(http_client.clone())
                         .with_live_config(live_metadata_config.clone()),
                 ),
             );
             preadd_clients.insert(
                 P::Audnexus,
-                m::ProviderClient::Audnexus(m::AudnexusClient::new(
-                    http_client.clone(),
-                    live_metadata_config.snapshot().audnexus_url.clone(),
-                )),
+                livrarr_external_data::ProviderClient::Audnexus(
+                    livrarr_external_data::AudnexusClient::new(
+                        http_client.clone(),
+                        live_metadata_config.snapshot().audnexus_url.clone(),
+                    ),
+                ),
             );
             preadd_clients.insert(
                 P::Audible,
-                m::ProviderClient::Audible(m::audible::AudibleCatalogClient::new(
-                    http_client.clone(),
-                    5 * 60,
-                )),
+                livrarr_external_data::ProviderClient::Audible(
+                    livrarr_external_data::audible::AudibleCatalogClient::new(
+                        http_client.clone(),
+                        5 * 60,
+                    ),
+                ),
             );
             Arc::new(m::preadd_cover_service::LivePreaddCoverService::new(
                 preadd_clients,

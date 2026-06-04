@@ -4,11 +4,13 @@ use std::time::Duration;
 use tracing::warn;
 use url::Url;
 
-use crate::normalize::nfc;
-use crate::provider_util::{clean_html_for_llm, is_anti_bot_page, validate_cover_url};
 use crate::{
     LlmClient, LlmError, LlmMessage, LlmRole, MetadataError, MetadataProvider,
     ProviderAuthorResult, ProviderSearchResult, ProviderWorkDetail,
+};
+use livrarr_external_data::normalize::nfc;
+use livrarr_external_data::provider_util::{
+    clean_html_for_llm, is_anti_bot_page, validate_cover_url,
 };
 use livrarr_http::HttpClient;
 

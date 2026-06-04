@@ -1,6 +1,6 @@
 use livrarr_http::HttpClient;
 
-use crate::provider_util::upscale_cover_url;
+use livrarr_external_data::provider_util::upscale_cover_url;
 
 /// Validate that an ISBN string contains only digits and an optional trailing X.
 /// Rejects any input that could be used for URL injection.
@@ -183,7 +183,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
     let unproxied = request_cover_url.map(crate::work_service::unproxy_cover_url);
     let valid_url = unproxied
         .as_deref()
-        .filter(|u| crate::provider_util::validate_cover_url(u, "").is_some());
+        .filter(|u| livrarr_external_data::provider_util::validate_cover_url(u, "").is_some());
 
     // Branch A: download existing URL directly (any provider)
     if let Some(url) = valid_url {
@@ -314,7 +314,7 @@ async fn fast_hc_cover_search(
     author: &str,
     token: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    use crate::hardcover::HARDCOVER_API_URL;
+    use livrarr_external_data::hardcover::HARDCOVER_API_URL;
 
     let query = r#"query SearchBooks($query: String!) {
         search(query: $query, query_type: "books", per_page: 10) { results }

@@ -45,18 +45,7 @@ pub use provider_queue::{
     ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
 };
 
-// Compatibility shim (D-014): re-export `livrarr-external-data`'s public surface
-// under the paths dependents currently import from `livrarr_metadata`. Removed
-// once consumers import from `livrarr_external_data` directly (AC-021).
-pub use livrarr_external_data::{
-    audible, audnexus, goodreads, google_books, hardcover, language, live_config,
-    llm_caller_service, normalize, openlibrary, parsers, provider_client, provider_util,
-    transport_cache,
-};
-pub use livrarr_external_data::{
-    AudnexusClient, GoodreadsClient, GoogleBooksClient, HardcoverClient, NormalizedWorkDetail,
-    OpenLibraryClient, ProviderClient, ProviderOutcome, StubProviderClient,
-};
+use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 
 // =============================================================================
 // Metadata Provider Trait
@@ -394,9 +383,9 @@ impl PriorityModel {
 
     /// Select model based on work language.
     pub fn for_language(language: Option<&str>) -> Self {
-        match crate::language::provider_priority(language) {
-            crate::language::ProviderPriority::English => Self::english(),
-            crate::language::ProviderPriority::Foreign => Self::foreign(),
+        match livrarr_external_data::language::provider_priority(language) {
+            livrarr_external_data::language::ProviderPriority::English => Self::english(),
+            livrarr_external_data::language::ProviderPriority::Foreign => Self::foreign(),
         }
     }
 }
@@ -447,7 +436,7 @@ pub trait MergeEngine: Send + Sync {
 /// `L` is the LLM caller — `LlmCallerImpl` in production, a no-op stub in tests.
 /// When `llm_configured` is false the LLM path is never entered and `L` is never
 /// called, so tests can use `NoOpLlmCaller` without wiring real credentials.
-pub struct DefaultMergeEngine<L = crate::llm_caller_service::LlmCallerImpl> {
+pub struct DefaultMergeEngine<L = livrarr_external_data::llm_caller_service::LlmCallerImpl> {
     llm: L,
     llm_configured: bool,
     /// Kept to satisfy the old `new(priority_model)` call sites during transition.
@@ -475,8 +464,8 @@ where
         // metadata. PriorityModel::foreign() still lists them as fallbacks, so
         // reordering is insufficient — drop them from the inputs before merging.
         let is_foreign = matches!(
-            crate::language::provider_priority(language),
-            crate::language::ProviderPriority::Foreign
+            livrarr_external_data::language::provider_priority(language),
+            livrarr_external_data::language::ProviderPriority::Foreign
         );
         let provider_results = payloads
             .into_iter()
@@ -504,12 +493,12 @@ where
     }
 }
 
-impl DefaultMergeEngine<crate::llm_caller_service::LlmCallerImpl> {
+impl DefaultMergeEngine<livrarr_external_data::llm_caller_service::LlmCallerImpl> {
     /// Construct with no LLM (deterministic-only). Compatible with the pre-Phase-5
     /// `new(priority_model)` signature used in `main.rs` and tests.
     pub fn new(priority_model: PriorityModel) -> Self {
         Self {
-            llm: crate::llm_caller_service::LlmCallerImpl::not_configured(),
+            llm: livrarr_external_data::llm_caller_service::LlmCallerImpl::not_configured(),
             llm_configured: false,
             _priority_model: priority_model,
         }

@@ -16,10 +16,10 @@ mod audnexus_tracer_tests {
 
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::EnrichmentContext;
-    use crate::{AudnexusClient, ProviderClient, ProviderOutcome};
     use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
     use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole};
+    use livrarr_external_data::{AudnexusClient, ProviderClient, ProviderOutcome};
     use livrarr_http::HttpClient;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -186,9 +186,9 @@ mod goodreads_tracer_tests {
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::EnrichmentContext;
     use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
-    use crate::{GoodreadsClient, ProviderClient, ProviderOutcome};
     use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole, WillRetryReason};
+    use livrarr_external_data::{GoodreadsClient, ProviderClient, ProviderOutcome};
     use livrarr_http::HttpClient;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

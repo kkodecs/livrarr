@@ -113,7 +113,7 @@ where
             .map(|s| s.to_string())
             .or(existing.llm_api_key.clone());
         let effective_model = llm_model.or(existing.llm_model.as_deref());
-        let llm_configured = livrarr_metadata::language::is_llm_configured(
+        let llm_configured = livrarr_external_data::language::is_llm_configured(
             effective_llm_enabled,
             effective_endpoint,
             effective_key.as_deref(),
@@ -123,7 +123,7 @@ where
             .map(|s| s.to_string())
             .or(existing.google_books_api_key.clone());
         let google_books_configured = effective_gb_key.as_deref().is_some_and(|s| !s.is_empty());
-        livrarr_metadata::language::validate_languages(
+        livrarr_external_data::language::validate_languages(
             languages,
             llm_configured,
             google_books_configured,

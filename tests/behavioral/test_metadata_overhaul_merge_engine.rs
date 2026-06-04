@@ -12,9 +12,10 @@ use livrarr_domain::{
     EnrichmentStatus, ExternalIdType, FieldProvenance, MetadataProvider as MetadataSource,
     NarrationType, OutcomeClass, ProvenanceSetter, UserId, Work, WorkField, WorkId,
 };
+use livrarr_external_data::NormalizedWorkDetail;
 use livrarr_metadata::{
     DefaultMergeEngine, EnrichmentMode, MergeEngine, MergeError, MergeInput, MergeOutput,
-    NormalizedWorkDetail, PriorityModel, ReconstructedOutcome,
+    PriorityModel, ReconstructedOutcome,
 };
 
 const USER_ID: UserId = 7;
