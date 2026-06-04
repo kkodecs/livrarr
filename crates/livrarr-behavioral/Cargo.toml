@@ -139,6 +139,10 @@ path = "../../tests/behavioral/test_consolidation_dto.rs"
 name = "test_stress_phase4a"
 path = "../../tests/behavioral/test_stress_phase4a.rs"
 
+[[test]]
+name = "test_status_two_state_split"
+path = "../../tests/behavioral/test_status_two_state_split.rs"
+
 # --- English work lifecycle behavioral test skeletons ---
 
 [[test]]
