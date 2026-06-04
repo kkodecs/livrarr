@@ -13,14 +13,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub mod async_resolver;
 pub mod author_service;
-pub mod bulk_resolver;
 pub mod cover;
 pub mod cover_alternatives;
 pub mod cover_gate;
 pub mod cover_resolution;
-pub mod english_identity_resolver;
 pub mod enrichment_workflow_service;
 pub mod http_llm;
 pub mod list_service;
@@ -31,8 +28,12 @@ pub mod preadd_cover_service;
 pub mod provider_queue;
 pub mod series_query_service;
 pub mod series_service;
-pub mod title_cleanup;
 pub mod work_service;
+
+// Re-export of the identity-resolution modules (now in livrarr-identity).
+pub use livrarr_identity::{
+    async_resolver, bulk_resolver, english_identity_resolver, title_cleanup,
+};
 
 pub mod author_monitor_workflow;
 pub mod provenance;
