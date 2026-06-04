@@ -16,9 +16,16 @@ export type GrabStatus =
 export type EnrichmentStatus =
   | "unenriched"
   | "enriched"
+  | "thin"
   | "failed"
   | "conflict"
   | "identity_pending"
+  | "needs_review";
+export type IdentityStatus =
+  | "pending"
+  | "confirmed"
+  | "provisional"
+  | "conflict"
   | "needs_review";
 export type QueueStatus =
   | "downloading"
@@ -219,6 +226,7 @@ export interface WorkDetailResponse {
   rating: number | null;
   ratingCount: number | null;
   enrichmentStatus: EnrichmentStatus;
+  identityStatus: IdentityStatus;
   enrichedAt: string | null;
   enrichmentSource: string | null;
   coverManual: boolean;

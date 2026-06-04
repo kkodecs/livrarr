@@ -1,5 +1,6 @@
 use livrarr_domain::{
-    AuthorId, CoverTrust, EnrichmentStatus, LibraryItemId, MediaType, NarrationType, Work, WorkId,
+    AuthorId, CoverTrust, EnrichmentStatus, IdentityStatus, LibraryItemId, MediaType,
+    NarrationType, Work, WorkId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -170,6 +171,7 @@ pub struct WorkDetailResponse {
     pub rating: Option<f64>,
     pub rating_count: Option<i32>,
     pub enrichment_status: EnrichmentStatus,
+    pub identity_status: IdentityStatus,
     pub enriched_at: Option<String>,
     pub enrichment_source: Option<String>,
     pub cover_manual: bool,
@@ -233,6 +235,7 @@ pub fn work_to_detail_with_cover_mtime(
         rating: w.rating,
         rating_count: w.rating_count,
         enrichment_status: w.enrichment_status,
+        identity_status: w.identity_status,
         enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
         enrichment_source: w.enrichment_source.clone(),
         cover_manual: w.cover_manual,
