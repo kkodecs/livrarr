@@ -92,12 +92,13 @@ async fn test_lookup_fans_out_across_providers_not_first_hit() {
 
     // First-hit would stop after Google Books returned a result (1 call). The
     // fan-out queries every eligible provider regardless of who answers first.
-    // GB + OpenLibrary + Hardcover are all enabled, so the fan-out issues exactly
-    // three provider calls; the old first-hit cascade would have stopped at one.
+    // GB + OpenLibrary + Hardcover are enabled and Goodreads is always queried
+    // (scrape-based, needs no credential), so the fan-out issues exactly four
+    // provider calls; the old first-hit cascade would have stopped at one.
     assert_eq!(
         http.call_count(),
-        3,
-        "lookup must query every enabled provider (GB+OL+HC), not stop at the first hit; got {} call(s)",
+        4,
+        "lookup must query every provider (GB+OL+HC+Goodreads), not stop at the first hit; got {} call(s)",
         http.call_count()
     );
 }

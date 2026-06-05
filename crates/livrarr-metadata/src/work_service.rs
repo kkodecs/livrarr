@@ -281,6 +281,54 @@ fn seed_carries_identifier(seed: &livrarr_domain::identity::WorkSeed) -> bool {
         || seed.hc_key.is_some()
 }
 
+/// Take one provider's discovery result (relevance-ordered), logging a failure or
+/// timeout rather than failing the whole search. Generic over the provider error
+/// type so every provider lookup can share one helper.
+fn take_lookup<E: std::fmt::Display>(
+    provider: &str,
+    term: &str,
+    res: Result<Result<Vec<LookupResult>, E>, tokio::time::error::Elapsed>,
+) -> Vec<LookupResult> {
+    match res {
+        Ok(Ok(found)) => found,
+        Ok(Err(e)) => {
+            tracing::warn!(provider, term, "discovery provider failed: {e}");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(provider, term, "discovery provider timed out");
+            Vec::new()
+        }
+    }
+}
+
+/// Round-robin the per-provider lists in fixed-size chunks so the strongest
+/// matches from every provider lead and quality degrades evenly down the combined
+/// list — instead of a naive concat (good→bad, good→bad, …). With `chunk = 3` the
+/// first rows are the top 3 of each provider, then the next 3 of each, and so on.
+fn interleave_by(lists: Vec<Vec<LookupResult>>, chunk: usize) -> Vec<LookupResult> {
+    let mut iters: Vec<_> = lists.into_iter().map(|l| l.into_iter()).collect();
+    let mut out = Vec::new();
+    loop {
+        let mut any = false;
+        for it in &mut iters {
+            for _ in 0..chunk {
+                match it.next() {
+                    Some(item) => {
+                        out.push(item);
+                        any = true;
+                    }
+                    None => break,
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    out
+}
+
 /// Map a resolved/confirmable identity into a wire `LookupResult`, carrying the
 /// federated anchors + the `candidate_id` payload handle (REQ-014/R-009).
 fn lookup_result_from_captured(
@@ -1272,38 +1320,44 @@ where
             )));
         }
 
-        // #97: query every eligible provider in parallel and merge, instead of
-        // returning the first one that answers. A book present only on a provider
-        // the cascade never reached (e.g. Hardcover, behind a non-empty Google
-        // Books) was silently dropped from the results.
-        let (gb, ol, hc) = tokio::join!(
-            self.lookup_google_books(&term, lang),
-            self.lookup_openlibrary(&term, lang),
-            self.lookup_hardcover(&term, lang),
+        // #97 + WCC chunk A: query every provider in parallel and union the
+        // results, instead of returning the first that answers. Goodreads joins
+        // as a co-equal provider via its WAF-free autocomplete endpoint. Each
+        // lookup is timeout-bounded so a slow scrape can't stall the search.
+        let provider_timeout = Duration::from_secs(8);
+        let (gb, ol, hc, gr) = tokio::join!(
+            tokio::time::timeout(provider_timeout, self.lookup_google_books(&term, lang)),
+            tokio::time::timeout(provider_timeout, self.lookup_openlibrary(&term, lang)),
+            tokio::time::timeout(provider_timeout, self.lookup_hardcover(&term, lang)),
+            tokio::time::timeout(provider_timeout, self.lookup_goodreads(&term, lang)),
         );
 
-        let mut merged: Vec<LookupResult> = Vec::new();
-        for (provider, result) in [("GoogleBooks", gb), ("OpenLibrary", ol), ("Hardcover", hc)] {
-            match result {
-                Ok(results) => merged.extend(results),
-                Err(e) => tracing::warn!(
-                    term = %term, lang = %lang, provider,
-                    error = %e, "provider lookup failed; continuing with the others"
-                ),
-            }
+        // Cap each provider to its top 9 (relevance-ordered), then round-robin in
+        // chunks of 3 so the strongest matches from every provider lead. Order is
+        // language-aware: English leads with the anchor-id providers (Hardcover,
+        // OpenLibrary), then Google Books, then Goodreads (scrape, often blocked)
+        // last. Non-English leads with Google Books — the foreign-language
+        // metadata provider — then OpenLibrary, Hardcover, Goodreads.
+        const PER_PROVIDER: usize = 9;
+        let mut lists = if lang == "en" {
+            vec![
+                take_lookup("Hardcover", &term, hc),
+                take_lookup("OpenLibrary", &term, ol),
+                take_lookup("GoogleBooks", &term, gb),
+                take_lookup("Goodreads", &term, gr),
+            ]
+        } else {
+            vec![
+                take_lookup("GoogleBooks", &term, gb),
+                take_lookup("OpenLibrary", &term, ol),
+                take_lookup("Hardcover", &term, hc),
+                take_lookup("Goodreads", &term, gr),
+            ]
+        };
+        for l in &mut lists {
+            l.truncate(PER_PROVIDER);
         }
-
-        // Goodreads is scrape-only — keep it as the non-English fallback so a
-        // foreign-language term with no structured-provider hit still resolves,
-        // without scraping it on every query.
-        if lang != "en" && merged.is_empty() {
-            match self.lookup_goodreads(&term, lang).await {
-                Ok(results) => merged.extend(results),
-                Err(e) => tracing::warn!(
-                    term = %term, lang = %lang, error = %e, "Goodreads lookup failed"
-                ),
-            }
-        }
+        let merged = interleave_by(lists, 3);
 
         Ok(dedupe_lookup_results(merged))
     }
@@ -1397,16 +1451,23 @@ where
 
         let raw_count = raw_results.len();
 
-        // Attempt LLM filtering
-        let (filtered, raw_available) = match self.llm_filter_search(&raw_results).await {
-            Some(indices) if indices.len() < raw_count => {
-                let filtered: Vec<LookupResult> = indices
-                    .into_iter()
-                    .filter_map(|i| raw_results.get(i).cloned())
-                    .collect();
-                (filtered, true)
+        // Keep the top 9 (the strongest cross-provider matches after the chunked
+        // interleave) untouched; LLM-filter only the lower-ranked tail (item 10+)
+        // for relevance to the query, so a genuine match in the head is never
+        // dropped — only long-tail noise is pruned.
+        const KEEP_HEAD: usize = 9;
+        let (filtered, raw_available) = if raw_count > KEEP_HEAD {
+            let tail = &raw_results[KEEP_HEAD..];
+            match self.llm_filter_search(&term, tail).await {
+                Some(keep) if keep.len() < tail.len() => {
+                    let mut filtered: Vec<LookupResult> = raw_results[..KEEP_HEAD].to_vec();
+                    filtered.extend(keep.into_iter().filter_map(|i| tail.get(i).cloned()));
+                    (filtered, true)
+                }
+                _ => (raw_results.clone(), false),
             }
-            _ => (raw_results.clone(), false),
+        } else {
+            (raw_results.clone(), false)
         };
 
         let filtered_count = filtered.len();
@@ -1487,7 +1548,7 @@ where
     M: crate::MergeEngine + Send + Sync,
     T: livrarr_domain::services::TagService + Send + Sync,
 {
-    async fn llm_filter_search(&self, results: &[LookupResult]) -> Option<Vec<usize>> {
+    async fn llm_filter_search(&self, query: &str, results: &[LookupResult]) -> Option<Vec<usize>> {
         let mut listing = String::new();
         for (i, r) in results.iter().enumerate() {
             listing.push_str(&format!(
@@ -1501,14 +1562,16 @@ where
 
         let system = "You are a librarian assistant. Clean up book search results.";
         let user_prompt = format!(
-            "These are search results from a book database:\n\n\
+            "A user searched a book database for: \"{query}\"\n\n\
+             These are lower-ranked results for that query:\n\n\
              {listing}\n\
              Clean up this list:\n\
-             1. Remove non-book items (study guides, journals, blank notebooks, merchandise, board games)\n\
-             2. Remove duplicate editions of the same work — keep the one with the best metadata\n\
-             3. Remove comic/manga adaptations, movie tie-in editions, and abridged versions\n\
-             4. Remove anthologies and compilations unless they are a well-known standalone work\n\
-             5. Keep results that are legitimate different works even if titles are similar\n\n\
+             1. Remove items not relevant to the query \"{query}\"\n\
+             2. Remove non-book items (study guides, journals, blank notebooks, merchandise, board games)\n\
+             3. Remove duplicate editions of the same work — keep the one with the best metadata\n\
+             4. Remove comic/manga adaptations, movie tie-in editions, and abridged versions\n\
+             5. Remove anthologies and compilations unless they are a well-known standalone work\n\
+             6. Keep results that are legitimate different works even if titles are similar\n\n\
              Return a JSON array of the original indices to keep, e.g. [0, 2, 5].\n\
              Return ONLY the JSON array, no other text."
         );
@@ -1553,15 +1616,20 @@ where
         term: &str,
         lang: &str,
     ) -> Result<Vec<LookupResult>, WorkServiceError> {
-        let search_url = format!(
-            "https://www.goodreads.com/search?q={}",
+        // Discovery uses the WAF-free `/book/auto_complete` JSON endpoint. The
+        // HTML `/search` page is AWS-WAF 202-challenged (dead); autocomplete
+        // returns structured title/author/cover/rating/id with no LLM. Query the
+        // term as-is — adding the author demotes the canonical book (author-in-
+        // title substring matches rank study guides / adaptations first).
+        let url = format!(
+            "https://www.goodreads.com/book/auto_complete?format=json&q={}",
             urlencoding::encode(term)
         );
 
         let fetch_req = FetchRequest {
-            url: search_url,
+            url,
             method: HttpMethod::Get,
-            headers: vec![("Accept-Language".into(), "en-US,en;q=0.9".into())],
+            headers: vec![("Accept".into(), "application/json".into())],
             body: None,
             timeout: std::time::Duration::from_secs(10),
             rate_bucket: RateBucket::Goodreads,
@@ -1573,34 +1641,24 @@ where
         let resp = match self.http.fetch(fetch_req).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Goodreads search fetch failed: {e}");
+                tracing::warn!("Goodreads autocomplete fetch failed: {e}");
                 return Ok(vec![]);
             }
         };
 
-        if resp.status >= 400 {
+        // 200 is the only "door open" status; a 202 challenge / 4xx / 5xx are
+        // transient blocks for discovery — the other providers carry the search.
+        if resp.status != 200 {
             tracing::warn!(
                 status = resp.status,
-                "Goodreads search returned non-success"
+                "Goodreads autocomplete returned non-200"
             );
             return Ok(vec![]);
         }
 
-        let raw_html = String::from_utf8_lossy(&resp.body);
-
-        if livrarr_external_data::provider_util::is_anti_bot_page(&raw_html) {
-            tracing::warn!("Goodreads search: anti-bot page detected");
-            return Ok(vec![]);
-        }
-
-        let parsed = livrarr_external_data::goodreads::parse_search_html(&raw_html);
-
-        if parsed.is_empty() && raw_html.contains("itemtype=\"http") {
-            tracing::warn!(
-                "Goodreads parser drift: HTML contains schema.org Book rows but 0 passed \
-                 validation. HTML structure may have changed."
-            );
-        }
+        let body = String::from_utf8_lossy(&resp.body);
+        // A non-array body (WAF interstitial / format change) parses to empty.
+        let parsed = livrarr_external_data::goodreads::parse_autocomplete_json(&body);
 
         let lang_owned = lang.to_string();
         let results = parsed
@@ -1617,6 +1675,9 @@ where
                     } else {
                         None
                     };
+                // gr_key is intentionally not set here: threading a Goodreads
+                // work anchor (normalized via normalize_gr_key) through the DTO
+                // chain into the add path is chunk B's job, not the search box.
                 LookupResult {
                     ol_key: None,
                     title: r.title,
@@ -2612,5 +2673,43 @@ mod discovery_tests {
             "HC-only book was dropped"
         );
         assert_eq!(merged.len(), 3, "expected 3 distinct works after dedupe");
+    }
+
+    #[test]
+    fn interleave_round_robins_in_chunks() {
+        // chunk=2: first 2 of A, first 2 of B, then A's remainder — so each
+        // provider's strongest hits lead and quality degrades evenly.
+        let a = vec![
+            lr("A0", "x", None),
+            lr("A1", "x", None),
+            lr("A2", "x", None),
+        ];
+        let b = vec![lr("B0", "y", None), lr("B1", "y", None)];
+        let out = interleave_by(vec![a, b], 2);
+        let titles: Vec<&str> = out.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, vec!["A0", "A1", "B0", "B1", "A2"]);
+    }
+
+    #[test]
+    fn interleave_handles_uneven_and_empty_lists() {
+        let a = vec![lr("A0", "x", None)];
+        let empty: Vec<LookupResult> = vec![];
+        let c = vec![lr("C0", "z", None), lr("C1", "z", None)];
+        let out = interleave_by(vec![a, empty, c], 3);
+        let titles: Vec<&str> = out.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, vec!["A0", "C0", "C1"]);
+    }
+
+    #[test]
+    fn take_lookup_passes_ok_and_swallows_err() {
+        let ok: Result<Result<Vec<LookupResult>, String>, tokio::time::error::Elapsed> =
+            Ok(Ok(vec![lr("Hit", "a", None)]));
+        assert_eq!(take_lookup("P", "t", ok).len(), 1);
+
+        // A provider error degrades to an empty contribution, never failing the
+        // whole search (the timeout arm behaves identically).
+        let err: Result<Result<Vec<LookupResult>, String>, tokio::time::error::Elapsed> =
+            Ok(Err("provider boom".to_string()));
+        assert!(take_lookup("P", "t", err).is_empty());
     }
 }
