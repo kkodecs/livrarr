@@ -4,6 +4,7 @@ import type { EnrichmentStatus, NarrationType, QueueStatus } from "@/types/api";
 const enrichmentColors: Record<EnrichmentStatus, string> = {
   unenriched: "bg-enrichment-pending/20 text-enrichment-pending",
   enriched: "bg-enrichment-enriched/20 text-enrichment-enriched",
+  thin: "bg-zinc-500/15 text-zinc-400",
   failed: "bg-enrichment-failed/20 text-enrichment-failed",
   conflict: "bg-enrichment-failed/20 text-enrichment-failed",
   identity_pending: "bg-enrichment-partial/20 text-enrichment-partial",
@@ -13,6 +14,7 @@ const enrichmentColors: Record<EnrichmentStatus, string> = {
 const enrichmentLabels: Record<EnrichmentStatus, string> = {
   unenriched: "Unenriched",
   enriched: "Enriched",
+  thin: "Sparse",
   failed: "Failed",
   conflict: "Conflict",
   identity_pending: "Identity Pending",
