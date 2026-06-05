@@ -322,3 +322,7 @@ name = "test_wcc_discovery_fanout"
 path = "../../tests/behavioral/test_wcc_discovery_fanout.rs"
 
 # --- End work creation consistency behavioral tests ---
+
+[[test]]
+name = "test_wcc_resolver_matrix"
+path = "../../tests/behavioral/test_wcc_resolver_matrix.rs"

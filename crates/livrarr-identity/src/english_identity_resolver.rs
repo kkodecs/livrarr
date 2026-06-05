@@ -246,7 +246,14 @@ pub fn run_quorum(
     responders: &HashMap<MetadataProvider, NormalizedWorkDetail>,
     seed: &WorkSeed,
 ) -> Resolution {
-    let items: Vec<&NormalizedWorkDetail> = responders.values().collect();
+    // Deterministic order: HashMap iteration is unordered, which would make the
+    // representative pick (`max_by_key`) and the `merge_missing` order below
+    // depend on hash layout — i.e. the captured identity could vary run-to-run
+    // when providers disagree on secondary fields. Sort by provider so the
+    // outcome is reproducible for a given input set.
+    let mut entries: Vec<(&MetadataProvider, &NormalizedWorkDetail)> = responders.iter().collect();
+    entries.sort_by_key(|(p, _)| format!("{p:?}"));
+    let items: Vec<&NormalizedWorkDetail> = entries.into_iter().map(|(_, d)| d).collect();
     if items.is_empty() {
         return Resolution::Unresolved {
             captured: captured_from_seed(seed),
@@ -280,9 +287,31 @@ pub fn run_quorum(
         clusters.push(members);
     }
 
-    clusters.sort_by_key(|m| std::cmp::Reverse(m.len()));
-    let top = &clusters[0];
-    let no_majority = items.len() > 1 && clusters.len() > 1 && clusters[1].len() == top.len();
+    // A work anchor (ol/gr/hc) outranks an ISBN/ASIN bridge for *winning* the
+    // quorum (REQ-018/020): when any anchored cluster exists, only anchored
+    // clusters compete, so an anchorless cluster can *corroborate* an anchored
+    // winner (its bridge is merged below) but can neither beat it nor tie it into
+    // a false Conflict. When NO provider carries a work anchor, the anchorless
+    // clusters compete normally and the winner is still `Resolved` — an ISBN-only
+    // identity is *provisional*, not a non-identity: `derived_identity_status`
+    // renders it `Provisional` (never a Confirmed lock), consistent with the
+    // no-responder Tier-A path (`resolve()` above). "ISBN is a bridge, not a
+    // lock" means Provisional, not Pending — so it is resolved, not held.
+    let any_anchored = clusters
+        .iter()
+        .any(|c| c.iter().any(|&i| has_work_anchor(items[i])));
+    let mut competing: Vec<Vec<usize>> = if any_anchored {
+        clusters
+            .into_iter()
+            .filter(|c| c.iter().any(|&i| has_work_anchor(items[i])))
+            .collect()
+    } else {
+        clusters
+    };
+
+    competing.sort_by_key(|m| std::cmp::Reverse(m.len()));
+    let top = &competing[0];
+    let no_majority = competing.len() > 1 && competing[1].len() == top.len();
     if no_majority {
         let rep = items[top[0]];
         return Resolution::Conflict {
@@ -292,7 +321,8 @@ pub fn run_quorum(
     }
 
     // The winning cluster's representative is its most-anchored member; merge any
-    // anchors the other members contribute (convergence adds, never clobbers).
+    // anchors/bridges the other members contribute (convergence adds, never
+    // clobbers) — including a corroborating anchorless member's ISBN.
     let rep_idx = *top
         .iter()
         .max_by_key(|&&idx| anchor_count(items[idx]))
@@ -336,6 +366,15 @@ fn method_for_seed(seed: &WorkSeed) -> IdentityMethod {
     } else {
         IdentityMethod::TitleAuthorSearch
     }
+}
+
+/// A payload carries a *work* anchor (ol/gr/hc) — the only kind that votes on
+/// work identity in the quorum. An edition bridge (isbn/asin) alone does not: an
+/// ISBN is a bridge to an anchor, never a lock on its own (REQ-018/020).
+fn has_work_anchor(d: &NormalizedWorkDetail) -> bool {
+    d.ol_key.as_deref().is_some_and(|v| !v.is_empty())
+        || d.gr_key.as_deref().is_some_and(|v| !v.is_empty())
+        || d.hc_key.as_deref().is_some_and(|v| !v.is_empty())
 }
 
 fn anchor_count(d: &NormalizedWorkDetail) -> usize {
