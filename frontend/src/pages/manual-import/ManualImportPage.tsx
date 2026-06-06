@@ -225,7 +225,7 @@ export default function ManualImportPage() {
       const title = m?.title ?? f.parsed?.title ?? f.filename;
       const author = m?.author ?? f.parsed?.author ?? "";
       const olKey = m?.olKey ?? "";
-      const language = f.parsed?.language || undefined;
+      const language = m?.language ?? f.parsed?.language ?? undefined;
       const paths = f.groupedPaths ?? [f.path];
       const group: ManualImportItem[] = paths.map((p) => ({
         path: p,
@@ -234,6 +234,15 @@ export default function ManualImportPage() {
         author,
         deleteExisting: f.deleteExisting,
         language,
+        // #97: carry the picked match's anchors + cover so the work lands
+        // Confirmed (and gets its cover) instead of falling back to ISBN-only.
+        candidateId: m?.candidateId ?? undefined,
+        hcKey: m?.hcKey ?? undefined,
+        grKey: m?.grKey ?? undefined,
+        asin: m?.asin ?? undefined,
+        coverUrl: m?.coverUrl ?? undefined,
+        isbn: m?.isbn13 ?? undefined,
+        year: m?.year ?? undefined,
       }));
       groups.push(group);
     }

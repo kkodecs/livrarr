@@ -52,12 +52,6 @@ pub trait ManualImportScanAccessor: Send + Sync {
     );
     fn increment_ol_completed(&self, scan_id: &str);
     fn remove_scan(&self, scan_id: &str);
-    fn acquire_ol_permit(&self) -> impl std::future::Future<Output = ()> + Send;
-    fn search_ol_works(
-        &self,
-        term: &str,
-        limit: u32,
-    ) -> impl std::future::Future<Output = Result<Vec<crate::WorkSearchResult>, String>> + Send;
 }
 
 /// Cover proxy cache — get/put for proxied cover images.

@@ -375,7 +375,6 @@ async fn main() {
     let import_io_arc = Arc::new(livrarr_server::import_io_service::ImportIoServiceImpl::new(
         svc_db.clone(),
     ));
-    let ol_rate_limiter_shared = Arc::new(livrarr_server::state::OlRateLimiter::new());
     let manual_import_scans_shared = Arc::new(dashmap::DashMap::new());
     let import_workflow_arc = Arc::new(livrarr_library::import_workflow::ImportWorkflowImpl::new(
         svc_db.clone(),
@@ -584,7 +583,6 @@ async fn main() {
         rss_last_run: rss_last_run.clone(),
         rss_sync_running: rss_sync_running.clone(),
         readarr_import_progress: readarr_import_progress_arc.clone(),
-        ol_rate_limiter: ol_rate_limiter_shared.clone(),
         manual_import_scans: manual_import_scans_shared.clone(),
         provider_queue,
         enrichment_service: enrichment_service.clone(),
@@ -802,8 +800,6 @@ async fn main() {
         manual_import_scan_svc:
             livrarr_server::manual_import_scan_service::LiveManualImportScanService {
                 scans: manual_import_scans_shared.clone(),
-                ol_rate_limiter: ol_rate_limiter_shared.clone(),
-                http_client: http_client_for_scan,
             },
         readarr_import_wf: Arc::new(
             livrarr_server::readarr_import_workflow::LiveReadarrImportWorkflow::new(

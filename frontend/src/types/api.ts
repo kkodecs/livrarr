@@ -916,6 +916,16 @@ export interface OlMatch {
   author: string;
   coverUrl: string | null;
   existingWorkId: number | null;
+  // #97: federated anchors + reuse handle carried from discovery, so import can
+  // land the work Confirmed (and reuse the cached payload) instead of ISBN-only.
+  candidateId?: string | null;
+  hcKey?: string | null;
+  grKey?: string | null;
+  asin?: string | null;
+  isbn13?: string | null;
+  year?: number | null;
+  source?: string | null;
+  language?: string | null;
 }
 
 export interface ManualImportItem {
@@ -925,6 +935,15 @@ export interface ManualImportItem {
   author: string;
   deleteExisting: boolean;
   language?: string;
+  // #97: forward the picked match's anchors + cover so the work is created
+  // Confirmed (it enriches directly, skipping the flaky ISBN convergence).
+  candidateId?: string | null;
+  hcKey?: string | null;
+  grKey?: string | null;
+  asin?: string | null;
+  coverUrl?: string | null;
+  isbn?: string | null;
+  year?: number | null;
 }
 
 export interface ManualImportResponse {

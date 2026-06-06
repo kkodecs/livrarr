@@ -1544,6 +1544,141 @@ where
         })
     }
 
+    async fn eager_match_by_author(
+        &self,
+        _user_id: UserId,
+        queries: Vec<EagerQuery>,
+    ) -> Result<Vec<(usize, LookupResult)>, WorkServiceError> {
+        // Group files by author (case-insensitive). Manual imports cluster
+        // heavily by author, so one author-scoped query per provider serves all
+        // of that author's files instead of one search per title.
+        let mut groups: HashMap<String, Vec<EagerQuery>> = HashMap::new();
+        for q in queries {
+            groups
+                .entry(q.author.trim().to_lowercase())
+                .or_default()
+                .push(q);
+        }
+
+        let mut out: Vec<(usize, LookupResult)> = Vec::new();
+
+        for group in groups.into_values() {
+            let author = group[0].author.trim().to_string();
+            if author.is_empty() {
+                continue;
+            }
+            let lang = group
+                .iter()
+                .find_map(|q| q.language.clone())
+                .unwrap_or_else(|| "en".to_string());
+
+            // One author-scoped query per provider, in parallel. Google Books
+            // (`inauthor:`) leads on coverage; OpenLibrary (`author:`) adds work
+            // anchors. Each is timeout-bounded so a slow provider can't stall the
+            // batch; a provider that errors or times out simply abstains. Google
+            // Books returns empty without a fetch when unconfigured (no API key),
+            // which makes the pass OpenLibrary-only for keyless installs.
+            let gb_term = format!("inauthor:\"{author}\"");
+            let ol_term = format!("author:\"{author}\"");
+            let provider_timeout = Duration::from_secs(8);
+            let gb_fut = async {
+                let t = Instant::now();
+                let r = tokio::time::timeout(
+                    provider_timeout,
+                    self.lookup_google_books(&gb_term, &lang),
+                )
+                .await;
+                (r, t.elapsed().as_millis() as u64)
+            };
+            let ol_fut = async {
+                let t = Instant::now();
+                let r = tokio::time::timeout(
+                    provider_timeout,
+                    self.lookup_openlibrary(&ol_term, &lang),
+                )
+                .await;
+                (r, t.elapsed().as_millis() as u64)
+            };
+            let ((gb, gb_ms), (ol, ol_ms)) = tokio::join!(gb_fut, ol_fut);
+            tracing::info!(author = %author, gb_ms, ol_ms, "perf eager: provider fetch");
+
+            // Union the author's corpus: Google Books first (coverage/covers),
+            // then OpenLibrary (work anchors).
+            let mut corpus: Vec<LookupResult> = Vec::new();
+            if let Ok(Ok(mut r)) = gb {
+                corpus.append(&mut r);
+            }
+            if let Ok(Ok(mut r)) = ol {
+                corpus.append(&mut r);
+            }
+            if corpus.is_empty() {
+                continue;
+            }
+
+            let cand_refs: Vec<(&str, &str)> = corpus
+                .iter()
+                .map(|c| (c.title.as_str(), c.author_name.as_str()))
+                .collect();
+
+            for q in &group {
+                // ISBN first: a file's embedded ISBN-13 pins the exact edition in
+                // the corpus (Google Books carries isbn_13; OpenLibrary does not),
+                // beating any title heuristic. Fall back to the strict title+author
+                // cascade when there's no ISBN or no ISBN hit in the corpus.
+                let chosen = q
+                    .isbn
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|isbn| {
+                        corpus
+                            .iter()
+                            .position(|c| c.isbn_13.as_deref() == Some(isbn))
+                    })
+                    .or_else(|| {
+                        livrarr_matching::work_dedup::best_candidate_index(
+                            &cand_refs, &q.title, &q.author,
+                        )
+                    });
+                if let Some(idx) = chosen {
+                    let mut result = corpus[idx].clone();
+                    // The pick is often a Google Books / ISBN hit, which carries a
+                    // cover + ISBN but NO work anchor. Graft an anchor from a
+                    // same-title OpenLibrary candidate in the corpus so the work
+                    // can be created Confirmed (and enrich directly) rather than
+                    // landing ISBN-only and relying on background convergence.
+                    let has_anchor = result.ol_key.is_some()
+                        || result.gr_key.is_some()
+                        || result.hc_key.is_some();
+                    if !has_anchor {
+                        let norm =
+                            livrarr_matching::work_dedup::normalize_title_for_match(&result.title);
+                        if let Some(anchored) = corpus.iter().find(|c| {
+                            (c.ol_key.is_some() || c.gr_key.is_some() || c.hc_key.is_some())
+                                && livrarr_matching::work_dedup::normalize_title_for_match(&c.title)
+                                    == norm
+                                && livrarr_matching::work_dedup::authors_match(
+                                    &c.author_name,
+                                    &result.author_name,
+                                )
+                        }) {
+                            result.ol_key = anchored.ol_key.clone();
+                            result.author_ol_key = anchored.author_ol_key.clone();
+                            if result.gr_key.is_none() {
+                                result.gr_key = anchored.gr_key.clone();
+                            }
+                            if result.hc_key.is_none() {
+                                result.hc_key = anchored.hc_key.clone();
+                            }
+                        }
+                    }
+                    out.push((q.id, result));
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
     async fn search_works(
         &self,
         user_id: UserId,

@@ -148,8 +148,6 @@ pub struct AppState {
     /// Readarr import progress — polled by frontend.
     pub readarr_import_progress:
         Arc<tokio::sync::Mutex<crate::readarr_import_service::ReadarrImportProgress>>,
-    /// OL rate limiter for manual import parallel lookups (3 req/sec, burst 10).
-    pub ol_rate_limiter: Arc<OlRateLimiter>,
     /// In-progress manual import scan results — OL matches stream in via polling.
     pub manual_import_scans: Arc<ManualImportScanMap>,
     /// Phase 1.5 plumbing: live `DefaultProviderQueue` constructed at startup

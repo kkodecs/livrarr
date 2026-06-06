@@ -123,11 +123,9 @@ path = "../../tests/behavioral/test_consolidation_enrichment_workflow.rs"
 name = "test_consolidation_rss_sync"
 path = "../../tests/behavioral/test_consolidation_rss_sync.rs"
 
-# EXCLUDED from the d612465 canary baseline: depends on uncommitted WCC code
-# (WorkService::eager_match_by_author + EagerQuery, not in this baseline). Restore when that code lands.
-# [[test]]
-# name = "test_consolidation_author_monitor"
-# path = "../../tests/behavioral/test_consolidation_author_monitor.rs"
+[[test]]
+name = "test_consolidation_author_monitor"
+path = "../../tests/behavioral/test_consolidation_author_monitor.rs"
 
 [[test]]
 name = "test_consolidation_dto"
@@ -318,6 +316,10 @@ path = "../../tests/behavioral/test_wcc_matching.rs"
 [[test]]
 name = "test_wcc_discovery_fanout"
 path = "../../tests/behavioral/test_wcc_discovery_fanout.rs"
+
+[[test]]
+name = "test_wcc_eager_match"
+path = "../../tests/behavioral/test_wcc_eager_match.rs"
 
 # --- End work creation consistency behavioral tests ---
 
