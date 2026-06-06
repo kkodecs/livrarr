@@ -13,6 +13,15 @@
 # against /mnt/opt/livrarr (decision brief §2.1/§2.2 trace; Serena + code-index).
 #
 # v1 (2026-06-02): initial design pass. Sequencing per decision brief §6/§8 (C').
+#
+# AS-BUILT (2026-06-06, feat/metadata-modularization @ 40b6445 — NOT merged): authoritative
+# delivery map is spec-metadata-modularization.md § "Delivery Status (as-built)". The per-seam
+# CUT pseudocode below is DESIGN INTENT; delivered = the status seam (4b two state machines) +
+# the discovery seam (chunk A fan-out + GR autocomplete) + cached-payload reuse (chunk B) +
+# Tier-A manual-import auto-match (chunk C). DEFERRED: the cover seam / materialize crate, the
+# full GR ladder + gr_key verify (REQ-018), Bug #2 (REQ-020), and the status-backport-drop
+# (EnrichmentStatus identity variants still duplicate IdentityStatus — see wiki/livrarr/gotchas.md;
+# a designed-later refactor needing pseudocode + PO approval, NOT housekeeping).
 
 metadata:
   feature: metadata-modularization

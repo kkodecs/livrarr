@@ -22,6 +22,19 @@
 # map, §2.3 the 8 seams, §6 the three tracks) + the design seed (the 7 PO-locked decisions).
 # Folds WCC's Track-2 feature REQs (GR ladder / cover-decouple / two-state-machines / Bug #2 /
 # de-facto identity) as the seam-cutting forcing functions.
+#
+# AS-BUILT (2026-06-06, feat/metadata-modularization @ 40b6445 — NOT merged): authoritative
+# delivery map is spec-metadata-modularization.md § "Delivery Status (as-built)". Summary:
+#   DELIVERED — 3 of 4 crates extracted (external-data canary GO / identity / enrichment);
+#     two-state-machine status split (4b: IdentityStatus + EnrichmentStatus{Unenriched/Enriched/Thin});
+#     WCC chunks D (run_quorum winner rule) / A (4-way discovery fan-out + GR autocomplete) /
+#     B (cached-payload reuse, consume-once cache) / C (Tier-A manual-import auto-match #97).
+#   DEFERRED (designed-later, not bugs) — livrarr-materialize crate (cover↔work_service cycle);
+#     status-backport-drop (EnrichmentStatus still carries Conflict/IdentityPending/NeedsReview
+#     duplicating IdentityStatus — see wiki/livrarr/gotchas.md); full GR anti-bot ladder + gr_key
+#     verify (REQ-018); Bug #2 identifier-change invalidation (REQ-020); clean-overwrite (REQ-024).
+#   DEVIATIONS (intentional) — sync enrichment KEPT (not the stranded deferred-enrichment path);
+#     Goodreads NOT in the eager pass (GB+OL only); MatchCluster harvest added.
 
 metadata:
   feature: metadata-modularization
