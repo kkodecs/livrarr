@@ -816,7 +816,8 @@ fn merge_output_conflict() -> MergeOutput {
         provenance_upserts: vec![],
         provenance_deletes: vec![],
         external_id_updates: vec![],
-        enrichment_status: EnrichmentStatus::Conflict,
+        // Conflict is signaled by conflict_detected; enrichment stays Unenriched.
+        enrichment_status: EnrichmentStatus::Unenriched,
         enrichment_source: None,
         cover_resolution: None,
         audiobook_cover_resolution: None,
@@ -1645,8 +1646,12 @@ macro_rules! enrichment_service_tests {
 
             let persisted = h.db().get_work(user_id, work.id).await.unwrap();
             assert_eq!(persisted.title, original_title);
-            assert_eq!(persisted.enrichment_status, EnrichmentStatus::Conflict);
-            assert_eq!(result.enrichment_status, EnrichmentStatus::Conflict);
+            assert_eq!(persisted.enrichment_status, EnrichmentStatus::Unenriched);
+            assert_eq!(result.enrichment_status, EnrichmentStatus::Unenriched);
+            assert!(
+                result.identity_not_found,
+                "all-rejected enrichment signals identity_not_found (the caller writes IdentityStatus::NotFound)"
+            );
             assert_eq!(
                 result.provider_outcomes,
                 outcome_classes(&[(MetadataProvider::Goodreads, OutcomeClass::Conflict)])

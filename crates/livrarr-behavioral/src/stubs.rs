@@ -203,6 +203,7 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
             provider_outcomes: HashMap::new(),
             cover_resolution: None,
             audiobook_cover_resolution: None,
+            identity_not_found: false,
         })
     }
 

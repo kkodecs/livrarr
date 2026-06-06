@@ -87,15 +87,11 @@ pub enum EnrichmentStatus {
     Thin,
     /// Enrichment attempted, transient error. Background job retries.
     Failed,
-    /// LLM identity validation detected a provider mismatch. Terminal until
-    /// user resolves. Only reachable when LLM is configured.
-    Conflict,
-    /// Identity could not be confidently resolved at add-time. A background job
-    /// will retry resolution.
-    IdentityPending,
-    /// A non-interactive path exhausted resolution for a work that has no
-    /// resolving identifier. Surfaced for the user; terminal until reviewed.
-    NeedsReview,
+    // NOTE: identity-track outcomes ({Conflict, IdentityPending, NeedsReview}) used to
+    // live here too. They were redundant projections of `IdentityStatus` and were
+    // dropped (migration 055); identity state now lives solely on `IdentityStatus`
+    // (incl. `NotFound` for "the LLM rejected all payloads"). EnrichmentStatus is
+    // enrichment-quality only.
 }
 
 /// Persisted identity-confidence badge — the identity track of the two-state
@@ -121,6 +117,13 @@ pub enum IdentityStatus {
     Conflict,
     /// A non-interactive path exhausted resolution; surfaced for the user.
     NeedsReview,
+    /// External sources could not verify this work's identity — the LLM rejected
+    /// every provider payload as not-this-book. Distinct from `Conflict` (an open
+    /// anchor dispute) and `NeedsReview` (resolver exhaustion). Terminal until
+    /// `reset_for_manual_refresh`. Enrichment SIGNALS this outcome via
+    /// [`crate::services::EnrichmentResult::identity_not_found`]; the caller — not
+    /// enrichment — writes the badge (the one-way identity←enrichment seam).
+    NotFound,
 }
 
 /// Per-file tag sync status. Tracked on LibraryItem, not on Work.

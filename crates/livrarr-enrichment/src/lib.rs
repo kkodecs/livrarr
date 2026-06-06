@@ -87,6 +87,10 @@ pub struct EnrichmentResult {
     pub provider_outcomes: HashMap<livrarr_domain::MetadataProvider, livrarr_domain::OutcomeClass>,
     pub cover_resolution: Option<livrarr_domain::CoverResolution>,
     pub audiobook_cover_resolution: Option<livrarr_domain::CoverResolution>,
+    /// Seam-2 signal: the LLM rejected every provider payload as not-this-book.
+    /// Propagated to `domain::services::EnrichmentResult.identity_not_found`; the
+    /// caller writes `IdentityStatus::NotFound`. Enrichment never writes identity.
+    pub identity_not_found: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -695,7 +699,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
             provenance_upserts: Vec::new(),
             provenance_deletes: Vec::new(),
             external_id_updates: Vec::new(),
-            enrichment_status: EnrichmentStatus::Conflict,
+            enrichment_status: EnrichmentStatus::Unenriched,
             enrichment_source: None,
             cover_resolution: None,
             audiobook_cover_resolution: None,
@@ -1114,7 +1118,7 @@ Return JSON only:\n\
             provenance_upserts: Vec::new(),
             provenance_deletes: Vec::new(),
             external_id_updates: collect_external_ids(&inputs),
-            enrichment_status: EnrichmentStatus::Conflict,
+            enrichment_status: EnrichmentStatus::Unenriched,
             enrichment_source: None,
             cover_resolution: None,
             audiobook_cover_resolution: None,
@@ -1532,6 +1536,7 @@ where
                 provider_outcomes,
                 cover_resolution: None,
                 audiobook_cover_resolution: None,
+                identity_not_found: false,
             });
         }
 
@@ -1680,14 +1685,18 @@ where
                 work_id,
                 user_id,
                 rejection_count = validation.rejections.len(),
-                "all Success providers rejected by LLM identity check — escalating to Conflict"
+                "all Success providers rejected by LLM identity check — signaling identity-not-found"
             );
+            // Enrichment stays Unenriched (nothing merged). The work's identity could
+            // not be verified from any source — SIGNAL it via `identity_not_found`; the
+            // caller writes `IdentityStatus::NotFound` (one-way seam, REQ-002). Enrichment
+            // never writes identity state.
             let apply_req = ApplyEnrichmentMergeRequest {
                 user_id,
                 work_id,
                 expected_merge_generation: generation,
                 work_update: None,
-                new_enrichment_status: livrarr_domain::EnrichmentStatus::Conflict,
+                new_enrichment_status: livrarr_domain::EnrichmentStatus::Unenriched,
                 provenance_upserts: Vec::new(),
                 provenance_deletes: Vec::new(),
                 external_id_updates: Vec::new(),
@@ -1695,7 +1704,7 @@ where
             let _ = self.db.apply_enrichment_merge(apply_req).await?;
             let result_work = self.db.get_work(user_id, work_id).await?;
             return Ok(EnrichmentResult {
-                enrichment_status: livrarr_domain::EnrichmentStatus::Conflict,
+                enrichment_status: livrarr_domain::EnrichmentStatus::Unenriched,
                 enrichment_source: result_work.enrichment_source.clone(),
                 llm_task_spawned: false,
                 work: result_work,
@@ -1703,6 +1712,7 @@ where
                 provider_outcomes,
                 cover_resolution: None,
                 audiobook_cover_resolution: None,
+                identity_not_found: true,
             });
         }
 
@@ -1805,6 +1815,9 @@ where
                         provider_outcomes,
                         cover_resolution: merge_output.cover_resolution,
                         audiobook_cover_resolution: merge_output.audiobook_cover_resolution,
+                        // A merge-detected conflict (per-provider Conflict class or LLM
+                        // merge identity_valid=false) signals identity-not-found upward.
+                        identity_not_found: merge_output.conflict_detected,
                     });
                 }
                 ApplyMergeOutcome::Superseded => {

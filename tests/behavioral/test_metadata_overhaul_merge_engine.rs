@@ -514,7 +514,11 @@ async fn test_merge_engine_conflict_sets_status_conflict() {
 
     let output = merge(&engine, input).await;
 
-    assert_eq!(output.enrichment_status, EnrichmentStatus::Conflict);
+    assert_eq!(output.enrichment_status, EnrichmentStatus::Unenriched);
+    assert!(
+        output.conflict_detected,
+        "a per-provider Conflict class signals conflict_detected; enrichment stays Unenriched and the caller writes IdentityStatus::NotFound"
+    );
 }
 
 #[tokio::test]

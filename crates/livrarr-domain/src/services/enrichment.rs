@@ -23,6 +23,11 @@ pub struct EnrichmentResult {
     pub provider_outcomes: HashMap<MetadataProvider, OutcomeClass>,
     pub cover_resolution: Option<CoverResolution>,
     pub audiobook_cover_resolution: Option<CoverResolution>,
+    /// Seam-2 signal (REQ-002): enrichment found NO provider payload matching the
+    /// locked identity (the LLM rejected them all). Enrichment never writes
+    /// identity state — it raises this flag and the caller writes
+    /// [`crate::IdentityStatus::NotFound`]. `false` on every normal outcome.
+    pub identity_not_found: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

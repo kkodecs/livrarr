@@ -11,9 +11,11 @@
 //!     `PermanentFailure` for this attempt; provider's other fields all
 //!     dropped.
 //!
-//! When ALL `Success` outcomes are rejected, the EnrichmentService escalates
-//! the work to `EnrichmentStatus::Conflict` (the IR's terminal "identity
-//! drift detected" status, exit only via `reset_for_manual_refresh`).
+//! When ALL `Success` outcomes are rejected, the EnrichmentService raises the
+//! `EnrichmentResult::identity_not_found` SIGNAL — the work's identity could not be
+//! verified from any source. The caller (not enrichment) writes
+//! `IdentityStatus::NotFound` (terminal; exit only via `reset_for_manual_refresh`).
+//! Enrichment itself stays `Unenriched` and never writes identity (one-way seam).
 //!
 //! ## Privacy
 //!

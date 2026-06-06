@@ -17,16 +17,14 @@ export type EnrichmentStatus =
   | "unenriched"
   | "enriched"
   | "thin"
-  | "failed"
-  | "conflict"
-  | "identity_pending"
-  | "needs_review";
+  | "failed";
 export type IdentityStatus =
   | "pending"
   | "confirmed"
   | "provisional"
   | "conflict"
-  | "needs_review";
+  | "needs_review"
+  | "not_found";
 export type QueueStatus =
   | "downloading"
   | "queued"

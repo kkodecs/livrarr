@@ -245,6 +245,7 @@ impl EnrichmentWorkflow for SpyEnrichmentWorkflow {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         Ok(WorkflowResult {
             enrichment_status: self.status,
+            identity_not_found: false,
             enrichment_source: Some("spy".to_string()),
             work: Work {
                 enrichment_status: self.status,
@@ -419,10 +420,7 @@ async fn test_group_b_pending_identity_does_not_invoke_enrichment_workflow() {
         .expect("pending add should succeed");
 
     assert_eq!(spy.call_count(), 0);
-    assert_matches!(
-        result.work.enrichment_status,
-        EnrichmentStatus::Unenriched | EnrichmentStatus::IdentityPending
-    );
+    assert_matches!(result.work.enrichment_status, EnrichmentStatus::Unenriched);
 }
 
 // =============================================================================

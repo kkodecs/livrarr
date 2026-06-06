@@ -14,7 +14,7 @@ use livrarr_domain::identity::{
 use livrarr_domain::services::{
     LlmCallRequest, LlmCaller, LlmPurpose, WorkIdentityRepository, WorkServiceError,
 };
-use livrarr_domain::{EnrichmentStatus, UserId, Work};
+use livrarr_domain::{IdentityStatus, UserId, Work};
 
 use crate::english_identity_resolver::EnglishIdentityResolver;
 
@@ -28,9 +28,13 @@ pub async fn converge_identity_pending<R: EnglishIdentityResolver, D: WorkIdenti
     user_id: UserId,
     work: &Work,
 ) -> Result<(), WorkServiceError> {
-    // REQ-025: a conflicted (or user-resolved) work is never re-litigated by a
-    // background pass — return before consulting the resolver.
-    if work.enrichment_status == EnrichmentStatus::Conflict {
+    // REQ-025: a work whose identity is terminal — an open anchor `Conflict` or an
+    // unverifiable `NotFound` (the LLM rejected all payloads) — is never re-litigated
+    // by a background pass; it waits for the user (reset_for_manual_refresh).
+    if matches!(
+        work.identity_status,
+        IdentityStatus::Conflict | IdentityStatus::NotFound
+    ) {
         return Ok(());
     }
 

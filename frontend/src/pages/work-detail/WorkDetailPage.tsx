@@ -104,7 +104,7 @@ export default function WorkDetailPage() {
     enabled: !!id,
     refetchInterval: (query) => {
       const status = query.state.data?.enrichmentStatus;
-      if (status === "identity_pending" || status === "unenriched") return 3_000;
+      if (status === "unenriched") return 3_000;
       if (coverPollBaseline === undefined) return false;
       const ebook = query.state.data?.coverMtime ?? null;
       const audiobook = query.state.data?.audiobookCoverMtime ?? null;
@@ -1160,20 +1160,17 @@ const IDENTITY_BADGE: Record<IdentityStatus, { tone: BadgeTone; label: string; t
   provisional: { tone: "blue", label: "Provisional", tip: "Identified by ISBN (barcode); no master record yet — may later upgrade to Confirmed." },
   conflict: { tone: "red", label: "Conflict", tip: "Sources disagree on the match; needs your review." },
   needs_review: { tone: "orange", label: "Needs Review", tip: "Couldn't match this book automatically; needs your review." },
+  not_found: { tone: "amber", label: "Unverified", tip: "No source could confirm this match — every provider was rejected. Edit the identity or refresh to retry." },
 };
 
 // Enrichment (details) state machine — "what do we know about it?". The canonical
-// outcomes are Pending/Enriched/Sparse; the legacy identity-conflated variants
-// (conflict/identity_pending/needs_review) read "Pending" here because the
-// Identity badge now owns that signal.
+// outcomes are Pending/Enriched/Sparse (+ Failed). Identity outcomes (incl. the
+// "unverified" not-found case) live on the Identity badge above, not here.
 const DETAILS_BADGE: Record<EnrichmentStatus, { tone: BadgeTone; label: string; tip: string }> = {
   unenriched: { tone: "amber", label: "Pending", tip: "Details haven't been fetched yet." },
   enriched: { tone: "green", label: "Enriched", tip: "Real information is present. A cover is a separate lazy asset and isn't required." },
   thin: { tone: "zinc", label: "Sparse", tip: "Known book, but providers returned almost nothing — a settled result, not still loading." },
   failed: { tone: "red", label: "Failed", tip: "A lookup error occurred while fetching details. Try refreshing." },
-  conflict: { tone: "amber", label: "Pending", tip: "Details haven't been fetched yet." },
-  identity_pending: { tone: "amber", label: "Pending", tip: "Details haven't been fetched yet." },
-  needs_review: { tone: "amber", label: "Pending", tip: "Details haven't been fetched yet." },
 };
 
 function BookInformationTab({

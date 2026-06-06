@@ -390,13 +390,11 @@ impl WorkIdentityRepository for SqliteDb {
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
-        sqlx::query(
-            "UPDATE works SET ol_key = NULL, enrichment_status = 'identity_pending' WHERE id = ?1",
-        )
-        .bind(work_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        sqlx::query("UPDATE works SET ol_key = NULL, identity_status = 'pending' WHERE id = ?1")
+            .bind(work_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
         tx.commit()
             .await
@@ -405,7 +403,7 @@ impl WorkIdentityRepository for SqliteDb {
     }
 
     async fn set_needs_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
-        sqlx::query("UPDATE works SET enrichment_status = 'needs_review' WHERE id = ?1")
+        sqlx::query("UPDATE works SET identity_status = 'needs_review' WHERE id = ?1")
             .bind(work_id)
             .execute(self.pool())
             .await

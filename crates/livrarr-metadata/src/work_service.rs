@@ -189,6 +189,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
         _mode: EnrichmentMode,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         Ok(EnrichmentResult {
+            identity_not_found: false,
             enrichment_status: EnrichmentStatus::Unenriched,
             enrichment_source: None,
             work: Work::default(),
@@ -538,7 +539,9 @@ where
                         .await
                         .map_err(WorkServiceError::Db)?;
                     let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
-                        let status = self
+                        // identity_not_found is for the new-work add path; these
+                        // existing/matched-work re-enrich paths keep their identity.
+                        let (status, _) = self
                             .run_unified_enrichment(user_id, &work, candidate.source_provider_data)
                             .await;
                         let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -590,7 +593,9 @@ where
                         .await
                         .map_err(WorkServiceError::Db)?;
                     let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
-                        let status = self
+                        // identity_not_found is for the new-work add path; these
+                        // existing/matched-work re-enrich paths keep their identity.
+                        let (status, _) = self
                             .run_unified_enrichment(
                                 user_id,
                                 &existing,
@@ -641,7 +646,9 @@ where
                         .await
                         .map_err(WorkServiceError::Db)?;
                     let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
-                        let status = self
+                        // identity_not_found is for the new-work add path; these
+                        // existing/matched-work re-enrich paths keep their identity.
+                        let (status, _) = self
                             .run_unified_enrichment(
                                 user_id,
                                 &work,
@@ -2252,7 +2259,7 @@ where
             .map_err(WorkServiceError::Db)?;
         if let Some(work) = existing.into_iter().next() {
             let (work, enrichment_status) = if source_provider_data.is_some() {
-                let status = self
+                let (status, _) = self
                     .run_unified_enrichment(user_id, &work, source_provider_data.clone())
                     .await;
                 let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -2312,7 +2319,7 @@ where
         source_provider_data: Option<SourceProviderData>,
     ) -> Result<AddWorkResult, WorkServiceError> {
         let (work, enrichment_status) = if source_provider_data.is_some() {
-            let status = self
+            let (status, _) = self
                 .run_unified_enrichment(user_id, &work, source_provider_data)
                 .await;
             let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -2351,7 +2358,7 @@ where
         user_id: UserId,
         work: &Work,
         candidate_id: &livrarr_domain::identity::CandidateId,
-    ) -> Option<EnrichmentStatus> {
+    ) -> Option<(EnrichmentStatus, bool)> {
         let payloads = self
             .transport_cache()?
             .cache_take(user_id, candidate_id.clone())?;
@@ -2418,7 +2425,10 @@ where
                 livrarr_domain::ApplyMergeOutcome::Applied
                 | livrarr_domain::ApplyMergeOutcome::NoChange
                 | livrarr_domain::ApplyMergeOutcome::Deferred,
-            ) => Some(merge_output.enrichment_status),
+            ) => Some((
+                merge_output.enrichment_status,
+                merge_output.conflict_detected,
+            )),
             Ok(livrarr_domain::ApplyMergeOutcome::Superseded) => None,
             Err(e) => {
                 tracing::warn!(
@@ -2469,7 +2479,16 @@ where
                 ) =>
             {
                 match self.try_reuse_cached_payloads(user_id, &work, id).await {
-                    Some(status) => {
+                    Some((status, identity_not_found)) => {
+                        // Seam-2: the cached merge can also reject every payload as
+                        // not-this-book; the caller writes IdentityStatus::NotFound
+                        // (overriding the derived badge), parity with the network path.
+                        if identity_not_found {
+                            self.db
+                                .set_identity_status(user_id, work.id, IdentityStatus::NotFound)
+                                .await
+                                .map_err(WorkServiceError::Db)?;
+                        }
                         work = self
                             .db
                             .get_work(user_id, work.id)
@@ -2618,21 +2637,22 @@ where
                 messages: vec![],
                 cover_mtime,
                 audiobook_cover_mtime,
-                enrichment_status: EnrichmentStatus::IdentityPending,
+                enrichment_status: EnrichmentStatus::Unenriched,
             });
         }
 
-        let enrichment_status = self
+        let (enrichment_status, identity_not_found) = self
             .run_unified_enrichment(user_id, &work, source_provider_data)
             .await;
 
-        // Seam-2 (REQ-002/D-013): enrichment signals an identity contradiction by
-        // returning Conflict; the caller — not enrichment — writes the identity
-        // badge (the interim seam: no EstablishedIdentity contract). Production-only,
-        // reachable when an LLM rejects all payloads as a different book.
-        if enrichment_status == EnrichmentStatus::Conflict {
+        // Seam-2 (REQ-002/D-013): enrichment SIGNALS that it could not verify the
+        // work's identity — the LLM rejected every provider payload as not-this-book.
+        // The caller — not enrichment — writes the identity badge (the one-way
+        // identity←enrichment seam; no EstablishedIdentity contract yet). This is an
+        // identity-not-found, distinct from an open anchor `Conflict`.
+        if identity_not_found {
             self.db
-                .set_identity_status(user_id, work.id, IdentityStatus::Conflict)
+                .set_identity_status(user_id, work.id, IdentityStatus::NotFound)
                 .await
                 .map_err(WorkServiceError::Db)?;
         }
@@ -2693,12 +2713,16 @@ where
     ///
     /// Returns the final `EnrichmentStatus`. Never returns `Err` — all failures
     /// are absorbed and produce `Failed` status, never a caller error.
+    /// Returns `(enrichment_status, identity_not_found)`. The second element is the
+    /// seam-2 signal: when enrichment rejected every provider payload as
+    /// not-this-book, the caller writes `IdentityStatus::NotFound` (enrichment
+    /// itself never writes identity).
     async fn run_unified_enrichment(
         &self,
         user_id: UserId,
         work: &Work,
         source_provider_data: Option<livrarr_domain::services::SourceProviderData>,
-    ) -> EnrichmentStatus {
+    ) -> (EnrichmentStatus, bool) {
         let work_id = work.id;
 
         // Step 1: Inject source provider data (Readarr import etc.)
@@ -2717,7 +2741,7 @@ where
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(work_id, "run_unified_enrichment: enrich_work failed: {e}");
-                return EnrichmentStatus::Failed;
+                return (EnrichmentStatus::Failed, false);
             }
         };
 
@@ -2726,13 +2750,14 @@ where
             Ok(w) => w,
             Err(e) => {
                 tracing::warn!(work_id, "run_unified_enrichment: get_work failed: {e}");
-                return EnrichmentStatus::Failed;
+                return (EnrichmentStatus::Failed, false);
             }
         };
 
         // Use the enrichment_status from the enrich_work pipeline
         // (it already ran merge internally via EnrichmentServiceImpl).
         let final_status = enrich_result.enrichment_status;
+        let identity_not_found = enrich_result.identity_not_found;
 
         // Step 4: Trust-aware cover upgrade (non-fatal). Ebook and audiobook
         // covers are independent; upgrade each from its own resolution.
@@ -2840,7 +2865,7 @@ where
             }
         }
 
-        final_status
+        (final_status, identity_not_found)
     }
 }
 
