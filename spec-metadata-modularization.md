@@ -34,6 +34,7 @@ Split the tangled work-creation + metadata pipeline — today all fused in `livr
 | Chunk A — discovery fan-out | Add-Work *search* box: 3-way → 4-way (`+Goodreads`), interleave/cap/tail-filter; **GR via `/book/auto_complete`** (no LLM) — carries the `a21c643` GR-autocomplete reconcile onto `external-data` | REQ-005/017; REQ-018 (autocomplete rung only) | `f19dc76` |
 | Chunk B — cached-payload reuse | `merge_from_cached` promoted to the `MergeEngine` trait; `try_reuse_cached_payloads`; consume-once/pass-scoped cache; `candidate_id` threaded end-to-end; "trust-the-pick" zero-network add | REQ-017/023 | `e181dc2` |
 | Chunk C — Tier-A auto-match (#97) | `eager_match_by_author` (author-grouped GB+OL, ISBN-beats-title), `SuggestedMatch`, per-file suggestions + Confirmed import reusing the cache; OL-only legacy machinery removed | REQ-016 (import path), issue #97 | `40b6445` |
+| Status-backport-drop | `EnrichmentStatus` → `{Unenriched, Enriched, Thin, Failed}` (the 3 identity dups dropped); `IdentityStatus` **+NotFound** (LLM rejected every payload — "Unverified", terminal until `reset_for_manual_refresh`, which re-derives identity); **seam-2 completed** — enrichment signals `identity_not_found`, the caller writes the badge (both cached + network add paths); migration 055 | REQ-014 (completes the two-state split) | `6164915` |
 
 ### Design §3 deviations (intentional, PO-approved)
 
@@ -48,7 +49,6 @@ Split the tangled work-creation + metadata pipeline — today all fused in `livr
 | Item | REQ / AC | Why deferred | Gate before code |
 |---|---|---|---|
 | `livrarr-materialize` crate + sync/async entry points | REQ-001/003/019(materialize)/021; AC-001(4th crate)/003/017 | Cover↔`work_service` bidirectional cycle (seam #3/#7) — not a clean Track-1 move. Cover/tag projection still lives in `enrichment`. | Design the cover-decouple seam first |
-| **Status-backport-drop** | REQ-014 follow-up | `EnrichmentStatus` still carries `{Conflict, IdentityPending, NeedsReview}` duplicating `IdentityStatus`; the merge engine still **writes** `EnrichmentStatus::Conflict` as an interim signal (a seam-2 one-way violation). Redundant, not broken. | **Pseudocode + PO approval.** See `wiki/livrarr/gotchas.md` (dual-status). **Pin first:** `EnrichmentStatus::Conflict` semantics — enum comment says "LLM identity-validation provider mismatch" but memory `project_enrichment_conflict_semantics` says "LLM rejected all provider payloads, not an identity dispute." |
 | Full GR anti-bot ladder + `gr_key` verify | REQ-018; AC-014 (← WCC REQ-032/024) | Only the `/book/auto_complete` rung shipped (chunk A). The cost-ordered ladder (TLS-impersonation HTML → LLM-locator → give-up), `WillRetry`-not-`NotFound`, and `/book/show` verify-before-persist are unbuilt. | Discovery-seam feature |
 | Bug #2 — identifier-change invalidation | REQ-020; AC-016 (← WCC REQ-031) | A dependent provider's terminal failure is not yet invalidated when its prerequisite id resolves `None → Some`. | Its own feature unit |
 | Clean-overwrite provenance | REQ-024; AC-020 | Already design-stage in §6. | (design-stage) |
