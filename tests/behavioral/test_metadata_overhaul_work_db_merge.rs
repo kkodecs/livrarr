@@ -139,7 +139,10 @@ fn conflict_merge_request(
         work_id,
         expected_merge_generation,
         work_update: None,
-        new_enrichment_status: EnrichmentStatus::Conflict,
+        // EnrichmentStatus::Conflict was dropped (identity moved to IdentityStatus).
+        // These tests exercise the generic status-only apply mechanic; Failed is the
+        // non-default vehicle now.
+        new_enrichment_status: EnrichmentStatus::Failed,
         provenance_upserts: vec![],
         provenance_deletes: vec![],
         external_id_updates: vec![],
@@ -272,11 +275,11 @@ async fn create_merged_work<DB: WorkDb + WorkDbCreate>(db: &DB, user_id: UserId)
 
 async fn create_conflict_work<DB: WorkDb + WorkDbCreate>(db: &DB, user_id: UserId) -> Work {
     let work = create_new_work(db, user_id).await;
-    let outcome = db
-        .apply_enrichment_merge(conflict_merge_request(user_id, work.id, 0))
+    // list_conflict_works now selects on identity_status (conflict/not_found), not the
+    // dropped EnrichmentStatus::Conflict.
+    db.set_identity_status(user_id, work.id, livrarr_domain::IdentityStatus::Conflict)
         .await
         .unwrap();
-    assert_eq!(outcome, ApplyMergeOutcome::Applied);
     db.get_work(user_id, work.id).await.unwrap()
 }
 
@@ -550,7 +553,7 @@ macro_rules! work_db_merge_tests {
 
             let got = db.get_work(u1, work.id).await.unwrap();
 
-            assert_eq!(got.enrichment_status, EnrichmentStatus::Conflict);
+            assert_eq!(got.enrichment_status, EnrichmentStatus::Failed);
         }
 
         #[tokio::test]
@@ -600,7 +603,7 @@ macro_rules! work_db_merge_tests {
             let got = db.get_work(u1, work.id).await.unwrap();
 
             assert_eq!(outcome, ApplyMergeOutcome::Applied);
-            assert_eq!(got.enrichment_status, EnrichmentStatus::Conflict);
+            assert_eq!(got.enrichment_status, EnrichmentStatus::Failed);
         }
 
         #[tokio::test]
@@ -617,7 +620,7 @@ macro_rules! work_db_merge_tests {
             let got = db.get_work(u1, work.id).await.unwrap();
 
             assert_eq!(outcome, ApplyMergeOutcome::Applied);
-            assert_eq!(got.enrichment_status, EnrichmentStatus::Conflict);
+            assert_eq!(got.enrichment_status, EnrichmentStatus::Failed);
             assert_eq!(after_generation, before_generation + 1);
         }
 
@@ -633,6 +636,39 @@ macro_rules! work_db_merge_tests {
 
             assert_eq!(got.enrichment_status, EnrichmentStatus::Unenriched);
             assert!(got.enriched_at.is_none());
+        }
+
+        #[tokio::test]
+        async fn test_work_db_merge_reset_for_manual_refresh_recovers_not_found_but_keeps_conflict() {
+            // REQ-014: NotFound is terminal *until* reset_for_manual_refresh, which must
+            // re-derive identity so the work can re-resolve/re-enrich (otherwise it is
+            // stuck forever). An open anchor Conflict is a dispute a refresh must NOT
+            // silently clear.
+            let (db, u1, _) = $setup().await;
+
+            let nf = create_new_work(&db, u1).await;
+            db.set_identity_status(u1, nf.id, livrarr_domain::IdentityStatus::NotFound)
+                .await
+                .unwrap();
+            db.reset_for_manual_refresh(u1, nf.id).await.unwrap();
+            let nf_after = db.get_work(u1, nf.id).await.unwrap();
+            assert_ne!(
+                nf_after.identity_status,
+                livrarr_domain::IdentityStatus::NotFound,
+                "reset must recover a NotFound work, not leave it permanently stuck"
+            );
+
+            let cf = create_new_work(&db, u1).await;
+            db.set_identity_status(u1, cf.id, livrarr_domain::IdentityStatus::Conflict)
+                .await
+                .unwrap();
+            db.reset_for_manual_refresh(u1, cf.id).await.unwrap();
+            let cf_after = db.get_work(u1, cf.id).await.unwrap();
+            assert_eq!(
+                cf_after.identity_status,
+                livrarr_domain::IdentityStatus::Conflict,
+                "reset must NOT clear an open anchor Conflict"
+            );
         }
 
         #[tokio::test]
@@ -689,7 +725,7 @@ macro_rules! work_db_merge_tests {
 
         #[tokio::test]
         async fn test_work_db_merge_list_conflict_works_returns_only_conflicts_for_user() {
-            // REQ-ID: R-21 | Contract: WorkDb::list_conflict_works | Behavior: returns only works with enrichment_status=Conflict for the requested user
+            // REQ-ID: R-21 | Contract: WorkDb::list_conflict_works | Behavior: returns only works with an unresolved identity (identity_status conflict/not_found) for the requested user
             let (db, u1, u2) = $setup().await;
 
             let conflict_u1 = create_conflict_work(&db, u1).await;

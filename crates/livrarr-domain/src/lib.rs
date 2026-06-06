@@ -81,17 +81,49 @@ pub enum EnrichmentStatus {
     Unenriched,
     /// Enrichment completed. DB metadata is authoritative.
     Enriched,
+    /// Confirmed identity but no meaningful text metadata was found
+    /// (REQ-014/019): "we know the book, found no info." Distinct from
+    /// `Unenriched` (not yet attempted) and from any identity problem.
+    Thin,
     /// Enrichment attempted, transient error. Background job retries.
     Failed,
-    /// LLM identity validation detected a provider mismatch. Terminal until
-    /// user resolves. Only reachable when LLM is configured.
+    // NOTE: identity-track outcomes ({Conflict, IdentityPending, NeedsReview}) used to
+    // live here too. They were redundant projections of `IdentityStatus` and were
+    // dropped (migration 055); identity state now lives solely on `IdentityStatus`
+    // (incl. `NotFound` for "the LLM rejected all payloads"). EnrichmentStatus is
+    // enrichment-quality only.
+}
+
+/// Persisted identity-confidence badge — the identity track of the two-state
+/// split (REQ-014). This is the flat, stored, user-facing status; it is
+/// distinct from the rich resolution-time [`identity::IdentityState`]
+/// (`Confirmed{..}`/`Pending{..}`) and is derived from a work's anchors
+/// (D-013 backfill): a work anchor → `Confirmed`; an ISBN/ASIN bridge with no
+/// work anchor → `Provisional`; none → `Pending`; an open identity conflict →
+/// `Conflict`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityStatus {
+    /// No confident identity yet (fuzzy title+author, no resolving key).
+    #[default]
+    Pending,
+    /// Resolved to a work anchor (OL/GR/HC work key).
+    Confirmed,
+    /// De-facto identity (REQ-016): an ISBN/ASIN bridge resolved but no work
+    /// anchor. Enriches; upgrades to `Confirmed` when a work anchor appears.
+    Provisional,
+    /// An identity contradiction is open (a differing confirmed anchor).
+    /// Terminal until the user resolves it.
     Conflict,
-    /// Identity could not be confidently resolved at add-time. A background job
-    /// will retry resolution.
-    IdentityPending,
-    /// A non-interactive path exhausted resolution for a work that has no
-    /// resolving identifier. Surfaced for the user; terminal until reviewed.
+    /// A non-interactive path exhausted resolution; surfaced for the user.
     NeedsReview,
+    /// External sources could not verify this work's identity — the LLM rejected
+    /// every provider payload as not-this-book. Distinct from `Conflict` (an open
+    /// anchor dispute) and `NeedsReview` (resolver exhaustion). Terminal until
+    /// `reset_for_manual_refresh`. Enrichment SIGNALS this outcome via
+    /// [`crate::services::EnrichmentResult::identity_not_found`]; the caller — not
+    /// enrichment — writes the badge (the one-way identity←enrichment seam).
+    NotFound,
 }
 
 /// Per-file tag sync status. Tracked on LibraryItem, not on Work.
@@ -388,6 +420,10 @@ pub struct Work {
     pub rating: Option<f64>,
     pub rating_count: Option<i32>,
     pub enrichment_status: EnrichmentStatus,
+    /// Identity-confidence track of the two-state split (REQ-014). Backfilled
+    /// anchor-derived (D-013); see [`IdentityStatus`].
+    #[serde(default)]
+    pub identity_status: IdentityStatus,
     /// v2.1 — persisted retry counter for enrichment retry queue.
     /// Satisfies: IMPL-JOBS-005
     #[serde(default)]

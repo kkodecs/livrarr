@@ -11,9 +11,11 @@
 //!     `PermanentFailure` for this attempt; provider's other fields all
 //!     dropped.
 //!
-//! When ALL `Success` outcomes are rejected, the EnrichmentService escalates
-//! the work to `EnrichmentStatus::Conflict` (the IR's terminal "identity
-//! drift detected" status, exit only via `reset_for_manual_refresh`).
+//! When ALL `Success` outcomes are rejected, the EnrichmentService raises the
+//! `EnrichmentResult::identity_not_found` SIGNAL — the work's identity could not be
+//! verified from any source. The caller (not enrichment) writes
+//! `IdentityStatus::NotFound` (terminal; exit only via `reset_for_manual_refresh`).
+//! Enrichment itself stays `Unenriched` and never writes identity (one-way seam).
 //!
 //! ## Privacy
 //!
@@ -146,12 +148,15 @@ impl LlmValidator for NoOpLlmValidator {
 #[derive(Clone)]
 pub struct LiveLlmValidator {
     http: HttpClient,
-    live_config: crate::live_config::LiveMetadataConfig,
+    live_config: livrarr_external_data::live_config::LiveMetadataConfig,
     timeout: Duration,
 }
 
 impl LiveLlmValidator {
-    pub fn new(http: HttpClient, live_config: crate::live_config::LiveMetadataConfig) -> Self {
+    pub fn new(
+        http: HttpClient,
+        live_config: livrarr_external_data::live_config::LiveMetadataConfig,
+    ) -> Self {
         Self {
             http,
             live_config,
@@ -559,6 +564,7 @@ mod tests {
 
     fn fake_work(title: &str, author: &str, language: Option<&str>) -> Work {
         Work {
+            identity_status: Default::default(),
             id: 0,
             user_id: 0,
             title: title.to_string(),

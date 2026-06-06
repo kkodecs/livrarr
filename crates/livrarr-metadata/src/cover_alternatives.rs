@@ -6,10 +6,8 @@ use livrarr_domain::{
 };
 
 use crate::cover_resolution::should_reject_cover;
-use crate::provider_client::ProviderClient;
-use crate::{
-    EnrichmentContext, EnrichmentMode, NormalizedWorkDetail, ProviderOutcome, RequestPriority,
-};
+use crate::{NormalizedWorkDetail, ProviderOutcome};
+use livrarr_external_data::provider_client::ProviderClient;
 
 const ALTERNATIVE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -68,24 +66,16 @@ pub async fn fetch_internal_alternatives(
     let eligible = eligible_providers_for_work(work);
     let mut candidates = Vec::new();
 
-    let ctx = EnrichmentContext {
-        priority: RequestPriority::Normal,
-        mode: EnrichmentMode::Manual,
-    };
-
     // Query providers in parallel with timeout
     let mut futures = Vec::new();
     for &provider in &eligible {
         if let Some(client) = clients.get(&provider) {
             let client = client.clone();
             let work_clone = work.clone();
-            let ctx_clone = ctx.clone();
             futures.push(async move {
-                let result = tokio::time::timeout(
-                    ALTERNATIVE_FETCH_TIMEOUT,
-                    client.fetch(&work_clone, &ctx_clone),
-                )
-                .await;
+                let result =
+                    tokio::time::timeout(ALTERNATIVE_FETCH_TIMEOUT, client.fetch(&work_clone))
+                        .await;
                 match result {
                     Ok(outcome) => (provider, extract_cover_info(provider, outcome)),
                     Err(_) => {

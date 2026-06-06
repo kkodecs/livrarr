@@ -55,7 +55,6 @@ pub struct WorkServiceImpl<
     http_client: livrarr_http::HttpClient,
     llm: L,
     data_dir: PathBuf,
-    #[allow(dead_code)]
     merge_engine: M,
     tag_service: Arc<T>,
     refresh_locks: KeyedMutex<(UserId, WorkId)>,
@@ -190,6 +189,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
         _mode: EnrichmentMode,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         Ok(EnrichmentResult {
+            identity_not_found: false,
             enrichment_status: EnrichmentStatus::Unenriched,
             enrichment_source: None,
             work: Work::default(),
@@ -279,6 +279,95 @@ fn seed_carries_identifier(seed: &livrarr_domain::identity::WorkSeed) -> bool {
         || seed.ol_key.is_some()
         || seed.gr_key.is_some()
         || seed.hc_key.is_some()
+}
+
+/// Take one provider's discovery result (relevance-ordered), logging a failure or
+/// timeout rather than failing the whole search. Generic over the provider error
+/// type so every provider lookup can share one helper.
+fn take_lookup<E: std::fmt::Display>(
+    provider: &str,
+    term: &str,
+    res: Result<Result<Vec<LookupResult>, E>, tokio::time::error::Elapsed>,
+) -> Vec<LookupResult> {
+    match res {
+        Ok(Ok(found)) => found,
+        Ok(Err(e)) => {
+            tracing::warn!(provider, term, "discovery provider failed: {e}");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(provider, term, "discovery provider timed out");
+            Vec::new()
+        }
+    }
+}
+
+/// Round-robin the per-provider lists in fixed-size chunks so the strongest
+/// matches from every provider lead and quality degrades evenly down the combined
+/// list — instead of a naive concat (good→bad, good→bad, …). With `chunk = 3` the
+/// first rows are the top 3 of each provider, then the next 3 of each, and so on.
+fn interleave_by(lists: Vec<Vec<LookupResult>>, chunk: usize) -> Vec<LookupResult> {
+    let mut iters: Vec<_> = lists.into_iter().map(|l| l.into_iter()).collect();
+    let mut out = Vec::new();
+    loop {
+        let mut any = false;
+        for it in &mut iters {
+            for _ in 0..chunk {
+                match it.next() {
+                    Some(item) => {
+                        out.push(item);
+                        any = true;
+                    }
+                    None => break,
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    out
+}
+
+/// REQ-014/015 revalidation (D-005): cached payloads may be reused only if they
+/// positively identify the freshly-created work — at least one anchor present on
+/// both sides and equal — AND no same-type anchor contradicts. A stale/colliding
+/// candidate_id (no overlap, or a differing anchor) falls back to network rather
+/// than applying unrelated payloads.
+fn cached_payloads_match_work(
+    work: &Work,
+    payloads: &HashMap<livrarr_domain::MetadataProvider, crate::NormalizedWorkDetail>,
+) -> bool {
+    // No payload may contradict a confirmed anchor on the work.
+    let no_contradiction = payloads.values().all(|p| {
+        anchor_compatible(work.ol_key.as_deref(), p.ol_key.as_deref())
+            && anchor_compatible(work.gr_key.as_deref(), p.gr_key.as_deref())
+            && anchor_compatible(work.hc_key.as_deref(), p.hc_key.as_deref())
+            && anchor_compatible(work.isbn_13.as_deref(), p.isbn_13.as_deref())
+            && anchor_compatible(work.asin.as_deref(), p.asin.as_deref())
+    });
+    // ...and at least one payload must positively share a matching anchor, so a
+    // stale/colliding candidate_id (or an anchorless work) cannot pass vacuously.
+    let positive_match = payloads.values().any(|p| {
+        anchors_match(work.ol_key.as_deref(), p.ol_key.as_deref())
+            || anchors_match(work.gr_key.as_deref(), p.gr_key.as_deref())
+            || anchors_match(work.hc_key.as_deref(), p.hc_key.as_deref())
+            || anchors_match(work.isbn_13.as_deref(), p.isbn_13.as_deref())
+            || anchors_match(work.asin.as_deref(), p.asin.as_deref())
+    });
+    no_contradiction && positive_match
+}
+
+/// True only when both anchors are present and equal (a positive overlap).
+fn anchors_match(work_anchor: Option<&str>, payload_anchor: Option<&str>) -> bool {
+    matches!((work_anchor, payload_anchor), (Some(a), Some(b)) if a == b)
+}
+
+fn anchor_compatible(work_anchor: Option<&str>, payload_anchor: Option<&str>) -> bool {
+    match (work_anchor, payload_anchor) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
 }
 
 /// Map a resolved/confirmable identity into a wire `LookupResult`, carrying the
@@ -405,6 +494,10 @@ where
         let normalized_title = livrarr_domain::normalize_for_matching(&cleaned_title);
         let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
 
+        // The persisted identity badge derived from the candidate's anchors
+        // (REQ-014/016, D-013) — written at create and used to gate enrichment.
+        let derived_identity = candidate.identity.derived_identity_status();
+
         match &candidate.identity {
             IdentityState::Confirmed { anchors, .. } => {
                 // Step 1: anchor match over the work-anchor types the candidate
@@ -446,7 +539,9 @@ where
                         .await
                         .map_err(WorkServiceError::Db)?;
                     let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
-                        let status = self
+                        // identity_not_found is for the new-work add path; these
+                        // existing/matched-work re-enrich paths keep their identity.
+                        let (status, _) = self
                             .run_unified_enrichment(user_id, &work, candidate.source_provider_data)
                             .await;
                         let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -498,7 +593,9 @@ where
                         .await
                         .map_err(WorkServiceError::Db)?;
                     let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
-                        let status = self
+                        // identity_not_found is for the new-work add path; these
+                        // existing/matched-work re-enrich paths keep their identity.
+                        let (status, _) = self
                             .run_unified_enrichment(
                                 user_id,
                                 &existing,
@@ -549,7 +646,9 @@ where
                         .await
                         .map_err(WorkServiceError::Db)?;
                     let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
-                        let status = self
+                        // identity_not_found is for the new-work add path; these
+                        // existing/matched-work re-enrich paths keep their identity.
+                        let (status, _) = self
                             .run_unified_enrichment(
                                 user_id,
                                 &work,
@@ -685,6 +784,8 @@ where
                     author_id,
                     candidate.source_provider_data,
                     candidate.skip_sync_enrichment,
+                    derived_identity,
+                    candidate.candidate_id.as_ref(),
                 )
                 .await
             }
@@ -791,9 +892,10 @@ where
                         })?;
                 }
 
-                // Enrichment runs even for Pending works — providers search
-                // by title/author and don't need a confirmed OL key. Identity
-                // resolution is orthogonal; the retry job handles that.
+                // Identity gate (REQ-015): a Pending identity HOLDS the enrich
+                // fan-out — finish_created_work skips enrichment for held identity
+                // states. Display/cover (best-in-hand) is still materialized and
+                // never gated; the retry job converges identity, then enriches.
                 self.finish_created_work(
                     user_id,
                     work,
@@ -801,6 +903,8 @@ where
                     author_id,
                     candidate.source_provider_data,
                     candidate.skip_sync_enrichment,
+                    derived_identity,
+                    candidate.candidate_id.as_ref(),
                 )
                 .await
             }
@@ -1259,48 +1363,52 @@ where
             .unwrap_or_else(|| "en".to_string());
         let lang = req.lang_override.as_deref().unwrap_or(&default_lang);
 
-        if lang != "en" && !crate::language::is_supported_language(lang) {
+        if lang != "en" && !livrarr_external_data::language::is_supported_language(lang) {
             return Err(WorkServiceError::Enrichment(format!(
                 "unsupported language: {lang}"
             )));
         }
 
-        // Step 1: Google Books (primary).
-        match self.lookup_google_books(&term, lang).await {
-            Ok(results) if !results.is_empty() => return Ok(results),
-            Ok(_) => tracing::debug!(term = %term, lang = %lang, "GoogleBooks returned empty"),
-            Err(e) => tracing::warn!(
-                term = %term, lang = %lang, error = %e,
-                "GoogleBooks lookup failed; falling back to next provider"
-            ),
-        }
+        // #97 + WCC chunk A: query every provider in parallel and union the
+        // results, instead of returning the first that answers. Goodreads joins
+        // as a co-equal provider via its WAF-free autocomplete endpoint. Each
+        // lookup is timeout-bounded so a slow scrape can't stall the search.
+        let provider_timeout = Duration::from_secs(8);
+        let (gb, ol, hc, gr) = tokio::join!(
+            tokio::time::timeout(provider_timeout, self.lookup_google_books(&term, lang)),
+            tokio::time::timeout(provider_timeout, self.lookup_openlibrary(&term, lang)),
+            tokio::time::timeout(provider_timeout, self.lookup_hardcover(&term, lang)),
+            tokio::time::timeout(provider_timeout, self.lookup_goodreads(&term, lang)),
+        );
 
-        // Step 2: OpenLibrary (fallback).
-        match self.lookup_openlibrary(&term, lang).await {
-            Ok(results) if !results.is_empty() => return Ok(results),
-            Ok(_) => tracing::debug!(term = %term, lang = %lang, "OpenLibrary returned empty"),
-            Err(e) => tracing::warn!(
-                term = %term, lang = %lang, error = %e,
-                "OpenLibrary lookup failed; falling back to next provider"
-            ),
+        // Cap each provider to its top 9 (relevance-ordered), then round-robin in
+        // chunks of 3 so the strongest matches from every provider lead. Order is
+        // language-aware: English leads with the anchor-id providers (Hardcover,
+        // OpenLibrary), then Google Books, then Goodreads (scrape, often blocked)
+        // last. Non-English leads with Google Books — the foreign-language
+        // metadata provider — then OpenLibrary, Hardcover, Goodreads.
+        const PER_PROVIDER: usize = 9;
+        let mut lists = if lang == "en" {
+            vec![
+                take_lookup("Hardcover", &term, hc),
+                take_lookup("OpenLibrary", &term, ol),
+                take_lookup("GoogleBooks", &term, gb),
+                take_lookup("Goodreads", &term, gr),
+            ]
+        } else {
+            vec![
+                take_lookup("GoogleBooks", &term, gb),
+                take_lookup("OpenLibrary", &term, ol),
+                take_lookup("Hardcover", &term, hc),
+                take_lookup("Goodreads", &term, gr),
+            ]
+        };
+        for l in &mut lists {
+            l.truncate(PER_PROVIDER);
         }
+        let merged = interleave_by(lists, 3);
 
-        // Step 3: Hardcover (if token configured).
-        match self.lookup_hardcover(&term, lang).await {
-            Ok(results) if !results.is_empty() => return Ok(results),
-            Ok(_) => tracing::debug!(term = %term, lang = %lang, "Hardcover returned empty"),
-            Err(e) => tracing::warn!(
-                term = %term, lang = %lang, error = %e,
-                "Hardcover lookup failed; falling back to next provider"
-            ),
-        }
-
-        // Step 4: Goodreads scrape (foreign-language only).
-        if lang != "en" {
-            return self.lookup_goodreads(&term, lang).await;
-        }
-
-        Ok(vec![])
+        Ok(dedupe_lookup_results(merged))
     }
 
     async fn lookup_filtered(
@@ -1392,16 +1500,23 @@ where
 
         let raw_count = raw_results.len();
 
-        // Attempt LLM filtering
-        let (filtered, raw_available) = match self.llm_filter_search(&raw_results).await {
-            Some(indices) if indices.len() < raw_count => {
-                let filtered: Vec<LookupResult> = indices
-                    .into_iter()
-                    .filter_map(|i| raw_results.get(i).cloned())
-                    .collect();
-                (filtered, true)
+        // Keep the top 9 (the strongest cross-provider matches after the chunked
+        // interleave) untouched; LLM-filter only the lower-ranked tail (item 10+)
+        // for relevance to the query, so a genuine match in the head is never
+        // dropped — only long-tail noise is pruned.
+        const KEEP_HEAD: usize = 9;
+        let (filtered, raw_available) = if raw_count > KEEP_HEAD {
+            let tail = &raw_results[KEEP_HEAD..];
+            match self.llm_filter_search(&term, tail).await {
+                Some(keep) if keep.len() < tail.len() => {
+                    let mut filtered: Vec<LookupResult> = raw_results[..KEEP_HEAD].to_vec();
+                    filtered.extend(keep.into_iter().filter_map(|i| tail.get(i).cloned()));
+                    (filtered, true)
+                }
+                _ => (raw_results.clone(), false),
             }
-            _ => (raw_results.clone(), false),
+        } else {
+            (raw_results.clone(), false)
         };
 
         let filtered_count = filtered.len();
@@ -1434,6 +1549,141 @@ where
             raw_count,
             raw_available,
         })
+    }
+
+    async fn eager_match_by_author(
+        &self,
+        _user_id: UserId,
+        queries: Vec<EagerQuery>,
+    ) -> Result<Vec<(usize, LookupResult)>, WorkServiceError> {
+        // Group files by author (case-insensitive). Manual imports cluster
+        // heavily by author, so one author-scoped query per provider serves all
+        // of that author's files instead of one search per title.
+        let mut groups: HashMap<String, Vec<EagerQuery>> = HashMap::new();
+        for q in queries {
+            groups
+                .entry(q.author.trim().to_lowercase())
+                .or_default()
+                .push(q);
+        }
+
+        let mut out: Vec<(usize, LookupResult)> = Vec::new();
+
+        for group in groups.into_values() {
+            let author = group[0].author.trim().to_string();
+            if author.is_empty() {
+                continue;
+            }
+            let lang = group
+                .iter()
+                .find_map(|q| q.language.clone())
+                .unwrap_or_else(|| "en".to_string());
+
+            // One author-scoped query per provider, in parallel. Google Books
+            // (`inauthor:`) leads on coverage; OpenLibrary (`author:`) adds work
+            // anchors. Each is timeout-bounded so a slow provider can't stall the
+            // batch; a provider that errors or times out simply abstains. Google
+            // Books returns empty without a fetch when unconfigured (no API key),
+            // which makes the pass OpenLibrary-only for keyless installs.
+            let gb_term = format!("inauthor:\"{author}\"");
+            let ol_term = format!("author:\"{author}\"");
+            let provider_timeout = Duration::from_secs(8);
+            let gb_fut = async {
+                let t = Instant::now();
+                let r = tokio::time::timeout(
+                    provider_timeout,
+                    self.lookup_google_books(&gb_term, &lang),
+                )
+                .await;
+                (r, t.elapsed().as_millis() as u64)
+            };
+            let ol_fut = async {
+                let t = Instant::now();
+                let r = tokio::time::timeout(
+                    provider_timeout,
+                    self.lookup_openlibrary(&ol_term, &lang),
+                )
+                .await;
+                (r, t.elapsed().as_millis() as u64)
+            };
+            let ((gb, gb_ms), (ol, ol_ms)) = tokio::join!(gb_fut, ol_fut);
+            tracing::info!(author = %author, gb_ms, ol_ms, "perf eager: provider fetch");
+
+            // Union the author's corpus: Google Books first (coverage/covers),
+            // then OpenLibrary (work anchors).
+            let mut corpus: Vec<LookupResult> = Vec::new();
+            if let Ok(Ok(mut r)) = gb {
+                corpus.append(&mut r);
+            }
+            if let Ok(Ok(mut r)) = ol {
+                corpus.append(&mut r);
+            }
+            if corpus.is_empty() {
+                continue;
+            }
+
+            let cand_refs: Vec<(&str, &str)> = corpus
+                .iter()
+                .map(|c| (c.title.as_str(), c.author_name.as_str()))
+                .collect();
+
+            for q in &group {
+                // ISBN first: a file's embedded ISBN-13 pins the exact edition in
+                // the corpus (Google Books carries isbn_13; OpenLibrary does not),
+                // beating any title heuristic. Fall back to the strict title+author
+                // cascade when there's no ISBN or no ISBN hit in the corpus.
+                let chosen = q
+                    .isbn
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|isbn| {
+                        corpus
+                            .iter()
+                            .position(|c| c.isbn_13.as_deref() == Some(isbn))
+                    })
+                    .or_else(|| {
+                        livrarr_matching::work_dedup::best_candidate_index(
+                            &cand_refs, &q.title, &q.author,
+                        )
+                    });
+                if let Some(idx) = chosen {
+                    let mut result = corpus[idx].clone();
+                    // The pick is often a Google Books / ISBN hit, which carries a
+                    // cover + ISBN but NO work anchor. Graft an anchor from a
+                    // same-title OpenLibrary candidate in the corpus so the work
+                    // can be created Confirmed (and enrich directly) rather than
+                    // landing ISBN-only and relying on background convergence.
+                    let has_anchor = result.ol_key.is_some()
+                        || result.gr_key.is_some()
+                        || result.hc_key.is_some();
+                    if !has_anchor {
+                        let norm =
+                            livrarr_matching::work_dedup::normalize_title_for_match(&result.title);
+                        if let Some(anchored) = corpus.iter().find(|c| {
+                            (c.ol_key.is_some() || c.gr_key.is_some() || c.hc_key.is_some())
+                                && livrarr_matching::work_dedup::normalize_title_for_match(&c.title)
+                                    == norm
+                                && livrarr_matching::work_dedup::authors_match(
+                                    &c.author_name,
+                                    &result.author_name,
+                                )
+                        }) {
+                            result.ol_key = anchored.ol_key.clone();
+                            result.author_ol_key = anchored.author_ol_key.clone();
+                            if result.gr_key.is_none() {
+                                result.gr_key = anchored.gr_key.clone();
+                            }
+                            if result.hc_key.is_none() {
+                                result.hc_key = anchored.hc_key.clone();
+                            }
+                        }
+                    }
+                    out.push((q.id, result));
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     async fn search_works(
@@ -1482,7 +1732,7 @@ where
     M: crate::MergeEngine + Send + Sync,
     T: livrarr_domain::services::TagService + Send + Sync,
 {
-    async fn llm_filter_search(&self, results: &[LookupResult]) -> Option<Vec<usize>> {
+    async fn llm_filter_search(&self, query: &str, results: &[LookupResult]) -> Option<Vec<usize>> {
         let mut listing = String::new();
         for (i, r) in results.iter().enumerate() {
             listing.push_str(&format!(
@@ -1496,14 +1746,16 @@ where
 
         let system = "You are a librarian assistant. Clean up book search results.";
         let user_prompt = format!(
-            "These are search results from a book database:\n\n\
+            "A user searched a book database for: \"{query}\"\n\n\
+             These are lower-ranked results for that query:\n\n\
              {listing}\n\
              Clean up this list:\n\
-             1. Remove non-book items (study guides, journals, blank notebooks, merchandise, board games)\n\
-             2. Remove duplicate editions of the same work — keep the one with the best metadata\n\
-             3. Remove comic/manga adaptations, movie tie-in editions, and abridged versions\n\
-             4. Remove anthologies and compilations unless they are a well-known standalone work\n\
-             5. Keep results that are legitimate different works even if titles are similar\n\n\
+             1. Remove items not relevant to the query \"{query}\"\n\
+             2. Remove non-book items (study guides, journals, blank notebooks, merchandise, board games)\n\
+             3. Remove duplicate editions of the same work — keep the one with the best metadata\n\
+             4. Remove comic/manga adaptations, movie tie-in editions, and abridged versions\n\
+             5. Remove anthologies and compilations unless they are a well-known standalone work\n\
+             6. Keep results that are legitimate different works even if titles are similar\n\n\
              Return a JSON array of the original indices to keep, e.g. [0, 2, 5].\n\
              Return ONLY the JSON array, no other text."
         );
@@ -1548,15 +1800,20 @@ where
         term: &str,
         lang: &str,
     ) -> Result<Vec<LookupResult>, WorkServiceError> {
-        let search_url = format!(
-            "https://www.goodreads.com/search?q={}",
+        // Discovery uses the WAF-free `/book/auto_complete` JSON endpoint. The
+        // HTML `/search` page is AWS-WAF 202-challenged (dead); autocomplete
+        // returns structured title/author/cover/rating/id with no LLM. Query the
+        // term as-is — adding the author demotes the canonical book (author-in-
+        // title substring matches rank study guides / adaptations first).
+        let url = format!(
+            "https://www.goodreads.com/book/auto_complete?format=json&q={}",
             urlencoding::encode(term)
         );
 
         let fetch_req = FetchRequest {
-            url: search_url,
+            url,
             method: HttpMethod::Get,
-            headers: vec![("Accept-Language".into(), "en-US,en;q=0.9".into())],
+            headers: vec![("Accept".into(), "application/json".into())],
             body: None,
             timeout: std::time::Duration::from_secs(10),
             rate_bucket: RateBucket::Goodreads,
@@ -1568,34 +1825,24 @@ where
         let resp = match self.http.fetch(fetch_req).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Goodreads search fetch failed: {e}");
+                tracing::warn!("Goodreads autocomplete fetch failed: {e}");
                 return Ok(vec![]);
             }
         };
 
-        if resp.status >= 400 {
+        // 200 is the only "door open" status; a 202 challenge / 4xx / 5xx are
+        // transient blocks for discovery — the other providers carry the search.
+        if resp.status != 200 {
             tracing::warn!(
                 status = resp.status,
-                "Goodreads search returned non-success"
+                "Goodreads autocomplete returned non-200"
             );
             return Ok(vec![]);
         }
 
-        let raw_html = String::from_utf8_lossy(&resp.body);
-
-        if crate::llm_scraper::is_anti_bot_page(&raw_html) {
-            tracing::warn!("Goodreads search: anti-bot page detected");
-            return Ok(vec![]);
-        }
-
-        let parsed = crate::goodreads::parse_search_html(&raw_html);
-
-        if parsed.is_empty() && raw_html.contains("itemtype=\"http") {
-            tracing::warn!(
-                "Goodreads parser drift: HTML contains schema.org Book rows but 0 passed \
-                 validation. HTML structure may have changed."
-            );
-        }
+        let body = String::from_utf8_lossy(&resp.body);
+        // A non-array body (WAF interstitial / format change) parses to empty.
+        let parsed = livrarr_external_data::goodreads::parse_autocomplete_json(&body);
 
         let lang_owned = lang.to_string();
         let results = parsed
@@ -1606,11 +1853,19 @@ where
                 } else {
                     r.detail_url.clone()
                 };
-                let validated_url = if crate::goodreads::validate_detail_url(&full_url) {
-                    Some(full_url)
-                } else {
-                    None
-                };
+                let validated_url =
+                    if livrarr_external_data::goodreads::validate_detail_url(&full_url) {
+                        Some(full_url)
+                    } else {
+                        None
+                    };
+                // Canonical Goodreads work anchor from the structured endpoint,
+                // normalized to the bare numeric id (the domain canonical form per
+                // normalize_gr_key) so it persists and matches consistently.
+                let gr_key = validated_url
+                    .as_deref()
+                    .and_then(livrarr_external_data::goodreads::extract_gr_key)
+                    .and_then(|k| livrarr_domain::normalization::normalize_gr_key(&k));
                 LookupResult {
                     ol_key: None,
                     title: r.title,
@@ -1629,7 +1884,7 @@ where
                     isbn_13: None,
                     candidate_id: None,
                     hc_key: None,
-                    gr_key: None,
+                    gr_key,
                     asin: None,
                 }
             })
@@ -1779,9 +2034,10 @@ where
             urlencoding::encode(&lang_norm),
         );
 
-        let volumes = crate::google_books::fetch_gb_volumes(&self.http, &api_key, url)
-            .await
-            .map_err(WorkServiceError::Enrichment)?;
+        let volumes =
+            livrarr_external_data::google_books::fetch_gb_volumes(&self.http, &api_key, url)
+                .await
+                .map_err(WorkServiceError::Enrichment)?;
 
         let results = volumes
             .iter()
@@ -1802,7 +2058,7 @@ where
                 let cover_url = vi
                     .image_links
                     .as_ref()
-                    .and_then(crate::google_books::normalize_cover_url);
+                    .and_then(livrarr_external_data::google_books::normalize_cover_url);
                 let language = vi.language.clone().or_else(|| Some(lang_norm.clone()));
 
                 Some(LookupResult {
@@ -1820,7 +2076,9 @@ where
                     language,
                     detail_url: None,
                     rating: None,
-                    isbn_13: crate::google_books::extract_isbn13(&vi.industry_identifiers),
+                    isbn_13: livrarr_external_data::google_books::extract_isbn13(
+                        &vi.industry_identifiers,
+                    ),
                     candidate_id: None,
                     hc_key: None,
                     gr_key: None,
@@ -1877,7 +2135,7 @@ where
         let resp = self
             .http
             .fetch(livrarr_domain::services::FetchRequest {
-                url: crate::hardcover::HARDCOVER_API_URL.to_string(),
+                url: livrarr_external_data::hardcover::HARDCOVER_API_URL.to_string(),
                 method: livrarr_domain::services::HttpMethod::Post,
                 headers: vec![
                     ("Authorization".into(), format!("Bearer {token}")),
@@ -1931,6 +2189,12 @@ where
                     .pointer("/image/url")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                // The Hardcover work id (same extraction the HC client uses) is a
+                // work anchor, so a picked HC result is trusted (zero-network add)
+                // instead of falling back to an ISBN re-resolve.
+                let hc_key = doc
+                    .get("id")
+                    .map(|v| v.to_string().trim_matches('"').to_string());
 
                 Some(LookupResult {
                     ol_key: None,
@@ -1949,7 +2213,7 @@ where
                     rating: None,
                     isbn_13,
                     candidate_id: None,
-                    hc_key: None,
+                    hc_key,
                     gr_key: None,
                     asin: None,
                 })
@@ -1995,7 +2259,7 @@ where
             .map_err(WorkServiceError::Db)?;
         if let Some(work) = existing.into_iter().next() {
             let (work, enrichment_status) = if source_provider_data.is_some() {
-                let status = self
+                let (status, _) = self
                     .run_unified_enrichment(user_id, &work, source_provider_data.clone())
                     .await;
                 let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -2055,7 +2319,7 @@ where
         source_provider_data: Option<SourceProviderData>,
     ) -> Result<AddWorkResult, WorkServiceError> {
         let (work, enrichment_status) = if source_provider_data.is_some() {
-            let status = self
+            let (status, _) = self
                 .run_unified_enrichment(user_id, &work, source_provider_data)
                 .await;
             let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -2076,6 +2340,107 @@ where
         })
     }
 
+    /// The shared transport cache (owned by the identity resolver) holding the
+    /// per-provider payloads the resolver fetched during discovery. `None` when no
+    /// resolver is composed (legacy chain / tests) — `add()` then network-enriches.
+    fn transport_cache(&self) -> Option<&livrarr_external_data::transport_cache::TransportCache> {
+        self.resolver.as_ref().map(|r| r.cache.as_ref())
+    }
+
+    /// REQ-014/015 (D-005): reuse the per-provider payloads the resolver cached
+    /// under `candidate_id` during discovery — feeding them to the merge engine
+    /// in-process (zero provider network) instead of re-querying. Returns the
+    /// resulting `EnrichmentStatus` on a cache hit, or `None` to fall back to
+    /// network/background enrichment (cache miss, TTL-expiry, anchor mismatch, or
+    /// a CAS supersede). Consume-once: the entry is evicted on take.
+    async fn try_reuse_cached_payloads(
+        &self,
+        user_id: UserId,
+        work: &Work,
+        candidate_id: &livrarr_domain::identity::CandidateId,
+    ) -> Option<(EnrichmentStatus, bool)> {
+        let payloads = self
+            .transport_cache()?
+            .cache_take(user_id, candidate_id.clone())?;
+        // Revalidate the cached identity against the work we just created (D-005):
+        // require a positive anchor match and no contradiction, so a stale or
+        // colliding candidate_id falls back to network instead of applying
+        // unrelated payloads.
+        if !cached_payloads_match_work(work, &payloads) {
+            tracing::warn!(
+                work_id = work.id,
+                "cached payloads do not positively match the work's anchors; falling back to network enrichment"
+            );
+            return None;
+        }
+        // Snapshot the CAS generation BEFORE computing the merge so a concurrent
+        // update surfaces as Superseded rather than being silently overwritten, and
+        // carry the current provenance so user/add-time field locks are respected
+        // (parity with the network enrichment path).
+        // A DB read failure must NOT fabricate a generation (breaks CAS) or empty
+        // provenance (drops user locks) — fall back to network enrichment instead.
+        let generation = match self.db.get_merge_generation(user_id, work.id).await {
+            Ok(generation) => generation,
+            Err(e) => {
+                tracing::warn!(
+                    work_id = work.id,
+                    "get_merge_generation failed: {e}; falling back"
+                );
+                return None;
+            }
+        };
+        let current_provenance = match self.db.list_work_provenance(user_id, work.id).await {
+            Ok(provenance) => provenance,
+            Err(e) => {
+                tracing::warn!(
+                    work_id = work.id,
+                    "list_work_provenance failed: {e}; falling back"
+                );
+                return None;
+            }
+        };
+        let merge_output = match self
+            .merge_engine
+            .merge_from_cached(
+                work.clone(),
+                payloads,
+                current_provenance,
+                work.language.as_deref(),
+            )
+            .await
+        {
+            Ok(output) => output,
+            Err(e) => {
+                tracing::warn!(
+                    work_id = work.id,
+                    "merge_from_cached failed: {e}; falling back"
+                );
+                return None;
+            }
+        };
+        let apply_req =
+            livrarr_enrichment::build_apply_request(&merge_output, user_id, work.id, generation);
+        match self.db.apply_enrichment_merge(apply_req).await {
+            Ok(
+                livrarr_domain::ApplyMergeOutcome::Applied
+                | livrarr_domain::ApplyMergeOutcome::NoChange
+                | livrarr_domain::ApplyMergeOutcome::Deferred,
+            ) => Some((
+                merge_output.enrichment_status,
+                merge_output.conflict_detected,
+            )),
+            Ok(livrarr_domain::ApplyMergeOutcome::Superseded) => None,
+            Err(e) => {
+                tracing::warn!(
+                    work_id = work.id,
+                    "applying cached merge failed: {e}; falling back"
+                );
+                None
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn finish_created_work(
         &self,
         user_id: UserId,
@@ -2084,7 +2449,59 @@ where
         author_id: Option<i64>,
         source_provider_data: Option<SourceProviderData>,
         skip_sync_enrichment: bool,
+        derived_identity: livrarr_domain::IdentityStatus,
+        candidate_id: Option<&livrarr_domain::identity::CandidateId>,
     ) -> Result<AddWorkResult, WorkServiceError> {
+        use livrarr_domain::IdentityStatus;
+
+        // Persist the identity-confidence badge derived at resolution time
+        // (REQ-014/D-013) — independent of enrichment, written once at create.
+        self.db
+            .set_identity_status(user_id, work.id, derived_identity)
+            .await
+            .map_err(WorkServiceError::Db)?;
+
+        // REQ-014/015 (D-005): if the candidate carried a candidate_id whose
+        // payloads the resolver cached during discovery, reuse them in-process
+        // (the merge engine, zero provider network) BEFORE cover/enrichment so the
+        // cover and returned status reflect the merged metadata. This fires even on
+        // skip_sync_enrichment: that gate defers slow *network* enrichment, but the
+        // cached merge makes no network calls (ir-v2 add:144/150).
+        let mut work = work;
+        let reused_status = match candidate_id {
+            // Reuse is a form of enrichment, so it is gated on a settled identity
+            // exactly like the network fan-out below: a held identity (Pending /
+            // Conflict / NeedsReview) never reuses, even if a candidate_id is echoed.
+            Some(id)
+                if matches!(
+                    derived_identity,
+                    IdentityStatus::Confirmed | IdentityStatus::Provisional
+                ) =>
+            {
+                match self.try_reuse_cached_payloads(user_id, &work, id).await {
+                    Some((status, identity_not_found)) => {
+                        // Seam-2: the cached merge can also reject every payload as
+                        // not-this-book; the caller writes IdentityStatus::NotFound
+                        // (overriding the derived badge), parity with the network path.
+                        if identity_not_found {
+                            self.db
+                                .set_identity_status(user_id, work.id, IdentityStatus::NotFound)
+                                .await
+                                .map_err(WorkServiceError::Db)?;
+                        }
+                        work = self
+                            .db
+                            .get_work(user_id, work.id)
+                            .await
+                            .map_err(WorkServiceError::Db)?;
+                        Some(status)
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+
         // Phase 1: synchronous cover download within 3s budget (REQ-010).
         let is_user_initiated = source_provider_data.is_none();
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
@@ -2117,6 +2534,39 @@ where
                     0,
                 )
                 .await;
+        }
+
+        // A cached-payload reuse already enriched the work in-process — return it,
+        // bypassing the skip / identity-gate / network paths below (REQ-014/015).
+        if let Some(status) = reused_status {
+            let updated_work = self
+                .db
+                .get_work(user_id, work.id)
+                .await
+                .map_err(WorkServiceError::Db)?;
+            let cover_mtime =
+                crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
+                    crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
+                });
+            let audiobook_cover_mtime =
+                crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id).or_else(
+                    || {
+                        crate::cover::audiobook_cover_file_mtime(
+                            &self.data_dir.join("covers"),
+                            updated_work.id,
+                        )
+                    },
+                );
+            return Ok(AddWorkResult {
+                work: updated_work,
+                created: true,
+                author_created,
+                author_id,
+                messages: vec![],
+                cover_mtime,
+                audiobook_cover_mtime,
+                enrichment_status: status,
+            });
         }
 
         // Skip sync enrichment: return Unenriched immediately (REQ-009).
@@ -2153,9 +2603,60 @@ where
             });
         }
 
-        let enrichment_status = self
+        // Identity gate (REQ-015): the enrich fan-out runs only for a settled
+        // identity (Confirmed/Provisional). A held identity (Pending/Conflict/
+        // NeedsReview) does not enrich here — the cover above is never gated, but
+        // the provider fan-out waits for identity convergence.
+        if matches!(
+            derived_identity,
+            IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
+        ) {
+            let updated_work = self
+                .db
+                .get_work(user_id, work.id)
+                .await
+                .map_err(WorkServiceError::Db)?;
+            let cover_mtime =
+                crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
+                    crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
+                });
+            let audiobook_cover_mtime =
+                crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id).or_else(
+                    || {
+                        crate::cover::audiobook_cover_file_mtime(
+                            &self.data_dir.join("covers"),
+                            updated_work.id,
+                        )
+                    },
+                );
+            return Ok(AddWorkResult {
+                work: updated_work,
+                created: true,
+                author_created,
+                author_id,
+                messages: vec![],
+                cover_mtime,
+                audiobook_cover_mtime,
+                enrichment_status: EnrichmentStatus::Unenriched,
+            });
+        }
+
+        let (enrichment_status, identity_not_found) = self
             .run_unified_enrichment(user_id, &work, source_provider_data)
             .await;
+
+        // Seam-2 (REQ-002/D-013): enrichment SIGNALS that it could not verify the
+        // work's identity — the LLM rejected every provider payload as not-this-book.
+        // The caller — not enrichment — writes the identity badge (the one-way
+        // identity←enrichment seam; no EstablishedIdentity contract yet). This is an
+        // identity-not-found, distinct from an open anchor `Conflict`.
+        if identity_not_found {
+            self.db
+                .set_identity_status(user_id, work.id, IdentityStatus::NotFound)
+                .await
+                .map_err(WorkServiceError::Db)?;
+        }
+
         let updated_work = self
             .db
             .get_work(user_id, work.id)
@@ -2212,12 +2713,16 @@ where
     ///
     /// Returns the final `EnrichmentStatus`. Never returns `Err` — all failures
     /// are absorbed and produce `Failed` status, never a caller error.
+    /// Returns `(enrichment_status, identity_not_found)`. The second element is the
+    /// seam-2 signal: when enrichment rejected every provider payload as
+    /// not-this-book, the caller writes `IdentityStatus::NotFound` (enrichment
+    /// itself never writes identity).
     async fn run_unified_enrichment(
         &self,
         user_id: UserId,
         work: &Work,
         source_provider_data: Option<livrarr_domain::services::SourceProviderData>,
-    ) -> EnrichmentStatus {
+    ) -> (EnrichmentStatus, bool) {
         let work_id = work.id;
 
         // Step 1: Inject source provider data (Readarr import etc.)
@@ -2236,7 +2741,7 @@ where
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(work_id, "run_unified_enrichment: enrich_work failed: {e}");
-                return EnrichmentStatus::Failed;
+                return (EnrichmentStatus::Failed, false);
             }
         };
 
@@ -2245,13 +2750,14 @@ where
             Ok(w) => w,
             Err(e) => {
                 tracing::warn!(work_id, "run_unified_enrichment: get_work failed: {e}");
-                return EnrichmentStatus::Failed;
+                return (EnrichmentStatus::Failed, false);
             }
         };
 
         // Use the enrichment_status from the enrich_work pipeline
         // (it already ran merge internally via EnrichmentServiceImpl).
         let final_status = enrich_result.enrichment_status;
+        let identity_not_found = enrich_result.identity_not_found;
 
         // Step 4: Trust-aware cover upgrade (non-fatal). Ebook and audiobook
         // covers are independent; upgrade each from its own resolution.
@@ -2359,7 +2865,7 @@ where
             }
         }
 
-        final_status
+        (final_status, identity_not_found)
     }
 }
 
@@ -2370,6 +2876,32 @@ async fn write_addtime_provenance<D: ProvenanceDb>(
     setter: ProvenanceSetter,
 ) {
     crate::provenance::write_addtime_provenance(db, user_id, work, setter).await;
+}
+
+/// Collapse duplicate works merged from multiple discovery providers. Prefers an
+/// ISBN-13 match; otherwise keys on normalized title + author. First occurrence
+/// wins, so provider order (Google Books, OpenLibrary, Hardcover) breaks ties.
+fn dedupe_lookup_results(results: Vec<LookupResult>) -> Vec<LookupResult> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        let key = match r
+            .isbn_13
+            .as_deref()
+            .and_then(livrarr_domain::normalization::normalize_isbn13)
+        {
+            Some(isbn) => format!("isbn:{isbn}"),
+            None => format!(
+                "ta:{}|{}",
+                r.title.trim().to_lowercase(),
+                r.author_name.trim().to_lowercase()
+            ),
+        };
+        if seen.insert(key) {
+            out.push(r);
+        }
+    }
+    out
 }
 
 pub fn unproxy_cover_url(url: &str) -> String {
@@ -2469,4 +3001,90 @@ fn is_supported_image(bytes: &[u8]) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn lr(title: &str, author: &str, isbn: Option<&str>) -> LookupResult {
+        LookupResult {
+            ol_key: None,
+            title: title.into(),
+            author_name: author.into(),
+            author_ol_key: None,
+            year: None,
+            cover_url: None,
+            description: None,
+            series_name: None,
+            series_position: None,
+            source: None,
+            source_type: None,
+            language: None,
+            detail_url: None,
+            rating: None,
+            isbn_13: isbn.map(|s| s.into()),
+            candidate_id: None,
+            hc_key: None,
+            gr_key: None,
+            asin: None,
+        }
+    }
+
+    #[test]
+    fn dedupe_keeps_distinct_works_from_all_providers() {
+        // A Hardcover-only book must survive a merge where Google Books already
+        // returned results (the #97 regression); duplicates collapse to one.
+        let merged = dedupe_lookup_results(vec![
+            lr("Google Result", "Author A", Some("9780000000001")),
+            lr("Hardcover Only", "Author B", Some("9780000000002")),
+            lr("Google Result", "Author A", Some("9780000000001")), // dup by isbn
+            lr("No ISBN Book", "Author C", None),
+            lr("No ISBN Book", "Author C", None), // dup by title+author
+        ]);
+        let titles: Vec<&str> = merged.iter().map(|r| r.title.as_str()).collect();
+        assert!(
+            titles.contains(&"Hardcover Only"),
+            "HC-only book was dropped"
+        );
+        assert_eq!(merged.len(), 3, "expected 3 distinct works after dedupe");
+    }
+
+    #[test]
+    fn interleave_round_robins_in_chunks() {
+        // chunk=2: first 2 of A, first 2 of B, then A's remainder — so each
+        // provider's strongest hits lead and quality degrades evenly.
+        let a = vec![
+            lr("A0", "x", None),
+            lr("A1", "x", None),
+            lr("A2", "x", None),
+        ];
+        let b = vec![lr("B0", "y", None), lr("B1", "y", None)];
+        let out = interleave_by(vec![a, b], 2);
+        let titles: Vec<&str> = out.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, vec!["A0", "A1", "B0", "B1", "A2"]);
+    }
+
+    #[test]
+    fn interleave_handles_uneven_and_empty_lists() {
+        let a = vec![lr("A0", "x", None)];
+        let empty: Vec<LookupResult> = vec![];
+        let c = vec![lr("C0", "z", None), lr("C1", "z", None)];
+        let out = interleave_by(vec![a, empty, c], 3);
+        let titles: Vec<&str> = out.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, vec!["A0", "C0", "C1"]);
+    }
+
+    #[test]
+    fn take_lookup_passes_ok_and_swallows_err() {
+        let ok: Result<Result<Vec<LookupResult>, String>, tokio::time::error::Elapsed> =
+            Ok(Ok(vec![lr("Hit", "a", None)]));
+        assert_eq!(take_lookup("P", "t", ok).len(), 1);
+
+        // A provider error degrades to an empty contribution, never failing the
+        // whole search (the timeout arm behaves identically).
+        let err: Result<Result<Vec<LookupResult>, String>, tokio::time::error::Elapsed> =
+            Ok(Err("provider boom".to_string()));
+        assert!(take_lookup("P", "t", err).is_empty());
+    }
 }

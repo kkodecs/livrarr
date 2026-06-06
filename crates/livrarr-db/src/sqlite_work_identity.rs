@@ -327,22 +327,32 @@ impl WorkIdentityRepository for SqliteDb {
         .fetch_optional(self.pool())
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
-        if let Some(id) = existing {
-            return Ok(id);
-        }
-        let incoming_json = serde_json::to_string(&conflict.incoming)
+        let conflict_id = if let Some(id) = existing {
+            id
+        } else {
+            let incoming_json = serde_json::to_string(&conflict.incoming)
+                .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            self.create_identity_conflict(
+                conflict.user_id,
+                conflict.existing_work_id,
+                conflict.kind,
+                &incoming_json,
+                Utc::now(),
+                conflict.raised_by,
+                conflict.raised_source_path.as_deref(),
+            )
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?
+        };
+        // An open identity contradiction now exists for this work — reflect it in
+        // the persisted identity badge (REQ-014/D-013) so reads surface Conflict.
+        sqlx::query("UPDATE works SET identity_status = 'conflict' WHERE id = ?1 AND user_id = ?2")
+            .bind(conflict.existing_work_id)
+            .bind(conflict.user_id)
+            .execute(self.pool())
+            .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
-        self.create_identity_conflict(
-            conflict.user_id,
-            conflict.existing_work_id,
-            conflict.kind,
-            &incoming_json,
-            Utc::now(),
-            conflict.raised_by,
-            conflict.raised_source_path.as_deref(),
-        )
-        .await
-        .map_err(|e| WorkIdentityError::Db(e.to_string()))
+        Ok(conflict_id)
     }
 
     async fn set_identity_pending(
@@ -380,13 +390,11 @@ impl WorkIdentityRepository for SqliteDb {
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
-        sqlx::query(
-            "UPDATE works SET ol_key = NULL, enrichment_status = 'identity_pending' WHERE id = ?1",
-        )
-        .bind(work_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        sqlx::query("UPDATE works SET ol_key = NULL, identity_status = 'pending' WHERE id = ?1")
+            .bind(work_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
         tx.commit()
             .await
@@ -395,7 +403,7 @@ impl WorkIdentityRepository for SqliteDb {
     }
 
     async fn set_needs_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
-        sqlx::query("UPDATE works SET enrichment_status = 'needs_review' WHERE id = ?1")
+        sqlx::query("UPDATE works SET identity_status = 'needs_review' WHERE id = ?1")
             .bind(work_id)
             .execute(self.pool())
             .await

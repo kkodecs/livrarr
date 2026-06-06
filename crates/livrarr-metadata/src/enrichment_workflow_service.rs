@@ -74,6 +74,7 @@ where
             provider_outcomes: result.provider_outcomes,
             cover_resolution: result.cover_resolution,
             audiobook_cover_resolution: result.audiobook_cover_resolution,
+            identity_not_found: result.identity_not_found,
         })
     }
 

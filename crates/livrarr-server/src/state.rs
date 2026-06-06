@@ -34,9 +34,9 @@ pub type LiveLlmValidator = livrarr_metadata::llm_validator::LiveLlmValidator;
 pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
     SqliteDb,
     LiveProviderQueue,
-    livrarr_metadata::DefaultMergeEngine<livrarr_metadata::llm_caller_service::LlmCallerImpl>,
+    livrarr_metadata::DefaultMergeEngine<livrarr_external_data::llm_caller_service::LlmCallerImpl>,
     LiveLlmValidator,
-    livrarr_metadata::llm_caller_service::LlmCallerImpl,
+    livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
 
 // =============================================================================
@@ -52,14 +52,14 @@ pub type LiveEnrichmentWorkflow =
 pub type LiveAuthorService = livrarr_metadata::author_service::AuthorServiceImpl<
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
-    livrarr_metadata::llm_caller_service::LlmCallerImpl,
+    livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
 pub type LiveSeriesService = livrarr_metadata::series_service::SeriesServiceImpl<SqliteDb>;
 pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::SeriesQueryServiceImpl<
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
     LiveWorkService,
-    livrarr_metadata::llm_caller_service::LlmCallerImpl,
+    livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
 pub type LiveTagServiceImpl = crate::tag_service::LiveTagService<LiveImportIoService>;
 pub type LiveIdentityResolver =
@@ -69,8 +69,8 @@ pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     SqliteDb,
     LiveEnrichmentWorkflow,
     livrarr_http::fetcher::HttpFetcherImpl,
-    livrarr_metadata::llm_caller_service::LlmCallerImpl,
-    livrarr_metadata::DefaultMergeEngine<livrarr_metadata::llm_caller_service::LlmCallerImpl>,
+    livrarr_external_data::llm_caller_service::LlmCallerImpl,
+    livrarr_metadata::DefaultMergeEngine<livrarr_external_data::llm_caller_service::LlmCallerImpl>,
     LiveTagServiceImpl,
 >;
 pub type LiveGrabService = livrarr_download::grab_service::GrabServiceImpl<SqliteDb>;
@@ -134,7 +134,7 @@ pub struct AppState {
     /// without a restart. All credential-dependent components
     /// (LiveLlmValidator, HardcoverClient, GoodreadsClient LLM fallback)
     /// hold a clone and read fresh per call.
-    pub live_metadata_config: livrarr_metadata::live_config::LiveMetadataConfig,
+    pub live_metadata_config: livrarr_external_data::live_config::LiveMetadataConfig,
     pub log_buffer: Arc<LogBuffer>,
     pub log_level_handle: Arc<LogLevelHandle>,
     pub refresh_in_progress: Arc<std::sync::Mutex<HashSet<livrarr_db::UserId>>>,
@@ -148,8 +148,6 @@ pub struct AppState {
     /// Readarr import progress — polled by frontend.
     pub readarr_import_progress:
         Arc<tokio::sync::Mutex<crate::readarr_import_service::ReadarrImportProgress>>,
-    /// OL rate limiter for manual import parallel lookups (3 req/sec, burst 10).
-    pub ol_rate_limiter: Arc<OlRateLimiter>,
     /// In-progress manual import scan results — OL matches stream in via polling.
     pub manual_import_scans: Arc<ManualImportScanMap>,
     /// Phase 1.5 plumbing: live `DefaultProviderQueue` constructed at startup
@@ -224,7 +222,9 @@ impl livrarr_handlers::accessors::ProviderHealthAccessor for ProviderHealthAcces
 
 /// Wrapper for live metadata config — satisfies orphan rule.
 #[derive(Clone)]
-pub struct LiveMetadataConfigAccessorImpl(pub livrarr_metadata::live_config::LiveMetadataConfig);
+pub struct LiveMetadataConfigAccessorImpl(
+    pub livrarr_external_data::live_config::LiveMetadataConfig,
+);
 
 impl livrarr_handlers::accessors::LiveMetadataConfigAccessor for LiveMetadataConfigAccessorImpl {
     fn replace(&self, cfg: livrarr_domain::settings::MetadataConfig) {

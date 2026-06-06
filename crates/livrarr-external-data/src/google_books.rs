@@ -160,7 +160,6 @@ impl GoogleBooksClient {
     pub async fn fetch(
         &self,
         work: &livrarr_domain::Work,
-        _ctx: &crate::EnrichmentContext,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let cfg = self.live_config.snapshot();
         let api_key = match cfg
@@ -411,7 +410,7 @@ pub fn normalize_cover_url(links: &GbImageLinks) -> Option<String> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return None;
     }
-    crate::llm_scraper::validate_cover_url(&url, "")
+    crate::provider_util::validate_cover_url(&url, "")
 }
 
 pub fn strip_html_tags(html: &str) -> String {
@@ -544,7 +543,7 @@ mod tests {
     }
 
     fn test_live_config() -> LiveMetadataConfig {
-        LiveMetadataConfig::new(livrarr_db::MetadataConfig {
+        LiveMetadataConfig::new(livrarr_domain::settings::MetadataConfig {
             hardcover_enabled: false,
             hardcover_api_token: None,
             llm_enabled: false,
@@ -1045,7 +1044,7 @@ mod tests {
     /// REQ-004: MetadataConfig Debug output redacts google_books_api_key.
     #[test]
     fn metadata_config_debug_redacts_google_books_key() {
-        let cfg = livrarr_db::MetadataConfig {
+        let cfg = livrarr_domain::settings::MetadataConfig {
             hardcover_enabled: false,
             hardcover_api_token: None,
             llm_enabled: false,
@@ -1068,7 +1067,7 @@ mod tests {
     /// REQ-004: fetch returns NotConfigured when API key is absent.
     #[tokio::test]
     async fn fetch_returns_not_configured_when_key_missing() {
-        let no_key_config = LiveMetadataConfig::new(livrarr_db::MetadataConfig {
+        let no_key_config = LiveMetadataConfig::new(livrarr_domain::settings::MetadataConfig {
             hardcover_enabled: false,
             hardcover_api_token: None,
             llm_enabled: false,
@@ -1082,11 +1081,7 @@ mod tests {
         });
         let client = GoogleBooksClient::new(test_http_client(), no_key_config);
         let work = livrarr_domain::Work::default();
-        let ctx = crate::EnrichmentContext {
-            priority: crate::RequestPriority::Normal,
-            mode: crate::EnrichmentMode::Background,
-        };
-        let result = client.fetch(&work, &ctx).await;
+        let result = client.fetch(&work).await;
         assert!(
             matches!(result, ProviderOutcome::NotConfigured),
             "expected NotConfigured, got {result:?}"

@@ -1662,6 +1662,7 @@ dependencies = [
  "livrarr-db",
  "livrarr-domain",
  "livrarr-download",
+ "livrarr-external-data",
  "livrarr-http",
  "livrarr-library",
  "livrarr-matching",
@@ -1735,6 +1736,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "livrarr-enrichment"
+version = "0.1.0-alpha5"
+dependencies = [
+ "chrono",
+ "image",
+ "livrarr-db",
+ "livrarr-domain",
+ "livrarr-external-data",
+ "livrarr-http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "trait-variant",
+]
+
+[[package]]
+name = "livrarr-external-data"
+version = "0.1.0-alpha5"
+dependencies = [
+ "chrono",
+ "csv",
+ "futures",
+ "livrarr-domain",
+ "livrarr-http",
+ "lru",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "trait-variant",
+ "unicode-normalization",
+ "url",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "livrarr-handlers"
 version = "0.1.0-alpha5"
 dependencies = [
@@ -1776,6 +1821,21 @@ dependencies = [
  "tracing",
  "trait-variant",
  "url",
+]
+
+[[package]]
+name = "livrarr-identity"
+version = "0.1.0-alpha5"
+dependencies = [
+ "futures",
+ "livrarr-domain",
+ "livrarr-external-data",
+ "livrarr-http",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1829,7 +1889,10 @@ dependencies = [
  "image",
  "livrarr-db",
  "livrarr-domain",
+ "livrarr-enrichment",
+ "livrarr-external-data",
  "livrarr-http",
+ "livrarr-identity",
  "livrarr-matching",
  "lru",
  "regex",
@@ -1867,6 +1930,7 @@ dependencies = [
  "livrarr-db",
  "livrarr-domain",
  "livrarr-download",
+ "livrarr-external-data",
  "livrarr-handlers",
  "livrarr-http",
  "livrarr-library",

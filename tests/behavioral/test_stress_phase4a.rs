@@ -128,6 +128,7 @@ fn make_candidate(title: &str, author: &str) -> WorkCandidate {
         },
         identity: IdentityState::Pending {
             reason: PendingReason::NoCandidates,
+            seed_anchors: None,
             top_candidates: vec![],
         },
         candidate_id: None,

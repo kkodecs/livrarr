@@ -23,7 +23,7 @@ use crate::audnexus::{query_audnexus, AudnexusCache};
 use crate::goodreads::{self, GoodreadsDetailResult, GoodreadsFetchError, GOODREADS_BASE_URL};
 use crate::hardcover::query_hardcover;
 use crate::openlibrary::query_ol_detail;
-use crate::{EnrichmentContext, NormalizedWorkDetail, ProviderOutcome};
+use crate::{NormalizedWorkDetail, ProviderOutcome};
 
 /// Heterogeneous provider client. Enum dispatch instead of `Box<dyn>` because
 /// `trait_variant::make(Send)` traits are not dyn-compatible. New real-provider
@@ -40,19 +40,15 @@ pub enum ProviderClient {
 }
 
 impl ProviderClient {
-    pub async fn fetch(
-        &self,
-        work: &Work,
-        ctx: &EnrichmentContext,
-    ) -> ProviderOutcome<NormalizedWorkDetail> {
+    pub async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
         match self {
-            Self::Stub(s) => s.fetch(work, ctx).await,
-            Self::Audnexus(a) => a.fetch(work, ctx).await,
-            Self::Hardcover(h) => h.fetch(work, ctx).await,
-            Self::OpenLibrary(o) => o.fetch(work, ctx).await,
-            Self::Goodreads(g) => g.fetch(work, ctx).await,
-            Self::GoogleBooks(g) => g.fetch(work, ctx).await,
-            Self::Audible(a) => a.fetch(work, ctx).await,
+            Self::Stub(s) => s.fetch(work).await,
+            Self::Audnexus(a) => a.fetch(work).await,
+            Self::Hardcover(h) => h.fetch(work).await,
+            Self::OpenLibrary(o) => o.fetch(work).await,
+            Self::Goodreads(g) => g.fetch(work).await,
+            Self::GoogleBooks(g) => g.fetch(work).await,
+            Self::Audible(a) => a.fetch(work).await,
         }
     }
 
@@ -127,11 +123,7 @@ impl StubProviderClient {
         self.call_count.load(Ordering::SeqCst)
     }
 
-    async fn fetch(
-        &self,
-        _work: &Work,
-        _ctx: &EnrichmentContext,
-    ) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(&self, _work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;
@@ -147,7 +139,7 @@ impl StubProviderClient {
 }
 
 /// Real-network Audnexus adapter — the Phase 1.5 tracer. Wraps the lifted
-/// `livrarr_metadata::audnexus::query_audnexus` and maps its return value
+/// `crate::audnexus::query_audnexus` and maps its return value
 /// onto `ProviderOutcome<NormalizedWorkDetail>`.
 ///
 /// Outcome mapping:
@@ -180,11 +172,7 @@ impl AudnexusClient {
         self
     }
 
-    async fn fetch(
-        &self,
-        work: &Work,
-        _ctx: &EnrichmentContext,
-    ) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
         let result = query_audnexus(
             &self.http,
             &self.base_url,
@@ -251,7 +239,7 @@ impl AudnexusClient {
     }
 }
 
-/// Real-network Hardcover adapter. Wraps `livrarr_metadata::hardcover::query_hardcover`
+/// Real-network Hardcover adapter. Wraps `crate::hardcover::query_hardcover`
 /// and maps its return value onto `ProviderOutcome<NormalizedWorkDetail>`.
 ///
 /// Holds a clone of `MetadataConfig` because the inner query consults
@@ -283,11 +271,7 @@ impl HardcoverClient {
         self
     }
 
-    async fn fetch(
-        &self,
-        work: &Work,
-        _ctx: &EnrichmentContext,
-    ) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
         let cfg = self.live_config.snapshot();
         if !cfg.hardcover_enabled {
             return ProviderOutcome::NotConfigured;
@@ -414,7 +398,7 @@ impl HardcoverClient {
 }
 
 /// Real-network OpenLibrary adapter. Wraps
-/// `livrarr_metadata::openlibrary::query_ol_detail`. OL detail fetch is keyed on
+/// `crate::openlibrary::query_ol_detail`. OL detail fetch is keyed on
 /// `work.ol_key`; works without an `ol_key` are reported as `NotFound` without
 /// hitting the network.
 #[derive(Clone)]
@@ -436,11 +420,7 @@ impl OpenLibraryClient {
         self
     }
 
-    async fn fetch(
-        &self,
-        work: &Work,
-        _ctx: &EnrichmentContext,
-    ) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
         // Tier 1: ISBN lookup
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
             let normalized = livrarr_domain::normalize_isbn(isbn);
@@ -611,7 +591,7 @@ impl OpenLibraryClient {
 }
 
 /// Real-network Goodreads adapter. Wraps the lifted
-/// `livrarr_metadata::goodreads::{search_goodreads, fetch_goodreads_detail}`
+/// `crate::goodreads::{search_goodreads, fetch_goodreads_detail}`
 /// helpers and maps their errors onto `ProviderOutcome<NormalizedWorkDetail>`.
 ///
 /// Resolution order:
@@ -674,11 +654,7 @@ impl GoodreadsClient {
         self
     }
 
-    async fn fetch(
-        &self,
-        work: &Work,
-        _ctx: &EnrichmentContext,
-    ) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
         let had_gr_key = work.gr_key.as_deref().is_some_and(|k| !k.is_empty());
         let detail_url = match self.resolve_detail_url(work).await {
             Ok(Some(url)) => url,
@@ -778,126 +754,110 @@ impl GoodreadsClient {
     }
 
     async fn resolve_detail_url(&self, work: &Work) -> Result<Option<String>, GoodreadsFetchError> {
-        // 1. work.gr_key — canonical GR identity (already verified; trust it).
+        // 1. work.gr_key — canonical GR identity.
         if let Some(key) = work.gr_key.as_deref().filter(|k| !k.is_empty()) {
             return Ok(Some(goodreads::detail_url_for_gr_key(&self.base_url, key)));
         }
 
-        let title = &work.title;
-        let author = &work.author_name;
-        let mut blocked = false;
-
-        // 2. Autocomplete JSON rung — the WAF-free discovery path (the `/search`
-        //    HTML page is 202-challenged and effectively dead). Prefer an ISBN
-        //    query (one exact hit) when we have one, then fall back to a
-        //    TITLE-ONLY query: adding the author demotes the canonical book
-        //    (measured 2026-06-01), and an ISBN that GR has not indexed must not
-        //    skip the title attempt — the book is still findable by name.
-        let mut queries: Vec<String> = Vec::new();
+        // 2. ISBN search — exact match via isbn: prefix query.
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
-            queries.push(livrarr_domain::normalize_isbn(isbn));
-        }
-        if !title.trim().is_empty() {
-            queries.push(title.clone());
-        }
-        for query in queries {
-            match goodreads::search_goodreads_autocomplete(&self.http, &self.base_url, &query).await
-            {
+            let normalized = livrarr_domain::normalize_isbn(isbn);
+            let query = format!("isbn:{normalized}");
+            match goodreads::search_goodreads_by_query(&self.http, &self.base_url, &query).await {
                 Ok(hits) if !hits.is_empty() => {
-                    if let Some(gr_key) = self.pick_autocomplete_hit(work, &hits).await {
-                        tracing::info!(title = %title, gr_key = %gr_key, "GR autocomplete matched");
-                        return Ok(Some(goodreads::detail_url_for_gr_key(
-                            &self.base_url,
-                            &gr_key,
-                        )));
+                    if let Some(live) = &self.live_config {
+                        let cfg = live.snapshot();
+                        match gr_llm_disambiguate(
+                            &self.http,
+                            cfg.as_ref(),
+                            &work.title,
+                            &work.author_name,
+                            &hits,
+                        )
+                        .await
+                        {
+                            Ok(Some(idx)) => {
+                                tracing::info!(isbn = %normalized, chosen_idx = idx, "LLM selected GR ISBN result");
+                                return Ok(Some(goodreads::resolve_detail_url(
+                                    &self.base_url,
+                                    &hits[idx].detail_url,
+                                )));
+                            }
+                            Ok(None) => {
+                                tracing::debug!(isbn = %normalized, "LLM declined all GR ISBN candidates");
+                            }
+                            Err(e) => {
+                                tracing::debug!(isbn = %normalized, error = %e, "GR ISBN LLM disambiguation failed");
+                            }
+                        }
                     }
-                    tracing::debug!(
-                        title = %title,
-                        query = %query,
-                        candidates = hits.len(),
-                        "GR autocomplete returned candidates but none matched title+author"
-                    );
                 }
-                Ok(_) => tracing::debug!(query = %query, "GR autocomplete: no candidates"),
+                Ok(_) => {
+                    tracing::debug!(isbn = %isbn, "GR ISBN search: no results");
+                }
                 Err(e) => {
-                    tracing::debug!(query = %query, error = ?e, "GR autocomplete blocked — escalating");
-                    blocked = true;
+                    tracing::debug!(isbn = %isbn, error = ?e, "GR ISBN search failed");
                 }
             }
         }
 
-        // 3. LLM-locator rung — last resort; the /book/show fetch downstream
-        //    verifies the id before anything is persisted.
+        let title = &work.title;
+        let author = &work.author_name;
+
+        // 3. Ask LLM for the GR key directly — fast, no scraping.
         if let Some(live) = &self.live_config {
             let cfg = live.snapshot();
             match gr_llm_key_lookup(&self.http, cfg.as_ref(), title, author).await {
                 Ok(Some(key)) => {
-                    tracing::info!(title = %title, gr_key = %key, "LLM resolved GR key (verify via /book/show)");
+                    tracing::info!(title = %title, gr_key = %key, "LLM resolved GR key directly");
                     return Ok(Some(goodreads::detail_url_for_gr_key(&self.base_url, &key)));
                 }
-                Ok(None) => tracing::debug!(title = %title, "LLM returned no GR key"),
+                Ok(None) => {
+                    tracing::debug!(title = %title, "LLM returned no GR key");
+                }
                 Err(e) => {
-                    tracing::debug!(title = %title, error = %e, "LLM GR key lookup unavailable")
+                    tracing::debug!(title = %title, error = %e, "LLM GR key lookup unavailable");
                 }
             }
         }
 
-        // Exhausted. A *block* is transient — surface it so the queue schedules a
-        // retry (never let a block become a terminal NotFound that suppresses
-        // Goodreads on later passes). Genuine empties are a real miss.
-        if blocked {
-            Err(GoodreadsFetchError::AntiBot)
-        } else {
-            Ok(None)
-        }
-    }
+        // 4. Fallback: search GR by title+author + LLM disambiguation.
+        let mut hits =
+            goodreads::search_goodreads(&self.http, &self.base_url, title, author).await?;
 
-    async fn pick_autocomplete_hit(
-        &self,
-        work: &Work,
-        hits: &[goodreads::GrAutocompleteHit],
-    ) -> Option<String> {
-        let want_title = normalize_for_match(&work.title);
-        let want_author = normalize_for_match(&work.author_name);
-
-        let local: Vec<usize> = hits
-            .iter()
-            .enumerate()
-            .filter(|(_, h)| autocomplete_hit_matches(&want_title, &want_author, h))
-            .map(|(i, _)| i)
-            .collect();
-
-        if local.len() == 1 {
-            return hits
-                .get(local[0])
-                .and_then(|h| goodreads::extract_gr_key(&h.book_url));
-        }
-
-        // Zero or ambiguous local matches → LLM disambiguation when configured.
-        if let Some(live) = &self.live_config {
-            let cfg = live.snapshot();
-            let as_search: Vec<goodreads::GoodreadsSearchResult> =
-                hits.iter().map(autocomplete_to_search_result).collect();
-            if let Ok(Some(idx)) = gr_llm_disambiguate(
-                &self.http,
-                cfg.as_ref(),
-                &work.title,
-                &work.author_name,
-                &as_search,
-            )
-            .await
-            {
-                return hits
-                    .get(idx)
-                    .and_then(|h| goodreads::extract_gr_key(&h.book_url));
+        if hits.is_empty() && !title.is_ascii() {
+            let ascii_title: String = title.chars().filter(|c| c.is_ascii()).collect();
+            if !ascii_title.trim().is_empty() {
+                hits =
+                    goodreads::search_goodreads(&self.http, &self.base_url, &ascii_title, author)
+                        .await?;
             }
         }
 
-        // No LLM (or it declined): take the highest-ranked local match, if any.
-        local
-            .first()
-            .and_then(|&i| hits.get(i))
-            .and_then(|h| goodreads::extract_gr_key(&h.book_url))
+        if hits.is_empty() {
+            return Ok(None);
+        }
+
+        if let Some(live) = &self.live_config {
+            let cfg = live.snapshot();
+            match gr_llm_disambiguate(&self.http, cfg.as_ref(), title, author, &hits).await {
+                Ok(Some(idx)) => {
+                    tracing::info!(title = %title, chosen_idx = idx, "LLM selected GR search result");
+                    return Ok(Some(goodreads::resolve_detail_url(
+                        &self.base_url,
+                        &hits[idx].detail_url,
+                    )));
+                }
+                Ok(None) => {
+                    tracing::debug!(title = %title, "LLM declined all GR candidates");
+                }
+                Err(e) => {
+                    tracing::debug!(title = %title, error = %e, "GR LLM disambiguation unavailable");
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     fn map_fetch_err(&self, err: GoodreadsFetchError) -> ProviderOutcome<NormalizedWorkDetail> {
@@ -939,7 +899,7 @@ impl GoodreadsClient {
         let cover_url = detail
             .cover_url
             .filter(|u| goodreads::validate_cover_url(u))
-            .map(|u| crate::cover::upscale_cover_url(&u));
+            .map(|u| crate::provider_util::upscale_cover_url(&u));
         let genres = if detail.genres.is_empty() {
             None
         } else {
@@ -1170,619 +1130,5 @@ async fn gr_llm_key_lookup(
             Ok(Some(id))
         }
         _ => Ok(None),
-    }
-}
-
-/// Lowercase + collapse to single-spaced alphanumerics for fuzzy matching.
-fn normalize_for_match(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut prev_space = false;
-    for c in s.chars() {
-        if c.is_alphanumeric() {
-            out.extend(c.to_lowercase());
-            prev_space = false;
-        } else if !prev_space && !out.is_empty() {
-            out.push(' ');
-            prev_space = true;
-        }
-    }
-    out.trim_end().to_string()
-}
-
-/// Reject obvious non-book noise (study guides, summaries) by title.
-fn is_study_guide_noise(normalized_title: &str) -> bool {
-    const NOISE: [&str; 6] = [
-        "study guide",
-        "summary",
-        "sparknotes",
-        "cliffsnotes",
-        "bookrags",
-        "quicklet",
-    ];
-    NOISE.iter().any(|m| normalized_title.contains(m))
-}
-
-fn autocomplete_hit_matches(
-    want_title: &str,
-    want_author: &str,
-    hit: &goodreads::GrAutocompleteHit,
-) -> bool {
-    let hit_title = normalize_for_match(&hit.title);
-    if hit_title.is_empty() || is_study_guide_noise(&hit_title) {
-        return false;
-    }
-    // Title must overlap when we know one (handles subtitles like
-    // "The Hobbit, or There and Back Again" vs "The Hobbit").
-    let title_ok = want_title.is_empty()
-        || hit_title.contains(want_title)
-        || want_title.contains(hit_title.as_str());
-    if !title_ok {
-        return false;
-    }
-    // Author must match when we know one.
-    if !want_author.is_empty() {
-        let hit_author = hit
-            .author
-            .as_ref()
-            .map(|a| normalize_for_match(&a.name))
-            .unwrap_or_default();
-        let author_ok = !hit_author.is_empty()
-            && (hit_author.contains(want_author) || want_author.contains(hit_author.as_str()));
-        if !author_ok {
-            return false;
-        }
-    }
-    true
-}
-
-/// Adapt an autocomplete hit to the search-result shape `gr_llm_disambiguate`
-/// consumes (it reads title + author + year; year is unknown from autocomplete).
-fn autocomplete_to_search_result(
-    hit: &goodreads::GrAutocompleteHit,
-) -> goodreads::GoodreadsSearchResult {
-    goodreads::GoodreadsSearchResult {
-        title: hit.title.clone(),
-        author: hit.author.as_ref().map(|a| a.name.clone()),
-        detail_url: hit.book_url.clone(),
-        cover_url: None,
-        year: None,
-        rating: None,
-        series_name: None,
-        series_position: None,
-    }
-}
-
-#[cfg(test)]
-mod audnexus_tracer_tests {
-    //! End-to-end smoke test of `ProviderClient::Audnexus` through
-    //! `DefaultProviderQueue` against a hand-rolled local HTTP server.
-    //!
-    //! Purpose: validate that the trait shape (`ProviderClient` enum +
-    //! `ProviderQueue::dispatch_enrichment`) actually holds against real
-    //! `reqwest`/`HttpClient`/`tokio` plumbing — not just stub clients.
-    //! If this compiles and passes, the trait is sound for the rest of the
-    //! cutover (Hardcover, OpenLibrary, Goodreads, LLM).
-
-    use super::*;
-    use crate::provider_queue::DefaultProviderQueueBuilder;
-    use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
-    use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
-    use livrarr_domain::{MetadataProvider, RequestPriority, UserRole};
-    use livrarr_http::HttpClient;
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    async fn spawn_canned_audnexus_server(body: String) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let url = format!("http://{addr}");
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            // Read until end of headers — single read is enough for these tiny GETs.
-            let _ = socket.read(&mut buf).await.unwrap();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body,
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
-            let _ = socket.shutdown().await;
-        });
-        url
-    }
-
-    fn audnexus_config() -> ProviderQueueConfig {
-        ProviderQueueConfig {
-            provider: MetadataProvider::Audnexus,
-            concurrency: 1,
-            requests_per_second: 1.0,
-            circuit_breaker: CircuitBreakerConfig {
-                failure_threshold: 3,
-                evaluation_window_secs: 60,
-                open_duration_secs: 60,
-                half_open_probe_count: 1,
-            },
-            max_attempts: 3,
-            max_suppressed_passes: 3,
-            max_suppression_window_secs: 3600,
-        }
-    }
-
-    async fn seed_db_and_work() -> (livrarr_db::sqlite::SqliteDb, livrarr_domain::Work) {
-        let db = livrarr_db::create_test_db().await;
-        let user_id = db
-            .create_user(CreateUserDbRequest {
-                username: "tracer_user".to_string(),
-                password_hash: "hash".to_string(),
-                role: UserRole::Admin,
-                api_key_hash: "apikey".to_string(),
-            })
-            .await
-            .unwrap()
-            .id;
-        let (work, _) = db
-            .create_work(CreateWorkDbRequest {
-                user_id,
-                title: "Tracer Audiobook".to_string(),
-                author_name: "Tracer Author".to_string(),
-                author_id: None,
-                ol_key: None,
-                year: Some(2024),
-                cover_url: None,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        (db, work)
-    }
-
-    #[tokio::test]
-    async fn audnexus_through_queue_returns_success_for_canned_response() {
-        let body = serde_json::json!({
-            "asin": "B07TRACER01",
-            "narrators": [{"name": "Sample Narrator"}],
-            "runtimeLengthSec": 12345
-        })
-        .to_string();
-        let url = spawn_canned_audnexus_server(body).await;
-
-        let (db, work) = seed_db_and_work().await;
-        let http = HttpClient::builder().build().unwrap();
-        let client = AudnexusClient::new(http, url);
-
-        let queue = DefaultProviderQueueBuilder::new()
-            .add_provider(
-                MetadataProvider::Audnexus,
-                ProviderClient::Audnexus(client),
-                audnexus_config(),
-            )
-            .build(Arc::new(db));
-
-        let ctx = EnrichmentContext {
-            priority: RequestPriority::Low,
-            mode: EnrichmentMode::Background,
-        };
-
-        let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
-
-        let outcome = result
-            .outcomes
-            .get(&MetadataProvider::Audnexus)
-            .expect("Audnexus must appear in scatter-gather outcomes");
-        match outcome {
-            ProviderOutcome::Success(payload) => {
-                assert_eq!(payload.asin.as_deref(), Some("B07TRACER01"));
-                assert_eq!(payload.duration_seconds, Some(12345));
-                let narrators = payload
-                    .narrator
-                    .as_ref()
-                    .expect("narrators must be populated for a successful Audnexus hit");
-                assert_eq!(narrators, &vec!["Sample Narrator".to_string()]);
-            }
-            other => panic!("expected Success outcome, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn audnexus_through_queue_returns_will_retry_when_endpoint_unreachable() {
-        // Bind, immediately drop — port is observed-then-closed; reqwest will fail
-        // to connect. Forces the WillRetry error path through the trait.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let url = format!("http://{addr}");
-        drop(listener);
-
-        let (db, work) = seed_db_and_work().await;
-        let http = HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(2))
-            .build()
-            .unwrap();
-        let client = AudnexusClient::new(http, url);
-
-        let queue = DefaultProviderQueueBuilder::new()
-            .add_provider(
-                MetadataProvider::Audnexus,
-                ProviderClient::Audnexus(client),
-                audnexus_config(),
-            )
-            .build(Arc::new(db));
-
-        let ctx = EnrichmentContext {
-            priority: RequestPriority::Low,
-            mode: EnrichmentMode::Background,
-        };
-
-        let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
-        let outcome = result.outcomes.get(&MetadataProvider::Audnexus).unwrap();
-        assert!(
-            matches!(outcome, ProviderOutcome::WillRetry { .. }),
-            "expected WillRetry on unreachable endpoint, got {outcome:?}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod goodreads_tracer_tests {
-    //! End-to-end smoke test of `ProviderClient::Goodreads` through
-    //! `DefaultProviderQueue` against a hand-rolled local HTTP server.
-    //!
-    //! Mirrors the Audnexus tracer pattern. Two scenarios:
-    //!   - direct gr_key lookup against a canned JSON-LD detail page → Success
-    //!   - anti-bot challenge body → WillRetry { AntiBotBlock } per IR
-
-    use super::*;
-    use crate::provider_queue::DefaultProviderQueueBuilder;
-    use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
-    use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
-    use livrarr_domain::{MetadataProvider, RequestPriority, UserRole, WillRetryReason};
-    use livrarr_http::HttpClient;
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    async fn spawn_canned_html_server(body: String) -> String {
-        spawn_routed_goodreads_server(move |_| {
-            (
-                200,
-                "text/html; charset=utf-8".to_string(),
-                body.clone().into_bytes(),
-            )
-        })
-        .await
-    }
-
-    async fn spawn_routed_goodreads_server<F>(route: F) -> String
-    where
-        F: Fn(&str) -> (u16, String, Vec<u8>) + Send + Sync + 'static,
-    {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let url = format!("http://{addr}");
-        let route = Arc::new(route);
-        tokio::spawn(async move {
-            loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let route = Arc::clone(&route);
-                tokio::spawn(async move {
-                    let mut buf = [0u8; 8192];
-                    // Single read is enough for these tiny GETs (request line + headers fit easily).
-                    let n = socket.read(&mut buf).await.unwrap();
-                    let request = String::from_utf8_lossy(&buf[..n]);
-                    let request_line = request.lines().next().unwrap_or_default();
-                    let (status, content_type, body) = route(request_line);
-                    let reason = match status {
-                        200 => "OK",
-                        404 => "Not Found",
-                        _ => "Error",
-                    };
-                    let headers = format!(
-                        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len(),
-                    );
-                    socket.write_all(headers.as_bytes()).await.unwrap();
-                    socket.write_all(&body).await.unwrap();
-                    let _ = socket.shutdown().await;
-                });
-            }
-        });
-        url
-    }
-
-    async fn spawn_autocomplete_detail_server(
-        autocomplete_body: String,
-        detail_body: String,
-    ) -> String {
-        spawn_routed_goodreads_server(move |request_line| {
-            if request_line.contains("/book/auto_complete") {
-                (
-                    200,
-                    "application/json; charset=utf-8".to_string(),
-                    autocomplete_body.clone().into_bytes(),
-                )
-            } else if request_line.contains("/book/show/") {
-                (
-                    200,
-                    "text/html; charset=utf-8".to_string(),
-                    detail_body.clone().into_bytes(),
-                )
-            } else {
-                (
-                    404,
-                    "text/plain; charset=utf-8".to_string(),
-                    b"not found".to_vec(),
-                )
-            }
-        })
-        .await
-    }
-
-    fn goodreads_config() -> ProviderQueueConfig {
-        ProviderQueueConfig {
-            provider: MetadataProvider::Goodreads,
-            concurrency: 1,
-            requests_per_second: 1.0,
-            circuit_breaker: CircuitBreakerConfig {
-                failure_threshold: 3,
-                evaluation_window_secs: 60,
-                open_duration_secs: 60,
-                half_open_probe_count: 1,
-            },
-            max_attempts: 3,
-            max_suppressed_passes: 3,
-            max_suppression_window_secs: 3600,
-        }
-    }
-
-    async fn seed_db_and_work_with_gr_key(
-        gr_key: Option<&str>,
-    ) -> (livrarr_db::sqlite::SqliteDb, livrarr_domain::Work) {
-        seed_db_and_work_with_gr_key_and_isbn(gr_key, None).await
-    }
-
-    async fn seed_db_and_work_with_gr_key_and_isbn(
-        gr_key: Option<&str>,
-        isbn_13: Option<&str>,
-    ) -> (livrarr_db::sqlite::SqliteDb, livrarr_domain::Work) {
-        let db = livrarr_db::create_test_db().await;
-        let user_id = db
-            .create_user(CreateUserDbRequest {
-                username: "gr_tracer_user".to_string(),
-                password_hash: "hash".to_string(),
-                role: UserRole::Admin,
-                api_key_hash: "apikey".to_string(),
-            })
-            .await
-            .unwrap()
-            .id;
-        let (work, _) = db
-            .create_work(CreateWorkDbRequest {
-                user_id,
-                title: "Tracer Book".to_string(),
-                author_name: "Tracer Author".to_string(),
-                author_id: None,
-                ol_key: None,
-                year: Some(2024),
-                cover_url: None,
-                gr_key: gr_key.map(|s| s.to_string()),
-                isbn_13: isbn_13.map(|s| s.to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        (db, work)
-    }
-
-    /// Minimal GR detail HTML — JSON-LD Book block with the fields
-    /// `parse_detail_html` extracts.
-    fn canned_detail_html() -> String {
-        r#"<html><head>
-<script type="application/ld+json">{
-  "@context": "https://schema.org",
-  "@type": "Book",
-  "name": "Tracer Book",
-  "author": [{"@type":"Person","name":"Tracer Author"}],
-  "isbn": "9781234567890",
-  "numberOfPages": 321,
-  "inLanguage": "en",
-  "image": "https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1700000000l/12345.jpg",
-  "aggregateRating": {"@type":"AggregateRating","ratingValue":4.25,"ratingCount":9876}
-}</script>
-</head><body>Anything goes here.</body></html>"#
-            .to_string()
-    }
-
-    #[tokio::test]
-    async fn goodreads_through_queue_returns_success_for_direct_gr_key_lookup() {
-        let url = spawn_canned_html_server(canned_detail_html()).await;
-
-        let (db, work) = seed_db_and_work_with_gr_key(Some("12345.Tracer_Book")).await;
-        let http = HttpClient::builder().build().unwrap();
-        let client = GoodreadsClient::new(http, url);
-
-        let queue = DefaultProviderQueueBuilder::new()
-            .add_provider(
-                MetadataProvider::Goodreads,
-                ProviderClient::Goodreads(client),
-                goodreads_config(),
-            )
-            .build(Arc::new(db));
-
-        let ctx = EnrichmentContext {
-            priority: RequestPriority::Low,
-            mode: EnrichmentMode::Background,
-        };
-
-        let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
-        let outcome = result
-            .outcomes
-            .get(&MetadataProvider::Goodreads)
-            .expect("Goodreads must appear in scatter-gather outcomes");
-        match outcome {
-            ProviderOutcome::Success(payload) => {
-                assert_eq!(payload.title.as_deref(), Some("Tracer Book"));
-                assert_eq!(payload.author_name.as_deref(), Some("Tracer Author"));
-                assert_eq!(payload.isbn_13.as_deref(), Some("9781234567890"));
-                assert_eq!(payload.page_count, Some(321));
-                assert_eq!(payload.language.as_deref(), Some("en"));
-                assert_eq!(payload.gr_key.as_deref(), Some("12345.Tracer_Book"));
-                assert!(
-                    payload
-                        .cover_url
-                        .as_deref()
-                        .is_some_and(|u| u.contains("gr-assets.com")),
-                    "cover_url should pass validate_cover_url, got {:?}",
-                    payload.cover_url
-                );
-                assert!(
-                    (payload.rating.unwrap_or(0.0) - 4.25).abs() < 0.001,
-                    "rating mismatch: {:?}",
-                    payload.rating
-                );
-                assert_eq!(payload.rating_count, Some(9876));
-            }
-            other => panic!("expected Success outcome, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn goodreads_through_queue_resolves_via_autocomplete() {
-        let autocomplete = r#"[{"bookUrl":"/book/show/12345.Tracer_Book","title":"Tracer Book","author":{"name":"Tracer Author"}}]"#
-            .to_string();
-        let url = spawn_autocomplete_detail_server(autocomplete, canned_detail_html()).await;
-
-        let (db, work) = seed_db_and_work_with_gr_key_and_isbn(None, Some("9781234567890")).await;
-        let http = HttpClient::builder().build().unwrap();
-        let client = GoodreadsClient::new(http, url);
-
-        let queue = DefaultProviderQueueBuilder::new()
-            .add_provider(
-                MetadataProvider::Goodreads,
-                ProviderClient::Goodreads(client),
-                goodreads_config(),
-            )
-            .build(Arc::new(db));
-
-        let ctx = EnrichmentContext {
-            priority: RequestPriority::Low,
-            mode: EnrichmentMode::Background,
-        };
-
-        let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
-        let outcome = result
-            .outcomes
-            .get(&MetadataProvider::Goodreads)
-            .expect("Goodreads must appear in scatter-gather outcomes");
-        match outcome {
-            ProviderOutcome::Success(payload) => {
-                assert_eq!(payload.title.as_deref(), Some("Tracer Book"));
-                assert_eq!(payload.author_name.as_deref(), Some("Tracer Author"));
-                assert_eq!(payload.isbn_13.as_deref(), Some("9781234567890"));
-                assert_eq!(payload.page_count, Some(321));
-                assert_eq!(payload.language.as_deref(), Some("en"));
-                assert_eq!(payload.gr_key.as_deref(), Some("12345.Tracer_Book"));
-                assert!(
-                    payload
-                        .cover_url
-                        .as_deref()
-                        .is_some_and(|u| u.contains("gr-assets.com")),
-                    "cover_url should pass validate_cover_url, got {:?}",
-                    payload.cover_url
-                );
-                assert!(
-                    (payload.rating.unwrap_or(0.0) - 4.25).abs() < 0.001,
-                    "rating mismatch: {:?}",
-                    payload.rating
-                );
-                assert_eq!(payload.rating_count, Some(9876));
-            }
-            other => panic!("expected Success outcome, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn goodreads_autocomplete_block_is_will_retry_not_notfound() {
-        let url = spawn_routed_goodreads_server(|request_line| {
-            if request_line.contains("/book/auto_complete") {
-                (
-                    200,
-                    "text/html; charset=utf-8".to_string(),
-                    b"<html><title>WAF interstitial</title><body>Checking your browser</body></html>"
-                        .to_vec(),
-                )
-            } else {
-                (404, "text/plain; charset=utf-8".to_string(), b"not found".to_vec())
-            }
-        })
-        .await;
-
-        let (db, work) = seed_db_and_work_with_gr_key_and_isbn(None, None).await;
-        let http = HttpClient::builder().build().unwrap();
-        let client = GoodreadsClient::new(http, url);
-
-        let queue = DefaultProviderQueueBuilder::new()
-            .add_provider(
-                MetadataProvider::Goodreads,
-                ProviderClient::Goodreads(client),
-                goodreads_config(),
-            )
-            .build(Arc::new(db));
-
-        let ctx = EnrichmentContext {
-            priority: RequestPriority::Low,
-            mode: EnrichmentMode::Background,
-        };
-
-        let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
-        let outcome = result
-            .outcomes
-            .get(&MetadataProvider::Goodreads)
-            .expect("Goodreads must appear in scatter-gather outcomes");
-        match outcome {
-            ProviderOutcome::WillRetry { reason, .. } => {
-                assert_eq!(*reason, WillRetryReason::AntiBotBlock);
-            }
-            ProviderOutcome::NotFound => panic!("autocomplete block must not become NotFound"),
-            other => panic!("expected WillRetry {{ AntiBotBlock }}, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn goodreads_through_queue_returns_will_retry_anti_bot_on_challenge_page() {
-        // Small (< 10KB) body containing an anti-bot indicator — triggers
-        // `is_anti_bot_page`. The lifted `fetch_goodreads_html` maps that to
-        // `GoodreadsFetchError::AntiBot`, which `GoodreadsClient::fetch` maps
-        // to WillRetry { AntiBotBlock }.
-        let body = r#"<html><head><title>Just a moment</title></head>
-<body><div class="cf-browser-verification">Checking your browser...</div></body></html>"#
-            .to_string();
-        let url = spawn_canned_html_server(body).await;
-
-        let (db, work) = seed_db_and_work_with_gr_key(Some("99999.Blocked")).await;
-        let http = HttpClient::builder().build().unwrap();
-        let client = GoodreadsClient::new(http, url);
-
-        let queue = DefaultProviderQueueBuilder::new()
-            .add_provider(
-                MetadataProvider::Goodreads,
-                ProviderClient::Goodreads(client),
-                goodreads_config(),
-            )
-            .build(Arc::new(db));
-
-        let ctx = EnrichmentContext {
-            priority: RequestPriority::Low,
-            mode: EnrichmentMode::Background,
-        };
-
-        let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
-        let outcome = result.outcomes.get(&MetadataProvider::Goodreads).unwrap();
-        match outcome {
-            ProviderOutcome::WillRetry { reason, .. } => {
-                assert_eq!(*reason, WillRetryReason::AntiBotBlock);
-            }
-            other => panic!("expected WillRetry {{ AntiBotBlock }}, got {other:?}"),
-        }
     }
 }

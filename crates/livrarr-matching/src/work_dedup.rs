@@ -104,6 +104,51 @@ pub fn find_matching_work<'a>(
     })
 }
 
+/// Pick the index of the `(title, author)` candidate that best matches the
+/// given `title`/`author`, using the same strict cascade as
+/// [`find_matching_work`] (minus provider keys):
+/// 1. exact normalized title + canonical author
+/// 2. base-title + canonical author (only when exactly one side has a subtitle)
+///
+/// Author is matched too, so a corpus mixing several authors (e.g. one provider
+/// query that returned more than the requested author) is safe. Returns `None`
+/// when nothing matches — there is deliberately **no fuzzy fallback**, so an
+/// absent title never resolves to a wrong work (e.g. a sequel's cover).
+pub fn best_candidate_index(
+    candidates: &[(&str, &str)],
+    title: &str,
+    author: &str,
+) -> Option<usize> {
+    let norm_title = normalize(title);
+    let norm_author = canonical_author(author);
+
+    // 1. Exact normalized title + author
+    if let Some(i) = candidates
+        .iter()
+        .position(|&(t, a)| normalize(t) == norm_title && canonical_author(a) == norm_author)
+    {
+        return Some(i);
+    }
+
+    // 2. Base-title match (only when exactly one side has a subtitle)
+    let incoming_has_sub = has_subtitle(title);
+    let norm_base = normalize(base_title(title));
+    candidates.iter().position(|&(t, a)| {
+        has_subtitle(t) != incoming_has_sub
+            && normalize(base_title(t)) == norm_base
+            && canonical_author(a) == norm_author
+    })
+}
+
+/// True when two author strings refer to the same author under the same
+/// canonicalization used for matching ("Last, First" → "First Last", then
+/// alphanumeric-lowercased). Used to constrain anchor-grafting so an
+/// author-scoped provider result that returned a same-title book by a
+/// *different* author can't lend its work anchor (#97).
+pub fn authors_match(a: &str, b: &str) -> bool {
+    canonical_author(a) == canonical_author(b)
+}
+
 /// Normalize a title for bibliography "already in library" matching.
 /// Strips subtitles (after `:` or ` - `), leading articles, punctuation,
 /// and collapses whitespace. More aggressive than `normalize` — designed
@@ -132,6 +177,7 @@ mod tests {
 
     fn make_work(title: &str, author: &str) -> Work {
         Work {
+            identity_status: Default::default(),
             id: 1,
             user_id: 1,
             title: title.to_string(),
@@ -302,5 +348,12 @@ mod tests {
             normalize_title_for_match("DUNE"),
             normalize_title_for_match("dune")
         );
+    }
+
+    #[test]
+    fn authors_match_canonicalizes_last_first_and_case() {
+        assert!(authors_match("Frank Herbert", "Herbert, Frank"));
+        assert!(authors_match("frank herbert", "Frank Herbert"));
+        assert!(!authors_match("Frank Herbert", "Brian Herbert"));
     }
 }

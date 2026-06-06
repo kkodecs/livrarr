@@ -8,7 +8,12 @@ use livrarr_db::{
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 
-pub struct SeriesQueryServiceImpl<D, F, W, L = crate::llm_caller_service::LlmCallerImpl> {
+pub struct SeriesQueryServiceImpl<
+    D,
+    F,
+    W,
+    L = livrarr_external_data::llm_caller_service::LlmCallerImpl,
+> {
     db: D,
     fetcher: F,
     work_service: Arc<W>,
@@ -251,7 +256,7 @@ where
         let html = fetch_gr_html(&self.fetcher, &url).await?;
 
         let candidates: Vec<GrAuthorCandidateView> =
-            crate::goodreads::parse_author_search_html(&html)
+            livrarr_external_data::goodreads::parse_author_search_html(&html)
                 .into_iter()
                 .map(|c| GrAuthorCandidateView {
                     gr_key: c.gr_key,
@@ -524,7 +529,8 @@ where
             };
 
             let html = fetch_gr_html(&self.fetcher, &url).await?;
-            let (books, has_next) = crate::goodreads::parse_series_detail_html(&html);
+            let (books, has_next) =
+                livrarr_external_data::goodreads::parse_series_detail_html(&html);
 
             if books.is_empty() {
                 break;
@@ -852,7 +858,7 @@ async fn fetch_author_series_pages<F: HttpFetcher>(
         );
 
         let html = fetch_gr_html(fetcher, &url).await?;
-        let (entries, has_next) = crate::goodreads::parse_series_list_html(&html);
+        let (entries, has_next) = livrarr_external_data::goodreads::parse_series_list_html(&html);
 
         if entries.is_empty() {
             break;

@@ -1,0 +1,28 @@
+[package]
+name = "livrarr-external-data"
+version = "0.1.0-alpha5"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[dependencies]
+chrono = { workspace = true }
+thiserror = { workspace = true }
+trait-variant = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+livrarr-domain = { workspace = true }
+livrarr-http = { workspace = true }
+unicode-normalization = "0.1"
+tracing = "0.1"
+url = "2"
+urlencoding = "2"
+regex = "1"
+csv = "1"
+uuid = { version = "1", features = ["v4"] }
+lru = "0.12"
+futures = "0.3"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

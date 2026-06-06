@@ -44,7 +44,7 @@ use livrarr_domain::services::{
     AppConfigService, AuthorService, ImportFileResult, ImportService, ImportSingleFileRequest,
     ManualImportService, MatchingService, WorkService,
 };
-use livrarr_domain::{classify_file, normalize_for_matching, MediaType};
+use livrarr_domain::{classify_file, MediaType};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -83,7 +83,7 @@ pub struct ScannedFile {
     pub size: i64,
     pub parsed: Option<ParsedFile>,
     #[serde(rename = "match")]
-    pub ol_match: Option<OlMatch>,
+    pub ol_match: Option<SuggestedMatch>,
     pub existing_work_id: Option<i64>,
     pub has_existing_media_type: bool,
     pub routable: bool,
@@ -115,12 +115,59 @@ pub struct ParsedFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OlMatch {
+pub struct SuggestedMatch {
     pub ol_key: String,
     pub title: String,
     pub author: String,
     pub cover_url: Option<String>,
     pub existing_work_id: Option<i64>,
+    // #97: carry the full discovery candidate so the import round-trip can reuse
+    // the cached payload (candidate_id; REQ-014/015) and lock identity from any
+    // anchor — not just an OpenLibrary key. All optional + camelCase so the
+    // current frontend (which ignores them) keeps deserializing unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<livrarr_domain::identity::CandidateId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hc_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gr_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn_13: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
+impl SuggestedMatch {
+    /// Build a suggestion from a multi-provider discovery result, attaching the
+    /// "already in library" work id resolved by the caller. `ol_key` falls back
+    /// to empty (a non-OL result, e.g. Google Books) — the round-trip carries
+    /// the other anchors so identity still locks at create.
+    fn from_lookup(
+        r: livrarr_domain::services::LookupResult,
+        existing_work_id: Option<i64>,
+    ) -> Self {
+        Self {
+            ol_key: r.ol_key.unwrap_or_default(),
+            title: r.title,
+            author: r.author_name,
+            cover_url: r.cover_url,
+            existing_work_id,
+            candidate_id: r.candidate_id,
+            hc_key: r.hc_key,
+            gr_key: r.gr_key,
+            asin: r.asin,
+            isbn_13: r.isbn_13,
+            year: r.year,
+            source: r.source,
+            language: r.language,
+        }
+    }
 }
 
 /// Snapshot returned by the scan accessor.
@@ -134,7 +181,7 @@ pub struct ScanSnapshot {
 
 /// Update for a single scanned file's OL match.
 pub struct ScanFileUpdate {
-    pub ol_match: Option<OlMatch>,
+    pub ol_match: Option<SuggestedMatch>,
     pub existing_work_id: Option<i64>,
 }
 
@@ -147,7 +194,7 @@ pub struct SearchRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResponse {
-    pub results: Vec<OlMatch>,
+    pub results: Vec<SuggestedMatch>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +227,16 @@ pub struct ImportItem {
     pub series_name: Option<String>,
     #[serde(default)]
     pub series_position: Option<f64>,
+    // #97: round-trip the picked candidate so add() can reuse its cached payload
+    // (candidate_id) and lock identity from any anchor (HC/GR/ASIN), not only OL.
+    #[serde(default)]
+    pub candidate_id: Option<livrarr_domain::identity::CandidateId>,
+    #[serde(default)]
+    pub hc_key: Option<String>,
+    #[serde(default)]
+    pub gr_key: Option<String>,
+    #[serde(default)]
+    pub asin: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -358,9 +415,9 @@ pub async fn scan<S: ManualImportHandlerContext>(
             series: c.series,
             series_position: c.series_position,
             language: c.language,
-            isbn: None,
-            asin: None,
-            year: None,
+            isbn: c.isbn,
+            asin: c.asin,
+            year: c.year,
         });
         parsed_files.push(parsed);
     }
@@ -513,132 +570,147 @@ pub async fn scan<S: ManualImportHandlerContext>(
         ol_total,
     );
 
-    // Background OL lookups.
+    // Background discovery (#97): one multi-provider, author-grouped pass over
+    // all parsed files instead of an OpenLibrary search per file. GB+OL are
+    // queried once per author; each file's title is matched locally to its
+    // author's corpus. Files already matched to an existing library work are
+    // left untouched (don't let discovery override a good local match).
     let bg_state = state.clone();
     let bg_scan_id = scan_id.clone();
     tokio::spawn(async move {
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
-        let mut handles = Vec::new();
+        use crate::accessors::ManualImportScanAccessor;
+        use livrarr_domain::services::EagerQuery;
 
-        for file_idx in ol_indices {
-            let sem = semaphore.clone();
-            let st = bg_state.clone();
-            let sid = bg_scan_id.clone();
+        let scan = match bg_state.manual_import_scan().get_scan(&bg_scan_id) {
+            Some(s) => s,
+            None => return,
+        };
+        let user_id = scan.user_id;
 
-            handles.push(tokio::spawn(async move {
-                let _permit = match sem.acquire().await {
-                    Ok(p) => p,
-                    Err(_) => return,
+        let mut queries: Vec<EagerQuery> = Vec::new();
+        let mut already_done = 0usize;
+        for &file_idx in &ol_indices {
+            if scan
+                .files
+                .get(file_idx)
+                .and_then(|f| f.existing_work_id)
+                .is_some()
+            {
+                already_done += 1;
+                continue;
+            }
+            if let Some(p) = scan.files.get(file_idx).and_then(|f| f.parsed.as_ref()) {
+                // Strip a trailing parenthetical and an over-long subtitle so the
+                // author corpus match keys on the core title (same cleaning the
+                // old per-file OL search used).
+                let mut clean_title = match p.title.find('(') {
+                    Some(paren) => p.title[..paren].trim().to_string(),
+                    None => p.title.trim().to_string(),
                 };
-
-                st.manual_import_scan().acquire_ol_permit().await;
-
-                // Skip OL lookup if the file already matched an existing work
-                // from parsed metadata — don't let OL's potentially bad data
-                // override a correct match.
-                let already_matched = {
-                    let scan = st.manual_import_scan().get_scan(&sid);
-                    scan.and_then(|s| s.files.get(file_idx).and_then(|f| f.existing_work_id))
-                        .is_some()
-                };
-
-                if already_matched {
-                    st.manual_import_scan().increment_ol_completed(&sid);
-                    return;
-                }
-
-                let search_term = {
-                    let scan = st.manual_import_scan().get_scan(&sid);
-                    let scan = match scan {
-                        Some(s) => s,
-                        None => return,
-                    };
-                    let f = match scan.files.get(file_idx) {
-                        Some(f) => f,
-                        None => return,
-                    };
-                    let p = match &f.parsed {
-                        Some(p) => p,
-                        None => return,
-                    };
-                    let mut clean_title = if let Some(paren) = p.title.find('(') {
-                        p.title[..paren].trim().to_string()
-                    } else {
-                        p.title.trim().to_string()
-                    };
-                    if clean_title.len() > 60 {
-                        if let Some(colon) = clean_title.find(':') {
-                            if colon > 5 {
-                                clean_title = clean_title[..colon].trim().to_string();
-                            }
+                if clean_title.len() > 60 {
+                    if let Some(colon) = clean_title.find(':') {
+                        if colon > 5 {
+                            clean_title = clean_title[..colon].trim().to_string();
                         }
                     }
-                    format!("{} {}", clean_title, p.author)
-                };
-
-                let ol_results = st
-                    .manual_import_scan()
-                    .search_ol_works(&search_term, 10)
-                    .await
-                    .unwrap_or_default();
-
-                if let Some(scan) = st.manual_import_scan().get_scan(&sid) {
-                    let user_id = scan.user_id;
-                    let existing_works = st
-                        .manual_import_service()
-                        .list_works(user_id)
-                        .await
-                        .unwrap_or_default();
-
-                    if !ol_results.is_empty() {
-                        let dup_match = ol_results.iter().find_map(|result| {
-                            let matched = livrarr_matching::work_dedup::find_matching_work(
-                                &existing_works,
-                                &result.title,
-                                &result.author_name,
-                                &livrarr_matching::work_dedup::ProviderKeys {
-                                    ol_key: result.ol_key.as_deref(),
-                                    ..Default::default()
-                                },
-                            );
-                            matched.map(|w| (result, w.id))
-                        });
-
-                        let update = if let Some((result, dup_id)) = dup_match {
-                            ScanFileUpdate {
-                                ol_match: Some(OlMatch {
-                                    ol_key: result.ol_key.clone().unwrap_or_default(),
-                                    title: result.title.clone(),
-                                    author: result.author_name.clone(),
-                                    cover_url: result.cover_url.clone(),
-                                    existing_work_id: Some(dup_id),
-                                }),
-                                existing_work_id: Some(dup_id),
-                            }
-                        } else {
-                            let result = &ol_results[0];
-                            ScanFileUpdate {
-                                ol_match: Some(OlMatch {
-                                    ol_key: result.ol_key.clone().unwrap_or_default(),
-                                    title: result.title.clone(),
-                                    author: result.author_name.clone(),
-                                    cover_url: result.cover_url.clone(),
-                                    existing_work_id: None,
-                                }),
-                                existing_work_id: None,
-                            }
-                        };
-                        st.manual_import_scan()
-                            .update_scan_file(&sid, file_idx, update);
-                    }
-                    st.manual_import_scan().increment_ol_completed(&sid);
                 }
-            }));
+                queries.push(EagerQuery {
+                    id: file_idx,
+                    title: clean_title,
+                    author: p.author.clone(),
+                    language: p.language.clone(),
+                    isbn: p.isbn.clone(),
+                });
+            } else {
+                already_done += 1;
+            }
         }
 
-        for h in handles {
-            let _ = h.await;
+        // Files already matched to a library work (or unparseable) need no lookup;
+        // count them toward completion now so the bar can reach 100%.
+        for _ in 0..already_done {
+            bg_state
+                .manual_import_scan()
+                .increment_ol_completed(&bg_scan_id);
         }
+
+        let existing_works = bg_state
+            .manual_import_service()
+            .list_works(user_id)
+            .await
+            .unwrap_or_default();
+
+        // Discover ONE author at a time, advancing the progress counter after each
+        // author's files so the bar fills incrementally. Discovery is grouped by
+        // author, so per-author is the honest granularity (not per-file); this is
+        // the same set of provider calls as a single bulk pass — only the progress
+        // reporting differs.
+        let mut by_author: std::collections::HashMap<String, Vec<EagerQuery>> =
+            std::collections::HashMap::new();
+        for q in queries {
+            by_author
+                .entry(q.author.trim().to_lowercase())
+                .or_default()
+                .push(q);
+        }
+
+        let t_disc = std::time::Instant::now();
+        let author_count = by_author.len();
+        tracing::info!(
+            authors = author_count,
+            "perf discovery: start (per-author GB+OL)"
+        );
+        for group in by_author.into_values() {
+            let n = group.len();
+            let group_author = group.first().map(|q| q.author.clone()).unwrap_or_default();
+            let t_g = std::time::Instant::now();
+            let matches = bg_state
+                .work_service()
+                .eager_match_by_author(user_id, group)
+                .await
+                .unwrap_or_default();
+            tracing::info!(
+                ms = t_g.elapsed().as_millis() as u64,
+                author = %group_author,
+                files = n,
+                hits = matches.len(),
+                "perf discovery: author group"
+            );
+
+            for (file_idx, r) in matches {
+                let existing_work_id = livrarr_matching::work_dedup::find_matching_work(
+                    &existing_works,
+                    &r.title,
+                    &r.author_name,
+                    &livrarr_matching::work_dedup::ProviderKeys {
+                        ol_key: r.ol_key.as_deref(),
+                        gr_key: r.gr_key.as_deref(),
+                        isbn_13: r.isbn_13.as_deref(),
+                        asin: r.asin.as_deref(),
+                    },
+                )
+                .map(|w| w.id);
+                bg_state.manual_import_scan().update_scan_file(
+                    &bg_scan_id,
+                    file_idx,
+                    ScanFileUpdate {
+                        ol_match: Some(SuggestedMatch::from_lookup(r, existing_work_id)),
+                        existing_work_id,
+                    },
+                );
+            }
+
+            for _ in 0..n {
+                bg_state
+                    .manual_import_scan()
+                    .increment_ol_completed(&bg_scan_id);
+            }
+        }
+        tracing::info!(
+            ms = t_disc.elapsed().as_millis() as u64,
+            authors = author_count,
+            "perf discovery: complete"
+        );
 
         let st = bg_state.clone();
         let sid = bg_scan_id.clone();
@@ -682,13 +754,11 @@ pub async fn scan_progress<S: HasManualImportScan>(
     }))
 }
 
-pub async fn search<S: HasManualImportScan + HasManualImportService>(
+pub async fn search<S: HasManualImportScan + HasManualImportService + HasWorkService>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Json(req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    use crate::accessors::ManualImportScanAccessor;
-
     let term = if let Some(ref author) = req.author {
         format!("{} {}", req.query, author)
     } else {
@@ -697,33 +767,47 @@ pub async fn search<S: HasManualImportScan + HasManualImportService>(
 
     tracing::info!(query = %req.query, author = ?req.author, term = %term, "manual import search");
 
-    let results = state
-        .manual_import_scan()
-        .search_ol_works(&term, 10)
-        .await
-        .map_err(ApiError::BadGateway)?;
-
-    tracing::info!(ol_results = results.len(), "OL search returned");
-
     let user_id = auth.user.id;
+
+    // #97: route the manual re-search through the same multi-provider discovery
+    // fan-out the Add Work box uses (Google Books / OpenLibrary / Hardcover /
+    // Goodreads), not the legacy OpenLibrary-only path.
+    let resp = state
+        .work_service()
+        .lookup_filtered(
+            user_id,
+            livrarr_domain::services::LookupRequest {
+                term,
+                lang_override: None,
+            },
+            false,
+        )
+        .await?;
+
+    tracing::info!(
+        results = resp.results.len(),
+        "manual import search returned"
+    );
+
     let existing_works = state.manual_import_service().list_works(user_id).await?;
 
-    let results: Vec<OlMatch> = results
+    let results: Vec<SuggestedMatch> = resp
+        .results
         .into_iter()
         .map(|r| {
-            let dup = existing_works.iter().find(|w| {
-                (r.ol_key.is_some() && w.ol_key.as_deref() == r.ol_key.as_deref())
-                    || (normalize_for_matching(&w.title) == normalize_for_matching(&r.title)
-                        && normalize_for_matching(&w.author_name)
-                            == normalize_for_matching(&r.author_name))
-            });
-            OlMatch {
-                ol_key: r.ol_key.unwrap_or_default(),
-                title: r.title,
-                author: r.author_name,
-                cover_url: r.cover_url,
-                existing_work_id: dup.map(|w| w.id),
-            }
+            let existing_work_id = livrarr_matching::work_dedup::find_matching_work(
+                &existing_works,
+                &r.title,
+                &r.author_name,
+                &livrarr_matching::work_dedup::ProviderKeys {
+                    ol_key: r.ol_key.as_deref(),
+                    gr_key: r.gr_key.as_deref(),
+                    isbn_13: r.isbn_13.as_deref(),
+                    asin: r.asin.as_deref(),
+                },
+            )
+            .map(|w| w.id);
+            SuggestedMatch::from_lookup(r, existing_work_id)
         })
         .collect();
 
@@ -898,7 +982,9 @@ fn find_existing_work<'a>(
     )
 }
 
-async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImportService>(
+async fn find_or_create_work<
+    S: HasAuthorService + HasWorkService + HasManualImportService + HasMatchingService,
+>(
     state: &S,
     user_id: i64,
     item: &ImportItem,
@@ -929,20 +1015,66 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
         CapturedIdentity, IdentityMethod, IdentityState, PendingReason, WorkCandidate,
         WorkSeedFields,
     };
-    let identity = if !item.ol_key.is_empty() {
+    // #97 (MatchCluster harvest): the file itself is the richest seed. Re-read
+    // its embedded metadata at import (EPUB dc:identifier ISBN, Audible ASIN,
+    // dc:language) and fill the identity gaps the picked candidate didn't carry.
+    // The user's explicit pick (work anchors below) still wins; the file only
+    // supplements a missing ISBN/ASIN and supplies the authoritative language.
+    let file_meta = state
+        .matching_service()
+        .extract_and_reconcile(&livrarr_domain::services::MatchInput {
+            file_path: Some(std::path::PathBuf::from(&item.path)),
+            grouped_paths: None,
+            parse_string: None,
+            media_type: None,
+            scan_root: None,
+        })
+        .await
+        .into_iter()
+        .next();
+    let file_isbn = file_meta.as_ref().and_then(|c| c.isbn.clone());
+    let file_asin = file_meta.as_ref().and_then(|c| c.asin.clone());
+    let file_language = file_meta.as_ref().and_then(|c| c.language.clone());
+
+    // Build identity from EVERY anchor the picked candidate carries (not just an
+    // OL key), supplemented by the file's embedded IDs. A work anchor (OL/GR/HC)
+    // locks identity at create (UserSelected); a bare bridge (ISBN/ASIN) — which
+    // can't lock identity per the quorum rule — seeds a Pending work that
+    // create-time resolution converges.
+    let ol_key = {
+        let k = item.ol_key.trim();
+        (!k.is_empty()).then(|| k.to_string())
+    };
+    let gr_key = item.gr_key.clone().filter(|s| !s.is_empty());
+    let hc_key = item.hc_key.clone().filter(|s| !s.is_empty());
+    let isbn_13 = item.isbn.clone().filter(|s| !s.is_empty()).or(file_isbn);
+    let asin = item.asin.clone().filter(|s| !s.is_empty()).or(file_asin);
+
+    let has_work_anchor = ol_key.is_some() || gr_key.is_some() || hc_key.is_some();
+    let has_bridge = isbn_13.is_some() || asin.is_some();
+
+    let anchors = CapturedIdentity {
+        ol_key,
+        gr_key,
+        hc_key,
+        isbn_13,
+        asin,
+        title: item.title.clone(),
+        author_name: item.author.clone(),
+        language: None,
+    };
+
+    let identity = if has_work_anchor {
         IdentityState::Confirmed {
-            anchors: CapturedIdentity {
-                ol_key: Some(item.ol_key.clone()),
-                gr_key: None,
-                hc_key: None,
-                isbn_13: item.isbn.clone(),
-                asin: None,
-                title: item.title.clone(),
-                author_name: item.author.clone(),
-                language: None,
-            },
+            anchors,
             method: IdentityMethod::UserSelected,
             score: None,
+        }
+    } else if has_bridge {
+        IdentityState::Pending {
+            reason: PendingReason::NoCandidates,
+            seed_anchors: Some(anchors),
+            top_candidates: vec![],
         }
     } else {
         IdentityState::Pending {
@@ -951,8 +1083,10 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
             top_candidates: vec![],
         }
     };
-    let language = item
-        .language
+    // Language priority: the file's embedded dc:language (authoritative for this
+    // edition), then the picked candidate's language, then English.
+    let language = file_language
+        .or_else(|| item.language.clone())
         .as_deref()
         .map(livrarr_domain::normalize_language)
         .unwrap_or_else(|| "en".to_string());
@@ -971,7 +1105,7 @@ async fn find_or_create_work<S: HasAuthorService + HasWorkService + HasManualImp
             series_position: item.series_position,
         },
         identity,
-        candidate_id: None,
+        candidate_id: item.candidate_id.clone(),
         source_provider_data: None,
         file_path: None,
         delete_existing_after_import: false,

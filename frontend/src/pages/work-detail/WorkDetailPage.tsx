@@ -68,6 +68,8 @@ import type {
   UpdateWorkRequest,
   ReleaseResponse,
   HistoryResponse,
+  EnrichmentStatus,
+  IdentityStatus,
 } from "@/types/api";
 
 
@@ -102,7 +104,7 @@ export default function WorkDetailPage() {
     enabled: !!id,
     refetchInterval: (query) => {
       const status = query.state.data?.enrichmentStatus;
-      if (status === "identity_pending" || status === "unenriched") return 3_000;
+      if (status === "unenriched") return 3_000;
       if (coverPollBaseline === undefined) return false;
       const ebook = query.state.data?.coverMtime ?? null;
       const audiobook = query.state.data?.audiobookCoverMtime ?? null;
@@ -228,7 +230,7 @@ export default function WorkDetailPage() {
             <TabTrigger value="files">Library Files</TabTrigger>
             <TabTrigger value="releases">Search</TabTrigger>
             <TabTrigger value="history">History</TabTrigger>
-            <TabTrigger value="metadata">Metadata</TabTrigger>
+            <TabTrigger value="metadata">Book Information</TabTrigger>
           </Tabs.List>
 
           <Tabs.Content value="files" className="mt-4">
@@ -241,7 +243,7 @@ export default function WorkDetailPage() {
             <HistoryTab workId={work.id} />
           </Tabs.Content>
           <Tabs.Content value="metadata" className="mt-4">
-            <MetadataTab work={work} onRefresh={() => refreshMutation.mutate()} refreshing={refreshMutation.isPending} />
+            <BookInformationTab work={work} onRefresh={() => refreshMutation.mutate()} refreshing={refreshMutation.isPending} />
           </Tabs.Content>
         </Tabs.Root>
       </PageContent>
@@ -1116,7 +1118,7 @@ const EVENT_ICONS: Record<string, typeof Download> = {
   fileDeleted: Trash2,
 };
 
-// --- Metadata Tab ---
+// --- Book Information Tab ---
 
 function MetadataRow({ label, value }: { label: string; value: React.ReactNode }) {
   if (!value) return null;
@@ -1128,7 +1130,50 @@ function MetadataRow({ label, value }: { label: string; value: React.ReactNode }
   );
 }
 
-function MetadataTab({
+type BadgeTone = "green" | "blue" | "amber" | "red" | "orange" | "zinc";
+
+const BADGE_TONE: Record<BadgeTone, { wrap: string; dot: string }> = {
+  green: { wrap: "text-green-400 bg-green-500/10 border-green-500/30", dot: "bg-green-500" },
+  blue: { wrap: "text-blue-400 bg-blue-500/10 border-blue-500/30", dot: "bg-blue-500" },
+  amber: { wrap: "text-amber-400 bg-amber-500/10 border-amber-500/30", dot: "bg-amber-500" },
+  red: { wrap: "text-red-400 bg-red-500/10 border-red-500/30", dot: "bg-red-500" },
+  orange: { wrap: "text-orange-400 bg-orange-500/10 border-orange-500/30", dot: "bg-orange-500" },
+  zinc: { wrap: "text-zinc-400 bg-zinc-500/10 border-zinc-500/25", dot: "bg-zinc-500" },
+};
+
+function StatusBadge({ tone, label, tip }: { tone: BadgeTone; label: string; tip: string }) {
+  const t = BADGE_TONE[tone];
+  return (
+    <span className={cn("inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium", t.wrap)}>
+      <span className={cn("h-1.5 w-1.5 rounded-full", t.dot)} />
+      {label}
+      <HelpTip text={tip} />
+    </span>
+  );
+}
+
+// Identity state machine (REQ-014) — "which book is this?". The section header
+// supplies the context a bare floating badge lacks.
+const IDENTITY_BADGE: Record<IdentityStatus, { tone: BadgeTone; label: string; tip: string }> = {
+  pending: { tone: "amber", label: "Pending", tip: "Still matching — only a fuzzy title/author guess so far." },
+  confirmed: { tone: "green", label: "Confirmed", tip: "Locked to a master catalog record." },
+  provisional: { tone: "blue", label: "Provisional", tip: "Identified by ISBN (barcode); no master record yet — may later upgrade to Confirmed." },
+  conflict: { tone: "red", label: "Conflict", tip: "Sources disagree on the match; needs your review." },
+  needs_review: { tone: "orange", label: "Needs Review", tip: "Couldn't match this book automatically; needs your review." },
+  not_found: { tone: "amber", label: "Unverified", tip: "No source could confirm this match — every provider was rejected. Edit the identity or refresh to retry." },
+};
+
+// Enrichment (details) state machine — "what do we know about it?". The canonical
+// outcomes are Pending/Enriched/Sparse (+ Failed). Identity outcomes (incl. the
+// "unverified" not-found case) live on the Identity badge above, not here.
+const DETAILS_BADGE: Record<EnrichmentStatus, { tone: BadgeTone; label: string; tip: string }> = {
+  unenriched: { tone: "amber", label: "Pending", tip: "Details haven't been fetched yet." },
+  enriched: { tone: "green", label: "Enriched", tip: "Real information is present. A cover is a separate lazy asset and isn't required." },
+  thin: { tone: "zinc", label: "Sparse", tip: "Known book, but providers returned almost nothing — a settled result, not still loading." },
+  failed: { tone: "red", label: "Failed", tip: "A lookup error occurred while fetching details. Try refreshing." },
+};
+
+function BookInformationTab({
   work,
   onRefresh,
   refreshing,
@@ -1137,88 +1182,78 @@ function MetadataTab({
   onRefresh: () => void;
   refreshing: boolean;
 }) {
-  const statusLabel = {
-    unenriched: "Enriching…",
-    enriched: "Enriched",
-    failed: "Failed",
-    conflict: "Conflict",
-    identity_pending: "Identity Pending",
-    needs_review: "Needs Review",
-  }[work.enrichmentStatus] ?? work.enrichmentStatus;
-
-  const statusColor = {
-    unenriched: "text-zinc-400",
-    enriched: "text-green-400",
-    failed: "text-red-400",
-    conflict: "text-red-400",
-    identity_pending: "text-yellow-400",
-    needs_review: "text-orange-400",
-  }[work.enrichmentStatus] ?? "text-muted";
+  const identity = IDENTITY_BADGE[work.identityStatus];
+  const details = DETAILS_BADGE[work.enrichmentStatus];
+  const missing = <span className="text-zinc-600">—</span>;
 
   return (
     <div className="max-w-2xl">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-zinc-100">Metadata</h3>
-        <button
-          onClick={onRefresh}
-          disabled={refreshing}
-          className="btn-secondary inline-flex items-center gap-1.5 text-xs"
-        >
-          <RefreshCw size={12} className={cn(refreshing && "animate-spin")} />
-          Refresh Metadata
-        </button>
-      </div>
+      {/* Identity — which book this is */}
+      <section>
+        <div className="flex items-center justify-between gap-4">
+          <h3 className="text-sm font-medium text-zinc-100">Identity</h3>
+          <button
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="btn-secondary inline-flex items-center gap-1.5 text-xs"
+          >
+            <RefreshCw size={12} className={cn(refreshing && "animate-spin")} />
+            Refresh
+          </button>
+        </div>
+        <p className="mt-0.5 mb-3 text-xs text-muted">Which book this is — catalog match &amp; identifiers.</p>
+        <StatusBadge tone={identity.tone} label={identity.label} tip={identity.tip} />
+        <dl className="mt-4">
+          <MetadataRow label="Open Library" value={work.olKey || missing} />
+          <MetadataRow label="Hardcover" value={work.hcKey || missing} />
+          <MetadataRow label="Goodreads" value={work.grKey || missing} />
+          <MetadataRow label="ISBN-13" value={work.isbn13 || missing} />
+          <MetadataRow label="ASIN" value={work.asin || missing} />
+        </dl>
+      </section>
 
-      <dl>
-        <MetadataRow label="Status" value={
-          <span className="inline-flex items-center gap-2">
-            <span className={statusColor}>{statusLabel}</span>
-            <HelpTip text="Pending: not yet enriched. Partial: some fields filled. Enriched: fully matched from metadata sources. Failed: lookup error. Exhausted: all sources tried, no match found." />
-          </span>
-        } />
-        <MetadataRow label="Source" value={work.enrichmentSource} />
-        {work.enrichedAt && (
-          <MetadataRow label="Last enriched" value={formatRelativeDate(work.enrichedAt)} />
-        )}
-
-        <div className="mt-4 mb-2 text-xs font-medium text-muted uppercase tracking-wide">Book Details</div>
-        <MetadataRow label="Title" value={work.title} />
-        {work.originalTitle && <MetadataRow label="Original title" value={work.originalTitle} />}
-        <MetadataRow label="Author" value={work.authorName} />
-        <MetadataRow label="Year" value={work.year} />
-        <MetadataRow label="Language" value={work.language?.toUpperCase()} />
-        <MetadataRow label="Pages" value={work.pageCount} />
-        {work.durationSeconds && (
-          <MetadataRow label="Duration" value={formatDuration(work.durationSeconds)} />
-        )}
-        <MetadataRow label="Publisher" value={work.publisher} />
-        <MetadataRow label="Publish date" value={work.publishDate} />
-        {work.seriesName && (
-          <MetadataRow label="Series" value={
-            `${work.seriesName}${work.seriesPosition != null ? ` #${work.seriesPosition}` : ""}`
-          } />
-        )}
-        {work.narrator && work.narrator.length > 0 && (
-          <MetadataRow label="Narrator" value={work.narrator.join(", ")} />
-        )}
-        {work.narrationType && <MetadataRow label="Narration" value={work.narrationType} />}
-        {work.abridged && <MetadataRow label="Abridged" value="Yes" />}
-        {work.rating != null && (
-          <MetadataRow label="Rating" value={
-            `${work.rating.toFixed(1)}/5${work.ratingCount != null ? ` (${work.ratingCount} ratings)` : ""}`
-          } />
-        )}
-        {work.genres && work.genres.length > 0 && (
-          <MetadataRow label="Genres" value={work.genres.join(", ")} />
-        )}
-
-        <div className="mt-4 mb-2 text-xs font-medium text-muted uppercase tracking-wide">Identifiers</div>
-        <MetadataRow label="Open Library" value={work.olKey || <span className="text-zinc-600">—</span>} />
-        <MetadataRow label="Hardcover" value={work.hcKey || <span className="text-zinc-600">—</span>} />
-        <MetadataRow label="Goodreads" value={work.grKey || <span className="text-zinc-600">—</span>} />
-        <MetadataRow label="ISBN-13" value={work.isbn13 || <span className="text-zinc-600">—</span>} />
-        <MetadataRow label="ASIN" value={work.asin || <span className="text-zinc-600">—</span>} />
-      </dl>
+      {/* Details — what we know about it */}
+      <section className="mt-7 pt-6 border-t border-border">
+        <h3 className="text-sm font-medium text-zinc-100">Details</h3>
+        <p className="mt-0.5 mb-3 text-xs text-muted">What we know about it — series, genres, publisher, cover.</p>
+        <StatusBadge tone={details.tone} label={details.label} tip={details.tip} />
+        <dl className="mt-4">
+          {work.originalTitle && <MetadataRow label="Original title" value={work.originalTitle} />}
+          <MetadataRow label="Year" value={work.year} />
+          {work.seriesName && (
+            <MetadataRow label="Series" value={
+              `${work.seriesName}${work.seriesPosition != null ? ` #${work.seriesPosition}` : ""}`
+            } />
+          )}
+          {work.genres && work.genres.length > 0 && (
+            <MetadataRow label="Genres" value={work.genres.join(", ")} />
+          )}
+          <MetadataRow label="Publisher" value={work.publisher} />
+          <MetadataRow label="Publish date" value={work.publishDate} />
+          <MetadataRow label="Language" value={work.language?.toUpperCase()} />
+          <MetadataRow label="Pages" value={work.pageCount} />
+          {work.durationSeconds && (
+            <MetadataRow label="Duration" value={formatDuration(work.durationSeconds)} />
+          )}
+          {work.narrator && work.narrator.length > 0 && (
+            <MetadataRow label="Narrator" value={work.narrator.join(", ")} />
+          )}
+          {work.narrationType && <MetadataRow label="Narration" value={work.narrationType} />}
+          {work.abridged && <MetadataRow label="Abridged" value="Yes" />}
+          {work.rating != null && (
+            <MetadataRow label="Rating" value={
+              `${work.rating.toFixed(1)}/5${work.ratingCount != null ? ` (${work.ratingCount} ratings)` : ""}`
+            } />
+          )}
+          <MetadataRow label="Source" value={work.enrichmentSource} />
+          {work.enrichedAt && (
+            <MetadataRow label="Last enriched" value={formatRelativeDate(work.enrichedAt)} />
+          )}
+        </dl>
+        <p className="mt-3 text-xs text-muted">
+          The cover is fetched separately and may appear after this — it never affects the Enriched status.
+        </p>
+      </section>
     </div>
   );
 }

@@ -40,6 +40,7 @@ fn tag_status_wire_name(status: TagStatus) -> &'static str {
 
 fn sample_work(series_position: Option<f64>) -> Work {
     Work {
+        identity_status: Default::default(),
         id: 42,
         user_id: 7,
         title: "Contract Work".to_string(),

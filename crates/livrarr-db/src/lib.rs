@@ -241,6 +241,15 @@ pub trait WorkDb: Send + Sync {
         manual: bool,
     ) -> Result<(), DbError>;
 
+    /// Set the persisted identity-confidence badge (REQ-014 two-state split):
+    /// the flat, user-facing identity status derived from a work's anchors.
+    async fn set_identity_status(
+        &self,
+        user_id: UserId,
+        id: WorkId,
+        status: livrarr_domain::IdentityStatus,
+    ) -> Result<(), DbError>;
+
     #[allow(clippy::too_many_arguments)]
     async fn update_cover_metadata(
         &self,

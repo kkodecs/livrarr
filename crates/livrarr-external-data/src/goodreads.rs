@@ -185,6 +185,73 @@ pub fn parse_search_html(html: &str) -> Vec<GoodreadsSearchResult> {
 }
 
 // =============================================================================
+// Autocomplete (discovery) parsing
+// =============================================================================
+
+/// One entry from the Goodreads `/book/auto_complete` JSON response. Only the
+/// fields a search card needs are modeled; the rest (`workId`, `numPages`,
+/// `ratingsCount`, `description`, …) is ignored.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutocompleteEntry {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    book_url: Option<String>,
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    avg_rating: Option<String>,
+    #[serde(default)]
+    author: Option<AutocompleteAuthor>,
+}
+
+#[derive(serde::Deserialize)]
+struct AutocompleteAuthor {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Parse the Goodreads `/book/auto_complete?format=json` response into the same
+/// `GoodreadsSearchResult` shape the HTML `/search` parser produces, so the
+/// discovery fan-out can treat Goodreads like any other provider.
+///
+/// `/search` is AWS-WAF 202-challenged (effectively dead); this WAF-free JSON
+/// endpoint is the live discovery path (measured 2026-06-01). A non-array body
+/// (a WAF interstitial or a format change) yields an empty list rather than an
+/// error — the caller unions providers, so a Goodreads miss is not a failure.
+pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
+    let entries: Vec<AutocompleteEntry> = match serde_json::from_str(body) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    entries
+        .into_iter()
+        .filter_map(|e| {
+            let title = e.title.filter(|t| !t.trim().is_empty())?;
+            let detail_url = e.book_url.filter(|u| !u.trim().is_empty())?;
+            Some(GoodreadsSearchResult {
+                title,
+                author: e
+                    .author
+                    .and_then(|a| a.name)
+                    .filter(|n| !n.trim().is_empty()),
+                detail_url,
+                cover_url: e
+                    .image_url
+                    .filter(|u| !u.trim().is_empty())
+                    .map(|u| crate::provider_util::upscale_cover_url(&u)),
+                year: None,
+                // `avgRating` is a string (e.g. "4.30"); "0.00" means unrated.
+                rating: e.avg_rating.filter(|r| !r.trim().is_empty() && r != "0.00"),
+                series_name: None,
+                series_position: None,
+            })
+        })
+        .collect()
+}
+
+// =============================================================================
 // Detail page parsing
 // =============================================================================
 
@@ -479,7 +546,7 @@ pub async fn fetch_goodreads_html(
         .text()
         .await
         .map_err(|e| GoodreadsFetchError::Network(format!("GR body: {e}")))?;
-    if crate::llm_scraper::is_anti_bot_page(&html) {
+    if crate::provider_util::is_anti_bot_page(&html) {
         return Err(GoodreadsFetchError::AntiBot);
     }
     Ok(html)
@@ -510,67 +577,6 @@ pub async fn search_goodreads_by_query(
     let url = format!("{base}/search?q={encoded}");
     let html = fetch_goodreads_html(http, &url).await?;
     Ok(parse_search_html(&html))
-}
-
-/// A candidate from Goodreads' `/book/auto_complete` JSON endpoint.
-///
-/// Unlike `/search` (AWS-WAF 202-challenged, effectively dead — measured
-/// 2026-06-01), this endpoint is unguarded and returns structured JSON. We keep
-/// only the fields needed to identify the canonical book; the full metadata is
-/// read from the `/book/show` detail page, which also verifies the id.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GrAutocompleteHit {
-    /// Relative detail path, e.g. `/book/show/5907.The_Hobbit_or_There_and_Back_Again`.
-    #[serde(default)]
-    pub book_url: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub author: Option<GrAutocompleteHitAuthor>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GrAutocompleteHitAuthor {
-    #[serde(default)]
-    pub name: String,
-}
-
-/// Query the Goodreads `/book/auto_complete` JSON endpoint and return the
-/// structured candidates.
-///
-/// Outcome discipline: an empty `Ok(vec![])` is a *genuine miss*; a non-200
-/// status or a non-JSON body is a transient **block** surfaced as `Err`, which
-/// the caller escalates to the next discovery rung rather than treating as a
-/// terminal NotFound (the Goodreads anti-bot access ladder).
-pub async fn search_goodreads_autocomplete(
-    http: &HttpClient,
-    base_url: &str,
-    query: &str,
-) -> Result<Vec<GrAutocompleteHit>, GoodreadsFetchError> {
-    let base = base_url.trim_end_matches('/');
-    let encoded = urlencoding::encode(query.trim());
-    let url = format!("{base}/book/auto_complete?format=json&q={encoded}");
-    let resp = http
-        .get(&url)
-        .header("User-Agent", GOODREADS_USER_AGENT)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete request: {e}")))?;
-    // 200 is the only "door is open" status; a 202 challenge / 403 / 429 / 5xx
-    // are all transient blocks the caller escalates past.
-    if resp.status().as_u16() != 200 {
-        return Err(GoodreadsFetchError::HttpStatus(resp.status().as_u16()));
-    }
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete body: {e}")))?;
-    // A 200 that isn't the JSON array we expect is a WAF interstitial or a
-    // format change — a block, not a real empty.
-    serde_json::from_str::<Vec<GrAutocompleteHit>>(&body).map_err(|_| GoodreadsFetchError::AntiBot)
 }
 
 /// Fetch and parse a Goodreads detail page. Returns `Err(Parse)` if the page
@@ -665,7 +671,7 @@ pub async fn extract_with_llm(
     raw_html: &str,
     language_hint: &str,
 ) -> Result<crate::NormalizedWorkDetail, GoodreadsFetchError> {
-    let cleaned = crate::llm_scraper::clean_html_for_llm(raw_html);
+    let cleaned = crate::provider_util::clean_html_for_llm(raw_html);
     if cleaned.is_empty() {
         return Err(GoodreadsFetchError::Parse);
     }
@@ -726,7 +732,7 @@ pub async fn extract_with_llm(
     let cover_url = result
         .cover_url
         .as_deref()
-        .and_then(|u| crate::llm_scraper::validate_cover_url(u, ""));
+        .and_then(|u| crate::provider_util::validate_cover_url(u, ""));
 
     Ok(crate::NormalizedWorkDetail {
         title: result.title.map(|s| nfc(&s)),
@@ -1227,6 +1233,49 @@ mod tests {
     fn search_empty_html_returns_empty() {
         assert!(parse_search_html("").is_empty());
         assert!(parse_search_html("<html></html>").is_empty());
+    }
+
+    #[test]
+    fn autocomplete_json_parses_card_fields() {
+        // A trimmed real `/book/auto_complete` entry (measured 2026-06-01).
+        let body = r#"[{"imageUrl":"https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1546071216i/5907._SY75_.jpg","bookId":"5907","workId":"1540236","bookUrl":"/book/show/5907.The_Hobbit_or_There_and_Back_Again","title":"The Hobbit, or There and Back Again","avgRating":"4.30","author":{"id":656983,"name":"J.R.R. Tolkien"}}]"#;
+        let results = parse_autocomplete_json(body);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.title, "The Hobbit, or There and Back Again");
+        assert_eq!(r.author.as_deref(), Some("J.R.R. Tolkien"));
+        assert_eq!(
+            r.detail_url,
+            "/book/show/5907.The_Hobbit_or_There_and_Back_Again"
+        );
+        assert_eq!(r.rating.as_deref(), Some("4.30"));
+        // The `_SY75_` thumbnail size token is stripped to the full-size cover.
+        let cover = r.cover_url.as_deref().expect("cover");
+        assert!(cover.ends_with("5907.jpg"), "cover not upscaled: {cover}");
+        assert!(
+            !cover.contains("_SY75_"),
+            "size token not stripped: {cover}"
+        );
+    }
+
+    #[test]
+    fn autocomplete_non_json_is_empty() {
+        // A WAF interstitial / HTML challenge body is a miss, not an error.
+        assert!(parse_autocomplete_json("<html>challenge</html>").is_empty());
+        assert!(parse_autocomplete_json("").is_empty());
+        // An entry with no title/url is skipped.
+        assert!(parse_autocomplete_json(r#"[{"avgRating":"4.0"}]"#).is_empty());
+    }
+
+    #[test]
+    fn extract_gr_key_normalizes_to_bare_numeric() {
+        // A picked Goodreads result must persist its anchor in the domain canonical
+        // form (bare numeric), not the slug — so matching/conflict stay consistent.
+        let slug = extract_gr_key("/book/show/5907.The_Hobbit_or_There_and_Back_Again")
+            .expect("gr_key from a /book/show url");
+        assert_eq!(slug, "5907.The_Hobbit_or_There_and_Back_Again");
+        let canonical = livrarr_domain::normalization::normalize_gr_key(&slug).expect("normalizes");
+        assert_eq!(canonical, "5907");
     }
 
     #[test]

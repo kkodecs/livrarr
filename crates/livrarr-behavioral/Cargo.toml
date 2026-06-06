@@ -26,6 +26,7 @@ livrarr-matching = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
 livrarr-http = { workspace = true }
+livrarr-external-data = { workspace = true }
 axum = "0.8"
 assert_matches = "1"
 futures = "0.3"
@@ -63,6 +64,10 @@ path = "../../tests/behavioral/test_metadata_overhaul_enrichment_service.rs"
 [[test]]
 name = "test_metadata_overhaul_provider_queue"
 path = "../../tests/behavioral/test_metadata_overhaul_provider_queue.rs"
+
+[[test]]
+name = "test_canary_external_data_boundary"
+path = "../../tests/behavioral/test_canary_external_data_boundary.rs"
 
 # --- Consolidation behavioral tests ---
 
@@ -129,6 +134,10 @@ path = "../../tests/behavioral/test_consolidation_dto.rs"
 [[test]]
 name = "test_stress_phase4a"
 path = "../../tests/behavioral/test_stress_phase4a.rs"
+
+[[test]]
+name = "test_status_two_state_split"
+path = "../../tests/behavioral/test_status_two_state_split.rs"
 
 # --- English work lifecycle behavioral test skeletons ---
 
@@ -304,4 +313,16 @@ path = "../../tests/behavioral/test_wcc_work_service.rs"
 name = "test_wcc_matching"
 path = "../../tests/behavioral/test_wcc_matching.rs"
 
+[[test]]
+name = "test_wcc_discovery_fanout"
+path = "../../tests/behavioral/test_wcc_discovery_fanout.rs"
+
+[[test]]
+name = "test_wcc_eager_match"
+path = "../../tests/behavioral/test_wcc_eager_match.rs"
+
 # --- End work creation consistency behavioral tests ---
+
+[[test]]
+name = "test_wcc_resolver_matrix"
+path = "../../tests/behavioral/test_wcc_resolver_matrix.rs"

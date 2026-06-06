@@ -321,6 +321,10 @@ export default function SearchPage() {
       detailUrl: work.detailUrl,
       coverManual,
       isbn13: work.isbn13,
+      candidateId: work.candidateId,
+      hcKey: work.hcKey,
+      grKey: work.grKey,
+      asin: work.asin,
     })
       .then((data: AddWorkResponse) => {
         setPickerWork(null);

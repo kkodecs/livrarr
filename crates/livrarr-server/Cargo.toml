@@ -20,6 +20,7 @@ livrarr-handlers = { workspace = true }
 livrarr-matching = { workspace = true }
 livrarr-db = { workspace = true }
 livrarr-http = { workspace = true }
+livrarr-external-data = { workspace = true }
 livrarr-metadata = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }

@@ -7,11 +7,9 @@ use livrarr_domain::services::WorkIdentityError;
 use livrarr_domain::{MetadataProvider, UserId, Work};
 use uuid::Uuid;
 
-use crate::provider_client::ProviderClient;
-use crate::transport_cache::TransportCache;
-use crate::{
-    EnrichmentContext, EnrichmentMode, NormalizedWorkDetail, ProviderOutcome, RequestPriority,
-};
+use livrarr_external_data::provider_client::ProviderClient;
+use livrarr_external_data::transport_cache::TransportCache;
+use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 
 pub use livrarr_domain::identity::WorkSeed;
 pub use livrarr_domain::services::IdentityResolver as EnglishIdentityResolver;
@@ -70,12 +68,22 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
             return Err(WorkIdentityError::EmptySeed);
         }
 
+        // "The user's pick is the identity vote": a user-confirmed seed that
+        // already carries a work anchor (ol/gr/hc) is trusted directly — no
+        // provider fan-out, so an interactive add is zero-network. Bridge-only
+        // (isbn/asin) or automated (non-confirmed) seeds resolve normally below.
+        if seed.user_confirmed
+            && (seed.ol_key.is_some() || seed.gr_key.is_some() || seed.hc_key.is_some())
+        {
+            return Ok(Resolution::Resolved {
+                identity: captured_from_seed(seed),
+                method: method_for_seed(seed),
+                candidate_id: CandidateId(Uuid::new_v4().to_string()),
+            });
+        }
+
         let providers = self.select_providers(seed, tier);
         let work = build_transient_work_from_seed(seed, user_id);
-        let ctx = EnrichmentContext {
-            priority: RequestPriority::Normal,
-            mode: EnrichmentMode::Manual,
-        };
 
         // Fan out to the eligible providers in parallel, each under the per-call
         // timeout. A timeout or any non-Success outcome is an abstention — it
@@ -85,10 +93,9 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
             if let Some(client) = self.clients.get(&provider) {
                 let client = client.clone();
                 let work = work.clone();
-                let ctx = ctx.clone();
                 let timeout = self.config.call_timeout;
                 futures.push(async move {
-                    match tokio::time::timeout(timeout, client.fetch(&work, &ctx)).await {
+                    match tokio::time::timeout(timeout, client.fetch(&work)).await {
                         Ok(ProviderOutcome::Success(detail)) => Some((provider, *detail)),
                         _ => None,
                     }
@@ -253,7 +260,14 @@ pub fn run_quorum(
     responders: &HashMap<MetadataProvider, NormalizedWorkDetail>,
     seed: &WorkSeed,
 ) -> Resolution {
-    let items: Vec<&NormalizedWorkDetail> = responders.values().collect();
+    // Deterministic order: HashMap iteration is unordered, which would make the
+    // representative pick (`max_by_key`) and the `merge_missing` order below
+    // depend on hash layout — i.e. the captured identity could vary run-to-run
+    // when providers disagree on secondary fields. Sort by provider so the
+    // outcome is reproducible for a given input set.
+    let mut entries: Vec<(&MetadataProvider, &NormalizedWorkDetail)> = responders.iter().collect();
+    entries.sort_by_key(|(p, _)| format!("{p:?}"));
+    let items: Vec<&NormalizedWorkDetail> = entries.into_iter().map(|(_, d)| d).collect();
     if items.is_empty() {
         return Resolution::Unresolved {
             captured: captured_from_seed(seed),
@@ -287,9 +301,31 @@ pub fn run_quorum(
         clusters.push(members);
     }
 
-    clusters.sort_by_key(|m| std::cmp::Reverse(m.len()));
-    let top = &clusters[0];
-    let no_majority = items.len() > 1 && clusters.len() > 1 && clusters[1].len() == top.len();
+    // A work anchor (ol/gr/hc) outranks an ISBN/ASIN bridge for *winning* the
+    // quorum (REQ-018/020): when any anchored cluster exists, only anchored
+    // clusters compete, so an anchorless cluster can *corroborate* an anchored
+    // winner (its bridge is merged below) but can neither beat it nor tie it into
+    // a false Conflict. When NO provider carries a work anchor, the anchorless
+    // clusters compete normally and the winner is still `Resolved` — an ISBN-only
+    // identity is *provisional*, not a non-identity: `derived_identity_status`
+    // renders it `Provisional` (never a Confirmed lock), consistent with the
+    // no-responder Tier-A path (`resolve()` above). "ISBN is a bridge, not a
+    // lock" means Provisional, not Pending — so it is resolved, not held.
+    let any_anchored = clusters
+        .iter()
+        .any(|c| c.iter().any(|&i| has_work_anchor(items[i])));
+    let mut competing: Vec<Vec<usize>> = if any_anchored {
+        clusters
+            .into_iter()
+            .filter(|c| c.iter().any(|&i| has_work_anchor(items[i])))
+            .collect()
+    } else {
+        clusters
+    };
+
+    competing.sort_by_key(|m| std::cmp::Reverse(m.len()));
+    let top = &competing[0];
+    let no_majority = competing.len() > 1 && competing[1].len() == top.len();
     if no_majority {
         let rep = items[top[0]];
         return Resolution::Conflict {
@@ -299,7 +335,8 @@ pub fn run_quorum(
     }
 
     // The winning cluster's representative is its most-anchored member; merge any
-    // anchors the other members contribute (convergence adds, never clobbers).
+    // anchors/bridges the other members contribute (convergence adds, never
+    // clobbers) — including a corroborating anchorless member's ISBN.
     let rep_idx = *top
         .iter()
         .max_by_key(|&&idx| anchor_count(items[idx]))
@@ -343,6 +380,15 @@ fn method_for_seed(seed: &WorkSeed) -> IdentityMethod {
     } else {
         IdentityMethod::TitleAuthorSearch
     }
+}
+
+/// A payload carries a *work* anchor (ol/gr/hc) — the only kind that votes on
+/// work identity in the quorum. An edition bridge (isbn/asin) alone does not: an
+/// ISBN is a bridge to an anchor, never a lock on its own (REQ-018/020).
+fn has_work_anchor(d: &NormalizedWorkDetail) -> bool {
+    d.ol_key.as_deref().is_some_and(|v| !v.is_empty())
+        || d.gr_key.as_deref().is_some_and(|v| !v.is_empty())
+        || d.hc_key.as_deref().is_some_and(|v| !v.is_empty())
 }
 
 fn anchor_count(d: &NormalizedWorkDetail) -> usize {
