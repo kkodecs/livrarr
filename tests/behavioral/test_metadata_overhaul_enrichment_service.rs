@@ -31,7 +31,11 @@ use livrarr_domain::{
     UserId, UserRole, Work, WorkField, WorkId,
 };
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
-use livrarr_metadata::{CircuitState, EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentService, MergeEngine, MergeError, MergeInput, MergeOutput, ProviderQueue, ProviderQueueError, ScatterGatherResult};
+use livrarr_metadata::{
+    CircuitState, EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentService,
+    MergeEngine, MergeError, MergeInput, MergeOutput, ProviderQueue, ProviderQueueError,
+    ScatterGatherResult,
+};
 use tokio::sync::{Mutex, Notify};
 
 #[async_trait]
@@ -212,6 +216,7 @@ impl MergeEngine for StubMergeEngine {
             livrarr_domain::MetadataProvider,
             NormalizedWorkDetail,
         >,
+        _current_provenance: Vec<livrarr_domain::FieldProvenance>,
         _language: Option<&str>,
     ) -> Result<MergeOutput, MergeError> {
         self.outputs

@@ -162,6 +162,11 @@ impl ManualImportScanAccessor for LiveManualImportScanService {
                     language: None,
                     detail_url: None,
                     rating: None,
+                    candidate_id: None,
+                    isbn_13: None,
+                    hc_key: None,
+                    gr_key: None,
+                    asin: None,
                 })
             })
             .collect();

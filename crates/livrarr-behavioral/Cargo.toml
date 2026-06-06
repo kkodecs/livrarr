@@ -57,11 +57,9 @@ path = "../../tests/behavioral/test_metadata_overhaul_external_id_db.rs"
 name = "test_metadata_overhaul_merge_engine"
 path = "../../tests/behavioral/test_metadata_overhaul_merge_engine.rs"
 
-# EXCLUDED from the d612465 canary baseline: depends on uncommitted WCC code
-# (MergeEngine::merge_from_cached, not in this baseline). Restore when that code lands.
-# [[test]]
-# name = "test_metadata_overhaul_enrichment_service"
-# path = "../../tests/behavioral/test_metadata_overhaul_enrichment_service.rs"
+[[test]]
+name = "test_metadata_overhaul_enrichment_service"
+path = "../../tests/behavioral/test_metadata_overhaul_enrichment_service.rs"
 
 [[test]]
 name = "test_metadata_overhaul_provider_queue"

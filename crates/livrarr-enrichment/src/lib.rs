@@ -336,6 +336,17 @@ pub enum MergeError {
 #[trait_variant::make(Send)]
 pub trait MergeEngine: Send + Sync {
     async fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError>;
+
+    /// Merge from already-fetched per-provider payloads — zero provider network
+    /// calls (REQ-014/015). The add path reuses the payloads the resolver cached
+    /// during discovery instead of re-querying. See ir-v2 metadata-merge-reuse.
+    async fn merge_from_cached(
+        &self,
+        work: Work,
+        payloads: HashMap<livrarr_domain::MetadataProvider, NormalizedWorkDetail>,
+        current_provenance: Vec<FieldProvenance>,
+        language: Option<&str>,
+    ) -> Result<MergeOutput, MergeError>;
 }
 
 /// Default merge engine: LLM arbitration when configured, deterministic fallback otherwise.
@@ -351,52 +362,42 @@ pub struct DefaultMergeEngine<L = livrarr_external_data::llm_caller_service::Llm
     _priority_model: PriorityModel,
 }
 
-impl<L> DefaultMergeEngine<L>
-where
-    L: livrarr_domain::services::LlmCaller + Send + Sync,
-{
-    /// Merge from already-fetched per-provider payloads — zero provider network
-    /// calls (REQ-014/015). Wraps each payload as a ReconstructedOutcome, drops
-    /// OpenLibrary + Hardcover for non-English works (REQ-027), and runs the
-    /// existing deterministic merge unchanged (REQ-016/017). See ir-v2
-    /// metadata-merge-reuse.
-    pub async fn merge_from_cached(
-        &self,
-        work: Work,
-        payloads: HashMap<livrarr_domain::MetadataProvider, NormalizedWorkDetail>,
-        language: Option<&str>,
-    ) -> Result<MergeOutput, MergeError> {
-        use livrarr_domain::MetadataProvider as P;
-        // REQ-027: a non-English work must not take OpenLibrary/Hardcover English
-        // metadata. PriorityModel::foreign() still lists them as fallbacks, so
-        // reordering is insufficient — drop them from the inputs before merging.
-        let is_foreign = matches!(
-            livrarr_external_data::language::provider_priority(language),
-            livrarr_external_data::language::ProviderPriority::Foreign
-        );
-        let provider_results = payloads
-            .into_iter()
-            .filter(|(provider, _)| {
-                !(is_foreign && matches!(provider, P::OpenLibrary | P::Hardcover))
-            })
-            .map(|(provider, detail)| {
-                (
-                    provider,
-                    ReconstructedOutcome {
-                        class: livrarr_domain::OutcomeClass::Success,
-                        payload: Some(detail),
-                    },
-                )
-            })
-            .collect();
-        let input = MergeInput {
-            current_work: work,
-            current_provenance: Vec::new(),
-            provider_results,
-            mode: EnrichmentMode::Manual,
-            priority_model: PriorityModel::for_language(language),
-        };
-        self.merge(input).await
+/// Build the DB apply-request from a computed merge output, rewriting the
+/// per-row ids to the target (user_id, work_id). Shared by the network
+/// enrichment path (`enrich_work`) and the cached-payload reuse path in
+/// `WorkService::add` (REQ-014/015) so both produce byte-identical writes.
+pub fn build_apply_request(
+    merge_output: &MergeOutput,
+    user_id: livrarr_domain::UserId,
+    work_id: livrarr_domain::WorkId,
+    expected_merge_generation: i64,
+) -> ApplyEnrichmentMergeRequest {
+    let provenance_upserts = merge_output
+        .provenance_upserts
+        .iter()
+        .map(|p| SetFieldProvenanceRequest {
+            user_id,
+            work_id,
+            ..p.clone()
+        })
+        .collect();
+    let external_id_updates = merge_output
+        .external_id_updates
+        .iter()
+        .map(|e| UpsertExternalIdRequest {
+            work_id,
+            ..e.clone()
+        })
+        .collect();
+    ApplyEnrichmentMergeRequest {
+        user_id,
+        work_id,
+        expected_merge_generation,
+        work_update: merge_output.work_update.clone(),
+        new_enrichment_status: merge_output.enrichment_status,
+        provenance_upserts,
+        provenance_deletes: merge_output.provenance_deletes.clone(),
+        external_id_updates,
     }
 }
 
@@ -438,6 +439,50 @@ where
         } else {
             merge_impl(inputs)
         }
+    }
+
+    /// Merge from already-fetched per-provider payloads — zero provider network
+    /// calls (REQ-014/015). Wraps each payload as a ReconstructedOutcome, drops
+    /// OpenLibrary + Hardcover for non-English works (REQ-027), and runs the
+    /// existing deterministic merge unchanged (REQ-016/017).
+    async fn merge_from_cached(
+        &self,
+        work: Work,
+        payloads: HashMap<livrarr_domain::MetadataProvider, NormalizedWorkDetail>,
+        current_provenance: Vec<FieldProvenance>,
+        language: Option<&str>,
+    ) -> Result<MergeOutput, MergeError> {
+        use livrarr_domain::MetadataProvider as P;
+        // REQ-027: a non-English work must not take OpenLibrary/Hardcover English
+        // metadata. PriorityModel::foreign() still lists them as fallbacks, so
+        // reordering is insufficient — drop them from the inputs before merging.
+        let is_foreign = matches!(
+            livrarr_external_data::language::provider_priority(language),
+            livrarr_external_data::language::ProviderPriority::Foreign
+        );
+        let provider_results = payloads
+            .into_iter()
+            .filter(|(provider, _)| {
+                !(is_foreign && matches!(provider, P::OpenLibrary | P::Hardcover))
+            })
+            .map(|(provider, detail)| {
+                (
+                    provider,
+                    ReconstructedOutcome {
+                        class: livrarr_domain::OutcomeClass::Success,
+                        payload: Some(detail),
+                    },
+                )
+            })
+            .collect();
+        let input = MergeInput {
+            current_work: work,
+            current_provenance,
+            provider_results,
+            mode: EnrichmentMode::Manual,
+            priority_model: PriorityModel::for_language(language),
+        };
+        self.merge(input).await
     }
 }
 
@@ -1741,35 +1786,7 @@ where
 
             let merge_output = self.merge_engine.merge(merge_input).await?;
 
-            // Rewrite IDs in sub-requests to match the actual user_id/work_id
-            let provenance_upserts: Vec<_> = merge_output
-                .provenance_upserts
-                .iter()
-                .map(|p| SetFieldProvenanceRequest {
-                    user_id,
-                    work_id,
-                    ..p.clone()
-                })
-                .collect();
-            let external_id_updates: Vec<_> = merge_output
-                .external_id_updates
-                .iter()
-                .map(|e| UpsertExternalIdRequest {
-                    work_id,
-                    ..e.clone()
-                })
-                .collect();
-
-            let apply_req = ApplyEnrichmentMergeRequest {
-                user_id,
-                work_id,
-                expected_merge_generation: generation,
-                work_update: merge_output.work_update.clone(),
-                new_enrichment_status: merge_output.enrichment_status,
-                provenance_upserts,
-                provenance_deletes: merge_output.provenance_deletes.clone(),
-                external_id_updates,
-            };
+            let apply_req = build_apply_request(&merge_output, user_id, work_id, generation);
 
             let apply_outcome = self.db.apply_enrichment_merge(apply_req).await?;
 

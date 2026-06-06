@@ -55,7 +55,6 @@ pub struct WorkServiceImpl<
     http_client: livrarr_http::HttpClient,
     llm: L,
     data_dir: PathBuf,
-    #[allow(dead_code)]
     merge_engine: M,
     tag_service: Arc<T>,
     refresh_locks: KeyedMutex<(UserId, WorkId)>,
@@ -327,6 +326,47 @@ fn interleave_by(lists: Vec<Vec<LookupResult>>, chunk: usize) -> Vec<LookupResul
         }
     }
     out
+}
+
+/// REQ-014/015 revalidation (D-005): cached payloads may be reused only if they
+/// positively identify the freshly-created work — at least one anchor present on
+/// both sides and equal — AND no same-type anchor contradicts. A stale/colliding
+/// candidate_id (no overlap, or a differing anchor) falls back to network rather
+/// than applying unrelated payloads.
+fn cached_payloads_match_work(
+    work: &Work,
+    payloads: &HashMap<livrarr_domain::MetadataProvider, crate::NormalizedWorkDetail>,
+) -> bool {
+    // No payload may contradict a confirmed anchor on the work.
+    let no_contradiction = payloads.values().all(|p| {
+        anchor_compatible(work.ol_key.as_deref(), p.ol_key.as_deref())
+            && anchor_compatible(work.gr_key.as_deref(), p.gr_key.as_deref())
+            && anchor_compatible(work.hc_key.as_deref(), p.hc_key.as_deref())
+            && anchor_compatible(work.isbn_13.as_deref(), p.isbn_13.as_deref())
+            && anchor_compatible(work.asin.as_deref(), p.asin.as_deref())
+    });
+    // ...and at least one payload must positively share a matching anchor, so a
+    // stale/colliding candidate_id (or an anchorless work) cannot pass vacuously.
+    let positive_match = payloads.values().any(|p| {
+        anchors_match(work.ol_key.as_deref(), p.ol_key.as_deref())
+            || anchors_match(work.gr_key.as_deref(), p.gr_key.as_deref())
+            || anchors_match(work.hc_key.as_deref(), p.hc_key.as_deref())
+            || anchors_match(work.isbn_13.as_deref(), p.isbn_13.as_deref())
+            || anchors_match(work.asin.as_deref(), p.asin.as_deref())
+    });
+    no_contradiction && positive_match
+}
+
+/// True only when both anchors are present and equal (a positive overlap).
+fn anchors_match(work_anchor: Option<&str>, payload_anchor: Option<&str>) -> bool {
+    matches!((work_anchor, payload_anchor), (Some(a), Some(b)) if a == b)
+}
+
+fn anchor_compatible(work_anchor: Option<&str>, payload_anchor: Option<&str>) -> bool {
+    match (work_anchor, payload_anchor) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
 }
 
 /// Map a resolved/confirmable identity into a wire `LookupResult`, carrying the
@@ -738,6 +778,7 @@ where
                     candidate.source_provider_data,
                     candidate.skip_sync_enrichment,
                     derived_identity,
+                    candidate.candidate_id.as_ref(),
                 )
                 .await
             }
@@ -856,6 +897,7 @@ where
                     candidate.source_provider_data,
                     candidate.skip_sync_enrichment,
                     derived_identity,
+                    candidate.candidate_id.as_ref(),
                 )
                 .await
             }
@@ -1675,9 +1717,13 @@ where
                     } else {
                         None
                     };
-                // gr_key is intentionally not set here: threading a Goodreads
-                // work anchor (normalized via normalize_gr_key) through the DTO
-                // chain into the add path is chunk B's job, not the search box.
+                // Canonical Goodreads work anchor from the structured endpoint,
+                // normalized to the bare numeric id (the domain canonical form per
+                // normalize_gr_key) so it persists and matches consistently.
+                let gr_key = validated_url
+                    .as_deref()
+                    .and_then(livrarr_external_data::goodreads::extract_gr_key)
+                    .and_then(|k| livrarr_domain::normalization::normalize_gr_key(&k));
                 LookupResult {
                     ol_key: None,
                     title: r.title,
@@ -1696,7 +1742,7 @@ where
                     isbn_13: None,
                     candidate_id: None,
                     hc_key: None,
-                    gr_key: None,
+                    gr_key,
                     asin: None,
                 }
             })
@@ -2001,6 +2047,12 @@ where
                     .pointer("/image/url")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                // The Hardcover work id (same extraction the HC client uses) is a
+                // work anchor, so a picked HC result is trusted (zero-network add)
+                // instead of falling back to an ISBN re-resolve.
+                let hc_key = doc
+                    .get("id")
+                    .map(|v| v.to_string().trim_matches('"').to_string());
 
                 Some(LookupResult {
                     ol_key: None,
@@ -2019,7 +2071,7 @@ where
                     rating: None,
                     isbn_13,
                     candidate_id: None,
-                    hc_key: None,
+                    hc_key,
                     gr_key: None,
                     asin: None,
                 })
@@ -2146,6 +2198,103 @@ where
         })
     }
 
+    /// The shared transport cache (owned by the identity resolver) holding the
+    /// per-provider payloads the resolver fetched during discovery. `None` when no
+    /// resolver is composed (legacy chain / tests) — `add()` then network-enriches.
+    fn transport_cache(&self) -> Option<&livrarr_external_data::transport_cache::TransportCache> {
+        self.resolver.as_ref().map(|r| r.cache.as_ref())
+    }
+
+    /// REQ-014/015 (D-005): reuse the per-provider payloads the resolver cached
+    /// under `candidate_id` during discovery — feeding them to the merge engine
+    /// in-process (zero provider network) instead of re-querying. Returns the
+    /// resulting `EnrichmentStatus` on a cache hit, or `None` to fall back to
+    /// network/background enrichment (cache miss, TTL-expiry, anchor mismatch, or
+    /// a CAS supersede). Consume-once: the entry is evicted on take.
+    async fn try_reuse_cached_payloads(
+        &self,
+        user_id: UserId,
+        work: &Work,
+        candidate_id: &livrarr_domain::identity::CandidateId,
+    ) -> Option<EnrichmentStatus> {
+        let payloads = self
+            .transport_cache()?
+            .cache_take(user_id, candidate_id.clone())?;
+        // Revalidate the cached identity against the work we just created (D-005):
+        // require a positive anchor match and no contradiction, so a stale or
+        // colliding candidate_id falls back to network instead of applying
+        // unrelated payloads.
+        if !cached_payloads_match_work(work, &payloads) {
+            tracing::warn!(
+                work_id = work.id,
+                "cached payloads do not positively match the work's anchors; falling back to network enrichment"
+            );
+            return None;
+        }
+        // Snapshot the CAS generation BEFORE computing the merge so a concurrent
+        // update surfaces as Superseded rather than being silently overwritten, and
+        // carry the current provenance so user/add-time field locks are respected
+        // (parity with the network enrichment path).
+        // A DB read failure must NOT fabricate a generation (breaks CAS) or empty
+        // provenance (drops user locks) — fall back to network enrichment instead.
+        let generation = match self.db.get_merge_generation(user_id, work.id).await {
+            Ok(generation) => generation,
+            Err(e) => {
+                tracing::warn!(
+                    work_id = work.id,
+                    "get_merge_generation failed: {e}; falling back"
+                );
+                return None;
+            }
+        };
+        let current_provenance = match self.db.list_work_provenance(user_id, work.id).await {
+            Ok(provenance) => provenance,
+            Err(e) => {
+                tracing::warn!(
+                    work_id = work.id,
+                    "list_work_provenance failed: {e}; falling back"
+                );
+                return None;
+            }
+        };
+        let merge_output = match self
+            .merge_engine
+            .merge_from_cached(
+                work.clone(),
+                payloads,
+                current_provenance,
+                work.language.as_deref(),
+            )
+            .await
+        {
+            Ok(output) => output,
+            Err(e) => {
+                tracing::warn!(
+                    work_id = work.id,
+                    "merge_from_cached failed: {e}; falling back"
+                );
+                return None;
+            }
+        };
+        let apply_req =
+            livrarr_enrichment::build_apply_request(&merge_output, user_id, work.id, generation);
+        match self.db.apply_enrichment_merge(apply_req).await {
+            Ok(
+                livrarr_domain::ApplyMergeOutcome::Applied
+                | livrarr_domain::ApplyMergeOutcome::NoChange
+                | livrarr_domain::ApplyMergeOutcome::Deferred,
+            ) => Some(merge_output.enrichment_status),
+            Ok(livrarr_domain::ApplyMergeOutcome::Superseded) => None,
+            Err(e) => {
+                tracing::warn!(
+                    work_id = work.id,
+                    "applying cached merge failed: {e}; falling back"
+                );
+                None
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn finish_created_work(
         &self,
@@ -2156,6 +2305,7 @@ where
         source_provider_data: Option<SourceProviderData>,
         skip_sync_enrichment: bool,
         derived_identity: livrarr_domain::IdentityStatus,
+        candidate_id: Option<&livrarr_domain::identity::CandidateId>,
     ) -> Result<AddWorkResult, WorkServiceError> {
         use livrarr_domain::IdentityStatus;
 
@@ -2165,6 +2315,38 @@ where
             .set_identity_status(user_id, work.id, derived_identity)
             .await
             .map_err(WorkServiceError::Db)?;
+
+        // REQ-014/015 (D-005): if the candidate carried a candidate_id whose
+        // payloads the resolver cached during discovery, reuse them in-process
+        // (the merge engine, zero provider network) BEFORE cover/enrichment so the
+        // cover and returned status reflect the merged metadata. This fires even on
+        // skip_sync_enrichment: that gate defers slow *network* enrichment, but the
+        // cached merge makes no network calls (ir-v2 add:144/150).
+        let mut work = work;
+        let reused_status = match candidate_id {
+            // Reuse is a form of enrichment, so it is gated on a settled identity
+            // exactly like the network fan-out below: a held identity (Pending /
+            // Conflict / NeedsReview) never reuses, even if a candidate_id is echoed.
+            Some(id)
+                if matches!(
+                    derived_identity,
+                    IdentityStatus::Confirmed | IdentityStatus::Provisional
+                ) =>
+            {
+                match self.try_reuse_cached_payloads(user_id, &work, id).await {
+                    Some(status) => {
+                        work = self
+                            .db
+                            .get_work(user_id, work.id)
+                            .await
+                            .map_err(WorkServiceError::Db)?;
+                        Some(status)
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
 
         // Phase 1: synchronous cover download within 3s budget (REQ-010).
         let is_user_initiated = source_provider_data.is_none();
@@ -2198,6 +2380,39 @@ where
                     0,
                 )
                 .await;
+        }
+
+        // A cached-payload reuse already enriched the work in-process — return it,
+        // bypassing the skip / identity-gate / network paths below (REQ-014/015).
+        if let Some(status) = reused_status {
+            let updated_work = self
+                .db
+                .get_work(user_id, work.id)
+                .await
+                .map_err(WorkServiceError::Db)?;
+            let cover_mtime =
+                crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
+                    crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
+                });
+            let audiobook_cover_mtime =
+                crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id).or_else(
+                    || {
+                        crate::cover::audiobook_cover_file_mtime(
+                            &self.data_dir.join("covers"),
+                            updated_work.id,
+                        )
+                    },
+                );
+            return Ok(AddWorkResult {
+                work: updated_work,
+                created: true,
+                author_created,
+                author_id,
+                messages: vec![],
+                cover_mtime,
+                audiobook_cover_mtime,
+                enrichment_status: status,
+            });
         }
 
         // Skip sync enrichment: return Unenriched immediately (REQ-009).

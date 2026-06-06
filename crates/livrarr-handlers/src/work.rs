@@ -146,6 +146,11 @@ pub async fn lookup<S: HasWorkService>(
             language: r.language,
             detail_url: r.detail_url,
             rating: r.rating,
+            candidate_id: r.candidate_id,
+            isbn_13: r.isbn_13,
+            hc_key: r.hc_key,
+            gr_key: r.gr_key,
+            asin: r.asin,
         })
         .collect();
 
@@ -171,7 +176,7 @@ pub async fn add<
 ) -> Result<Json<AddWorkResponse>, ApiError> {
     let author_name_for_gr = req.author_name.clone();
     use livrarr_domain::identity::{
-        IdentityState, LatencyTier, PendingReason, Resolution, WorkCandidate, WorkSeed,
+        IdentityState, LatencyTier, PendingReason, RawHarvest, Resolution, WorkCandidate, WorkSeed,
         WorkSeedFields,
     };
 
@@ -183,20 +188,34 @@ pub async fn add<
 
     let cover_is_manual = req.cover_manual && req.cover_url.is_some();
 
-    let identity = if req.ol_key.is_some() {
-        let seed = WorkSeed {
-            ol_key: req.ol_key.clone(),
-            gr_key: None,
-            hc_key: None,
-            isbn_13: req.isbn_13.clone(),
-            asin: None,
-            title: Some(req.title.clone()),
-            author_name: Some(req.author_name.clone()),
-            language: Some(language.clone()),
-            series_name: None,
-            year: req.year,
-            user_confirmed: true,
-        };
+    // Sanitize the request's identifiers at the boundary: normalize (isbn/asin/
+    // gr_key) and DROP malformed ones (WorkSeed::sanitized), so the resolver
+    // fast-path never trusts an un-normalized or bad anchor — which would persist
+    // a denormalized identifier. Resolve only when a real anchor survives; a user
+    // pick is then trusted via the fast-path (work anchors resolve with no
+    // network; an isbn/asin-only pick still fans out to find a work anchor).
+    let seed = WorkSeed::sanitized(RawHarvest {
+        ol_key: req.ol_key.clone(),
+        gr_key: req.gr_key.clone(),
+        hc_key: req.hc_key.clone(),
+        isbn: req.isbn_13.clone(),
+        asin: req.asin.clone(),
+        title: Some(req.title.clone()),
+        author_name: Some(req.author_name.clone()),
+        language: Some(language.clone()),
+        series_name: None,
+        year: req.year,
+        user_confirmed: true,
+    })
+    .ok()
+    .filter(|s| {
+        s.ol_key.is_some()
+            || s.gr_key.is_some()
+            || s.hc_key.is_some()
+            || s.isbn_13.is_some()
+            || s.asin.is_some()
+    });
+    let identity = if let Some(seed) = seed {
         let resolution = state
             .identity_resolver()
             .resolve(ctx.user.id, &seed, LatencyTier::Interactive)
@@ -257,7 +276,7 @@ pub async fn add<
             series_position: None,
         },
         identity,
-        candidate_id: None,
+        candidate_id: req.candidate_id,
         source_provider_data: None,
         file_path: None,
         delete_existing_after_import: false,

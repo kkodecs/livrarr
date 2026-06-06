@@ -1268,6 +1268,17 @@ mod tests {
     }
 
     #[test]
+    fn extract_gr_key_normalizes_to_bare_numeric() {
+        // A picked Goodreads result must persist its anchor in the domain canonical
+        // form (bare numeric), not the slug — so matching/conflict stay consistent.
+        let slug = extract_gr_key("/book/show/5907.The_Hobbit_or_There_and_Back_Again")
+            .expect("gr_key from a /book/show url");
+        assert_eq!(slug, "5907.The_Hobbit_or_There_and_Back_Again");
+        let canonical = livrarr_domain::normalization::normalize_gr_key(&slug).expect("normalizes");
+        assert_eq!(canonical, "5907");
+    }
+
+    #[test]
     fn detail_empty_html_returns_none() {
         assert!(parse_detail_html("").is_none());
         assert!(parse_detail_html("<html></html>").is_none());

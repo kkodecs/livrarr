@@ -68,6 +68,20 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
             return Err(WorkIdentityError::EmptySeed);
         }
 
+        // "The user's pick is the identity vote": a user-confirmed seed that
+        // already carries a work anchor (ol/gr/hc) is trusted directly — no
+        // provider fan-out, so an interactive add is zero-network. Bridge-only
+        // (isbn/asin) or automated (non-confirmed) seeds resolve normally below.
+        if seed.user_confirmed
+            && (seed.ol_key.is_some() || seed.gr_key.is_some() || seed.hc_key.is_some())
+        {
+            return Ok(Resolution::Resolved {
+                identity: captured_from_seed(seed),
+                method: method_for_seed(seed),
+                candidate_id: CandidateId(Uuid::new_v4().to_string()),
+            });
+        }
+
         let providers = self.select_providers(seed, tier);
         let work = build_transient_work_from_seed(seed, user_id);
 

@@ -153,6 +153,14 @@ export interface WorkSearchResult {
   detailUrl?: string | null;
   rating?: string | null;
   isbn13?: string | null;
+  /** Opaque handle to the per-provider payloads cached during this search; echo
+   * it back in the add request so the server reuses them network-free. */
+  candidateId?: string | null;
+  /** Federated work anchors carried from discovery so the add path trusts the
+   * pick (no re-resolve). */
+  hcKey?: string | null;
+  grKey?: string | null;
+  asin?: string | null;
 }
 
 export interface PreaddCoverCandidate {
@@ -174,6 +182,12 @@ export interface AddWorkRequest {
   detailUrl?: string | null;
   coverManual?: boolean;
   isbn13?: string | null;
+  /** Echoed from the selected search result so the server reuses the cached
+   * provider payloads instead of re-querying. */
+  candidateId?: string | null;
+  hcKey?: string | null;
+  grKey?: string | null;
+  asin?: string | null;
 }
 
 export interface AddWorkResponse {
