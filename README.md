@@ -6,38 +6,7 @@
 
 ---
 
-## 🚨 OpenLibrary lookups affected on alpha4 and earlier — upgrade to alpha5
-
-**TL;DR — if you're having trouble adding works, upgrade to alpha5 immediately. Honestly, you should do that regardless.**
-
-### What happened
-
-OpenLibrary started returning HTTP 403 to Livrarr's User-Agent. Search, enrichment, author monitor, and cover backfill all silently broke. Many reports of "OL is down" were actually "OL is blocking us."
-
-### Diagnosis
-
-Per [OpenLibrary's published API policy](https://openlibrary.org/developers/api), bulk clients must use a User-Agent that identifies the app *and* includes a contact (email or URL). Livrarr's UA on alpha4 (`Livrarr/0.1.0-alpha4`) had the app name but no contact field — flagged as identifiable bulk traffic without policy compliance, penalized harder than fully-anonymous requests.
-
-### What we did
-
-- Filed [#83](https://github.com/kkodecs/livrarr/issues/83) with the empirical evidence and the two-line fix
-- Sent an apology email to OpenLibrary's contact address explaining the gap and confirming our intent to comply
-- No response yet — but as of 2026-05-27, OL appears to have lifted the block on the old UA
-
-### Current status
-
-- OL is currently returning 200 to alpha4's UA from multiple test hosts. So lookups are working again **for now**.
-- But every alpha4 request is still **technically out of compliance** with OL's policy. The block could come back at any time, and the next round of enforcement may be more aggressive (IP-level instead of UA-level).
-
-### The fix — alpha5 is now released
-
-**alpha5 ships a fully policy-compliant UA** — app name + version + contact email + contact URL — earning the higher rate limit (3 req/s vs 1 req/s) and getting out of the penalty bucket entirely. It also bundles a stack of metadata fixes (audiobook cover pipeline, OpenLibrary cover extraction, UI cache invalidation on metadata refresh) and stability fixes (PID self-deadlock on Docker restart, OOM guard for tag writes on large audiobooks).
-
-Upgrade:
-
-```
-docker compose pull livrarr && docker compose up -d
-```
+> **Note:** alpha4 and earlier used an OpenLibrary User-Agent that wasn't fully policy-compliant, which could cause OL lookups (search, enrichment, author monitor, cover backfill) to fail. alpha5 ships a compliant UA — run alpha5 or later. See [Notes → OpenLibrary compliance](#openlibrary-compliance) for detail.
 
 ---
 
@@ -46,7 +15,8 @@ docker compose pull livrarr && docker compose up -d
 - **Search** any Torznab or Newznab indexer (Prowlarr, NZBHydra2, Jackett, or direct) for ebooks and audiobooks
 - **Grab** via qBittorrent or SABnzbd (forthcoming: support for other clients)
 - **Import** to your library with automatic file organization
-- **Enrich** metadata from Hardcover, OpenLibrary, and Audnexus
+- **Enrich** metadata from Hardcover, OpenLibrary, Google Books, and Audnexus
+- **Read** in your browser with a built-in ebook reader and audiobook player
 - **Push** to Calibre-Web Automated (CWA) or AudioBookShelf (ABS)
 
 ---
@@ -67,7 +37,7 @@ docker compose pull livrarr && docker compose up -d
 ```yaml
 services:
   livrarr:
-    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha4
+    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha5
     container_name: livrarr
     ports:
       - 8789:8789
@@ -118,7 +88,7 @@ level = "info"       # trace | debug | info | warn | error
 
 | Component | Required | Notes |
 |---|---|---|
-| Docker | Yes | linux/amd64 only (ARM coming later) |
+| Docker | Yes | Multi-arch image — linux/amd64 and linux/arm64 |
 | qBittorrent or SABnzbd | Yes | Download client |
 | Torznab or Newznab indexer | Yes | Prowlarr, NZBHydra2, Jackett, or direct feed |
 | Hardcover API key | No | Better metadata — free at hardcover.app |
@@ -151,14 +121,27 @@ Livrarr and your download client must see completed downloads at the **same host
 
 - Multi-user partially implemented — additional users can log in but share admin indexers/clients. Treat as single-user for alpha.
 - PUID/PGID not configurable — runs as UID/GID 1000 (fix in beta)
-- No mobile-optimized UI
-- Cover quality varies — Goodreads matching can return incorrect covers for some titles. Manual refresh usually fixes it. Full cover trust model coming in alpha4.
+- Cover accuracy can still vary for some titles (especially Goodreads matches). A manual refresh usually fixes it.
 
 ---
 
 ## Stack
 
 Built in Rust (backend) + React (frontend). Ships as a single Docker image — no database sidecar, no separate web server. For full workflows you'll still need a download client and at least one indexer. Starts in under a second.
+
+---
+
+## Notes
+
+### OpenLibrary compliance
+
+Per [OpenLibrary's published API policy](https://openlibrary.org/developers/api), bulk clients must use a User-Agent that identifies the app *and* includes a contact (email or URL). alpha4 and earlier sent a UA with the app name but no contact field (`Livrarr/0.1.0-alpha4`), which OL flagged as non-compliant bulk traffic — this could cause OpenLibrary search, enrichment, author monitor, and cover backfill to fail. The gap is tracked in [#83](https://github.com/kkodecs/livrarr/issues/83).
+
+alpha5 ships a fully policy-compliant UA (app name + version + contact email + contact URL), which also earns OL's higher rate limit (3 req/s vs 1 req/s). If you're on an older build, upgrade:
+
+```
+docker compose pull livrarr && docker compose up -d
+```
 
 ---
 
