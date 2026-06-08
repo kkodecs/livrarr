@@ -14,6 +14,14 @@ pub enum EnrichmentMode {
     HardRefresh,
 }
 
+impl EnrichmentMode {
+    /// A HardRefresh bypasses the 24h (work,provider) cache and re-fetches
+    /// (REQ-009); Manual and Background consult the cache.
+    pub fn bypasses_cache(&self) -> bool {
+        matches!(self, EnrichmentMode::HardRefresh)
+    }
+}
+
 #[derive(Debug)]
 pub struct EnrichmentResult {
     pub enrichment_status: EnrichmentStatus,

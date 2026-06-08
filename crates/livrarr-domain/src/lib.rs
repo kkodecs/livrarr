@@ -919,6 +919,23 @@ pub fn proxy_cover_url(url: &str) -> String {
     format!("/api/v1/coverproxy?url={}", urlencoding::encode(url))
 }
 
+/// Reverse `proxy_cover_url`: recover the canonical external URL from the
+/// internal cover-proxy display form (`/api/v1/coverproxy?url=<encoded-url>`).
+/// Values that are not in proxied form are returned unchanged.
+///
+/// The search results the UI renders carry covers in proxied form so `<img>`
+/// tags can fetch them. When the user picks one of those covers, the persisted
+/// value must be the real provider URL, not the proxied display string — a
+/// proxied (leading-`/`) value is not a usable cover source.
+pub fn unproxy_cover_url(url: &str) -> String {
+    match url.strip_prefix("/api/v1/coverproxy?url=") {
+        Some(encoded) => urlencoding::decode(encoded)
+            .map(|s| s.into_owned())
+            .unwrap_or_else(|_| url.to_string()),
+        None => url.to_string(),
+    }
+}
+
 /// Strip all non-alphanumeric characters from an ISBN (hyphens, spaces, etc.).
 pub fn normalize_isbn(isbn: &str) -> String {
     isbn.chars().filter(|c| c.is_alphanumeric()).collect()

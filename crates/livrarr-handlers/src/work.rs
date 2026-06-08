@@ -18,7 +18,7 @@ use crate::{
 };
 use livrarr_domain::services::{
     AuthorService, CreateNotificationRequest, EmailService, EnrichmentWorkflow, FileService,
-    IdentityResolver, NotificationService, SeriesQueryService, TagService, WorkService,
+    NotificationService, SeriesQueryService, TagService, WorkService,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -175,10 +175,7 @@ pub async fn add<
     Json(req): Json<AddWorkRequest>,
 ) -> Result<Json<AddWorkResponse>, ApiError> {
     let author_name_for_gr = req.author_name.clone();
-    use livrarr_domain::identity::{
-        IdentityState, LatencyTier, PendingReason, RawHarvest, Resolution, WorkCandidate, WorkSeed,
-        WorkSeedFields,
-    };
+    use livrarr_domain::identity::{LatencyTier, RawHarvest, WorkCandidate, WorkSeedFields};
 
     let language = req
         .language
@@ -186,81 +183,54 @@ pub async fn add<
         .map(livrarr_domain::normalize_language)
         .unwrap_or_else(|| "en".to_string());
 
-    let cover_is_manual = req.cover_manual && req.cover_url.is_some();
+    // The UI hands back the picked cover in its proxied display form
+    // (`/api/v1/coverproxy?url=<encoded>`); persist the real provider URL so it
+    // is a usable cover source (a proxied, leading-`/` value is dropped by the
+    // DB cover-URL backstop and the manual pick never sticks).
+    let cover_url = req
+        .cover_url
+        .as_deref()
+        .map(livrarr_domain::unproxy_cover_url);
+    let cover_is_manual = req.cover_manual && cover_url.is_some();
 
-    // Sanitize the request's identifiers at the boundary: normalize (isbn/asin/
-    // gr_key) and DROP malformed ones (WorkSeed::sanitized), so the resolver
-    // fast-path never trusts an un-normalized or bad anchor — which would persist
-    // a denormalized identifier. Resolve only when a real anchor survives; a user
-    // pick is then trusted via the fast-path (work anchors resolve with no
-    // network; an isbn/asin-only pick still fans out to find a work anchor).
-    let seed = WorkSeed::sanitized(RawHarvest {
-        ol_key: req.ol_key.clone(),
-        gr_key: req.gr_key.clone(),
-        hc_key: req.hc_key.clone(),
-        isbn: req.isbn_13.clone(),
-        asin: req.asin.clone(),
-        title: Some(req.title.clone()),
-        author_name: Some(req.author_name.clone()),
-        language: Some(language.clone()),
-        series_name: None,
-        year: req.year,
-        user_confirmed: true,
-    })
-    .ok()
-    .filter(|s| {
-        s.ol_key.is_some()
-            || s.gr_key.is_some()
-            || s.hc_key.is_some()
-            || s.isbn_13.is_some()
-            || s.asin.is_some()
-    });
-    let identity = if let Some(seed) = seed {
-        let resolution = state
-            .identity_resolver()
-            .resolve(ctx.user.id, &seed, LatencyTier::Interactive)
-            .await
-            .map_err(|e| ApiError::Internal(format!("identity resolve: {e}")))?;
-        match resolution {
-            Resolution::Resolved {
-                identity, method, ..
-            } => IdentityState::Confirmed {
-                anchors: identity,
-                method,
-                score: None,
+    // Resolve identity through the shared resolver — the one place every door
+    // turns raw anchors into a Confirmed/Pending/Conflict badge (P1). Boundary
+    // sanitization (normalize + drop malformed anchors) happens inside
+    // resolve_identity; an isbn/asin-only pick still fans out to find a work anchor.
+    let resolved = state
+        .work_service()
+        .resolve_identity(
+            ctx.user.id,
+            RawHarvest {
+                ol_key: req.ol_key.clone(),
+                gr_key: req.gr_key.clone(),
+                hc_key: req.hc_key.clone(),
+                isbn: req.isbn_13.clone(),
+                asin: req.asin.clone(),
+                title: Some(req.title.clone()),
+                author_name: Some(req.author_name.clone()),
+                language: Some(language.clone()),
+                series_name: None,
+                year: req.year,
+                user_confirmed: true,
             },
-            Resolution::NeedsConfirmation { candidates } => IdentityState::Pending {
-                reason: PendingReason::LowConfidence,
-                seed_anchors: None,
-                top_candidates: candidates,
-            },
-            Resolution::Unresolved {
-                reason, captured, ..
-            } => IdentityState::Pending {
-                reason,
-                seed_anchors: Some(captured),
-                top_candidates: vec![],
-            },
-            Resolution::Conflict { conflict, .. } => {
-                let work = state
-                    .work_service()
-                    .get(ctx.user.id, conflict.existing_work_id)
-                    .await?;
-                let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None, None);
-                return Ok(Json(AddWorkResponse {
-                    work: detail,
-                    author_created: false,
-                    messages: vec!["identity conflict: existing work has a different anchor".into()],
-                }));
-            }
-        }
-    } else {
-        IdentityState::Pending {
-            reason: PendingReason::NoCandidates,
-            seed_anchors: None,
-            top_candidates: vec![],
-        }
-    };
+            LatencyTier::Interactive,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("identity resolve: {e}")))?;
+    if let Some(conflict) = resolved.conflict {
+        let work = state
+            .work_service()
+            .get(ctx.user.id, conflict.existing_work_id)
+            .await?;
+        let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None, None);
+        return Ok(Json(AddWorkResponse {
+            work: detail,
+            author_created: false,
+            messages: vec!["identity conflict: existing work has a different anchor".into()],
+        }));
+    }
+    let identity = resolved.identity;
 
     let candidate = WorkCandidate {
         fields: WorkSeedFields {
@@ -269,7 +239,7 @@ pub async fn add<
             language,
             author_ol_key: req.author_ol_key,
             year: req.year,
-            cover_url: req.cover_url,
+            cover_url,
             detail_url: req.detail_url,
             description: None,
             series_name: None,

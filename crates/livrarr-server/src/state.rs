@@ -34,7 +34,7 @@ pub type LiveLlmValidator = livrarr_metadata::llm_validator::LiveLlmValidator;
 pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
     SqliteDb,
     LiveProviderQueue,
-    livrarr_metadata::DefaultMergeEngine<livrarr_external_data::llm_caller_service::LlmCallerImpl>,
+    livrarr_metadata::DefaultMergeEngine,
     LiveLlmValidator,
     livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
@@ -70,7 +70,7 @@ pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     LiveEnrichmentWorkflow,
     livrarr_http::fetcher::HttpFetcherImpl,
     livrarr_external_data::llm_caller_service::LlmCallerImpl,
-    livrarr_metadata::DefaultMergeEngine<livrarr_external_data::llm_caller_service::LlmCallerImpl>,
+    livrarr_metadata::DefaultMergeEngine,
     LiveTagServiceImpl,
 >;
 pub type LiveGrabService = livrarr_download::grab_service::GrabServiceImpl<SqliteDb>;

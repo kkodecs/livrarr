@@ -41,9 +41,9 @@ pub use livrarr_enrichment::provider_queue::{
 pub use livrarr_enrichment::{
     cover_gate, cover_resolution, llm_ewl, llm_validator, provider_queue, CircuitBreakerConfig,
     CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentError, EnrichmentMode,
-    EnrichmentResult, EnrichmentService, EnrichmentServiceImpl, MergeEngine, MergeError,
-    MergeInput, MergeOutput, PriorityModel, ProviderQueue, ProviderQueueConfig, ProviderQueueError,
-    ReconstructedOutcome, ScatterGatherResult,
+    EnrichmentResult, EnrichmentService, EnrichmentServiceImpl, LivePacingQueue, MergeEngine,
+    MergeError, MergeInput, MergeOutput, PacingQueue, PriorityModel, ProviderQueue,
+    ProviderQueueConfig, ProviderQueueError, ReconstructedOutcome, ScatterGatherResult,
 };
 
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
@@ -452,6 +452,7 @@ pub mod tests {
             _user_id: UserId,
             _work_id: WorkId,
             _mode: EnrichmentMode,
+            _candidate_id: Option<livrarr_domain::identity::CandidateId>,
         ) -> Result<EnrichmentResult, EnrichmentError> {
             // TEMP(pk-tdd): stub uses internal scenario mode; real work_id lookup not needed here.
             let work = Work::default();

@@ -2,7 +2,7 @@ use chrono::Utc;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
-use crate::sqlite_common::{map_db_err, parse_dt};
+use crate::sqlite_common::{absolute_http_cover_url, map_db_err, parse_dt};
 use crate::{
     ApplyEnrichmentMergeRequest, ApplyMergeOutcome, AuthorId, CreateWorkDbRequest, DbError,
     EnrichmentStatus, MediaType, NarrationType, ProvenanceSetter, UpdateWorkEnrichmentDbRequest,
@@ -473,7 +473,7 @@ impl WorkDb for SqliteDb {
         .bind(req.rating_count)
         .bind(enrichment_status_str(req.enrichment_status))
         .bind(req.enrichment_source.as_deref())
-        .bind(req.cover_url.as_deref())
+        .bind(absolute_http_cover_url(req.cover_url.as_deref()))
         .bind(&now)
         .bind(id)
         .bind(user_id)
@@ -604,7 +604,7 @@ impl WorkDb for SqliteDb {
              cover_width = ?, cover_height = ?, cover_manual = ? \
              WHERE id = ? AND user_id = ?",
         )
-        .bind(cover_url)
+        .bind(absolute_http_cover_url(cover_url))
         .bind(cover_source)
         .bind(trust_str)
         .bind(cover_width)
@@ -642,7 +642,7 @@ impl WorkDb for SqliteDb {
              audiobook_cover_trust = ?, audiobook_cover_width = ?, audiobook_cover_height = ? \
              WHERE id = ? AND user_id = ?",
         )
-        .bind(audiobook_cover_url)
+        .bind(absolute_http_cover_url(audiobook_cover_url))
         .bind(audiobook_cover_source)
         .bind(trust_str)
         .bind(audiobook_cover_width)
@@ -949,7 +949,7 @@ impl WorkDb for SqliteDb {
             .bind(u.abridged)
             .bind(u.rating)
             .bind(u.rating_count)
-            .bind(u.cover_url.as_deref())
+            .bind(absolute_http_cover_url(u.cover_url.as_deref()))
             .bind(u.enrichment_source.as_deref())
             .bind(status_str)
             .bind(&now)
@@ -1190,7 +1190,7 @@ impl crate::WorkDbCreate for SqliteDb {
         .bind(&req.ol_key)
         .bind(&req.gr_key)
         .bind(req.year)
-        .bind(&req.cover_url)
+        .bind(absolute_http_cover_url(req.cover_url.as_deref()))
         .bind(&now)
         .bind(req.language.as_deref())
         .bind(&req.import_id)

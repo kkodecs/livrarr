@@ -497,10 +497,21 @@ pub fn verify_isbn_match(requested_isbn: &str, identifiers: &Option<Vec<GbIdenti
 fn map_http_error(status: u16) -> ProviderOutcome<NormalizedWorkDetail> {
     match status {
         403 => ProviderOutcome::NotConfigured,
-        429 => ProviderOutcome::WillRetry {
-            reason: livrarr_domain::WillRetryReason::RateLimit,
-            next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(60),
-        },
+        429 => {
+            // Rate-limited / daily quota exhausted (Google Books free tier is
+            // ~1000 req/day; once spent, every call 429s until the daily reset).
+            // Back off several hours so the background retry loop doesn't pound
+            // an exhausted quota ~1 req/s; jitter spreads works so they don't
+            // retry in lockstep. Foreground refresh (Manual/HardRefresh) bypasses
+            // next_attempt_at, so a user can still force an immediate retry.
+            let jitter_secs = (chrono::Utc::now().timestamp_subsec_nanos() % 10_800) as i64;
+            ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::RateLimit,
+                next_attempt_at: chrono::Utc::now()
+                    + chrono::Duration::hours(6)
+                    + chrono::Duration::seconds(jitter_secs),
+            }
+        }
         _ => ProviderOutcome::WillRetry {
             reason: livrarr_domain::WillRetryReason::ServerError,
             next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),

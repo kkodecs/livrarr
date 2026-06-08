@@ -27,6 +27,7 @@ livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
 livrarr-http = { workspace = true }
 livrarr-external-data = { workspace = true }
+livrarr-materialize = { workspace = true }
 axum = "0.8"
 assert_matches = "1"
 futures = "0.3"
@@ -326,3 +327,29 @@ path = "../../tests/behavioral/test_wcc_eager_match.rs"
 [[test]]
 name = "test_wcc_resolver_matrix"
 path = "../../tests/behavioral/test_wcc_resolver_matrix.rs"
+
+# --- Metadata refactor behavioral tests (RED — Code stage test-first) ---
+
+[[test]]
+name = "test_metadata_refactor_policy"
+path = "../../tests/behavioral/test_metadata_refactor_policy.rs"
+
+[[test]]
+name = "test_metadata_refactor_pacing"
+path = "../../tests/behavioral/test_metadata_refactor_pacing.rs"
+
+[[test]]
+name = "test_metadata_refactor_materialize"
+path = "../../tests/behavioral/test_metadata_refactor_materialize.rs"
+
+[[test]]
+name = "test_metadata_refactor_merge"
+path = "../../tests/behavioral/test_metadata_refactor_merge.rs"
+
+[[test]]
+name = "test_metadata_refactor_pipeline"
+path = "../../tests/behavioral/test_metadata_refactor_pipeline.rs"
+
+[[test]]
+name = "test_metadata_refactor_cache"
+path = "../../tests/behavioral/test_metadata_refactor_cache.rs"

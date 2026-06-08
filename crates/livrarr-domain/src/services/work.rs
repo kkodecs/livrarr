@@ -247,6 +247,19 @@ pub trait WorkService: Send + Sync {
         user_id: UserId,
         candidate: crate::identity::WorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError>;
+    /// Resolve a raw identity harvest into a [`crate::identity::ResolvedIdentity`]
+    /// through the shared multi-provider resolver — the single place identity is
+    /// decided, so every creation path agrees on what a book is (P1). `tier`
+    /// selects interactive (synchronous; a person is waiting) vs background (bulk).
+    /// With no resolver configured or no usable anchor in the harvest, returns a
+    /// `Pending` identity (anchors preserved) and no conflict — never a fabricated
+    /// `Confirmed`.
+    async fn resolve_identity(
+        &self,
+        user_id: UserId,
+        harvest: crate::identity::RawHarvest,
+        tier: crate::identity::LatencyTier,
+    ) -> Result<crate::identity::ResolvedIdentity, WorkServiceError>;
     async fn get(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError>;
     async fn get_detail(
         &self,

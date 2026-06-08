@@ -1113,7 +1113,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -1212,7 +1212,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -1316,7 +1316,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -1377,7 +1377,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -1437,7 +1437,7 @@ macro_rules! enrichment_service_tests {
             );
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -1499,7 +1499,7 @@ macro_rules! enrichment_service_tests {
             );
 
             let err = service
-                .enrich_work(h.user_id(), work.id, EnrichmentMode::Background)
+                .enrich_work(h.user_id(), work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap_err();
 
@@ -1565,7 +1565,7 @@ macro_rules! enrichment_service_tests {
             let first_work = work.clone();
             let first = tokio::spawn(async move {
                 first_service
-                    .enrich_work(first_work.user_id, first_work.id, EnrichmentMode::Background)
+                    .enrich_work(first_work.user_id, first_work.id, EnrichmentMode::Background, None)
                     .await
                     .unwrap()
             });
@@ -1578,7 +1578,7 @@ macro_rules! enrichment_service_tests {
             let second = tokio::spawn(async move {
                 let _ = second_started_tx.send(());
                 second_service
-                    .enrich_work(second_work.user_id, second_work.id, EnrichmentMode::Background)
+                    .enrich_work(second_work.user_id, second_work.id, EnrichmentMode::Background, None)
                     .await
                     .unwrap()
             });
@@ -1640,7 +1640,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -1724,7 +1724,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let err = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap_err();
 
@@ -1776,7 +1776,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(h.user_id(), work.id, EnrichmentMode::Background)
+                .enrich_work(h.user_id(), work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -1798,7 +1798,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Manual)
+                .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
                 .await
                 .unwrap();
 
@@ -1856,7 +1856,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -1909,7 +1909,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -1964,7 +1964,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(h.user_id(), work.id, EnrichmentMode::Background)
+                .enrich_work(h.user_id(), work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -2019,7 +2019,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, StubMergeEngine::default());
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -2108,7 +2108,7 @@ macro_rules! enrichment_service_tests {
             );
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -2153,7 +2153,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::HardRefresh)
+                .enrich_work(user_id, work.id, EnrichmentMode::HardRefresh, None)
                 .await
                 .unwrap();
 
@@ -2195,7 +2195,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -2267,7 +2267,7 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                 .await
                 .unwrap();
 
@@ -2533,7 +2533,7 @@ macro_rules! enrichment_service_tests {
             let enrich_service = service.clone();
             let enrich = tokio::spawn(async move {
                 enrich_service
-                    .enrich_work(user_id, work.id, EnrichmentMode::Background)
+                    .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
                     .await
                     .unwrap()
             });

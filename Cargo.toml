@@ -12,6 +12,7 @@ members = [
     "crates/livrarr-download",
     "crates/livrarr-library",
     "crates/livrarr-tagwrite",
+    "crates/livrarr-materialize",
     "crates/livrarr-jobs",
     "crates/livrarr-handlers",
     "crates/livrarr-server",
@@ -40,6 +41,7 @@ livrarr-metadata = { path = "crates/livrarr-metadata" }
 livrarr-download = { path = "crates/livrarr-download" }
 livrarr-library = { path = "crates/livrarr-library" }
 livrarr-tagwrite = { path = "crates/livrarr-tagwrite" }
+livrarr-materialize = { path = "crates/livrarr-materialize" }
 livrarr-jobs = { path = "crates/livrarr-jobs" }
 livrarr-matching = { path = "crates/livrarr-matching" }
 livrarr-handlers = { path = "crates/livrarr-handlers" }

@@ -22,11 +22,13 @@ pub mod cover_gate;
 pub mod cover_resolution;
 pub mod llm_ewl;
 pub mod llm_validator;
+pub mod pacing_queue;
 pub mod provider_queue;
 
 #[cfg(test)]
 mod provider_queue_tracer_tests;
 
+pub use pacing_queue::{LivePacingQueue, PacingQueue};
 pub use provider_queue::{
     ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
 };
@@ -48,12 +50,16 @@ impl livrarr_domain::services::LlmCaller for StubNoLlm {
 
 #[trait_variant::make(Send)]
 pub trait EnrichmentService: Send + Sync {
-    /// TEMP(pk-tdd): compile-only scaffold — signature updated for metadata-overhaul.
+    /// The one enrichment road (REQ-001). `candidate_id` (metadata-refactor R-001):
+    /// when `Some`, the pipeline consumes that picked candidate's cached discovery
+    /// payloads (zero network) before gateway-fetching the rest; `None` = enrich
+    /// from the network.
     async fn enrich_work(
         &self,
         user_id: UserId,
         work_id: WorkId,
         mode: EnrichmentMode,
+        candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<EnrichmentResult, EnrichmentError>;
 
     /// TEMP(pk-tdd): compile-only scaffold — reset work for manual refresh.
@@ -353,18 +359,9 @@ pub trait MergeEngine: Send + Sync {
     ) -> Result<MergeOutput, MergeError>;
 }
 
-/// Default merge engine: LLM arbitration when configured, deterministic fallback otherwise.
-///
-/// `L` is the LLM caller — `LlmCallerImpl` in production, a no-op stub in tests.
-/// When `llm_configured` is false the LLM path is never entered and `L` is never
-/// called, so tests can use `NoOpLlmCaller` without wiring real credentials.
-pub struct DefaultMergeEngine<L = livrarr_external_data::llm_caller_service::LlmCallerImpl> {
-    llm: L,
-    llm_configured: bool,
-    /// Kept to satisfy the old `new(priority_model)` call sites during transition.
-    /// The priority model per merge is taken from `MergeInput` — this field is unused.
-    _priority_model: PriorityModel,
-}
+/// Deterministic merge engine (REQ-004/REQ-005, P-C): pure and zero-LLM. The
+/// per-merge priority model is taken from `MergeInput`; the engine is stateless.
+pub struct DefaultMergeEngine;
 
 /// Build the DB apply-request from a computed merge output, rewriting the
 /// per-row ids to the target (user_id, work_id). Shared by the network
@@ -405,50 +402,41 @@ pub fn build_apply_request(
     }
 }
 
-impl DefaultMergeEngine<livrarr_external_data::llm_caller_service::LlmCallerImpl> {
-    /// Construct with no LLM (deterministic-only). Compatible with the pre-Phase-5
-    /// `new(priority_model)` signature used in `main.rs` and tests.
-    pub fn new(priority_model: PriorityModel) -> Self {
-        Self {
-            llm: livrarr_external_data::llm_caller_service::LlmCallerImpl::not_configured(),
-            llm_configured: false,
-            _priority_model: priority_model,
-        }
+impl DefaultMergeEngine {
+    /// Construct the deterministic merge engine. `priority_model` is accepted for
+    /// call-site compatibility; the per-merge model comes from `MergeInput`.
+    pub fn new(_priority_model: PriorityModel) -> Self {
+        Self
     }
 }
 
-impl<L> DefaultMergeEngine<L>
-where
-    L: livrarr_domain::services::LlmCaller + Send + Sync,
-{
-    /// Construct with an LLM caller. `llm_configured` controls whether the LLM
-    /// path is entered — set to `false` to force deterministic mode even when
-    /// an `L` is supplied (useful in tests).
-    pub fn new_with_llm(priority_model: PriorityModel, llm: L, llm_configured: bool) -> Self {
-        Self {
-            llm,
-            llm_configured,
-            _priority_model: priority_model,
-        }
+impl DefaultMergeEngine {
+    /// Compatibility constructor for call sites that previously supplied an LLM
+    /// caller. The merge is purely deterministic now (REQ-005/D-010), so the
+    /// caller and its configured flag are accepted and discarded.
+    pub fn new_with_llm<L>(_priority_model: PriorityModel, _llm: L, _llm_configured: bool) -> Self
+    where
+        L: livrarr_domain::services::LlmCaller + Send + Sync,
+    {
+        Self
     }
 }
 
-impl<L> MergeEngine for DefaultMergeEngine<L>
-where
-    L: livrarr_domain::services::LlmCaller + Send + Sync,
-{
+impl MergeEngine for DefaultMergeEngine {
     async fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError> {
-        if self.llm_configured {
-            merge_impl_llm(&self.llm, inputs).await
-        } else {
-            merge_impl(inputs)
-        }
+        // REQ-005/D-010: the merge is purely deterministic — ZERO LLM, even when a
+        // caller is configured. Language routing (REQ-014/#133) is enforced here at
+        // the single chokepoint both the cached and network entry paths funnel through,
+        // so a foreign work can never take English OpenLibrary/Hardcover metadata.
+        let inputs = drop_language_incompatible_providers(inputs);
+        merge_impl(inputs)
     }
 
     /// Merge from already-fetched per-provider payloads — zero provider network
-    /// calls (REQ-014/015). Wraps each payload as a ReconstructedOutcome, drops
-    /// OpenLibrary + Hardcover for non-English works (REQ-027), and runs the
-    /// existing deterministic merge unchanged (REQ-016/017).
+    /// calls (REQ-014/015). Wraps each payload as a ReconstructedOutcome and runs
+    /// the deterministic merge. The foreign-work OpenLibrary/Hardcover drop
+    /// (REQ-027) is enforced centrally in `merge`, so this cached path and the
+    /// network path share one language-routing policy (#133).
     async fn merge_from_cached(
         &self,
         work: Work,
@@ -456,19 +444,8 @@ where
         current_provenance: Vec<FieldProvenance>,
         language: Option<&str>,
     ) -> Result<MergeOutput, MergeError> {
-        use livrarr_domain::MetadataProvider as P;
-        // REQ-027: a non-English work must not take OpenLibrary/Hardcover English
-        // metadata. PriorityModel::foreign() still lists them as fallbacks, so
-        // reordering is insufficient — drop them from the inputs before merging.
-        let is_foreign = matches!(
-            livrarr_external_data::language::provider_priority(language),
-            livrarr_external_data::language::ProviderPriority::Foreign
-        );
         let provider_results = payloads
             .into_iter()
-            .filter(|(provider, _)| {
-                !(is_foreign && matches!(provider, P::OpenLibrary | P::Hardcover))
-            })
             .map(|(provider, detail)| {
                 (
                     provider,
@@ -493,6 +470,27 @@ where
 // =============================================================================
 // Merge implementation helpers
 // =============================================================================
+
+/// Enforce P2 (a book's language is sacred): a foreign-language work must never
+/// take English-centric OpenLibrary/Hardcover metadata (#133 / REQ-027). Called
+/// once at the `MergeEngine::merge` chokepoint, so the rule is caller-independent —
+/// `PriorityModel::foreign()` still lists OL/HC as fallbacks, so reordering alone
+/// is insufficient; the providers must be removed from the inputs. OL/HC anchors
+/// are captured upstream at the identity resolver (language-agnostic), so only
+/// metadata contribution is affected, not identity.
+fn drop_language_incompatible_providers(mut inputs: MergeInput) -> MergeInput {
+    use livrarr_domain::MetadataProvider as P;
+    let is_foreign = matches!(
+        livrarr_external_data::language::provider_priority(inputs.current_work.language.as_deref()),
+        livrarr_external_data::language::ProviderPriority::Foreign
+    );
+    if is_foreign {
+        inputs
+            .provider_results
+            .retain(|provider, _| !matches!(provider, P::OpenLibrary | P::Hardcover));
+    }
+    inputs
+}
 
 /// Field category for priority model lookup.
 enum FieldCategory {
@@ -597,7 +595,7 @@ fn extract_current_field(field: WorkField, work: &Work) -> FieldValue {
         WorkField::SeriesName => FieldValue::Str(work.series_name.clone()),
         WorkField::SeriesPosition => FieldValue::Float(work.series_position),
         WorkField::Genres => FieldValue::Strings(work.genres.clone()),
-        WorkField::Language => FieldValue::Str(work.language.clone()),
+        WorkField::Language => FieldValue::Str(non_blank(&work.language)),
         WorkField::PageCount => FieldValue::Int(work.page_count),
         WorkField::DurationSeconds => FieldValue::Int(work.duration_seconds),
         WorkField::Publisher => FieldValue::Str(work.publisher.clone()),
@@ -743,8 +741,14 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
     let mut contributing_providers: Vec<livrarr_domain::MetadataProvider> = Vec::new();
 
     for &field in MERGE_FIELDS {
-        // 4a. Identity fields are locked at add-time — never overwrite non-empty title/author.
-        if field == WorkField::Title || field == WorkField::AuthorName {
+        // 4a. Identity fields are locked at add-time — never overwrite a non-empty
+        // title/author/language. Language is identity-sovereign (P2): set once at
+        // identity from real data, only a user changes it. A provider may FILL a
+        // blank language but never override a set one.
+        if field == WorkField::Title
+            || field == WorkField::AuthorName
+            || field == WorkField::Language
+        {
             let current = extract_current_field(field, &inputs.current_work);
             if current.is_some() {
                 resolved_values.insert(field, current);
@@ -847,19 +851,29 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
 
     let merged_description = get_str(WorkField::Description);
 
-    // 5b. Cover resolution (separate from generic field merge).
+    // 5b. Cover resolution (separate from generic field merge). REQ-006: covers
+    // are chosen by provider PRIORITY (something-beats-nothing, no size ranking).
+    // REQ-008: a user-locked cover (provenance Setter=User) is never resolved
+    // over, so materialize neither downloads nor writes a replacement.
     let outcomes_ref: HashMap<livrarr_domain::MetadataProvider, &ReconstructedOutcome> = inputs
         .provider_results
         .iter()
         .map(|(p, o)| (*p, o))
         .collect();
-    let cover_resolution = cover_resolution::resolve_cover(
-        &inputs.current_work,
-        livrarr_domain::CoverMediaType::Ebook,
-        &pm.cover,
-        &eligible_providers,
-        &outcomes_ref,
-    );
+    let cover_user_locked = prov_map
+        .get(&WorkField::CoverUrl)
+        .is_some_and(|fp| fp.setter == livrarr_domain::ProvenanceSetter::User && !fp.cleared);
+    let cover_resolution = if cover_user_locked {
+        None
+    } else {
+        cover_resolution::resolve_cover(
+            &inputs.current_work,
+            livrarr_domain::CoverMediaType::Ebook,
+            &pm.cover,
+            &eligible_providers,
+            &outcomes_ref,
+        )
+    };
     let audiobook_cover_resolution = cover_resolution::resolve_cover(
         &inputs.current_work,
         livrarr_domain::CoverMediaType::Audiobook,
@@ -920,7 +934,13 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         rating_count: get_int(WorkField::RatingCount),
         enrichment_status,
         enrichment_source: enrichment_source.clone(),
-        cover_url: inputs.current_work.cover_url.clone(),
+        // REQ-006: persist the priority-resolved cover URL; fall back to the
+        // existing cover when no provider supplied one (non-destructive) or when
+        // the user locked it (cover_resolution is None above).
+        cover_url: cover_resolution
+            .as_ref()
+            .map(|c| c.url.clone())
+            .or_else(|| inputs.current_work.cover_url.clone()),
     };
 
     // 8. External ID collection: from all Success providers.
@@ -963,385 +983,6 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
 // =============================================================================
 // LLM arbitration merge path
 // =============================================================================
-
-/// LLM response for per-field merge arbitration.
-#[derive(Debug, serde::Deserialize)]
-struct LlmMergeResponse {
-    identity_valid: bool,
-    #[serde(default)]
-    conflict_providers: Vec<String>,
-    #[serde(default)]
-    fields: HashMap<String, LlmFieldSelection>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct LlmFieldSelection {
-    value: serde_json::Value,
-    #[serde(default)]
-    provider: Option<String>,
-}
-
-/// LLM arbitration path for merge.
-///
-/// Sends a single call describing all provider payloads and requests per-field
-/// selection with identity validation. Falls back to `merge_impl` on any LLM
-/// error — the LLM is value-add and never gatekeeps enrichment (Principle 11).
-async fn merge_impl_llm<L>(llm: &L, inputs: MergeInput) -> Result<MergeOutput, MergeError>
-where
-    L: livrarr_domain::services::LlmCaller + Send + Sync,
-{
-    use livrarr_domain::services::{LlmCallRequest, LlmPurpose};
-
-    let pm = &inputs.priority_model;
-
-    // Build priority hint string for the system prompt.
-    let priority_hint: Vec<&str> = pm.content.iter().map(|p| provider_name(*p)).collect();
-    let priority_hint_str = priority_hint.join(" > ");
-
-    // Collect user-owned fields.
-    let user_owned: Vec<String> = inputs
-        .current_provenance
-        .iter()
-        .filter(|fp| fp.setter == livrarr_domain::ProvenanceSetter::User)
-        .map(|fp| format!("{:?}", fp.field))
-        .collect();
-
-    // Collect eligible provider payloads.
-    let eligible: Vec<(livrarr_domain::MetadataProvider, serde_json::Value)> = inputs
-        .provider_results
-        .iter()
-        .filter(|(_, o)| o.class == livrarr_domain::OutcomeClass::Success)
-        .filter_map(|(provider, o)| {
-            o.payload.as_ref().map(|detail| {
-                let json = serde_json::to_value(detail).unwrap_or(serde_json::Value::Null);
-                (*provider, json)
-            })
-        })
-        .collect();
-
-    if eligible.is_empty() {
-        // No providers succeeded — fall back to deterministic.
-        return merge_impl(inputs);
-    }
-
-    // Build user prompt: provider data as JSON.
-    let mut provider_block = String::new();
-    for (provider, json) in &eligible {
-        provider_block.push_str(&format!(
-            "- {}: {}\n",
-            provider_name(*provider),
-            serde_json::to_string(json).unwrap_or_default()
-        ));
-    }
-
-    let work_identity = format!(
-        "\"{}\" by \"{}\" (language: {})",
-        inputs.current_work.title,
-        inputs.current_work.author_name,
-        inputs.current_work.language.as_deref().unwrap_or("unknown")
-    );
-    let user_owned_str = if user_owned.is_empty() {
-        "(none)".to_string()
-    } else {
-        user_owned.join(", ")
-    };
-
-    let system_template = format!(
-        "You are a librarian assistant merging book metadata from multiple sources. \
-Pick the best value for each field. Consider: completeness, accuracy, native language \
-for foreign works, and specificity. Provider priority (hint, not rule): {priority_hint_str}. \
-User-owned fields are locked — do not suggest changes to them.",
-    );
-
-    let user_template = format!(
-        "Work identity: {work_identity}\n\n\
-Provider results:\n{provider_block}\n\
-User-owned fields (DO NOT CHANGE): {user_owned_str}\n\n\
-For each field, select the best value and name the source provider.\n\
-Also confirm all providers describe the same work (identity validation).\n\
-If any provider's data is for a different book, flag it in conflict_providers.\n\n\
-Return JSON only:\n\
-{{\n\
-  \"identity_valid\": true,\n\
-  \"conflict_providers\": [],\n\
-  \"fields\": {{\n\
-    \"description\": {{\"value\": \"...\", \"provider\": \"hardcover\"}},\n\
-    \"genres\": {{\"value\": [...], \"provider\": \"goodreads\"}},\n\
-    \"...\": {{\"value\": \"...\", \"provider\": \"...\"}}\n\
-  }}\n\
-}}"
-    );
-
-    let req = LlmCallRequest {
-        system_template,
-        user_template,
-        context: std::collections::HashMap::new(),
-        allowed_fields: &[],
-        timeout: std::time::Duration::from_secs(30),
-        purpose: LlmPurpose::MergeArbitration,
-    };
-
-    let llm_resp = match llm.call(req).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("LLM merge arbitration failed, falling back to deterministic: {e}");
-            return merge_impl(inputs);
-        }
-    };
-
-    // Strip optional code-fence wrapping.
-    let raw = llm_resp.content.trim();
-    let raw = raw
-        .strip_prefix("```json")
-        .or_else(|| raw.strip_prefix("```"))
-        .unwrap_or(raw);
-    let raw = raw.strip_suffix("```").unwrap_or(raw).trim();
-
-    let parsed: LlmMergeResponse = match serde_json::from_str(raw) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("LLM merge response parse failed ({e}), falling back to deterministic");
-            return merge_impl(inputs);
-        }
-    };
-
-    // Identity check: if invalid, mark Conflict and return early.
-    if !parsed.identity_valid {
-        tracing::warn!(
-            work_id = inputs.current_work.id,
-            conflict_providers = ?parsed.conflict_providers,
-            "LLM merge identity check failed — marking work as Conflict"
-        );
-        return Ok(MergeOutput {
-            conflict_detected: true,
-            work_update: None,
-            provenance_upserts: Vec::new(),
-            provenance_deletes: Vec::new(),
-            external_id_updates: collect_external_ids(&inputs),
-            enrichment_status: EnrichmentStatus::Unenriched,
-            enrichment_source: None,
-            cover_resolution: None,
-            audiobook_cover_resolution: None,
-        });
-    }
-
-    // Apply LLM-selected fields on top of the deterministic merge result.
-    // We run deterministic first to get all the bookkeeping (provenance,
-    // external IDs, status), then patch field values and provenance for
-    // fields where the LLM made a selection.
-    let mut output = merge_impl(inputs.clone())?;
-
-    // Build a lookup: provider name → MetadataProvider.
-    let provider_by_name: HashMap<&str, livrarr_domain::MetadataProvider> = [
-        ("hardcover", livrarr_domain::MetadataProvider::Hardcover),
-        ("goodreads", livrarr_domain::MetadataProvider::Goodreads),
-        ("openlibrary", livrarr_domain::MetadataProvider::OpenLibrary),
-        ("audnexus", livrarr_domain::MetadataProvider::Audnexus),
-        ("readarr", livrarr_domain::MetadataProvider::Readarr),
-        ("llm", livrarr_domain::MetadataProvider::Llm),
-        (
-            "google_books",
-            livrarr_domain::MetadataProvider::GoogleBooks,
-        ),
-        ("googlebooks", livrarr_domain::MetadataProvider::GoogleBooks),
-    ]
-    .iter()
-    .cloned()
-    .collect();
-
-    // Provenance maps for patching.
-    let user_id = inputs.current_work.user_id;
-    let work_id = inputs.current_work.id;
-    let prov_map: HashMap<WorkField, &FieldProvenance> = inputs
-        .current_provenance
-        .iter()
-        .map(|fp| (fp.field, fp))
-        .collect();
-
-    if let Some(ref mut work_update_inner) = output.work_update {
-        let req = work_update_inner.as_inner_mut();
-
-        for (field_name, selection) in &parsed.fields {
-            let wf = match field_name.as_str() {
-                "title" => WorkField::Title,
-                "subtitle" => WorkField::Subtitle,
-                "original_title" => WorkField::OriginalTitle,
-                "author_name" => WorkField::AuthorName,
-                "description" => WorkField::Description,
-                "year" => WorkField::Year,
-                "series_name" => WorkField::SeriesName,
-                "series_position" => WorkField::SeriesPosition,
-                "genres" => WorkField::Genres,
-                "language" => WorkField::Language,
-                "page_count" => WorkField::PageCount,
-                "duration_seconds" => WorkField::DurationSeconds,
-                "publisher" => WorkField::Publisher,
-                "publish_date" => WorkField::PublishDate,
-                "ol_key" => WorkField::OlKey,
-                "hc_key" => WorkField::HcKey,
-                "gr_key" => WorkField::GrKey,
-                "isbn_13" => WorkField::Isbn13,
-                "asin" => WorkField::Asin,
-                _ => continue,
-            };
-
-            // Skip user-owned fields.
-            if let Some(fp) = prov_map.get(&wf) {
-                if fp.setter == livrarr_domain::ProvenanceSetter::User {
-                    continue;
-                }
-            }
-            // Skip cover_manual bypass.
-            if wf == WorkField::CoverUrl && inputs.current_work.cover_manual {
-                continue;
-            }
-            // Identity fields locked.
-            if wf == WorkField::Title || wf == WorkField::AuthorName {
-                if !inputs.current_work.title.is_empty() && wf == WorkField::Title {
-                    continue;
-                }
-                if !inputs.current_work.author_name.is_empty() && wf == WorkField::AuthorName {
-                    continue;
-                }
-            }
-
-            // Skip null/empty LLM selections — a provider with no data should
-            // never override one that has data, regardless of priority.
-            if selection.value.is_null()
-                || selection
-                    .value
-                    .as_str()
-                    .is_some_and(|s| s.trim().is_empty())
-            {
-                continue;
-            }
-
-            // Apply the LLM-selected value to the work_update request.
-            patch_work_update_field(req, wf, &selection.value);
-
-            // Update provenance upsert if the LLM named a provider.
-            if let Some(ref pname) = selection.provider {
-                if let Some(&winning_provider) = provider_by_name.get(pname.as_str()) {
-                    // Remove any existing upsert for this field.
-                    output.provenance_upserts.retain(|u| u.field != wf);
-                    output.provenance_upserts.push(SetFieldProvenanceRequest {
-                        user_id,
-                        work_id,
-                        field: wf,
-                        source: Some(winning_provider),
-                        setter: livrarr_domain::ProvenanceSetter::Provider,
-                        cleared: false,
-                    });
-                }
-            }
-        }
-
-        // Post-merge title/author cleanup on LLM-selected values.
-        if let Some(ref t) = req.title.clone() {
-            let cleaned = livrarr_domain::title_cleanup::clean_title(t);
-            req.title = Some(cleaned);
-        }
-        if let Some(ref a) = req.author_name.clone() {
-            let cleaned = livrarr_domain::title_cleanup::clean_author(a);
-            req.author_name = Some(cleaned);
-        }
-
-        // Re-classify enrichment status after LLM patching (REQ-019): text-only,
-        // cover never gates. Enriched iff >=1 meaningful text field is present.
-        let has_meaningful_text = req.description.is_some()
-            || req.subtitle.is_some()
-            || req.series_name.is_some()
-            || req.genres.as_ref().is_some_and(|g| !g.is_empty())
-            || req.publisher.is_some();
-        output.enrichment_status = if has_meaningful_text {
-            EnrichmentStatus::Enriched
-        } else {
-            EnrichmentStatus::Thin
-        };
-        req.enrichment_status = output.enrichment_status;
-    }
-
-    output.conflict_detected = false;
-    Ok(output)
-}
-
-/// Collect external IDs from all Success providers (used in LLM conflict path).
-fn collect_external_ids(inputs: &MergeInput) -> Vec<UpsertExternalIdRequest> {
-    let work_id = inputs.current_work.id;
-    let mut external_id_updates = Vec::new();
-    for outcome in inputs.provider_results.values() {
-        if outcome.class == livrarr_domain::OutcomeClass::Success {
-            if let Some(ref detail) = outcome.payload {
-                for isbn in &detail.additional_isbns {
-                    external_id_updates.push(UpsertExternalIdRequest {
-                        work_id,
-                        id_type: livrarr_domain::ExternalIdType::Isbn13,
-                        id_value: isbn.clone(),
-                    });
-                }
-                for asin_val in &detail.additional_asins {
-                    external_id_updates.push(UpsertExternalIdRequest {
-                        work_id,
-                        id_type: livrarr_domain::ExternalIdType::Asin,
-                        id_value: asin_val.clone(),
-                    });
-                }
-            }
-        }
-    }
-    external_id_updates
-}
-
-/// Patch a single field in `UpdateWorkEnrichmentDbRequest` from a JSON value.
-fn patch_work_update_field(
-    req: &mut UpdateWorkEnrichmentDbRequest,
-    field: WorkField,
-    value: &serde_json::Value,
-) {
-    let as_str = |v: &serde_json::Value| -> Option<String> {
-        v.as_str().map(|s| s.to_owned()).or_else(|| {
-            if v.is_null() {
-                None
-            } else {
-                Some(v.to_string())
-            }
-        })
-    };
-
-    match field {
-        WorkField::Title => req.title = value.as_str().map(|s| s.to_owned()),
-        WorkField::Subtitle => req.subtitle = as_str(value),
-        WorkField::OriginalTitle => req.original_title = as_str(value),
-        WorkField::AuthorName => req.author_name = value.as_str().map(|s| s.to_owned()),
-        WorkField::Description => req.description = as_str(value),
-        WorkField::Year => req.year = value.as_i64().map(|v| v as i32),
-        WorkField::SeriesName => req.series_name = as_str(value),
-        WorkField::SeriesPosition => req.series_position = value.as_f64(),
-        WorkField::Genres => {
-            req.genres = value.as_array().map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_owned()))
-                    .collect()
-            });
-        }
-        WorkField::Language => {
-            req.language = as_str(value).map(|s| livrarr_domain::normalize_language(&s));
-        }
-        WorkField::PageCount => req.page_count = value.as_i64().map(|v| v as i32),
-        WorkField::DurationSeconds => req.duration_seconds = value.as_i64().map(|v| v as i32),
-        WorkField::Publisher => req.publisher = as_str(value),
-        WorkField::PublishDate => req.publish_date = as_str(value),
-        WorkField::OlKey => req.ol_key = as_str(value),
-        WorkField::HcKey => req.hc_key = as_str(value),
-        WorkField::GrKey => req.gr_key = as_str(value),
-        WorkField::Isbn13 => req.isbn_13 = as_str(value),
-        WorkField::Asin => req.asin = as_str(value),
-        WorkField::CoverUrl => req.cover_url = as_str(value),
-        // Narrator, NarrationType, Abridged, Rating, RatingCount —
-        // complex typed fields: skip LLM override, keep deterministic result.
-        _ => {}
-    }
-}
 
 /// Per-work lock map type [I-12].
 type PerWorkLocks = tokio::sync::Mutex<HashMap<(UserId, WorkId), Arc<tokio::sync::Mutex<()>>>>;
@@ -1455,7 +1096,11 @@ where
         user_id: UserId,
         work_id: WorkId,
         mode: EnrichmentMode,
+        candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<EnrichmentResult, EnrichmentError> {
+        // metadata-refactor: candidate-reuse + always-materialize relocate here in
+        // the green phase (DD-007); the widened signature lands first (stub).
+        let _ = candidate_id;
         // Step 1: Acquire per-work lock [I-12]
         let _sweep = SweepLocksOnDrop {
             locks: self.locks.clone(),

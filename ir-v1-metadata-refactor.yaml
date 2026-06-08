@@ -1,0 +1,611 @@
+# IR v1 — Structural
+# Feature: metadata-refactor
+# Framing: BEHAVIORAL REBUILD on the existing 16-crate substrate (NOT a re-org).
+# The metadata-modularization re-org already split livrarr-metadata into
+# external-data / identity / enrichment (3 of the 4 planned crates landed;
+# livrarr-materialize was DEFERRED — it is created HERE). This feature collapses
+# today's several half-different add/enrich/cover roads into ONE pipeline
+# (ask -> merge -> save) that every door funnels through, with ONE HOME per
+# cross-cutting policy (provider-selection, caching, pacing, saving), enforced
+# by crate boundaries (P-D), not convention.
+#
+# The originating bug (docs/metadata-lifecycle-audit-deep-passes.md): add-from-
+# author-page produces NO cover because `try_reuse_cached_payloads` (work_service)
+# reuses pre-add provider data and SKIPS the cover/save step. This refactor
+# DELETES that fork; the single pipeline's save step (livrarr-materialize) is the
+# only road to a cover/tag, so divergence-by-door becomes structurally impossible.
+#
+# v1 (2026-06-08): initial architecture, distilled from spec-metadata-refactor.md v4
+# (15 REQ / 20 AC / 8 ST / §7 PO-locked architectural decisions) and the PO-approved
+# architecture shape (session-log-metadata-refactor.md 2026-06-08T07:00 entry).
+
+metadata:
+  feature: metadata-refactor
+  stage: v1-structural
+  spec_ref: spec-metadata-refactor.md
+  diagnosis_ref: docs/metadata-lifecycle-audit-deep-passes.md
+  version: 1
+  supersedes_note: >-
+    Builds on the as-built metadata-modularization (3 crates extracted; EnrichmentStatus
+    = {Unenriched,Enriched,Thin,Failed} after the 055 status-backport-drop). The
+    livrarr-materialize crate that modularization DEFERRED is created here as the
+    feature's forcing function (REQ-012 + the cover-bug fix).
+
+# ---------------------------------------------------------------------------
+system_architecture:
+  components:
+    - name: livrarr-domain
+      type: library
+      crate: existing
+      description: >-
+        THE LEAF (zero outward deps). Gains this feature's CONTRACTS: the EnrichmentSeed
+        + ExecutionContext{Foreground,Background}; the ProviderPolicy types (per-language
+        ebook/audiobook priority lists); the MetadataCache trait (REQ-009); the PacingQueue
+        trait + PacingLane (REQ-010); the ProviderPolicySource trait (REQ-003); the NEW
+        MaterializeService trait + MaterializeRequest/MaterializeOutcome (REQ-012); and the
+        EnrichmentOutcome value the pipeline returns. REUSES the existing EnrichmentStatus
+        enum {Unenriched,Enriched,Thin,Failed} (REQ-011 — no new persisted state) and the
+        existing provenance/Setter mechanism (REQ-008). Names NO provider payload type in a
+        trait it owns beyond the relocated-but-domain-visible contracts (keeps the handler
+        wall intact, insight 9e).
+    - name: livrarr-external-data
+      type: library
+      crate: existing
+      description: >-
+        UNCHANGED ROLE — the stateless dumb-pipe substrate (6 provider clients + ProviderFetch
+        + ProviderDiscovery + in-memory transport_cache). THE CANARY INVARIANT HOLDS: depends
+        ONLY on livrarr-domain + livrarr-http; NO livrarr-db (REQ-006 of modularization; carried
+        forward). This feature does NOT add the persistent (work,provider) cache here — that is a
+        livrarr-db impl injected via the domain MetadataCache trait, so external-data stays DB-free.
+    - name: livrarr-enrichment
+      type: library
+      crate: existing
+      description: >-
+        THE ONE ROAD. Hosts EnrichmentWorkflow (ask -> merge -> save), the deterministic merge,
+        the provider-gateway ("ask a provider" black box = cache-check + pacing + external-data
+        fetch), the PacingQueue impl (DB-stateful), and status resolution (REQ-011). Consumes the
+        ProviderPolicy snapshot, the MetadataCache (db impl), and calls livrarr-materialize for the
+        save step. DELETES the work_service `try_reuse_cached_payloads` fork AND its own LLM override
+        layer (the existing `llm_validator` / `llm_ewl` / `merge_impl_llm` surface) so the merge makes
+        ZERO LLM calls (REQ-005). Depends on domain, external-data, db, http, and the NEW livrarr-materialize.
+    - name: livrarr-materialize
+      type: library
+      crate: NEW
+      description: >-
+        NEW CRATE — 'the save step', the single home all paths are forced through for cover
+        download + tag write (P-D, REQ-012). Created by RELOCATING `download_cover_to_disk` (+
+        unproxy/upscale cover helpers) OUT of livrarr-metadata::work_service — which BREAKS the
+        cover<->work_service cycle that kept materialize out of the modularization carve. Two
+        operations behind MaterializeService: download covers (REQ-006 download side, REQ-015
+        identity-independent) and write file tags. CHANGE-GATED (REQ-012): does nothing when the
+        merged metadata is unchanged. Depends ONLY on domain + http + tagwrite. DB-FREE — the
+        caller (enrichment/server) persists cover_path + the change generation; materialize is
+        pure artifact I/O. MUST NOT depend on enrichment (REQ-012 one-home + failure isolation;
+        lets livrarr-library reuse it without pulling the enrich/network/LLM stack).
+    - name: livrarr-db
+      type: library
+      crate: existing
+      description: >-
+        Gains TWO new storages, both impls of domain traits: (1) the persistent (work,provider)
+        MetadataCache (24h TTL, refresh-bypass — REQ-009); (2) the provider-policy table + loader
+        (language -> {ebook list, audiobook list}, NEW migration — REQ-003). Also the home of the
+        provider-status rows the PacingQueue writes (REQ-010). db -> domain only (unchanged).
+    - name: livrarr-metadata
+      type: library
+      crate: existing
+      description: >-
+        SHRINKS at the cutover. work_service stops being a parallel enrichment road: its
+        `try_reuse_cached_payloads` fork is DELETED, `download_cover_to_disk` MOVES to materialize,
+        and the remaining add path becomes a thin caller that hands a seed to the pipeline
+        (REQ-001/REQ-013). No new enrichment logic lands here.
+    - name: livrarr-server
+      type: service
+      crate: existing
+      description: >-
+        Composition root. Wires the single PacingQueue instance into AppState (REQ-010), builds +
+        atomically swaps the in-memory ProviderPolicy snapshot (REQ-003), injects the db
+        MetadataCache impl into the provider-gateway, runs the materialize job, derives the
+        transient 'in progress' indicator from queue membership, and serves the Failed-retry +
+        'Retry all failed' actions (REQ-011). DELETES the background auto-retry job (REQ-011).
+    - name: livrarr-handlers
+      type: library
+      crate: existing
+      description: >-
+        The manual-import door funnels into the single pipeline via the EXISTING Has*-capability
+        trait (the compile wall: handlers must not import enrichment/db/metadata/external-data —
+        insight 9b). Unchanged wall.
+    - name: livrarr-library
+      type: library
+      crate: existing
+      description: >-
+        The list/import door. Its file-import tag-write is a tracked CUTOVER step to route through
+        livrarr-materialize (REQ-001 one-home for tags); sequenced AFTER the enrichment save path
+        is green, not in the first cut (D-008). No enrichment logic here.
+    - name: frontend
+      type: frontend
+      crate: existing
+      description: >-
+        Status badge shows the STORED EnrichmentStatus (Unenriched-as-'Pending' / Enriched / Thin /
+        Failed); a transient 'in progress / enriching…' indicator is derived from queue membership,
+        NOT the stored enum (REQ-011). Failed -> toast with a Retry link; a 'Retry all failed' bulk
+        action. Provider status page surfaces per-provider health (REQ-010). No new pages.
+  connections:
+    - { from: livrarr-enrichment,  to: livrarr-materialize, protocol: in-process, description: "the save step (REQ-012); NEW edge" }
+    - { from: livrarr-materialize, to: livrarr-tagwrite,    protocol: in-process, description: "file tag writing (existing leaf); NEW edge" }
+    - { from: livrarr-materialize, to: livrarr-http,        protocol: in-process, description: "cover download via http_client_safe (runtime URL, insight 37)" }
+    - { from: livrarr-materialize, to: livrarr-domain,      protocol: in-process, description: "impls MaterializeService; reads the merged record via domain types" }
+    - { from: livrarr-enrichment,  to: livrarr-db,          protocol: in-process, description: "MetadataCache impl + PacingQueue status writes + the merge txn (existing edge)" }
+    - { from: livrarr-enrichment,  to: livrarr-external-data, protocol: in-process, description: "ProviderFetch underneath the gateway (existing edge)" }
+    - { from: livrarr-server,      to: livrarr-enrichment,  protocol: in-process, description: "composes the pipeline + PacingQueue instance + policy snapshot + cache injection" }
+    - { from: livrarr-server,      to: livrarr-materialize, protocol: in-process, description: "runs the materialize job; injects MaterializeService" }
+    - { from: livrarr-handlers,    to: livrarr-domain,      protocol: in-process, description: "manual-import door binds the EnrichmentService capability via Has* (compile wall)" }
+    - { from: frontend,            to: livrarr-handlers,    protocol: HTTP, description: "REST; status badge + retry actions + provider status page" }
+  deployment:
+    topology: single-process
+    notes: >-
+      All Rust crates compile to one binary; frontend is a static SPA served by the same process.
+      ONE new crate (livrarr-materialize). NO new third-party dependencies (uses existing workspace
+      deps). One new DB migration (provider-policy table); the (work,provider) cache table is also
+      new. No change to the EnrichmentStatus persisted enum (REQ-011).
+
+languages:
+  - { language: Rust, version: "1.80+", usage: primary backend }
+  - { language: TypeScript, version: "5.x", usage: frontend (React SPA) }
+
+frameworks:
+  - { name: axum, version: "0.8", usage: HTTP framework (existing) }
+  - { name: React, version: "19", usage: frontend UI (existing) }
+  - { name: TanStack Query, version: "5", usage: frontend data fetching (existing) }
+
+# NO new third-party deps (P-E). Listed so the compliance gate can validate LIBRARY annotations.
+approved_libraries:
+  - { name: serde, version: "1", usage: "Serialization (existing)" }
+  - { name: serde_json, version: "1", usage: "JSON payloads (existing)" }
+  - { name: sqlx, version: "0.8", usage: "DB: policy table + (work,provider) cache + status rows + migrations (existing)" }
+  - { name: chrono, version: "0.4", usage: "DateTime: 24h cache TTL, daily-budget reset window (existing)" }
+  - { name: tokio, version: "1", usage: "Async runtime, queue workers, spawn_blocking for tag writes, time (existing)" }
+  - { name: reqwest, version: "0.12", usage: "Cover download via livrarr-http http_client_safe (existing)" }
+  - { name: image, version: "0.25", usage: "Cover decode/transform in materialize (existing; moves with cover code)" }
+  - { name: quick-xml, version: "0.37", usage: "EPUB OPF tag writing via livrarr-tagwrite (existing)" }
+  - { name: trait-variant, version: "0.1", usage: "Send async traits, non-dyn (existing)" }
+  - { name: thiserror, version: "2", usage: "Typed per-layer error enums (existing)" }
+  - { name: arc-swap, version: "1", usage: "Atomic swap of the in-memory ProviderPolicy snapshot (REQ-003) — CONFIRM present in workspace; if absent, use RwLock<Arc<..>> (no new dep)" }
+
+# ---------------------------------------------------------------------------
+decisions:
+  - id: D-001
+    topic: "One pipeline behind one port; every door funnels in (REQ-001)"
+    choice: >-
+      There is exactly one EnrichmentWorkflow (ask -> merge -> save) in livrarr-enrichment, exposed
+      as the EnrichmentService port. Every door (Add box, author page, manual import, list import,
+      refresh, background) calls it with only a SEED; doors differ in the seed's richness, never in
+      the road. The walled handlers door reaches it via the existing Has*-capability trait pattern
+      (server composes the impl) — no handler->enrichment import. work_service's parallel road and
+      its `try_reuse_cached_payloads` fork are DELETED.
+    rationale: "P-A/P-B + REQ-001. Convergence-by-construction: one road => same book, same destination, regardless of door. The cover bug was a SECOND road skipping save; removing the road removes the bug class."
+  - id: D-002
+    topic: "NEW livrarr-materialize crate = the single save home; breaks the cover<->work_service cycle (REQ-012)"
+    choice: >-
+      Create livrarr-materialize by relocating `download_cover_to_disk` (+ unproxy/upscale cover
+      helpers) OUT of livrarr-metadata::work_service. That relocation is what severs the
+      cover<->work_service dependency cycle (cover.rs currently calls back into work_service) that
+      kept materialize out of the modularization carve. materialize depends ONLY on domain + http +
+      tagwrite and is DB-FREE: it receives a fully-specified MaterializeRequest and returns a
+      MaterializeOutcome; the caller persists cover_path + the change generation. R-001 (round 1,
+      both families): the request MUST carry every DB-derived input — resolved LibraryItem file
+      paths (tagwrite needs concrete paths, not just fields), current cover state per slot (trust/
+      source/lock — to honor REQ-008 + REQ-006 replace-vs-keep without a DB read), the TagMetadata,
+      and the covers dir — otherwise materialize would have to read DB (violating this decision) or
+      the caller would materialize outside the one home (violating REQ-012). The expanded
+      MaterializeRequest (above) resolves this; DB-free holds. [ARCH-INTERNAL CALL — reviewer-confirmed.]
+    rationale: >-
+      P-D 'one home per policy' + REQ-012. Keeping materialize DB-free (vs the modularization IR's
+      db-having materialize) keeps it a clean leaf, makes failure isolation trivial (a tag-write OOM
+      cannot stall the pipeline through a shared db handle), and lets livrarr-library reuse it. The
+      cost: the change-gate state (generation) is computed by the caller (enrichment) which already
+      holds db. Honest tradeoff, not zero-cost.
+  - id: D-003
+    topic: "enrichment -> materialize is one-way; materialize MUST NOT depend on enrichment (REQ-012)"
+    choice: "The enrich spine calls MaterializeService after a successful merge. materialize names no enrichment symbol (verified by cargo tree). The materialize job in server reacts to change generation."
+    rationale: "Failure isolation + one-home reuse (D-002 rationale). A doc convention rots; the crate boundary is the only durable enforcement (insight 9b)."
+  - id: D-004
+    topic: "Transparent cache = domain MetadataCache trait, db impl, wrapped by the provider-gateway (REQ-009)"
+    choice: >-
+      'Ask a provider' is a black box (REQ-009): provider-gateway (in enrichment) checks the
+      (work,provider) MetadataCache (<=24h) -> hit: use; miss: fetch through pacing -> store. A
+      refresh bypasses the cache. The trait lives in domain; the persistent impl in livrarr-db; the
+      server injects it. external-data stays DB-FREE (the canary). The pipeline never sees the cache.
+    open_question: >-
+      Q-D04 (design): reconcile with external-data's EXISTING in-memory transport_cache (keyed
+      (provider, provider-key), ephemeral). The new cache is (work,provider)-keyed + persistent +
+      24h. Do NOT double-cache: design decides whether the persistent layer wraps or supersedes the
+      in-memory one for the enrichment-fetch path. (Spec scopes search-box/discovery caching OUT.)
+    rationale: "P-D + REQ-009. The 'transparent' wording in REQ-009 forbids the pipeline orchestrating cache; the gateway black box satisfies it while keeping external-data dumb + db-free."
+  - id: D-005
+    topic: "Pacing = domain PacingQueue trait, enrichment impl (DB-stateful), one AppState instance (REQ-010)"
+    choice: >-
+      One shared gate all provider network calls pass through. Unit of work = one provider call;
+      fan-out = submit-N-and-join. Two lanes: Foreground (drains first) + Background (REQ-010
+      foreground-before-background). Enforces per-provider rate + per-provider DAILY budget (Google
+      Books, ST-004) with backoff-to-reset. Records each call's outcome (ok / rate-limited /
+      quota-exhausted-until-T / blocked) to the provider status rows (REQ-010). Impl in enrichment
+      (DB-stateful for status + budget accounting); trait in domain; ONE instance in AppState.
+    open_question: "Q-002 (design): worker counts, per-provider rates, GB daily-budget value, backoff window — numeric tuning, not spec-blocking."
+    rationale: "P-D + REQ-010 + ST-004/ST-005. A single forced gate is the only place 'foreground outranks background' and 'GB daily budget' can be true for ALL calls."
+  - id: D-006
+    topic: "Provider policy by language = domain types + db table (NEW migration) + server in-memory snapshot (REQ-003)"
+    choice: >-
+      A policy table keyed by language; each language has TWO self-contained priority lists (ebook,
+      audiobook). DB is source of truth; loaded into an in-memory snapshot at startup; rebuilt +
+      atomically swapped on edit; lookup is a memory read. Lists used as written — no fallback, no
+      concatenation, no provider twice WITHIN a list (a provider may appear in BOTH lists, per
+      ST-001/ST-002). A language absent from the table uses a standalone GENERIC row (used instead
+      of, never appended to, a dedicated row). Foreign-language lists EXCLUDE Hardcover + OpenLibrary
+      (REQ-014, intentional policy).
+    open_question: "Q-003 (design): the generic row's exact provider membership."
+    rationale: "P-D + P-F + REQ-003/REQ-014. Provider selection is DATA with one home; language integrity is a property of the lists, enforced once."
+  - id: D-007
+    topic: "Status resolution in the pipeline; 'in progress' derived, not stored; no auto-retry (REQ-011)"
+    choice: >-
+      The pipeline maps a run outcome to the EXISTING EnrichmentStatus enum (no migration): Enriched
+      if >=1 usable field saved; else Thin if >=1 provider responded successfully (even zero usable
+      fields); else Failed (no provider returned a usable response). A MIXED outcome (one empty, rest
+      error) = Thin. 'In Progress' is NOT stored — derived live from PacingQueue membership and shown
+      transiently. DELETE the background auto-retry job (the current enum doc-comments still describe
+      it — Unenriched-after-5min + Failed-retries — that behavior is REMOVED). Recovery = user-
+      triggered single retry + a 'Retry all failed' bulk action re-enqueuing through the same queue +
+      daily budget.
+    rationale: "REQ-011 + the primary fix for GB quota churn (ST-004): removing the auto-retry loop stops the background re-dispatch that exhausts the budget."
+  - id: D-008
+    topic: "Cutover: one door at a time, compiler-guided; delete each old road as it dies (spec §7)"
+    choice: >-
+      Build the pipeline + materialize green first, then migrate doors one at a time (add box ->
+      author page -> manual import -> list import -> refresh -> background), deleting the dead road at
+      each step. The livrarr-library import tag-write reroute through materialize is a LATER cut
+      (after the enrichment save path is green) — tracked, REQ-001 one-home, not in the first slice.
+    rationale: "Spec §7 cutover strategy + P-E. Not a scorched-earth rewrite; the compiler proves each old road is dead before deletion."
+  - id: D-009
+    topic: "ExecutionContext{Foreground,Background} is an invocation parameter, not part of the seed (spec §7)"
+    choice: "The foreground/background lane is set by the CALLER on each enrich invocation (interactive add/refresh = Foreground; bulk/queue-drain = Background), not carried in EnrichmentSeed."
+    rationale: "Spec §7 'Execution context'. The seed is identity-richness only; priority is a property of the call site, backing REQ-010's lane semantics."
+  - id: D-010
+    topic: "DELETE the LLM override layer from the enrichment merge (REQ-005, R-003 round 1)"
+    choice: >-
+      The current enrichment crate ships an LLM merge path — `merge_impl_llm`, `llm_validator`,
+      `llm_ewl`, `LlmMergeResponse`, `LlmFieldSelection`, the `LlmCaller`/`StubNoLlm` plumbing, and
+      `DefaultMergeEngine`'s LLM type parameter. This refactor REMOVES it; `merge_impl` (pure,
+      deterministic) is the only merge. Identity-side LLM use (livrarr-identity) is untouched.
+    rationale: >-
+      Spec §1 names 'the merge has an LLM override layer that adds latency and nondeterminism and
+      blocks the whole record on a single identity dissent' as a core problem; REQ-005/P-C forbid any
+      LLM in enrichment. The review confirmed the surface is live in-crate today (lib.rs:21-46), so
+      'zero LLM' is a DELETION, not merely an assertion of absence.
+# dependency_graph nodes are these module names; edges are acyclic + one-way.
+# ---------------------------------------------------------------------------
+modules:
+  # ── livrarr-domain (contracts; the leaf) ──
+  - name: domain-contracts
+    home_crate: livrarr-domain
+    responsibility: >-
+      The feature's contracts on the leaf. NEW: EnrichmentSeed, ExecutionContext, ProviderPolicy +
+      ProviderList + ProviderRef, MetadataCache trait, PacingQueue trait + PacingLane + ProviderCallOutcome,
+      ProviderPolicySource trait, MaterializeService trait + MaterializeRequest + MaterializeOutcome,
+      EnrichmentOutcome. REUSE: EnrichmentStatus (existing enum), provenance/Setter (existing). Zero outward deps.
+    req_ids: [REQ-001, REQ-002, REQ-003, REQ-009, REQ-010, REQ-011, REQ-012]
+    dependencies: []
+    public_api:
+      types:
+        - { kind: struct, name: EnrichmentSeed, description: "Guarantees title + author; optional language (REQ-002). No format field (ST-008). The single thing every door hands the pipeline." }
+        - { kind: enum,   name: ExecutionContext, description: "Foreground | Background — the lane (REQ-010/D-009). A call parameter, not part of the seed." }
+        - { kind: struct, name: ProviderPolicy, description: "Per-language selection policy (REQ-003): an ebook ProviderList + an audiobook ProviderList. Foreign lists exclude HC/OL (REQ-014)." }
+        - { kind: struct, name: ProviderList, description: "An ordered, de-duplicated priority list of ProviderRef (no provider twice within a list; AC-015)." }
+        - { kind: struct, name: ProviderRef, description: "A provider + its rank within a list. Used as written (no fallback/concat, REQ-003)." }
+        - { kind: trait,  name: MetadataCache, description: "(work,provider) cache port (REQ-009): get(<=24h) / put. Impl in livrarr-db; injected. Keeps external-data DB-free." }
+        - { kind: trait,  name: PacingQueue, description: "The single pacing gate port (REQ-010): submit(call, lane) -> ProviderCallOutcome; foreground drains first; per-provider rate + GB daily budget. Impl in enrichment." }
+        - { kind: enum,   name: PacingLane, description: "Foreground | Background lane within the queue (REQ-010)." }
+        - { kind: enum,   name: ProviderCallOutcome, description: "Ok | RateLimited | QuotaExhaustedUntil(T) | Blocked — recorded to the provider status page (REQ-010)." }
+        - { kind: trait,  name: ProviderPolicySource, description: "Reads the in-memory ProviderPolicy snapshot by language (REQ-003). Server builds + swaps the snapshot." }
+        - { kind: trait,  name: MaterializeService, description: "NEW save port (REQ-012): materialize(MaterializeRequest) -> MaterializeOutcome. Cover download + tag write, change-gated. Impl in livrarr-materialize." }
+        - { kind: struct, name: MaterializeRequest, description: "Everything materialize needs for PURE I/O — the caller (enrichment/server) resolves ALL of it from DB BEFORE the call so materialize never reads DB (R-001, round 1): work_id; per cover slot {chosen new URL, current cover URL/path + trust/source, user_locked flag} (honors REQ-008 lock + REQ-006 non-destructive/replace-decision without a DB read); resolved file targets (LibraryItem absolute paths + format) for tag writing; the TagMetadata to write; the covers storage dir; the change flag/generation (REQ-012)." }
+        - { kind: struct, name: MaterializeOutcome, description: "What was written (covers downloaded, tags written) — caller persists cover_path + generation." }
+        - { kind: struct, name: EnrichmentOutcome, description: "The pipeline's return: resolved EnrichmentStatus + whether identity was unconfirmed (identity_not_found signal, one-way seam) + change flag." }
+        - { kind: enum,   name: "EnrichmentStatus (EXISTING — reused, REQ-011)", description: "Unenriched | Enriched | Thin | Failed. No new variant, no migration (verified: livrarr-domain/src/lib.rs:72)." }
+
+  # ── livrarr-enrichment (the one road) ──
+  - name: enrichment-pipeline
+    home_crate: livrarr-enrichment
+    responsibility: >-
+      THE one pipeline: EnrichmentWorkflow.run(seed, ctx) = ask (read ProviderPolicy by language ->
+      for each provider in the language's lists, provider-gateway.ask) -> merge (deterministic) ->
+      save (MaterializeService, change-gated). Reuses/extends the existing EnrichmentService port.
+      Resolves EnrichmentStatus from the run outcome (REQ-011). Never blocks the add (REQ-013):
+      provider failure / unconfigured / zero results -> save the seed + reflect status. Covers are
+      resolved + materialized regardless of identity state (REQ-015). ZERO LLM (REQ-005).
+    req_ids: [REQ-001, REQ-005, REQ-011, REQ-013, REQ-014, REQ-015]
+    dependencies: [domain-contracts, provider-gateway, deterministic-merge, materialize, provider-policy-store]
+    public_api:
+      types:
+        - { kind: struct, name: EnrichmentWorkflow, description: "impls EnrichmentService. The single ask->merge->save road. Stateless over injected ports." }
+
+  - name: deterministic-merge
+    home_crate: livrarr-enrichment
+    responsibility: >-
+      The PURE, deterministic merge (REQ-004, P-C): per field, the winner is the highest-priority
+      provider (per the field's list) returning a non-empty value; shared content fields from the
+      ebook list, audiobook fields from the audiobook list. Covers (REQ-006): pick the highest-
+      PRIORITY source per slot that returns that cover kind — NOT by resolution; something-beats-
+      nothing; never overwrite a user-locked cover; a refresh yielding no cover never blanks an
+      existing one. Identifiers accumulate (REQ-007): a known id is never blanked by a merge lacking
+      it. User edits preserved (REQ-008): provenance Setter=User is never overwritten. NO LLM, NO I/O.
+      DELETES the LLM override layer (REQ-005, R-003 round 1): the enrichment crate currently ships
+      `merge_impl_llm` + an LlmCaller (`llm_validator`, `llm_ewl`, `LlmMergeResponse`, `LlmFieldSelection`,
+      `StubNoLlm`) — the spec §1 'LLM override layer'. This refactor removes that path so `merge_impl`
+      (pure) is the ONLY merge. Builds on the pure scaffolding already present in lib.rs (MERGE_FIELDS,
+      field_category shared-vs-audiobook, drop_language_incompatible_providers, priority_list_for).
+    req_ids: [REQ-004, REQ-005, REQ-006, REQ-007, REQ-008]
+    dependencies: [domain-contracts]
+    public_api:
+      types:
+        - { kind: struct, name: MergedMetadata, description: "The deterministic merge result: winning field values + chosen cover URLs per slot + accumulated identifiers + provenance. Input to save." }
+
+  - name: provider-gateway
+    home_crate: livrarr-enrichment
+    responsibility: >-
+      The 'ask a provider' BLACK BOX (REQ-009/REQ-010): ask(work, provider, refresh) = MetadataCache
+      get (<=24h, unless refresh) -> hit returns cached NormalizedWorkDetail; miss -> PacingQueue.submit
+      (external-data ProviderFetch, lane from ctx) -> on Ok store to cache. The pipeline calls this and
+      never sees cache or pacing internals (REQ-009 transparency). Translates ProviderCallOutcome into
+      the status-page write.
+    req_ids: [REQ-009, REQ-010]
+    dependencies: [domain-contracts, provider-cache, pacing-queue]
+    public_api:
+      types:
+        - { kind: struct, name: ProviderGateway, description: "Wraps MetadataCache (db) + PacingQueue (enrichment) + external-data ProviderFetch. The cache+pace boundary." }
+
+  - name: pacing-queue
+    home_crate: livrarr-enrichment
+    responsibility: >-
+      The PacingQueue impl (REQ-010, DB-stateful). Two lanes (Foreground drains before Background);
+      per-provider rate limit; per-provider DAILY budget with backoff-to-reset (GB, ST-004); writes
+      each call's ProviderCallOutcome to the provider status rows. Queue membership is the source of
+      the derived 'in progress' indicator (REQ-011 — read by server, not stored).
+    req_ids: [REQ-010, REQ-011]
+    dependencies: [domain-contracts]
+    public_api:
+      types:
+        - { kind: struct, name: LivePacingQueue, description: "impls domain::PacingQueue. DB-stateful (status + daily-budget accounting). One instance in AppState." }
+        - { kind: struct, name: ProviderStatus, description: "Per-provider health row the queue writes (REQ-010): provider + ProviderCallOutcome + reset time. Surfaced on the status page." }
+
+  # ── livrarr-materialize (the save step; NEW crate) ──
+  - name: materialize
+    home_crate: livrarr-materialize
+    responsibility: >-
+      NEW CRATE. impls MaterializeService: download covers (the ALREADY-CHOSEN URL per slot, via
+      http_client_safe — runtime URL, insight 37) + write file tags (via tagwrite, over the caller-
+      resolved LibraryItem paths). CHANGE-GATED (REQ-012): no-op when the merged metadata is unchanged
+      (caller passes the change flag / generation). Identity-INDEPENDENT (REQ-015): covers download for
+      held/unverified works too. Holds `download_cover_to_disk` (relocated from work_service — the cycle
+      break). DB-FREE: pure I/O over the fully-specified MaterializeRequest; returns MaterializeOutcome;
+      caller persists. NOTE: cover SELECTION (priority/trust per slot) stays in deterministic-merge —
+      materialize only downloads the chosen URL. Per REQ-006 the legacy dimension/upgrade machinery
+      (measure_dimensions / maybe_upgrade_cover / should_upgrade_same_tier in the current
+      cover_resolution.rs) is DROPPED: priority-only, something-beats-nothing, no size floor.
+    req_ids: [REQ-006, REQ-012, REQ-015]
+    dependencies: [domain-contracts]
+    public_api:
+      types:
+        - { kind: struct, name: LiveMaterializeService, description: "impls domain::MaterializeService. Cover download (http) + tag write (tagwrite); idempotent on the change flag (REQ-012)." }
+        - { kind: artifact, name: CoverArtifact, description: "A downloaded cover image on disk (the sink); path returned for the caller to persist." }
+        - { kind: artifact, name: FileTags, description: "Tags written into the ebook/m4b file (the sink); audio tag writers stay disabled (OOM), per spec §4." }
+
+  # ── livrarr-db (two new domain-trait impls) ──
+  - name: provider-cache
+    home_crate: livrarr-db
+    responsibility: >-
+      impls domain::MetadataCache: the PERSISTENT (work,provider) cache (24h TTL, refresh-bypass —
+      REQ-009). NEW table + migration. db -> domain only (external-data stays DB-free; the cache
+      lives here, not there).
+    req_ids: [REQ-009]
+    dependencies: [domain-contracts]
+    public_api:
+      types:
+        - { kind: struct, name: SqliteMetadataCache, description: "impls domain::MetadataCache over a NEW (work,provider,fetched_at,payload) table. INSERT ... ON CONFLICT (no INSERT OR REPLACE, insight 20)." }
+
+  - name: provider-policy-store
+    home_crate: livrarr-db
+    responsibility: >-
+      The provider-policy table (language -> {ebook list, audiobook list}, NEW migration) + the loader
+      that builds the in-memory snapshot (REQ-003). Server holds + atomically swaps the snapshot and
+      injects ProviderPolicySource. Generic row for unlisted languages (REQ-003); foreign lists exclude
+      HC/OL (REQ-014).
+    req_ids: [REQ-003, REQ-014]
+    dependencies: [domain-contracts]
+    public_api:
+      types:
+        - { kind: struct, name: SqliteProviderPolicy, description: "Loads ProviderPolicy rows from the NEW policy table into a snapshot. Source of truth = DB; lookup = memory read." }
+
+  # ── livrarr-server + handlers + frontend (the status/retry surface + the cutover) ──
+  - name: status-surface
+    home_crate: livrarr-server
+    responsibility: >-
+      Derives the transient 'in progress' indicator from PacingQueue membership (REQ-011, not stored).
+      On Failed: a notification with a Retry link (single work). A 'Retry all failed' bulk action re-
+      enqueues failed works through the SAME queue + daily budget. NO automatic retry (the background
+      retry job is DELETED). Serves the provider status page (REQ-010). Frontend renders badges +
+      retry actions.
+    req_ids: [REQ-010, REQ-011]
+    dependencies: [domain-contracts, enrichment-pipeline, pacing-queue]
+    public_api: {}
+
+  - name: door-cutover
+    home_crate: livrarr-metadata
+    responsibility: >-
+      Funnel every door into the single pipeline (REQ-001). DELETE work_service `try_reuse_cached_payloads`
+      (the cover-bug fork) and its parallel road; the add path becomes a thin caller handing a seed to
+      EnrichmentService. Seed contract (REQ-002): title+author guaranteed, missing language -> English
+      (interim guard). Never block (REQ-013). THE CANONICAL WORK-CREATION DOOR SET — the DEFINITIONAL
+      list from spec-work-creation-consistency.md §1 (L42): "Livrarr creates Works through SIX paths."
+      This is the closed governing set. (NOT the audit-brief §6 L127 trace-aid, which is incomplete —
+      using it is what leaked author-monitor (r2) then series-monitor (r3); the WCC spec is the authority.)
+      Every one funnels via the same port (one door per cut, D-008):
+        1. Add Work — WorkService::add (work_service.rs); the UI Add box + author page route here.
+           Becomes the thin caller handing an EnrichmentSeed to EnrichmentService.
+        2. manual import — handlers/manual_import.rs.
+        3. list import — list_service.
+        4. Readarr import — server readarr_import_workflow + readarr_import_service + handlers readarr_import.rs.  [R-002,r1]
+        5. series monitor — series_query_service.rs (holds work_service Arc; add at ~:650 'created work from series'). [R-005,r3]
+        6. author monitor — author_monitor_workflow.rs (builds its own WorkCandidate + calls add).                  [R-004,r2]
+      COUNT RECONCILIATION (so this cannot leak again): the audit brief's "8 entry paths" (L71) = these 6
+      creation paths + WorkService::refresh + bulk-refresh (RE-enrichment, not creation — they already funnel
+      through the same pipeline). rss_sync_workflow is a FEEDER (verified: no direct work_service reference) —
+      it routes through an existing creation path, not an independent door.
+      Each door must produce its EnrichmentSeed through EnrichmentService (or the adapted add thin-caller)
+      with NO metadata-writing bypass, else it is a second road violating REQ-001. As part of the cutover,
+      also DELETE the LLM override layer from the enrichment merge (REQ-005, see deterministic-merge).
+    req_ids: [REQ-001, REQ-002, REQ-005, REQ-013]
+    dependencies: [domain-contracts, enrichment-pipeline]
+    public_api: {}
+
+# ---------------------------------------------------------------------------
+shared_types:
+  - { kind: struct,   name: EnrichmentSeed,        note: "every door's input (domain) — REQ-002" }
+  - { kind: enum,     name: ExecutionContext,      note: "Foreground|Background lane (domain) — REQ-010/D-009" }
+  - { kind: struct,   name: ProviderPolicy,        note: "per-language ebook+audiobook lists (domain) — REQ-003" }
+  - { kind: struct,   name: ProviderList,          note: "ordered de-duplicated priority list (domain) — REQ-003/AC-015" }
+  - { kind: struct,   name: ProviderRef,           note: "provider + rank within a list (domain)" }
+  - { kind: trait,    name: MetadataCache,         note: "(work,provider) cache port (domain trait, impl in db) — REQ-009" }
+  - { kind: trait,    name: PacingQueue,           note: "the single pacing gate port (domain trait, impl in enrichment) — REQ-010" }
+  - { kind: enum,     name: PacingLane,            note: "Foreground|Background (domain) — REQ-010" }
+  - { kind: enum,     name: ProviderCallOutcome,   note: "Ok|RateLimited|QuotaExhaustedUntil|Blocked (domain) — REQ-010" }
+  - { kind: trait,    name: ProviderPolicySource,  note: "reads the policy snapshot (domain trait) — REQ-003" }
+  - { kind: trait,    name: MaterializeService,    note: "NEW save port (domain trait, impl in livrarr-materialize) — REQ-012" }
+  - { kind: struct,   name: MaterializeRequest,    note: "DB-free save input — carries ALL caller-resolved DB data (paths, current cover state, TagMetadata, covers dir) — REQ-012, R-001" }
+  - { kind: struct,   name: MaterializeOutcome,    note: "what was written; caller persists (domain) — REQ-012" }
+  - { kind: struct,   name: EnrichmentOutcome,     note: "pipeline return: status + identity_not_found + change flag (domain) — REQ-011" }
+  - { kind: enum,     name: EnrichmentStatus,      note: "EXISTING enum, reused unchanged (domain) — REQ-011, livrarr-domain/src/lib.rs:72" }
+  - { kind: struct,   name: MergedMetadata,        note: "deterministic merge result (enrichment) — REQ-004" }
+  - { kind: struct,   name: ProviderStatus,        note: "per-provider health row written by the queue (enrichment/db) — REQ-010" }
+  - { kind: struct,   name: NormalizedWorkDetail,  note: "EXISTING per-provider payload (external-data) — REQ-009 cache value, REQ-004 merge input" }
+  - { kind: struct,   name: Work,                  note: "EXISTING canonical record (domain/db) — the merge sink (REQ-004/006/007)" }
+  - { kind: artifact, name: CoverArtifact,         note: "downloaded cover on disk (materialize sink) — REQ-006/012" }
+  - { kind: artifact, name: FileTags,              note: "tags written into the file (materialize sink) — REQ-012" }
+
+# The crate-level dependency graph (module nodes). ACYCLIC + ONE-WAY (cargo tree-verifiable).
+# A -> B means 'A depends on B'.
+dependency_graph:
+  - { source: provider-cache,         target: domain-contracts }
+  - { source: provider-policy-store,  target: domain-contracts }
+  - { source: pacing-queue,           target: domain-contracts }
+  - { source: deterministic-merge,    target: domain-contracts }
+  - { source: materialize,            target: domain-contracts }
+  - { source: provider-gateway,       target: domain-contracts }
+  - { source: provider-gateway,       target: provider-cache }
+  - { source: provider-gateway,       target: pacing-queue }
+  - { source: enrichment-pipeline,    target: domain-contracts }
+  - { source: enrichment-pipeline,    target: provider-gateway }
+  - { source: enrichment-pipeline,    target: deterministic-merge }
+  - { source: enrichment-pipeline,    target: materialize }
+  - { source: enrichment-pipeline,    target: provider-policy-store }
+  - { source: status-surface,         target: domain-contracts }
+  - { source: status-surface,         target: enrichment-pipeline }
+  - { source: status-surface,         target: pacing-queue }
+  - { source: door-cutover,           target: domain-contracts }
+  - { source: door-cutover,           target: enrichment-pipeline }
+  # NON-EDGES that MATTER (verified by their ABSENCE in cargo tree):
+  #   materialize           -X-> enrichment-pipeline   (REQ-012 one-home + failure isolation, D-003)
+  #   livrarr-external-data -X-> livrarr-db            (THE CANARY — the persistent cache is a db impl injected via a domain trait, REQ-009/D-004)
+  #   livrarr-handlers      -X-> {enrichment,db,metadata,external-data}  (the compile wall — door via Has* capability, D-001)
+  #   deterministic-merge   -X-> {provider-gateway,external-data,db}     (the merge is PURE — no I/O, no LLM, REQ-004/005)
+
+# The module dependency_graph above is over FEATURE MODULES (the logical units) and intentionally
+# omits unchanged leaf-infra crates (livrarr-http, livrarr-tagwrite). The cargo-tree-VERIFIABLE crate
+# graph below (R-002 round 1) is the real, acyclic, one-way edge set the GO-gate checks. A -> B = depends.
+crate_dependency_edges:
+  - { source: livrarr-materialize,   target: livrarr-domain }
+  - { source: livrarr-materialize,   target: livrarr-http }
+  - { source: livrarr-materialize,   target: livrarr-tagwrite }   # NEW crate; the only new third-party-free edges
+  - { source: livrarr-tagwrite,      target: livrarr-domain }     # existing leaf
+  - { source: livrarr-enrichment,    target: livrarr-materialize } # NEW edge (the save step)
+  - { source: livrarr-enrichment,    target: livrarr-domain }
+  - { source: livrarr-enrichment,    target: livrarr-db }
+  - { source: livrarr-enrichment,    target: livrarr-external-data }
+  - { source: livrarr-enrichment,    target: livrarr-http }
+  - { source: livrarr-external-data, target: livrarr-domain }     # THE CANARY: no livrarr-db edge
+  - { source: livrarr-external-data, target: livrarr-http }
+  - { source: livrarr-db,            target: livrarr-domain }
+  - { source: livrarr-server,        target: livrarr-enrichment }
+  - { source: livrarr-server,        target: livrarr-materialize }
+  # Verifiable: `cargo tree -p livrarr-materialize` lists none of {enrichment,identity,db,metadata,external-data};
+  # `cargo tree -p livrarr-external-data` lists no livrarr-db. These two are the load-bearing GO-gates.
+
+# ---------------------------------------------------------------------------
+# Data-flow contract (the map the code is held to at the code gate). Every entity
+# named here is declared in shared_types or a module's public_api.types.
+data_flow:
+  sources:
+    - { entity: EnrichmentSeed,       from: "the CANONICAL 6 Work-creation paths (WCC spec §1 L42): Add Work (add — Add box + author page) / manual_import / list_service / readarr_import_workflow / series monitor (series_query_service) / author_monitor_workflow", note: "title+author guaranteed; language optional->English (REQ-002). refresh/bulk-refresh re-enrich via the same pipeline; rss_sync is a feeder, not an independent door. Door set CLOSED: R-002(r1)/R-004(r2)/R-005(r3)." }
+    - { entity: ProviderPolicy,       from: "livrarr-db policy table -> in-memory snapshot (REQ-003)", note: "selects which providers + priority by language; foreign excludes HC/OL (REQ-014)" }
+    - { entity: NormalizedWorkDetail, from: "livrarr-external-data ProviderFetch (live) or MetadataCache (<=24h, REQ-009)", note: "the per-provider payload merged into MergedMetadata" }
+  sinks:
+    - { entity: MergedMetadata,   to: "Work record in livrarr-db (the merge txn)", note: "deterministic winners + accumulated ids + provenance (REQ-004/007/008)" }
+    - { entity: Work,             to: "livrarr-db", note: "the canonical record; status field set from EnrichmentOutcome (REQ-011)" }
+    - { entity: CoverArtifact,    to: "disk (covers dir)", note: "downloaded by materialize, change-gated (REQ-006/012); caller persists cover_path" }
+    - { entity: FileTags,         to: "the ebook/m4b file", note: "written by materialize via tagwrite, change-gated (REQ-012); audio writers disabled (OOM)" }
+    - { entity: ProviderStatus,   to: "provider status page (livrarr-db rows)", note: "each provider call's outcome (REQ-010)" }
+    - { entity: EnrichmentStatus, to: "Work record (stored)", note: "Enriched|Thin|Failed resolved by the pipeline (REQ-011); 'in progress' is NOT stored (queue-derived)" }
+  state_machines:
+    - entity: EnrichmentStatus
+      note: "REQ-011. Stored quality only; identity lives on the separate IdentityStatus (out of scope)."
+      transitions:
+        - "Unenriched --run--> Enriched  (>=1 usable field saved)"
+        - "Unenriched --run--> Thin      (>=1 provider responded successfully, 0 usable fields; or mixed empty+error)"
+        - "Unenriched --run--> Failed    (no provider returned a usable response — all errored/blocked/rate-limited)"
+        - "Failed --user retry / 'retry all failed'--> (re-enqueued; re-runs the same pipeline)  [NO automatic retry — REQ-011]"
+        - "(any) --refresh--> re-runs the pipeline bypassing the 24h cache (REQ-009)"
+      not_a_state: "'In Progress' — derived live from PacingQueue membership, never persisted (self-heals if a process dies mid-run)."
+  invariants:
+    - "ONE road: no path writes enrichable metadata, covers, or tags except through the pipeline's save step (materialize) — REQ-001."
+    - "Convergence: the same book via different doors reaches an identical final field set + identifiers + both cover slots — REQ-001/AC-001."
+    - "The merge is PURE + deterministic; ZERO LLM calls anywhere in enrichment — REQ-005/AC-003."
+    - "livrarr-external-data has ZERO db dependency (the canary); the persistent cache is a db impl injected via the domain MetadataCache trait — REQ-009/D-004."
+    - "Non-destructive: a known identifier (REQ-007) or an existing cover (REQ-006) is never blanked by a merge lacking it; user-locked fields (provenance=User) are never overwritten — REQ-008."
+    - "Language integrity: a work is enriched ONLY from its language's lists; no Hardcover/OpenLibrary on a foreign record, on add OR refresh — REQ-014/AC-006."
+    - "Covers are independent of identity: held/unverified works still get covers — REQ-015/AC-002."
+    - "Materialize is idempotent on change: an enrichment that changes nothing re-downloads no cover and rewrites no tags — REQ-012/AC-010."
+    - "Never block: provider failure / unconfigured / zero results saves the seed + reflects status, never fails the add — REQ-013/AC-017/AC-018."
+    - "Foreground outranks background: a user-waiting call drains before queued background calls — REQ-010/AC-016."
+    - "No automatic retry: recovery is user-triggered only — REQ-011/AC-009/AC-019."
+
+# ---------------------------------------------------------------------------
+# REQ -> module coverage (every REQ-001..015 maps to >=1 module; the gate greps REQ-NNN).
+req_coverage:
+  REQ-001: [domain-contracts, enrichment-pipeline, door-cutover]            # single pipeline
+  REQ-002: [domain-contracts, door-cutover]                                  # seed contract (+English default)
+  REQ-003: [domain-contracts, provider-policy-store]                         # provider policy by language
+  REQ-004: [deterministic-merge]                                             # deterministic merge
+  REQ-005: [enrichment-pipeline, deterministic-merge, door-cutover]          # no LLM (delete the override layer, D-010)
+  REQ-006: [deterministic-merge, materialize]                                # covers (select + download)
+  REQ-007: [deterministic-merge]                                             # identifiers accumulate
+  REQ-008: [deterministic-merge]                                             # user edits preserved
+  REQ-009: [provider-cache, provider-gateway]                                # transparent cache
+  REQ-010: [pacing-queue, provider-gateway, status-surface]                  # pacing + status page
+  REQ-011: [domain-contracts, enrichment-pipeline, pacing-queue, status-surface]  # status model + retry
+  REQ-012: [domain-contracts, materialize, enrichment-pipeline]             # save (materialize), change-gated
+  REQ-013: [enrichment-pipeline, door-cutover]                               # never block
+  REQ-014: [provider-policy-store, enrichment-pipeline]                      # language integrity
+  REQ-015: [enrichment-pipeline, materialize]                                # covers independent of identity
+
+# ---------------------------------------------------------------------------
+# Open questions carried to Design (IR v2):
+#   Q-002  Pacing numerics (workers, per-provider rates, GB daily budget, backoff window) — D-005.
+#   Q-003  Generic-row provider membership for unlisted languages — D-006.
+#   Q-D04  Reconcile the NEW persistent (work,provider) cache with external-data's EXISTING in-memory
+#          transport_cache — do not double-cache the enrichment-fetch path — D-004.
+#   Q-D05  Confirm `arc-swap` is in the workspace; else RwLock<Arc<..>> for the snapshot swap (no new dep).
+#
+# WATCH (code stage):
+#   * kk-build config.yaml `module_paths` lists nonexistent crates (api/core) and maps only `enrichment`.
+#     The contract's module_dependency rules (external-data/handlers/domain/materialize) are NOT enforced
+#     by verify.py code until module_paths maps those crate dirs. Extend it at the code stage.
+#   * The EnrichmentStatus doc-comments (livrarr-domain/src/lib.rs:72) still describe the background retry
+#     job REQ-011 deletes — update them when the job is removed.

@@ -795,7 +795,7 @@ macro_rules! work_db_merge_tests {
             db.update_cover_metadata(
                 u1,
                 work.id,
-                Some("covers/41.jpg"),
+                Some("https://covers.example.com/41.jpg"),
                 "Goodreads",
                 CoverTrust::Validated,
                 800,
@@ -806,7 +806,7 @@ macro_rules! work_db_merge_tests {
 
             let updated = db.get_work(u1, work.id).await.unwrap();
 
-            assert_eq!(updated.cover_url.as_deref(), Some("covers/41.jpg"));
+            assert_eq!(updated.cover_url.as_deref(), Some("https://covers.example.com/41.jpg"));
             assert_eq!(updated.cover_source.as_deref(), Some("Goodreads"));
             assert_eq!(updated.cover_trust, CoverTrust::Validated);
             assert_eq!(updated.cover_width, 800);
@@ -822,7 +822,7 @@ macro_rules! work_db_merge_tests {
             db.update_cover_metadata(
                 u1,
                 work.id,
-                Some("covers/user-selected.jpg"),
+                Some("https://covers.example.com/user-selected.jpg"),
                 "Picker",
                 CoverTrust::User,
                 900,
@@ -846,7 +846,7 @@ macro_rules! work_db_merge_tests {
             db.update_cover_metadata(
                 u1,
                 work.id,
-                Some("covers/validated.jpg"),
+                Some("https://covers.example.com/validated.jpg"),
                 "Hardcover",
                 CoverTrust::Validated,
                 640,
@@ -870,7 +870,7 @@ macro_rules! work_db_merge_tests {
             db.update_cover_metadata(
                 u1,
                 work.id,
-                Some("covers/ebook.jpg"),
+                Some("https://covers.example.com/ebook.jpg"),
                 "Goodreads",
                 CoverTrust::Validated,
                 800,
@@ -882,7 +882,7 @@ macro_rules! work_db_merge_tests {
             db.update_audiobook_cover_metadata(
                 u1,
                 work.id,
-                Some("covers/audio.jpg"),
+                Some("https://covers.example.com/audio.jpg"),
                 "Audnexus",
                 CoverTrust::User,
                 1400,
@@ -893,14 +893,14 @@ macro_rules! work_db_merge_tests {
 
             let updated = db.get_work(u1, work.id).await.unwrap();
 
-            assert_eq!(updated.cover_url.as_deref(), Some("covers/ebook.jpg"));
+            assert_eq!(updated.cover_url.as_deref(), Some("https://covers.example.com/ebook.jpg"));
             assert_eq!(updated.cover_source.as_deref(), Some("Goodreads"));
             assert_eq!(updated.cover_trust, CoverTrust::Validated);
             assert_eq!(updated.cover_width, 800);
             assert_eq!(updated.cover_height, 1200);
             assert_eq!(
                 updated.audiobook_cover_url.as_deref(),
-                Some("covers/audio.jpg")
+                Some("https://covers.example.com/audio.jpg")
             );
             assert_eq!(updated.audiobook_cover_source.as_deref(), Some("Audnexus"));
             assert_eq!(updated.audiobook_cover_trust, CoverTrust::User);
@@ -917,7 +917,7 @@ macro_rules! work_db_merge_tests {
             db.update_audiobook_cover_metadata(
                 u1,
                 work.id,
-                Some("covers/audio.jpg"),
+                Some("https://covers.example.com/audio.jpg"),
                 "Audnexus",
                 CoverTrust::User,
                 1400,
@@ -929,7 +929,7 @@ macro_rules! work_db_merge_tests {
             db.update_cover_metadata(
                 u1,
                 work.id,
-                Some("covers/ebook.jpg"),
+                Some("https://covers.example.com/ebook.jpg"),
                 "Goodreads",
                 CoverTrust::Validated,
                 800,
@@ -940,14 +940,14 @@ macro_rules! work_db_merge_tests {
 
             let updated = db.get_work(u1, work.id).await.unwrap();
 
-            assert_eq!(updated.cover_url.as_deref(), Some("covers/ebook.jpg"));
+            assert_eq!(updated.cover_url.as_deref(), Some("https://covers.example.com/ebook.jpg"));
             assert_eq!(updated.cover_source.as_deref(), Some("Goodreads"));
             assert_eq!(updated.cover_trust, CoverTrust::Validated);
             assert_eq!(updated.cover_width, 800);
             assert_eq!(updated.cover_height, 1200);
             assert_eq!(
                 updated.audiobook_cover_url.as_deref(),
-                Some("covers/audio.jpg")
+                Some("https://covers.example.com/audio.jpg")
             );
             assert_eq!(updated.audiobook_cover_source.as_deref(), Some("Audnexus"));
             assert_eq!(updated.audiobook_cover_trust, CoverTrust::User);

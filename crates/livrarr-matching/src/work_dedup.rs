@@ -140,6 +140,59 @@ pub fn best_candidate_index(
     })
 }
 
+/// Language-aware variant of [`best_candidate_index`] for the manual-import
+/// eager auto-match (#8). Additive: the language-blind [`best_candidate_index`]
+/// is unchanged for its other callers.
+///
+/// `langs[i]` is the (raw) language tag of `candidates[i]`, if known.
+///
+/// Title/author comparison uses the single canonical normalizer
+/// [`normalize_title_for_match`] (leading-article + subtitle stripping), so the
+/// same title compares equal here, in the scan's query, and in the anchor-graft.
+/// There is deliberately **no fuzzy fallback**.
+///
+/// Language filter:
+/// * `file_language = Some(known)` → candidates with a *known, different*
+///   language are excluded; a candidate with an *unknown* (None) language is
+///   allowed (Hardcover/Goodreads don't tag language — excluding them would
+///   collapse the search to OpenLibrary). The title+author match still gates.
+/// * `file_language = None` → no language filter; ranks on title + author alone.
+pub fn best_candidate_index_lang(
+    candidates: &[(&str, &str)],
+    langs: &[Option<&str>],
+    title: &str,
+    author: &str,
+    file_language: Option<&str>,
+) -> Option<usize> {
+    let want_lang = file_language.and_then(normalize_lang);
+    let norm_title = normalize_title_for_match(title);
+    let norm_author = canonical_author(author);
+
+    candidates.iter().enumerate().find_map(|(i, &(t, a))| {
+        // Language filter: exclude a candidate only when it has a KNOWN,
+        // different language. A candidate with an unknown (None) language is
+        // allowed — Hardcover/Goodreads don't tag language, and excluding them
+        // would collapse the search to OpenLibrary. The title+author match below
+        // still gates, so a different-language edition with a mismatched title
+        // is never selected.
+        if let Some(ref want) = want_lang {
+            if let Some(cand_lang) = langs.get(i).and_then(|l| l.and_then(normalize_lang)) {
+                if cand_lang != *want {
+                    return None;
+                }
+            }
+        }
+        (normalize_title_for_match(t) == norm_title && canonical_author(a) == norm_author)
+            .then_some(i)
+    })
+}
+
+/// Normalize a language tag to its ISO 639-1 code via the domain authority,
+/// so comparisons are robust to "en"/"eng"/"English"/"en-US" variants.
+fn normalize_lang(raw: &str) -> Option<String> {
+    livrarr_domain::normalization::normalize_language(raw)
+}
+
 /// True when two author strings refer to the same author under the same
 /// canonicalization used for matching ("Last, First" → "First Last", then
 /// alphanumeric-lowercased). Used to constrain anchor-grafting so an
@@ -355,5 +408,94 @@ mod tests {
         assert!(authors_match("Frank Herbert", "Herbert, Frank"));
         assert!(authors_match("frank herbert", "Frank Herbert"));
         assert!(!authors_match("Frank Herbert", "Brian Herbert"));
+    }
+
+    // ---- best_candidate_index_lang (#8 HARD language filter) -----------------
+
+    #[test]
+    fn lang_filter_picks_same_language_over_english() {
+        // A German file with both a German and an English candidate picks German.
+        let cands = [
+            ("Der Steppenwolf", "Hermann Hesse"),
+            ("Der Steppenwolf", "Hermann Hesse"),
+        ];
+        let langs = [Some("en"), Some("de")];
+        let idx = best_candidate_index_lang(
+            &cands,
+            &langs,
+            "Der Steppenwolf",
+            "Hermann Hesse",
+            Some("de"),
+        );
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn lang_filter_abstains_when_only_other_language() {
+        // A German file with ONLY an English candidate abstains (no match).
+        let cands = [("Steppenwolf", "Hermann Hesse")];
+        let langs = [Some("en")];
+        let idx =
+            best_candidate_index_lang(&cands, &langs, "Steppenwolf", "Hermann Hesse", Some("de"));
+        assert_eq!(idx, None);
+    }
+
+    #[test]
+    fn lang_filter_unknown_file_matches_on_title_author() {
+        // Unknown file language → no language filter; ranks on title+author.
+        let cands = [
+            ("Some Other Book", "Hermann Hesse"),
+            ("Steppenwolf", "Hermann Hesse"),
+        ];
+        let langs = [Some("en"), Some("en")];
+        let idx = best_candidate_index_lang(&cands, &langs, "Steppenwolf", "Hermann Hesse", None);
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn lang_filter_unknown_does_not_force_english() {
+        // Unknown file language still selects a non-English candidate on title+author.
+        let cands = [("Der Steppenwolf", "Hermann Hesse")];
+        let langs = [Some("de")];
+        let idx =
+            best_candidate_index_lang(&cands, &langs, "Der Steppenwolf", "Hermann Hesse", None);
+        assert_eq!(idx, Some(0));
+    }
+
+    #[test]
+    fn lang_filter_normalizes_variants() {
+        // "eng"/"English"/"en-US" all normalize to "en" on both sides.
+        let cands = [("Steppenwolf", "Hermann Hesse")];
+        let langs = [Some("English")];
+        let idx =
+            best_candidate_index_lang(&cands, &langs, "Steppenwolf", "Hermann Hesse", Some("eng"));
+        assert_eq!(idx, Some(0));
+    }
+
+    #[test]
+    fn lang_filter_canonical_title_strips_article_and_subtitle() {
+        // Canonical normalizer makes "The X: Subtitle" compare equal to "X".
+        let cands = [("The Great Gatsby: A Novel", "F. Scott Fitzgerald")];
+        let langs = [Some("en")];
+        let idx = best_candidate_index_lang(
+            &cands,
+            &langs,
+            "Great Gatsby",
+            "F. Scott Fitzgerald",
+            Some("en"),
+        );
+        assert_eq!(idx, Some(0));
+    }
+
+    #[test]
+    fn lang_filter_allows_unknown_language_candidate_when_file_known() {
+        // A candidate with unknown (None) language is ALLOWED under a known file
+        // language — Hardcover/Goodreads don't tag language; only a KNOWN,
+        // different language is excluded. Title+author still gates.
+        let cands = [("Steppenwolf", "Hermann Hesse")];
+        let langs = [None];
+        let idx =
+            best_candidate_index_lang(&cands, &langs, "Steppenwolf", "Hermann Hesse", Some("de"));
+        assert_eq!(idx, Some(0));
     }
 }

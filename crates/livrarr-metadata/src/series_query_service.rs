@@ -665,9 +665,24 @@ where
                         },
                         identity: IdentityState::Pending {
                             reason: PendingReason::NoCandidates,
-                            // TODO(REQ-006): seed normalize_gr_key(book.gr_key) so series-monitored
-                            // works carry their source GR anchor at create (untested here; converges).
-                            seed_anchors: None,
+                            // Carry the source GR anchor (REQ-006) so the work persists its
+                            // gr_key at create and the background resolver converges it — a
+                            // work anchor resolves with no further network.
+                            seed_anchors: livrarr_domain::normalization::normalize_gr_key(
+                                &book.gr_key,
+                            )
+                            .map(|gr| {
+                                livrarr_domain::identity::CapturedIdentity {
+                                    ol_key: None,
+                                    gr_key: Some(gr),
+                                    hc_key: None,
+                                    isbn_13: None,
+                                    asin: None,
+                                    title: book.title.clone(),
+                                    author_name: author.name.clone(),
+                                    language: None,
+                                }
+                            }),
                             top_candidates: vec![],
                         },
                         candidate_id: None,

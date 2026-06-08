@@ -79,6 +79,9 @@ pub struct ScanProgressResponse {
 pub struct ScannedFile {
     pub path: String,
     pub filename: String,
+    /// Path relative to the scan root (e.g. `Author/Book/file.epub`).
+    /// Gives nested files folder context in the scan results UI.
+    pub rel_path: String,
     pub media_type: MediaType,
     pub size: i64,
     pub parsed: Option<ParsedFile>,
@@ -316,72 +319,71 @@ pub async fn scan<S: ManualImportHandlerContext>(
         }));
     }
 
-    // Group multi-file audiobooks by parent directory.
+    // Group multi-file audiobooks into book-level items. Same-directory
+    // multi-file books group by their shared directory; multi-disc books
+    // (Book/CD1, Book/CD2, ...) collapse all discs into one book item.
     let scan_root = &path;
-    let mut dir_audio_files: std::collections::HashMap<PathBuf, Vec<usize>> =
-        std::collections::HashMap::new();
-    for (i, sf) in source_files.iter().enumerate() {
-        if sf.media_type == MediaType::Audiobook {
-            if let Some(parent) = sf.path.parent() {
-                dir_audio_files
-                    .entry(parent.to_path_buf())
-                    .or_default()
-                    .push(i);
-            }
-        }
-    }
+    let audio_files: Vec<(usize, PathBuf)> = source_files
+        .iter()
+        .enumerate()
+        .filter(|(_, sf)| sf.media_type == MediaType::Audiobook)
+        .map(|(i, sf)| (i, sf.path.clone()))
+        .collect();
+    let audio_groups = group_audio_files(&audio_files);
 
     struct ScanItem {
         display_name: String,
+        /// Path relative to the scan root (e.g. `Author/Book/file.epub`),
+        /// used to give nested files folder context in the UI.
+        rel_path: String,
         primary_path: PathBuf,
         media_type: MediaType,
         grouped_paths: Option<Vec<PathBuf>>,
     }
 
-    let grouped_dirs: std::collections::HashSet<PathBuf> = dir_audio_files
+    // Every audio-file index that landed in a group is skipped by the singleton
+    // pass below; the rest become one row each.
+    let grouped_indices: std::collections::HashSet<usize> = audio_groups
         .iter()
-        .filter(|(_, indices)| indices.len() >= 2)
-        .map(|(dir, _)| dir.clone())
+        .flat_map(|g| g.indices.iter().copied())
         .collect();
 
     let mut scan_items: Vec<ScanItem> = Vec::new();
 
-    for (dir, indices) in &dir_audio_files {
-        if indices.len() < 2 {
-            continue;
-        }
-        let rel = dir
+    for group in &audio_groups {
+        let rel = group
+            .dir
             .strip_prefix(scan_root)
-            .unwrap_or(dir)
+            .unwrap_or(&group.dir)
             .to_string_lossy()
             .to_string();
         let display = if rel.is_empty() {
-            dir.file_name()
+            group
+                .dir
+                .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string()
         } else {
             rel
         };
-        let file_paths: Vec<PathBuf> = indices
+        let file_paths: Vec<PathBuf> = group
+            .indices
             .iter()
             .map(|&i| source_files[i].path.clone())
             .collect();
         scan_items.push(ScanItem {
-            display_name: display,
-            primary_path: dir.clone(),
+            display_name: display.clone(),
+            rel_path: display,
+            primary_path: group.dir.clone(),
             media_type: MediaType::Audiobook,
             grouped_paths: Some(file_paths),
         });
     }
 
-    for sf in source_files.iter() {
-        if sf.media_type == MediaType::Audiobook {
-            if let Some(parent) = sf.path.parent() {
-                if grouped_dirs.contains(parent) {
-                    continue;
-                }
-            }
+    for (i, sf) in source_files.iter().enumerate() {
+        if sf.media_type == MediaType::Audiobook && grouped_indices.contains(&i) {
+            continue;
         }
         let filename = sf
             .path
@@ -389,8 +391,10 @@ pub async fn scan<S: ManualImportHandlerContext>(
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        let rel_path = scan_root_relative_path(scan_root, &sf.path, &filename);
         scan_items.push(ScanItem {
             display_name: filename,
+            rel_path,
             primary_path: sf.path.clone(),
             media_type: sf.media_type,
             grouped_paths: None,
@@ -539,6 +543,15 @@ pub async fn scan<S: ManualImportHandlerContext>(
             filename
         };
 
+        // Scan-root-relative path for folder context in the UI. For grouped
+        // audiobook dirs this is the directory path with a file-count suffix;
+        // for singletons it is the file's path relative to the scan root.
+        let rel_path = if let Some(ref paths) = si.grouped_paths {
+            format!("{}/ ({} files)", si.rel_path, paths.len())
+        } else {
+            si.rel_path.clone()
+        };
+
         let file_idx = scanned_files.len();
         if parsed.is_some() {
             ol_indices.push(file_idx);
@@ -547,6 +560,7 @@ pub async fn scan<S: ManualImportHandlerContext>(
         scanned_files.push(ScannedFile {
             path: si.primary_path.display().to_string(),
             filename: display_filename,
+            rel_path,
             media_type: si.media_type,
             size,
             parsed,
@@ -1011,10 +1025,7 @@ async fn find_or_create_work<
         result
     };
 
-    use livrarr_domain::identity::{
-        CapturedIdentity, IdentityMethod, IdentityState, PendingReason, WorkCandidate,
-        WorkSeedFields,
-    };
+    use livrarr_domain::identity::{LatencyTier, RawHarvest, WorkCandidate, WorkSeedFields};
     // #97 (MatchCluster harvest): the file itself is the richest seed. Re-read
     // its embedded metadata at import (EPUB dc:identifier ISBN, Audible ASIN,
     // dc:language) and fill the identity gaps the picked candidate didn't carry.
@@ -1036,11 +1047,11 @@ async fn find_or_create_work<
     let file_asin = file_meta.as_ref().and_then(|c| c.asin.clone());
     let file_language = file_meta.as_ref().and_then(|c| c.language.clone());
 
-    // Build identity from EVERY anchor the picked candidate carries (not just an
-    // OL key), supplemented by the file's embedded IDs. A work anchor (OL/GR/HC)
-    // locks identity at create (UserSelected); a bare bridge (ISBN/ASIN) — which
-    // can't lock identity per the quorum rule — seeds a Pending work that
-    // create-time resolution converges.
+    // The file is the richest seed: the picked candidate's anchors plus the file's
+    // embedded IDs. Resolve identity through the shared resolver — the one place
+    // every door turns raw anchors into a Confirmed/Pending badge (P1). A user pick
+    // carrying a work anchor (OL/GR/HC) is trusted with no network; a bridge-only
+    // (ISBN/ASIN) or title-only pick fans out (interactive) to find a work anchor.
     let ol_key = {
         let k = item.ol_key.trim();
         (!k.is_empty()).then(|| k.to_string())
@@ -1050,39 +1061,6 @@ async fn find_or_create_work<
     let isbn_13 = item.isbn.clone().filter(|s| !s.is_empty()).or(file_isbn);
     let asin = item.asin.clone().filter(|s| !s.is_empty()).or(file_asin);
 
-    let has_work_anchor = ol_key.is_some() || gr_key.is_some() || hc_key.is_some();
-    let has_bridge = isbn_13.is_some() || asin.is_some();
-
-    let anchors = CapturedIdentity {
-        ol_key,
-        gr_key,
-        hc_key,
-        isbn_13,
-        asin,
-        title: item.title.clone(),
-        author_name: item.author.clone(),
-        language: None,
-    };
-
-    let identity = if has_work_anchor {
-        IdentityState::Confirmed {
-            anchors,
-            method: IdentityMethod::UserSelected,
-            score: None,
-        }
-    } else if has_bridge {
-        IdentityState::Pending {
-            reason: PendingReason::NoCandidates,
-            seed_anchors: Some(anchors),
-            top_candidates: vec![],
-        }
-    } else {
-        IdentityState::Pending {
-            reason: PendingReason::NoCandidates,
-            seed_anchors: None,
-            top_candidates: vec![],
-        }
-    };
     // Language priority: the file's embedded dc:language (authoritative for this
     // edition), then the picked candidate's language, then English.
     let language = file_language
@@ -1090,6 +1068,29 @@ async fn find_or_create_work<
         .as_deref()
         .map(livrarr_domain::normalize_language)
         .unwrap_or_else(|| "en".to_string());
+
+    let resolved = state
+        .work_service()
+        .resolve_identity(
+            user_id,
+            RawHarvest {
+                ol_key,
+                gr_key,
+                hc_key,
+                isbn: isbn_13,
+                asin,
+                title: Some(item.title.clone()),
+                author_name: Some(item.author.clone()),
+                language: Some(language.clone()),
+                series_name: item.series_name.clone(),
+                year: item.year,
+                user_confirmed: true,
+            },
+            LatencyTier::Interactive,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("identity resolve: {e}")))?;
+    let identity = resolved.identity;
     let author_ol_key = item.author_ol_key.clone().or(author_ol_key);
     let candidate = WorkCandidate {
         fields: WorkSeedFields {
@@ -1202,5 +1203,326 @@ fn enumerate_recursive(
                 files.push(EnumeratedFile { path, media_type });
             }
         }
+    }
+}
+
+/// Compute a scan-root-relative display path for a file (e.g.
+/// `Author/Book/file.epub`), giving nested files folder context in the scan
+/// results UI. Falls back to the bare filename when `file_path` is not under
+/// `scan_root`.
+fn scan_root_relative_path(scan_root: &Path, file_path: &Path, filename: &str) -> String {
+    file_path
+        .strip_prefix(scan_root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| filename.to_string())
+}
+
+/// A group of audio files that belong to a single book item in the scan
+/// results. `dir` is the directory the group is keyed on — either the immediate
+/// parent directory (same-dir multi-file books) or the parent "book" directory
+/// when its children are disc/part subfolders (multi-disc books). `indices`
+/// point into the original audio-file slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioGroup {
+    dir: PathBuf,
+    indices: Vec<usize>,
+}
+
+/// Return true if `name` looks like a disc/part divider directory, e.g.
+/// `cd1`, `cd 1`, `cd-1`, `disc 2`, `disc-2`, `disk 3`, `part 1`, `pt 1`,
+/// `vol 2`, `volume 2`. Matching is case-insensitive and tolerates a separator
+/// (space, hyphen, underscore) and leading zeros between the keyword and the
+/// number. The remainder after the keyword must be a non-empty run of digits so
+/// that ordinary folders like `cdrom` or `partials` are not misread as dividers.
+fn is_disc_part_dir_name(name: &str) -> bool {
+    // Longer keywords first so `volume` wins over `vol` and `disk` is tried
+    // before nothing — prefix stripping is greedy on the first match.
+    const KEYWORDS: &[&str] = &["volume", "disc", "disk", "part", "vol", "cd", "pt"];
+    let lower = name.trim().to_lowercase();
+    for kw in KEYWORDS {
+        if let Some(rest) = lower.strip_prefix(kw) {
+            // Allow one optional separator between keyword and number.
+            let rest = rest
+                .strip_prefix(' ')
+                .or_else(|| rest.strip_prefix('-'))
+                .or_else(|| rest.strip_prefix('_'))
+                .unwrap_or(rest);
+            let rest = rest.trim();
+            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Group audio files into book-level items.
+///
+/// Input is `(original_index, path)` for every audio file found in the scan.
+/// The result is the set of grouped items (each with ≥2 files); any audio file
+/// whose index is absent from every group is a singleton row handled by the
+/// caller.
+///
+/// Two collapsing rules apply, in order:
+///
+/// 1. **Multi-disc / multi-part books.** When a directory's audio-containing
+///    immediate child directories are *all* disc/part dividers (e.g.
+///    `Book/CD1`, `Book/CD2`), every audio file beneath that book directory is
+///    collapsed into one group keyed on the book directory. The requirement
+///    that *every* audio-bearing child be a divider is the guard against
+///    merging two genuinely separate books that merely sit side by side — real
+///    book folders are not named `cd1`/`disc 2`.
+///
+/// 2. **Same-directory multi-file books.** Any remaining directory holding ≥2
+///    audio files (and not already absorbed by rule 1) becomes one group keyed
+///    on that directory — the pre-existing behavior.
+fn group_audio_files(audio: &[(usize, PathBuf)]) -> Vec<AudioGroup> {
+    use std::collections::BTreeMap;
+
+    // Bucket by immediate parent directory, preserving input order within each
+    // bucket. BTreeMap gives deterministic iteration for stable output.
+    let mut dir_files: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
+    for (idx, path) in audio {
+        if let Some(parent) = path.parent() {
+            dir_files
+                .entry(parent.to_path_buf())
+                .or_default()
+                .push(*idx);
+        }
+    }
+
+    // Identify candidate book directories: the parents of any divider-named
+    // directory that holds audio.
+    let mut book_dirs: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    for dir in dir_files.keys() {
+        let is_divider = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_disc_part_dir_name);
+        if is_divider {
+            if let Some(book_dir) = dir.parent() {
+                book_dirs.insert(book_dir.to_path_buf());
+            }
+        }
+    }
+
+    let mut grouped: Vec<AudioGroup> = Vec::new();
+    let mut absorbed_dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+    // Rule 1: collapse multi-disc books.
+    for book_dir in &book_dirs {
+        // Every audio-bearing immediate child of book_dir must be a divider for
+        // us to treat book_dir as a single multi-disc title.
+        let mut audio_children: Vec<&PathBuf> = dir_files
+            .keys()
+            .filter(|d| d.parent() == Some(book_dir.as_path()))
+            .collect();
+        audio_children.sort();
+        let all_dividers = audio_children.iter().all(|d| {
+            d.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_disc_part_dir_name)
+        });
+        if !all_dividers || audio_children.is_empty() {
+            continue;
+        }
+
+        // Collect every audio file under the disc children, in deterministic
+        // (sorted-dir, input) order.
+        let mut indices: Vec<usize> = Vec::new();
+        for child in &audio_children {
+            if let Some(files) = dir_files.get(*child) {
+                indices.extend(files.iter().copied());
+            }
+        }
+        if indices.len() >= 2 {
+            for child in &audio_children {
+                absorbed_dirs.insert((*child).clone());
+            }
+            grouped.push(AudioGroup {
+                dir: book_dir.clone(),
+                indices,
+            });
+        }
+        // If only a single file lives under the disc dirs, leave it for rule 2
+        // / singleton handling (don't form a one-file multi-disc group).
+    }
+
+    // Rule 2: same-directory multi-file books for everything not absorbed.
+    for (dir, indices) in &dir_files {
+        if absorbed_dirs.contains(dir) {
+            continue;
+        }
+        if indices.len() >= 2 {
+            grouped.push(AudioGroup {
+                dir: dir.clone(),
+                indices: indices.clone(),
+            });
+        }
+    }
+
+    grouped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rel_path_for_nested_file_is_scan_root_relative() {
+        let scan_root = Path::new("/import");
+        let file = Path::new("/import/Brandon Sanderson/Mistborn/book.epub");
+        let rel = scan_root_relative_path(scan_root, file, "book.epub");
+        assert_eq!(rel, "Brandon Sanderson/Mistborn/book.epub");
+    }
+
+    #[test]
+    fn rel_path_for_top_level_file_is_just_filename() {
+        let scan_root = Path::new("/import");
+        let file = Path::new("/import/book.epub");
+        let rel = scan_root_relative_path(scan_root, file, "book.epub");
+        assert_eq!(rel, "book.epub");
+    }
+
+    #[test]
+    fn rel_path_falls_back_to_filename_when_not_under_root() {
+        let scan_root = Path::new("/import");
+        let file = Path::new("/elsewhere/book.epub");
+        let rel = scan_root_relative_path(scan_root, file, "book.epub");
+        assert_eq!(rel, "book.epub");
+    }
+
+    fn pbs(paths: &[&str]) -> Vec<(usize, PathBuf)> {
+        paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, PathBuf::from(p)))
+            .collect()
+    }
+
+    #[test]
+    fn disc_part_dir_name_matches_common_patterns() {
+        for ok in [
+            "cd1",
+            "cd 1",
+            "cd-1",
+            "cd_1",
+            "CD1",
+            "Cd 02",
+            "disc1",
+            "disc 2",
+            "disc-2",
+            "Disc 03",
+            "disk3",
+            "disk 3",
+            "part1",
+            "part 3",
+            "Part 10",
+            "pt1",
+            "pt 2",
+            "vol2",
+            "vol 2",
+            "volume2",
+            "volume 12",
+        ] {
+            assert!(is_disc_part_dir_name(ok), "expected divider: {ok}");
+        }
+        for no in [
+            "cdrom",
+            "partials",
+            "Book Title",
+            "disco",
+            "cd",
+            "part",
+            "vol",
+            "Chapter 1",
+            "cda",
+            "volume",
+            "",
+        ] {
+            assert!(!is_disc_part_dir_name(no), "expected NOT divider: {no}");
+        }
+    }
+
+    #[test]
+    fn multi_disc_book_collapses_to_one_group() {
+        let files = pbs(&[
+            "/import/Author/Book/CD1/track01.mp3",
+            "/import/Author/Book/CD1/track02.mp3",
+            "/import/Author/Book/CD2/track01.mp3",
+            "/import/Author/Book/CD2/track02.mp3",
+        ]);
+        let groups = group_audio_files(&files);
+        assert_eq!(groups.len(), 1, "multi-disc book should be ONE group");
+        assert_eq!(groups[0].dir, PathBuf::from("/import/Author/Book"));
+        assert_eq!(groups[0].indices.len(), 4);
+    }
+
+    #[test]
+    fn two_adjacent_separate_books_stay_separate() {
+        // Two distinct book folders, each with its own tracks — not discs of one
+        // title. Must NOT merge.
+        let files = pbs(&[
+            "/import/Author/Book One/track01.mp3",
+            "/import/Author/Book One/track02.mp3",
+            "/import/Author/Book Two/track01.mp3",
+            "/import/Author/Book Two/track02.mp3",
+        ]);
+        let mut groups = group_audio_files(&files);
+        groups.sort_by(|a, b| a.dir.cmp(&b.dir));
+        assert_eq!(groups.len(), 2, "two separate books should stay separate");
+        assert_eq!(groups[0].dir, PathBuf::from("/import/Author/Book One"));
+        assert_eq!(groups[1].dir, PathBuf::from("/import/Author/Book Two"));
+    }
+
+    #[test]
+    fn flat_directory_of_tracks_is_one_group() {
+        let files = pbs(&[
+            "/import/Author/Book/track01.mp3",
+            "/import/Author/Book/track02.mp3",
+            "/import/Author/Book/track03.mp3",
+        ]);
+        let groups = group_audio_files(&files);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].dir, PathBuf::from("/import/Author/Book"));
+        assert_eq!(groups[0].indices.len(), 3);
+    }
+
+    #[test]
+    fn single_file_is_not_grouped() {
+        let files = pbs(&["/import/Author/Book.m4b"]);
+        let groups = group_audio_files(&files);
+        assert!(groups.is_empty(), "lone file should remain a singleton");
+    }
+
+    #[test]
+    fn book_with_disc_dirs_plus_stray_audio_does_not_collapse() {
+        // The book dir has a non-divider audio-bearing child alongside the disc
+        // dirs, so we cannot safely treat it as a single multi-disc title. The
+        // disc dirs still group individually (rule 2).
+        let files = pbs(&[
+            "/import/Author/Book/CD1/track01.mp3",
+            "/import/Author/Book/CD1/track02.mp3",
+            "/import/Author/Book/Bonus/extra01.mp3",
+            "/import/Author/Book/Bonus/extra02.mp3",
+        ]);
+        let mut groups = group_audio_files(&files);
+        groups.sort_by(|a, b| a.dir.cmp(&b.dir));
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].dir, PathBuf::from("/import/Author/Book/Bonus"));
+        assert_eq!(groups[1].dir, PathBuf::from("/import/Author/Book/CD1"));
+    }
+
+    #[test]
+    fn disc_dirs_with_one_file_each_still_collapse() {
+        // Each disc holds a single (large) file — common for m4b-per-disc.
+        let files = pbs(&[
+            "/import/Author/Book/Disc 1/disc1.m4b",
+            "/import/Author/Book/Disc 2/disc2.m4b",
+        ]);
+        let groups = group_audio_files(&files);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].dir, PathBuf::from("/import/Author/Book"));
+        assert_eq!(groups[0].indices.len(), 2);
     }
 }

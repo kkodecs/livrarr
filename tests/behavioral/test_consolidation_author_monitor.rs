@@ -74,6 +74,24 @@ impl WorkService for StubWorkService {
         })
     }
 
+    async fn resolve_identity(
+        &self,
+        _user_id: UserId,
+        _harvest: livrarr_domain::identity::RawHarvest,
+        _tier: livrarr_domain::identity::LatencyTier,
+    ) -> Result<livrarr_domain::identity::ResolvedIdentity, WorkServiceError> {
+        Ok(livrarr_domain::identity::ResolvedIdentity {
+            identity: livrarr_domain::identity::IdentityState::Pending {
+                reason: livrarr_domain::identity::PendingReason::NoCandidates,
+                seed_anchors: None,
+                top_candidates: vec![],
+            },
+            candidate_id: None,
+            language: None,
+            conflict: None,
+        })
+    }
+
     async fn get(&self, _user_id: UserId, _work_id: WorkId) -> Result<Work, WorkServiceError> {
         Ok(Work::default())
     }

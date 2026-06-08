@@ -29,8 +29,33 @@ pub async fn run_cover_backfill(db: SqliteDb, covers_dir: PathBuf) {
     let mut downloaded = 0u32;
     let mut skipped = 0u32;
     let mut failed = 0u32;
+    let mut nulled = 0u32;
 
     for (work_id, cover_url) in &works {
+        // A stored cover URL must be absolute http(s) for the SSRF-safe fetcher
+        // to resolve it. A relative value can never download and would otherwise
+        // be retried on every run; clear it so it stops generating log noise.
+        if !(cover_url.starts_with("http://") || cover_url.starts_with("https://")) {
+            match sqlx::query("UPDATE works SET cover_url = NULL WHERE id = ?")
+                .bind(work_id)
+                .execute(db.pool())
+                .await
+            {
+                Ok(_) => {
+                    nulled += 1;
+                    tracing::warn!(
+                        work_id,
+                        cover_url = %cover_url,
+                        "cover backfill: cleared non-absolute cover URL"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(work_id, error = %e, "cover backfill: failed to clear cover URL");
+                }
+            }
+            continue;
+        }
+
         let cover_path = covers_dir.join(format!("{work_id}.jpg"));
         if cover_path.exists() {
             skipped += 1;
@@ -49,7 +74,13 @@ pub async fn run_cover_backfill(db: SqliteDb, covers_dir: PathBuf) {
         }
     }
 
-    if downloaded > 0 || failed > 0 {
-        tracing::info!(downloaded, skipped, failed, "cover backfill: complete");
+    if downloaded > 0 || failed > 0 || nulled > 0 {
+        tracing::info!(
+            downloaded,
+            skipped,
+            failed,
+            nulled,
+            "cover backfill: complete"
+        );
     }
 }

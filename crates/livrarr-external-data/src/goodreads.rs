@@ -140,13 +140,14 @@ pub fn parse_search_html(html: &str) -> Vec<GoodreadsSearchResult> {
             .map(|c| c[1].trim().to_string())
             .filter(|a| !a.is_empty());
 
-        // Cover URL (optional, filter placeholders)
+        // Cover URL (optional, filter placeholders). Resolve to an absolute URL
+        // against the Goodreads base so a relative `src` never propagates.
         let cover_url = RE_COVER.captures(row).and_then(|c| {
-            let url = c[1].to_string();
+            let url = &c[1];
             if url.contains("nophoto") || url.contains("loading-trans") {
                 None
             } else {
-                Some(url)
+                crate::provider_util::validate_cover_url(url, GOODREADS_BASE_URL)
             }
         });
 
@@ -240,6 +241,7 @@ pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
                 cover_url: e
                     .image_url
                     .filter(|u| !u.trim().is_empty())
+                    .and_then(|u| crate::provider_util::validate_cover_url(&u, GOODREADS_BASE_URL))
                     .map(|u| crate::provider_util::upscale_cover_url(&u)),
                 year: None,
                 // `avgRating` is a string (e.g. "4.30"); "0.00" means unrated.
@@ -663,6 +665,10 @@ struct LlmExtractionResult {
 /// `language_hint` should be the work's expected language English-name (e.g.
 /// "French", "Japanese") or "the original" if unknown — used to tell the LLM
 /// which-language description to keep / drop.
+///
+/// `page_url` is the absolute detail-page URL the HTML was fetched from; it is
+/// the base against which a relative `cover_url` from the LLM is resolved to an
+/// absolute URL. A relative cover that cannot be resolved is dropped.
 pub async fn extract_with_llm(
     http: &HttpClient,
     endpoint: &str,
@@ -670,6 +676,7 @@ pub async fn extract_with_llm(
     model: &str,
     raw_html: &str,
     language_hint: &str,
+    page_url: &str,
 ) -> Result<crate::NormalizedWorkDetail, GoodreadsFetchError> {
     let cleaned = crate::provider_util::clean_html_for_llm(raw_html);
     if cleaned.is_empty() {
@@ -732,7 +739,7 @@ pub async fn extract_with_llm(
     let cover_url = result
         .cover_url
         .as_deref()
-        .and_then(|u| crate::provider_util::validate_cover_url(u, ""));
+        .and_then(|u| crate::provider_util::validate_cover_url(u, page_url));
 
     Ok(crate::NormalizedWorkDetail {
         title: result.title.map(|s| nfc(&s)),
@@ -1236,6 +1243,22 @@ mod tests {
     }
 
     #[test]
+    fn search_relative_cover_resolves_to_absolute() {
+        // A relative cover `src` on a search-results row is resolved against the
+        // Goodreads base, never stored relative.
+        let html = r#"<tr itemscope itemtype="https://schema.org/Book">
+            <td><img class="bookCover" src="/images/cover/123.jpg"></td>
+            <td><a class="bookTitle" href="/book/show/123"><span>A Book</span></a></td>
+            </tr>"#;
+        let results = parse_search_html(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].cover_url.as_deref(),
+            Some("https://www.goodreads.com/images/cover/123.jpg")
+        );
+    }
+
+    #[test]
     fn autocomplete_json_parses_card_fields() {
         // A trimmed real `/book/auto_complete` entry (measured 2026-06-01).
         let body = r#"[{"imageUrl":"https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1546071216i/5907._SY75_.jpg","bookId":"5907","workId":"1540236","bookUrl":"/book/show/5907.The_Hobbit_or_There_and_Back_Again","title":"The Hobbit, or There and Back Again","avgRating":"4.30","author":{"id":656983,"name":"J.R.R. Tolkien"}}]"#;
@@ -1256,6 +1279,29 @@ mod tests {
             !cover.contains("_SY75_"),
             "size token not stripped: {cover}"
         );
+    }
+
+    #[test]
+    fn autocomplete_relative_cover_resolves_to_absolute() {
+        // A relative `imageUrl` must be resolved against the Goodreads base so
+        // it never reaches the work as a non-downloadable relative URL.
+        let body = r#"[{"imageUrl":"/assets/cover/5907.jpg","bookId":"5907","bookUrl":"/book/show/5907","title":"Some Book","author":{"name":"Author"}}]"#;
+        let results = parse_autocomplete_json(body);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].cover_url.as_deref(),
+            Some("https://www.goodreads.com/assets/cover/5907.jpg")
+        );
+    }
+
+    #[test]
+    fn autocomplete_non_http_cover_is_dropped() {
+        // A non-http(s) cover (e.g. a data: or javascript: payload) is dropped
+        // rather than stored.
+        let body = r#"[{"imageUrl":"javascript:alert(1)","bookId":"1","bookUrl":"/book/show/1","title":"X","author":{"name":"A"}}]"#;
+        let results = parse_autocomplete_json(body);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].cover_url.is_none());
     }
 
     #[test]

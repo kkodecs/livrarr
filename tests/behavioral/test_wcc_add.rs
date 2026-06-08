@@ -389,3 +389,52 @@ async fn test_wcc_add_reqs_014_015_add_reuses_cached_payloads_in_process_without
         "REQ-014: the cached-payload reuse path issues zero provider HTTP"
     );
 }
+
+/// Regression: a user-picked cover from the Add-Work search result must persist
+/// to `works.cover_url` and stay protected from enrichment.
+///
+/// The Add-Work handler un-proxies the picked cover before it reaches the work
+/// service (the search result carries its cover in the proxied display form
+/// `/api/v1/coverproxy?url=<absolute>`; the handler reverses that so the work
+/// service receives the canonical absolute URL). This test pins the work-service
+/// half of that contract — the absolute URL it is handed, plus the `cover_manual`
+/// flag, must survive create + phase-1 cover write. The prior bug here: the
+/// phase-1 cover write assigned Validated trust and reset `cover_manual` to
+/// false, so background enrichment overrode the pick. After the fix the stored
+/// URL is unchanged, `cover_manual` stays true, and trust is `User` (which
+/// `resolve_cover` refuses to upgrade).
+#[tokio::test]
+async fn test_wcc_add_picked_cover_persists_and_locks_manual() {
+    let db = common::create_test_db().await;
+    let user_id = create_user(&db, "covpick").await;
+    let http = StubHttpFetcher::new();
+    let service = service(db, http);
+
+    // The handler has already un-proxied the pick; the work service is handed
+    // the canonical absolute cover URL with cover_manual set.
+    let absolute = "https://assets.hardcover.app/edition/5293286/abc.jpeg";
+    let mut candidate = confirmed_candidate(isbn_identity());
+    candidate.fields.cover_url = Some(absolute.to_string());
+    candidate.cover_manual = true;
+
+    let result = service
+        .add(user_id, candidate)
+        .await
+        .expect("picked-cover candidate should add");
+
+    assert!(result.created);
+    assert_eq!(
+        result.work.cover_url.as_deref(),
+        Some(absolute),
+        "the picked cover must persist as the canonical absolute URL it was given"
+    );
+    assert!(
+        result.work.cover_manual,
+        "a user-picked cover must stay cover_manual so enrichment cannot replace it"
+    );
+    assert_eq!(
+        result.work.cover_trust,
+        livrarr_domain::CoverTrust::User,
+        "a user pick is locked at User trust; resolve_cover refuses to upgrade it"
+    );
+}

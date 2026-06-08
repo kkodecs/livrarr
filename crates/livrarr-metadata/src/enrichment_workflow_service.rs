@@ -62,7 +62,7 @@ where
 
         let result = self
             .inner
-            .enrich_work(user_id, work_id, metadata_mode)
+            .enrich_work(user_id, work_id, metadata_mode, None)
             .await
             .map_err(convert_error)?;
 

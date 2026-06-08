@@ -724,6 +724,7 @@ impl GoodreadsClient {
                     model,
                     &html,
                     language_hint,
+                    &detail_url,
                 )
                 .await
                 {

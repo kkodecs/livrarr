@@ -386,7 +386,8 @@ where
 }
 
 /// Best-effort torrent info_hash extraction before sending to download client.
-/// Handles: direct magnet URIs, body-text magnets, .torrent file bytes.
+/// Handles: direct magnet URIs, body-text magnets, .torrent file bytes,
+/// and redirect-to-magnet responses (e.g. Prowlarr proxying a torrent indexer).
 ///
 /// Returns `(hash, Option<torrent_bytes>)`:
 /// - For magnets: hash extracted from URI, no bytes.
@@ -418,7 +419,18 @@ async fn fetch_and_extract_hash<H: HttpFetcher>(
         .await
     {
         Ok(r) => r,
-        Err(_) => return (None, None),
+        Err(_) => {
+            // The fetch may have failed because the URL redirects to a magnet: URI.
+            // reqwest's redirect-following client rejects non-HTTP schemes, so a
+            // 301/302 Location: magnet:?xt=... response causes an Err rather than a
+            // usable redirect. Some indexer proxies (e.g. Prowlarr) use this pattern.
+            // Probe with a no-redirect client to recover the magnet if that's the case.
+            if let Some(magnet) = probe_for_magnet_redirect(download_url).await {
+                let hash = extract_torrent_hash(&TorrentSource::Magnet(magnet)).ok();
+                return (hash, None);
+            }
+            return (None, None);
+        }
     };
 
     if !(200..300).contains(&resp.status) {
@@ -440,6 +452,31 @@ async fn fetch_and_extract_hash<H: HttpFetcher>(
     })
     .ok();
     (hash, Some(resp.body))
+}
+
+/// Probe a URL with a no-redirect client and return the Location value if it is
+/// a magnet: URI. Used to recover from redirect-to-magnet responses that cause
+/// the redirect-following client to error on the non-HTTP scheme.
+async fn probe_for_magnet_redirect(url: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let resp = client.get(url).send().await.ok()?;
+    if !resp.status().is_redirection() {
+        return None;
+    }
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()?;
+    if location.starts_with("magnet:") {
+        Some(location.to_string())
+    } else {
+        None
+    }
 }
 
 /// Dispatch torrent to qBittorrent via HTTP API.

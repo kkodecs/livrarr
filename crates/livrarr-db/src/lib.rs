@@ -31,9 +31,11 @@ mod sqlite_import;
 mod sqlite_indexer;
 mod sqlite_library_item;
 mod sqlite_list_import;
+mod sqlite_metadata_cache;
 mod sqlite_notification;
 mod sqlite_playback_progress;
 mod sqlite_provenance;
+mod sqlite_provider_policy;
 mod sqlite_remote_path_mapping;
 mod sqlite_retry_state;
 mod sqlite_root_folder;
@@ -1489,6 +1491,48 @@ pub trait SeriesCacheDb: Send + Sync {
     ) -> Result<AuthorSeriesCache, DbError>;
 
     async fn delete_series_cache(&self, author_id: i64) -> Result<(), DbError>;
+}
+
+/// One row of the persistent (work, provider) metadata cache (REQ-009). The
+/// payload is stored as opaque JSON so livrarr-db never names external-data's
+/// `NormalizedWorkDetail` (keeps db -> domain only, GC-2); the enrichment cache
+/// adapter (de)serializes it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MetadataCacheRow {
+    pub payload_json: String,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Persistent (work, provider) metadata cache (REQ-009). The enrichment
+/// provider-gateway wraps this behind a cache abstraction; a refresh bypasses it.
+/// TTL is enforced here via `max_age`.
+#[trait_variant::make(Send)]
+pub trait MetadataCacheDb: Send + Sync {
+    /// The cached payload JSON if present and younger than `max_age`, else None.
+    async fn metadata_cache_get(
+        &self,
+        work_id: livrarr_domain::WorkId,
+        provider: livrarr_domain::MetadataProvider,
+        max_age: std::time::Duration,
+    ) -> Result<Option<MetadataCacheRow>, DbError>;
+
+    /// Upsert a provider payload for (work, provider). INSERT ... ON CONFLICT
+    /// DO UPDATE SET (never INSERT OR REPLACE, insight 20).
+    async fn metadata_cache_put(
+        &self,
+        work_id: livrarr_domain::WorkId,
+        provider: livrarr_domain::MetadataProvider,
+        payload_json: &str,
+    ) -> Result<(), DbError>;
+}
+
+/// Loads the provider-policy table into the in-memory snapshot (REQ-003). The
+/// server holds + atomically swaps the snapshot; runtime lookup is a memory read.
+#[trait_variant::make(Send)]
+pub trait ProviderPolicyDb: Send + Sync {
+    async fn load_provider_policy_snapshot(
+        &self,
+    ) -> Result<livrarr_domain::services::ProviderPolicySnapshot, DbError>;
 }
 
 // ---------------------------------------------------------------------------

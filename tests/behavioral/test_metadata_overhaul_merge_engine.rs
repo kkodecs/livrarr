@@ -1140,8 +1140,12 @@ async fn test_merge_engine_audio_fields_use_audio_priority_model_not_content_pri
 }
 
 #[tokio::test]
-async fn test_merge_engine_cover_manual_bypasses_provider_cover_logic() {
-    // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: when cover_manual is true provider cover values are ignored, existing cover is preserved, and cover provenance is unchanged
+async fn test_merge_engine_cover_manual_no_longer_blocks_provider_cover() {
+    // REQ-008 (metadata-refactor): cover_manual is no longer a cover lock — provenance
+    // Setter=User is the single lock mechanism (metadata-refactor AC-005). The cover
+    // provenance here is Provider-owned, so the highest-priority provider cover wins;
+    // the legacy cover_manual bypass is removed. Cover selection generates no field
+    // provenance (cover is resolved separately from MERGE_FIELDS).
     let engine = make_engine();
 
     let input = MergeInput {
@@ -1185,7 +1189,7 @@ async fn test_merge_engine_cover_manual_bypasses_provider_cover_logic() {
 
     assert_eq!(
         resolved(&output).cover_url.as_deref(),
-        Some("https://example.test/manual-cover.jpg")
+        Some("https://example.test/gr-cover.jpg")
     );
     assert_no_field_mutation(&output, WorkField::CoverUrl);
 }
@@ -1280,4 +1284,160 @@ async fn test_merge_engine_empty_audio_priority_model_returns_error_for_audio_fi
         .await;
 
     assert!(matches!(result, Err(MergeError::EmptyPriorityModel)));
+}
+
+/// REQ-IDs: REQ-027
+/// #133 regression: the NETWORK merge path (`MergeEngine::merge` fed reconstructed
+/// `provider_results`) must drop OpenLibrary/Hardcover English metadata for a
+/// foreign work — not only the cached `merge_from_cached` path. Before the fix,
+/// `PriorityModel::foreign()`'s fallback list let Hardcover win a field that the
+/// language-compatible providers (GB/GR) left empty.
+#[tokio::test]
+async fn test_merge_network_path_foreign_drops_english_openlibrary_and_hardcover() {
+    let engine = make_engine();
+
+    let work = Work {
+        identity_status: Default::default(),
+        id: WORK_ID,
+        user_id: USER_ID,
+        title: "Le Petit Prince".to_string(),
+        author_name: "Antoine de Saint-Exupéry".to_string(),
+        language: Some("fr".to_string()),
+        ..Default::default()
+    };
+
+    // Only the English OpenLibrary/Hardcover editions carry a description; the
+    // language-compatible providers contributed nothing for this field, so on the
+    // unpatched network path Hardcover would win it.
+    let provider_results = HashMap::from([
+        (
+            MetadataSource::OpenLibrary,
+            success(NormalizedWorkDetail {
+                description: Some("English OpenLibrary description".to_string()),
+                ..empty_detail()
+            }),
+        ),
+        (
+            MetadataSource::Hardcover,
+            success(NormalizedWorkDetail {
+                description: Some("English Hardcover description".to_string()),
+                ..empty_detail()
+            }),
+        ),
+    ]);
+
+    let output = merge(
+        &engine,
+        MergeInput {
+            current_work: work,
+            current_provenance: vec![],
+            provider_results,
+            mode: EnrichmentMode::Manual,
+            priority_model: PriorityModel::foreign(),
+        },
+    )
+    .await;
+
+    assert!(!output.conflict_detected);
+    let resolved = resolved(&output);
+    assert_eq!(
+        resolved.description, None,
+        "foreign work must not take English OpenLibrary/Hardcover description on the network path (#133/REQ-027)"
+    );
+    assert!(
+        provenance_upsert(&output, WorkField::Description).is_none(),
+        "no provider should win Description for a foreign work when only OL/HC supplied it"
+    );
+}
+
+/// P2 (language is sovereign): a work's already-set language is identity-locked —
+/// a provider returning a DIFFERENT language must never override it (only a user
+/// changes language). Guards the "one language home" fix.
+#[tokio::test]
+async fn test_merge_language_is_identity_locked_provider_cannot_override() {
+    let engine = make_engine();
+
+    let work = Work {
+        identity_status: Default::default(),
+        id: WORK_ID,
+        user_id: USER_ID,
+        title: "Le Petit Prince".to_string(),
+        author_name: "Antoine de Saint-Exupéry".to_string(),
+        language: Some("fr".to_string()),
+        ..Default::default()
+    };
+
+    // A provider reports a different language; it must not win.
+    let provider_results = HashMap::from([(
+        MetadataSource::GoogleBooks,
+        success(NormalizedWorkDetail {
+            description: Some("Descripción en español".to_string()),
+            language: Some("es".to_string()),
+            ..empty_detail()
+        }),
+    )]);
+
+    let output = merge(
+        &engine,
+        MergeInput {
+            current_work: work,
+            current_provenance: vec![],
+            provider_results,
+            mode: EnrichmentMode::Manual,
+            priority_model: PriorityModel::foreign(),
+        },
+    )
+    .await;
+
+    let resolved = resolved(&output);
+    assert_eq!(
+        resolved.language.as_deref(),
+        Some("fr"),
+        "a set language must not be overridden by a provider (P2)"
+    );
+}
+
+/// Fill-blank companion: when the work has NO language yet, a provider may supply
+/// one — the lock only prevents overriding a set value, never filling a blank.
+#[tokio::test]
+async fn test_merge_language_fills_when_blank() {
+    let engine = make_engine();
+
+    let work = Work {
+        identity_status: Default::default(),
+        id: WORK_ID,
+        user_id: USER_ID,
+        title: "Some Book".to_string(),
+        author_name: "An Author".to_string(),
+        language: None,
+        ..Default::default()
+    };
+
+    let provider_results = HashMap::from([(
+        MetadataSource::GoogleBooks,
+        success(NormalizedWorkDetail {
+            description: Some("Une description".to_string()),
+            language: Some("fr".to_string()),
+            ..empty_detail()
+        }),
+    )]);
+
+    let output = merge(
+        &engine,
+        MergeInput {
+            current_work: work,
+            current_provenance: vec![],
+            provider_results,
+            mode: EnrichmentMode::Manual,
+            priority_model: PriorityModel::foreign(),
+        },
+    )
+    .await;
+
+    let resolved = resolved(&output);
+    assert_eq!(
+        resolved.language.as_deref(),
+        Some("fr"),
+        "a provider may fill a blank language"
+    );
 }

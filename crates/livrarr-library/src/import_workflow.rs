@@ -42,6 +42,27 @@ impl<D> ImportWorkflowImpl<D> {
     }
 }
 
+impl<D> ImportWorkflowImpl<D>
+where
+    D: ChapterDb + Send + Sync,
+{
+    /// Extracts and stores audiobook chapters for a just-imported item.
+    ///
+    /// Mirrors the chapter-extraction hook in `import_grab` so that imports
+    /// arriving through other paths (e.g. manual import) populate
+    /// `audiobook_chapters` the same way. Failure is non-fatal: errors are
+    /// logged inside `try_extract_chapters` and the scan status is left for
+    /// backfill retry where applicable.
+    pub async fn extract_chapters_for_item(
+        &self,
+        item_id: livrarr_domain::LibraryItemId,
+        target: &Path,
+        media_type: MediaType,
+    ) {
+        try_extract_chapters(item_id, target, media_type, &self.db).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Source file enumeration
 // ---------------------------------------------------------------------------

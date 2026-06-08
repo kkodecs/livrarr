@@ -247,6 +247,30 @@ pub enum Resolution {
     },
 }
 
+/// The shared identity outcome a creation path receives from
+/// [`crate::services::WorkService::resolve_identity`]: the resolved badge plus
+/// the bits a door needs to finish building its `WorkCandidate`. Every door uses
+/// this instead of hand-deriving identity, so all paths agree on what a book IS
+/// (P1 / REQ-014). It collapses the four [`Resolution`] verdicts into what a
+/// caller actually needs.
+#[derive(Debug, Clone)]
+pub struct ResolvedIdentity {
+    /// The badge to place on the `WorkCandidate` — `Confirmed` only when the
+    /// resolver corroborated a work anchor; otherwise `Pending`.
+    pub identity: IdentityState,
+    /// Payload-cache handle from this resolve, so `add()` can reuse the fetched
+    /// payloads without a second network round (REQ-015). `None` when nothing was
+    /// fetched.
+    pub candidate_id: Option<CandidateId>,
+    /// The language the resolver determined, if any. A door SHOULD prefer this
+    /// over a hardcoded default so a foreign work is never stamped English (#8).
+    pub language: Option<String>,
+    /// `Some` when the resolver raised an identity conflict. The door decides how
+    /// to surface it — the interactive add shows the existing work; batch paths
+    /// skip or notify. `identity` is left `Pending` in this case.
+    pub conflict: Option<NewIdentityConflict>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IdentityState {
     Confirmed {

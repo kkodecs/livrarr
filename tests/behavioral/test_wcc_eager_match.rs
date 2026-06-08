@@ -88,6 +88,38 @@ fn gb_volumes_body(works: &[(&str, &str, &str)]) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({ "items": items })).unwrap()
 }
 
+/// Build a Google Books `volumes` body from (title, author, isbn13, language)
+/// tuples — like `gb_volumes_body` but with an explicit per-volume `language`,
+/// so the HARD language filter (#8) can be exercised at selection time.
+fn gb_volumes_body_lang(works: &[(&str, &str, &str, &str)]) -> Vec<u8> {
+    let items: Vec<serde_json::Value> = works
+        .iter()
+        .map(|(title, author, isbn, lang)| {
+            serde_json::json!({
+                "id": format!("gb-{isbn}"),
+                "volumeInfo": {
+                    "title": title,
+                    "authors": [author],
+                    "publishedDate": "1927",
+                    "language": lang,
+                    "industryIdentifiers": [{"type": "ISBN_13", "identifier": isbn}],
+                }
+            })
+        })
+        .collect();
+    serde_json::to_vec(&serde_json::json!({ "items": items })).unwrap()
+}
+
+fn query_lang(id: usize, title: &str, author: &str, language: Option<&str>) -> EagerQuery {
+    EagerQuery {
+        id,
+        title: title.into(),
+        author: author.into(),
+        language: language.map(|s| s.to_string()),
+        isbn: None,
+    }
+}
+
 /// Set a Google Books API key on the test DB so `lookup_google_books` actually
 /// fetches (it short-circuits to empty without a key).
 async fn set_gb_key(db: &SqliteDb) {
@@ -311,5 +343,313 @@ async fn test_eager_match_no_cross_author_anchor_graft() {
     assert!(
         r.ol_key.is_none(),
         "must not graft a different author's work anchor (OL_WRONG is Brian Herbert's)"
+    );
+}
+
+// =============================================================================
+// HARD language filter (#8): foreign file must not match the English edition
+// =============================================================================
+
+#[tokio::test]
+async fn test_eager_match_german_file_picks_german_over_english() {
+    // A German file, with both a German and an English same-title candidate in
+    // the corpus, must pick the German one.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    set_gb_key(&db).await;
+
+    let body = gb_volumes_body_lang(&[
+        ("Der Steppenwolf", "Hermann Hesse", "9780000000001", "en"),
+        ("Der Steppenwolf", "Hermann Hesse", "9780000000002", "de"),
+    ]);
+    let http = StubHttpFetcher::with_ok(200, body);
+    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+
+    let queries = vec![query_lang(
+        0,
+        "Der Steppenwolf",
+        "Hermann Hesse",
+        Some("de"),
+    )];
+    let matches = svc.eager_match_by_author(user_id, queries).await.unwrap();
+
+    assert_eq!(matches.len(), 1);
+    let (_, r) = &matches[0];
+    assert_eq!(
+        r.isbn_13.as_deref(),
+        Some("9780000000002"),
+        "German file must pick the German edition, not the English one"
+    );
+    assert_eq!(r.language.as_deref(), Some("de"));
+}
+
+#[tokio::test]
+async fn test_eager_match_german_file_abstains_when_only_english() {
+    // A German file with ONLY an English candidate must abstain (fall to manual
+    // search), never silently take the English edition.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    set_gb_key(&db).await;
+
+    let body = gb_volumes_body_lang(&[("Der Steppenwolf", "Hermann Hesse", "9780000000001", "en")]);
+    let http = StubHttpFetcher::with_ok(200, body);
+    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+
+    let queries = vec![query_lang(
+        0,
+        "Der Steppenwolf",
+        "Hermann Hesse",
+        Some("de"),
+    )];
+    let matches = svc.eager_match_by_author(user_id, queries).await.unwrap();
+
+    assert!(
+        matches.is_empty(),
+        "German file with only an English candidate must abstain"
+    );
+}
+
+#[tokio::test]
+async fn test_eager_match_unknown_language_still_matches() {
+    // A file with unknown language (None) must NOT be language-filtered: it ranks
+    // on title+author as before and matches the (English) candidate.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    set_gb_key(&db).await;
+
+    let body = gb_volumes_body_lang(&[(
+        "The Great Gatsby",
+        "F. Scott Fitzgerald",
+        "9780000000003",
+        "en",
+    )]);
+    let http = StubHttpFetcher::with_ok(200, body);
+    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+
+    let queries = vec![query_lang(
+        0,
+        "The Great Gatsby",
+        "F. Scott Fitzgerald",
+        None,
+    )];
+    let matches = svc.eager_match_by_author(user_id, queries).await.unwrap();
+
+    assert_eq!(
+        matches.len(),
+        1,
+        "unknown-language file must still match on title+author"
+    );
+    assert_eq!(matches[0].1.isbn_13.as_deref(), Some("9780000000003"));
+}
+
+#[tokio::test]
+async fn test_eager_match_anchor_graft_respects_language() {
+    // A German file pins (by ISBN) an anchorless German Google Books volume. The
+    // corpus also has a same-title English OpenLibrary doc carrying an anchor.
+    // The anchor must NOT be grafted — it is the wrong-language work.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    set_gb_key(&db).await;
+
+    // GB volume: German, anchorless, the ISBN pick. OL doc: English, same title +
+    // author, carries an ol_key. (OL's LookupResult.language echoes the query
+    // lang; the group lang here is "de", so the OL doc would be labeled "de" — to
+    // make the English-anchor case real we instead rely on GB carrying the only
+    // anchor-eligible English candidate.)
+    let body = serde_json::to_vec(&serde_json::json!({
+        "items": [
+            {
+                "id": "gb-de",
+                "volumeInfo": {
+                    "title": "Der Steppenwolf",
+                    "authors": ["Hermann Hesse"],
+                    "publishedDate": "1927",
+                    "language": "de",
+                    "industryIdentifiers": [{"type": "ISBN_13", "identifier": "9780000000010"}],
+                }
+            },
+            {
+                "id": "gb-en",
+                "volumeInfo": {
+                    "title": "Der Steppenwolf",
+                    "authors": ["Hermann Hesse"],
+                    "publishedDate": "1927",
+                    "language": "en",
+                    "industryIdentifiers": [{"type": "ISBN_13", "identifier": "9780000000011"}],
+                }
+            }
+        ],
+        "docs": [{
+            "key": "/works/OL_EN",
+            "title": "Der Steppenwolf",
+            "author_name": ["Hermann Hesse"],
+            "first_publish_year": 1927,
+            "cover_i": 333,
+        }],
+    }))
+    .unwrap();
+    let http = StubHttpFetcher::with_ok(200, body);
+    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+
+    let queries = vec![EagerQuery {
+        id: 0,
+        title: "Der Steppenwolf".into(),
+        author: "Hermann Hesse".into(),
+        language: Some("de".into()),
+        isbn: Some("9780000000010".into()),
+    }];
+    let matches = svc.eager_match_by_author(user_id, queries).await.unwrap();
+
+    assert_eq!(matches.len(), 1);
+    let (_, r) = &matches[0];
+    // Picked the German edition by ISBN.
+    assert_eq!(r.isbn_13.as_deref(), Some("9780000000010"));
+    assert_eq!(r.language.as_deref(), Some("de"));
+}
+
+// =============================================================================
+// Per-file 4-way fallback (#6): author-batch abstains, title+author finds it
+// =============================================================================
+
+#[tokio::test]
+async fn test_eager_match_fallback_finds_title_when_author_batch_abstains() {
+    // The author-scoped batch corpus does NOT contain the queried title (an
+    // incomplete author facet), so the batch abstains. The per-file fallback then
+    // runs the full 4-way `"<title> <author>"` discovery, whose corpus DOES
+    // contain the title, and confidently matches it.
+    //
+    // Stub call sequence (GB unconfigured, Hardcover disabled by default):
+    //   call #1  -> author-batch OpenLibrary query  (gets `batch_body`)
+    //   call #2+ -> per-file fallback (OL + Goodreads)  (replays `fallback_body`)
+    // The stub pops queued responses FIFO while >1 remain, then replays the last
+    // one — so the batch consumes `batch_body` and every fallback call sees
+    // `fallback_body`. Goodreads parses the OL-shaped body to empty (non-array),
+    // leaving OpenLibrary to carry the fallback corpus.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+
+    // Batch corpus: a DIFFERENT book by the same author — the queried title is
+    // absent, so the batch cannot match it.
+    let batch_body = ol_search_body(&[("OL_OTHER", "Some Other Book", "James S. A. Corey")]);
+    // Fallback corpus: the queried title, found by the title+author search.
+    let fallback_body = ol_search_body(&[("OL_LEV", "Leviathan Wakes", "James S. A. Corey")]);
+
+    let http = StubHttpFetcher::new();
+    http.push_response(Ok(livrarr_domain::services::FetchResponse {
+        status: 200,
+        headers: vec![],
+        body: batch_body,
+    }));
+    http.push_response(Ok(livrarr_domain::services::FetchResponse {
+        status: 200,
+        headers: vec![],
+        body: fallback_body,
+    }));
+
+    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+
+    let queries = vec![query(0, "Leviathan Wakes", "James S. A. Corey")];
+    let matches = svc.eager_match_by_author(user_id, queries).await.unwrap();
+
+    assert_eq!(
+        matches.len(),
+        1,
+        "fallback must confidently match a title the author batch missed"
+    );
+    let (id, r) = &matches[0];
+    assert_eq!(*id, 0);
+    assert_eq!(r.title, "Leviathan Wakes");
+    assert_eq!(
+        r.ol_key.as_deref(),
+        Some("OL_LEV"),
+        "fallback hit must carry the work anchor from the title+author corpus"
+    );
+}
+
+#[tokio::test]
+async fn test_eager_match_fallback_guard_holds_on_wrong_book() {
+    // The author batch abstains AND the per-file fallback corpus contains only a
+    // wrong-title book — the confident-match guard (best_candidate_index_lang)
+    // must still abstain, never auto-picking a wrong book.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+
+    let batch_body = ol_search_body(&[("OL_OTHER", "Some Other Book", "James S. A. Corey")]);
+    // Fallback corpus has a same-author but title-mismatched book only.
+    let fallback_body = ol_search_body(&[("OL_WRONG", "An Unrelated Title", "James S. A. Corey")]);
+
+    let http = StubHttpFetcher::new();
+    http.push_response(Ok(livrarr_domain::services::FetchResponse {
+        status: 200,
+        headers: vec![],
+        body: batch_body,
+    }));
+    http.push_response(Ok(livrarr_domain::services::FetchResponse {
+        status: 200,
+        headers: vec![],
+        body: fallback_body,
+    }));
+
+    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+
+    let queries = vec![query(0, "Leviathan Wakes", "James S. A. Corey")];
+    let matches = svc.eager_match_by_author(user_id, queries).await.unwrap();
+
+    assert!(
+        matches.is_empty(),
+        "fallback must abstain when only a wrong-title candidate is found (no wrong-book pick)"
+    );
+}
+
+#[tokio::test]
+async fn test_eager_match_fallback_guard_holds_on_wrong_language() {
+    // The author batch abstains; the fallback corpus contains the right title but
+    // only in the wrong language. The HARD language guard must abstain rather than
+    // take the wrong-language edition.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    set_gb_key(&db).await; // Google Books carries per-volume language for the guard
+
+    // With a GB key, the author batch fires TWO providers (Google Books + Open-
+    // Library), so both batch calls must see a non-matching corpus. Queue the
+    // batch body twice, then the fallback body — the stub replays the last entry
+    // for every subsequent (fallback) call. Google Books is the only provider
+    // carrying true per-volume language, so the guard is exercised on GB results.
+    let batch_body =
+        gb_volumes_body_lang(&[("Ein Anderes Buch", "Hermann Hesse", "9780000000099", "de")]);
+    // Fallback corpus: the queried title, but English-only.
+    let fallback_body =
+        gb_volumes_body_lang(&[("Der Steppenwolf", "Hermann Hesse", "9780000000098", "en")]);
+
+    let http = StubHttpFetcher::new();
+    http.push_response(Ok(livrarr_domain::services::FetchResponse {
+        status: 200,
+        headers: vec![],
+        body: batch_body.clone(),
+    }));
+    http.push_response(Ok(livrarr_domain::services::FetchResponse {
+        status: 200,
+        headers: vec![],
+        body: batch_body,
+    }));
+    http.push_response(Ok(livrarr_domain::services::FetchResponse {
+        status: 200,
+        headers: vec![],
+        body: fallback_body,
+    }));
+
+    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+
+    let queries = vec![query_lang(
+        0,
+        "Der Steppenwolf",
+        "Hermann Hesse",
+        Some("de"),
+    )];
+    let matches = svc.eager_match_by_author(user_id, queries).await.unwrap();
+
+    assert!(
+        matches.is_empty(),
+        "German file must abstain when the fallback finds only an English edition"
     );
 }

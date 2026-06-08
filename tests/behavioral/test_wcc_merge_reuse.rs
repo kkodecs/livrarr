@@ -48,7 +48,7 @@ fn work(language: Option<&str>) -> Work {
     }
 }
 
-fn engine() -> DefaultMergeEngine<NoOpLlm> {
+fn engine() -> DefaultMergeEngine {
     DefaultMergeEngine::new_with_llm(PriorityModel::english(), NoOpLlm, false)
 }
 
