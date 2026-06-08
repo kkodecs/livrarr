@@ -3,7 +3,8 @@
 //! foreground-before-background lane priority. DB-stateful (status + budget).
 //! Complements the scatter-gather `ProviderQueue` with lanes + budget + status.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use livrarr_domain::services::{PacingLane, ProviderCallOutcome};
 use livrarr_domain::{MetadataProvider, WorkId};
@@ -29,11 +30,19 @@ pub trait PacingQueue: Send + Sync {
 /// status rows. One instance in AppState.
 pub struct LivePacingQueue<DB> {
     db: Arc<DB>,
+    /// In-memory membership of works with a queued/running provider call — the
+    /// source of the derived "in progress" indicator (REQ-011). Held in memory
+    /// (not the DB) so it self-heals if the process dies mid-run. `submit`
+    /// populates it as calls enter/leave the gate.
+    in_flight: Arc<Mutex<HashSet<WorkId>>>,
 }
 
 impl<DB> LivePacingQueue<DB> {
     pub fn new(db: Arc<DB>) -> Self {
-        Self { db }
+        Self {
+            db,
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 }
 
@@ -47,7 +56,9 @@ where
     }
 
     fn has_pending_or_running(&self, work_id: WorkId) -> bool {
-        let _ = (&self.db, work_id);
-        todo!()
+        self.in_flight
+            .lock()
+            .expect("pacing in_flight lock poisoned")
+            .contains(&work_id)
     }
 }
