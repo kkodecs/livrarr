@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_http::fetcher::HttpFetcherImpl;
-use livrarr_metadata::work_service::download_cover_to_disk;
+use livrarr_materialize::download_cover_to_disk;
 
 pub async fn run_cover_backfill(db: SqliteDb, covers_dir: PathBuf) {
     let http = match HttpFetcherImpl::new() {
@@ -63,7 +63,7 @@ pub async fn run_cover_backfill(db: SqliteDb, covers_dir: PathBuf) {
         }
 
         match download_cover_to_disk(&http, cover_url, &covers_dir, *work_id, "").await {
-            Ok(()) => {
+            Ok(_) => {
                 downloaded += 1;
                 tracing::debug!(work_id, "cover backfill: downloaded");
             }

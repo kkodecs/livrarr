@@ -1889,9 +1889,15 @@ where
         cover_url: &str,
     ) -> Result<(), WorkServiceError> {
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-        download_cover_to_disk(&self.http, cover_url, &covers_dir, work_id, "")
-            .await
-            .map_err(|e| WorkServiceError::Cover(e.to_string()))?;
+        livrarr_materialize::download_cover_to_disk(
+            &self.http,
+            cover_url,
+            &covers_dir,
+            work_id,
+            "",
+        )
+        .await
+        .map_err(|e| WorkServiceError::Cover(e.to_string()))?;
         let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
         let _ = tokio::fs::remove_file(&thumb).await;
         Ok(())
@@ -3335,62 +3341,6 @@ pub fn unproxy_cover_url(url: &str) -> String {
             .unwrap_or_else(|_| url.to_string())
     } else {
         url.to_string()
-    }
-}
-
-pub async fn download_cover_to_disk<H: HttpFetcher>(
-    http: &H,
-    url: &str,
-    covers_dir: &std::path::Path,
-    work_id: i64,
-    suffix: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tokio::fs::create_dir_all(covers_dir).await?;
-
-    let req = FetchRequest {
-        url: url.to_string(),
-        method: HttpMethod::Get,
-        headers: vec![],
-        body: None,
-        timeout: std::time::Duration::from_secs(30),
-        rate_bucket: RateBucket::None,
-        max_body_bytes: 10 * 1024 * 1024,
-        anti_bot_check: false,
-        user_agent: UserAgentProfile::Server,
-    };
-
-    let resp = http
-        .fetch_ssrf_safe(req)
-        .await
-        .map_err(|e| format!("fetch: {e}"))?;
-    if resp.status >= 400 {
-        return Err(format!("cover download returned {}", resp.status).into());
-    }
-
-    let cover_path = covers_dir.join(format!("{work_id}{suffix}.jpg"));
-    let tmp_path = cover_path.with_extension("jpg.tmp");
-    let tmp_clone = tmp_path.clone();
-    let target = cover_path.clone();
-    let bytes = resp.body;
-    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp_clone)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp_clone, &target)
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            Err(Box::new(e))
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            Err(format!("spawn error: {e}").into())
-        }
     }
 }
 

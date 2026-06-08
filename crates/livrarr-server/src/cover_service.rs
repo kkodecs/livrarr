@@ -217,7 +217,7 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
         };
 
         // Download the cover
-        livrarr_metadata::work_service::download_cover_to_disk(
+        livrarr_materialize::download_cover_to_disk(
             &self.http_fetcher,
             &url,
             &covers_dir,

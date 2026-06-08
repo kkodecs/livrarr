@@ -195,7 +195,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
         if remaining > Duration::from_millis(200) {
             let result = tokio::time::timeout(
                 remaining,
-                crate::work_service::download_cover_to_disk(
+                livrarr_materialize::download_cover_to_disk(
                     http_fetcher,
                     &preferred,
                     covers_dir,
@@ -205,7 +205,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
             )
             .await;
 
-            if matches!(result, Ok(Ok(()))) {
+            if matches!(result, Ok(Ok(_))) {
                 tracing::info!(
                     work_id,
                     source,
@@ -221,7 +221,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
             if remaining > Duration::from_millis(200) {
                 let result = tokio::time::timeout(
                     remaining,
-                    crate::work_service::download_cover_to_disk(
+                    livrarr_materialize::download_cover_to_disk(
                         http_fetcher,
                         url,
                         covers_dir,
@@ -231,7 +231,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                 )
                 .await;
 
-                if matches!(result, Ok(Ok(()))) {
+                if matches!(result, Ok(Ok(_))) {
                     tracing::info!(
                         work_id,
                         source = "request_url_fallback",
@@ -268,7 +268,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                         && matches!(
                             tokio::time::timeout(
                                 remaining,
-                                crate::work_service::download_cover_to_disk(
+                                livrarr_materialize::download_cover_to_disk(
                                     http_fetcher,
                                     &hc_url,
                                     covers_dir,
@@ -277,7 +277,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                                 ),
                             )
                             .await,
-                            Ok(Ok(()))
+                            Ok(Ok(_))
                         )
                     {
                         tracing::info!(
