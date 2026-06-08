@@ -1242,121 +1242,75 @@ where
                 other => EnrichmentError::Db(other),
             })?;
 
-        // Step 2.5: Candidate reuse (REQ-014/015 / AC-001).
-        // If a `candidate_id` is provided and the transport cache has payloads
-        // for that candidate, validate them against the work's anchors and run
-        // the merge in-process — skipping `dispatch_enrichment` entirely (zero
-        // network calls on this path).  A cache miss, TTL expiry, or anchor
-        // mismatch falls through to the normal network path below.
-        if let Some(ref cid) = candidate_id {
-            if let Some(tc) = &self.transport_cache {
-                if let Some(payloads) = tc.cache_take(user_id, cid.clone()) {
-                    if cached_payloads_match_work(&work, &payloads) {
-                        // Snapshot generation + provenance for CAS correctness.
-                        let generation = match self.db.get_merge_generation(user_id, work_id).await
-                        {
-                            Ok(g) => g,
-                            Err(e) => {
-                                tracing::warn!(
-                                    work_id,
-                                    "candidate reuse: get_merge_generation failed: {e}; falling back to network"
-                                );
-                                // Fall through to network path — drop out of this block.
-                                // We continue below the if-let chain.
-                                let _ = e;
-                                // Use a sentinel to signal fall-through.
-                                i64::MIN
-                            }
-                        };
-                        if generation != i64::MIN {
-                            let current_provenance = match self
-                                .db
-                                .list_work_provenance(user_id, work_id)
-                                .await
-                            {
-                                Ok(prov) => prov,
-                                Err(e) => {
-                                    tracing::warn!(
-                                            work_id,
-                                            "candidate reuse: list_work_provenance failed: {e}; falling back"
-                                        );
-                                    // Fall through to network path.
-                                    vec![]
-                                    // We can't cleanly fall through here without restructuring;
-                                    // treat empty provenance as a miss to avoid silent data loss.
-                                }
-                            };
-                            match self
-                                .merge_engine
-                                .merge_from_cached(
-                                    work.clone(),
-                                    payloads,
-                                    current_provenance,
-                                    work.language.as_deref(),
-                                )
-                                .await
-                            {
-                                Ok(merge_output) => {
-                                    let apply_req = build_apply_request(
-                                        &merge_output,
-                                        user_id,
-                                        work_id,
-                                        generation,
-                                    );
-                                    match self.db.apply_enrichment_merge(apply_req).await? {
-                                        ApplyMergeOutcome::Applied
-                                        | ApplyMergeOutcome::NoChange
-                                        | ApplyMergeOutcome::Deferred => {
-                                            let result_work =
-                                                self.db.get_work(user_id, work_id).await?;
-                                            let changed = merge_output.work_update.is_some()
-                                                || !merge_output.external_id_updates.is_empty()
-                                                || merge_output.cover_resolution.is_some()
-                                                || merge_output
-                                                    .audiobook_cover_resolution
-                                                    .is_some();
-                                            // No provider_outcomes on cached path — build empty map.
-                                            let provider_outcomes = HashMap::new();
-                                            return Ok(EnrichmentResult {
-                                                enrichment_status: merge_output.enrichment_status,
-                                                enrichment_source: merge_output.enrichment_source,
-                                                llm_task_spawned: false,
-                                                work: result_work,
-                                                merge_deferred: false,
-                                                provider_outcomes,
-                                                cover_resolution: merge_output.cover_resolution,
-                                                audiobook_cover_resolution: merge_output
-                                                    .audiobook_cover_resolution,
-                                                identity_not_found: merge_output.conflict_detected,
-                                                changed,
-                                            });
-                                        }
-                                        ApplyMergeOutcome::Superseded => {
-                                            tracing::warn!(
-                                                work_id,
-                                                "candidate reuse: CAS superseded — falling back to network"
-                                            );
-                                            // Fall through to network path.
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        work_id,
-                                        "candidate reuse: merge_from_cached failed: {e}; falling back"
-                                    );
-                                    // Fall through to network path.
-                                }
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            work_id,
-                            "candidate reuse: payloads do not match work anchors — falling back to network"
-                        );
-                    }
+        // Step 2.5: Candidate reuse (REQ-014/015 / AC-001) — zero-network path.
+        // If candidate_id has cached discovery payloads that revalidate against
+        // the work's anchors, merge them in-process and return. ANY miss (no
+        // candidate, no cache, TTL expiry, anchor mismatch) OR DB error yields
+        // `None` and falls cleanly through to the network path below — it never
+        // proceeds with empty provenance (which would drop user field-locks) or
+        // a fabricated CAS generation.
+        let reuse_result: Option<EnrichmentResult> = async {
+            let cid = candidate_id.as_ref()?;
+            let tc = self.transport_cache.as_ref()?;
+            let payloads = tc.cache_take(user_id, cid.clone())?;
+            if !cached_payloads_match_work(&work, &payloads) {
+                tracing::warn!(
+                    work_id,
+                    "candidate reuse: payloads do not match work anchors — falling back to network"
+                );
+                return None;
+            }
+            // Snapshot generation + provenance for CAS correctness; a DB read
+            // failure here returns None → network fallback (never empty
+            // provenance, which would silently drop user field-locks).
+            let generation = self.db.get_merge_generation(user_id, work_id).await.ok()?;
+            let current_provenance = self.db.list_work_provenance(user_id, work_id).await.ok()?;
+            let merge_output = self
+                .merge_engine
+                .merge_from_cached(
+                    work.clone(),
+                    payloads,
+                    current_provenance,
+                    work.language.as_deref(),
+                )
+                .await
+                .ok()?;
+            let apply_req = build_apply_request(&merge_output, user_id, work_id, generation);
+            match self.db.apply_enrichment_merge(apply_req).await.ok()? {
+                ApplyMergeOutcome::Applied
+                | ApplyMergeOutcome::NoChange
+                | ApplyMergeOutcome::Deferred => {
+                    let result_work = self.db.get_work(user_id, work_id).await.ok()?;
+                    let changed = merge_output.work_update.is_some()
+                        || !merge_output.external_id_updates.is_empty()
+                        || merge_output.cover_resolution.is_some()
+                        || merge_output.audiobook_cover_resolution.is_some();
+                    Some(EnrichmentResult {
+                        enrichment_status: merge_output.enrichment_status,
+                        enrichment_source: merge_output.enrichment_source,
+                        llm_task_spawned: false,
+                        work: result_work,
+                        merge_deferred: false,
+                        // No provider_outcomes on the cached-reuse path.
+                        provider_outcomes: HashMap::new(),
+                        cover_resolution: merge_output.cover_resolution,
+                        audiobook_cover_resolution: merge_output.audiobook_cover_resolution,
+                        identity_not_found: merge_output.conflict_detected,
+                        changed,
+                    })
+                }
+                ApplyMergeOutcome::Superseded => {
+                    tracing::warn!(
+                        work_id,
+                        "candidate reuse: CAS superseded — falling back to network"
+                    );
+                    None
                 }
             }
+        }
+        .await;
+        if let Some(result) = reuse_result {
+            return Ok(result);
         }
 
         // Step 3: Read merge_generation before dispatch (for CAS baseline)
