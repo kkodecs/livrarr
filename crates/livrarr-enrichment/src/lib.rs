@@ -93,10 +93,15 @@ pub struct EnrichmentResult {
     pub provider_outcomes: HashMap<livrarr_domain::MetadataProvider, livrarr_domain::OutcomeClass>,
     pub cover_resolution: Option<livrarr_domain::CoverResolution>,
     pub audiobook_cover_resolution: Option<livrarr_domain::CoverResolution>,
-    /// Seam-2 signal: the LLM rejected every provider payload as not-this-book.
-    /// Propagated to `domain::services::EnrichmentResult.identity_not_found`; the
-    /// caller writes `IdentityStatus::NotFound`. Enrichment never writes identity.
+    /// Seam-2 signal: the merge detected a per-provider Conflict — identity
+    /// could not be confirmed. Propagated to
+    /// `domain::services::EnrichmentResult.identity_not_found`; the caller
+    /// writes `IdentityStatus::NotFound`. Enrichment never writes identity.
     pub identity_not_found: bool,
+    /// True when the merge actually changed any work field, external ID, or
+    /// cover resolution. Drives the materialize gate in the wrapper
+    /// (REQ-012): cover download + retag runs only when changed=true.
+    pub changed: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -981,7 +986,102 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
 }
 
 // =============================================================================
-// LLM arbitration merge path
+// REQ-011: resolve_status — determine the correct EnrichmentStatus after merge
+// =============================================================================
+
+/// Classify the final enrichment status after a merge (REQ-011):
+/// - `Enriched` when the merge produced ≥1 usable field (the merge engine
+///   already sets this via `has_meaningful_text`, so trust its verdict when
+///   Enriched or Thin).
+/// - `Thin` when ≥1 provider responded with a Success outcome (including empty
+///   payloads) but the merge produced no usable text.
+/// - `Failed` when NO provider returned a Success outcome — all were
+///   NotConfigured, WillRetry, PermanentFailure, Suppressed, or NotFound. This
+///   is the transient "try later" state; the background job will retry.
+///
+/// Special case: when `conflict_detected = true`, the merge blocked on a
+/// per-provider identity conflict — the merge output status (`Unenriched`) is
+/// a sentinel for a distinct non-enrichment condition and is preserved as-is.
+///
+/// The merge engine's own `enrichment_status` already handles Enriched/Thin
+/// correctly; this function only overrides to `Failed` when appropriate.
+fn resolve_status(
+    merge_status: EnrichmentStatus,
+    conflict_detected: bool,
+    provider_results: &HashMap<livrarr_domain::MetadataProvider, ReconstructedOutcome>,
+) -> EnrichmentStatus {
+    if merge_status == EnrichmentStatus::Enriched {
+        return EnrichmentStatus::Enriched;
+    }
+    // A merge-level conflict (per-provider Conflict class) is a distinct
+    // non-enrichment condition — preserve Unenriched as the sentinel so the
+    // caller can write IdentityStatus::NotFound.
+    if conflict_detected {
+        return merge_status;
+    }
+    // If ANY provider had a Success outcome (even an empty one), the work is at
+    // most Thin — we know the book, we just found no useful metadata.
+    let any_success = provider_results
+        .values()
+        .any(|o| o.class == livrarr_domain::OutcomeClass::Success);
+    if any_success {
+        EnrichmentStatus::Thin
+    } else {
+        EnrichmentStatus::Failed
+    }
+}
+
+// =============================================================================
+// Candidate-reuse anchor matching (relocated from livrarr-metadata::work_service)
+// =============================================================================
+
+/// Revalidate cached per-provider payloads against the work's confirmed anchors
+/// (D-005): require no contradiction AND at least one positive anchor overlap,
+/// so a stale or colliding `candidate_id` falls back to network enrichment
+/// instead of applying unrelated payloads.
+fn cached_payloads_match_work(
+    work: &Work,
+    payloads: &HashMap<
+        livrarr_domain::MetadataProvider,
+        livrarr_external_data::NormalizedWorkDetail,
+    >,
+) -> bool {
+    // No payload may contradict a confirmed anchor on the work.
+    let no_contradiction = payloads.values().all(|p| {
+        payload_anchor_compatible(work.ol_key.as_deref(), p.ol_key.as_deref())
+            && payload_anchor_compatible(work.gr_key.as_deref(), p.gr_key.as_deref())
+            && payload_anchor_compatible(work.hc_key.as_deref(), p.hc_key.as_deref())
+            && payload_anchor_compatible(work.isbn_13.as_deref(), p.isbn_13.as_deref())
+            && payload_anchor_compatible(work.asin.as_deref(), p.asin.as_deref())
+    });
+    // At least one payload must positively share a matching anchor, so an
+    // anchorless work or vacuously empty payload set cannot pass.
+    let positive_match = payloads.values().any(|p| {
+        payload_anchors_match(work.ol_key.as_deref(), p.ol_key.as_deref())
+            || payload_anchors_match(work.gr_key.as_deref(), p.gr_key.as_deref())
+            || payload_anchors_match(work.hc_key.as_deref(), p.hc_key.as_deref())
+            || payload_anchors_match(work.isbn_13.as_deref(), p.isbn_13.as_deref())
+            || payload_anchors_match(work.asin.as_deref(), p.asin.as_deref())
+    });
+    no_contradiction && positive_match
+}
+
+/// True when both anchors are present AND equal (positive overlap).
+fn payload_anchors_match(work_anchor: Option<&str>, payload_anchor: Option<&str>) -> bool {
+    matches!((work_anchor, payload_anchor), (Some(a), Some(b)) if a == b)
+}
+
+/// Compatible = either anchor is absent, OR both are present and equal.
+/// A work anchor of "OL123" vs payload anchor of "OL456" is a contradiction.
+fn payload_anchor_compatible(work_anchor: Option<&str>, payload_anchor: Option<&str>) -> bool {
+    match (work_anchor, payload_anchor) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+// =============================================================================
+// Per-work lock infrastructure
 // =============================================================================
 
 /// Per-work lock map type [I-12].
@@ -1017,10 +1117,13 @@ pub struct EnrichmentServiceImpl<DB, Q, ME, V, L = crate::StubNoLlm> {
     db: Arc<DB>,
     queue: Arc<Q>,
     merge_engine: Arc<ME>,
-    /// Cross-provider semantic validator. Inserts an identity-check +
-    /// per-provider accept/reject step between scatter-gather and merge.
-    /// Use `NoOpLlmValidator` to disable when LLM is not configured.
+    /// Cross-provider semantic validator. Kept for API compatibility; Step 8.5
+    /// (LLM identity-validation) is removed per REQ-005 (zero LLM in pipeline).
+    #[allow(dead_code)]
     validator: Arc<V>,
+    /// LLM caller. Kept for API compatibility; no longer called in the pipeline
+    /// (REQ-005). The cover-gate AskLlm path is replaced with conservative strip.
+    #[allow(dead_code)]
     llm: L,
     llm_configured: bool,
     /// Per-work lock map [I-12]: serializes concurrent enrichment calls for the same (user_id, work_id).
@@ -1028,6 +1131,12 @@ pub struct EnrichmentServiceImpl<DB, Q, ME, V, L = crate::StubNoLlm> {
     /// Pre-injected source provider data (e.g., from Readarr import).
     /// Set via `pre_inject_source_data` before calling `enrich_work`.
     source_data_store: Arc<SourceDataStore>,
+    /// Optional transport cache: holds per-provider payloads the identity
+    /// resolver fetched during discovery. When `candidate_id` is `Some` and
+    /// the cache has an entry, the merge runs without any network dispatch
+    /// (AC-001 / REQ-014/015). Set via `with_transport_cache`; `None` in
+    /// contexts where no resolver is composed (tests, CLI tools).
+    transport_cache: Option<Arc<livrarr_external_data::transport_cache::TransportCache>>,
 }
 
 impl<DB, Q, ME, V, L> EnrichmentServiceImpl<DB, Q, ME, V, L>
@@ -1061,7 +1170,19 @@ where
             llm_configured,
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             source_data_store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            transport_cache: None,
         }
+    }
+
+    /// Wire the transport cache (produced by the identity resolver at composition
+    /// root). When set, `enrich_work` can reuse cached per-provider payloads for
+    /// a `candidate_id` hit instead of re-dispatching providers (REQ-014/015).
+    pub fn with_transport_cache(
+        mut self,
+        tc: Arc<livrarr_external_data::transport_cache::TransportCache>,
+    ) -> Self {
+        self.transport_cache = Some(tc);
+        self
     }
 
     /// Pre-inject source provider data before calling `enrich_work`.
@@ -1098,9 +1219,6 @@ where
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<EnrichmentResult, EnrichmentError> {
-        // metadata-refactor: candidate-reuse + always-materialize relocate here in
-        // the green phase (DD-007); the widened signature lands first (stub).
-        let _ = candidate_id;
         // Step 1: Acquire per-work lock [I-12]
         let _sweep = SweepLocksOnDrop {
             locks: self.locks.clone(),
@@ -1123,6 +1241,123 @@ where
                 DbError::NotFound { .. } => EnrichmentError::WorkNotFound,
                 other => EnrichmentError::Db(other),
             })?;
+
+        // Step 2.5: Candidate reuse (REQ-014/015 / AC-001).
+        // If a `candidate_id` is provided and the transport cache has payloads
+        // for that candidate, validate them against the work's anchors and run
+        // the merge in-process — skipping `dispatch_enrichment` entirely (zero
+        // network calls on this path).  A cache miss, TTL expiry, or anchor
+        // mismatch falls through to the normal network path below.
+        if let Some(ref cid) = candidate_id {
+            if let Some(tc) = &self.transport_cache {
+                if let Some(payloads) = tc.cache_take(user_id, cid.clone()) {
+                    if cached_payloads_match_work(&work, &payloads) {
+                        // Snapshot generation + provenance for CAS correctness.
+                        let generation = match self.db.get_merge_generation(user_id, work_id).await
+                        {
+                            Ok(g) => g,
+                            Err(e) => {
+                                tracing::warn!(
+                                    work_id,
+                                    "candidate reuse: get_merge_generation failed: {e}; falling back to network"
+                                );
+                                // Fall through to network path — drop out of this block.
+                                // We continue below the if-let chain.
+                                let _ = e;
+                                // Use a sentinel to signal fall-through.
+                                i64::MIN
+                            }
+                        };
+                        if generation != i64::MIN {
+                            let current_provenance = match self
+                                .db
+                                .list_work_provenance(user_id, work_id)
+                                .await
+                            {
+                                Ok(prov) => prov,
+                                Err(e) => {
+                                    tracing::warn!(
+                                            work_id,
+                                            "candidate reuse: list_work_provenance failed: {e}; falling back"
+                                        );
+                                    // Fall through to network path.
+                                    vec![]
+                                    // We can't cleanly fall through here without restructuring;
+                                    // treat empty provenance as a miss to avoid silent data loss.
+                                }
+                            };
+                            match self
+                                .merge_engine
+                                .merge_from_cached(
+                                    work.clone(),
+                                    payloads,
+                                    current_provenance,
+                                    work.language.as_deref(),
+                                )
+                                .await
+                            {
+                                Ok(merge_output) => {
+                                    let apply_req = build_apply_request(
+                                        &merge_output,
+                                        user_id,
+                                        work_id,
+                                        generation,
+                                    );
+                                    match self.db.apply_enrichment_merge(apply_req).await? {
+                                        ApplyMergeOutcome::Applied
+                                        | ApplyMergeOutcome::NoChange
+                                        | ApplyMergeOutcome::Deferred => {
+                                            let result_work =
+                                                self.db.get_work(user_id, work_id).await?;
+                                            let changed = merge_output.work_update.is_some()
+                                                || !merge_output.external_id_updates.is_empty()
+                                                || merge_output.cover_resolution.is_some()
+                                                || merge_output
+                                                    .audiobook_cover_resolution
+                                                    .is_some();
+                                            // No provider_outcomes on cached path — build empty map.
+                                            let provider_outcomes = HashMap::new();
+                                            return Ok(EnrichmentResult {
+                                                enrichment_status: merge_output.enrichment_status,
+                                                enrichment_source: merge_output.enrichment_source,
+                                                llm_task_spawned: false,
+                                                work: result_work,
+                                                merge_deferred: false,
+                                                provider_outcomes,
+                                                cover_resolution: merge_output.cover_resolution,
+                                                audiobook_cover_resolution: merge_output
+                                                    .audiobook_cover_resolution,
+                                                identity_not_found: merge_output.conflict_detected,
+                                                changed,
+                                            });
+                                        }
+                                        ApplyMergeOutcome::Superseded => {
+                                            tracing::warn!(
+                                                work_id,
+                                                "candidate reuse: CAS superseded — falling back to network"
+                                            );
+                                            // Fall through to network path.
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        work_id,
+                                        "candidate reuse: merge_from_cached failed: {e}; falling back"
+                                    );
+                                    // Fall through to network path.
+                                }
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            work_id,
+                            "candidate reuse: payloads do not match work anchors — falling back to network"
+                        );
+                    }
+                }
+            }
+        }
 
         // Step 3: Read merge_generation before dispatch (for CAS baseline)
         let mut generation = self.db.get_merge_generation(user_id, work_id).await?;
@@ -1182,6 +1417,7 @@ where
                 cover_resolution: None,
                 audiobook_cover_resolution: None,
                 identity_not_found: false,
+                changed: false,
             });
         }
 
@@ -1275,91 +1511,9 @@ where
             }
         }
 
-        // Step 8.5: LLM cross-provider validation (identity check +
-        // per-provider accept/reject + selective field nullification).
-        // No-op when LLM is not configured (NoOpLlmValidator) or when the
-        // work has no User-set anchor in provenance.
-        //
-        // On LLM error: log and pass through unchanged — LLM is value-add,
-        // never gatekeeps enrichment per project Principle 11.
-        let validation = match self
-            .validator
-            .validate(&current_work, &current_provenance, reconstructed)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    work_id,
-                    user_id,
-                    "LLM validation failed; passing outcomes through: {e}"
-                );
-                // Re-build reconstructed unmodified — but we already moved it.
-                // Easiest path: re-reconstruct from scatter_result.
-                let mut rebuilt: HashMap<livrarr_domain::MetadataProvider, ReconstructedOutcome> =
-                    HashMap::new();
-                for (provider, outcome) in &scatter_result.outcomes {
-                    let class = outcome.class();
-                    let payload = if class == livrarr_domain::OutcomeClass::Success {
-                        let retry_state =
-                            self.db.get_retry_state(user_id, work_id, *provider).await?;
-                        retry_state
-                            .and_then(|s| s.normalized_payload_json)
-                            .and_then(|j| serde_json::from_str::<NormalizedWorkDetail>(&j).ok())
-                    } else {
-                        None
-                    };
-                    rebuilt.insert(*provider, ReconstructedOutcome { class, payload });
-                }
-                crate::llm_validator::ValidationOutcome {
-                    reconstructed: rebuilt,
-                    rejections: HashMap::new(),
-                    all_success_rejected: false,
-                }
-            }
-        };
-        let reconstructed = validation.reconstructed;
-
-        // If the LLM rejected EVERY Success payload, escalate the work to
-        // Conflict status (terminal, exit only via reset_for_manual_refresh).
-        // Skip the merge entirely — there's no usable provider data, and we
-        // need the user to manually review which providers are wrong (or
-        // edit the locked anchor).
-        if validation.all_success_rejected {
-            tracing::warn!(
-                work_id,
-                user_id,
-                rejection_count = validation.rejections.len(),
-                "all Success providers rejected by LLM identity check — signaling identity-not-found"
-            );
-            // Enrichment stays Unenriched (nothing merged). The work's identity could
-            // not be verified from any source — SIGNAL it via `identity_not_found`; the
-            // caller writes `IdentityStatus::NotFound` (one-way seam, REQ-002). Enrichment
-            // never writes identity state.
-            let apply_req = ApplyEnrichmentMergeRequest {
-                user_id,
-                work_id,
-                expected_merge_generation: generation,
-                work_update: None,
-                new_enrichment_status: livrarr_domain::EnrichmentStatus::Unenriched,
-                provenance_upserts: Vec::new(),
-                provenance_deletes: Vec::new(),
-                external_id_updates: Vec::new(),
-            };
-            let _ = self.db.apply_enrichment_merge(apply_req).await?;
-            let result_work = self.db.get_work(user_id, work_id).await?;
-            return Ok(EnrichmentResult {
-                enrichment_status: livrarr_domain::EnrichmentStatus::Unenriched,
-                enrichment_source: result_work.enrichment_source.clone(),
-                llm_task_spawned: false,
-                work: result_work,
-                merge_deferred,
-                provider_outcomes,
-                cover_resolution: None,
-                audiobook_cover_resolution: None,
-                identity_not_found: true,
-            });
-        }
+        // Step 8.5 removed (REQ-005): LLM identity validation no longer runs in
+        // the pipeline. `identity_not_found` is derived solely from
+        // `merge_output.conflict_detected` (per-provider Conflict class).
 
         // Cover gate: for English works with an OL key, filter GR cover_urls
         // through the deterministic Jaccard gate before merge (REQ-017).
@@ -1390,27 +1544,16 @@ where
                             &candidate,
                             self.llm_configured,
                         );
-                        let final_outcome = match outcome {
-                            crate::cover_gate::CoverGateOutcome::AskLlm {
-                                jaccard,
-                                ref prompt_inputs,
-                            } => {
-                                let decision = crate::llm_ewl::ask_same_book(
-                                    &self.llm,
-                                    prompt_inputs,
-                                    self.llm_configured,
-                                )
-                                .await;
-                                crate::cover_gate::apply_llm_decision(decision, jaccard)
-                            }
-                            other => other,
-                        };
-                        match final_outcome {
+                        // REQ-005 (zero LLM): AskLlm borderline cases are treated
+                        // conservatively as a strip — the GR cover is rejected.
+                        // The deterministic Jaccard gate's Apply / non-Apply outcomes
+                        // are unchanged.
+                        match outcome {
                             crate::cover_gate::CoverGateOutcome::Apply { .. } => {}
-                            _ => {
+                            other => {
                                 tracing::info!(
                                     work_id,
-                                    ?final_outcome,
+                                    ?other,
                                     "cover gate: stripping GR cover_url"
                                 );
                                 payload.cover_url = None;
@@ -1439,7 +1582,15 @@ where
                 priority_model: priority_model.clone(),
             };
 
-            let merge_output = self.merge_engine.merge(merge_input).await?;
+            let mut merge_output = self.merge_engine.merge(merge_input).await?;
+
+            // REQ-011: apply resolve_status before persisting — the DB must store
+            // the same status that is returned to the caller.
+            merge_output.enrichment_status = resolve_status(
+                merge_output.enrichment_status,
+                merge_output.conflict_detected,
+                &reconstructed,
+            );
 
             let apply_req = build_apply_request(&merge_output, user_id, work_id, generation);
 
@@ -1451,6 +1602,10 @@ where
                 | ApplyMergeOutcome::Deferred => {
                     // Success — build result
                     let result_work = self.db.get_work(user_id, work_id).await?;
+                    let changed = merge_output.work_update.is_some()
+                        || !merge_output.external_id_updates.is_empty()
+                        || merge_output.cover_resolution.is_some()
+                        || merge_output.audiobook_cover_resolution.is_some();
                     return Ok(EnrichmentResult {
                         enrichment_status: merge_output.enrichment_status,
                         enrichment_source: merge_output.enrichment_source,
@@ -1460,9 +1615,10 @@ where
                         provider_outcomes,
                         cover_resolution: merge_output.cover_resolution,
                         audiobook_cover_resolution: merge_output.audiobook_cover_resolution,
-                        // A merge-detected conflict (per-provider Conflict class or LLM
-                        // merge identity_valid=false) signals identity-not-found upward.
+                        // A merge-detected conflict (per-provider Conflict class) signals
+                        // identity-not-found upward.
                         identity_not_found: merge_output.conflict_detected,
+                        changed,
                     });
                 }
                 ApplyMergeOutcome::Superseded => {
