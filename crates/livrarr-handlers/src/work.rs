@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Response};
 
 use crate::context::{
     HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasEmailService,
-    HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasIdentityResolver,
-    HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkService,
+    HasEnrichmentWorkflow, HasFileService, HasIdentityResolver, HasNotificationService,
+    HasSeriesQueryService, HasTagService, HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
@@ -166,7 +166,6 @@ pub async fn add<
     S: HasWorkService
         + HasAuthorService
         + HasSeriesQueryService
-        + HasEnrichmentNotify
         + HasEnrichmentWorkflow
         + HasIdentityResolver,
 >(
@@ -658,6 +657,61 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
             .await
         {
             tracing::warn!("create_notification failed: {e}");
+        }
+
+        s.work_service().finish_bulk_refresh(user_id);
+    });
+
+    Ok(axum::http::StatusCode::ACCEPTED)
+}
+
+/// User-triggered bulk recovery (REQ-011): sweep every incomplete work — Failed,
+/// Unenriched, or identity-Pending — and re-run each through the one road in a
+/// single pass. Replaces the deleted background `enrichment_retry` job (REQ-001):
+/// recovery is now an explicit user action, not a recurring loop. Shares the
+/// `try_start_bulk_refresh` guard with `refresh_all` so only one bulk sweep runs
+/// per user at a time; the work happens in a spawned one-shot and the response is
+/// an immediate 202.
+pub async fn retry_all_incomplete<S: HasWorkService + HasNotificationService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let user_id = ctx.user.id;
+
+    if !state.work_service().try_start_bulk_refresh(user_id) {
+        return Err(ApiError::Conflict {
+            reason: "Bulk operation already in progress".to_string(),
+        });
+    }
+
+    let s = state.clone();
+    tokio::spawn(async move {
+        match s.work_service().retry_all_incomplete(user_id).await {
+            Ok(summary) => {
+                if let Err(e) = s
+                    .notification_service()
+                    .create(CreateNotificationRequest {
+                        user_id,
+                        notification_type: livrarr_domain::NotificationType::BulkEnrichmentComplete,
+                        ref_key: None,
+                        message: format!(
+                            "Retry complete: {}/{} recovered, {} still incomplete",
+                            summary.recovered, summary.total, summary.still_incomplete
+                        ),
+                        data: serde_json::json!({
+                            "total": summary.total,
+                            "recovered": summary.recovered,
+                            "still_incomplete": summary.still_incomplete,
+                        }),
+                    })
+                    .await
+                {
+                    tracing::warn!("create_notification failed: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("retry_all_incomplete failed: {e}");
+            }
         }
 
         s.work_service().finish_bulk_refresh(user_id);

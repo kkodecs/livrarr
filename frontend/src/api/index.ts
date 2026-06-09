@@ -202,6 +202,8 @@ export const refreshWork = (id: number) =>
   apiFetch<RefreshWorkResponse>(`/work/${id}/refresh`, { method: "POST" });
 export const refreshAllWorks = () =>
   apiFetch<void>("/work/refresh", { method: "POST" });
+export const retryAllIncomplete = () =>
+  apiFetch<void>("/work/retry-incomplete", { method: "POST" });
 
 // Authors
 export const lookupAuthors = (term: string) =>

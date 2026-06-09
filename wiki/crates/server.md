@@ -44,7 +44,6 @@ Composition root. Depends on all other crates. Nothing depends on it.
 | `refresh_in_progress` | `Arc<Mutex<HashSet<UserId>>>` | Prevents concurrent refreshes for the same user |
 | `rss_last_run` | `Arc<AtomicI64>` | Unix timestamp of last RSS sync |
 | `rss_sync_running` | `Arc<AtomicBool>` | Guard against concurrent RSS sync |
-| `enrichment_notify` | `Arc<Notify>` | Wakes the enrichment job when new work is queued |
 | `provider_queue` | `Arc<LiveProviderQueue>` | Phase 1.5 plumbing: provider queue (not yet on live enrichment path) |
 | `enrichment_service` | `Arc<LiveEnrichmentService>` | Phase 1.5 plumbing: enrichment service (not yet on live enrichment path) |
 
@@ -172,9 +171,6 @@ High-level import orchestrator. Fields:
 - `poll_qbittorrent` — fetch status from qBittorrent client
 - `poll_sabnzbd` — fetch status from SABnzbd client
 - `spawn_import` — spawn an import task for a completed download (respects `import_semaphore`)
-
-### enrichment.rs
-- `enrichment_retry_tick` — retry enrichment for works stuck in a failed/pending state
 
 ### rss_sync.rs
 - `rss_sync_tick` — called on interval; skips if already running

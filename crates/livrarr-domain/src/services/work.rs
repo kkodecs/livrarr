@@ -144,6 +144,17 @@ pub struct RefreshWorkResult {
     pub merge_deferred: bool,
 }
 
+/// Outcome of a single user-triggered "retry all incomplete" sweep.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct RetrySummary {
+    /// Incomplete works found and swept (Failed, Unenriched, or identity-Pending).
+    pub total: usize,
+    /// Works that reached a settled+enriched state after the pass.
+    pub recovered: usize,
+    /// Works still incomplete after the pass (left for a later retry).
+    pub still_incomplete: usize,
+}
+
 // Dead: bulk refresh is implemented at the handler layer
 // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g
 // (handler-level spawning for long-running background work). This type
@@ -294,6 +305,14 @@ pub trait WorkService: Send + Sync {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<RefreshWorkResult, WorkServiceError>;
+    /// User-triggered bulk recovery (REQ-011 / PO §7): sweep every "incomplete"
+    /// work for the user — Failed, Unenriched, or identity-Pending — and re-run
+    /// each through the one road in a **single pass, no recurring loop**. A
+    /// Pending work re-resolves identity first (the convergence the deleted
+    /// background job used to do); the rest re-enrich via [`Self::refresh`].
+    /// Replaces the removed `enrichment_retry_tick`.
+    async fn retry_all_incomplete(&self, user_id: UserId)
+        -> Result<RetrySummary, WorkServiceError>;
     // Dead: bulk refresh is implemented at the handler layer
     // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g.
     // Restore here only if the spawn pattern is ever moved into services.
@@ -340,12 +359,6 @@ pub trait WorkService: Send + Sync {
         page: u32,
         page_size: u32,
     ) -> Result<(Vec<Work>, i64), WorkServiceError>;
-    async fn download_cover_from_url(
-        &self,
-        user_id: i64,
-        work_id: i64,
-        cover_url: &str,
-    ) -> Result<(), WorkServiceError>;
     fn try_start_bulk_refresh(&self, user_id: i64) -> bool;
     fn finish_bulk_refresh(&self, user_id: i64);
 }

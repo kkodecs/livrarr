@@ -18,7 +18,6 @@ use livrarr_domain::{NotificationType, UserRole};
 
 pub mod author_monitor;
 pub mod download_poller;
-pub mod enrichment;
 pub mod maintenance;
 pub mod repair;
 pub mod rss_sync;
@@ -28,7 +27,6 @@ pub use maintenance::recover_interrupted_state;
 
 use self::author_monitor::author_monitor_tick;
 use self::download_poller::download_poller_tick;
-use self::enrichment::enrichment_retry_tick;
 use self::maintenance::{session_cleanup_tick, state_map_cleanup_tick};
 use self::rss_sync::rss_sync_tick;
 use self::tag_convergence::tag_convergence_tick;
@@ -100,106 +98,6 @@ impl JobRunner {
             author_monitor_tick,
         )
         .await;
-        {
-            let status = self.status.clone();
-            let cancel = self.cancel.clone();
-            status.write().await.push(JobStatus {
-                name: "enrichment_retry".to_string(),
-                interval: Duration::from_secs(300),
-                last_run: None,
-                running: false,
-                panic_notified: false,
-            });
-            let s = state.clone();
-            let handle = tokio::spawn(async move {
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {},
-                    _ = cancel.cancelled() => return,
-                }
-                if let Err(e) = enrichment_retry_tick(s.clone(), cancel.clone()).await {
-                    error!("enrichment_retry initial tick: {e}");
-                }
-                set_job_running(&status, "enrichment_retry", false).await;
-                if let Some(st) = status
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|s| s.name == "enrichment_retry")
-                {
-                    st.last_run = Some(chrono::Utc::now());
-                }
-                debug!("job 'enrichment_retry' tick completed");
-                loop {
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(300)) => {}
-                        _ = s.enrichment_notify.notified() => {}
-                        _ = cancel.cancelled() => {
-                            debug!("job 'enrichment_retry' cancelled");
-                            break;
-                        }
-                    }
-                    if cancel.is_cancelled() {
-                        break;
-                    }
-                    set_job_running(&status, "enrichment_retry", true).await;
-                    match tokio::spawn({
-                        let s2 = s.clone();
-                        let c2 = cancel.clone();
-                        async move { enrichment_retry_tick(s2, c2).await }
-                    })
-                    .await
-                    {
-                        Ok(Ok(())) => {
-                            let mut statuses = status.write().await;
-                            if let Some(st) =
-                                statuses.iter_mut().find(|s| s.name == "enrichment_retry")
-                            {
-                                st.last_run = Some(chrono::Utc::now());
-                                st.running = false;
-                            }
-                            debug!("job 'enrichment_retry' tick completed");
-                        }
-                        Ok(Err(e)) => {
-                            error!("job 'enrichment_retry' error: {e}");
-                            set_job_running(&status, "enrichment_retry", false).await;
-                        }
-                        Err(join_err) if join_err.is_panic() => {
-                            let payload = join_err.into_panic();
-                            let msg = payload
-                                .downcast_ref::<&str>()
-                                .map(|s| s.to_string())
-                                .or_else(|| payload.downcast_ref::<String>().cloned())
-                                .unwrap_or_else(|| "unknown panic".to_string());
-                            error!("job 'enrichment_retry' panicked: {msg}");
-                            let should_notify = {
-                                let mut statuses = status.write().await;
-                                if let Some(st) =
-                                    statuses.iter_mut().find(|st| st.name == "enrichment_retry")
-                                {
-                                    st.running = false;
-                                    if !st.panic_notified {
-                                        st.panic_notified = true;
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            };
-                            if should_notify {
-                                notify_admins_of_panic(&s.db, "enrichment_retry", &msg).await;
-                            }
-                        }
-                        Err(join_err) => {
-                            warn!("job 'enrichment_retry' task cancelled: {join_err}");
-                            set_job_running(&status, "enrichment_retry", false).await;
-                        }
-                    }
-                }
-            });
-            self.handles.lock().await.push(handle);
-        }
         self.spawn_job(
             "state_map_cleanup",
             Duration::from_secs(1800),

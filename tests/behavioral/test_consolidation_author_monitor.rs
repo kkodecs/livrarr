@@ -74,6 +74,13 @@ impl WorkService for StubWorkService {
         })
     }
 
+    async fn retry_all_incomplete(
+        &self,
+        _user_id: UserId,
+    ) -> Result<livrarr_domain::services::RetrySummary, WorkServiceError> {
+        todo!("stub: not exercised by author-monitor tests")
+    }
+
     async fn resolve_identity(
         &self,
         _user_id: UserId,
@@ -222,14 +229,6 @@ impl WorkService for StubWorkService {
         Ok((vec![], 0))
     }
 
-    async fn download_cover_from_url(
-        &self,
-        _user_id: i64,
-        _work_id: i64,
-        _cover_url: &str,
-    ) -> Result<(), WorkServiceError> {
-        Ok(())
-    }
     fn try_start_bulk_refresh(&self, _user_id: i64) -> bool {
         true
     }

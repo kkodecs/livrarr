@@ -825,7 +825,6 @@ async fn main() {
                 work_service_arc.clone(),
             ),
         ),
-        enrichment_notify: Arc::new(tokio::sync::Notify::new()),
         cover_service,
         preadd_cover_service: {
             use livrarr_domain::MetadataProvider as P;

@@ -8,6 +8,7 @@ import {
   Headphones,
   Plus,
   RefreshCw,
+  RotateCcw,
   Rss,
   TableProperties,
   LayoutGrid,
@@ -20,7 +21,7 @@ import {
   ZoomOut,
   Star,
 } from "lucide-react";
-import { listWorks, refreshAllWorks, deleteWork, refreshWork, triggerRssSync, getQueue, updateWork } from "@/api";
+import { listWorks, refreshAllWorks, retryAllIncomplete, deleteWork, refreshWork, triggerRssSync, getQueue, updateWork } from "@/api";
 import type { UpdateWorkRequest } from "@/types/api";
 import { computeTotalPages } from "@/utils/pagination";
 import type { WorkSortField } from "@/utils/works";
@@ -122,6 +123,12 @@ export function WorksPage() {
     mutationFn: refreshAllWorks,
     onSuccess: () => toast.success("Refreshing all works"),
     onError: () => toast.error("Failed to refresh works"),
+  });
+
+  const retryMutation = useMutation({
+    mutationFn: retryAllIncomplete,
+    onSuccess: () => toast.success("Retrying incomplete works"),
+    onError: () => toast.error("Failed to start retry"),
   });
 
   const rssSyncMutation = useMutation({
@@ -311,6 +318,17 @@ export function WorksPage() {
               className={cn(refreshMutation.isPending && "animate-spin")}
             />
             <span className="hidden sm:inline">Refresh All</span>
+          </button>
+          <button
+            onClick={() => retryMutation.mutate()}
+            disabled={retryMutation.isPending}
+            className="btn-secondary inline-flex items-center gap-1.5"
+          >
+            <RotateCcw
+              size={14}
+              className={cn(retryMutation.isPending && "animate-spin")}
+            />
+            <span className="hidden sm:inline">Retry Incomplete</span>
           </button>
           <Link
             to="/work/add"

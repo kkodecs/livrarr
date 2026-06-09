@@ -49,7 +49,6 @@ Each `Has*` trait exposes one service to handlers via an accessor method. `AppCo
 | `HasRssSync` | RSS sync running/last-run state |
 | `HasSystem` | System info accessor |
 | `HasCoverCache` | Cover proxy cache |
-| `HasEnrichmentNotify` | Enrichment wake notification |
 | `AppContext` | Composite supertrait — requires all `Has*` above |
 
 `impl AppContext for T` is a blanket impl: any type satisfying all `Has*` traits automatically implements `AppContext`.
@@ -87,6 +86,7 @@ Thin accessor interfaces consumed by handlers for shared mutable state (not serv
 - `delete` — delete a work and optionally its files
 - `refresh` — trigger metadata refresh for a single work
 - `refresh_all` — trigger metadata refresh for all works
+- `retry_all_incomplete` — bulk-recover incomplete works (Failed/Unenriched/identity-Pending) through the one road; replaces the deleted background retry job
 - `send_email` — send a library file to an email address (Kindle)
 - `download` — serve a library file for direct browser download
 - `stream` — stream a library file for in-browser reading

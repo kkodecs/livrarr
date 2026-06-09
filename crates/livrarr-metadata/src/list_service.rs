@@ -36,67 +36,114 @@ impl<D, W, H, B> ListServiceImpl<D, W, H, B> {
 }
 
 // ---------------------------------------------------------------------------
-// Row -> identity-pending candidate (Bulk-tier seed)
+// Row -> identity candidate (resolved synchronously through the one road)
 // ---------------------------------------------------------------------------
 
-/// Build an identity-pending `WorkCandidate` from a confirmed preview row,
-/// harvesting the row's identifiers (Goodreads Book Id -> gr_key, ISBN bridge)
-/// as seed anchors. Multi-provider resolution is deferred to the background
-/// async resolver (M9 carve-out, REQ-006/026); the retired OL-only synchronous
-/// lookup was the #97 single-provider locus (D-004).
-fn pending_candidate_from_row(
-    row: &livrarr_db::ListImportPreviewRow,
-) -> livrarr_domain::identity::WorkCandidate {
-    use livrarr_domain::identity::{
-        CapturedIdentity, IdentityState, PendingReason, WorkCandidate, WorkSeedFields,
-    };
-    use livrarr_domain::normalization::{normalize_gr_key, normalize_isbn13};
+impl<D, W, H, B> ListServiceImpl<D, W, H, B>
+where
+    W: WorkService,
+{
+    /// Resolve a confirmed preview row's identity through the shared
+    /// [`WorkService::resolve_identity`] — the same road the interactive Add-Work
+    /// door takes (P-A/P-B). The row's harvested anchors (Goodreads Book Id, ISBN)
+    /// resolve to a canonical work anchor synchronously: `user_confirmed = false`
+    /// forces the multi-provider fan-out that finds the OpenLibrary work key,
+    /// because a list row is not a per-book identity confirmation. A resolution
+    /// miss lands `Pending` and is still added — the import is never blocked
+    /// (REQ-013); a pending row converges later via "retry all incomplete".
+    async fn resolve_candidate_from_row(
+        &self,
+        user_id: UserId,
+        row: &livrarr_db::ListImportPreviewRow,
+    ) -> livrarr_domain::identity::WorkCandidate {
+        use livrarr_domain::identity::{
+            CapturedIdentity, IdentityState, LatencyTier, PendingReason, RawHarvest, WorkCandidate,
+            WorkSeedFields,
+        };
+        use livrarr_domain::normalization::{normalize_gr_key, normalize_isbn13};
 
-    let gr_key = row.goodreads_book_id.as_deref().and_then(normalize_gr_key);
-    let isbn_13 = row
-        .isbn_13
-        .as_deref()
-        .or(row.isbn_10.as_deref())
-        .and_then(normalize_isbn13);
+        let gr_key = row.goodreads_book_id.as_deref().and_then(normalize_gr_key);
+        let isbn_13 = row
+            .isbn_13
+            .as_deref()
+            .or(row.isbn_10.as_deref())
+            .and_then(normalize_isbn13);
 
-    WorkCandidate {
-        fields: WorkSeedFields {
-            title: row.title.clone(),
-            author_name: row.author.clone(),
-            language: "en".into(),
-            author_ol_key: None,
-            year: row.year,
-            cover_url: None,
-            detail_url: None,
-            description: None,
-            series_name: None,
-            series_position: None,
-        },
-        identity: IdentityState::Pending {
-            reason: PendingReason::NoCandidates,
-            seed_anchors: Some(CapturedIdentity {
-                ol_key: None,
-                gr_key,
-                hc_key: None,
-                isbn_13,
-                asin: None,
+        // Background lane: a foreground interactive add always outranks bulk
+        // import (REQ-010).
+        let resolved = self
+            .work_service
+            .resolve_identity(
+                user_id,
+                RawHarvest {
+                    ol_key: None,
+                    gr_key: gr_key.clone(),
+                    hc_key: None,
+                    isbn: isbn_13.clone(),
+                    asin: None,
+                    title: Some(row.title.clone()),
+                    author_name: Some(row.author.clone()),
+                    language: Some("en".to_string()),
+                    series_name: None,
+                    year: row.year,
+                    user_confirmed: false,
+                },
+                LatencyTier::Background,
+            )
+            .await;
+
+        // A resolver infrastructure error never blocks the import: seed a Pending
+        // candidate that a later user-triggered "retry all incomplete" converges.
+        let (identity, candidate_id) = match resolved {
+            Ok(r) => (r.identity, r.candidate_id),
+            Err(e) => {
+                warn!(error = %e, title = %row.title, "list import: identity resolve failed; seeding Pending");
+                (
+                    IdentityState::Pending {
+                        reason: PendingReason::NoCandidates,
+                        seed_anchors: Some(CapturedIdentity {
+                            ol_key: None,
+                            gr_key,
+                            hc_key: None,
+                            isbn_13,
+                            asin: None,
+                            title: row.title.clone(),
+                            author_name: row.author.clone(),
+                            language: None,
+                        }),
+                        top_candidates: vec![],
+                    },
+                    None,
+                )
+            }
+        };
+
+        WorkCandidate {
+            fields: WorkSeedFields {
                 title: row.title.clone(),
                 author_name: row.author.clone(),
-                language: None,
-            }),
-            top_candidates: vec![],
-        },
-        candidate_id: None,
-        source_provider_data: None,
-        file_path: None,
-        delete_existing_after_import: false,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
-        provenance_setter: Some(ProvenanceSetter::Imported),
-        import_id: None,
-        cover_manual: false,
-        skip_sync_enrichment: false,
+                language: "en".into(),
+                author_ol_key: None,
+                year: row.year,
+                cover_url: None,
+                detail_url: None,
+                description: None,
+                series_name: None,
+                series_position: None,
+            },
+            identity,
+            candidate_id,
+            source_provider_data: None,
+            file_path: None,
+            delete_existing_after_import: false,
+            series_id: None,
+            monitor_ebook: None,
+            monitor_audiobook: None,
+            provenance_setter: Some(ProvenanceSetter::Imported),
+            import_id: None,
+            cover_manual: false,
+            skip_sync_enrichment: false,
+        }
     }
 }
 
@@ -344,12 +391,11 @@ where
                     }
                 };
 
-                // Harvest the row's identifiers (Goodreads Book Id -> gr_key,
-                // ISBN bridge) and seed an identity-pending work. Bulk-tier paths
-                // create identity-pending and converge via the background async
-                // resolver (M9 carve-out, REQ-006/026) rather than the retired
-                // OL-only synchronous lookup (D-004, the #97 single-provider locus).
-                let add_req = pending_candidate_from_row(&row);
+                // Resolve identity synchronously through the shared one-road
+                // resolver (same path as the interactive Add-Work door), then add.
+                // A resolvable row lands Confirmed; a miss lands Pending without
+                // blocking the import.
+                let add_req = self.resolve_candidate_from_row(user_id, &row).await;
 
                 match self.work_service.add(user_id, add_req).await {
                     Ok(add_result) if !add_result.created => RowOutcome {

@@ -241,10 +241,6 @@ pub trait HasCoverCache: Clone + Send + Sync + 'static {
     fn cover_proxy_cache(&self) -> &Self::CoverCache;
 }
 
-pub trait HasEnrichmentNotify: Clone + Send + Sync + 'static {
-    fn enrichment_notify(&self) -> &tokio::sync::Notify;
-}
-
 pub trait HasCoverService: Clone + Send + Sync + 'static {
     type CoverSvc: CoverService + Send + Sync + 'static;
     fn cover_service(&self) -> &Self::CoverSvc;
@@ -313,7 +309,6 @@ pub trait AppContext:
     + HasRssSync
     + HasSystem
     + HasCoverCache
-    + HasEnrichmentNotify
     + HasCoverService
     + HasPreaddCoverService
     + HasHmacKey
@@ -366,7 +361,6 @@ impl<T> AppContext for T where
         + HasRssSync
         + HasSystem
         + HasCoverCache
-        + HasEnrichmentNotify
         + HasCoverService
         + HasPreaddCoverService
         + HasHmacKey

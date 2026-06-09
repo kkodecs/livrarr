@@ -1,9 +1,9 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
+    time::Duration,
 };
 
-use futures::future::BoxFuture;
 use livrarr_db::{
     create_test_db, CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb, WorkDbCreate,
 };
@@ -11,7 +11,9 @@ use livrarr_domain::{
     identity::CandidateId, normalize_for_matching, EnrichmentStatus, MetadataProvider,
     OutcomeClass, UserId, UserRole, Work, WorkId,
 };
-use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
+use livrarr_external_data::{
+    transport_cache::TransportCache, NormalizedWorkDetail, ProviderOutcome,
+};
 use livrarr_metadata::{
     CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentService,
     EnrichmentServiceImpl, PacingQueue, PriorityModel, ProviderQueue, ProviderQueueError,
@@ -182,11 +184,15 @@ async fn seed_work_for_user(
     db: &livrarr_db::sqlite::SqliteDb,
     user_id: UserId,
     title: &str,
+    gr_key: Option<&str>,
 ) -> Work {
-    db.create_work(work_req(user_id, title, "Contract Author"))
-        .await
-        .expect("test work should be created")
-        .0
+    db.create_work(CreateWorkDbRequest {
+        gr_key: gr_key.map(str::to_string),
+        ..work_req(user_id, title, "Contract Author")
+    })
+    .await
+    .expect("test work should be created")
+    .0
 }
 
 fn payload_with_cover() -> ProviderOutcome<NormalizedWorkDetail> {
@@ -213,7 +219,11 @@ fn scatter(
     }
 }
 
-fn service(db: livrarr_db::sqlite::SqliteDb, queue: StubProviderQueue) -> impl EnrichmentService {
+fn service(
+    db: livrarr_db::sqlite::SqliteDb,
+    queue: StubProviderQueue,
+    cache: TransportCache,
+) -> impl EnrichmentService {
     EnrichmentServiceImpl::new(
         Arc::new(db),
         Arc::new(queue),
@@ -222,6 +232,7 @@ fn service(db: livrarr_db::sqlite::SqliteDb, queue: StubProviderQueue) -> impl E
         livrarr_metadata::work_service::StubNoLlm,
         false,
     )
+    .with_transport_cache(Arc::new(cache.clone()))
 }
 
 #[tokio::test]
@@ -229,7 +240,8 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
     // AC-001
     let db = create_test_db().await;
     let (user_id, add_box_work) = seed_user_and_work(&db, "add-box", "Add Box Title").await;
-    let author_page_work = seed_work_for_user(&db, user_id, "Author Page Title").await;
+    let author_page_work =
+        seed_work_for_user(&db, user_id, "Add Box Title", Some("gr-refactor")).await;
 
     let queue = StubProviderQueue::with_persisted_plans(
         db.clone(),
@@ -240,12 +252,23 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
         )],
     );
     let queue_probe = queue.clone();
-    let service = service(db.clone(), queue);
+    let cache = TransportCache::new(Duration::from_secs(60));
+    let service = service(db.clone(), queue, cache.clone());
 
     service
         .enrich_work(user_id, add_box_work.id, EnrichmentMode::Manual, None)
         .await
         .expect("network path should enrich");
+
+    let cached_payload = match payload_with_cover() {
+        ProviderOutcome::Success(payload) => *payload,
+        _ => unreachable!("payload_with_cover always returns a successful payload"),
+    };
+    cache.cache_put(
+        user_id,
+        CandidateId("cached-candidate-with-cover".to_string()),
+        HashMap::from([(MetadataProvider::Hardcover, cached_payload)]),
+    );
 
     service
         .enrich_work(
@@ -286,7 +309,11 @@ async fn failed_enrichment_sets_failed_and_queue_membership_is_transient() {
             HashMap::from([(MetadataProvider::Hardcover, ProviderOutcome::NotConfigured)]),
         )],
     );
-    let service = service(db.clone(), queue);
+    let service = service(
+        db.clone(),
+        queue,
+        TransportCache::new(Duration::from_secs(60)),
+    );
 
     let result = service
         .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
@@ -325,7 +352,11 @@ async fn unconfigured_provider_is_skipped_remaining_providers_save_the_work() {
             ]),
         )],
     );
-    let service = service(db.clone(), queue);
+    let service = service(
+        db.clone(),
+        queue,
+        TransportCache::new(Duration::from_secs(60)),
+    );
 
     let result = service
         .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
@@ -358,7 +389,11 @@ async fn all_providers_no_usable_data_saves_seed_and_lands_thin_or_failed() {
             HashMap::from([(MetadataProvider::Hardcover, empty_success)]),
         )],
     );
-    let service = service(db.clone(), queue);
+    let service = service(
+        db.clone(),
+        queue,
+        TransportCache::new(Duration::from_secs(60)),
+    );
 
     let result = service
         .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
@@ -369,17 +404,6 @@ async fn all_providers_no_usable_data_saves_seed_and_lands_thin_or_failed() {
     let saved = db.get_work(user_id, work.id).await.unwrap();
     assert_eq!(saved.title, "Thin Title");
     assert_eq!(saved.author_name, "Contract Author");
-}
-
-#[ignore = "pk-impl: blocked pending green server wiring (AC-019)"]
-#[tokio::test]
-async fn retry_all_failed_reenqueues_failed_works_without_background_retry_loop() {
-    // AC-019
-    let _intended_assertion: BoxFuture<'static, ()> = Box::pin(async {
-        panic!(
-            "retry_all_failed should list Failed works, enqueue each through the same pacing queue, and start no background retry loop"
-        );
-    });
 }
 
 #[tokio::test]
@@ -399,7 +423,11 @@ async fn one_empty_success_and_rest_errors_lands_thin_not_failed() {
             ]),
         )],
     );
-    let service = service(db.clone(), queue);
+    let service = service(
+        db.clone(),
+        queue,
+        TransportCache::new(Duration::from_secs(60)),
+    );
 
     let result = service
         .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)

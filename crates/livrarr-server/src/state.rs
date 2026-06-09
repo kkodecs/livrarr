@@ -202,7 +202,6 @@ pub struct AppState {
     pub matching_svc: crate::matching_service::LiveMatchingService,
     pub manual_import_scan_svc: crate::manual_import_scan_service::LiveManualImportScanService,
     pub readarr_import_wf: Arc<crate::readarr_import_workflow::LiveReadarrImportWorkflow>,
-    pub enrichment_notify: Arc<tokio::sync::Notify>,
     pub cover_service: Arc<LiveCoverService>,
     pub preadd_cover_service: Arc<livrarr_metadata::preadd_cover_service::LivePreaddCoverService>,
     pub hmac_key: Vec<u8>,
@@ -315,8 +314,8 @@ use livrarr_handlers::context::{
     HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
     HasBookmarkService, HasChapterService, HasCoverCache, HasCoverService, HasDataDir,
     HasDownloadClientCredentialService, HasDownloadClientSettingsService, HasEmailService,
-    HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService,
-    HasHmacKey, HasHttpClient, HasIdentityConflictService, HasIdentityResolver, HasImportIoService,
+    HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService, HasHmacKey,
+    HasHttpClient, HasIdentityConflictService, HasIdentityResolver, HasImportIoService,
     HasImportService, HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService,
     HasListService, HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
     HasNotificationService, HasPreaddCoverService, HasProviderHealth, HasQueueService,
@@ -631,12 +630,6 @@ impl HasCoverCache for AppState {
     type CoverCache = CoverProxyCacheAccessorImpl;
     fn cover_proxy_cache(&self) -> &Self::CoverCache {
         &self.cover_proxy_cache_accessor
-    }
-}
-
-impl HasEnrichmentNotify for AppState {
-    fn enrichment_notify(&self) -> &tokio::sync::Notify {
-        &self.enrichment_notify
     }
 }
 

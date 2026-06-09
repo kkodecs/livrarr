@@ -234,6 +234,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             post(livrarr_handlers::work::refresh_all::<AppState>),
         )
         .route(
+            "/work/retry-incomplete",
+            post(livrarr_handlers::work::retry_all_incomplete::<AppState>),
+        )
+        .route(
             "/work",
             get(livrarr_handlers::work::list::<AppState>)
                 .post(livrarr_handlers::work::add::<AppState>),

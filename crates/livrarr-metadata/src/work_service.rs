@@ -1346,6 +1346,109 @@ where
         })
     }
 
+    async fn retry_all_incomplete(
+        &self,
+        user_id: UserId,
+    ) -> Result<livrarr_domain::services::RetrySummary, WorkServiceError> {
+        use livrarr_domain::identity::{
+            AnchorSetter, AnchorType, LatencyTier, Resolution, WorkSeed,
+        };
+        use livrarr_domain::services::IdentityResolver;
+
+        // Single pass over every "incomplete" work — Failed, Unenriched, or
+        // identity-Pending — filtered in memory (like refresh_all). This REPLACES
+        // the deleted background retry job: user-triggered, one pass, no recurring
+        // loop (REQ-011 / PO §7).
+        let works = self
+            .db
+            .list_works(user_id)
+            .await
+            .map_err(WorkServiceError::Db)?;
+        let incomplete: Vec<Work> = works
+            .into_iter()
+            .filter(|w| {
+                matches!(
+                    w.enrichment_status,
+                    EnrichmentStatus::Failed | EnrichmentStatus::Unenriched
+                ) || w.identity_status == IdentityStatus::Pending
+            })
+            .collect();
+
+        let total = incomplete.len();
+        let mut recovered = 0usize;
+
+        for work in &incomplete {
+            // A Pending work re-resolves identity first — the convergence the
+            // deleted job's identity source used to perform. Go straight to the
+            // resolver (not resolve_identity, which gates on a hard anchor) so a
+            // title+author seed still fans out. The promoted anchor survives the
+            // refresh below (reset_enrichment_for_refresh touches only enrichment).
+            if work.identity_status == IdentityStatus::Pending {
+                if let Some(resolver) = self.resolver.clone() {
+                    let seed = WorkSeed {
+                        ol_key: work.ol_key.clone(),
+                        gr_key: work.gr_key.clone(),
+                        hc_key: work.hc_key.clone(),
+                        isbn_13: work.isbn_13.clone(),
+                        asin: work.asin.clone(),
+                        title: Some(work.title.clone()),
+                        author_name: Some(work.author_name.clone()),
+                        language: work.language.clone(),
+                        series_name: work.series_name.clone(),
+                        year: work.year,
+                        user_confirmed: false,
+                    };
+                    if let Ok(Resolution::Resolved { identity, .. }) = resolver
+                        .resolve(user_id, &seed, LatencyTier::Background)
+                        .await
+                    {
+                        // Persist the OL anchor when present (confirm_anchor writes
+                        // work_identity_anchors + the denormalized ol_key column).
+                        if let Some(ol_key) = identity.ol_key.as_deref() {
+                            let _ = self
+                                .db
+                                .confirm_anchor(
+                                    work.id,
+                                    AnchorType::new(AnchorType::OL_WORK),
+                                    ol_key,
+                                    AnchorSetter::AutoSearch,
+                                )
+                                .await;
+                        }
+                        // Settle the badge for ANY Resolved: confirm_anchor writes the
+                        // anchor but never the status, and resolve_identity (the
+                        // interactive door) confirms regardless of ol_key — match it,
+                        // or a Resolved-without-OL work stays stuck Pending.
+                        let _ = self
+                            .db
+                            .set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
+                            .await;
+                    }
+                }
+            }
+
+            // Re-enrich through the one road (refresh -> run_unified ->
+            // materialize). A refresh error never blocks the rest of the sweep.
+            if self.refresh(user_id, work.id).await.is_ok() {
+                if let Ok(after) = self.db.get_work(user_id, work.id).await {
+                    let still_incomplete = matches!(
+                        after.enrichment_status,
+                        EnrichmentStatus::Failed | EnrichmentStatus::Unenriched
+                    ) || after.identity_status == IdentityStatus::Pending;
+                    if !still_incomplete {
+                        recovered += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(RetrySummary {
+            total,
+            recovered,
+            still_incomplete: total - recovered,
+        })
+    }
+
     // Dead: bulk refresh is implemented at the handler layer
     // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g
     // (handler-level spawning for long-running background work). This stub
@@ -1853,27 +1956,6 @@ where
         WorkDb::search_works(&self.db, user_id, query, page, page_size)
             .await
             .map_err(WorkServiceError::Db)
-    }
-
-    async fn download_cover_from_url(
-        &self,
-        user_id: i64,
-        work_id: i64,
-        cover_url: &str,
-    ) -> Result<(), WorkServiceError> {
-        let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-        livrarr_materialize::download_cover_to_disk(
-            &self.http,
-            cover_url,
-            &covers_dir,
-            work_id,
-            "",
-        )
-        .await
-        .map_err(|e| WorkServiceError::Cover(e.to_string()))?;
-        let thumb = covers_dir.join(format!("{work_id}_thumb.jpg"));
-        let _ = tokio::fs::remove_file(&thumb).await;
-        Ok(())
     }
 
     fn try_start_bulk_refresh(&self, user_id: i64) -> bool {
