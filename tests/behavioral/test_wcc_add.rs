@@ -18,15 +18,23 @@ use livrarr_domain::identity::{
     CandidateId, CapturedIdentity, IdentityMethod, IdentityState, WorkCandidate, WorkSeedFields,
 };
 use livrarr_domain::services::{LookupRequest, WorkService};
-use livrarr_domain::{MetadataProvider, ProvenanceSetter, UserId, UserRole};
+use livrarr_domain::{
+    EnrichmentStatus, MetadataProvider, ProvenanceSetter, UserId, UserRole, Work,
+};
 use livrarr_external_data::transport_cache::TransportCache;
 use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
+use livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl;
 use livrarr_metadata::work_service::WorkServiceImpl;
+use livrarr_metadata::{
+    CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentServiceImpl, PriorityModel,
+    ProviderQueue, ProviderQueueError, ScatterGatherResult,
+};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -141,6 +149,40 @@ fn confirmed_candidate(identity: CapturedIdentity) -> WorkCandidate {
         import_id: None,
         cover_manual: false,
         skip_sync_enrichment: true,
+    }
+}
+
+#[derive(Clone, Default)]
+struct NoProviderDispatchQueue {
+    dispatch_count: Arc<AtomicUsize>,
+}
+
+impl NoProviderDispatchQueue {
+    fn dispatch_count(&self) -> usize {
+        self.dispatch_count.load(Ordering::SeqCst)
+    }
+}
+
+impl ProviderQueue for NoProviderDispatchQueue {
+    async fn dispatch_enrichment(
+        &self,
+        work: &Work,
+        _context: EnrichmentContext,
+    ) -> Result<ScatterGatherResult, ProviderQueueError> {
+        self.dispatch_count.fetch_add(1, Ordering::SeqCst);
+        Ok(ScatterGatherResult {
+            work_id: work.id,
+            outcomes: HashMap::from([(
+                MetadataProvider::Hardcover,
+                ProviderOutcome::NotConfigured,
+            )]),
+            merge_eligible: false,
+            deferred: false,
+        })
+    }
+
+    fn circuit_state(&self, _provider: MetadataProvider) -> CircuitState {
+        CircuitState::Closed
     }
 }
 
@@ -344,24 +386,36 @@ async fn test_wcc_add_reqs_014_015_add_reuses_cached_payloads_in_process_without
     )]);
     cache.cache_put(user_id, candidate_id.clone(), cached_payloads);
 
-    let resolver = LiveEnglishIdentityResolver {
-        clients: HashMap::new(),
-        cache: cache.clone(),
-        config: ResolverConfig {
-            gb_key_present: false,
-            llm_configured: false,
-            ..ResolverConfig::default()
-        },
-    };
-    let service = service(db, http).with_resolver(Arc::new(resolver));
+    let queue = NoProviderDispatchQueue::default();
+    let queue_spy = queue.clone();
+    let enrichment = EnrichmentServiceImpl::new(
+        Arc::new(db.clone()),
+        Arc::new(queue),
+        Arc::new(DefaultMergeEngine::new(PriorityModel::english())),
+        Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
+        livrarr_metadata::work_service::StubNoLlm,
+        false,
+    )
+    .with_transport_cache(cache.clone());
+    let workflow = EnrichmentWorkflowImpl::new(Arc::new(enrichment), db.clone());
+    let service = WorkServiceImpl::new(
+        db,
+        workflow,
+        http,
+        tempfile::tempdir()
+            .expect("test data dir")
+            .path()
+            .to_path_buf(),
+    );
 
-    // Interactive add of the selected candidate: `skip_sync_enrichment` is true
-    // (the real Add-Work handler sets it), and candidate_id echoes the search
-    // result whose anchors match the cached payload (revalidation passes).
+    // The selected candidate echoes the search result whose anchors match the
+    // cached payload; sync enrichment must run so add() reaches the one road:
+    // finish_created_work -> run_unified_enrichment -> enrich_work step 2.5.
     let mut candidate = confirmed_candidate(isbn_identity());
     candidate.candidate_id = Some(candidate_id);
+    candidate.skip_sync_enrichment = false;
     // Cover-less: the only HTTP a candidate_id-backed add could then issue would be
-    // a provider re-query, which it must not (the resolver's clients map is empty).
+    // a provider re-query, which it must not.
     candidate.fields.cover_url = None;
 
     let result = service
@@ -382,6 +436,21 @@ async fn test_wcc_add_reqs_014_015_add_reuses_cached_payloads_in_process_without
         Some(412),
         "REQ-015: cached payloads are merged and applied synchronously within add(), \
          so the returned work already carries the cached fields (not deferred)"
+    );
+    assert_eq!(
+        result.work.enrichment_status,
+        EnrichmentStatus::Enriched,
+        "the cached payload merge should mark the saved work enriched"
+    );
+    assert_eq!(
+        result.enrichment_status,
+        EnrichmentStatus::Enriched,
+        "add() should report the status produced by the one-road enrichment merge"
+    );
+    assert_eq!(
+        queue_spy.dispatch_count(),
+        0,
+        "candidate reuse must return before provider dispatch"
     );
     assert_eq!(
         http_spy.call_count(),

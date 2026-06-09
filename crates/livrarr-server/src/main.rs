@@ -205,6 +205,14 @@ async fn main() {
         }
     }
 
+    // Shared payload transport cache (REQ-014/015): the identity resolver seeds it
+    // during discovery; EnrichmentServiceImpl::enrich_work consumes it for a
+    // candidate_id hit (zero-network reuse through the one road). The SAME Arc is
+    // wired into both the enrichment service (below) and the identity resolver.
+    let transport_cache = Arc::new(livrarr_external_data::transport_cache::TransportCache::new(
+        std::time::Duration::from_secs(300),
+    ));
+
     let (provider_queue, enrichment_service) = {
         use livrarr_domain::MetadataProvider as P;
         use livrarr_metadata as m;
@@ -349,14 +357,17 @@ async fn main() {
             http_client.clone(),
         );
         let llm_configured = live_metadata_config.snapshot().llm_enabled;
-        let service = Arc::new(m::EnrichmentServiceImpl::new(
-            db_arc,
-            queue.clone(),
-            merge_engine,
-            Arc::new(validator),
-            llm_caller,
-            llm_configured,
-        ));
+        let service = Arc::new(
+            m::EnrichmentServiceImpl::new(
+                db_arc,
+                queue.clone(),
+                merge_engine,
+                Arc::new(validator),
+                llm_caller,
+                llm_configured,
+            )
+            .with_transport_cache(transport_cache.clone()),
+        );
         (queue, service)
     };
 
@@ -486,9 +497,7 @@ async fn main() {
     let identity_resolver_arc = Arc::new(
         livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver {
             clients: provider_clients.clone(),
-            cache: Arc::new(livrarr_external_data::transport_cache::TransportCache::new(
-                std::time::Duration::from_secs(300),
-            )),
+            cache: transport_cache.clone(),
             config: {
                 let cfg = live_metadata_config.snapshot();
                 let llm_configured = cfg.llm_enabled

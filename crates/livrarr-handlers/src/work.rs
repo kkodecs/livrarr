@@ -17,8 +17,8 @@ use crate::{
     RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
 use livrarr_domain::services::{
-    AuthorService, CreateNotificationRequest, EmailService, EnrichmentWorkflow, FileService,
-    NotificationService, SeriesQueryService, TagService, WorkService,
+    AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
+    SeriesQueryService, WorkService,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -256,7 +256,10 @@ pub async fn add<
         provenance_setter: None,
         import_id: None,
         cover_manual: cover_is_manual,
-        skip_sync_enrichment: true,
+        // Funnel through the one road: enrichment + cover/tag materialization run
+        // synchronously via the pipeline, reusing the candidate's cached discovery
+        // payloads (zero-network when the search cache is still warm).
+        skip_sync_enrichment: false,
     };
 
     let result = state.work_service().add(ctx.user.id, candidate).await?;
@@ -321,45 +324,6 @@ pub async fn add<
                 }
             });
         }
-    }
-
-    // Phase 2: background enrichment for metadata + potential cover upgrade
-    {
-        let s = state.clone();
-        let user_id = ctx.user.id;
-        let work_id = result.work.id;
-        let phase1_had_cover = result.cover_mtime.is_some();
-        tokio::spawn(async move {
-            if !phase1_had_cover {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-            match s
-                .enrichment_workflow()
-                .enrich_work(
-                    user_id,
-                    work_id,
-                    livrarr_domain::services::EnrichmentMode::Background,
-                    None,
-                )
-                .await
-            {
-                Ok(r) => {
-                    if !r.work.cover_manual {
-                        if let Some(ref url) = r.work.cover_url {
-                            let _ = s
-                                .work_service()
-                                .download_cover_from_url(user_id, work_id, url)
-                                .await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(work_id, "background enrichment failed: {e}");
-                }
-            }
-        });
     }
 
     let detail = crate::types::work::work_to_detail_with_cover_mtime(
@@ -663,30 +627,16 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
         let mut failed = 0usize;
 
         for work in &works {
-            let result = match s.work_service().refresh(user_id, work.id).await {
-                Ok(r) => r,
+            // refresh() funnels through run_unified, which materializes covers and
+            // tags itself — the handler does not re-download or re-tag (REQ-001).
+            match s.work_service().refresh(user_id, work.id).await {
+                Ok(_) => {
+                    enriched += 1;
+                }
                 Err(e) => {
                     tracing::warn!(work_id = work.id, "refresh_all: refresh failed: {e}");
                     failed += 1;
-                    continue;
                 }
-            };
-
-            if !result.work.cover_manual {
-                if let Some(ref cover_url) = result.work.cover_url {
-                    let _ = s
-                        .work_service()
-                        .download_cover_from_url(user_id, work.id, cover_url)
-                        .await;
-                }
-            }
-
-            enriched += 1;
-            if !result.taggable_items.is_empty() {
-                let _ = s
-                    .tag_service()
-                    .retag_library_items(&result.work, &result.taggable_items)
-                    .await;
             }
         }
 
