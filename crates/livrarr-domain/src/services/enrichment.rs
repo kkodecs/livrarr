@@ -36,6 +36,10 @@ pub struct EnrichmentResult {
     /// identity state — it raises this flag and the caller writes
     /// [`crate::IdentityStatus::NotFound`]. `false` on every normal outcome.
     pub identity_not_found: bool,
+    /// True when the merge actually changed any work field, external ID, or cover
+    /// resolution. Drives the materialize gate in `run_unified_enrichment` (REQ-012):
+    /// cover download + retag runs only when `changed = true`.
+    pub changed: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +70,7 @@ pub trait EnrichmentWorkflow: Send + Sync {
         user_id: crate::UserId,
         work_id: WorkId,
         mode: EnrichmentMode,
+        candidate_id: Option<crate::identity::CandidateId>,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError>;
     async fn reset_for_manual_refresh(
         &self,

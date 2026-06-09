@@ -190,6 +190,7 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
         _user_id: UserId,
         _work_id: WorkId,
         _mode: EnrichmentMode,
+        _candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         if self.should_fail {
             return Err(EnrichmentWorkflowError::Queue("stub failure".into()));
@@ -204,6 +205,7 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
             cover_resolution: None,
             audiobook_cover_resolution: None,
             identity_not_found: false,
+            changed: true,
         })
     }
 

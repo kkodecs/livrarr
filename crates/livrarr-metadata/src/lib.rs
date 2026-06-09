@@ -459,6 +459,7 @@ pub mod tests {
             match self.mode {
                 StubEnrichmentMode::Success => Ok(EnrichmentResult {
                     identity_not_found: false,
+                    changed: true,
                     enrichment_status: EnrichmentStatus::Enriched,
                     enrichment_source: Some("hardcover+audnexus".to_string()),
                     llm_task_spawned: false,
@@ -473,6 +474,7 @@ pub mod tests {
                 }),
                 StubEnrichmentMode::Partial => Ok(EnrichmentResult {
                     identity_not_found: false,
+                    changed: false,
                     enrichment_status: EnrichmentStatus::Unenriched,
                     enrichment_source: Some("openlibrary".to_string()),
                     llm_task_spawned: false,
@@ -487,6 +489,7 @@ pub mod tests {
                 }),
                 StubEnrichmentMode::AllFail => Ok(EnrichmentResult {
                     identity_not_found: false,
+                    changed: false,
                     enrichment_status: EnrichmentStatus::Failed,
                     enrichment_source: None,
                     llm_task_spawned: false,
@@ -506,6 +509,7 @@ pub mod tests {
                 StubEnrichmentMode::NotFound => Err(EnrichmentError::WorkNotFound),
                 StubEnrichmentMode::ManualCover => Ok(EnrichmentResult {
                     identity_not_found: false,
+                    changed: false,
                     enrichment_status: EnrichmentStatus::Enriched,
                     enrichment_source: Some("hardcover".to_string()),
                     llm_task_spawned: false,
@@ -520,6 +524,7 @@ pub mod tests {
                 }),
                 StubEnrichmentMode::LlmFallback => Ok(EnrichmentResult {
                     identity_not_found: false,
+                    changed: false,
                     enrichment_status: EnrichmentStatus::Enriched,
                     enrichment_source: Some("hardcover".to_string()),
                     llm_task_spawned: true,

@@ -341,6 +341,7 @@ pub async fn add<
                     user_id,
                     work_id,
                     livrarr_domain::services::EnrichmentMode::Background,
+                    None,
                 )
                 .await
             {

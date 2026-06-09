@@ -233,6 +233,7 @@ async fn dispatch_enrich(
             user_id,
             work_id,
             livrarr_domain::services::EnrichmentMode::Background,
+            None,
         ),
     )
     .await

@@ -57,12 +57,13 @@ where
         user_id: UserId,
         work_id: WorkId,
         mode: DomainEnrichmentMode,
+        candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<DomainEnrichmentResult, EnrichmentWorkflowError> {
         let metadata_mode = convert_mode(mode);
 
         let result = self
             .inner
-            .enrich_work(user_id, work_id, metadata_mode, None)
+            .enrich_work(user_id, work_id, metadata_mode, candidate_id)
             .await
             .map_err(convert_error)?;
 
@@ -75,6 +76,7 @@ where
             cover_resolution: result.cover_resolution,
             audiobook_cover_resolution: result.audiobook_cover_resolution,
             identity_not_found: result.identity_not_found,
+            changed: result.changed,
         })
     }
 
@@ -114,6 +116,7 @@ where
         _user_id: UserId,
         _work_id: WorkId,
         _mode: DomainEnrichmentMode,
+        _candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<DomainEnrichmentResult, EnrichmentWorkflowError> {
         Err(EnrichmentWorkflowError::Queue(
             "enrichment not available in reset-only mode".into(),

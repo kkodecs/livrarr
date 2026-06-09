@@ -241,11 +241,13 @@ impl EnrichmentWorkflow for SpyEnrichmentWorkflow {
         _user_id: UserId,
         _work_id: WorkId,
         _mode: WorkflowMode,
+        _candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<WorkflowResult, EnrichmentWorkflowError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         Ok(WorkflowResult {
             enrichment_status: self.status,
             identity_not_found: false,
+            changed: false,
             enrichment_source: Some("spy".to_string()),
             work: Work {
                 enrichment_status: self.status,
