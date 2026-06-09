@@ -1,8 +1,18 @@
 ---
 feature: "cross-format-resume"
 stage: spec
-status: draft
+status: delivered
 version: 4
+# As-built 2026-06-09: all 18 REQ delivered; PO-validated live (DC Carl).
+# Operational deviations are recorded in ir-v2 (4 AS-BUILT amendments).
+# Deferred (logged, not silently dropped):
+#   - Link establishment for ALREADY-imported audiobooks (sidecar added later)
+#     has no rescan path — links form only on import. Follow-up: rescan/backfill
+#     reconciliation.
+#   - kash generation MUST use the library's epub as input (livrarr rewrites
+#     EPUB tags on import; pre-import sources never hash-match) — kash_gen-side.
+#   - Audiobook "Sync to here" is always visible (server no-ops on unlinked)
+#     rather than link-gated — accepted UX deviation.
 req_ids: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009, REQ-010, REQ-011, REQ-012, REQ-013, REQ-014, REQ-015, REQ-016, REQ-017, REQ-018]
 ---
 

@@ -28,6 +28,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 - [Grab](domain/grab.md) — download lifecycle, import lock, queue visibility
 - [LibraryItem](domain/library-item.md) — file lifecycle, import path, CWA
 - [List](domain/list.md) — bulk import from CSV/URL, preview → confirm → undo
+- [Cross-Format Resume](domain/cross-format-resume.md) — kash links, audio-ts coordinate, furthest-mark semantics, gotchas
 - [Metadata Sources](domain/metadata-sources.md) — providers, priority, fallback, foreign language gotchas
 
 ## Patterns
