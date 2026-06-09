@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::atomic_copy;
 use livrarr_db::{
     ChapterDb, ConfigDb, CreateHistoryEventDbRequest, CreateLibraryItemDbRequest, GrabDb,
-    HistoryDb, LibraryItemDb, RemotePathMappingDb, RootFolderDb, WorkDb,
+    HistoryDb, KashLinkDb, LibraryItemDb, NewKashLink, RemotePathMappingDb, RootFolderDb, WorkDb,
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::{
@@ -15,6 +15,7 @@ use livrarr_domain::{
     classify_file, sanitize_path_component, DbError, EventType, GrabId, GrabStatus, MediaType,
     UserId, WorkId,
 };
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -44,22 +45,24 @@ impl<D> ImportWorkflowImpl<D> {
 
 impl<D> ImportWorkflowImpl<D>
 where
-    D: ChapterDb + Send + Sync,
+    D: ChapterDb + LibraryItemDb + KashLinkDb + RootFolderDb + Send + Sync,
 {
-    /// Extracts and stores audiobook chapters for a just-imported item.
+    /// Extracts and stores audiobook chapters for a just-imported item, then
+    /// runs `.kash` link establishment for m4bs with a parsed duration.
     ///
     /// Mirrors the chapter-extraction hook in `import_grab` so that imports
     /// arriving through other paths (e.g. manual import) populate
-    /// `audiobook_chapters` the same way. Failure is non-fatal: errors are
-    /// logged inside `try_extract_chapters` and the scan status is left for
-    /// backfill retry where applicable.
+    /// `audiobook_chapters` and kash links the same way. Failure is
+    /// non-fatal: errors are logged and never fail the import.
     pub async fn extract_chapters_for_item(
         &self,
         item_id: livrarr_domain::LibraryItemId,
         target: &Path,
         media_type: MediaType,
+        user_id: UserId,
+        work_id: WorkId,
     ) {
-        try_extract_chapters(item_id, target, media_type, &self.db).await;
+        extract_chapters_and_kash(&self.db, item_id, target, media_type, user_id, work_id).await;
     }
 }
 
@@ -257,12 +260,16 @@ fn filter_preferred_formats(
 // Trait implementation
 // ---------------------------------------------------------------------------
 
+/// Returns the m4b container duration when the header parsed successfully
+/// (`None` otherwise) so callers can feed `.kash` link establishment without
+/// re-reading the file.
 async fn try_extract_chapters<D: ChapterDb>(
     item_id: livrarr_domain::LibraryItemId,
     target: &Path,
     media_type: MediaType,
     db: &D,
-) {
+) -> Option<f64> {
+    let mut container_duration: Option<f64> = None;
     let ext = target
         .extension()
         .and_then(|e| e.to_str())
@@ -278,6 +285,7 @@ async fn try_extract_chapters<D: ChapterDb>(
         match result {
             Ok(Ok(extraction)) => {
                 let dur = extraction.duration_secs;
+                container_duration = dur;
                 if extraction.chapters.is_empty() {
                     let _ = db
                         .update_chapter_scan_result(item_id, "no_chapters", dur)
@@ -353,6 +361,208 @@ async fn try_extract_chapters<D: ChapterDb>(
             .update_chapter_scan_result(item_id, "no_chapters", None)
             .await;
     }
+    container_duration
+}
+
+/// Errors from `.kash` link establishment. Warn-and-continue at every call
+/// site — kash problems never fail or abort an import.
+#[derive(Debug)]
+pub enum KashLinkError {
+    KashUnreadable,
+    NoMatchingEbook,
+    Db(String),
+}
+
+/// Detect a sibling `<stem>.kash` for a just-imported m4b and reconcile the
+/// kash link: a matching sidecar upserts the link (identity changes reset its
+/// per-user state); an absent or duration-mismatched sidecar deletes any
+/// stale link; an unreadable sidecar leaves the link intact (a transient IO
+/// failure must not destroy state). The m4b itself is never read or hashed
+/// here — audio identity is the already-extracted container duration only
+/// (REQ-009/REQ-014).
+pub async fn establish_kash_link<D>(
+    db: &D,
+    user_id: UserId,
+    audio_item_id: livrarr_domain::LibraryItemId,
+    audio_path: &Path,
+    work_id: WorkId,
+    duration_secs: f64,
+) -> Result<(), KashLinkError>
+where
+    D: ChapterDb + LibraryItemDb + KashLinkDb + RootFolderDb + Send + Sync,
+{
+    // --- Step 1: sidecar existence check ---
+    // No sidecar = unlink (reconciliation); idempotent no-op for the common
+    // case where no row ever existed.
+    let kash_path = audio_path.with_extension("kash");
+    let sidecar_exists = tokio::fs::try_exists(&kash_path).await.unwrap_or(false);
+    if !sidecar_exists {
+        db.delete_link_for_audio(audio_item_id)
+            .await
+            .map_err(|e| KashLinkError::Db(e.to_string()))?;
+        return Ok(());
+    }
+
+    // --- Step 2: read sidecar bytes ---
+    // Transient IO must not destroy an existing link — return Err and leave
+    // the link row intact.
+    let bytes = tokio::fs::read(&kash_path)
+        .await
+        .map_err(|_| KashLinkError::KashUnreadable)?;
+
+    // --- Step 3: parse the sidecar ---
+    // Same conservative posture as an IO error: leave link intact on parse
+    // failure.
+    let kash =
+        livrarr_domain::kash::parse_kash(&bytes).map_err(|_| KashLinkError::KashUnreadable)?;
+
+    // --- Step 4: duration identity check ---
+    // The sidecar must describe this audio cut. Drift beyond tolerance means
+    // a different rip/edition — delete any stale link to close the R-003
+    // poison window, then return Ok (not an import failure).
+    if (kash.duration_seconds - duration_secs).abs() > livrarr_domain::kash::DURATION_TOLERANCE_SECS
+    {
+        db.delete_link_for_audio(audio_item_id)
+            .await
+            .map_err(|e| KashLinkError::Db(e.to_string()))?;
+        tracing::info!(
+            audio_item_id,
+            kash_duration = kash.duration_seconds,
+            container_duration = duration_secs,
+            "kash duration drift beyond tolerance — stale link deleted"
+        );
+        return Ok(());
+    }
+
+    // --- Step 5: enumerate EPUB candidates for this work ---
+    let candidates = db
+        .list_library_items_by_work(user_id, work_id)
+        .await
+        .map_err(|e| KashLinkError::Db(e.to_string()))?;
+
+    let epub_candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|item| {
+            item.media_type == livrarr_domain::MediaType::Ebook
+                && Path::new(&item.path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
+        })
+        .collect();
+
+    // --- Step 6: resolve absolute paths and hash each candidate ---
+    // First candidate whose SHA-256 hex matches kash.epub_hash is the link
+    // target (first-link-wins within the candidate set). Candidates that
+    // fail to read are skipped with a warning — do not abort.
+    let target_hash = kash.epub_hash.clone();
+    let mut matched_id: Option<livrarr_domain::LibraryItemId> = None;
+
+    for candidate in epub_candidates {
+        let root = db
+            .get_root_folder(candidate.root_folder_id)
+            .await
+            .map_err(|e| KashLinkError::Db(e.to_string()))?;
+
+        let abs_path = Path::new(&root.path).join(&candidate.path);
+        let candidate_id = candidate.id;
+        let hash_target = target_hash.clone();
+
+        let hash_result = tokio::task::spawn_blocking(move || -> Option<String> {
+            let bytes = std::fs::read(&abs_path).ok()?;
+            let hex = format!("{:x}", Sha256::digest(&bytes));
+            Some(hex)
+        })
+        .await
+        .unwrap_or(None);
+
+        match hash_result {
+            Some(hex) if hex == hash_target => {
+                matched_id = Some(candidate_id);
+                break;
+            }
+            None => {
+                tracing::warn!(
+                    audio_item_id,
+                    candidate_id,
+                    "kash link: could not read epub candidate — skipping"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // --- Step 7: upsert the link or error ---
+    let ebook_item_id = matched_id.ok_or(KashLinkError::NoMatchingEbook)?;
+
+    match db
+        .upsert_link(NewKashLink {
+            audio_item_id,
+            ebook_item_id,
+            container_duration_secs: duration_secs,
+            epub_hash: kash.epub_hash,
+        })
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(livrarr_domain::DbError::Constraint { .. }) => {
+            tracing::warn!(
+                audio_item_id,
+                ebook_item_id,
+                "kash link: first link wins (v1 1:1 limitation) — ebook already linked"
+            );
+            Ok(())
+        }
+        Err(e) => Err(KashLinkError::Db(e.to_string())),
+    }
+}
+
+/// Shared post-import hook: chapter extraction + kash link establishment.
+/// Used by all three import paths (grab import ×2 call sites, manual import
+/// via `extract_chapters_for_item`).
+///
+/// When the m4b header cannot be parsed (file absent or corrupt) but the item
+/// already has a stored `duration_seconds` (e.g. set by an earlier scan or a
+/// manual import that pre-populated the field), that stored duration is used
+/// for kash link establishment so that `.kash` sidecars are wired up even on
+/// paths that do not re-parse the container.
+async fn extract_chapters_and_kash<D>(
+    db: &D,
+    item_id: livrarr_domain::LibraryItemId,
+    target: &Path,
+    media_type: MediaType,
+    user_id: UserId,
+    work_id: WorkId,
+) where
+    D: ChapterDb + LibraryItemDb + KashLinkDb + RootFolderDb + Send + Sync,
+{
+    let extracted_duration = try_extract_chapters(item_id, target, media_type, db).await;
+    let is_m4b = target
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("m4b"));
+    if media_type == MediaType::Audiobook && is_m4b {
+        // Prefer the freshly-extracted duration; fall back to the item's
+        // stored duration_seconds so that manual-import paths (where the m4b
+        // may not be present but the DB was pre-populated) still wire up the
+        // kash link.
+        let duration = if extracted_duration.is_some() {
+            extracted_duration
+        } else {
+            db.get_library_item(user_id, item_id)
+                .await
+                .ok()
+                .and_then(|item| item.duration_seconds)
+        };
+        if let Some(d) = duration {
+            if let Err(e) = establish_kash_link(db, user_id, item_id, target, work_id, d).await {
+                tracing::warn!(
+                    item_id,
+                    error = ?e,
+                    "kash link establishment failed — import unaffected"
+                );
+            }
+        }
+    }
 }
 
 impl<D> ImportWorkflow for ImportWorkflowImpl<D>
@@ -365,6 +575,7 @@ where
         + RemotePathMappingDb
         + ConfigDb
         + ChapterDb
+        + KashLinkDb
         + Clone
         + Send
         + Sync
@@ -681,7 +892,10 @@ where
                             cwa_copied: false,
                         });
                         warnings.push(format!("adopted orphaned file: {}", target_path));
-                        try_extract_chapters(item.id, &target, media_type, &self.db).await;
+                        extract_chapters_and_kash(
+                            &self.db, item.id, &target, media_type, user_id, work_id,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         failed_files.push(FailedFile {
@@ -734,7 +948,10 @@ where
                                 tags_written: false,
                                 cwa_copied: false,
                             });
-                            try_extract_chapters(item.id, &target, media_type, &self.db).await;
+                            extract_chapters_and_kash(
+                                &self.db, item.id, &target, media_type, user_id, work_id,
+                            )
+                            .await;
                         }
                         Err(e) => {
                             // File copied but DB failed — leave file on disk for retry recovery

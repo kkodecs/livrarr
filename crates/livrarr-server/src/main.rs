@@ -643,6 +643,12 @@ async fn main() {
         bookmark_service: Arc::new(livrarr_library::bookmark_service::BookmarkServiceImpl::new(
             svc_db.clone(),
         )),
+        cross_format_service: Arc::new(
+            livrarr_library::cross_format_service::CrossFormatServiceImpl::new(
+                svc_db.clone(),
+                livrarr_library::file_service::FileServiceImpl::new(svc_db.clone()),
+            ),
+        ),
         import_workflow: import_workflow_arc.clone(),
         rss_sync_workflow: {
             let rs = Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(

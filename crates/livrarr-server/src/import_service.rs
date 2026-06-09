@@ -189,7 +189,7 @@ impl LiveImportService {
         // `audiobook_chapters` like the grab import path does. Non-fatal:
         // extraction failures are logged inside the workflow, never fail import.
         self.import_workflow
-            .extract_chapters_for_item(item.id, &target, media_type)
+            .extract_chapters_for_item(item.id, &target, media_type, user_id, work_id)
             .await;
 
         // CWA integration (ebooks only, non-fatal).

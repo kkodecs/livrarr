@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect } from "react";
 import { BrowserRouter, Routes, Route } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "sonner";
 import { useAuthStore } from "@/stores/auth";
 import { AppLayout } from "@/components/Page/AppLayout";
 import { AuthGuard, AdminGuard, GuestGuard } from "@/components/Page/AuthGuard";
@@ -431,6 +432,7 @@ export function App() {
           </Routes>
         </AuthInitializer>
       </BrowserRouter>
+      <Toaster richColors position="bottom-center" />
     </QueryClientProvider>
   );
 }

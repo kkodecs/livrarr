@@ -491,6 +491,23 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             patch(livrarr_handlers::bookmark::rename_bookmark::<AppState>)
                 .delete(livrarr_handlers::bookmark::delete_bookmark::<AppState>),
         )
+        // Cross-format resume (Whispersync model)
+        .route(
+            "/workfile/{id}/cross-format/prompt",
+            get(livrarr_handlers::cross_format::get_resume_prompt::<AppState>),
+        )
+        .route(
+            "/workfile/{id}/cross-format/anchors",
+            get(livrarr_handlers::cross_format::get_anchors::<AppState>),
+        )
+        .route(
+            "/workfile/{id}/cross-format/decline",
+            post(livrarr_handlers::cross_format::post_decline::<AppState>),
+        )
+        .route(
+            "/workfile/{id}/cross-format/sync",
+            post(livrarr_handlers::cross_format::post_sync_to_here::<AppState>),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

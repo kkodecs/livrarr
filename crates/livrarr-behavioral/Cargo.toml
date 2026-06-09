@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 trait-variant = { workspace = true }
@@ -25,6 +26,7 @@ livrarr-metadata = { workspace = true }
 livrarr-matching = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
+livrarr-handlers = { workspace = true }
 livrarr-http = { workspace = true }
 livrarr-external-data = { workspace = true }
 livrarr-materialize = { workspace = true }
@@ -32,6 +34,7 @@ axum = "0.8"
 assert_matches = "1"
 futures = "0.3"
 tempfile = "3"
+tower = "0.5"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 
 [[test]]

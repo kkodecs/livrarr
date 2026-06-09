@@ -1,4 +1,5 @@
 pub mod identity;
+pub mod kash;
 pub mod keyed_mutex;
 pub mod normalization;
 pub mod readarr;
@@ -522,6 +523,39 @@ pub struct AudiobookChapter {
     pub title: String,
     pub start_time_secs: f64,
     pub end_time_secs: f64,
+}
+
+/// A `.kash`-established 1:1 binding between one audiobook and one ebook
+/// LibraryItem. Each item is in at most one link (UNIQUE both sides).
+/// `kash_path` is never persisted — derived from the audio item's path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KashLink {
+    pub id: i64,
+    pub audio_item_id: LibraryItemId,
+    pub ebook_item_id: LibraryItemId,
+    /// Audio identity/drift reference (REQ-014): container duration at link time.
+    pub container_duration_secs: f64,
+    /// Ebook identity/drift reference (REQ-008).
+    pub epub_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewKashLink {
+    pub audio_item_id: LibraryItemId,
+    pub ebook_item_id: LibraryItemId,
+    pub container_duration_secs: f64,
+    pub epub_hash: String,
+}
+
+/// Per-(user, link) cross-format resume state: the monotonic furthest mark
+/// (audio-timestamp space) plus per-format decline-suppression thresholds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossFormatState {
+    pub user_id: UserId,
+    pub kash_link_id: i64,
+    pub furthest_ts: f64,
+    pub ebook_declined_at_ts: Option<f64>,
+    pub audio_declined_at_ts: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

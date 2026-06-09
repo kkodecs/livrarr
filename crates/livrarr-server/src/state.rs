@@ -81,6 +81,8 @@ pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceI
 pub type LiveFileService = livrarr_library::file_service::FileServiceImpl<SqliteDb>;
 pub type LiveChapterService = livrarr_library::chapter_service::ChapterServiceImpl<SqliteDb>;
 pub type LiveBookmarkService = livrarr_library::bookmark_service::BookmarkServiceImpl<SqliteDb>;
+pub type LiveCrossFormatService =
+    livrarr_library::cross_format_service::CrossFormatServiceImpl<SqliteDb, LiveFileService>;
 pub type LiveImportWorkflow = livrarr_library::import_workflow::ImportWorkflowImpl<SqliteDb>;
 pub type LiveListService = livrarr_metadata::list_service::ListServiceImpl<
     SqliteDb,
@@ -171,6 +173,7 @@ pub struct AppState {
     pub file_service: Arc<LiveFileService>,
     pub chapter_service: Arc<LiveChapterService>,
     pub bookmark_service: Arc<LiveBookmarkService>,
+    pub cross_format_service: Arc<LiveCrossFormatService>,
     pub import_workflow: Arc<LiveImportWorkflow>,
     pub list_service: Arc<LiveListService>,
     pub identity_conflict_service:
@@ -347,6 +350,13 @@ impl HasBookmarkService for AppState {
     type BookmarkSvc = LiveBookmarkService;
     fn bookmark_service(&self) -> &Self::BookmarkSvc {
         &self.bookmark_service
+    }
+}
+
+impl livrarr_handlers::context::HasCrossFormatService for AppState {
+    type CrossFormatSvc = LiveCrossFormatService;
+    fn cross_format_service(&self) -> &Self::CrossFormatSvc {
+        &self.cross_format_service
     }
 }
 

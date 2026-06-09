@@ -84,6 +84,8 @@ import type {
   ListImportSummary,
   ListImportUndoResponse,
   HealthSummaryResponse,
+  ResumePromptDTO,
+  AnchorDTO,
 } from "@/types/api";
 
 // Setup
@@ -479,10 +481,30 @@ export const updatePlaybackProgress = (
   id: number,
   position: string,
   progress_pct: number,
-) =>
-  apiFetch<{ success: boolean }>(`/workfile/${id}/progress`, {
+  kind?: "progress" | "seek",
+  crossFormatTs?: number,
+) => {
+  const body: Record<string, unknown> = { position, progress_pct };
+  if (kind !== undefined) body.kind = kind;
+  if (crossFormatTs !== undefined) body.cross_format_ts = crossFormatTs;
+  return apiFetch<{ success: boolean }>(`/workfile/${id}/progress`, {
     method: "PUT",
-    body: JSON.stringify({ position, progress_pct }),
+    body: JSON.stringify(body),
+  });
+};
+
+// Cross-format resume
+export const getCrossFormatPrompt = (id: number, currentTs: number) =>
+  apiFetch<ResumePromptDTO | null>(
+    `/workfile/${id}/cross-format/prompt?current_ts=${currentTs}`,
+  );
+export const getCrossFormatAnchors = (id: number) =>
+  apiFetch<AnchorDTO[]>(`/workfile/${id}/cross-format/anchors`);
+export const declineCrossFormat = (id: number) =>
+  apiFetch<void>(`/workfile/${id}/cross-format/decline`, { method: "POST" });
+export const syncCrossFormatToHere = (id: number, currentTs: number) =>
+  apiFetch<void>(`/workfile/${id}/cross-format/sync?current_ts=${currentTs}`, {
+    method: "POST",
   });
 
 // File download URL (for reader/player — returns the API path, not a fetch)

@@ -1,0 +1,314 @@
+# IR v1 — Structural
+# Feature: cross-format-resume
+# Grounded in the architecture survey; revised after architecture review round 1:
+#   - cross-format coordinate is the audio TIMESTAMP (ts), not pct (ebook% != audio%)
+#   - furthest advancement folds into the existing update_progress (atomic), no 2nd write
+#   - scan seam takes user_id + an explicit small-ebook hash match against .kash epub_hash
+#   - KashLink stores epub_hash (ebook drift) alongside container_duration_secs (audio drift)
+#   - KashLinkDb / CrossFormatStateDb traits live in livrarr-db (mirror PlaybackProgressDb)
+#   - contract trimmed to enforceable patterns; m4b-no-hash + no-position-compare are invariants
+
+metadata:
+  feature: "cross-format-resume"
+  stage: v1-structural
+  spec_ref: "spec-cross-format-resume.md"
+  version: 1
+
+system_architecture:
+  components:
+    - { name: "kash_sidecar", description: "Parse a .kash file and do numeric lookups in TIMESTAMP space (partition_point on alignment by ts); carries CFI strings, never parses CFI structurally. Pure, in livrarr-domain. (REQ-014, REQ-015)", type: "pure-library" }
+    - { name: "cross_format_service", description: "Domain trait CrossFormatService + server impl: compute resume prompt, serve anchors, decline, sync-to-here, validate link. (REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-016, REQ-017, REQ-018)", type: "service" }
+    - { name: "cross_format_store", description: "livrarr-db: kash_links + cross_format_state tables, KashLinkDb + CrossFormatStateDb traits AND SQLite impls, migration 058. (REQ-002, REQ-003, REQ-008, REQ-016, REQ-017)", type: "persistence" }
+    - { name: "progress_extension", description: "Extends the EXISTING PlaybackProgressDb::upsert_progress (FileService::update_progress passes through) to accept kind (Progress|Seek) + cross_format_ts. The upsert_progress IMPL performs BOTH the playback_progress write AND the cross_format_state.furthest_ts advance in ONE SQLite transaction (single DB op, not two trait calls). When kind=Progress and the item has a link, furthest_ts = max(furthest_ts, cross_format_ts). No second endpoint. (REQ-003, REQ-016)", type: "integration-point" }
+    - { name: "library_scan_hook", description: "livrarr-library: in try_extract_chapters, detect sibling <stem>.kash; take container duration from extract_m4b_chapters (no audio hashing); list ebooks under the same (user_id, work_id), hash each candidate epub and match .kash epub_hash; upsert a kash_link. (REQ-001, REQ-002, REQ-008, REQ-009, REQ-014)", type: "integration-point" }
+    - { name: "cross_format_handlers", description: "livrarr-handlers: GET prompt, GET anchors (for the ebook reader's CFI->ts resolution), POST decline, POST sync-to-here. Generic over HasCrossFormatService (compile wall). (REQ-004, REQ-005, REQ-018)", type: "http" }
+    - { name: "resume_prompt_ui", description: "Frontend: ebook reader fetches .kash anchors and resolves its current CFI -> nearest anchor ts via epub.js; reports cross_format_ts + kind on the existing progress save; non-modal Jump/Stay banner; sync-to-here. Audio reports its ts natively. (REQ-004, REQ-005, REQ-013-display, REQ-018)", type: "ui" }
+    - { name: "sleep_bookmark_ui", description: "Frontend: AudioPlayer sleep-timer (both paths) auto-creates a bookmark via the existing bookmarks API, deduped within 60s, with a toast; non-disruptive. (REQ-010, REQ-011, REQ-012, REQ-013)", type: "ui" }
+
+  connections:
+    - { from: "resume_prompt_ui", to: "cross_format_handlers", protocol: "HTTP/REST", description: "GET /workfile/{id}/cross-format/prompt; GET .../anchors; POST .../decline; POST .../sync" }
+    - { from: "resume_prompt_ui", to: "progress_extension (existing update_progress)", protocol: "HTTP/REST", description: "PUT /workfile/{id}/progress now carries kind + cross_format_ts" }
+    - { from: "cross_format_handlers", to: "cross_format_service", protocol: "trait-call", description: "HasCrossFormatService capability bound" }
+    - { from: "cross_format_service", to: "cross_format_store", protocol: "trait-call", description: "kash_links + cross_format_state read/write" }
+    - { from: "cross_format_service", to: "kash_sidecar", protocol: "in-process", description: "read .kash from disk (kash_path), parse, ts<->anchor lookup, serve anchors" }
+    - { from: "cross_format_service", to: "playback_progress (existing)", protocol: "trait-call", description: "read both linked items' current position (read-only)" }
+    - { from: "progress_extension", to: "cross_format_store", protocol: "trait-call (same tx)", description: "atomic: write playback_progress AND bump furthest_ts when kind=Progress" }
+    - { from: "library_scan_hook", to: "cross_format_store", protocol: "trait-call", description: "upsert kash_link on scan" }
+    - { from: "sleep_bookmark_ui", to: "bookmarks API (existing)", protocol: "HTTP/REST", description: "POST /workfile/{id}/bookmarks — unchanged" }
+
+  deployment:
+    topology: "Single Axum server + SQLite (WAL) + static React SPA. No new processes."
+    notes: ".kash files read from disk on demand (kash_path); only the alignment (cfi,ts pairs) is served to the ebook reader. Existing audio save loop unchanged; the ebook save call gains two fields."
+
+languages:
+  - { language: "Rust", version: "2021", usage: "backend: domain types, service, db, scan hook, handlers, update_progress extension" }
+  - { language: "TypeScript", version: "5.x", usage: "frontend: resume prompt UI, CFI->ts resolution, sleep-bookmark wiring" }
+
+frameworks:
+  - { name: "Axum", version: "existing", usage: "HTTP routes/handlers" }
+  - { name: "sqlx", version: "existing", usage: "SQLite access + migration 058" }
+  - { name: "React", version: "19", usage: "reader/player UI" }
+
+approved_libraries:
+  - { name: "serde / serde_json", version: "existing", usage: "parse the .kash JSON sidecar" }
+  - { name: "sha2", version: "existing", usage: "hash the small EPUB to match .kash epub_hash (REQ-002) — NEVER the m4b" }
+  - { name: "chrono", version: "existing", usage: "timestamps (project-wide)" }
+  - { name: "sonner", version: "existing (frontend)", usage: "non-blocking toast for sleep bookmark" }
+  - { name: "react-reader / epub.js", version: "existing (frontend)", usage: "EpubCFI compare (CFI->anchor) + apply target CFI" }
+  # No NEW libraries. m4b container duration comes from existing livrarr_tagwrite::extract_m4b_chapters.
+
+modules:
+  - name: "domain-kash"
+    responsibility: "Pure KASH parsing + numeric ts<->anchor lookup (partition_point on ts; carries CFI strings; NO structural CFI comparison). Boundary rules in ts space: nearest anchor at/before target; before-first -> start; at/after last -> last anchor; resolve None when no anchor strictly ahead of current. (REQ-014, REQ-015)"
+    dependencies: []
+    public_api:
+      types:
+        - kind: struct
+          name: "Kash"
+          fields:
+            - { name: "version", type: "u32" }
+            - { name: "epub_hash", type: "String" }
+            - { name: "audio_hash", type: "String" }
+            - { name: "duration_seconds", type: "f64" }
+            - { name: "chapters", type: "Vec<KashChapter>" }
+            - { name: "alignment", type: "Vec<AlignmentEntry>" }
+        - kind: struct
+          name: "AlignmentEntry"
+          fields:
+            - { name: "cfi", type: "String" }
+            - { name: "ts", type: "f64" }
+        - kind: struct
+          name: "KashChapter"
+          fields:
+            - { name: "title", type: "String" }
+            - { name: "start", type: "f64" }
+            - { name: "end", type: "f64" }
+        - kind: enum
+          name: "KashError"
+          fields:
+            - { name: "Unreadable", type: "" }
+            - { name: "Malformed", type: "String" }
+      functions:
+        - name: "parse_kash"
+          inputs: [{ name: "bytes", type: "&[u8]" }]
+          output: "Result<Kash, KashError>"
+          errors: ["KashError"]
+        - name: "resolve_target"
+          inputs:
+            - { name: "kash", type: "&Kash" }
+            - { name: "furthest_ts", type: "f64" }
+            - { name: "current_ts", type: "f64" }
+          output: "Option<ResolvedTarget>"   # None when no anchor strictly ahead of current_ts (REQ-015, REQ-006)
+          errors: []
+  - name: "domain-cross-format-contract"
+    responsibility: "Domain CrossFormatService trait + shared DTO/error types ONLY (no DB traits, no impl). (REQ-004, REQ-005, REQ-006, REQ-007, REQ-016, REQ-018)"
+    dependencies: ["domain-kash"]
+    public_api:
+      types:
+        - kind: struct
+          name: "ResumePrompt"
+          fields:
+            - { name: "format", type: "MediaType" }
+            - { name: "position", type: "String" }     # opaque per-format target (CFI for ebook, seconds for audio)
+            - { name: "label", type: "String" }         # human-readable (timestamp, or chapter + %)
+        - kind: enum
+          name: "ProgressKind"
+          fields:
+            - { name: "Progress", type: "" }            # genuine consumption -> may advance furthest_ts
+            - { name: "Seek", type: "" }                # manual jump/scrub -> never advances furthest (REQ-003)
+        - kind: enum
+          name: "CrossFormatError"
+          fields:
+            - { name: "NotLinked", type: "" }
+            - { name: "LinkStale", type: "" }
+            - { name: "KashUnreadable", type: "" }
+            - { name: "Db", type: "String" }
+      functions:
+        - name: "CrossFormatService::resume_prompt"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "library_item_id", type: "LibraryItemId" }, { name: "current_ts", type: "f64" }]
+          output: "Result<Option<ResumePrompt>, CrossFormatError>"
+          errors: ["CrossFormatError"]
+        - name: "CrossFormatService::anchors_for_item"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "library_item_id", type: "LibraryItemId" }]
+          output: "Result<Vec<AlignmentEntry>, CrossFormatError>"   # served to ebook reader for CFI->ts
+          errors: ["CrossFormatError"]
+        - name: "CrossFormatService::decline_resume"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "library_item_id", type: "LibraryItemId" }, { name: "current_ts", type: "f64" }]
+          output: "Result<(), CrossFormatError>"
+          errors: ["CrossFormatError"]
+        - name: "CrossFormatService::sync_to_here"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "library_item_id", type: "LibraryItemId" }, { name: "current_ts", type: "f64" }]
+          output: "Result<(), CrossFormatError>"
+          errors: ["CrossFormatError"]
+          # (link creation is NOT a service concern — it lives in library-scan-hook at scan time)
+  - name: "db-cross-format"
+    responsibility: "livrarr-db: KashLinkDb + CrossFormatStateDb traits + SQLite impls (mirroring PlaybackProgressDb); migration 058 adds kash_links (UNIQUE audio_item_id, UNIQUE ebook_item_id — 1:1 per item) and cross_format_state. ON CONFLICT upserts (never INSERT OR REPLACE). furthest_ts bump is monotonic. (REQ-002, REQ-003, REQ-008, REQ-016, REQ-017)"
+    dependencies: ["domain-kash", "domain-cross-format-contract"]
+    public_api:
+      types:
+        - kind: struct
+          name: "KashLink"
+          fields:
+            - { name: "id", type: "i64" }
+            - { name: "audio_item_id", type: "LibraryItemId" }
+            - { name: "ebook_item_id", type: "LibraryItemId" }
+            - { name: "container_duration_secs", type: "f64" }   # audio drift (REQ-008/014)
+            - { name: "epub_hash", type: "String" }              # ebook drift (REQ-008)
+        - kind: struct
+          name: "CrossFormatState"
+          fields:
+            - { name: "user_id", type: "UserId" }
+            - { name: "kash_link_id", type: "i64" }
+            - { name: "furthest_ts", type: "f64" }
+            - { name: "ebook_declined_at_ts", type: "Option<f64>" }
+            - { name: "audio_declined_at_ts", type: "Option<f64>" }
+      functions:
+        - name: "KashLinkDb::upsert_link"
+          inputs: [{ name: "link", type: "NewKashLink" }]
+          output: "Result<KashLink, DbError>"
+          errors: ["DbError"]
+        - name: "KashLinkDb::link_for_item"
+          inputs: [{ name: "library_item_id", type: "LibraryItemId" }]
+          output: "Result<Option<KashLink>, DbError>"
+          errors: ["DbError"]
+        - name: "CrossFormatStateDb::get_or_default"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "kash_link_id", type: "i64" }]
+          output: "Result<CrossFormatState, DbError>"
+          errors: ["DbError"]
+        # furthest_ts advancement is performed INSIDE the extended PlaybackProgressDb::upsert_progress
+        # transaction (one atomic op), not via a separate call. (REQ-016)
+        - name: "CrossFormatStateDb::set_decline"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "kash_link_id", type: "i64" }, { name: "format", type: "MediaType" }, { name: "declined_at_ts", type: "f64" }]
+          output: "Result<(), DbError>"
+          errors: ["DbError"]
+        - name: "CrossFormatStateDb::sync_to"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "kash_link_id", type: "i64" }, { name: "ts", type: "f64" }]
+          output: "Result<(), DbError>"   # override (may decrease) — REQ-018
+          errors: ["DbError"]
+  - name: "library-scan-hook"
+    responsibility: "In the import flow (import_workflow.rs), generic over D: ChapterDb + LibraryItemDb + KashLinkDb (same generic-over-DB pattern the workflow already uses for ChapterDb). When an .m4b is imported and a sibling <stem>.kash exists: read+parse the .kash (file IO); list ebooks via list_library_items_by_work(user_id, work_id); read+hash each candidate epub (small) and match Kash.epub_hash; upsert a KashLink (1:1 — UNIQUE per item) using the container duration from extract_m4b_chapters. NO audio hashing. (REQ-001, REQ-002, REQ-008, REQ-009, REQ-014)"
+    dependencies: ["domain-kash", "db-cross-format"]
+    public_api:
+      types:
+        - kind: enum
+          name: "KashLinkError"
+          fields:
+            - { name: "KashUnreadable", type: "" }
+            - { name: "NoMatchingEbook", type: "" }
+            - { name: "Db", type: "String" }
+      functions:
+        - name: "establish_kash_link"
+          inputs:
+            - { name: "db", type: "&D" }                       # D: ChapterDb + LibraryItemDb + KashLinkDb
+            - { name: "user_id", type: "UserId" }
+            - { name: "audio_item_id", type: "LibraryItemId" }
+            - { name: "audio_path", type: "&Path" }
+            - { name: "work_id", type: "WorkId" }
+            - { name: "duration_secs", type: "f64" }
+          output: "Result<(), KashLinkError>"
+          errors: ["KashLinkError"]
+  - name: "handlers-cross-format"
+    responsibility: "Axum handlers generic over HasCrossFormatService (compile wall: NO db/metadata/tagwrite/download deps). Routes under /workfile/{id}/cross-format. (REQ-004, REQ-005, REQ-018)"
+    dependencies: ["domain-cross-format-contract"]
+    public_api:
+      functions:
+        - name: "get_resume_prompt"
+          inputs: [{ name: "state", type: "State<S>" }, { name: "item_id", type: "Path<i64>" }, { name: "q", type: "Query<CurrentTs>" }, { name: "user", type: "AuthUser" }]
+          output: "Result<Json<Option<ResumePrompt>>, ApiError>"
+          errors: ["ApiError"]
+        - name: "get_anchors"
+          inputs: [{ name: "state", type: "State<S>" }, { name: "item_id", type: "Path<i64>" }, { name: "user", type: "AuthUser" }]
+          output: "Result<Json<Vec<AlignmentEntry>>, ApiError>"
+          errors: ["ApiError"]
+        - name: "post_decline"
+          inputs: [{ name: "state", type: "State<S>" }, { name: "item_id", type: "Path<i64>" }, { name: "q", type: "Query<CurrentTs>" }, { name: "user", type: "AuthUser" }]
+          output: "Result<StatusCode, ApiError>"
+          errors: ["ApiError"]
+        - name: "post_sync_to_here"
+          inputs: [{ name: "state", type: "State<S>" }, { name: "item_id", type: "Path<i64>" }, { name: "q", type: "Query<CurrentTs>" }, { name: "user", type: "AuthUser" }]
+          output: "Result<StatusCode, ApiError>"
+          errors: ["ApiError"]
+  - name: "frontend-resume"
+    responsibility: "Ebook reader fetches anchors (GET .../anchors) and resolves current CFI -> nearest anchor ts via epub.js EpubCFI compare; sends cross_format_ts + kind on the existing progress save; audio sends its ts natively. Non-modal Jump/Stay banner on a behind format; accept writes through existing progress; decline/sync call their endpoints. Shows label, never raw CFI. (REQ-004, REQ-005, REQ-013-display, REQ-018)"
+    dependencies: []
+    public_api:
+      types:
+        - kind: struct
+          name: "ResumePromptDTO"
+          fields:
+            - { name: "format", type: "'ebook' | 'audiobook'" }
+            - { name: "position", type: "string" }
+            - { name: "label", type: "string" }
+  - name: "frontend-sleep-bookmark"
+    responsibility: "In AudioPlayer.tsx, both sleep activation paths (startSleepTimer + sleepAtChapterEnd) create a bookmark at the current position named 'Sleep Timer / <local date @ time>' via the existing bookmarks mutation, deduped within 60s position, with a toast; non-disruptive. (REQ-010, REQ-011, REQ-012, REQ-013)"
+    dependencies: []
+    public_api: {}
+
+shared_types:
+  - kind: struct
+    name: "ResolvedTarget"
+    fields:
+      - { name: "cfi", type: "String" }
+      - { name: "ts", type: "f64" }
+  - kind: struct
+    name: "NewKashLink"
+    fields:
+      - { name: "audio_item_id", type: "LibraryItemId" }
+      - { name: "ebook_item_id", type: "LibraryItemId" }
+      - { name: "container_duration_secs", type: "f64" }
+      - { name: "epub_hash", type: "String" }
+  - kind: struct
+    name: "UpdateProgressExtension"
+    fields:
+      - { name: "kind", type: "ProgressKind" }          # added to the existing update_progress payload
+      - { name: "cross_format_ts", type: "Option<f64>" } # the reporting item's ts (audio native; ebook resolved via .kash)
+
+dependency_graph:
+  - { source: "domain-cross-format-contract", target: "domain-kash" }
+  - { source: "db-cross-format", target: "domain-kash" }
+  - { source: "db-cross-format", target: "domain-cross-format-contract" }
+  - { source: "library-scan-hook", target: "domain-kash" }
+  - { source: "library-scan-hook", target: "db-cross-format" }
+  - { source: "handlers-cross-format", target: "domain-cross-format-contract" }
+  - { source: "cross_format_service (server impl)", target: "domain-cross-format-contract" }
+  - { source: "cross_format_service (server impl)", target: "db-cross-format" }
+  - { source: "cross_format_service (server impl)", target: "domain-kash" }
+  - { source: "progress_extension (server impl)", target: "db-cross-format" }
+
+data_flow:
+  sources:
+    - { entity: "Kash", origin: "file", description: ".kash sidecar on disk, discovered at scan, read on demand by path" }
+    - { entity: "KashLink", origin: "file", description: "derived at scan from .kash presence + ebook whose hash matches epub_hash" }
+    - { entity: "UpdateProgressExtension", origin: "http-api", description: "ebook/audio report kind + cross_format_ts on the existing progress save" }
+  sinks:
+    - { entity: "ResumePrompt", destination: "http-api", description: "returned to the reader/player when the linked format is ahead" }
+    - { entity: "AlignmentEntry", destination: "http-api", description: "anchors served to the ebook reader for CFI->ts resolution" }
+    - { entity: "CrossFormatState", destination: "db-read", description: "monotonic furthest_ts + decline thresholds per (user, link)" }
+  state_machines:
+    - entity: "KashLink"
+      states: ["unlinked", "linked", "stale"]
+      transitions:
+        - { from: "unlinked", to: "linked", trigger: "scan finds .kash + ebook matching epub_hash" }
+        - { from: "linked", to: "stale", trigger: "container duration OR epub_hash drift (REQ-008)" }
+        - { from: "stale", to: "linked", trigger: "rescan with matching duration + epub_hash" }
+    - entity: "CrossFormatState"
+      states: ["none", "tracking"]
+      transitions:
+        - { from: "none", to: "tracking", trigger: "first Progress on a linked item" }
+        - { from: "tracking", to: "tracking", trigger: "Progress with ts > furthest_ts (advance); Seek (no change); sync_to_here (set, may decrease)" }
+    - entity: "ResumePrompt"
+      states: ["eligible", "suppressed"]
+      transitions:
+        - { from: "eligible", to: "suppressed", trigger: "user declines (records declined_at_ts = furthest_ts)" }
+        - { from: "suppressed", to: "eligible", trigger: "furthest_ts advances beyond declined_at_ts" }
+  invariants:
+    - "The cross-format coordinate is the audio TIMESTAMP; ebook positions map to ts via the .kash anchors (epub.js), NEVER via percentage (ebook% != audio%)."
+    - "furthest_ts is monotonic except via sync_to_here (REQ-016, REQ-018)."
+    - "A resume target is never behind the opened format's current_ts (REQ-006, REQ-015)."
+    - "Never compare the opaque per-format `position` TEXT across formats (audio seconds vs ebook CFI) — reviewer-enforced invariant."
+    - "No audiobook (m4b) content is hashed or fully read in v1; audio identity is container duration only. The small EPUB IS hashed (epub_hash match) — reviewer-enforced invariant (REQ-009, REQ-014)."
+    - "State is isolated per (user_id, kash_link_id) (REQ-003)."
+    - "Each library item is in at most one kash_link (1:1, UNIQUE). v1 limitation: a book with two audiobook narrations both aligned to one ebook gets cross-format resume on only one."
+    - "The existing audio save loop is unchanged; the ebook save call and update_progress gain kind + cross_format_ts only."
+    - "kash_path is NOT persisted; it is derived from the audio item's path (sibling <stem>.kash) to avoid staleness on move/rename."
+    - "The playback_progress write and the furthest_ts advance occur in ONE SQLite transaction (no cross-store desync)."

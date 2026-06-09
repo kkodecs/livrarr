@@ -889,6 +889,8 @@ export interface ScanProgressResponse {
 export interface ScannedFile {
   path: string;
   filename: string;
+  /** Path relative to the scan root (e.g. `Author/Book/file.epub`), for folder context. */
+  relPath: string;
   mediaType: MediaType;
   size: number;
   parsed: ParsedFile | null;
@@ -1074,4 +1076,16 @@ export interface ListImportSummary {
 
 export interface ListImportUndoResponse {
   worksRemoved: number;
+}
+
+// Cross-format resume
+export interface ResumePromptDTO {
+  format: "ebook" | "audiobook";
+  position: string;
+  label: string;
+}
+
+export interface AnchorDTO {
+  cfi: string;
+  ts: number;
 }

@@ -3,12 +3,19 @@ import { ReactReader, ReactReaderStyle } from "react-reader";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Rendition = any;
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   getDownloadUrl,
   getPlaybackProgress,
   updatePlaybackProgress,
+  getCrossFormatAnchors,
+  getCrossFormatPrompt,
+  declineCrossFormat,
+  syncCrossFormatToHere,
 } from "@/api";
 import { apiFetch } from "@/api/client";
+import { resolveTsForCfi } from "@/utils/kashAnchors";
+import { ResumePromptBanner } from "@/components/ResumePromptBanner";
 import {
   ArrowLeft,
   List,
@@ -22,7 +29,7 @@ import {
 import { useNavigate } from "react-router";
 import * as Popover from "@radix-ui/react-popover";
 import { cn } from "@/utils/cn";
-import type { BookmarkResponse, CreateBookmarkRequest } from "@/types/api";
+import type { BookmarkResponse, CreateBookmarkRequest, ResumePromptDTO } from "@/types/api";
 
 interface TocItem {
   label: string;
@@ -107,6 +114,24 @@ export function EpubReader({ libraryItemId }: Props) {
 
   const [currentPct, setCurrentPct] = useState(0);
 
+  // Cross-format resume
+  const jumpUntilRef = useRef<number>(Date.now() + 3000);
+  const currentCfiRef = useRef<string>("");
+  const promptFiredRef = useRef(false);
+  const [firstCfiKnown, setFirstCfiKnown] = useState(false);
+  const [resumePrompt, setResumePrompt] = useState<ResumePromptDTO | null>(null);
+
+  const { data: anchors } = useQuery({
+    queryKey: ["cross-format-anchors", libraryItemId],
+    queryFn: () => getCrossFormatAnchors(libraryItemId),
+    retry: false,
+  });
+  // Ref mirror so the relocated closure always sees the latest anchors without re-registering.
+  const anchorsRef = useRef(anchors);
+  useEffect(() => {
+    anchorsRef.current = anchors;
+  }, [anchors]);
+
   // Persist settings
   useEffect(() => {
     localStorage.setItem("epub_theme", darkTheme ? "dark" : "light");
@@ -148,10 +173,17 @@ export function EpubReader({ libraryItemId }: Props) {
 
   // Save progress with trailing debounce.
   const saveProgress = useCallback(
-    (cfi: string, pct: number) => {
+    (
+      cfi: string,
+      pct: number,
+      kind?: "progress" | "seek",
+      crossFormatTs?: number,
+    ) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
-        updatePlaybackProgress(libraryItemId, cfi, pct).catch(() => {});
+        updatePlaybackProgress(libraryItemId, cfi, pct, kind, crossFormatTs).catch(
+          () => {},
+        );
       }, 2000);
     },
     [libraryItemId],
@@ -162,6 +194,20 @@ export function EpubReader({ libraryItemId }: Props) {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, []);
+
+  // Cross-format prompt: fire once per mount after loaded + anchors available + first CFI known.
+  useEffect(() => {
+    if (!initialLoaded || !anchors || !firstCfiKnown || promptFiredRef.current) return;
+    const cfi = currentCfiRef.current;
+    if (!cfi) return;
+    promptFiredRef.current = true;
+    const currentTs = resolveTsForCfi(anchors, cfi);
+    getCrossFormatPrompt(libraryItemId, currentTs)
+      .then((dto) => {
+        if (dto) setResumePrompt(dto);
+      })
+      .catch(() => {});
+  }, [initialLoaded, anchors, firstCfiKnown, libraryItemId]);
 
   const onLocationChanged = useCallback(
     (loc: string) => {
@@ -390,6 +436,27 @@ export function EpubReader({ libraryItemId }: Props) {
               ))}
             </div>
 
+            {/* Sync to here — visible only when cross-format anchors are loaded */}
+            {anchors && (
+              <>
+                <div className="my-3 border-t border-zinc-700" />
+                <button
+                  onClick={() => {
+                    const cfi = currentCfiRef.current;
+                    if (!cfi) return;
+                    syncCrossFormatToHere(
+                      libraryItemId,
+                      resolveTsForCfi(anchors, cfi),
+                    ).catch(() => {});
+                    toast("Position synced");
+                  }}
+                  className="w-full rounded px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                >
+                  Sync to here
+                </button>
+              </>
+            )}
+
             <Popover.Arrow className="fill-zinc-700" />
           </Popover.Content>
         </Popover.Root>
@@ -461,6 +528,7 @@ export function EpubReader({ libraryItemId }: Props) {
                   key={i}
                   item={item}
                   onNavigate={(href) => {
+                    jumpUntilRef.current = Date.now() + 1500;
                     setLocation(href);
                     setTocOpen(false);
                   }}
@@ -501,8 +569,10 @@ export function EpubReader({ libraryItemId }: Props) {
                     key={bm.id}
                     className="flex items-center gap-2 px-2 py-2 rounded hover:bg-zinc-800 group cursor-pointer"
                     onClick={() => {
-                      if (renamingId !== bm.id && bm.position)
+                      if (renamingId !== bm.id && bm.position) {
+                        jumpUntilRef.current = Date.now() + 1500;
                         setLocation(bm.position);
+                      }
                     }}
                   >
                     <div className="flex-1 min-w-0">
@@ -589,7 +659,20 @@ export function EpubReader({ libraryItemId }: Props) {
             rendition.on("relocated", (loc: { start: { cfi: string; percentage: number } }) => {
               const pct = loc.start.percentage ?? 0;
               setCurrentPct(pct);
-              if (pct > 0) saveProgress(loc.start.cfi, pct);
+              if (pct > 0) {
+                const cfi = loc.start.cfi;
+                if (!currentCfiRef.current) {
+                  // First relocation — signal the prompt effect.
+                  setFirstCfiKnown(true);
+                }
+                currentCfiRef.current = cfi;
+                const kind = Date.now() < jumpUntilRef.current ? "seek" : "progress";
+                const currentAnchors = anchorsRef.current;
+                const crossFormatTs = currentAnchors
+                  ? resolveTsForCfi(currentAnchors, cfi)
+                  : undefined;
+                saveProgress(cfi, pct, kind, crossFormatTs);
+              }
             });
             rendition.book.ready.then(() => {
               const key = `livrarr-locations-${libraryItemId}`;
@@ -628,6 +711,22 @@ export function EpubReader({ libraryItemId }: Props) {
             style={{ width: `${currentPct * 100}%` }}
           />
         </div>
+      )}
+
+      {/* Cross-format resume banner */}
+      {resumePrompt && (
+        <ResumePromptBanner
+          label={resumePrompt.label}
+          onJump={() => {
+            jumpUntilRef.current = Date.now() + 1500;
+            setLocation(resumePrompt.position);
+            setResumePrompt(null);
+          }}
+          onStay={() => {
+            declineCrossFormat(libraryItemId).catch(() => {});
+            setResumePrompt(null);
+          }}
+        />
       )}
     </div>
   );

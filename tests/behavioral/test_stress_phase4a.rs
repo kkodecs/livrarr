@@ -385,13 +385,27 @@ async fn test_file_update_progress_clamps_pct() {
     .await;
     let svc = FileServiceImpl::new(db);
 
-    svc.update_progress(user_id, item_id, "middle", -0.5)
-        .await
-        .unwrap();
+    svc.update_progress(
+        user_id,
+        item_id,
+        "middle",
+        -0.5,
+        livrarr_domain::services::ProgressKind::Progress,
+        None,
+    )
+    .await
+    .unwrap();
     let low = svc.get_progress(user_id, item_id).await.unwrap().unwrap();
-    svc.update_progress(user_id, item_id, "end", 1.5)
-        .await
-        .unwrap();
+    svc.update_progress(
+        user_id,
+        item_id,
+        "end",
+        1.5,
+        livrarr_domain::services::ProgressKind::Progress,
+        None,
+    )
+    .await
+    .unwrap();
     let high = svc.get_progress(user_id, item_id).await.unwrap().unwrap();
 
     assert_eq!(low.progress_pct, 0.0);

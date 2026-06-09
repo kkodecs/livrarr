@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use livrarr_db::{ConfigDb, LibraryItemDb, PlaybackProgressDb, RootFolderDb};
-use livrarr_domain::services::{EmailPayload, FileService, FileServiceError, ItemProgress};
+use livrarr_domain::services::{
+    EmailPayload, FileService, FileServiceError, ItemProgress, ProgressKind,
+};
 use livrarr_domain::{DbError, LibraryItem, LibraryItemId, MediaType, PlaybackProgress, UserId};
 
 /// Accepted file extensions for email delivery (mirrors handler constant).
@@ -217,6 +219,8 @@ where
         item_id: i64,
         position: &str,
         progress_pct: f64,
+        kind: ProgressKind,
+        cross_format_ts: Option<f64>,
     ) -> Result<(), FileServiceError> {
         let item = self
             .db
@@ -232,13 +236,15 @@ where
         };
 
         if suppress_lifecycle {
+            // No-duration audio can never hold a validated kash link, so the
+            // cross-format args are dropped on this branch by design.
             self.db
                 .upsert_progress_no_lifecycle(user_id, item_id, position, pct)
                 .await
                 .map_err(FileServiceError::Db)
         } else {
             self.db
-                .upsert_progress(user_id, item_id, position, pct)
+                .upsert_progress(user_id, item_id, position, pct, kind, cross_format_ts)
                 .await
                 .map_err(FileServiceError::Db)
         }

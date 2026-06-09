@@ -1,17 +1,18 @@
 use serde::Deserialize;
 
+pub use livrarr_domain::services::ProgressKind;
 pub use livrarr_domain::settings::{
     EmailConfig, MediaManagementConfig, MetadataConfig, NamingConfig, ProwlarrConfig,
 };
 pub use livrarr_domain::{
-    ApplyMergeOutcome, AudiobookChapter, Author, AuthorId, Bookmark, DbError, DownloadClient,
-    DownloadClientId, DownloadClientImplementation, EnrichmentStatus, EventType, ExternalIdRowId,
-    ExternalIdType, FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent, HistoryFilter,
-    HistoryId, Import, Indexer, IndexerConfig, IndexerId, IndexerRssState, LibraryItem,
-    LibraryItemId, LlmProvider, MediaType, MergeResolved, MetadataProvider, NarrationType,
-    Notification, NotificationId, NotificationType, OutcomeClass, PlaybackProgress,
-    ProvenanceSetter, RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Series,
-    Session, TagStatus, User, UserId, UserRole, Work, WorkField, WorkId,
+    ApplyMergeOutcome, AudiobookChapter, Author, AuthorId, Bookmark, CrossFormatState, DbError,
+    DownloadClient, DownloadClientId, DownloadClientImplementation, EnrichmentStatus, EventType,
+    ExternalIdRowId, ExternalIdType, FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent,
+    HistoryFilter, HistoryId, Import, Indexer, IndexerConfig, IndexerId, IndexerRssState, KashLink,
+    LibraryItem, LibraryItemId, LlmProvider, MediaType, MergeResolved, MetadataProvider,
+    NarrationType, NewKashLink, Notification, NotificationId, NotificationType, OutcomeClass,
+    PlaybackProgress, ProvenanceSetter, RemotePathMapping, RemotePathMappingId, RootFolder,
+    RootFolderId, Series, Session, TagStatus, User, UserId, UserRole, Work, WorkField, WorkId,
 };
 
 pub mod pool;
@@ -22,6 +23,7 @@ mod sqlite_bookmarks;
 mod sqlite_chapters;
 pub(crate) mod sqlite_common;
 mod sqlite_config;
+mod sqlite_cross_format_state;
 mod sqlite_download_client;
 mod sqlite_external_id;
 mod sqlite_grab;
@@ -29,6 +31,7 @@ mod sqlite_history;
 mod sqlite_identity_conflict;
 mod sqlite_import;
 mod sqlite_indexer;
+mod sqlite_kash_link;
 mod sqlite_library_item;
 mod sqlite_list_import;
 mod sqlite_metadata_cache;
@@ -1597,12 +1600,21 @@ pub trait PlaybackProgressDb: Send + Sync {
     ) -> Result<Option<PlaybackProgress>, DbError>;
 
     /// Insert or update playback progress with finished_at lifecycle.
+    ///
+    /// When `kind` is `Progress`, the item belongs to a kash link, and
+    /// `cross_format_ts` is a finite timestamp, the link's per-user
+    /// `cross_format_state.furthest_ts` advances monotonically
+    /// (`MAX(furthest_ts, ts)`) IN THE SAME SQLite transaction as the
+    /// progress write. `Seek` or a missing/non-finite ts never touches
+    /// cross-format state (REQ-003/REQ-016).
     async fn upsert_progress(
         &self,
         user_id: UserId,
         library_item_id: LibraryItemId,
         position: &str,
         progress_pct: f64,
+        kind: ProgressKind,
+        cross_format_ts: Option<f64>,
     ) -> Result<(), DbError>;
 
     /// Insert or update progress without touching finished_at.
@@ -1668,6 +1680,60 @@ pub trait BookmarkDb: Send + Sync {
     ) -> Result<(), DbError>;
 
     async fn delete_bookmark(&self, user_id: UserId, bookmark_id: i64) -> Result<(), DbError>;
+}
+
+/// `.kash` link data access (cross-format resume). 1:1 per item — UNIQUE on
+/// both `audio_item_id` and `ebook_item_id`.
+#[trait_variant::make(Send)]
+pub trait KashLinkDb: Send + Sync {
+    /// Insert or update the link keyed by `audio_item_id` (one transaction).
+    /// An identity change (different ebook, different `epub_hash`, or
+    /// duration drift beyond tolerance) deletes the link's
+    /// `cross_format_state` rows in the same transaction — a furthest mark
+    /// recorded against a different alignment/timeline is never
+    /// reinterpreted. Linking to an ebook already in another link surfaces
+    /// as `DbError::Constraint` (first-link-wins, caller logs).
+    async fn upsert_link(&self, link: NewKashLink) -> Result<KashLink, DbError>;
+
+    /// The link containing this item on either side, if any.
+    async fn link_for_item(
+        &self,
+        library_item_id: LibraryItemId,
+    ) -> Result<Option<KashLink>, DbError>;
+
+    /// Remove the link for an audio item (scan reconciliation: sidecar gone
+    /// or duration-mismatched). Its `cross_format_state` rows cascade.
+    /// Idempotent when no link exists.
+    async fn delete_link_for_audio(&self, audio_item_id: LibraryItemId) -> Result<(), DbError>;
+}
+
+/// Per-(user, link) cross-format resume state access.
+///
+/// `furthest_ts` ADVANCEMENT is not exposed here — it happens inside the
+/// extended [`PlaybackProgressDb::upsert_progress`] transaction (REQ-016).
+#[trait_variant::make(Send)]
+pub trait CrossFormatStateDb: Send + Sync {
+    /// The state row, or a zero-value default (furthest 0, no declines)
+    /// WITHOUT inserting one.
+    async fn get_or_default(
+        &self,
+        user_id: UserId,
+        kash_link_id: i64,
+    ) -> Result<CrossFormatState, DbError>;
+
+    /// Record a decline threshold for one format; the other format's
+    /// threshold and `furthest_ts` are untouched (REQ-017).
+    async fn set_decline(
+        &self,
+        user_id: UserId,
+        kash_link_id: i64,
+        format: MediaType,
+        declined_at_ts: f64,
+    ) -> Result<(), DbError>;
+
+    /// Explicit override: set `furthest_ts` (may DECREASE — REQ-018) and
+    /// clear both decline thresholds.
+    async fn sync_to(&self, user_id: UserId, kash_link_id: i64, ts: f64) -> Result<(), DbError>;
 }
 
 pub struct CreateImportDbRequest {

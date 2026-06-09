@@ -1,0 +1,924 @@
+# IR v2 — Operational
+# Extends IR v1 with pseudocode, call annotations, conditions, and TDD directives.
+# IR v1 (ir-v1-cross-format-resume.yaml) remains the source of truth for
+# system_architecture, languages, frameworks, approved_libraries, shared_types,
+# and dependency_graph. This document adds the operational layer only.
+#
+# Grounding (verified against code on wcc-stage5-green, 2026-06-09):
+#   PlaybackProgressDb::upsert_progress(user_id, library_item_id, position: &str, progress_pct: f64)
+#     -> crates/livrarr-db/src/lib.rs:1600; sole production caller FileServiceImpl::update_progress
+#     (crates/livrarr-library/src/file_service.rs:214); finished_at lifecycle >=0.98 set / <0.95 clear.
+#   FileService::update_progress trait: crates/livrarr-domain/src/services/file.rs:77.
+#   Handler: workfile::update_progress + UpdateProgressRequest {position, progress_pct} (snake_case,
+#     no rename_all) crates/livrarr-handlers/src/workfile.rs:78; route PUT /workfile/{id}/progress
+#     registered crates/livrarr-server/src/router.rs:475.
+#   try_extract_chapters<D: ChapterDb>(item_id, target, media_type, db) -> () at
+#     crates/livrarr-library/src/import_workflow.rs:260; call sites lines 684, 737 (user_id, work_id,
+#     target absolute path all in scope); extraction.duration_secs: Option<f64>.
+#   LibraryItemDb::list_library_items_by_work(user_id, work_id) lib.rs:546.
+#   LibraryItem { path (RELATIVE to root folder), media_type, duration_seconds: Option<f64>, .. }.
+#   FileService::resolve_path(user_id, item_id) -> PathBuf — existing absolute-path resolution.
+#   FileServiceImpl<D> { db } stateless, ::new(db) — cheap to construct a second instance.
+#   Latest migration: 057_provider_policy.sql -> migration 058 is next.
+#   Bookmarks: CreateBookmarkRequest {position, sortKey, name, chapterTitle} camelCase;
+#     POST /workfile/{id}/bookmarks; frontend mutations already in AudioPlayer.tsx.
+#   AudioPlayer.tsx: startSleepTimer(minutes) line 277; end-of-chapter path = popover onClick that
+#     sets sleepAtChapterEnd(true); periodic 10s progress interval while playing; onSeek slider save.
+#   EpubReader.tsx: rendition.on("relocated") -> saveProgress(cfi, pct); jumps via setLocation().
+#   frontend deps: react-reader 2.0.15 (epubjs transitive), sonner 2.0.7 present.
+
+metadata:
+  feature: "cross-format-resume"
+  stage: v2-operational
+  spec_ref: "spec-cross-format-resume.md"
+  ir_v1_ref: "ir-v1-cross-format-resume.yaml"
+  version: 1
+
+# Inherited verbatim from IR v1 (semantics unchanged) so the compliance gate can
+# validate LIBRARY call annotations against it. Two name normalizations only:
+# IR v1's combined "react-reader / epub.js" entry is split into "react-reader" +
+# "epubjs" (the gate's dot-splitting matcher cannot match a name containing '.').
+approved_libraries:
+  - { name: "serde / serde_json", version: "existing", usage: "parse the .kash JSON sidecar" }
+  - { name: "sha2", version: "existing", usage: "hash the small EPUB to match .kash epub_hash (REQ-002) — NEVER the m4b" }
+  - { name: "chrono", version: "existing", usage: "timestamps (project-wide)" }
+  - { name: "sonner", version: "existing (frontend)", usage: "non-blocking toasts" }
+  - { name: "react-reader", version: "existing (frontend)", usage: "EPUB rendition" }
+  - { name: "epubjs", version: "existing (transitive via react-reader; pinned as direct dep — see epubjs-direct-dep decision)", usage: "EpubCFI compare for CFI->anchor resolution" }
+
+# Deviations from IR v1 (operational refinements, with rationale; structure otherwise unchanged):
+#   DEV-1: CrossFormatService::decline_resume drops the current_ts input. REQ-017 defines the
+#          suppression threshold as "furthest position at decline time" — the opened format's
+#          current position plays no role; an unused parameter would be a review finding.
+#   DEV-2: The "cross_format_service -> playback_progress (read both items' position)" connection
+#          in IR v1 is not used. current_ts is always client-supplied (the opened reader holds the
+#          freshest position; the DB copy is 2s-debounce stale). No PlaybackProgressDb bound on the
+#          service impl. Prompt math needs only furthest_ts + current_ts + .kash.
+#   DEV-3: library-scan-hook: try_extract_chapters gains a return value (Option<f64> container
+#          duration) so the existing call sites can invoke establish_kash_link without re-reading
+#          the m4b header. IR v1 left the duration hand-off unspecified.
+
+modules:
+  # ==========================================================================
+  # 1. domain-kash — pure .kash parsing + numeric lookups (livrarr-domain/src/kash.rs)
+  # ==========================================================================
+  - name: "domain-kash"
+    responsibility: "Pure KASH parsing + ts-space lookups. No file IO, no CFI structural parsing (CFI strings are opaque payloads). REQ-014, REQ-015."
+    dependencies: []
+
+    module_invariants:
+      - "alignment is strictly increasing in ts AFTER parse normalization (equal-ts runs collapse to their final anchor; a decrease is Malformed); all lookups may binary-search (partition_point) without re-checking."
+      - "No function reads a file or hashes anything — callers pass bytes."
+      - "CFI strings pass through untouched; ordering decisions use ts only (contract INV-2)."
+
+    capability_survey:
+      - capability: "JSON parsing"
+        existing_source: "serde / serde_json (workspace)"
+        reuse_decision: "reuse"
+        rationale: "approved_libraries; .kash is a JSON sidecar"
+      - capability: "sorted-slice lookup"
+        existing_source: "std slice::partition_point"
+        reuse_decision: "reuse"
+        rationale: "stdlib; no dependency"
+
+    public_api:
+      types:
+        - kind: const
+          name: "DURATION_TOLERANCE_SECS"
+          fields:
+            - { name: "value", type: "f64 = 2.0" }
+
+      functions:
+        - name: "parse_kash"
+          inputs: [{ name: "bytes", type: "&[u8]" }]
+          output: "Result<Kash, KashError>"
+          errors: ["KashError"]
+          pseudocode:
+            - "deserialize bytes as JSON into a serde struct mirroring Kash; on serde error return KashError::Malformed(serde message)"
+            - "if version != 1 return Malformed(\"unsupported version\")"
+            - "if duration_seconds is not finite or <= 0 return Malformed"
+            - "if epub_hash is empty return Malformed"
+            - "if alignment is empty return Malformed"
+            - "walk alignment: any non-finite ts -> Malformed; any ts DECREASE -> Malformed; equal-ts runs NORMALIZE by keeping the run's final anchor (AS-BUILT AMENDMENT, S5: the real generator emits occasional same-second ties — 15 of 4003 in the first production sidecar; strict rejection bricked the file. Normalization preserves the strictly-increasing invariant every lookup relies on.)"
+            - "return Ok(Kash) with the normalized alignment"
+          call_annotations:
+            - { call: "serde_json::from_slice", type: "LIBRARY", target: "serde / serde_json" }
+          postconditions:
+            - "Returned Kash satisfies the module invariant (monotonic alignment, positive duration)."
+          decisions:
+            - { key: "strict-monotonic", value: "AMENDED at S5: parse NORMALIZES equal-ts runs (final anchor wins) and rejects only decreases; output alignment is strictly increasing", rationale: "the original strictly-increasing REJECTION assumed the generator emits unique sample times — the first production sidecar (4003 anchors) carried 15 same-second ties and was bricked. Collapsing ties at parse keeps at-or-before unambiguous (last tie wins, deterministic) without rejecting real files; decreases still indicate corruption." }
+          tdd_directives:
+            - "valid minimal kash (2 anchors) parses"
+            - "equal-ts ties collapse to the run's final anchor (not rejected)"
+            - "rejects: wrong version, empty alignment, DECREASING ts, NaN ts, zero/negative/NaN duration, empty epub_hash, malformed JSON"
+
+        - name: "anchor_at_or_before"
+          inputs:
+            - { name: "kash", type: "&Kash" }
+            - { name: "ts", type: "f64" }
+          output: "Option<&AlignmentEntry>"
+          errors: []
+          pseudocode:
+            - "i = kash.alignment.partition_point(entry.ts <= ts)   # count of entries with ts <= target"
+            - "if i == 0 return None   # ts is before the first anchor"
+            - "return Some(&kash.alignment[i - 1])   # nearest at-or-before; for ts at/beyond the last anchor this is the LAST anchor (REQ-015: never skip unanchored tail)"
+          call_annotations:
+            - { call: "slice::partition_point", type: "STDLIB", target: "core" }
+          tdd_directives:
+            - "ts exactly on an anchor returns that anchor"
+            - "ts in a gap returns the preceding anchor"
+            - "ts beyond the last anchor returns the last anchor (AC-011)"
+            - "ts before the first anchor returns None"
+
+        - name: "resolve_target"
+          inputs:
+            - { name: "kash", type: "&Kash" }
+            - { name: "furthest_ts", type: "f64" }
+            - { name: "current_ts", type: "f64" }
+          output: "Option<ResolvedTarget>"
+          errors: []
+          pseudocode:
+            - "match anchor_at_or_before(kash, furthest_ts):"
+            - "  Some(anchor) -> target = ResolvedTarget { cfi: anchor.cfi.clone(), ts: anchor.ts }"
+            - "  None -> target = ResolvedTarget { cfi: first anchor's cfi, ts: 0.0 }   # 'before first anchor resolves to the start' (REQ-015/AC-011): ts 0 = audio start; the first anchor is the earliest CFI-addressable point for the ebook side"
+            - "if target.ts <= current_ts return None   # never-backward, strict (REQ-006/REQ-015/AC-007 incl. the in-gap case: current resolved anchor == target anchor -> suppressed)"
+            - "return Some(target)"
+          call_annotations:
+            - { call: "anchor_at_or_before", type: "NEW", target: "domain-kash" }
+          invariants:
+            - "Returned target.ts > current_ts (strictly) — a prompt target is never at/behind the opened position."
+          decisions:
+            - { key: "before-first-anchor", value: "ResolvedTarget{ts: 0.0, cfi: first anchor cfi}", rationale: "AC-011 'resolves to the start': ts 0 is the literal audio start; ebooks have no 'start CFI', and the first anchor is at most one sample (~4-18s) past the start — within the approximate-but-instant principle. The never-backward guard then suppresses it in virtually every real case." }
+          tdd_directives:
+            - "furthest in gap + current before that gap -> preceding anchor returned"
+            - "furthest beyond last anchor -> last anchor (AC-011)"
+            - "target anchor == current resolved anchor -> None (AC-007 in-gap)"
+            - "target anchor behind current -> None; equal ts -> None (strict)"
+            - "furthest before first anchor + current 0 -> None (target ts 0 not > 0)"
+
+        - name: "chapter_label"
+          inputs:
+            - { name: "kash", type: "&Kash" }
+            - { name: "ts", type: "f64" }
+          output: "String"
+          errors: []
+          pseudocode:
+            - "pct = clamp(ts / kash.duration_seconds, 0.0, 1.0) rendered as integer percent"
+            - "find the chapter where start <= ts < end"
+            - "if found return \"{chapter.title} — {pct}%\" else return \"{pct}%\"   # kash chapters may be empty/sparse"
+          call_annotations:
+            - { call: "f64::clamp", type: "STDLIB", target: "core" }
+          tdd_directives:
+            - "ts inside a chapter yields title + percent; ts outside any chapter yields percent only"
+
+  # ==========================================================================
+  # 2. domain-cross-format-contract — trait + DTOs (livrarr-domain/src/services/cross_format.rs)
+  # ==========================================================================
+  - name: "domain-cross-format-contract"
+    responsibility: "CrossFormatService trait + ResumePrompt/ProgressKind/CrossFormatError. Signatures per IR v1 (minus DEV-1). trait_variant::make(Send), matching every other domain service."
+    dependencies: ["domain-kash"]
+
+    module_invariants:
+      - "No types from walled-off crates in signatures (insight 9e); only domain types."
+
+    capability_survey:
+      - capability: "async trait pattern"
+        existing_source: "livrarr-domain/src/services/file.rs (FileService)"
+        reuse_decision: "reuse"
+        rationale: "identical trait_variant::make(Send) + thiserror error enum shape"
+
+    public_api:
+      types:
+        - kind: enum
+          name: "ProgressKind"
+          fields:
+            - { name: "Progress", type: "genuine consumption — may advance furthest_ts" }
+            - { name: "Seek", type: "manual jump/scrub — never advances furthest_ts (REQ-003)" }
+          # serde: rename_all = "lowercase"; Default = Seek (see D-kind below). Derives Clone, Copy, PartialEq, Debug, Serialize, Deserialize.
+        # ResumePrompt { format: MediaType, position: String, label: String } and
+        # CrossFormatError { NotLinked, LinkStale, KashUnreadable, Db(String) } exactly per IR v1.
+
+      functions:
+        - name: "CrossFormatService (trait signatures)"
+          inputs: []
+          output: "see IR v1"
+          errors: ["CrossFormatError"]
+          pseudocode:
+            - "resume_prompt(user_id, library_item_id, current_ts) -> Result<Option<ResumePrompt>, CrossFormatError>"
+            - "anchors_for_item(user_id, library_item_id) -> Result<Vec<AlignmentEntry>, CrossFormatError>"
+            - "decline_resume(user_id, library_item_id) -> Result<(), CrossFormatError>   # DEV-1: no current_ts"
+            - "sync_to_here(user_id, library_item_id, current_ts) -> Result<(), CrossFormatError>"
+          call_annotations:
+            - { call: "trait_variant::make(Send)", type: "EXISTING", target: "project-wide async trait pattern (insight 8)" }
+          decisions:
+            - { key: "D-kind-default", value: "serde default for ProgressKind = Seek", rationale: "REQ-003: furthest advances ONLY from genuine progress. A stale cached frontend bundle sends no kind; defaulting to Progress would let old clients' scrubs advance the mark (poisoning). Defaulting to Seek merely delays advancement until the bundle refreshes — safe direction. In practice kind only matters when cross_format_ts is present, which only new clients send." }
+
+  # ==========================================================================
+  # 3. db-cross-format — migration 058 + KashLinkDb + CrossFormatStateDb (livrarr-db)
+  # ==========================================================================
+  - name: "db-cross-format"
+    responsibility: "kash_links + cross_format_state tables; trait + SQLite impls mirroring PlaybackProgressDb (traits in lib.rs, impls in sqlite_kash_link.rs / sqlite_cross_format_state.rs)."
+    dependencies: ["domain-cross-format-contract"]
+
+    module_invariants:
+      - "INSERT ... ON CONFLICT ... DO UPDATE only — the replace-style upsert is banned project-wide (contract forbidden_pattern, insight 20: it deletes+reinserts, losing FK children)."
+      - "furthest_ts changes monotonically (MAX) everywhere except sync_to (REQ-016/REQ-018)."
+      - "No file IO in this module — pure SQL."
+
+    capability_survey:
+      - capability: "upsert + row-mapping + error mapping conventions"
+        existing_source: "crates/livrarr-db/src/sqlite_playback_progress.rs"
+        reuse_decision: "reuse"
+        rationale: "same table-per-user-item shape; copy map_db_err/parse_dt/row mapping style"
+      - capability: "migration conventions (FK, timestamps)"
+        existing_source: "crates/livrarr-db/migrations/ (latest 057)"
+        reuse_decision: "reuse"
+        rationale: "new file 058_cross_format.sql; never edit applied migrations (insight 19)"
+
+    public_api:
+      functions:
+        - name: "migration 058_cross_format.sql"
+          inputs: []
+          output: "DDL"
+          errors: []
+          pseudocode:
+            - "CREATE TABLE kash_links: id INTEGER PRIMARY KEY AUTOINCREMENT; audio_item_id INTEGER NOT NULL UNIQUE REFERENCES library_items(id) ON DELETE CASCADE; ebook_item_id INTEGER NOT NULL UNIQUE REFERENCES library_items(id) ON DELETE CASCADE; container_duration_secs REAL NOT NULL; epub_hash TEXT NOT NULL; created_at TEXT NOT NULL"
+            - "CREATE TABLE cross_format_state: user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE; kash_link_id INTEGER NOT NULL REFERENCES kash_links(id) ON DELETE CASCADE; furthest_ts REAL NOT NULL DEFAULT 0; ebook_declined_at_ts REAL NULL; audio_declined_at_ts REAL NULL; updated_at TEXT NOT NULL; PRIMARY KEY (user_id, kash_link_id)"
+            - "(table/column FK names: confirm 'users' / 'library_items' spelling against an existing migration before writing — convention copy, not invention)"
+          call_annotations:
+            - { call: "sqlx migrate", type: "EXISTING", target: "migration runner" }
+          invariants:
+            - "UNIQUE(audio_item_id) + UNIQUE(ebook_item_id) = 1:1 links (IR v1 round-3 decision)."
+            - "ON DELETE CASCADE: deleting either library item dissolves the link and its per-user state (REQ-008 'both items present' holds trivially after deletes)."
+
+        - name: "KashLinkDb::upsert_link"
+          inputs: [{ name: "link", type: "NewKashLink" }]
+          output: "Result<KashLink, DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "begin transaction"
+            - "existing = SELECT * FROM kash_links WHERE audio_item_id = ? (on the tx)"
+            - "if existing is None: INSERT the row; on SQLite constraint violation (UNIQUE ebook_item_id — that ebook is already in another link) map to DbError::Constraint and bubble up (caller treats as first-link-wins, see establish_kash_link); commit; return row"
+            - "identity_changed = existing.ebook_item_id != link.ebook_item_id OR existing.epub_hash != link.epub_hash OR |existing.container_duration_secs - link.container_duration_secs| > DURATION_TOLERANCE_SECS"
+            - "if identity_changed: DELETE FROM cross_format_state WHERE kash_link_id = existing.id (on the tx) — a furthest_ts recorded against a different alignment/timeline must not be reinterpreted (review r1 R-001)"
+            - "UPDATE kash_links SET ebook_item_id, container_duration_secs, epub_hash WHERE id = existing.id; UNIQUE(ebook_item_id) violation -> DbError::Constraint (rollback)"
+            - "commit; return updated row"
+          call_annotations:
+            - { call: "sqlx tx + query", type: "EXISTING", target: "sqlx transactions (existing usage in livrarr-db)" }
+          postconditions:
+            - "Same-identity refresh (same ebook, same hash, duration within tolerance): cross_format_state rows survive."
+            - "Identity-changing relink: that link's cross_format_state rows are gone — every user's mark restarts from zero on the new alignment."
+          decisions:
+            - { key: "conflict-target", value: "explicit SELECT-then-INSERT/UPDATE in one tx; UNIQUE(ebook_item_id) violations surface as Constraint errors", rationale: "the scan hook is keyed by the audio item (it found the .kash); a second audio claiming an already-linked ebook is the documented v1 multi-narration limitation — first link wins, caller logs and continues" }
+            - { key: "reset-state-on-identity-change", value: "link identity = (ebook_item_id, epub_hash, duration within tolerance); any change deletes the link's cross_format_state in the same tx", rationale: "furthest_ts lives on the AUDIO timeline — a duration change means a different audio cut, so an old mark can resolve near a wrong position (e.g. past the end of a shorter rip); an ebook/hash change is reset conservatively too (rare event, Whispersync parity: replacing the files restarts the shared mark; per-item playback_progress and bookmarks are untouched). Review r1 R-001." }
+          tdd_directives:
+            - "fresh insert returns the row"
+            - "re-upsert same identity with duration drift WITHIN tolerance preserves cross_format_state rows"
+            - "re-upsert with changed epub_hash (or changed ebook_item_id, or duration drift beyond tolerance) deletes that link's cross_format_state rows; other links' state untouched"
+            - "upsert linking a NEW audio item to an ALREADY-LINKED ebook returns Constraint error (not silent overwrite)"
+
+        - name: "KashLinkDb::delete_link_for_audio"
+          inputs: [{ name: "audio_item_id", type: "LibraryItemId" }]
+          output: "Result<(), DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "DELETE FROM kash_links WHERE audio_item_id = ?   # cross_format_state rows die via ON DELETE CASCADE; idempotent when no row exists"
+          call_annotations:
+            - { call: "sqlx::query", type: "EXISTING", target: "db delete pattern" }
+          postconditions:
+            - "No link row for that audio item -> the extended upsert_progress finds no link and advances nothing (the R-003 poison window is structurally closed)."
+          tdd_directives:
+            - "deleting a link removes its cross_format_state rows; deleting a non-existent link succeeds"
+
+        - name: "KashLinkDb::link_for_item"
+          inputs: [{ name: "library_item_id", type: "LibraryItemId" }]
+          output: "Result<Option<KashLink>, DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "SELECT * FROM kash_links WHERE audio_item_id = ? OR ebook_item_id = ? LIMIT 1; map to Option<KashLink>"
+          call_annotations:
+            - { call: "sqlx fetch_optional", type: "EXISTING", target: "sqlite_playback_progress.rs get pattern" }
+          invariants:
+            - "Both UNIQUE constraints guarantee at most one row matches either column."
+          tdd_directives:
+            - "found via audio id; found via ebook id; None for unlinked item"
+
+        - name: "CrossFormatStateDb::get_or_default"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "kash_link_id", type: "i64" }]
+          output: "Result<CrossFormatState, DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "SELECT by (user_id, kash_link_id); if no row return CrossFormatState { user_id, kash_link_id, furthest_ts: 0.0, ebook_declined_at_ts: None, audio_declined_at_ts: None } WITHOUT inserting (read-only default)"
+          call_annotations:
+            - { call: "sqlx fetch_optional", type: "EXISTING", target: "db read pattern" }
+          tdd_directives:
+            - "missing row returns zero-default without creating a row; existing row round-trips all fields"
+
+        - name: "CrossFormatStateDb::set_decline"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "kash_link_id", type: "i64" }, { name: "format", type: "MediaType" }, { name: "declined_at_ts", type: "f64" }]
+          output: "Result<(), DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "column = ebook_declined_at_ts when format == Ebook else audio_declined_at_ts"
+            - "INSERT (user_id, kash_link_id, furthest_ts=0 default, {column}=?, updated_at=now) ON CONFLICT(user_id, kash_link_id) DO UPDATE SET {column} = excluded.{column}, updated_at = excluded.updated_at   # two static SQL strings, one per format — no string interpolation of user data"
+          call_annotations:
+            - { call: "sqlx::query", type: "EXISTING", target: "upsert pattern" }
+          postconditions:
+            - "Only the named format's threshold changes; furthest_ts untouched (REQ-005: decline never resets furthest)."
+          tdd_directives:
+            - "decline on ebook leaves audio threshold + furthest untouched (and vice versa); works when no state row existed yet"
+
+        - name: "CrossFormatStateDb::sync_to"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "kash_link_id", type: "i64" }, { name: "ts", type: "f64" }]
+          output: "Result<(), DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "INSERT (user_id, kash_link_id, furthest_ts=?, updated_at=now) ON CONFLICT(user_id, kash_link_id) DO UPDATE SET furthest_ts = excluded.furthest_ts, ebook_declined_at_ts = NULL, audio_declined_at_ts = NULL, updated_at = excluded.updated_at   # explicit override: may DECREASE (REQ-018)"
+          call_annotations:
+            - { call: "sqlx::query", type: "EXISTING", target: "upsert pattern" }
+          decisions:
+            - { key: "sync-clears-declines", value: "sync_to NULLs both declined_at thresholds", rationale: "a deliberate position reset re-arms prompting from the new baseline; stale thresholds from the pre-sync timeline would suppress prompts the user now expects" }
+          tdd_directives:
+            - "sync below current furthest decreases it (AC-016); both decline thresholds cleared"
+
+  # ==========================================================================
+  # 4. progress-extension — atomic furthest advance inside upsert_progress
+  # ==========================================================================
+  - name: "progress-extension"
+    responsibility: "Extend PlaybackProgressDb::upsert_progress + FileService::update_progress + the PUT /workfile/{id}/progress handler to carry kind + cross_format_ts; the SQLite impl performs the playback write AND the furthest advance in ONE transaction. REQ-003, REQ-016."
+    dependencies: ["domain-cross-format-contract", "db-cross-format"]
+
+    module_invariants:
+      - "playback_progress write semantics (incl. finished_at lifecycle and the no-lifecycle audio branch) are byte-for-byte unchanged when kind=Seek or cross_format_ts=None."
+      - "The furthest advance never occurs outside the same SQLite transaction as the progress write (IR v1 atomicity invariant)."
+      - "No link validation (file IO) on the write path — the write advances furthest on whatever link row exists; the READ side (resume_prompt/anchors) gates all offers on validation, and the SCAN side reconciles: a rescan that finds the sidecar gone or duration-mismatched DELETES the link row (cascading its state), so wrong-timeline marks cannot accumulate against a link that later returns to validity (r2 R-003; see establish_kash_link reconciliation + scan-granularity residual decision). Keeps the hot save path IO-free."
+
+    capability_survey:
+      - capability: "existing upsert + lifecycle SQL"
+        existing_source: "sqlite_playback_progress.rs:60 (upsert_progress)"
+        reuse_decision: "wrap"
+        rationale: "same statement, now executed on a transaction handle; cross-format statement appended conditionally"
+      - capability: "transactions"
+        existing_source: "sqlx pool.begin() (used elsewhere in livrarr-db)"
+        reuse_decision: "reuse"
+        rationale: "standard sqlx tx"
+
+    public_api:
+      functions:
+        - name: "PlaybackProgressDb::upsert_progress (extended signature)"
+          inputs:
+            - { name: "user_id", type: "UserId" }
+            - { name: "library_item_id", type: "LibraryItemId" }
+            - { name: "position", type: "&str" }
+            - { name: "progress_pct", type: "f64" }
+            - { name: "kind", type: "ProgressKind" }
+            - { name: "cross_format_ts", type: "Option<f64>" }
+          output: "Result<(), DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "if kind == Seek OR cross_format_ts is None OR cross_format_ts is not finite: execute the EXISTING single upsert statement unchanged and return (no tx overhead on the common path)"
+            - "begin transaction"
+            - "execute the existing playback_progress upsert (unchanged SQL incl. finished_at CASE) on the tx"
+            - "SELECT id FROM kash_links WHERE audio_item_id = ? OR ebook_item_id = ? (the reporting item) on the tx"
+            - "if a link row exists: INSERT INTO cross_format_state (user_id, kash_link_id, furthest_ts, updated_at) VALUES (?,?,?,now) ON CONFLICT(user_id, kash_link_id) DO UPDATE SET furthest_ts = MAX(cross_format_state.furthest_ts, excluded.furthest_ts), updated_at = excluded.updated_at   # SQLite scalar max() — monotonic"
+            - "commit"
+          call_annotations:
+            - { call: "pool.begin / tx.commit", type: "EXISTING", target: "sqlx transactions (IR v1 framework; existing usage in livrarr-db)" }
+            - { call: "existing upsert SQL", type: "EXISTING", target: "sqlite_playback_progress.rs:73-94" }
+            - { call: "max()", type: "EXISTING", target: "SQLite builtin scalar, via the existing sqlx layer" }
+          preconditions:
+            data_invariants:
+              - "cross_format_ts, when Some, is the reporting item's position in audio-timestamp space (audio: native seconds; ebook: anchor-resolved by the client)."
+          postconditions:
+            - "kind=Progress + linked item: furthest_ts' = max(furthest_ts, cross_format_ts); declines untouched."
+            - "kind=Seek or unlinked item or ts=None: cross_format_state untouched (AC-015)."
+          invariants:
+            - "Both writes commit or neither does."
+          decisions:
+            - { key: "monotonic-in-sql", value: "MAX() inside DO UPDATE, not read-modify-write", rationale: "concurrent saves from two devices can interleave; MAX in the statement makes the advance order-independent (REQ-016 monotonic under races)" }
+            - { key: "no_lifecycle-unchanged", value: "upsert_progress_no_lifecycle keeps its current signature", rationale: "that branch exists solely for audiobooks with missing/invalid duration (file_service.rs:229) — such items can never pass duration-identity validation, so a validated link cannot exist for them; threading dead parameters through would be noise" }
+          tdd_directives:
+            - "kind=Progress on linked item advances furthest (AC-004 backend leg)"
+            - "kind=Seek never advances (AC-015); kind=Progress with lower ts never lowers (monotonic)"
+            - "unlinked item: progress write succeeds, no state row appears"
+            - "two users, same link: independent furthest rows (AC-021)"
+            - "finished_at lifecycle outcomes identical to pre-change behavior for all three pct zones (existing playback_enhancement_tests stay green after mechanical arg addition)"
+
+        - name: "FileService::update_progress (extended) + FileServiceImpl"
+          inputs:
+            - { name: "user_id", type: "UserId" }
+            - { name: "item_id", type: "i64" }
+            - { name: "position", type: "&str" }
+            - { name: "progress_pct", type: "f64" }
+            - { name: "kind", type: "ProgressKind" }
+            - { name: "cross_format_ts", type: "Option<f64>" }
+          output: "Result<(), FileServiceError>"
+          errors: ["FileServiceError"]
+          pseudocode:
+            - "unchanged: get_library_item, clamp pct, compute suppress_lifecycle"
+            - "if suppress_lifecycle: call upsert_progress_no_lifecycle exactly as today (cross-format args dropped — see no_lifecycle-unchanged decision)"
+            - "else: call extended upsert_progress passing kind + cross_format_ts through"
+            - "(livrarr-behavioral stubs.rs FileService stub + any other FileService impls gain the two parameters — compiler-driven, no behavior)"
+          call_annotations:
+            - { call: "db.upsert_progress", type: "EXISTING", target: "extended in this feature" }
+            - { call: "get_library_item / clamp / no_lifecycle branch", type: "EXISTING", target: "file_service.rs:214-245 unchanged" }
+          tdd_directives:
+            - "suppress_lifecycle audio item routes to no_lifecycle and never touches cross_format_state"
+
+        - name: "handlers/workfile.rs update_progress + UpdateProgressRequest (extended)"
+          inputs: [{ name: "body", type: "UpdateProgressRequest { position: String, progress_pct: f64, kind: Option<ProgressKind> (serde default), cross_format_ts: Option<f64> }" }]
+          output: "Result<Json<…>, ApiError>"
+          errors: ["ApiError"]
+          pseudocode:
+            - "kind = body.kind.unwrap_or(ProgressKind::Seek)   # D-kind-default"
+            - "pass kind + body.cross_format_ts to file_service.update_progress; response unchanged {success: true}"
+            - "fields stay snake_case on the wire (UpdateProgressRequest has no rename_all — matches existing progress_pct)"
+          call_annotations:
+            - { call: "state.file_service().update_progress", type: "EXISTING", target: "workfile.rs:84 extended" }
+          tdd_directives:
+            - "legacy body {position, progress_pct} still deserializes (kind/ts optional) and behaves exactly as before"
+
+  # ==========================================================================
+  # 5. server-cross-format-service — CrossFormatServiceImpl (livrarr-library/src/cross_format_service.rs)
+  # ==========================================================================
+  # PLACEMENT (amended at stub time, 2026-06-09): the impl lives in
+  # livrarr-LIBRARY, not livrarr-server — that IS the FileService pattern this
+  # module mirrors (FileServiceImpl/BookmarkServiceImpl/ChapterServiceImpl are
+  # all livrarr_library types aliased in state.rs:81-83), and livrarr-behavioral
+  # tests can only reach livrarr-library (livrarr-server is not a dev-dep).
+  # Crate dependency edges are unchanged (library already depends on domain+db).
+  - name: "server-cross-format-service"
+    responsibility: "Implements CrossFormatService in livrarr-library/src/cross_format_service.rs. Generic CrossFormatServiceImpl<D, F> { db: D, files: F } where D: KashLinkDb + CrossFormatStateDb + LibraryItemDb, F: FileService (path resolution reuse). Mirrors the FileServiceImpl shape."
+    dependencies: ["domain-kash", "domain-cross-format-contract", "db-cross-format"]
+
+    module_invariants:
+      - "All file reads + hashing run in spawn_blocking (insight 10)."
+      - "Every entry point loads the item via LibraryItemDb::get_library_item(user_id, item_id) — user scoping enforced before any link lookup (AC-021)."
+      - "The m4b is never opened, read, or hashed here; audio identity = stored library_items.duration_seconds vs kash.duration_seconds (REQ-009/REQ-014; contract INV-1)."
+
+    capability_survey:
+      - capability: "absolute path resolution for a library item"
+        existing_source: "FileService::resolve_path (domain trait; impl in livrarr-library)"
+        reuse_decision: "reuse"
+        rationale: "root-folder join + traversal checks already exist; reimplementing is the duplication trap (insight 26). state.rs constructs a second FileServiceImpl::new(db) — the impl is a stateless wrapper over the same pool"
+      - capability: "EPUB hashing"
+        existing_source: "sha2 (workspace, approved)"
+        reuse_decision: "reuse"
+        rationale: "small file; read + Sha256 in spawn_blocking"
+      - capability: "service impl + wiring pattern"
+        existing_source: "manual_import_service.rs + state.rs Arc fields + context.rs Has*"
+        reuse_decision: "reuse"
+        rationale: "identical generic-over-DB service shape (insights 9c/9h)"
+
+    public_api:
+      functions:
+        - name: "load_validated (private helper)"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "library_item_id", type: "LibraryItemId" }]
+          output: "Result<Validated { link, kash, opened: LibraryItem, audio: LibraryItem, ebook: LibraryItem }, CrossFormatError>"
+          errors: ["CrossFormatError"]
+          pseudocode:
+            - "opened = db.get_library_item(user_id, library_item_id); DbError::NotFound -> NotLinked (also covers foreign-user probing)"
+            - "link = db.link_for_item(library_item_id); None -> NotLinked"
+            - "audio = db.get_library_item(user_id, link.audio_item_id); ebook = db.get_library_item(user_id, link.ebook_item_id); NotFound -> LinkStale (REQ-007 'both items present')"
+            - "audio identity: audio.duration_seconds must be Some(d) with |d - (kash duration, read below)| <= DURATION_TOLERANCE_SECS — order note: read .kash first, then compare"
+            - "kash_path = root_folder(audio.root_folder_id).path JOIN audio.path, extension swapped to 'kash' (sibling <stem>.kash — derived, never persisted). AS-BUILT AMENDMENT (S5 C5): NOT via files.resolve_path for the AUDIO side — resolve_path canonicalizes, which stats/requires the m4b on disk; the direct join keeps the audio side stat-free (REQ-009 strict). The EBOOK path (step 7) still reuses files.resolve_path. Adds RootFolderDb to the impl-block bounds only."
+            - "bytes = spawn_blocking(std::fs::read(kash_path)); IO error -> KashUnreadable"
+            - "kash = parse_kash(&bytes); error -> KashUnreadable"
+            - "duration check (above) fails -> LinkStale (REQ-008/REQ-014/AC-009)"
+            - "ebook identity: epub_path = files.resolve_path(user_id, ebook.id); hash = spawn_blocking(read + Sha256 hex); hash != kash.epub_hash -> LinkStale (REQ-008)"
+            - "return Validated{..}"
+          call_annotations:
+            - { call: "db.get_library_item", type: "EXISTING", target: "LibraryItemDb" }
+            - { call: "db.link_for_item", type: "NEW", target: "db-cross-format" }
+            - { call: "files.resolve_path", type: "EXISTING", target: "FileService::resolve_path" }
+            - { call: "tokio::task::spawn_blocking", type: "EXISTING", target: "tokio runtime (project-wide blocking-IO rule, insight 10)" }
+            - { call: "sha2::Sha256 (EPUB only)", type: "LIBRARY", target: "sha2" }
+            - { call: "parse_kash", type: "NEW", target: "domain-kash" }
+          decisions:
+            - { key: "validate-per-open", value: "full validation (duration + epub hash) on every prompt/anchors/sync call", rationale: "reads are reader-open-frequency (not per-tick); the epub is a few MB (ms to hash); guarantees REQ-007 freshness without a cache-invalidation design. The .kash read is required anyway to serve anchors/resolve targets." }
+            - { key: "duration-tolerance", value: "±2.0s (DURATION_TOLERANCE_SECS)", rationale: "the .kash was generated from this exact file — sub-second agreement expected; header rounding across muxers stays well under 2s; a different rip/edition differs by far more (intros, chapter marks). Constant lives in domain-kash beside the types." }
+          tdd_directives:
+            - "unlinked -> NotLinked; missing counterpart item -> LinkStale; duration drift > tolerance -> LinkStale (AC-009); epub hash mismatch -> LinkStale; unreadable/malformed kash -> KashUnreadable; foreign user's item id -> NotLinked (AC-021)"
+
+        - name: "CrossFormatService::resume_prompt"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "library_item_id", type: "LibraryItemId" }, { name: "current_ts", type: "f64" }]
+          output: "Result<Option<ResumePrompt>, CrossFormatError>"
+          errors: ["CrossFormatError"]
+          pseudocode:
+            - "v = load_validated(...); on NotLinked | LinkStale | KashUnreadable return Ok(None) — SILENT fallback (REQ-007/REQ-008/Q-004: no prompt, independent positions); on Db(e) return Err"
+            - "state = db.get_or_default(user_id, v.link.id)"
+            - "if state.furthest_ts <= 0 return Ok(None)   # nothing recorded yet"
+            - "declined = match v.opened.media_type { Ebook -> state.ebook_declined_at_ts, Audiobook -> state.audio_declined_at_ts }"
+            - "if declined is Some(d) and state.furthest_ts <= d return Ok(None)   # REQ-017 suppression: re-arms only when furthest advances beyond the declined value"
+            - "target = resolve_target(&v.kash, state.furthest_ts, current_ts); None -> Ok(None)   # never-backward (REQ-015/AC-007)"
+            - "match v.opened.media_type:"
+            - "  Audiobook -> position = target.ts as string (seconds, matching existing audio position encoding); label = formatted H:MM:SS of target.ts (AC-013)"
+            - "  Ebook -> position = target.cfi; label = chapter_label(&v.kash, target.ts) (chapter + percent, never raw CFI — AC-013)"
+            - "return Ok(Some(ResumePrompt { format: opened.media_type, position, label }))"
+          call_annotations:
+            - { call: "load_validated / get_or_default", type: "NEW", target: "this module / db-cross-format" }
+            - { call: "resolve_target / chapter_label", type: "NEW", target: "domain-kash" }
+          postconditions:
+            - "A returned prompt's target is strictly ahead of current_ts and is the exact position the frontend will jump to on accept (REQ-016 honor-shown-target: accept does not re-query)."
+          tdd_directives:
+            - "listen-then-open-ebook yields prompt with CFI position + chapter/percent label (AC-004/AC-013); symmetric read-then-open-audio yields seconds + timestamp label (AC-014)"
+            - "furthest at/behind current -> None (AC-007); fresh link no progress -> None"
+            - "decline then same furthest -> None; decline then advanced furthest -> prompt returns (AC-006)"
+            - "two links in one work: progress on link A never prompts on link B (AC-003)"
+
+        - name: "CrossFormatService::anchors_for_item"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "library_item_id", type: "LibraryItemId" }]
+          output: "Result<Vec<AlignmentEntry>, CrossFormatError>"
+          errors: ["CrossFormatError"]
+          pseudocode:
+            - "v = load_validated(...)? — errors PROPAGATE here (the ebook reader uses an error/404 as 'not linked: skip all cross-format reporting'; serving anchors for a stale link would let garbage CFIs poison furthest_ts)"
+            - "return Ok(v.kash.alignment)"
+          call_annotations:
+            - { call: "load_validated", type: "NEW", target: "this module" }
+          tdd_directives:
+            - "linked+valid returns the alignment in order; unlinked errors NotLinked; drifted errors LinkStale"
+
+        - name: "CrossFormatService::decline_resume"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "library_item_id", type: "LibraryItemId" }]
+          output: "Result<(), CrossFormatError>"
+          errors: ["CrossFormatError"]
+          pseudocode:
+            - "opened = db.get_library_item(user_id, item_id) (NotFound -> NotLinked); link = link_for_item (None -> NotLinked)   # no kash/file validation: declining must work even if files drifted moments ago"
+            - "state = get_or_default; db.set_decline(user_id, link.id, opened.media_type, state.furthest_ts)   # threshold = furthest at decline time (REQ-017 literal)"
+          call_annotations:
+            - { call: "set_decline", type: "NEW", target: "db-cross-format" }
+          tdd_directives:
+            - "decline records the current furthest for the opened format only (AC-006 setup)"
+
+        - name: "CrossFormatService::sync_to_here"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "library_item_id", type: "LibraryItemId" }, { name: "current_ts", type: "f64" }]
+          output: "Result<(), CrossFormatError>"
+          errors: ["CrossFormatError"]
+          pseudocode:
+            - "v = load_validated(...)? — errors propagate (sync needs a valid alignment to resolve the anchor)"
+            - "ts = anchor_at_or_before(&v.kash, current_ts) map .ts, else 0.0 (before first anchor -> start; REQ-018 'nearest anchor at or before')"
+            - "db.sync_to(user_id, v.link.id, ts)   # override, may decrease; clears declines"
+          call_annotations:
+            - { call: "anchor_at_or_before", type: "NEW", target: "domain-kash" }
+            - { call: "sync_to", type: "NEW", target: "db-cross-format" }
+          tdd_directives:
+            - "sync at mid-book stores the preceding anchor's ts even when below prior furthest (AC-016); sync before first anchor stores 0"
+
+        - name: "AppState wiring (state.rs + context.rs)"
+          inputs: []
+          output: "compile-time wiring"
+          errors: []
+          pseudocode:
+            - "context.rs: pub trait HasCrossFormatService { type CrossFormatSvc: CrossFormatService; fn cross_format_service(&self) -> &Self::CrossFormatSvc; } — copy HasBookmarkService shape (context.rs:39)"
+            - "AppContext supertrait union gains + HasCrossFormatService (insight 9h)"
+            - "state.rs: alias LiveCrossFormatService = livrarr_library::cross_format_service::CrossFormatServiceImpl<SqliteDb, LiveFileService>; AppState field cross_format_service: Arc<LiveCrossFormatService>; constructed in main.rs with svc_db.clone() + FileServiceImpl::new(svc_db.clone()) (stateless); impl HasCrossFormatService for AppState returns &self.cross_format_service (deref coercion, insight 9c)"
+          call_annotations:
+            - { call: "Has* + Arc field pattern", type: "EXISTING", target: "context.rs/state.rs conventions" }
+
+  # ==========================================================================
+  # 6. library-scan-hook — establish_kash_link (livrarr-library/src/import_workflow.rs)
+  # ==========================================================================
+  - name: "library-scan-hook"
+    responsibility: "Detect sibling .kash at import time and upsert the link. Generic over D: ChapterDb + LibraryItemDb + KashLinkDb. REQ-001, REQ-002, REQ-009, REQ-014."
+    dependencies: ["domain-kash", "db-cross-format"]
+
+    module_invariants:
+      - "Kash failures NEVER fail or slow an import beyond reading the small sidecar + candidate epubs — warn-and-continue at both call sites (matches try_extract_chapters' fire-and-forget posture)."
+      - "The m4b is never read here; container duration arrives as a parameter from the chapter extraction that already parsed the header (REQ-009/AC-010)."
+
+    capability_survey:
+      - capability: "m4b container duration"
+        existing_source: "livrarr_tagwrite::extract_m4b_chapters (already called in try_extract_chapters)"
+        reuse_decision: "reuse"
+        rationale: "duration_secs already extracted; DEV-3 returns it instead of re-parsing"
+      - capability: "ebook candidates for the work"
+        existing_source: "LibraryItemDb::list_library_items_by_work (lib.rs:546)"
+        reuse_decision: "reuse"
+        rationale: "exact query needed; user+work scoped"
+
+    public_api:
+      functions:
+        - name: "try_extract_chapters (modified return — DEV-3)"
+          inputs: [{ name: "(unchanged)", type: "item_id, target, media_type, db" }]
+          output: "Option<f64>   # container duration when an m4b header was successfully parsed"
+          errors: []
+          pseudocode:
+            - "body unchanged; in the Ok(Ok(extraction)) arm capture extraction.duration_secs and return it at the end; all failure arms return None"
+          call_annotations:
+            - { call: "extract_m4b_chapters", type: "EXISTING", target: "livrarr-tagwrite (unchanged)" }
+          tdd_directives:
+            - "existing chapter-extraction behavior unchanged (no_chapters / scanned statuses); returns Some(duration) on parse success, None otherwise"
+
+        - name: "establish_kash_link"
+          inputs:
+            - { name: "db", type: "&D where D: ChapterDb + LibraryItemDb + KashLinkDb" }
+            - { name: "user_id", type: "UserId" }
+            - { name: "audio_item_id", type: "LibraryItemId" }
+            - { name: "audio_path", type: "&Path (absolute target path)" }
+            - { name: "work_id", type: "WorkId" }
+            - { name: "duration_secs", type: "f64" }
+          output: "Result<(), KashLinkError>"
+          errors: ["KashLinkError"]
+          pseudocode:
+            - "kash_path = audio_path.with_extension(\"kash\"); if !exists (async fs metadata): db.delete_link_for_audio(audio_item_id) then return Ok(()) — sidecar gone = unlink; idempotent no-op for the common no-sidecar audiobook (r2 R-003 reconciliation)"
+            - "bytes = tokio::fs::read(kash_path) else Err(KashUnreadable) — transient IO: existing link left intact (read-side suppression covers it; don't destroy state on an IO blip)"
+            - "kash = parse_kash(&bytes) else Err(KashUnreadable) — same conservative posture"
+            - "if |kash.duration_seconds - duration_secs| > DURATION_TOLERANCE_SECS: db.delete_link_for_audio(audio_item_id); log info; return Ok(()) — the sidecar does not describe THIS audio cut: removing the link (and its state, via cascade) prevents wrong-timeline marks from accumulating while reads are suppressed, the R-003 poison window (and a known-stale link row is pointless anyway)"
+            - "candidates = db.list_library_items_by_work(user_id, work_id) filtered to media_type == Ebook AND path extension == epub"
+            - "for each candidate: abs path = root-join NOT available here — candidates carry RELATIVE paths; resolve via the same root_folder the workflow already holds for the work's ebook root? NO — simpler: the import workflow call sites pass a resolver closure? AVOID complexity: hash via files on disk addressed from the AUDIO item's perspective is wrong too."
+            - "RESOLUTION (load-bearing, see decision path-resolution-at-scan): D additionally bounds RootFolderDb (the workflow's D already satisfies it — import_workflow constructs paths from root folders today); abs = root_folder(candidate.root_folder_id).path JOIN candidate.path"
+            - "hash candidate epub in spawn_blocking (std::fs::read + Sha256, hex-encode); skip candidates that fail to read (warn)"
+            - "first candidate whose hash == kash.epub_hash -> matched; none -> Err(NoMatchingEbook) (REQ-002: no link)"
+            - "db.upsert_link(NewKashLink { audio_item_id, ebook_item_id: matched.id, container_duration_secs: duration_secs, epub_hash: kash.epub_hash })"
+            - "on DbError::Constraint (ebook already linked to another audio): log warn 'first link wins (v1 1:1 limitation)' + return Ok(()); other DbError -> Err(KashLinkError::Db)"
+          call_annotations:
+            - { call: "tokio::fs::read / try_exists", type: "EXISTING", target: "tokio runtime (project-wide)" }
+            - { call: "parse_kash", type: "NEW", target: "domain-kash" }
+            - { call: "list_library_items_by_work", type: "EXISTING", target: "LibraryItemDb" }
+            - { call: "root folder lookup", type: "EXISTING", target: "RootFolderDb (workflow already bounds it)" }
+            - { call: "spawn_blocking for candidate read+hash", type: "EXISTING", target: "tokio runtime (insight 10)" }
+            - { call: "sha2::Sha256 (EPUB candidates only)", type: "LIBRARY", target: "sha2" }
+            - { call: "delete_link_for_audio", type: "NEW", target: "db-cross-format" }
+            - { call: "upsert_link", type: "NEW", target: "db-cross-format" }
+          preconditions:
+            domain_state:
+              - "Called only after the audio library item exists (post create_library_item)."
+          decisions:
+            - { key: "path-resolution-at-scan", value: "bound D with RootFolderDb and join root.path + item.path", rationale: "library_items.path is relative; the workflow crate already depends on RootFolderDb for target construction, so no new crate edge; reusing FileService here would invert the dependency direction (library -> domain service impl)" }
+            - { key: "scan-reconciles-stale-links", value: "rescan with sidecar ABSENT or duration-MISMATCHED deletes the existing link (cascading its state); unreadable/malformed sidecar leaves it intact (warn)", rationale: "r2 R-003: scan is the moment disk truth updates the DB (it also writes the new stored duration the read-side validates against). Without reconciliation, listening during a drifted interval writes wrong-timeline furthest marks that survive a later return-to-validity and can produce a poisoned prompt. Deleting the link makes stale-period advancement structurally impossible — upsert_progress finds no link row. Cost: a drift event resets the shared mark (Whispersync parity; per-item progress/bookmarks untouched). Unreadable is kept conservative because a transient IO failure should not destroy state, and reads are suppressed meanwhile." }
+            - { key: "scan-granularity-residual", value: "drift detection is SCAN-granularity; an in-place file swap with no rescan is out of v1 scope", rationale: "between a physical replacement and the next scan, the DB's stored duration still describes the old file, so reads validate against stale truth — the same lag applies to plain per-item playback positions in any scan-based library manager; the next scan reconciles (documented limitation, accepted)" }
+          tdd_directives:
+            - "m4b + sibling kash + matching epub in work -> link row with that ebook (AC-001/AC-002)"
+            - "no sibling kash -> Ok, no row; malformed kash -> KashUnreadable, EXISTING link (if any) left intact"
+            - "no epub whose hash matches -> NoMatchingEbook, no row (AC-002 negative)"
+            - "kash duration far from container duration -> Ok, no row; an EXISTING link for that audio is deleted and its state gone (R-003)"
+            - "rescan with the sidecar removed deletes the existing link + state (R-003)"
+            - "R-003 poison regression (service-level): valid link + progress to T1 -> replace audio cut + rescan (link deleted) -> listen on new cut (furthest advances NOTHING) -> restore original audio + rescan (link recreated, fresh state) -> prompt derives only from post-restore progress, never from the drifted interval"
+            - "ebook already linked to a different audio -> Ok (warn), original link intact"
+            - "AC-010 (audio never opened): fixtures NEVER create the .m4b file at all — any implementation that opens/reads/hashes the audio fails on the missing file. This is strictly stronger than a sparse multi-GB fixture, whose zero-reads would silently succeed. (Amended at tests stage, r1: replaces the earlier 'file-size-tier fixtures' suggestion.)"
+
+        - name: "call-site wiring (ALL THREE chapter-extraction paths)"
+          inputs: []
+          output: "one shared private helper + three call-site edits"
+          errors: []
+          pseudocode:
+            - "private helper extract_chapters_and_kash(db, item_id, target, media_type, user_id, work_id): let dur = try_extract_chapters(item_id, target, media_type, db).await; when dur is None fall back to the item's STORED library_items.duration_seconds (a prior scan's truth — the same value read-side validation compares; lets rescans/manual paths reconcile when the header is unreadable); if media_type == Audiobook && target extension == m4b && a duration is available: if let Err(e) = establish_kash_link(db, user_id, item_id, target, work_id, d).await { tracing::warn!(...) } — never fails the import (fallback amended at S5 C4, test-pinned by the manual_extract tests)"
+            - "call path 1+2 (grab import): import_workflow.rs lines 684 and 737 replace the bare try_extract_chapters call with the helper (user_id, work_id already in scope at both sites)"
+            - "call path 3 (manual import): the PUBLIC ImportWorkflowImpl::extract_chapters_for_item (import_workflow.rs:56) gains user_id + work_id params and delegates to the helper; its impl-block bound widens from D: ChapterDb to D: ChapterDb + LibraryItemDb + KashLinkDb + RootFolderDb. Sole caller LiveImportService::import_file (livrarr-server/src/import_service.rs:191) already has user_id + work_id in scope (lines 174-175) — one-line call-site update"
+            - "(production D = SqliteDb implements all four traits; any behavioral fake DB bound only to ChapterDb gains the new trait impls — compile-driven)"
+          call_annotations:
+            - { call: "establish_kash_link", type: "NEW", target: "this module" }
+            - { call: "extract_chapters_for_item", type: "EXISTING", target: "import_workflow.rs:56 (signature extended)" }
+          tdd_directives:
+            - "kash failure (e.g. unreadable) leaves the import result identical to today's (file imported, warning logged)"
+            - "an m4b+kash arriving via the MANUAL import path establishes the link (REQ-001 covers every import road, not just grab import)"
+
+  # ==========================================================================
+  # 7. handlers-cross-format — livrarr-handlers/src/cross_format.rs + router
+  # ==========================================================================
+  - name: "handlers-cross-format"
+    responsibility: "Four thin handlers behind HasCrossFormatService. validate -> call trait -> map result (insight 9). Routes under /workfile/{id}/cross-format/*."
+    dependencies: ["domain-cross-format-contract"]
+
+    module_invariants:
+      - "No livrarr-db/metadata/tagwrite/download imports (compile wall, contract module_dependency)."
+
+    capability_survey:
+      - capability: "handler + error-mapping shape"
+        existing_source: "handlers/src/bookmark.rs + types/api_error.rs From<FileServiceError>"
+        reuse_decision: "reuse"
+        rationale: "same AuthContext + Path + Json pattern; add From<CrossFormatError> beside the others"
+
+    public_api:
+      types:
+        - kind: struct
+          name: "CurrentTsQuery"
+          fields:
+            - { name: "current_ts", type: "f64 (serde, snake_case wire param)" }
+        - kind: struct
+          name: "ResumePromptResponse"
+          fields:
+            - { name: "format", type: "String — \"ebook\"|\"audiobook\" via the bookmark.rs format!(\"{:?}\").to_lowercase() pattern" }
+            - { name: "position", type: "String" }
+            - { name: "label", type: "String" }
+          # serde rename_all = camelCase, matching BookmarkResponse. AnchorResponse { cfi: String, ts: f64 } likewise.
+
+      functions:
+        - name: "get_resume_prompt / get_anchors / post_decline / post_sync_to_here"
+          inputs: [{ name: "see IR v1", type: "State<S>, AuthContext, Path<i64>; prompt+sync also Query<CurrentTsQuery>; decline has NO query (DEV-1)" }]
+          output: "Json<Option<ResumePromptResponse>> | Json<Vec<AnchorResponse>> | StatusCode::NO_CONTENT | StatusCode::NO_CONTENT"
+          errors: ["ApiError"]
+          pseudocode:
+            - "each: call the corresponding CrossFormatService method with ctx.user.id; map domain values to response DTOs"
+            - "From<CrossFormatError> for ApiError: NotLinked -> NotFound; LinkStale -> NotFound (reader treats any 404 as 'no cross-format here' — REQ-008 silent fallback); KashUnreadable -> NotFound (same UX posture; details to tracing::warn); Db(msg) -> Internal(msg)"
+            - "guard: current_ts must be finite and >= 0 else ApiError::BadRequest"
+            - "router.rs (after the bookmarks block, inside the auth-middleware router): GET /workfile/{id}/cross-format/prompt, GET .../anchors, POST .../decline, POST .../sync"
+          call_annotations:
+            - { call: "state.cross_format_service().*", type: "NEW", target: "HasCrossFormatService" }
+            - { call: "route registration", type: "EXISTING", target: "livrarr-server/src/router.rs:489 insertion point" }
+          tdd_directives:
+            - "unlinked item: prompt 200 null body; anchors 404; decline 404; sync 404"
+            - "non-finite/negative current_ts -> 400"
+            - "compile wall: cargo tree -p livrarr-handlers shows no forbidden deps (existing CI check)"
+
+  # ==========================================================================
+  # 8. frontend-resume — anchors, kind classification, prompt banner, sync (TS)
+  # ==========================================================================
+  - name: "frontend-resume"
+    responsibility: "Ebook CFI<->ts resolution + kind classification + Jump/Stay banner + sync-to-here in both players. REQ-004, REQ-005, REQ-013(display), REQ-018."
+    dependencies: []
+
+    module_invariants:
+      - "The frontend never compares CFIs to seconds; all cross-format ordering happens in ts after anchor resolution (contract INV-2)."
+      - "Accepting a prompt jumps to EXACTLY prompt.position as delivered (REQ-016/AC-012) — no re-fetch, no re-resolution."
+
+    capability_survey:
+      - capability: "CFI ordering"
+        existing_source: "epubjs (EpubCFI.compare) — transitive dep of react-reader 2.0.15"
+        reuse_decision: "reuse"
+        rationale: "the canonical CFI comparator; never parse CFIs by hand"
+      - capability: "toasts"
+        existing_source: "sonner 2.0.7 (package.json)"
+        reuse_decision: "reuse"
+        rationale: "approved; non-blocking"
+      - capability: "server prompt/anchors/decline/sync"
+        existing_source: "none"
+        reuse_decision: "rewrite"
+        rationale: "new endpoints — four functions in src/api/index.ts beside the Playback progress block (index.ts:458)"
+
+    public_api:
+      types:
+        - kind: interface
+          name: "ResumePromptDTO"
+          fields:
+            - { name: "format", type: "'ebook' | 'audiobook'" }
+            - { name: "position", type: "string" }
+            - { name: "label", type: "string" }
+        - kind: interface
+          name: "AnchorDTO"
+          fields:
+            - { name: "cfi", type: "string" }
+            - { name: "ts", type: "number" }
+
+      functions:
+        - name: "api/index.ts additions"
+          inputs: []
+          output: "typed fetch wrappers"
+          errors: []
+          pseudocode:
+            - "getCrossFormatPrompt(id, currentTs) -> apiFetch<ResumePromptDTO | null>(`/workfile/${id}/cross-format/prompt?current_ts=${currentTs}`)"
+            - "getCrossFormatAnchors(id) -> apiFetch<AnchorDTO[]>(`/workfile/${id}/cross-format/anchors`)"
+            - "declineCrossFormat(id) -> POST .../decline; syncCrossFormatToHere(id, currentTs) -> POST `.../sync?current_ts=${currentTs}`"
+            - "updatePlaybackProgress gains optional trailing args (kind?: 'progress'|'seek', crossFormatTs?: number) -> body { position, progress_pct, kind, cross_format_ts } (snake_case keys; omit undefined)"
+          call_annotations:
+            - { call: "apiFetch", type: "EXISTING", target: "src/api/client.ts" }
+          decisions:
+            - { key: "epubjs-direct-dep", value: "add \"epubjs\" to package.json dependencies at react-reader's own version", rationale: "pnpm strict node_modules does not expose transitive deps for direct import; the code already ships in the bundle via react-reader, so this pins — not adds — a library (within IR v1's approved 'react-reader / epub.js (existing)')" }
+
+        - name: "resolveTsForCfi (shared helper, e.g. src/utils/kashAnchors.ts)"
+          inputs: [{ name: "anchors", type: "AnchorDTO[] (server order = ascending ts)" }, { name: "cfi", type: "string" }]
+          output: "number   # ts of nearest anchor at-or-before cfi; 0 when before the first anchor"
+          errors: []
+          pseudocode:
+            - "comparator = new EpubCFI(); binary search for the LAST anchor with comparator.compare(anchor.cfi, cfi) <= 0"
+            - "return its ts, else 0   # mirrors domain anchor_at_or_before semantics in CFI space"
+          call_annotations:
+            - { call: "new EpubCFI().compare", type: "LIBRARY", target: "epubjs" }
+            # epubjs is in the (inherited) approved list — see metadata note on name normalization
+          tdd_directives:
+            - "(vitest) exact-anchor cfi returns its ts; between-anchors returns preceding; before-first returns 0 — with EpubCFI mocked or real epubjs"
+
+        - name: "ResumePromptBanner (src/components/ResumePromptBanner.tsx)"
+          inputs: [{ name: "props", type: "{ label: string; onJump(): void; onStay(): void }" }]
+          output: "non-modal dismissible banner"
+          errors: []
+          pseudocode:
+            - "fixed bottom-center card: text 'Resume at {label}?' + Jump (primary) + Stay buttons; rendering it never blocks or pauses the underlying reader/player (REQ-004 'position is not changed without explicit confirmation'); Stay and the X both call onStay"
+          call_annotations:
+            - { call: "tailwind + lucide", type: "EXISTING", target: "frontend conventions" }
+
+        - name: "EpubReader integration"
+          inputs: []
+          output: "edits to EpubReader.tsx"
+          errors: []
+          pseudocode:
+            - "anchors = useQuery(['cross-format-anchors', libraryItemId], getCrossFormatAnchors, { retry: false }); on error/404 -> anchors undefined -> ALL cross-format behavior below disabled (REQ-007/REQ-008 fallback)"
+            - "jumpUntilRef = useRef(Date.now() + 3000)   # settle WINDOW, not a consume-once flag (review r1 R-002): every relocated inside the window is a seek. Initialized at mount to cover the entire restore burst (initial setLocation + locations.generate relocations)"
+            - "TOC navigate, bookmark click, and prompt-accept each set jumpUntilRef.current = Date.now() + 1500 immediately before setLocation(...)"
+            - "in the relocated handler: kind = Date.now() < jumpUntilRef.current ? 'seek' : 'progress'; ts = anchors ? resolveTsForCfi(anchors, loc.start.cfi) : undefined; saveProgress(cfi, pct, kind, ts)   # page turns outside any window -> progress (Q-006 ebook signal)"
+            - "saveProgress threads (kind, crossFormatTs) into updatePlaybackProgress (debounce unchanged)"
+            - "prompt effect: when initialLoaded && anchors && rendition's first relocation has produced a current cfi: currentTs = resolveTsForCfi(anchors, currentCfi); getCrossFormatPrompt(id, currentTs) -> if non-null setPrompt(dto) (fetch once per mount)"
+            - "onJump: jumpUntilRef.current = Date.now() + 1500; setLocation(prompt.position); clear prompt   # the ensuing relocated save(s) (kind=seek inside the window, ts of the target anchor) are the position write — no extra call (r2 R-004: settle window, not the dropped consume-once flag)"
+            - "onStay: declineCrossFormat(id).catch(noop); clear prompt"
+            - "sync-to-here: button in the settings popover, visible only when anchors loaded; onClick -> syncCrossFormatToHere(id, resolveTsForCfi(anchors, currentCfi)) + sonner toast 'Position synced'"
+          call_annotations:
+            - { call: "useQuery / useMutation", type: "EXISTING", target: "@tanstack/react-query (file conventions)" }
+            - { call: "resolveTsForCfi / api fns / banner", type: "NEW", target: "this module" }
+            - { call: "setLocation / relocated handler", type: "EXISTING", target: "EpubReader.tsx:166,589" }
+          decisions:
+            - { key: "seek-settle-window", value: "time window (1500ms per jump; 3000ms at mount) classifies ALL relocated events inside it as seek — replaces the consume-once boolean from draft 1", rationale: "epub.js can emit multiple relocated events for one programmatic jump (intermediate + final + layout), and react-reader's built-in arrows call rendition.next/prev internally where we have no hook — so neither a consume-once flag nor clear-on-user-event is reliable (review r1 R-002). A settle window classifies the whole burst as seek with no react-reader internals. Residual: a resize-triggered relocated OUTSIDE any window posts progress at an unchanged position — harmless, its ts equals the stored furthest candidate and MAX() makes it a no-op; and a genuine page turn within 1.5s of a jump posts seek — one turn's advancement delayed, conservative direction (kind misclassification toward seek never corrupts furthest)." }
+          tdd_directives:
+            - "(vitest, handler-level) TWO relocated events fired from one TOC jump inside the window both post kind=seek (AC-015, R-002 regression); same for a PROMPT-ACCEPT jump (R-004); relocated after the window posts kind=progress; relocations during the mount window post seek"
+            - "prompt accept calls setLocation with EXACTLY dto.position (AC-012)"
+
+        - name: "AudioPlayer integration"
+          inputs: []
+          output: "edits to AudioPlayer.tsx"
+          errors: []
+          pseudocode:
+            - "periodic 10s interval save (line 178) -> kind 'progress', crossFormatTs = t   # playback ticks = genuine consumption (Q-006)"
+            - "saveProgress(time, dur) gains kind param: togglePlay-pause / sleep-expiry / chapter-end-sleep saves -> 'progress' (they persist the last LISTENED position); onSeek slider -> 'seek' (AC-015)"
+            - "crossFormatTs accompanies every save (= the position being saved); kind decides whether the server advances"
+            - "skip/chapter-nav/bookmark-click set currentTime without saving (unchanged); the next playing tick reports the post-jump position as progress — consumption AFTER a jump is genuine progress (Q-006 resolution: the seek itself never advances the mark; continued listening does; sync-to-here is the backstop)"
+            - "prompt effect: after initial progress restore (the getPlaybackProgress effect), currentTs = restored seconds (0 if none); getCrossFormatPrompt(id, currentTs) -> non-null -> setPrompt (once per mount; works for unlinked items because prompt returns null, not 404)"
+            - "onJump: t = parseFloat(prompt.position); audioRef.currentTime = t; setCurrentTime(t); updatePlaybackProgress(id, prompt.position, duration > 0 ? t/duration : 0, 'seek', t); clear prompt   # explicit save: paused players have no tick to persist the jump"
+            - "onStay: declineCrossFormat(id).catch(noop); clear prompt"
+            - "sync-to-here: row in the player settings popover; onClick -> syncCrossFormatToHere(id, currentTime) + toast (server resolves to the nearest anchor — REQ-018)"
+          call_annotations:
+            - { call: "updatePlaybackProgress(+kind,+ts)", type: "EXISTING", target: "extended in api/index.ts" }
+            - { call: "prompt/decline/sync api + banner", type: "NEW", target: "this module" }
+          decisions:
+            - { key: "audio-kind-map", value: "ticks/pause/sleep-saves=progress; slider=seek; post-jump listening=progress", rationale: "Q-006 as resolved in the spec: the scrub itself never advances; consumption after it is real consumption (Whispersync-parity), and skip-to-end-without-playing leaves furthest untouched because the tick only fires while playing" }
+          tdd_directives:
+            - "(vitest) slider seek posts kind=seek; interval tick posts kind=progress with crossFormatTs; accept jump posts seek at exactly prompt.position"
+
+  # ==========================================================================
+  # 9. frontend-sleep-bookmark — AudioPlayer.tsx only
+  # ==========================================================================
+  - name: "frontend-sleep-bookmark"
+    responsibility: "Auto-bookmark on sleep-timer activation, both paths. REQ-010..REQ-013."
+    dependencies: []
+
+    capability_survey:
+      - capability: "bookmark creation + list"
+        existing_source: "createBookmarkMut + bookmarks query (AudioPlayer.tsx:99-112)"
+        reuse_decision: "reuse"
+        rationale: "REQ-013: ordinary bookmark via the existing store; zero backend"
+      - capability: "local date/time label"
+        existing_source: "browser Date (toLocaleDateString/toLocaleTimeString)"
+        reuse_decision: "reuse"
+        rationale: "ST-007; date-fns available but unnecessary for a display-only label (Q-005: format not load-bearing)"
+
+    public_api:
+      functions:
+        - name: "createSleepBookmark (helper inside AudioPlayer)"
+          inputs: []
+          output: "void"
+          errors: []
+          pseudocode:
+            - "t = audioRef.current?.currentTime ?? currentTime"
+            - "dedupe (REQ-012/AC-019): if any existing bookmark has name.startsWith('Sleep Timer / ') && |parseFloat(position) - t| <= 60 -> return; ALSO check lastSleepBookmarkRef {pos} (in-flight guard: the bookmarks query may not reflect a create fired seconds ago) -> |pos - t| <= 60 -> return"
+            - "now = new Date(); name = `Sleep Timer / ${now.toLocaleDateString()} @ ${now.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}` (REQ-011, device-local per ST-007)"
+            - "createBookmarkMut.mutate({ position: String(t), sortKey: t, name, chapterTitle: currentChapter?.title ?? null })"
+            - "lastSleepBookmarkRef = { pos: t }; sonner toast('Bookmark saved') — non-blocking, playback untouched (REQ-012)"
+          call_annotations:
+            - { call: "createBookmarkMut.mutate", type: "EXISTING", target: "AudioPlayer.tsx:105" }
+            - { call: "toast", type: "LIBRARY", target: "sonner" }
+            - { call: "Date#toLocale*", type: "STDLIB", target: "browser" }
+          forbidden_behaviors:
+            - "Never pause/stop/await playback; mutation errors are swallowed to a console.warn (a failed bookmark must not disturb the player)."
+          tdd_directives:
+            - "(vitest) name matches /^Sleep Timer \\/ / with locale date+time (AC-017)"
+            - "second activation within 60s position creates nothing (AC-019); >60s apart creates a second bookmark"
+            - "chapterTitle populated when a chapter is active"
+
+        - name: "hook points"
+          inputs: []
+          output: "two one-line insertions"
+          errors: []
+          pseudocode:
+            - "startSleepTimer(minutes): call createSleepBookmark() first (timed path — REQ-010/AC-017)"
+            - "end-of-chapter popover onClick (the setSleepAtChapterEnd(true) branch, AudioPlayer.tsx:606-609): call createSleepBookmark() — bookmark at ACTIVATION position; playback continues to chapter end (ST-006/AC-018)"
+          call_annotations:
+            - { call: "createSleepBookmark", type: "NEW", target: "this module" }
+          tdd_directives:
+            - "enabling end-of-chapter mode creates exactly one bookmark at the activation position and does not pause (AC-018)"
+
+# ============================================================================
+# Compliance self-check (gate, tech-lead.md "Before submitting IR v2")
+# ============================================================================
+compliance:
+  contract_check:
+    - "handlers-cross-format imports only livrarr-domain + axum/serde — no forbidden targets; verified pattern: cargo tree -p livrarr-handlers."
+    - "No banned replace-style upsert anywhere above — all writes are INSERT ... ON CONFLICT ... DO UPDATE."
+    - "INV-1: sha2 appears exactly twice (server validate, scan-hook candidate match) — both EPUB-only; m4b duration comes from stored metadata / the existing header parse."
+    - "INV-2: position strings never ordered cross-format; every comparison is f64 ts."
+  req_coverage:
+    REQ-001: ["establish_kash_link", "call-site wiring"]
+    REQ-002: ["establish_kash_link (hash match)", "KashLinkDb::upsert_link"]
+    REQ-003: ["upsert_progress extension (kind gate)", "ProgressKind", "audio/ebook kind classification"]
+    REQ-004: ["resume_prompt", "get_resume_prompt", "ResumePromptBanner", "prompt effects"]
+    REQ-005: ["onJump/onStay paths", "resume_prompt postcondition"]
+    REQ-006: ["resolve_target never-backward guard"]
+    REQ-007: ["load_validated", "resume_prompt silent None"]
+    REQ-008: ["load_validated drift -> LinkStale", "error mapping -> 404 fallback", "establish_kash_link scan reconciliation (delete stale links)", "delete_link_for_audio"]
+    REQ-009: ["establish_kash_link (no audio reads)", "module invariant"]
+    REQ-010: ["hook points (both paths)"]
+    REQ-011: ["createSleepBookmark name"]
+    REQ-012: ["createSleepBookmark dedupe + non-blocking"]
+    REQ-013: ["reuse of existing bookmark store/UI"]
+    REQ-014: ["DURATION_TOLERANCE_SECS check (scan + validate)", "no file-size use"]
+    REQ-015: ["anchor_at_or_before", "resolve_target", "before-first decision"]
+    REQ-016: ["MAX() monotonic upsert", "honor-shown-target (frontend jumps to delivered position)"]
+    REQ-017: ["decline_resume", "suppression check in resume_prompt"]
+    REQ-018: ["sync_to_here", "sync_to (clears declines)", "sync buttons in both players"]

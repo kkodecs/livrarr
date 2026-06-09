@@ -41,6 +41,11 @@ pub trait HasBookmarkService: Clone + Send + Sync + 'static {
     fn bookmark_service(&self) -> &Self::BookmarkSvc;
 }
 
+pub trait HasCrossFormatService: Clone + Send + Sync + 'static {
+    type CrossFormatSvc: livrarr_domain::services::CrossFormatService + Send + Sync + 'static;
+    fn cross_format_service(&self) -> &Self::CrossFormatSvc;
+}
+
 pub trait HasAuthorService: Clone + Send + Sync + 'static {
     type AuthorSvc: AuthorService + Send + Sync + 'static;
     fn author_service(&self) -> &Self::AuthorSvc;
@@ -268,6 +273,7 @@ pub trait AppContext:
     + HasFileService
     + HasChapterService
     + HasBookmarkService
+    + HasCrossFormatService
     + HasAuthorService
     + HasSeriesService
     + HasSeriesQueryService
@@ -320,6 +326,7 @@ impl<T> AppContext for T where
         + HasFileService
         + HasChapterService
         + HasBookmarkService
+        + HasCrossFormatService
         + HasAuthorService
         + HasSeriesService
         + HasSeriesQueryService
