@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.1.0-alpha6 (unreleased)
+
+### New Features
+
+- **Cross-format resume** — Whispersync-style position sync between an ebook and its audiobook: jump to the furthest position in either format, with sleep-timer auto-bookmarks (#23)
+- **Add directly from search** — works are added straight from the search results; covers resolve automatically (no pre-add picker step)
+- **Goodreads discovery restored** — book search reaches Goodreads again via its autocomplete endpoint (the old search path is bot-blocked)
+- **Identity badge** — works show Verified/Unverified, so you can tell whether the metadata identity was confirmed against a provider
+
+### Improvements
+
+- **Consistent work creation** — search fans out across all providers (Hardcover, OpenLibrary, Google Books, Goodreads, Audnexus) and adding reuses the already-fetched result, so the work you add is exactly the one you picked — and it's instant
+- **Manual import auto-match** — high-confidence files match automatically (#97), with per-file fallback and a relaxed language guard for mixed and foreign libraries
+- **One enrichment pipeline** — every add and refresh path runs through the same road; the background retry job is replaced by an explicit "Retry Incomplete" action
+- **Audiobook scanning** — multi-disc audiobooks group into a single work, scan results carry folder context, and chapters are extracted at import
+- **Cover quality** — covers are ranked with a high-resolution preference, and dead cover URLs (404) are no longer saved
+
+### Bug Fixes
+
+- **qBittorrent 5.2 authentication** — accepts the new `QBT_SID_*` session cookies and 2xx responses; fixes the background poller's authentication-failure loop (#116). Contributed by @Jandalslap (#113)
+- **Prowlarr magnet redirects** — when an indexer download URL resolves to a magnet, the magnet itself is sent to qBittorrent/Transmission; fixes grabs where the download client can't reach Prowlarr, e.g. behind a VPN. Contributed by @Vandypointe2 (#136)
+- Google Books daily-quota exhaustion now backs off cleanly instead of failing enrichment
+- Manual Refresh keeps best-effort results — a transient provider error no longer discards data from the providers that succeeded (#117)
+
+### Internal
+
+- Metadata stack split into dedicated crates (external-data / identity / enrichment) with behavior preserved
+- Canonical architecture model authored in-repo (entity spine + crate seams) with conformance gates
+- Pull-request CI builds arm64 natively (~12 minutes; previously hit 6-hour QEMU timeouts)
+
+---
+
+## 0.1.0-alpha5 (2026-05-28)
+
+### New Features
+
+- **Transmission support** — Transmission joins qBittorrent and SABnzbd as a download client (#17)
+- **Google Books enrichment** — foreign-language metadata via Google Books, with an onboarding step for the API key (#72)
+- **Trust-aware covers** — multi-source cover system with a picker UI; trusted sources preferred, manual choices stick
+- **Playback upgrades** — audiobook chapters, bookmarks, and a full progress lifecycle in the built-in player
+- **System status page** — infrastructure health summary with a sidebar indicator (#74)
+- **Search fallback chain** — Google-Books-first discovery with an Audible provider and ISBN bridging (#73)
+
+### Improvements
+
+- **Native arm64 release builds** — multi-arch images build natively (#98)
+- Language filter on the works page, denser overview, cover play button (#57, #71, #72)
+- Poster view shows the series name with a link; recently-downloaded sort option
+- qBittorrent grabs fetch the .torrent server-side, so qBittorrent doesn't need to reach the indexer (#88)
+- Audiobook covers auto-select by media-aware resolution and priority (#95)
+- Gemini default moved to the stable model, deprecated model names auto-migrate (#89)
+- 12 hardening fixes from a cross-model audit
+
+### Bug Fixes
+
+- PID-file deadlock on container restart (#86), including the self-deadlock variant found in the first alpha5 image
+- qBittorrent add results are read from the response body instead of trusting HTTP 200 (#85)
+- Trusted origins rebuild after indexer/download-client changes — no restart needed (#87)
+- CJK titles match correctly via bigram tokenization (#93)
+- Deleting already-missing library files no longer errors (#94)
+- Monitoring toggles work from the works-overview chips (#92)
+- EPUB reader: right-arrow advances past the cover page (#91)
+- Poster tiles keep equal heights (#90)
+- API-key fields show "leave blank to keep" instead of clearing saved keys
+
+### Known Limitations
+
+- Audiobook tag writing (m4b/mp3) is disabled in this release — the underlying writers exhaust memory on large files. EPUB tag writing is unaffected
+- The first published alpha5 image had a startup deadlock and an out-of-memory crash on very large audiobook files; the image was re-issued within the hour — `docker compose pull` if you grabbed it early
+
+---
+
 ## 0.1.0-alpha4 (2026-04-29)
 
 ### Improvements
