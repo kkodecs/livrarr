@@ -1274,8 +1274,12 @@ fn is_disc_part_dir_name(name: &str) -> bool {
 ///    book folders are not named `cd1`/`disc 2`.
 ///
 /// 2. **Same-directory multi-file books.** Any remaining directory holding ≥2
-///    audio files (and not already absorbed by rule 1) becomes one group keyed
-///    on that directory — the pre-existing behavior.
+///    *chapter-style* audio files (and not already absorbed by rule 1) becomes
+///    one group keyed on that directory. Self-contained containers (`.m4b`)
+///    never join these groups: one m4b is one complete book, so multiple m4bs
+///    sharing a directory (e.g. loose files in a downloads root) are separate
+///    books. Disc-divider layouts still collapse m4bs under rule 1 — there the
+///    explicit `CD1`/`Part 2` naming signals a single title.
 fn group_audio_files(audio: &[(usize, PathBuf)]) -> Vec<AudioGroup> {
     use std::collections::BTreeMap;
 
@@ -1349,19 +1353,40 @@ fn group_audio_files(audio: &[(usize, PathBuf)]) -> Vec<AudioGroup> {
     }
 
     // Rule 2: same-directory multi-file books for everything not absorbed.
+    // Self-contained containers stay out: two m4bs in one directory are two
+    // books, not chapters of one.
+    let idx_to_path: std::collections::HashMap<usize, &PathBuf> =
+        audio.iter().map(|(i, p)| (*i, p)).collect();
     for (dir, indices) in &dir_files {
         if absorbed_dirs.contains(dir) {
             continue;
         }
-        if indices.len() >= 2 {
+        let groupable: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|i| {
+                idx_to_path
+                    .get(i)
+                    .is_none_or(|p| !is_self_contained_audio(p))
+            })
+            .collect();
+        if groupable.len() >= 2 {
             grouped.push(AudioGroup {
                 dir: dir.clone(),
-                indices: indices.clone(),
+                indices: groupable,
             });
         }
     }
 
     grouped
+}
+
+/// Self-contained audiobook container: one file is one complete book, so
+/// same-directory grouping (rule 2) must never merge multiple of these.
+fn is_self_contained_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("m4b"))
 }
 
 #[cfg(test)]
@@ -1524,5 +1549,38 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].dir, PathBuf::from("/import/Author/Book"));
         assert_eq!(groups[0].indices.len(), 2);
+    }
+
+    #[test]
+    fn loose_m4bs_in_one_directory_stay_separate() {
+        // Unrelated self-contained audiobooks dumped loose in a downloads root
+        // must NOT fuse into one phantom work keyed on the shared directory.
+        let files = pbs(&[
+            "/import/A Game of Thrones (Unabridged).m4b",
+            "/import/Fourth Wing.m4b",
+            "/import/Project Hail Mary NL.m4b",
+            "/import/The Man from the Future.m4b",
+        ]);
+        let groups = group_audio_files(&files);
+        assert!(
+            groups.is_empty(),
+            "self-contained m4bs must stay singletons"
+        );
+    }
+
+    #[test]
+    fn mixed_directory_groups_chapters_but_not_m4b() {
+        let files = pbs(&[
+            "/import/Book/track01.mp3",
+            "/import/Book/track02.mp3",
+            "/import/Book/complete.m4b",
+        ]);
+        let groups = group_audio_files(&files);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].indices,
+            vec![0, 1],
+            "m4b stays out of the chapter group"
+        );
     }
 }
