@@ -326,19 +326,24 @@ pub(crate) async fn qbit_login(
         .await
         .map_err(|e| ApiError::BadGateway(format!("qBittorrent login failed: {e}")))?;
 
-    let sid = resp
+    let auth_cookie = resp
         .headers()
         .get_all("set-cookie")
         .iter()
         .find_map(|v| {
             let s = v.to_str().ok()?;
-            s.split(';')
-                .find(|part| part.trim().starts_with("SID="))
-                .map(|part| part.trim().trim_start_matches("SID=").to_string())
+            let cookie = s.split(';').next()?.trim();
+
+            let name = cookie.split('=').next()?;
+            if name == "SID" || name == "QBT_SID" || name.starts_with("QBT_SID_") {
+                Some(cookie.to_string())
+            } else {
+                None
+            }
         })
         .unwrap_or_default();
 
-    if sid.is_empty() {
+    if auth_cookie.is_empty() {
         let body = resp.text().await.unwrap_or_default();
         if body.contains("Fails") {
             return Err(ApiError::BadGateway(
@@ -350,5 +355,5 @@ pub(crate) async fn qbit_login(
         ));
     }
 
-    Ok(sid)
+    Ok(auth_cookie)
 }

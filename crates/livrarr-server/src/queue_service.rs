@@ -106,12 +106,12 @@ async fn fetch_qbit_progress(
             .get("set-cookie")
             .and_then(|v| v.to_str().ok())
         {
-            if let Some(s) = cookie
-                .split(';')
-                .next()
-                .and_then(|c| c.strip_prefix("SID="))
-            {
-                sid = Some(s.to_string());
+            if let Some(cookie_pair) = cookie.split(';').next().map(str::trim) {
+                let name = cookie_pair.split('=').next().unwrap_or("");
+
+                if name == "SID" || name == "QBT_SID" || name.starts_with("QBT_SID_") {
+                    sid = Some(cookie_pair.to_string());
+                }
             }
         }
     }
@@ -119,7 +119,7 @@ async fn fetch_qbit_progress(
     let url = format!("{base_url}/api/v2/torrents/info");
     let mut req = http.get(&url).query(&[("hashes", hash)]);
     if let Some(ref s) = sid {
-        req = req.header("Cookie", format!("SID={s}"));
+        req = req.header("Cookie", s);
     }
     let resp = req
         .timeout(std::time::Duration::from_secs(5))
