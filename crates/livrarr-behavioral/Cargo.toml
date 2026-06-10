@@ -356,3 +356,15 @@ path = "../../tests/behavioral/test_metadata_refactor_pipeline.rs"
 [[test]]
 name = "test_metadata_refactor_cache"
 path = "../../tests/behavioral/test_metadata_refactor_cache.rs"
+
+[[test]]
+name = "test_idu_bulk_import_identity"
+path = "../../tests/behavioral/test_idu_bulk_import_identity.rs"
+
+[[test]]
+name = "test_s6_retry_all_incomplete"
+path = "../../tests/behavioral/test_s6_retry_all_incomplete.rs"
+
+[[test]]
+name = "test_cross_format_resume"
+path = "../../tests/behavioral/test_cross_format_resume.rs"
