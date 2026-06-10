@@ -21,7 +21,7 @@ Path to beta = three themed alpha releases:
 
 Open items are grouped into **sprints** (settled with the PO, 2026-06-10). Triage statuses below are grounded in the metadata-lifecycle audit (`docs/metadata-lifecycle-audit-scout.md` + `-deep-passes.md`, verdict IDs DP1–DP5 / fix backlog F1–F8) — not guesses.
 
-> **Release gate (PO decision, 2026-06-10):** `v0.1.0-alpha6` is cut only after **Sprint B lands AND the enrichment-scatter parallelization (Sprint E lead item) lands**. The cut does not ride Sprint A. Rationale: F1-class corruption was live-confirmed on 2026-06-10 (bulk refresh wrote wrong-book data onto foreign works; reverted), and the serial scatter is the system-wide long pole (baseline: `docs/speed-baseline-2026-06-10.md`). Issue closes ride the relocated cut.
+> **Release gate (PO decision, 2026-06-10):** `v0.1.0-alpha6` is cut when **Sprints A–F are all complete**. Alpha 6 the theme and `v0.1.0-alpha6` the tag are the same thing — everything in this section ships in it. Sprint order: A (done) → B → E → C → D, with F interleaved. Issue closes ride the cut. Context for B/E priority: F1-class corruption was live-confirmed on 2026-06-10 (bulk refresh wrote wrong-book data onto foreign works; reverted), and the serial enrichment scatter is the system-wide long pole (baseline: `docs/speed-baseline-2026-06-10.md`).
 
 ### Sprint A — Stabilize + baseline (✅ complete 2026-06-10; cut relocated to the release gate)
 
@@ -33,7 +33,7 @@ Open items are grouped into **sprints** (settled with the PO, 2026-06-10). Triag
 | ✅ | Indexers | PR #136 | Magnet-redirect dispatch merged (`487a2d3`) — reworked on main's probe-on-failure + contributor's dispatch-source enum, authorship preserved |
 | ✅ | Docs | — | CHANGELOG backfilled for alpha5 + alpha-6 unreleased notes (`4b0df25`) |
 | ✅ | Perf | — | **Speed baseline captured** — report at `docs/speed-baseline-2026-06-10.md` (harness + raw data local); headline: enrichment scatter is serial (per-work ≈ sum of provider RTTs), bulk = serial×serial |
-| ➡️ | Release | — | Cut `v0.1.0-alpha6` — **relocated behind the release gate** (after Sprint B + scatter parallelization); release.yml node24 path remains citest-validated |
+| ➡️ | Release | — | Cut `v0.1.0-alpha6` — happens when Sprints A–F are all complete (see the release gate above); release.yml node24 path remains citest-validated |
 
 ### Sprint B — Metadata correctness core (audit F1/F3/F4/F5)
 
@@ -79,7 +79,7 @@ Measure first, then tune — against the Sprint-A baseline (`docs/speed-baseline
 
 | Status | Area | # | Item |
 |:------:|------|---|------|
-| ⬜ | Perf | — | **Enrichment-scatter parallelization — RELEASE-GATING for a6 (PO, 2026-06-10).** Principled cut: identity phase resolves all anchors incl. ASIN (depends on B's #144 work), then one join across providers, per-leg timeout/rate-bucket/breaker unchanged, merge untouched. Projected: ~2.2 s → ~1 s per work; bulk 8 min → ~2.5 min |
+| ⬜ | Perf | — | **Enrichment-scatter parallelization.** Principled cut (PO, 2026-06-10): identity phase resolves all anchors incl. ASIN (depends on B's #144 work), then one join across providers, per-leg timeout/rate-bucket/breaker unchanged, merge untouched. Projected: ~2.2 s → ~1 s per work; bulk 8 min → ~2.5 min |
 | 🔄 | Perf | — | Test harness: baseline harness + 2026-06-10 capture done (`scripts/speed-baseline.py`: add / refresh / probe / bulk + scan timings); extend to repeatable per-door scenarios + per-provider budget burn |
 | ⬜ | Perf | — | Pacing/budget tuning: GB daily budget + reason-aware 429 backoff, foreground-beats-background verification, per-provider rates (the R1 research-shelf scope) |
 | ⬜ | Perf | — | Cache effectiveness: 24h `(work, provider)` cache hit-rate; skip-already-enriched sweep coverage. Baseline says the scan path may not consult the cache at all (warm ≈ cold) — verify before tuning |
