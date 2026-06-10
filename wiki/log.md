@@ -223,3 +223,4 @@ Processed all 17 specs chronologically (v2 through consolidation), 4 policies, c
 
 - Initial wiki scaffold created (17 pages)
 - Ingested domain knowledge from high-level build artifact review
+- 2026-06-10: insight 49 added — speed baseline + serial-scatter finding, a6 release gate (B + parallelization), F1 live-confirmation + revert. Sprint A closed in ROADMAP.

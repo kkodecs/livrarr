@@ -21,17 +21,19 @@ Path to beta = three themed alpha releases:
 
 Open items are grouped into **sprints** (settled with the PO, 2026-06-10). Triage statuses below are grounded in the metadata-lifecycle audit (`docs/metadata-lifecycle-audit-scout.md` + `-deep-passes.md`, verdict IDs DP1–DP5 / fix backlog F1–F8) — not guesses.
 
-### Sprint A — Cut the release (days, release-blocking)
+> **Release gate (PO decision, 2026-06-10):** `v0.1.0-alpha6` is cut only after **Sprint B lands AND the enrichment-scatter parallelization (Sprint E lead item) lands**. The cut does not ride Sprint A. Rationale: F1-class corruption was live-confirmed on 2026-06-10 (bulk refresh wrote wrong-book data onto foreign works; reverted), and the serial scatter is the system-wide long pole (baseline: `docs/speed-baseline-2026-06-10.md`). Issue closes ride the relocated cut.
+
+### Sprint A — Stabilize + baseline (✅ complete 2026-06-10; cut relocated to the release gate)
 
 | Status | Area | # | Item |
 |:------:|------|---|------|
-| 🔄 | Validation | #97 | GB re-test now that quota is reset — confirm the merged manual-import fix batch end-to-end, then close |
-| 🔍 | Import | #132 | Verify-then-close: the merged fix batch shipped the grouping + folder-label halves and the match fallback; re-test nested audiobooks + common titles with GB up |
-| 🔄 | Indexers | PR #113 | qBit 5.2 auth — approve CI, review, land (community PR; likely also closes #116 — verify) |
-| 🔄 | Indexers | PR #136 | Prowlarr magnet redirects for qBittorrent — approve CI, review, land (community PR) |
-| ⬜ | Docs | — | Backfill CHANGELOG for alpha 5; write alpha-6 notes |
-| ⬜ | Release | — | Cut `v0.1.0-alpha6` (release.yml node24 path already citest-validated); close resolved issues with explanations |
-| ⬜ | Perf | — | **Speed baseline capture** (1 day, feeds Sprint E): time add-work / enrichment-per-provider / refresh / bulk-refresh on the live library, before any fixes change the numbers |
+| ✅ | Validation | #97 | GB re-test done — quota live (18 GB-sourced matches in the test scan), the reported case resolves (16 candidates); close at the cut |
+| 🔄 | Import | #132 | Root-grouping fix landed (`d1b8768`): loose m4bs no longer fuse into phantom works; remaining variant-title auto-match slice → Sprint B |
+| ✅ | Indexers | PR #113 | qBit 5.2 auth merged (`ac682a1`) with the `Fails.`-body guard restored; fixes #116 (commented, close on reporter confirm or at the cut) |
+| ✅ | Indexers | PR #136 | Magnet-redirect dispatch merged (`487a2d3`) — reworked on main's probe-on-failure + contributor's dispatch-source enum, authorship preserved |
+| ✅ | Docs | — | CHANGELOG backfilled for alpha5 + alpha-6 unreleased notes (`4b0df25`) |
+| ✅ | Perf | — | **Speed baseline captured** — report at `docs/speed-baseline-2026-06-10.md` (harness + raw data local); headline: enrichment scatter is serial (per-work ≈ sum of provider RTTs), bulk = serial×serial |
+| ➡️ | Release | — | Cut `v0.1.0-alpha6` — **relocated behind the release gate** (after Sprint B + scatter parallelization); release.yml node24 path remains citest-validated |
 
 ### Sprint B — Metadata correctness core (audit F1/F3/F4/F5)
 
@@ -39,9 +41,12 @@ First feature(s) through the armed gates — report gate friction verbatim (insi
 
 | Status | Area | # | Item |
 |:------:|------|---|------|
+| ⬜ | Perf | #131 | **Sprint opener — instrumentation:** per-provider latency/outcome recording (status page gets nothing today) + revive file logging (dead since April while the status page claims it; #102-adjacent). Prerequisite for measuring the E scatter change against the baseline |
 | ⬜ | Architecture | #141 | Rename `ReleaseSearchResult` → `Release` (conformance; gate-dogfood warm-up) |
 | ⬜ | Architecture | #143 | Route import-time save via `livrarr-materialize` (seam conformance; warm-up) |
-| ⬜ | Metadata | #133 | **F1 / critical** — foreign wrong-language merge. Audit DP5: the cached-path fix is incomplete; the network/refresh path has **no language guard at all** (English HC/OL values win empty fields on foreign works) |
+| ⬜ | Metadata | #133 | **F1 / critical** — foreign wrong-language merge. Audit DP5: the cached-path fix is incomplete; the network/refresh path has **no language guard at all** (English HC/OL values win empty fields on foreign works). **Live-confirmed 2026-06-10**: one bulk refresh wrote wrong-book/wrong-language values onto 8 of 13 foreign works (GB+GR both contributed; field-level provenance in `testdata/livrarr.db.f1-damaged-20260610-183104`) |
+| ⬜ | Metadata | #144 | Anchor-less add lands permanently unenriched — sync enrichment leg skipped for lookup results with no candidateId/anchors (GB-sourced results systematically). Fix: populate identifiers/anchors at lookup→identity — **also the prerequisite for E's parallel scatter** (all keys, incl. ASIN, resolved in the identity phase) |
+| ⬜ | Import | #132 | Variant-title auto-match — `(Unabridged)`, `: …, Book N`, translated-subtitle and diacritic forms decline valid candidates (remaining slice after the root-grouping fix; 4 clean repro cases in the staging set) |
 | ⬜ | Metadata | — | **F3** — stop stamping query-language onto GR autocomplete hits (`lookup_goodreads`); root of #11 / `三体`→`es` (narrow fix, distinct from the deferred GR ladder) |
 | ⬜ | Metadata | — | **F4** — COALESCE all anchor keys in `apply_enrichment_merge` (gr_key NULLed on 82/120 enriched works) + defensive `cover_url` COALESCE (latent footgun, DP3) |
 | ⬜ | Metadata | #110 | **F5** — per-field/per-provider conflict instead of whole-work block (one dissent currently discards every merged field; confirmed by scout + DP1) |
@@ -68,16 +73,17 @@ Series entity + FK exist and work; **0 of 125 works use them** (only the GR seri
 | ⬜ | Metadata | #53 | Author-biblio junk entries — quality screen on author-monitor adds (today every "eligible" OL entry lands as Confirmed) |
 | ⬜ | Cleanup | — | **F8** — delete the dead `MetadataProvider` trait (zero impls); begin the `work_service.rs` god-object split (3,383 lines; do last) |
 
-### Sprint E — Metadata speed: testing & optimization (NEW)
+### Sprint E — Metadata speed: testing & optimization
 
-Measure first, then tune — against the Sprint-A baseline so before/after is real.
+Measure first, then tune — against the Sprint-A baseline (`docs/speed-baseline-2026-06-10.md`) so before/after is real. #131 instrumentation moved to Sprint B's opener.
 
 | Status | Area | # | Item |
 |:------:|------|---|------|
-| ⬜ | Perf | — | Test harness: timed scenarios per door (add, refresh, bulk refresh, manual-import batch) + per-provider latency/budget burn; repeatable against the dev library |
+| ⬜ | Perf | — | **Enrichment-scatter parallelization — RELEASE-GATING for a6 (PO, 2026-06-10).** Principled cut: identity phase resolves all anchors incl. ASIN (depends on B's #144 work), then one join across providers, per-leg timeout/rate-bucket/breaker unchanged, merge untouched. Projected: ~2.2 s → ~1 s per work; bulk 8 min → ~2.5 min |
+| 🔄 | Perf | — | Test harness: baseline harness + 2026-06-10 capture done (`scripts/speed-baseline.py`: add / refresh / probe / bulk + scan timings); extend to repeatable per-door scenarios + per-provider budget burn |
 | ⬜ | Perf | — | Pacing/budget tuning: GB daily budget + reason-aware 429 backoff, foreground-beats-background verification, per-provider rates (the R1 research-shelf scope) |
-| ⬜ | Perf | — | Cache effectiveness: 24h `(work, provider)` cache hit-rate; skip-already-enriched sweep coverage |
-| ⬜ | Status page | #131 | Provider health recording — the pacing gate is supposed to write outcomes to the status page; today nothing is written (also fixes "all providers green unconditionally") |
+| ⬜ | Perf | — | Cache effectiveness: 24h `(work, provider)` cache hit-rate; skip-already-enriched sweep coverage. Baseline says the scan path may not consult the cache at all (warm ≈ cold) — verify before tuning |
+| ⬜ | Perf | — | Bulk refresh pipelining (post-a6): a few works in flight, per-work flag release (kills #135's all-or-nothing 409); pacing-bound floor |
 
 ### Sprint F — Acquisition & ops correctness
 
@@ -176,6 +182,9 @@ Measure first, then tune — against the Sprint-A baseline so before/after is re
 
 ## Shipped since Alpha 5 (on `main`, unreleased)
 
+- **Community PRs merged** (2026-06-10): #113 qBittorrent 5.2 session cookies (`QBT_SID_*`, fixes #116's poller loop; `Fails.`-body guard kept) and #136 magnet-redirect dispatch (resolved magnets now sent to qBit/Transmission; contributor's dispatch-source enum on main's probe-on-failure skeleton).
+- **Manual-import grouping fix** (`d1b8768`): loose `.m4b`s no longer fuse into a phantom folder-work; per-file tag parsing now reaches them.
+- **Speed baseline captured** (`docs/speed-baseline-2026-06-10.md`): lookup parallel / enrichment scatter serial; bulk = serial×serial; F1 live-confirmed during capture and fully reverted from backup.
 - **WCC / metadata epic merged to main** (PR #140, 2026-06-10) — everything below plus the alpha-6 fix batch.
 - **Cross-format resume + sleep-timer auto-bookmark** — Whispersync-style ebook↔audiobook position sync over `.kash` links.
 - **One-road enrichment (metadata-refactor)** — every add/refresh door funnels through the single pipeline; background retry job removed in favor of user-triggered "Retry Incomplete".
