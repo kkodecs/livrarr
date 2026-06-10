@@ -6,7 +6,7 @@ use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::pagination::{PaginatedResponse, PaginationQuery};
 use crate::types::work::LibraryItemResponse;
-use livrarr_domain::services::FileService;
+use livrarr_domain::services::{FileService, ProgressKind};
 
 fn to_response(li: &livrarr_domain::LibraryItem) -> LibraryItemResponse {
     LibraryItemResponse {
@@ -79,6 +79,12 @@ pub async fn get_progress<S: HasFileService>(
 pub struct UpdateProgressRequest {
     pub position: String,
     pub progress_pct: f64,
+    /// Defaults to `Seek` when absent so stale clients can never advance the
+    /// cross-format furthest mark (REQ-003).
+    #[serde(default)]
+    pub kind: ProgressKind,
+    #[serde(default)]
+    pub cross_format_ts: Option<f64>,
 }
 
 pub async fn update_progress<S: HasFileService>(
@@ -89,7 +95,14 @@ pub async fn update_progress<S: HasFileService>(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state
         .file_service()
-        .update_progress(ctx.user.id, id, &body.position, body.progress_pct)
+        .update_progress(
+            ctx.user.id,
+            id,
+            &body.position,
+            body.progress_pct,
+            body.kind,
+            body.cross_format_ts,
+        )
         .await?;
     Ok(Json(serde_json::json!({ "success": true })))
 }

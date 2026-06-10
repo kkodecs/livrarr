@@ -13,6 +13,7 @@ libc = "0.2"
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true }
 livrarr-tagwrite = { workspace = true }
+sha2 = "0.10"
 tempfile = "3"
 tracing = "0.1"
 

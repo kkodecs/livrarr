@@ -247,6 +247,30 @@ pub enum Resolution {
     },
 }
 
+/// The shared identity outcome a creation path receives from
+/// [`crate::services::WorkService::resolve_identity`]: the resolved badge plus
+/// the bits a door needs to finish building its `WorkCandidate`. Every door uses
+/// this instead of hand-deriving identity, so all paths agree on what a book IS
+/// (P1 / REQ-014). It collapses the four [`Resolution`] verdicts into what a
+/// caller actually needs.
+#[derive(Debug, Clone)]
+pub struct ResolvedIdentity {
+    /// The badge to place on the `WorkCandidate` — `Confirmed` only when the
+    /// resolver corroborated a work anchor; otherwise `Pending`.
+    pub identity: IdentityState,
+    /// Payload-cache handle from this resolve, so `add()` can reuse the fetched
+    /// payloads without a second network round (REQ-015). `None` when nothing was
+    /// fetched.
+    pub candidate_id: Option<CandidateId>,
+    /// The language the resolver determined, if any. A door SHOULD prefer this
+    /// over a hardcoded default so a foreign work is never stamped English (#8).
+    pub language: Option<String>,
+    /// `Some` when the resolver raised an identity conflict. The door decides how
+    /// to surface it — the interactive add shows the existing work; batch paths
+    /// skip or notify. `identity` is left `Pending` in this case.
+    pub conflict: Option<NewIdentityConflict>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IdentityState {
     Confirmed {
@@ -256,6 +280,10 @@ pub enum IdentityState {
     },
     Pending {
         reason: PendingReason,
+        /// Source anchors seeded at create for a bulk/monitor path not yet
+        /// cross-provider-resolved — persisted now (REQ-001/006), converged later
+        /// (REQ-022). `None` for a genuinely identifier-less pending work.
+        seed_anchors: Option<CapturedIdentity>,
         top_candidates: Vec<Candidate>,
     },
 }
@@ -266,6 +294,37 @@ impl IdentityState {
         match self {
             IdentityState::Confirmed { anchors, .. } => Some(anchors),
             IdentityState::Pending { .. } => None,
+        }
+    }
+
+    /// The anchors to persist at create: a Confirmed work's full set, or a
+    /// Pending work's seed anchors (a bulk/monitor path that carries source
+    /// identifiers but is not yet cross-provider-resolved). `None` when neither.
+    pub fn seed_or_confirmed_anchors(&self) -> Option<&CapturedIdentity> {
+        match self {
+            IdentityState::Confirmed { anchors, .. } => Some(anchors),
+            IdentityState::Pending { seed_anchors, .. } => seed_anchors.as_ref(),
+        }
+    }
+
+    /// Derive the persisted identity-confidence badge ([`crate::IdentityStatus`])
+    /// from this resolution state's confirmed anchors (REQ-014/016, D-013): a work
+    /// anchor (OL/GR/HC work key) is `Confirmed`; an ISBN/ASIN bridge with no work
+    /// anchor is the de-facto `Provisional`; otherwise `Pending`. A `Pending`
+    /// resolution stays `Pending` even when it carries unresolved seed anchors —
+    /// only a `Confirmed` resolution yields a settled badge. `Conflict` and
+    /// `NeedsReview` are written by their own paths (an open conflict row;
+    /// resolution exhaustion), not derived from a fresh candidate.
+    pub fn derived_identity_status(&self) -> crate::IdentityStatus {
+        let nonempty = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.is_empty());
+        match self.anchors() {
+            Some(a) if nonempty(&a.ol_key) || nonempty(&a.gr_key) || nonempty(&a.hc_key) => {
+                crate::IdentityStatus::Confirmed
+            }
+            Some(a) if nonempty(&a.isbn_13) || nonempty(&a.asin) => {
+                crate::IdentityStatus::Provisional
+            }
+            _ => crate::IdentityStatus::Pending,
         }
     }
 }

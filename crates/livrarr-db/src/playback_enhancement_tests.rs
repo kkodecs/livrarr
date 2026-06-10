@@ -9,8 +9,8 @@ mod tests {
     use crate::{
         test_helpers::create_test_db, AuthorDb, BookmarkDb, ChapterDb, CreateAuthorDbRequest,
         CreateLibraryItemDbRequest, CreateUserDbRequest, CreateWorkDbRequest, DbError,
-        LibraryItemDb, MediaType, PlaybackProgressDb, RootFolderDb, TagStatus, UserDb, UserRole,
-        WorkDb,
+        LibraryItemDb, MediaType, PlaybackProgressDb, ProgressKind, RootFolderDb, TagStatus,
+        UserDb, UserRole, WorkDb,
     };
     use livrarr_domain::{AudiobookChapter, Bookmark};
 
@@ -735,9 +735,16 @@ mod tests {
         let db = create_test_db().await;
         let seed = seed_one_user(&db).await;
 
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "3528.0", 0.99)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "3528.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(seed.user_id, seed.audiobook_item_id)
@@ -756,13 +763,27 @@ mod tests {
         let seed = seed_one_user(&db).await;
 
         // First set to finished
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "3528.0", 0.99)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "3528.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
         // Then seek backward
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "1800.0", 0.50)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "1800.0",
+            0.50,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(seed.user_id, seed.audiobook_item_id)
@@ -780,9 +801,16 @@ mod tests {
         let db = create_test_db().await;
         let seed = seed_one_user(&db).await;
 
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "3528.0", 0.99)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "3528.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
         let original = db
             .get_progress(seed.user_id, seed.audiobook_item_id)
             .await
@@ -790,9 +818,16 @@ mod tests {
             .unwrap();
 
         // 0.96 is in [0.95, 0.98) — dead zone
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "3420.0", 0.96)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "3420.0",
+            0.96,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(seed.user_id, seed.audiobook_item_id)
@@ -810,9 +845,16 @@ mod tests {
         let db = create_test_db().await;
         let seed = seed_one_user(&db).await;
 
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "3528.0", 0.99)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "3528.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
         let first = db
             .get_progress(seed.user_id, seed.audiobook_item_id)
             .await
@@ -820,9 +862,16 @@ mod tests {
             .unwrap();
 
         // Another update at 0.99 should NOT overwrite the timestamp
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "3530.0", 0.99)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "3530.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
         let second = db
             .get_progress(seed.user_id, seed.audiobook_item_id)
             .await
@@ -840,9 +889,16 @@ mod tests {
         let db = create_test_db().await;
         let seed = seed_one_user(&db).await;
 
-        db.upsert_progress(seed.user_id, seed.ebook_item_id, "epubcfi(/6/98)", 0.99)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.ebook_item_id,
+            "epubcfi(/6/98)",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(seed.user_id, seed.ebook_item_id)
@@ -860,9 +916,16 @@ mod tests {
         let db = create_test_db().await;
         let seed = seed_one_user(&db).await;
 
-        db.upsert_progress(seed.user_id, seed.ebook_item_id, "epubcfi(/6/50)", 0.50)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.ebook_item_id,
+            "epubcfi(/6/50)",
+            0.50,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(seed.user_id, seed.ebook_item_id)
@@ -903,9 +966,16 @@ mod tests {
         let seed = seed_one_user(&db).await;
 
         // Set finished_at via normal upsert
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "3528.0", 0.99)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "3528.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
         let original = db
             .get_progress(seed.user_id, seed.audiobook_item_id)
             .await
@@ -931,9 +1001,16 @@ mod tests {
         let seed = seed_one_user(&db).await;
 
         // Set finished_at
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "3528.0", 0.99)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "3528.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Backward seek via no_lifecycle — must NOT clear finished_at
         db.upsert_progress_no_lifecycle(seed.user_id, seed.audiobook_item_id, "1800.0", 0.50)
@@ -958,12 +1035,26 @@ mod tests {
         let db = create_test_db().await;
         let seed = seed_one_user(&db).await;
 
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "100.0", 0.30)
-            .await
-            .unwrap();
-        db.upsert_progress(seed.user_id, seed.ebook_item_id, "epubcfi(/6/20)", 0.25)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "100.0",
+            0.30,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.ebook_item_id,
+            "epubcfi(/6/20)",
+            0.25,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let results = db
             .get_progress_for_items(seed.user_id, &[seed.audiobook_item_id, seed.ebook_item_id])
@@ -1003,6 +1094,8 @@ mod tests {
             seed.user_a.audiobook_item_id,
             "100.0",
             0.30,
+            ProgressKind::Progress,
+            None,
         )
         .await
         .unwrap();
@@ -1025,9 +1118,16 @@ mod tests {
         let db = create_test_db().await;
         let seed = seed_one_user(&db).await;
 
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "3528.0", 0.99)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "3528.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(seed.user_id, seed.audiobook_item_id)
@@ -1042,9 +1142,16 @@ mod tests {
         let db = create_test_db().await;
         let seed = seed_one_user(&db).await;
 
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "100.0", 0.30)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "100.0",
+            0.30,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(seed.user_id, seed.audiobook_item_id)
@@ -1063,9 +1170,16 @@ mod tests {
         let db = create_test_db().await;
         let seed = seed_one_user(&db).await;
 
-        db.upsert_progress(seed.user_id, seed.audiobook_item_id, "100.0", 0.30)
-            .await
-            .unwrap();
+        db.upsert_progress(
+            seed.user_id,
+            seed.audiobook_item_id,
+            "100.0",
+            0.30,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
         db.delete_library_item(seed.user_id, seed.audiobook_item_id)
             .await
             .unwrap();

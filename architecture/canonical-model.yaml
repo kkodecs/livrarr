@@ -1,0 +1,121 @@
+# Canonical Architecture Model — livrarr
+# The single AUTHORED source of truth for this project's structure: the entity spine,
+# the legal crate dependency edges (seams), and the system-level data flow + invariants.
+# Authored from the spec corpus with the PO (2026-06-10) — never derived from code
+# (enforcement-ladder.md, decision 1). Code conforms to THIS; where live code differs,
+# that difference is the conformance backlog, not a model bug.
+#
+# Enforced bidirectionally:
+#   forward — verify(architecture): a feature IR's marked `domain_entities` must appear
+#             in `entities`, and its crate-level dependency_graph edges must be legal
+#             per `seams`. Hard-stop; the deliberate amendments[] row is the escape.
+#   reverse — verify(canonical): an entity here with no matching `pub struct/enum` in
+#             the source is flagged stale (the `name` field is what is machine-checked;
+#             `kind`/`module`/`description` document intent).
+#
+# Conventions (settled with the PO, 2026-06-10):
+#   - Modules use FULL CRATE NAMES (livrarr-*) in `module:` and `may_depend_on:`.
+#     IR dependency_graph edges BETWEEN CRATES use these names; conceptual
+#     feature-internal edges remain fine and are not seam-gated.
+#   - Deliberate not-yet-conformed entities (reverse-gate reds) stay <= 2, each
+#     logged in amendments[]. Currently 1: Release.
+
+metadata:
+  project: livrarr
+  version: 1
+
+# The entity spine — the core domain concepts every feature conforms to (16, settled
+# with the PO 2026-06-10). An entity is a CONCEPT and may be backed by several types;
+# the primary domain type names it. DTOs, requests/responses, DB rows, service traits,
+# and provider payloads (NormalizedWorkDetail/ProviderOutcome) are deliberately NOT spine.
+entities:
+  # Media spine (BIG7 minus List — no persisted List entity exists or is planned;
+  # a future list feature amends the spine when specced)
+  - { name: Work, kind: struct, module: livrarr-domain, description: "a book as a concept (work-first); per-media-type monitoring (monitor_ebook / monitor_audiobook); the primary entity everywhere" }
+  - { name: Author, kind: struct, module: livrarr-domain, description: "a creator; monitorable (monitored, monitor_new_items, monitor_since)" }
+  - { name: Series, kind: struct, module: livrarr-domain, description: "an ordered set of works; enrichment sets per-work name + position strings (first-class series linking is known-deferred work)" }
+  - { name: Release, kind: struct, module: livrarr-domain, description: "DELIBERATE NOT-YET-CONFORMED (see amendments): an indexer search result eligible for grabbing; code carries ReleaseSearchResult (livrarr-download) — rename queued as conformance backlog" }
+  - { name: Grab, kind: struct, module: livrarr-domain, description: "a release handed to a download client; its hash is the ownership key through download -> import" }
+  - { name: LibraryItem, kind: struct, module: livrarr-domain, description: "a physical media file in the library; owns media_type; the unit of import, playback progress, and tag writes" }
+  # Identity & enrichment (the two-track metadata model)
+  - { name: CapturedIdentity, kind: struct, module: livrarr-domain, description: "the one-way identity contract: federated work anchors (ol/gr/hc) + edition bridges (isbn_13/asin) + state/method/generation; identity -> enrichment only, never metadata payloads" }
+  - { name: IdentityStatus, kind: enum, module: livrarr-domain, description: "identity track: Pending -> Confirmed | Provisional | Conflict | NeedsReview | NotFound" }
+  - { name: EnrichmentStatus, kind: enum, module: livrarr-domain, description: "details track: Unenriched -> Enriched | Thin | Failed; independent of the identity track" }
+  - { name: IdentityConflict, kind: struct, module: livrarr-domain, description: "an observable identity dispute (any federated anchor type); pauses automatic identity changes until the user resolves" }
+  # Consumption (don't lose your place)
+  - { name: PlaybackProgress, kind: struct, module: livrarr-domain, description: "per-user, per-item position with the finished lifecycle (set at >= 0.98, clear below 0.95)" }
+  - { name: KashLink, kind: struct, module: livrarr-domain, description: "a validated .kash binding of exactly one audiobook item to one ebook item; the carrier of cross-format resume" }
+  - { name: Bookmark, kind: struct, module: livrarr-domain, description: "a per-user named position (incl. sleep-timer auto-bookmarks); paired_bookmark_id reserved for cross-format pairing" }
+  - { name: AudiobookChapter, kind: struct, module: livrarr-domain, description: "an M4B chapter (title + start time) per library item; shared metadata, not per-user" }
+  # Acquisition infrastructure (admin-configured, trusted)
+  - { name: DownloadClient, kind: struct, module: livrarr-domain, description: "an admin-configured download engine (qBittorrent / SABnzbd / Transmission); trusted infrastructure" }
+  - { name: Indexer, kind: struct, module: livrarr-domain, description: "an admin-configured Torznab/Newznab source (Prowlarr optional); trusted infrastructure" }
+
+# Legal dependency edges (the seams). Each crate may depend ONLY on its listed targets.
+# Authored INTENT from the specs — not a Cargo.toml transcription.
+seams:
+  - { module: livrarr-domain, may_depend_on: [] }
+  - { module: livrarr-http, may_depend_on: [livrarr-domain] }
+  - { module: livrarr-db, may_depend_on: [livrarr-domain] }
+  - { module: livrarr-matching, may_depend_on: [livrarr-domain] }
+  # substrate: no back-edge to metadata/identity/enrichment/db (REQ-006), encoded by omission
+  - { module: livrarr-external-data, may_depend_on: [livrarr-domain, livrarr-http] }
+  # identity & enrichment are non-dependent siblings (REQ-002): neither lists the other
+  - { module: livrarr-identity, may_depend_on: [livrarr-domain, livrarr-external-data, livrarr-http] }
+  - { module: livrarr-enrichment, may_depend_on: [livrarr-domain, livrarr-external-data, livrarr-db, livrarr-http] }
+  # the one save home for covers + tags (metadata-refactor REQ-012)
+  - { module: livrarr-materialize, may_depend_on: [livrarr-domain, livrarr-http, livrarr-tagwrite] }
+  # shrinking orchestrator — future seam-cuts amend this list DOWN
+  - { module: livrarr-metadata, may_depend_on: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data, livrarr-identity, livrarr-enrichment, livrarr-materialize] }
+  - { module: livrarr-download, may_depend_on: [livrarr-domain, livrarr-http, livrarr-db] }
+  # INTENT: the save step routes via materialize (metadata-refactor REQ-012, metadata-
+  # modularization REQ-003); the live library->tagwrite edge is conformance backlog (S1)
+  - { module: livrarr-library, may_depend_on: [livrarr-domain, livrarr-db, livrarr-materialize] }
+  - { module: livrarr-tagwrite, may_depend_on: [livrarr-domain] }
+  - { module: livrarr-jobs, may_depend_on: [livrarr-domain] }
+  # compile wall: handlers never name db/metadata/tagwrite/download or their extractions
+  - { module: livrarr-handlers, may_depend_on: [livrarr-domain, livrarr-http, livrarr-matching, livrarr-jobs] }
+  # composition root: all internal crates
+  - { module: livrarr-server, may_depend_on: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data, livrarr-identity, livrarr-enrichment, livrarr-metadata, livrarr-download, livrarr-library, livrarr-tagwrite, livrarr-materialize, livrarr-jobs, livrarr-handlers] }
+  - { module: livrarr-cli, may_depend_on: [livrarr-domain] }
+  # cross-crate behavioral test harness: may stub anything except the composition root
+  - { module: livrarr-behavioral, may_depend_on: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data, livrarr-identity, livrarr-enrichment, livrarr-metadata, livrarr-download, livrarr-library, livrarr-tagwrite, livrarr-materialize, livrarr-jobs, livrarr-handlers] }
+
+# System-level data flow: where domain data enters, where it leaves, and the few
+# cross-feature invariants the whole system preserves.
+data_flow:
+  sources:
+    - { entity: Work, origin: "six creation doors (Add Work search, manual import, list import, Readarr import, series monitor, author monitor) — every door funnels into the one enrichment road with a seed (title + author + language)" }
+    - { entity: Author, origin: "created alongside works; bibliography + new-work detection via the author monitor" }
+    - { entity: Series, origin: "series name/position strings from enrichment; monitor-seeded series (first-class linking deferred)" }
+    - { entity: Release, origin: "indexer searches (Torznab/Newznab; Prowlarr optional) — interactive search and RSS sync" }
+    - { entity: Grab, origin: "user or automation grabs a Release to the protocol-default download client" }
+    - { entity: LibraryItem, origin: "import pipeline: completed downloads matched by grab hash + client id; manual import of on-disk files" }
+    - { entity: CapturedIdentity, origin: "work creation: harvest source identifiers -> deterministic multi-provider resolve -> quorum; background convergence thereafter" }
+    - { entity: IdentityConflict, origin: "a conflicting federated anchor on a matching normalized title+author, or a quorum tie" }
+    - { entity: KashLink, origin: "library scan: a .kash sidecar binds an audiobook item to the ebook item whose epub_hash matches (container-duration drift check, no audio hashing)" }
+    - { entity: PlaybackProgress, origin: "reader/player genuine-progress ticks (never manual seeks), per user" }
+    - { entity: Bookmark, origin: "user-created in reader/player; auto-created at sleep-timer activation" }
+    - { entity: AudiobookChapter, origin: "M4B chapter atoms (QuickTime track first, then Nero chpl) at import + startup backfill" }
+    - { entity: DownloadClient, origin: "admin settings (trusted infrastructure; may live on private IPs)" }
+    - { entity: Indexer, origin: "admin settings (trusted infrastructure; may live on private IPs)" }
+  sinks:
+    - { entity: Grab, destination: "download-client APIs (qBittorrent / SABnzbd / Transmission): add + poll" }
+    - { entity: LibraryItem, destination: "library filesystem layout (copy-for-import; hardlink-first CWA share); EPUB tag writes load-bearing, audio tag writes disabled (OOM)" }
+    - { entity: LibraryItem, destination: "push-to-Kindle via SMTP" }
+    - { entity: Work, destination: "cover artifacts on disk (proxy-validated, two cover slots) + OPDS / HTTP API to reader clients" }
+  invariants:
+    - "One road: every creation door funnels into the single enrichment pipeline (ask -> merge -> save); no path writes enrichable metadata, covers, or tags by any other route (metadata-refactor REQ-001)"
+    - "One-way identity: identity -> enrichment communicates only via CapturedIdentity; enrichment never writes identity state — detected contradictions are emitted as events routed back to identity (metadata-modularization REQ-002)"
+    - "Anchors are monotonic: ADD appends a new anchor type, CONFLICT raises to the user, only a user EDIT mutates an established anchor (metadata-modularization REQ-012)"
+    - "Provenance order is absolute: User > Provider > System; a null/empty value never overwrites a populated one; user-set fields and covers survive every refresh (work-creation-consistency REQ-016)"
+    - "Language integrity: no OpenLibrary/Hardcover metadata is ever written onto a foreign-language work, on any path (metadata-refactor REQ-014, work-creation-consistency REQ-027)"
+    - "Per-user isolation: PlaybackProgress, Bookmark, and cross-format furthest positions are scoped per user; one user's activity never surfaces to or mutates another's (playback-enhancements principles, cross-format-resume AC-021)"
+    - "Positions never move backward automatically; a cross-format jump happens only on explicit user confirmation (cross-format-resume REQ-006)"
+    - "Hash ownership: download pollers touch only downloads matching an active Grab's hash for that specific client; user-added downloads are never imported (transmission FDP-2)"
+
+# Deliberate amendments to the spine — the architecture's change log.
+amendments:
+  - { date: 2026-06-10, change: "initial spine authored from the spec corpus — 16 entities, 17-crate seams, data_flow", reason: "canonical-model authoring with the PO; activates the forward (architecture), reverse (canonical), and amendments gates" }
+  - { date: 2026-06-10, change: "Release included as deliberate not-yet-conformed (no pub type yet; code carries ReleaseSearchResult)", reason: "settled BIG7 vocabulary (decision D1); conformance backlog = rename, queued in livrarr tracking; deliberate-red budget 1 of 2" }
+  - { date: 2026-06-10, change: "livrarr-library seam authored as intent (may depend on livrarr-materialize, no livrarr-tagwrite edge) while live code still depends on tagwrite directly", reason: "one save home (metadata-refactor REQ-012, metadata-modularization REQ-003); the live edge is conformance backlog (decision S1)" }

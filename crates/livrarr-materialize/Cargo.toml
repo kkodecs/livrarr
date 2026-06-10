@@ -1,0 +1,12 @@
+[package]
+name = "livrarr-materialize"
+version = "0.1.0-alpha5"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[dependencies]
+tokio = { workspace = true }
+trait-variant = { workspace = true }
+livrarr-domain = { workspace = true }
+livrarr-http = { workspace = true }
+livrarr-tagwrite = { workspace = true }

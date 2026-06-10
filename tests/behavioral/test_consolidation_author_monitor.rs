@@ -74,6 +74,31 @@ impl WorkService for StubWorkService {
         })
     }
 
+    async fn retry_all_incomplete(
+        &self,
+        _user_id: UserId,
+    ) -> Result<livrarr_domain::services::RetrySummary, WorkServiceError> {
+        todo!("stub: not exercised by author-monitor tests")
+    }
+
+    async fn resolve_identity(
+        &self,
+        _user_id: UserId,
+        _harvest: livrarr_domain::identity::RawHarvest,
+        _tier: livrarr_domain::identity::LatencyTier,
+    ) -> Result<livrarr_domain::identity::ResolvedIdentity, WorkServiceError> {
+        Ok(livrarr_domain::identity::ResolvedIdentity {
+            identity: livrarr_domain::identity::IdentityState::Pending {
+                reason: livrarr_domain::identity::PendingReason::NoCandidates,
+                seed_anchors: None,
+                top_candidates: vec![],
+            },
+            candidate_id: None,
+            language: None,
+            conflict: None,
+        })
+    }
+
     async fn get(&self, _user_id: UserId, _work_id: WorkId) -> Result<Work, WorkServiceError> {
         Ok(Work::default())
     }
@@ -172,6 +197,7 @@ impl WorkService for StubWorkService {
 
     async fn lookup_filtered(
         &self,
+        _user_id: UserId,
         req: LookupRequest,
         _raw: bool,
     ) -> Result<LookupResponse, WorkServiceError> {
@@ -185,6 +211,14 @@ impl WorkService for StubWorkService {
         })
     }
 
+    async fn eager_match_by_author(
+        &self,
+        _user_id: UserId,
+        _queries: Vec<EagerQuery>,
+    ) -> Result<Vec<(usize, LookupResult)>, WorkServiceError> {
+        Ok(vec![])
+    }
+
     async fn search_works(
         &self,
         _user_id: UserId,
@@ -195,14 +229,6 @@ impl WorkService for StubWorkService {
         Ok((vec![], 0))
     }
 
-    async fn download_cover_from_url(
-        &self,
-        _user_id: i64,
-        _work_id: i64,
-        _cover_url: &str,
-    ) -> Result<(), WorkServiceError> {
-        Ok(())
-    }
     fn try_start_bulk_refresh(&self, _user_id: i64) -> bool {
         true
     }

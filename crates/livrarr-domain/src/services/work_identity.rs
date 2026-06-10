@@ -39,6 +39,10 @@ pub trait WorkIdentityRepository: Send + Sync {
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError>;
 
+    /// Surface a Tier-B identity-pending work the resolver cannot deterministically
+    /// match as needs-review — never an indefinite background-retry loop (REQ-026).
+    async fn set_needs_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError>;
+
     async fn verify_anchor_cache_consistency(
         &self,
     ) -> Result<Vec<ConsistencyDivergence>, WorkIdentityError>;
@@ -74,6 +78,14 @@ pub trait WorkIdentityRepository: Send + Sync {
         incoming: &CapturedIdentity,
         source: ConflictSource,
     ) -> Result<Vec<NewIdentityConflict>, WorkIdentityError>;
+
+    /// Persist an observable open conflict row for any federated anchor kind
+    /// (REQ-020). Idempotent: an existing open conflict of the same kind on the
+    /// same work is returned rather than duplicated. Returns the conflict id.
+    async fn raise_identity_conflict(
+        &self,
+        conflict: NewIdentityConflict,
+    ) -> Result<i64, WorkIdentityError>;
 
     /// One-shot startup backfill (ordered after schema migrations, like the
     /// FK-check harness): rewrite drifted slug-form Goodreads keys in the works

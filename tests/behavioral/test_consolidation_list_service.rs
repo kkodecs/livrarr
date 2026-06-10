@@ -131,6 +131,7 @@ async fn test_list_preview_existing_works_marked_already_exists() {
         },
         identity: IdentityState::Pending {
             reason: PendingReason::NoCandidates,
+            seed_anchors: None,
             top_candidates: vec![],
         },
         candidate_id: None,
@@ -276,6 +277,7 @@ async fn test_list_undo_returns_removed_and_skipped_counts() {
         },
         identity: IdentityState::Pending {
             reason: PendingReason::NoCandidates,
+            seed_anchors: None,
             top_candidates: vec![],
         },
         candidate_id: None,
@@ -356,6 +358,7 @@ async fn test_list_undo_already_undone_returns_conflict() {
         },
         identity: IdentityState::Pending {
             reason: PendingReason::NoCandidates,
+            seed_anchors: None,
             top_candidates: vec![],
         },
         candidate_id: None,

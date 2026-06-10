@@ -92,6 +92,14 @@ fn extract_m4b(path: &Path) -> Option<Extraction> {
     let raw_author = tag.artist().map(|s| s.to_string());
     let raw_year = tag.year().and_then(|s| s.to_string().parse::<i32>().ok());
 
+    // Language is left absent: mp4ameta 0.13's public `Tag` API only exposes the
+    // iTunes `ilst` metadata atoms (title/artist/year/freeform), none of which is
+    // a language tag. The track language lives in the `mdhd` media-header atom,
+    // which the crate parses but keeps private (the `mdia`/`mdhd` modules are not
+    // `pub`). A wrong language is worse than None downstream (it would force a
+    // foreign audiobook onto the wrong edition), so we do not guess.
+    let language = None;
+
     let title = raw_title.and_then(|t| sanitize_title(&t, path))?;
     let author = raw_author.and_then(|a| sanitize_author(&a));
 
@@ -119,7 +127,7 @@ fn extract_m4b(path: &Path) -> Option<Extraction> {
         author,
         year: raw_year,
         isbn,
-        language: None,
+        language,
         series: None,
         series_position: None,
         narrator: None,
@@ -136,10 +144,13 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
         vec![path]
     };
 
+    use livrarr_domain::normalization::normalize_language;
+
     let mut titles: Vec<String> = Vec::new();
     let mut artists: Vec<String> = Vec::new();
     let mut albums: Vec<String> = Vec::new();
     let mut years: Vec<i32> = Vec::new();
+    let mut languages: Vec<String> = Vec::new();
 
     for p in &paths_to_read {
         if let Ok(tag) = id3::Tag::read_from_path(p) {
@@ -154,6 +165,12 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
             }
             if let Some(y) = tag.year() {
                 years.push(y);
+            }
+            // ID3 `TLAN` carries the language; normalize through the single
+            // authority (unrecognized → dropped) so a foreign audiobook is not
+            // treated as English downstream.
+            if let Some(lang) = tag.text_for_frame_id("TLAN").and_then(normalize_language) {
+                languages.push(lang);
             }
         }
     }
@@ -174,6 +191,7 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
     let author = raw_author;
 
     let year = most_common(&years).copied();
+    let language = most_common(&languages).cloned();
 
     let confidence = if author.is_some() {
         Confidence::High
@@ -186,7 +204,7 @@ fn extract_mp3(path: &Path, grouped_paths: Option<&[std::path::PathBuf]>) -> Opt
         author,
         year,
         isbn: None,
-        language: None,
+        language,
         series: None,
         series_position: None,
         narrator: None,
@@ -293,4 +311,55 @@ fn parse_year(raw: &str) -> Option<i32> {
         .find(|tok| tok.len() == 4)
         .and_then(|tok| tok.parse::<i32>().ok())
         .filter(|y| (1000..=2999).contains(y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Write an ID3v2.4 tag (title + optional TLAN) into a fresh `.mp3` file in a
+    /// unique temp dir, returning the path. No real audio data is needed:
+    /// `id3::Tag::read_from_path` decodes a bare ID3 header by magic.
+    fn write_mp3_with_tags(name: &str, title: &str, tlan: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("livrarr-m1-{}-{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.mp3"));
+        // The file must exist before `write_to_path` (it opens read+write).
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&[])
+            .unwrap();
+
+        let mut tag = id3::Tag::new();
+        tag.set_text("TIT2", title);
+        if let Some(l) = tlan {
+            tag.set_text("TLAN", l);
+        }
+        tag.write_to_path(&path, id3::Version::Id3v24).unwrap();
+        path
+    }
+
+    #[test]
+    fn mp3_tlan_yields_normalized_language() {
+        // A German MP3 (TLAN="ger") surfaces normalized "de".
+        let path = write_mp3_with_tags("german", "Der Steppenwolf", Some("ger"));
+        let ex = extract_mp3(&path, None).expect("extraction");
+        assert_eq!(ex.language.as_deref(), Some("de"));
+    }
+
+    #[test]
+    fn mp3_tlan_unrecognized_is_dropped() {
+        // An unrecognized TLAN value normalizes to None (not stored raw).
+        let path = write_mp3_with_tags("bogus", "Some Title", Some("zzz"));
+        let ex = extract_mp3(&path, None).expect("extraction");
+        assert_eq!(ex.language, None);
+    }
+
+    #[test]
+    fn mp3_without_tlan_has_no_language() {
+        let path = write_mp3_with_tags("notag", "Some Title", None);
+        let ex = extract_mp3(&path, None).expect("extraction");
+        assert_eq!(ex.language, None);
+    }
 }

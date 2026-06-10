@@ -2,7 +2,7 @@ use chrono::Utc;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
-use crate::sqlite_common::{map_db_err, parse_dt};
+use crate::sqlite_common::{absolute_http_cover_url, map_db_err, parse_dt};
 use crate::{
     ApplyEnrichmentMergeRequest, ApplyMergeOutcome, AuthorId, CreateWorkDbRequest, DbError,
     EnrichmentStatus, MediaType, NarrationType, ProvenanceSetter, UpdateWorkEnrichmentDbRequest,
@@ -120,6 +120,12 @@ fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
             .try_get("rating_count")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         enrichment_status: parse_enrichment_status(&enrichment_status_str)?,
+        identity_status: row
+            .try_get::<String, _>("identity_status")
+            .ok()
+            .map(|s| parse_identity_status(&s))
+            .transpose()?
+            .unwrap_or_default(),
         enrichment_retry_count: row
             .try_get::<i32, _>("enrichment_retry_count")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -177,12 +183,14 @@ fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
         // Legacy values migrated to unenriched by migration 035
         "pending" | "partial" => Ok(EnrichmentStatus::Unenriched),
         "enriched" => Ok(EnrichmentStatus::Enriched),
+        "thin" => Ok(EnrichmentStatus::Thin),
         "failed" => Ok(EnrichmentStatus::Failed),
         // Legacy exhausted/skipped mapped to failed — migration handles DB rows
         "exhausted" | "skipped" => Ok(EnrichmentStatus::Failed),
-        "conflict" => Ok(EnrichmentStatus::Conflict),
-        "identity_pending" => Ok(EnrichmentStatus::IdentityPending),
-        "needs_review" => Ok(EnrichmentStatus::NeedsReview),
+        // Legacy identity-track values dropped from EnrichmentStatus (migration 055
+        // moved identity to the identity_status column). Tolerate any pre-migration
+        // row by reading them as Unenriched.
+        "conflict" | "identity_pending" | "needs_review" => Ok(EnrichmentStatus::Unenriched),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown enrichment status: {s}"),
         }),
@@ -193,10 +201,35 @@ fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
     match s {
         EnrichmentStatus::Unenriched => "unenriched",
         EnrichmentStatus::Enriched => "enriched",
+        EnrichmentStatus::Thin => "thin",
         EnrichmentStatus::Failed => "failed",
-        EnrichmentStatus::Conflict => "conflict",
-        EnrichmentStatus::IdentityPending => "identity_pending",
-        EnrichmentStatus::NeedsReview => "needs_review",
+    }
+}
+
+fn parse_identity_status(s: &str) -> Result<livrarr_domain::IdentityStatus, DbError> {
+    use livrarr_domain::IdentityStatus;
+    match s {
+        "pending" => Ok(IdentityStatus::Pending),
+        "confirmed" => Ok(IdentityStatus::Confirmed),
+        "provisional" => Ok(IdentityStatus::Provisional),
+        "conflict" => Ok(IdentityStatus::Conflict),
+        "needs_review" => Ok(IdentityStatus::NeedsReview),
+        "not_found" => Ok(IdentityStatus::NotFound),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown identity status: {s}"),
+        }),
+    }
+}
+
+fn identity_status_str(s: livrarr_domain::IdentityStatus) -> &'static str {
+    use livrarr_domain::IdentityStatus;
+    match s {
+        IdentityStatus::Pending => "pending",
+        IdentityStatus::Confirmed => "confirmed",
+        IdentityStatus::Provisional => "provisional",
+        IdentityStatus::Conflict => "conflict",
+        IdentityStatus::NeedsReview => "needs_review",
+        IdentityStatus::NotFound => "not_found",
     }
 }
 
@@ -440,7 +473,7 @@ impl WorkDb for SqliteDb {
         .bind(req.rating_count)
         .bind(enrichment_status_str(req.enrichment_status))
         .bind(req.enrichment_source.as_deref())
-        .bind(req.cover_url.as_deref())
+        .bind(absolute_http_cover_url(req.cover_url.as_deref()))
         .bind(&now)
         .bind(id)
         .bind(user_id)
@@ -528,6 +561,27 @@ impl WorkDb for SqliteDb {
         Ok(())
     }
 
+    async fn set_identity_status(
+        &self,
+        user_id: UserId,
+        id: WorkId,
+        status: livrarr_domain::IdentityStatus,
+    ) -> Result<(), DbError> {
+        let result =
+            sqlx::query("UPDATE works SET identity_status = ? WHERE id = ? AND user_id = ?")
+                .bind(identity_status_str(status))
+                .bind(id)
+                .bind(user_id)
+                .execute(self.pool())
+                .await
+                .map_err(map_db_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound { entity: "work" });
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn update_cover_metadata(
         &self,
@@ -550,7 +604,7 @@ impl WorkDb for SqliteDb {
              cover_width = ?, cover_height = ?, cover_manual = ? \
              WHERE id = ? AND user_id = ?",
         )
-        .bind(cover_url)
+        .bind(absolute_http_cover_url(cover_url))
         .bind(cover_source)
         .bind(trust_str)
         .bind(cover_width)
@@ -588,7 +642,7 @@ impl WorkDb for SqliteDb {
              audiobook_cover_trust = ?, audiobook_cover_width = ?, audiobook_cover_height = ? \
              WHERE id = ? AND user_id = ?",
         )
-        .bind(audiobook_cover_url)
+        .bind(absolute_http_cover_url(audiobook_cover_url))
         .bind(audiobook_cover_source)
         .bind(trust_str)
         .bind(audiobook_cover_width)
@@ -770,7 +824,7 @@ impl WorkDb for SqliteDb {
     }
 
     async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError> {
-        let rows = sqlx::query("SELECT * FROM works WHERE enrichment_status = 'identity_pending'")
+        let rows = sqlx::query("SELECT * FROM works WHERE identity_status = 'pending'")
             .fetch_all(self.pool())
             .await
             .map_err(map_db_err)?;
@@ -781,8 +835,14 @@ impl WorkDb for SqliteDb {
         &self,
         older_than: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Work>, DbError> {
+        // REQ-015: only a SETTLED identity auto-enriches. A held identity (pending →
+        // converges first; conflict/needs_review/not_found → terminal, user acts) must
+        // not be picked up by the stale-unenriched retry — otherwise a pending work
+        // enriches prematurely and a not_found work loops (both are enrichment
+        // 'unenriched' now that identity lives on identity_status).
         let rows = sqlx::query(
-            "SELECT * FROM works WHERE enrichment_status = 'unenriched' AND added_at < ?",
+            "SELECT * FROM works WHERE enrichment_status = 'unenriched' \
+             AND identity_status IN ('confirmed', 'provisional') AND added_at < ?",
         )
         .bind(older_than.to_rfc3339())
         .fetch_all(self.pool())
@@ -889,7 +949,7 @@ impl WorkDb for SqliteDb {
             .bind(u.abridged)
             .bind(u.rating)
             .bind(u.rating_count)
-            .bind(u.cover_url.as_deref())
+            .bind(absolute_http_cover_url(u.cover_url.as_deref()))
             .bind(u.enrichment_source.as_deref())
             .bind(status_str)
             .bind(&now)
@@ -1007,9 +1067,20 @@ impl WorkDb for SqliteDb {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<(), DbError> {
+        // Recovering a terminal `not_found` identity (the LLM rejected all payloads):
+        // a manual refresh re-derives identity from the work's anchors so it can
+        // re-resolve + re-enrich. Other identity states are left untouched — an open
+        // `conflict` is a data dispute a refresh must not silently clear, and
+        // confirmed/provisional/pending already re-enrich on their own.
         let result = sqlx::query(
             "UPDATE works SET enrichment_status = 'pending', enriched_at = NULL, \
-             merge_generation = merge_generation + 1 \
+             merge_generation = merge_generation + 1, \
+             identity_status = CASE \
+                 WHEN identity_status = 'not_found' AND (ol_key IS NOT NULL OR gr_key IS NOT NULL OR hc_key IS NOT NULL) THEN 'confirmed' \
+                 WHEN identity_status = 'not_found' AND (isbn_13 IS NOT NULL OR asin IS NOT NULL) THEN 'provisional' \
+                 WHEN identity_status = 'not_found' THEN 'pending' \
+                 ELSE identity_status \
+             END \
              WHERE id = ? AND user_id = ?",
         )
         .bind(work_id)
@@ -1034,8 +1105,11 @@ impl WorkDb for SqliteDb {
     }
 
     async fn list_conflict_works(&self, user_id: UserId) -> Result<Vec<Work>, DbError> {
+        // Works with an unresolved identity problem the user must act on: an open
+        // anchor `conflict` or an unverifiable `not_found` (the LLM rejected all
+        // payloads — formerly enrichment_status='conflict', now identity_status).
         let rows = sqlx::query(
-            "SELECT * FROM works WHERE user_id = ? AND enrichment_status = 'conflict' ORDER BY id",
+            "SELECT * FROM works WHERE user_id = ? AND identity_status IN ('conflict', 'not_found') ORDER BY id",
         )
         .bind(user_id)
         .fetch_all(self.pool())
@@ -1116,7 +1190,7 @@ impl crate::WorkDbCreate for SqliteDb {
         .bind(&req.ol_key)
         .bind(&req.gr_key)
         .bind(req.year)
-        .bind(&req.cover_url)
+        .bind(absolute_http_cover_url(req.cover_url.as_deref()))
         .bind(&now)
         .bind(req.language.as_deref())
         .bind(&req.import_id)

@@ -1,17 +1,18 @@
 use serde::Deserialize;
 
+pub use livrarr_domain::services::ProgressKind;
 pub use livrarr_domain::settings::{
     EmailConfig, MediaManagementConfig, MetadataConfig, NamingConfig, ProwlarrConfig,
 };
 pub use livrarr_domain::{
-    ApplyMergeOutcome, AudiobookChapter, Author, AuthorId, Bookmark, DbError, DownloadClient,
-    DownloadClientId, DownloadClientImplementation, EnrichmentStatus, EventType, ExternalIdRowId,
-    ExternalIdType, FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent, HistoryFilter,
-    HistoryId, Import, Indexer, IndexerConfig, IndexerId, IndexerRssState, LibraryItem,
-    LibraryItemId, LlmProvider, MediaType, MergeResolved, MetadataProvider, NarrationType,
-    Notification, NotificationId, NotificationType, OutcomeClass, PlaybackProgress,
-    ProvenanceSetter, RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Series,
-    Session, TagStatus, User, UserId, UserRole, Work, WorkField, WorkId,
+    ApplyMergeOutcome, AudiobookChapter, Author, AuthorId, Bookmark, CrossFormatState, DbError,
+    DownloadClient, DownloadClientId, DownloadClientImplementation, EnrichmentStatus, EventType,
+    ExternalIdRowId, ExternalIdType, FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent,
+    HistoryFilter, HistoryId, Import, Indexer, IndexerConfig, IndexerId, IndexerRssState, KashLink,
+    LibraryItem, LibraryItemId, LlmProvider, MediaType, MergeResolved, MetadataProvider,
+    NarrationType, NewKashLink, Notification, NotificationId, NotificationType, OutcomeClass,
+    PlaybackProgress, ProvenanceSetter, RemotePathMapping, RemotePathMappingId, RootFolder,
+    RootFolderId, Series, Session, TagStatus, User, UserId, UserRole, Work, WorkField, WorkId,
 };
 
 pub mod pool;
@@ -22,6 +23,7 @@ mod sqlite_bookmarks;
 mod sqlite_chapters;
 pub(crate) mod sqlite_common;
 mod sqlite_config;
+mod sqlite_cross_format_state;
 mod sqlite_download_client;
 mod sqlite_external_id;
 mod sqlite_grab;
@@ -29,11 +31,14 @@ mod sqlite_history;
 mod sqlite_identity_conflict;
 mod sqlite_import;
 mod sqlite_indexer;
+mod sqlite_kash_link;
 mod sqlite_library_item;
 mod sqlite_list_import;
+mod sqlite_metadata_cache;
 mod sqlite_notification;
 mod sqlite_playback_progress;
 mod sqlite_provenance;
+mod sqlite_provider_policy;
 mod sqlite_remote_path_mapping;
 mod sqlite_retry_state;
 mod sqlite_root_folder;
@@ -239,6 +244,15 @@ pub trait WorkDb: Send + Sync {
         user_id: UserId,
         id: WorkId,
         manual: bool,
+    ) -> Result<(), DbError>;
+
+    /// Set the persisted identity-confidence badge (REQ-014 two-state split):
+    /// the flat, user-facing identity status derived from a work's anchors.
+    async fn set_identity_status(
+        &self,
+        user_id: UserId,
+        id: WorkId,
+        status: livrarr_domain::IdentityStatus,
     ) -> Result<(), DbError>;
 
     #[allow(clippy::too_many_arguments)]
@@ -1482,6 +1496,48 @@ pub trait SeriesCacheDb: Send + Sync {
     async fn delete_series_cache(&self, author_id: i64) -> Result<(), DbError>;
 }
 
+/// One row of the persistent (work, provider) metadata cache (REQ-009). The
+/// payload is stored as opaque JSON so livrarr-db never names external-data's
+/// `NormalizedWorkDetail` (keeps db -> domain only, GC-2); the enrichment cache
+/// adapter (de)serializes it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MetadataCacheRow {
+    pub payload_json: String,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Persistent (work, provider) metadata cache (REQ-009). The enrichment
+/// provider-gateway wraps this behind a cache abstraction; a refresh bypasses it.
+/// TTL is enforced here via `max_age`.
+#[trait_variant::make(Send)]
+pub trait MetadataCacheDb: Send + Sync {
+    /// The cached payload JSON if present and younger than `max_age`, else None.
+    async fn metadata_cache_get(
+        &self,
+        work_id: livrarr_domain::WorkId,
+        provider: livrarr_domain::MetadataProvider,
+        max_age: std::time::Duration,
+    ) -> Result<Option<MetadataCacheRow>, DbError>;
+
+    /// Upsert a provider payload for (work, provider). INSERT ... ON CONFLICT
+    /// DO UPDATE SET (never INSERT OR REPLACE, insight 20).
+    async fn metadata_cache_put(
+        &self,
+        work_id: livrarr_domain::WorkId,
+        provider: livrarr_domain::MetadataProvider,
+        payload_json: &str,
+    ) -> Result<(), DbError>;
+}
+
+/// Loads the provider-policy table into the in-memory snapshot (REQ-003). The
+/// server holds + atomically swaps the snapshot; runtime lookup is a memory read.
+#[trait_variant::make(Send)]
+pub trait ProviderPolicyDb: Send + Sync {
+    async fn load_provider_policy_snapshot(
+        &self,
+    ) -> Result<livrarr_domain::services::ProviderPolicySnapshot, DbError>;
+}
+
 // ---------------------------------------------------------------------------
 // Import DB (Readarr Library Import)
 // ---------------------------------------------------------------------------
@@ -1544,12 +1600,21 @@ pub trait PlaybackProgressDb: Send + Sync {
     ) -> Result<Option<PlaybackProgress>, DbError>;
 
     /// Insert or update playback progress with finished_at lifecycle.
+    ///
+    /// When `kind` is `Progress`, the item belongs to a kash link, and
+    /// `cross_format_ts` is a finite timestamp, the link's per-user
+    /// `cross_format_state.furthest_ts` advances monotonically
+    /// (`MAX(furthest_ts, ts)`) IN THE SAME SQLite transaction as the
+    /// progress write. `Seek` or a missing/non-finite ts never touches
+    /// cross-format state (REQ-003/REQ-016).
     async fn upsert_progress(
         &self,
         user_id: UserId,
         library_item_id: LibraryItemId,
         position: &str,
         progress_pct: f64,
+        kind: ProgressKind,
+        cross_format_ts: Option<f64>,
     ) -> Result<(), DbError>;
 
     /// Insert or update progress without touching finished_at.
@@ -1617,6 +1682,60 @@ pub trait BookmarkDb: Send + Sync {
     async fn delete_bookmark(&self, user_id: UserId, bookmark_id: i64) -> Result<(), DbError>;
 }
 
+/// `.kash` link data access (cross-format resume). 1:1 per item — UNIQUE on
+/// both `audio_item_id` and `ebook_item_id`.
+#[trait_variant::make(Send)]
+pub trait KashLinkDb: Send + Sync {
+    /// Insert or update the link keyed by `audio_item_id` (one transaction).
+    /// An identity change (different ebook, different `epub_hash`, or
+    /// duration drift beyond tolerance) deletes the link's
+    /// `cross_format_state` rows in the same transaction — a furthest mark
+    /// recorded against a different alignment/timeline is never
+    /// reinterpreted. Linking to an ebook already in another link surfaces
+    /// as `DbError::Constraint` (first-link-wins, caller logs).
+    async fn upsert_link(&self, link: NewKashLink) -> Result<KashLink, DbError>;
+
+    /// The link containing this item on either side, if any.
+    async fn link_for_item(
+        &self,
+        library_item_id: LibraryItemId,
+    ) -> Result<Option<KashLink>, DbError>;
+
+    /// Remove the link for an audio item (scan reconciliation: sidecar gone
+    /// or duration-mismatched). Its `cross_format_state` rows cascade.
+    /// Idempotent when no link exists.
+    async fn delete_link_for_audio(&self, audio_item_id: LibraryItemId) -> Result<(), DbError>;
+}
+
+/// Per-(user, link) cross-format resume state access.
+///
+/// `furthest_ts` ADVANCEMENT is not exposed here — it happens inside the
+/// extended [`PlaybackProgressDb::upsert_progress`] transaction (REQ-016).
+#[trait_variant::make(Send)]
+pub trait CrossFormatStateDb: Send + Sync {
+    /// The state row, or a zero-value default (furthest 0, no declines)
+    /// WITHOUT inserting one.
+    async fn get_or_default(
+        &self,
+        user_id: UserId,
+        kash_link_id: i64,
+    ) -> Result<CrossFormatState, DbError>;
+
+    /// Record a decline threshold for one format; the other format's
+    /// threshold and `furthest_ts` are untouched (REQ-017).
+    async fn set_decline(
+        &self,
+        user_id: UserId,
+        kash_link_id: i64,
+        format: MediaType,
+        declined_at_ts: f64,
+    ) -> Result<(), DbError>;
+
+    /// Explicit override: set `furthest_ts` (may DECREASE — REQ-018) and
+    /// clear both decline thresholds.
+    async fn sync_to(&self, user_id: UserId, kash_link_id: i64, ts: f64) -> Result<(), DbError>;
+}
+
 pub struct CreateImportDbRequest {
     pub id: String,
     pub user_id: UserId,
@@ -1635,6 +1754,7 @@ pub struct ListImportPreviewRow {
     pub author: String,
     pub isbn_13: Option<String>,
     pub isbn_10: Option<String>,
+    pub goodreads_book_id: Option<String>,
     pub year: Option<i32>,
 }
 
@@ -1668,6 +1788,7 @@ pub trait ListImportDb: Send + Sync {
         author: &str,
         isbn_13: Option<&str>,
         isbn_10: Option<&str>,
+        goodreads_book_id: Option<&str>,
         year: Option<i32>,
         source_status: Option<&str>,
         source_rating: Option<f32>,

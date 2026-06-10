@@ -1,11 +1,16 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   getStreamUrl,
   getPlaybackProgress,
   updatePlaybackProgress,
+  getCrossFormatPrompt,
+  declineCrossFormat,
+  syncCrossFormatToHere,
 } from "@/api";
 import { apiFetch } from "@/api/client";
+import { ResumePromptBanner } from "@/components/ResumePromptBanner";
 import {
   ArrowLeft,
   Play,
@@ -29,7 +34,7 @@ import {
 import { useNavigate } from "react-router";
 import * as Popover from "@radix-ui/react-popover";
 import { cn } from "@/utils/cn";
-import type { ChapterResponse, BookmarkResponse, CreateBookmarkRequest } from "@/types/api";
+import type { ChapterResponse, BookmarkResponse, CreateBookmarkRequest, ResumePromptDTO } from "@/types/api";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
 const SLEEP_OPTIONS = [5, 10, 15, 30, 45, 60];
@@ -134,6 +139,13 @@ export function AudioPlayer({
   const sleepTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sleepDeadlineRef = useRef<number | null>(null);
 
+  // Cross-format resume
+  const [resumePrompt, setResumePrompt] = useState<ResumePromptDTO | null>(null);
+  const promptFiredRef = useRef(false);
+
+  // Sleep bookmark dedup guard (in-flight: query may not reflect a recent create)
+  const lastSleepBookmarkRef = useRef<{ pos: number } | null>(null);
+
   useEffect(() => {
     localStorage.setItem("livrarr_skip_back", String(skipBack));
   }, [skipBack]);
@@ -144,27 +156,46 @@ export function AudioPlayer({
   const streamUrl = getStreamUrl(libraryItemId);
   const coverUrl = `/api/v1/mediacover/${workId}/audiocover.jpg`;
 
-  // Load saved progress.
+  // Load saved progress, then check for a cross-format resume prompt. The
+  // prompt fires even when no progress row exists yet (404): a never-played
+  // audiobook whose linked ebook is ahead is exactly the resume moment.
   useEffect(() => {
+    promptFiredRef.current = false;
+    const fetchPrompt = (currentTs: number) => {
+      if (promptFiredRef.current) return;
+      promptFiredRef.current = true;
+      getCrossFormatPrompt(libraryItemId, currentTs)
+        .then((dto) => {
+          if (dto) setResumePrompt(dto);
+        })
+        .catch(() => {});
+    };
     getPlaybackProgress(libraryItemId)
       .then((p) => {
+        let restoredTs = 0;
         if (p?.position) {
           const t = parseFloat(p.position);
           if (!isNaN(t) && t > 0) {
+            restoredTs = t;
             setCurrentTime(t);
             if (audioRef.current) audioRef.current.currentTime = t;
           }
         }
+        fetchPrompt(restoredTs);
       })
-      .catch(() => {});
+      .catch(() => fetchPrompt(0));
   }, [libraryItemId]);
 
   const saveProgress = useCallback(
-    (time: number, dur: number) => {
+    (
+      time: number,
+      dur: number,
+      kind: "progress" | "seek" = "progress",
+    ) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
         const pct = isFinite(dur) && dur > 0 ? time / dur : 0;
-        updatePlaybackProgress(libraryItemId, String(time), pct).catch(
+        updatePlaybackProgress(libraryItemId, String(time), pct, kind, time).catch(
           () => {},
         );
       }, 2000);
@@ -172,7 +203,7 @@ export function AudioPlayer({
     [libraryItemId],
   );
 
-  // Periodic save while playing.
+  // Periodic save while playing (genuine progress; advances furthest_ts).
   useEffect(() => {
     if (!playing) return;
     const interval = setInterval(() => {
@@ -181,7 +212,7 @@ export function AudioPlayer({
         const d = audioRef.current.duration;
         if (isFinite(t) && isFinite(d)) {
           const pct = d > 0 ? t / d : 0;
-          updatePlaybackProgress(libraryItemId, String(t), pct).catch(
+          updatePlaybackProgress(libraryItemId, String(t), pct, "progress", t).catch(
             () => {},
           );
         }
@@ -252,7 +283,7 @@ export function AudioPlayer({
     if (audioRef.current) {
       audioRef.current.currentTime = t;
       setCurrentTime(t);
-      saveProgress(t, duration);
+      saveProgress(t, duration, "seek");
     }
   };
 
@@ -273,8 +304,43 @@ export function AudioPlayer({
     if (audioRef.current) audioRef.current.volume = v;
   };
 
+  // Sleep bookmark helper (REQ-010..REQ-013)
+  const createSleepBookmark = useCallback(() => {
+    const t = audioRef.current?.currentTime ?? currentTime;
+    // Dedupe: skip if an existing bookmark is within 60s of current position.
+    const tooClose = bookmarks.some(
+      (bm) =>
+        bm.name.startsWith("Sleep Timer / ") &&
+        Math.abs(parseFloat(bm.position) - t) <= 60,
+    );
+    if (tooClose) return;
+    // In-flight guard: the query may not reflect a create fired seconds ago.
+    if (
+      lastSleepBookmarkRef.current !== null &&
+      Math.abs(lastSleepBookmarkRef.current.pos - t) <= 60
+    ) {
+      return;
+    }
+    const now = new Date();
+    const name = `Sleep Timer / ${now.toLocaleDateString()} @ ${now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+    createBookmarkMut.mutate(
+      {
+        position: String(t),
+        sortKey: t,
+        name,
+        chapterTitle: currentChapter?.title ?? null,
+      },
+      {
+        onError: (err) => console.warn("Sleep bookmark failed", err),
+      },
+    );
+    lastSleepBookmarkRef.current = { pos: t };
+    toast("Bookmark saved");
+  }, [audioRef, currentTime, bookmarks, currentChapter, createBookmarkMut]);
+
   // Sleep timer
   const startSleepTimer = (minutes: number) => {
+    createSleepBookmark();
     if (sleepTimerRef.current) clearInterval(sleepTimerRef.current);
 
     const deadline = Date.now() + minutes * 60 * 1000;
@@ -605,6 +671,7 @@ export function AudioPlayer({
                 <button
                   onClick={() => {
                     cancelSleepTimer();
+                    createSleepBookmark();
                     setSleepAtChapterEnd(true);
                   }}
                   className={cn(
@@ -704,6 +771,19 @@ export function AudioPlayer({
                   </option>
                 ))}
               </select>
+              <div className="mt-3 border-t border-zinc-700 pt-3">
+                <button
+                  onClick={() => {
+                    syncCrossFormatToHere(libraryItemId, currentTime).catch(
+                      () => {},
+                    );
+                    toast("Position synced");
+                  }}
+                  className="w-full rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                >
+                  Sync to here
+                </button>
+              </div>
               <Popover.Arrow className="fill-zinc-700" />
             </Popover.Content>
           </Popover.Root>
@@ -856,6 +936,32 @@ export function AudioPlayer({
             ))
           )}
         </div>
+      )}
+
+      {/* Cross-format resume banner */}
+      {resumePrompt && (
+        <ResumePromptBanner
+          label={resumePrompt.label}
+          onJump={() => {
+            const t = parseFloat(resumePrompt.position);
+            if (audioRef.current) {
+              audioRef.current.currentTime = t;
+            }
+            setCurrentTime(t);
+            updatePlaybackProgress(
+              libraryItemId,
+              resumePrompt.position,
+              duration > 0 ? t / duration : 0,
+              "seek",
+              t,
+            ).catch(() => {});
+            setResumePrompt(null);
+          }}
+          onStay={() => {
+            declineCrossFormat(libraryItemId).catch(() => {});
+            setResumePrompt(null);
+          }}
+        />
       )}
 
       {/* Hidden audio element */}

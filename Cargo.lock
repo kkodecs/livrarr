@@ -1662,16 +1662,21 @@ dependencies = [
  "livrarr-db",
  "livrarr-domain",
  "livrarr-download",
+ "livrarr-external-data",
+ "livrarr-handlers",
  "livrarr-http",
  "livrarr-library",
  "livrarr-matching",
+ "livrarr-materialize",
  "livrarr-metadata",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "tokio",
  "tokio-util",
+ "tower",
  "trait-variant",
  "urlencoding",
 ]
@@ -1724,6 +1729,7 @@ dependencies = [
  "livrarr-db",
  "livrarr-domain",
  "livrarr-http",
+ "reqwest",
  "serde",
  "serde_json",
  "sha1",
@@ -1732,6 +1738,50 @@ dependencies = [
  "tracing",
  "trait-variant",
  "url",
+]
+
+[[package]]
+name = "livrarr-enrichment"
+version = "0.1.0-alpha5"
+dependencies = [
+ "chrono",
+ "image",
+ "livrarr-db",
+ "livrarr-domain",
+ "livrarr-external-data",
+ "livrarr-http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "trait-variant",
+]
+
+[[package]]
+name = "livrarr-external-data"
+version = "0.1.0-alpha5"
+dependencies = [
+ "chrono",
+ "csv",
+ "futures",
+ "livrarr-domain",
+ "livrarr-http",
+ "lru",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "trait-variant",
+ "unicode-normalization",
+ "url",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]
@@ -1779,6 +1829,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "livrarr-identity"
+version = "0.1.0-alpha5"
+dependencies = [
+ "futures",
+ "livrarr-domain",
+ "livrarr-external-data",
+ "livrarr-http",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "livrarr-jobs"
 version = "0.1.0-alpha5"
 dependencies = [
@@ -1796,6 +1861,7 @@ dependencies = [
  "livrarr-domain",
  "livrarr-tagwrite",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1820,6 +1886,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "livrarr-materialize"
+version = "0.1.0-alpha5"
+dependencies = [
+ "livrarr-domain",
+ "livrarr-http",
+ "livrarr-tagwrite",
+ "tokio",
+ "trait-variant",
+]
+
+[[package]]
 name = "livrarr-metadata"
 version = "0.1.0-alpha5"
 dependencies = [
@@ -1829,8 +1906,12 @@ dependencies = [
  "image",
  "livrarr-db",
  "livrarr-domain",
+ "livrarr-enrichment",
+ "livrarr-external-data",
  "livrarr-http",
+ "livrarr-identity",
  "livrarr-matching",
+ "livrarr-materialize",
  "lru",
  "regex",
  "reqwest",
@@ -1867,10 +1948,12 @@ dependencies = [
  "livrarr-db",
  "livrarr-domain",
  "livrarr-download",
+ "livrarr-external-data",
  "livrarr-handlers",
  "livrarr-http",
  "livrarr-library",
  "livrarr-matching",
+ "livrarr-materialize",
  "livrarr-metadata",
  "livrarr-tagwrite",
  "regex",

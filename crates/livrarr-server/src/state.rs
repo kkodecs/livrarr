@@ -34,9 +34,9 @@ pub type LiveLlmValidator = livrarr_metadata::llm_validator::LiveLlmValidator;
 pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
     SqliteDb,
     LiveProviderQueue,
-    livrarr_metadata::DefaultMergeEngine<livrarr_metadata::llm_caller_service::LlmCallerImpl>,
+    livrarr_metadata::DefaultMergeEngine,
     LiveLlmValidator,
-    livrarr_metadata::llm_caller_service::LlmCallerImpl,
+    livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
 
 // =============================================================================
@@ -52,29 +52,25 @@ pub type LiveEnrichmentWorkflow =
 pub type LiveAuthorService = livrarr_metadata::author_service::AuthorServiceImpl<
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
-    livrarr_metadata::llm_caller_service::LlmCallerImpl,
+    livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
 pub type LiveSeriesService = livrarr_metadata::series_service::SeriesServiceImpl<SqliteDb>;
 pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::SeriesQueryServiceImpl<
     SqliteDb,
     livrarr_http::fetcher::HttpFetcherImpl,
     LiveWorkService,
-    livrarr_metadata::llm_caller_service::LlmCallerImpl,
+    livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
 pub type LiveTagServiceImpl = crate::tag_service::LiveTagService<LiveImportIoService>;
 pub type LiveIdentityResolver =
-    livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver<
-        livrarr_metadata::ol_resolver_client::LiveOlResolverClient<
-            livrarr_http::fetcher::HttpFetcherImpl,
-        >,
-    >;
+    livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver;
 
 pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     SqliteDb,
     LiveEnrichmentWorkflow,
     livrarr_http::fetcher::HttpFetcherImpl,
-    livrarr_metadata::llm_caller_service::LlmCallerImpl,
-    livrarr_metadata::DefaultMergeEngine<livrarr_metadata::llm_caller_service::LlmCallerImpl>,
+    livrarr_external_data::llm_caller_service::LlmCallerImpl,
+    livrarr_metadata::DefaultMergeEngine,
     LiveTagServiceImpl,
 >;
 pub type LiveGrabService = livrarr_download::grab_service::GrabServiceImpl<SqliteDb>;
@@ -85,6 +81,8 @@ pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceI
 pub type LiveFileService = livrarr_library::file_service::FileServiceImpl<SqliteDb>;
 pub type LiveChapterService = livrarr_library::chapter_service::ChapterServiceImpl<SqliteDb>;
 pub type LiveBookmarkService = livrarr_library::bookmark_service::BookmarkServiceImpl<SqliteDb>;
+pub type LiveCrossFormatService =
+    livrarr_library::cross_format_service::CrossFormatServiceImpl<SqliteDb, LiveFileService>;
 pub type LiveImportWorkflow = livrarr_library::import_workflow::ImportWorkflowImpl<SqliteDb>;
 pub type LiveListService = livrarr_metadata::list_service::ListServiceImpl<
     SqliteDb,
@@ -138,7 +136,7 @@ pub struct AppState {
     /// without a restart. All credential-dependent components
     /// (LiveLlmValidator, HardcoverClient, GoodreadsClient LLM fallback)
     /// hold a clone and read fresh per call.
-    pub live_metadata_config: livrarr_metadata::live_config::LiveMetadataConfig,
+    pub live_metadata_config: livrarr_external_data::live_config::LiveMetadataConfig,
     pub log_buffer: Arc<LogBuffer>,
     pub log_level_handle: Arc<LogLevelHandle>,
     pub refresh_in_progress: Arc<std::sync::Mutex<HashSet<livrarr_db::UserId>>>,
@@ -152,8 +150,6 @@ pub struct AppState {
     /// Readarr import progress — polled by frontend.
     pub readarr_import_progress:
         Arc<tokio::sync::Mutex<crate::readarr_import_service::ReadarrImportProgress>>,
-    /// OL rate limiter for manual import parallel lookups (3 req/sec, burst 10).
-    pub ol_rate_limiter: Arc<OlRateLimiter>,
     /// In-progress manual import scan results — OL matches stream in via polling.
     pub manual_import_scans: Arc<ManualImportScanMap>,
     /// Phase 1.5 plumbing: live `DefaultProviderQueue` constructed at startup
@@ -177,6 +173,7 @@ pub struct AppState {
     pub file_service: Arc<LiveFileService>,
     pub chapter_service: Arc<LiveChapterService>,
     pub bookmark_service: Arc<LiveBookmarkService>,
+    pub cross_format_service: Arc<LiveCrossFormatService>,
     pub import_workflow: Arc<LiveImportWorkflow>,
     pub list_service: Arc<LiveListService>,
     pub identity_conflict_service:
@@ -205,7 +202,6 @@ pub struct AppState {
     pub matching_svc: crate::matching_service::LiveMatchingService,
     pub manual_import_scan_svc: crate::manual_import_scan_service::LiveManualImportScanService,
     pub readarr_import_wf: Arc<crate::readarr_import_workflow::LiveReadarrImportWorkflow>,
-    pub enrichment_notify: Arc<tokio::sync::Notify>,
     pub cover_service: Arc<LiveCoverService>,
     pub preadd_cover_service: Arc<livrarr_metadata::preadd_cover_service::LivePreaddCoverService>,
     pub hmac_key: Vec<u8>,
@@ -228,7 +224,9 @@ impl livrarr_handlers::accessors::ProviderHealthAccessor for ProviderHealthAcces
 
 /// Wrapper for live metadata config — satisfies orphan rule.
 #[derive(Clone)]
-pub struct LiveMetadataConfigAccessorImpl(pub livrarr_metadata::live_config::LiveMetadataConfig);
+pub struct LiveMetadataConfigAccessorImpl(
+    pub livrarr_external_data::live_config::LiveMetadataConfig,
+);
 
 impl livrarr_handlers::accessors::LiveMetadataConfigAccessor for LiveMetadataConfigAccessorImpl {
     fn replace(&self, cfg: livrarr_domain::settings::MetadataConfig) {
@@ -316,8 +314,8 @@ use livrarr_handlers::context::{
     HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
     HasBookmarkService, HasChapterService, HasCoverCache, HasCoverService, HasDataDir,
     HasDownloadClientCredentialService, HasDownloadClientSettingsService, HasEmailService,
-    HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService,
-    HasHmacKey, HasHttpClient, HasIdentityConflictService, HasIdentityResolver, HasImportIoService,
+    HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService, HasHmacKey,
+    HasHttpClient, HasIdentityConflictService, HasIdentityResolver, HasImportIoService,
     HasImportService, HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService,
     HasListService, HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
     HasNotificationService, HasPreaddCoverService, HasProviderHealth, HasQueueService,
@@ -351,6 +349,13 @@ impl HasBookmarkService for AppState {
     type BookmarkSvc = LiveBookmarkService;
     fn bookmark_service(&self) -> &Self::BookmarkSvc {
         &self.bookmark_service
+    }
+}
+
+impl livrarr_handlers::context::HasCrossFormatService for AppState {
+    type CrossFormatSvc = LiveCrossFormatService;
+    fn cross_format_service(&self) -> &Self::CrossFormatSvc {
+        &self.cross_format_service
     }
 }
 
@@ -625,12 +630,6 @@ impl HasCoverCache for AppState {
     type CoverCache = CoverProxyCacheAccessorImpl;
     fn cover_proxy_cache(&self) -> &Self::CoverCache {
         &self.cover_proxy_cache_accessor
-    }
-}
-
-impl HasEnrichmentNotify for AppState {
-    fn enrichment_notify(&self) -> &tokio::sync::Notify {
-        &self.enrichment_notify
     }
 }
 

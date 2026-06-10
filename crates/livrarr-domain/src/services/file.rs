@@ -74,12 +74,17 @@ pub trait FileService: Send + Sync {
         user_id: UserId,
         item_id: i64,
     ) -> Result<Option<PlaybackProgress>, FileServiceError>;
+    /// `kind` + `cross_format_ts` drive the cross-format furthest mark:
+    /// only `ProgressKind::Progress` with a finite ts may advance it
+    /// (REQ-003); the per-item progress write itself is unchanged.
     async fn update_progress(
         &self,
         user_id: UserId,
         item_id: i64,
         position: &str,
         progress_pct: f64,
+        kind: super::cross_format::ProgressKind,
+        cross_format_ts: Option<f64>,
     ) -> Result<(), FileServiceError>;
 
     async fn get_progress_for_items(

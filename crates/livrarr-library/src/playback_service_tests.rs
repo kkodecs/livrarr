@@ -13,7 +13,7 @@ mod tests {
         MediaType, PlaybackProgressDb, RootFolderDb, TagStatus, UserDb, UserRole, WorkDb,
     };
     use livrarr_domain::services::{
-        BookmarkService, ChapterService, FileService, FileServiceError,
+        BookmarkService, ChapterService, FileService, FileServiceError, ProgressKind,
     };
     use livrarr_domain::AudiobookChapter;
 
@@ -160,9 +160,16 @@ mod tests {
             .unwrap();
 
         let svc = FileServiceImpl::new(db.clone());
-        svc.update_progress(s.user_id, s.audiobook_item_id, "3564.0", 0.99)
-            .await
-            .unwrap();
+        svc.update_progress(
+            s.user_id,
+            s.audiobook_item_id,
+            "3564.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(s.user_id, s.audiobook_item_id)
@@ -182,9 +189,16 @@ mod tests {
         // audiobook_item has NULL duration_seconds by default
 
         let svc = FileServiceImpl::new(db.clone());
-        svc.update_progress(s.user_id, s.audiobook_item_id, "3564.0", 0.99)
-            .await
-            .unwrap();
+        svc.update_progress(
+            s.user_id,
+            s.audiobook_item_id,
+            "3564.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(s.user_id, s.audiobook_item_id)
@@ -204,9 +218,16 @@ mod tests {
         // ebook has no duration_seconds — no guard should apply
 
         let svc = FileServiceImpl::new(db.clone());
-        svc.update_progress(s.user_id, s.ebook_item_id, "epubcfi(/6/98)", 0.99)
-            .await
-            .unwrap();
+        svc.update_progress(
+            s.user_id,
+            s.ebook_item_id,
+            "epubcfi(/6/98)",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(s.user_id, s.ebook_item_id)
@@ -229,12 +250,26 @@ mod tests {
             .unwrap();
 
         let svc = FileServiceImpl::new(db.clone());
-        svc.update_progress(s.user_id, s.audiobook_item_id, "3564.0", 0.99)
-            .await
-            .unwrap();
-        svc.update_progress(s.user_id, s.audiobook_item_id, "1800.0", 0.50)
-            .await
-            .unwrap();
+        svc.update_progress(
+            s.user_id,
+            s.audiobook_item_id,
+            "3564.0",
+            0.99,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
+        svc.update_progress(
+            s.user_id,
+            s.audiobook_item_id,
+            "1800.0",
+            0.50,
+            ProgressKind::Seek,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(s.user_id, s.audiobook_item_id)
@@ -254,9 +289,16 @@ mod tests {
         // NULL duration — lifecycle suppressed, but position must still save
 
         let svc = FileServiceImpl::new(db.clone());
-        svc.update_progress(s.user_id, s.audiobook_item_id, "1234.5", 0.35)
-            .await
-            .unwrap();
+        svc.update_progress(
+            s.user_id,
+            s.audiobook_item_id,
+            "1234.5",
+            0.35,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let prog = db
             .get_progress(s.user_id, s.audiobook_item_id)
@@ -391,12 +433,26 @@ mod tests {
         let s = seed(&db).await;
 
         let svc = FileServiceImpl::new(db.clone());
-        svc.update_progress(s.user_id, s.audiobook_item_id, "100.0", 0.30)
-            .await
-            .unwrap();
-        svc.update_progress(s.user_id, s.ebook_item_id, "epubcfi(/6/20)", 0.25)
-            .await
-            .unwrap();
+        svc.update_progress(
+            s.user_id,
+            s.audiobook_item_id,
+            "100.0",
+            0.30,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
+        svc.update_progress(
+            s.user_id,
+            s.ebook_item_id,
+            "epubcfi(/6/20)",
+            0.25,
+            ProgressKind::Progress,
+            None,
+        )
+        .await
+        .unwrap();
 
         let results = svc
             .get_progress_for_items(s.user_id, &[s.audiobook_item_id, s.ebook_item_id])

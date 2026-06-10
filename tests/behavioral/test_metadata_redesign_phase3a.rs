@@ -124,6 +124,7 @@ impl EnrichmentWorkflow for RecordingEnrichment {
         user_id: UserId,
         work_id: WorkId,
         mode: EnrichmentMode,
+        _candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         assert_eq!(mode, EnrichmentMode::Background);
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -172,6 +173,10 @@ impl EnrichmentWorkflow for RecordingEnrichment {
             },
             merge_deferred: false,
             provider_outcomes: HashMap::<MetadataProvider, OutcomeClass>::new(),
+            cover_resolution: None,
+            audiobook_cover_resolution: None,
+            identity_not_found: false,
+            changed: true,
         })
     }
 

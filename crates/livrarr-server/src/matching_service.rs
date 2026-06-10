@@ -21,6 +21,9 @@ impl MatchingService for LiveMatchingService {
                 series: c.primary.series,
                 series_position: c.primary.series_position,
                 language: c.primary.language,
+                isbn: c.primary.isbn,
+                asin: c.primary.asin,
+                year: c.primary.year,
             })
             .collect()
     }

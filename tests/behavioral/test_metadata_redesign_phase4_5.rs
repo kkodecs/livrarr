@@ -16,12 +16,10 @@ use livrarr_domain::{
     EnrichmentStatus, FieldProvenance, MetadataProvider, OutcomeClass, ProvenanceSetter,
     SourceProviderData, UserId, Work, WorkField, WorkId,
 };
-use livrarr_metadata::language::{provider_priority, ProviderPriority};
+use livrarr_external_data::language::{provider_priority, ProviderPriority};
 use livrarr_metadata::llm_scraper::build_llm_scraper_configs;
-use livrarr_metadata::{
-    DefaultMergeEngine, EnrichmentMode, MergeEngine, MergeInput, MergeOutput, NormalizedWorkDetail,
-    PriorityModel, ReconstructedOutcome,
-};
+use livrarr_external_data::{NormalizedWorkDetail};
+use livrarr_metadata::{DefaultMergeEngine, EnrichmentMode, MergeEngine, MergeInput, MergeOutput, PriorityModel, ReconstructedOutcome};
 
 const USER_ID: UserId = 101;
 const WORK_ID: WorkId = 202;
@@ -62,6 +60,7 @@ impl LlmCaller for JsonLlmCaller {
 
 fn work() -> Work {
     Work {
+        identity_status: Default::default(),
         id: WORK_ID,
         user_id: USER_ID,
         title: "Current Title".to_string(),
@@ -72,6 +71,7 @@ fn work() -> Work {
 
 fn current_work_with_description(description: &str) -> Work {
     Work {
+        identity_status: Default::default(),
         description: Some(description.to_string()),
         ..work()
     }

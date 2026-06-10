@@ -5,10 +5,14 @@ members = [
     "crates/livrarr-http",
     "crates/livrarr-db",
     "crates/livrarr-matching",
+    "crates/livrarr-external-data",
+    "crates/livrarr-identity",
+    "crates/livrarr-enrichment",
     "crates/livrarr-metadata",
     "crates/livrarr-download",
     "crates/livrarr-library",
     "crates/livrarr-tagwrite",
+    "crates/livrarr-materialize",
     "crates/livrarr-jobs",
     "crates/livrarr-handlers",
     "crates/livrarr-server",
@@ -30,10 +34,14 @@ tokio-util = "0.7"
 livrarr-domain = { path = "crates/livrarr-domain" }
 livrarr-http = { path = "crates/livrarr-http" }
 livrarr-db = { path = "crates/livrarr-db" }
+livrarr-external-data = { path = "crates/livrarr-external-data" }
+livrarr-identity = { path = "crates/livrarr-identity" }
+livrarr-enrichment = { path = "crates/livrarr-enrichment" }
 livrarr-metadata = { path = "crates/livrarr-metadata" }
 livrarr-download = { path = "crates/livrarr-download" }
 livrarr-library = { path = "crates/livrarr-library" }
 livrarr-tagwrite = { path = "crates/livrarr-tagwrite" }
+livrarr-materialize = { path = "crates/livrarr-materialize" }
 livrarr-jobs = { path = "crates/livrarr-jobs" }
 livrarr-matching = { path = "crates/livrarr-matching" }
 livrarr-handlers = { path = "crates/livrarr-handlers" }

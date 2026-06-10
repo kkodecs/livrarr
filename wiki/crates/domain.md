@@ -149,10 +149,10 @@ Manages Work CRUD, metadata lookup, cover images, and bulk refresh.
 - `update(user_id, id, req)` — updates user-editable Work fields
 - `delete(user_id, id)` — deletes a Work and its library items
 - `refresh(user_id, id)` — re-enriches a single Work from metadata providers
+- `retry_all_incomplete(user_id)` — bulk-recovers incomplete works (Failed/Unenriched/identity-Pending) in a single pass through the one road; replaces the deleted background retry job
 - `refresh_all(user_id)` — kicks off a background bulk re-enrichment pass
 - `upload_cover(user_id, id, bytes)` — replaces the cover with a user-uploaded image
 - `download_cover(user_id, id)` — returns cover image bytes
-- `download_cover_from_url(user_id, id, url)` — fetches and stores a cover from a URL
 - `lookup(user_id, req)` — searches metadata providers for works by title/author
 - `lookup_filtered(user_id, req)` — same but applies library-dedup and language filters
 - `search_works(user_id, term)` — full-text search across library works

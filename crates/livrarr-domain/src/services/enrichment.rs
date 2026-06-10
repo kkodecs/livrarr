@@ -14,6 +14,14 @@ pub enum EnrichmentMode {
     HardRefresh,
 }
 
+impl EnrichmentMode {
+    /// A HardRefresh bypasses the 24h (work,provider) cache and re-fetches
+    /// (REQ-009); Manual and Background consult the cache.
+    pub fn bypasses_cache(&self) -> bool {
+        matches!(self, EnrichmentMode::HardRefresh)
+    }
+}
+
 #[derive(Debug)]
 pub struct EnrichmentResult {
     pub enrichment_status: EnrichmentStatus,
@@ -23,6 +31,15 @@ pub struct EnrichmentResult {
     pub provider_outcomes: HashMap<MetadataProvider, OutcomeClass>,
     pub cover_resolution: Option<CoverResolution>,
     pub audiobook_cover_resolution: Option<CoverResolution>,
+    /// Seam-2 signal (REQ-002): enrichment found NO provider payload matching the
+    /// locked identity (the LLM rejected them all). Enrichment never writes
+    /// identity state — it raises this flag and the caller writes
+    /// [`crate::IdentityStatus::NotFound`]. `false` on every normal outcome.
+    pub identity_not_found: bool,
+    /// True when the merge actually changed any work field, external ID, or cover
+    /// resolution. Drives the materialize gate in `run_unified_enrichment` (REQ-012):
+    /// cover download + retag runs only when `changed = true`.
+    pub changed: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +70,7 @@ pub trait EnrichmentWorkflow: Send + Sync {
         user_id: crate::UserId,
         work_id: WorkId,
         mode: EnrichmentMode,
+        candidate_id: Option<crate::identity::CandidateId>,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError>;
     async fn reset_for_manual_refresh(
         &self,

@@ -7,6 +7,12 @@ pub struct MatchCluster {
     pub series: Option<String>,
     pub series_position: Option<f64>,
     pub language: Option<String>,
+    /// Identifiers harvested from the file's embedded metadata (EPUB OPF
+    /// dc:identifier ISBN, Audible ASIN) — used to seed identity at manual
+    /// import (#97) without an extra provider round-trip.
+    pub isbn: Option<String>,
+    pub asin: Option<String>,
+    pub year: Option<i32>,
 }
 
 #[derive(Debug)]

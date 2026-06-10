@@ -232,6 +232,27 @@ impl From<livrarr_domain::services::ListServiceError> for ApiError {
     }
 }
 
+impl From<livrarr_domain::services::CrossFormatError> for ApiError {
+    fn from(e: livrarr_domain::services::CrossFormatError) -> Self {
+        use livrarr_domain::services::CrossFormatError;
+        match e {
+            // All three map to NotFound: the reader treats 404 as "no
+            // cross-format for this item" (REQ-007/REQ-008 silent fallback);
+            // stale/unreadable details go to the log.
+            CrossFormatError::NotLinked => ApiError::NotFound,
+            CrossFormatError::LinkStale => {
+                tracing::warn!("cross-format link stale — treating as absent");
+                ApiError::NotFound
+            }
+            CrossFormatError::KashUnreadable => {
+                tracing::warn!("kash sidecar unreadable — treating link as absent");
+                ApiError::NotFound
+            }
+            CrossFormatError::Db(msg) => ApiError::Internal(msg),
+        }
+    }
+}
+
 impl From<livrarr_domain::services::FileServiceError> for ApiError {
     fn from(e: livrarr_domain::services::FileServiceError) -> Self {
         use livrarr_domain::services::FileServiceError;

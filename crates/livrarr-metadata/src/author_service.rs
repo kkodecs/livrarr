@@ -527,9 +527,10 @@ where
             urlencoding::encode(&query),
         );
 
-        let volumes = crate::google_books::fetch_gb_volumes(&self.fetcher, &api_key, url)
-            .await
-            .map_err(AuthorServiceError::Provider)?;
+        let volumes =
+            livrarr_external_data::google_books::fetch_gb_volumes(&self.fetcher, &api_key, url)
+                .await
+                .map_err(AuthorServiceError::Provider)?;
 
         let entries: Vec<livrarr_db::BibliographyEntry> = volumes
             .iter()

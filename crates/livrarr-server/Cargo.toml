@@ -20,10 +20,12 @@ livrarr-handlers = { workspace = true }
 livrarr-matching = { workspace = true }
 livrarr-db = { workspace = true }
 livrarr-http = { workspace = true }
+livrarr-external-data = { workspace = true }
 livrarr-metadata = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
 livrarr-tagwrite = { workspace = true }
+livrarr-materialize = { workspace = true }
 futures = "0.3"
 libc = "0.2"
 toml = "1.1"

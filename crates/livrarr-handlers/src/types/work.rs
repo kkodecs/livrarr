@@ -1,5 +1,6 @@
 use livrarr_domain::{
-    AuthorId, CoverTrust, EnrichmentStatus, LibraryItemId, MediaType, NarrationType, Work, WorkId,
+    identity::CandidateId, AuthorId, CoverTrust, EnrichmentStatus, IdentityStatus, LibraryItemId,
+    MediaType, NarrationType, Work, WorkId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +39,20 @@ pub struct WorkSearchResult {
     pub detail_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rating: Option<String>,
+    /// Reuse handle for the per-provider payloads cached during discovery, echoed
+    /// back on add so enrichment reuses them network-free (REQ-014/015).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<CandidateId>,
+    /// Federated work/edition anchors carried from discovery so the add path can
+    /// trust the user's pick (build identity directly, no re-resolve).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isbn_13: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hc_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gr_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asin: Option<String>,
 }
 
 #[trait_variant::make(Send)]
@@ -104,6 +119,18 @@ pub struct AddWorkRequest {
     pub cover_manual: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isbn_13: Option<String>,
+    /// Echoed from the selected search result so add() reuses the discovery
+    /// payloads instead of re-querying (REQ-014/015).
+    #[serde(default)]
+    pub candidate_id: Option<CandidateId>,
+    /// Federated work anchors echoed from the pick so the handler builds identity
+    /// directly (trust the pick — no re-resolve).
+    #[serde(default)]
+    pub hc_key: Option<String>,
+    #[serde(default)]
+    pub gr_key: Option<String>,
+    #[serde(default)]
+    pub asin: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -170,6 +197,7 @@ pub struct WorkDetailResponse {
     pub rating: Option<f64>,
     pub rating_count: Option<i32>,
     pub enrichment_status: EnrichmentStatus,
+    pub identity_status: IdentityStatus,
     pub enriched_at: Option<String>,
     pub enrichment_source: Option<String>,
     pub cover_manual: bool,
@@ -233,6 +261,7 @@ pub fn work_to_detail_with_cover_mtime(
         rating: w.rating,
         rating_count: w.rating_count,
         enrichment_status: w.enrichment_status,
+        identity_status: w.identity_status,
         enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
         enrichment_source: w.enrichment_source.clone(),
         cover_manual: w.cover_manual,

@@ -168,7 +168,8 @@ impl LiveImportService {
             .to_string();
 
         use livrarr_domain::services::ImportIoService;
-        self.import_io
+        let item = self
+            .import_io
             .create_library_item(livrarr_domain::services::CreateLibraryItemRequest {
                 user_id,
                 work_id,
@@ -183,6 +184,13 @@ impl LiveImportService {
                 // Do NOT delete the file — leave on disk for retry recovery.
                 ImportFileError::Failed(format!("DB error: {e}"))
             })?;
+
+        // Extract audiobook chapters (M4B) so manual-imported items populate
+        // `audiobook_chapters` like the grab import path does. Non-fatal:
+        // extraction failures are logged inside the workflow, never fail import.
+        self.import_workflow
+            .extract_chapters_for_item(item.id, &target, media_type, user_id, work_id)
+            .await;
 
         // CWA integration (ebooks only, non-fatal).
         if media_type == MediaType::Ebook {

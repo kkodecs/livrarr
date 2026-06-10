@@ -1,5 +1,7 @@
 use livrarr_http::HttpClient;
 
+use livrarr_external_data::provider_util::upscale_cover_url;
+
 /// Validate that an ISBN string contains only digits and an optional trailing X.
 /// Rejects any input that could be used for URL injection.
 fn is_valid_isbn(isbn: &str) -> bool {
@@ -160,19 +162,6 @@ fn classify_cover_url(url: &str) -> &'static str {
     }
 }
 
-use std::sync::LazyLock;
-
-static RE_GR_SIZE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"\._S[A-Z0-9_,]+_\.").unwrap());
-
-pub fn upscale_cover_url(url: &str) -> String {
-    if url.contains("gr-assets.com") || url.contains("goodreads.com") {
-        RE_GR_SIZE.replace(url, ".").into_owned()
-    } else {
-        url.to_string()
-    }
-}
-
 /// Try to get a cover on disk within 3 seconds. Returns the cover file mtime on success.
 ///
 /// Branch A: download existing URL immediately (any host, with GR upscaling).
@@ -194,7 +183,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
     let unproxied = request_cover_url.map(crate::work_service::unproxy_cover_url);
     let valid_url = unproxied
         .as_deref()
-        .filter(|u| crate::llm_scraper::validate_cover_url(u, "").is_some());
+        .filter(|u| livrarr_external_data::provider_util::validate_cover_url(u, "").is_some());
 
     // Branch A: download existing URL directly (any provider)
     if let Some(url) = valid_url {
@@ -206,7 +195,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
         if remaining > Duration::from_millis(200) {
             let result = tokio::time::timeout(
                 remaining,
-                crate::work_service::download_cover_to_disk(
+                livrarr_materialize::download_cover_to_disk(
                     http_fetcher,
                     &preferred,
                     covers_dir,
@@ -216,7 +205,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
             )
             .await;
 
-            if matches!(result, Ok(Ok(()))) {
+            if matches!(result, Ok(Ok(_))) {
                 tracing::info!(
                     work_id,
                     source,
@@ -232,7 +221,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
             if remaining > Duration::from_millis(200) {
                 let result = tokio::time::timeout(
                     remaining,
-                    crate::work_service::download_cover_to_disk(
+                    livrarr_materialize::download_cover_to_disk(
                         http_fetcher,
                         url,
                         covers_dir,
@@ -242,7 +231,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                 )
                 .await;
 
-                if matches!(result, Ok(Ok(()))) {
+                if matches!(result, Ok(Ok(_))) {
                     tracing::info!(
                         work_id,
                         source = "request_url_fallback",
@@ -279,7 +268,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                         && matches!(
                             tokio::time::timeout(
                                 remaining,
-                                crate::work_service::download_cover_to_disk(
+                                livrarr_materialize::download_cover_to_disk(
                                     http_fetcher,
                                     &hc_url,
                                     covers_dir,
@@ -288,7 +277,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                                 ),
                             )
                             .await,
-                            Ok(Ok(()))
+                            Ok(Ok(_))
                         )
                     {
                         tracing::info!(
@@ -325,7 +314,7 @@ async fn fast_hc_cover_search(
     author: &str,
     token: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    use crate::hardcover::HARDCOVER_API_URL;
+    use livrarr_external_data::hardcover::HARDCOVER_API_URL;
 
     let query = r#"query SearchBooks($query: String!) {
         search(query: $query, query_type: "books", per_page: 10) { results }

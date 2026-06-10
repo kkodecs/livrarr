@@ -15,6 +15,10 @@ serde_json = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-matching = { workspace = true }
 livrarr-db = { workspace = true }
+livrarr-external-data = { workspace = true }
+livrarr-identity = { workspace = true }
+livrarr-enrichment = { workspace = true }
+livrarr-materialize = { workspace = true }
 livrarr-http = { workspace = true }
 unicode-normalization = "0.1"
 tracing = "0.1"

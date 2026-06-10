@@ -2,7 +2,7 @@ use axum::extract::{Multipart, Path, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::context::{HasEnrichmentNotify, HasListService};
+use crate::context::HasListService;
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use livrarr_domain::services::{
@@ -47,7 +47,7 @@ pub async fn preview<S: HasListService>(
     Ok(Json(result))
 }
 
-pub async fn confirm<S: HasListService + HasEnrichmentNotify>(
+pub async fn confirm<S: HasListService>(
     State(state): State<S>,
     ctx: AuthContext,
     Json(req): Json<ConfirmRequest>,
@@ -61,7 +61,6 @@ pub async fn confirm<S: HasListService + HasEnrichmentNotify>(
             &req.row_indices,
         )
         .await?;
-    state.enrichment_notify().notify_one();
     Ok(Json(result))
 }
 

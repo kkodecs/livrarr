@@ -12,10 +12,10 @@ use livrarr_domain::{
     CoverCandidate, CoverCandidateSource, CoverMediaType, CoverTrust, InternalCoverCandidate,
     MetadataProvider, UserId, Work, WorkId,
 };
+use livrarr_external_data::provider_client::ProviderClient;
 use livrarr_http::fetcher::HttpFetcherImpl;
 use livrarr_http::HttpClient;
 use livrarr_metadata::cover_resolution::measure_dimensions;
-use livrarr_metadata::provider_client::ProviderClient;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -217,7 +217,7 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
         };
 
         // Download the cover
-        livrarr_metadata::work_service::download_cover_to_disk(
+        livrarr_materialize::download_cover_to_disk(
             &self.http_fetcher,
             &url,
             &covers_dir,
@@ -414,18 +414,12 @@ impl LiveCoverService {
             CoverServiceError::Internal(format!("no client for provider {provider:?}"))
         })?;
 
-        let ctx = livrarr_metadata::EnrichmentContext {
-            priority: livrarr_domain::RequestPriority::Normal,
-            mode: livrarr_metadata::EnrichmentMode::Manual,
-        };
-
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(10), client.fetch(work, &ctx))
-                .await
-                .map_err(|_| CoverServiceError::Internal("provider timeout".into()))?;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), client.fetch(work))
+            .await
+            .map_err(|_| CoverServiceError::Internal("provider timeout".into()))?;
 
         match outcome {
-            livrarr_metadata::ProviderOutcome::Success(detail) => Ok(detail.cover_url.clone()),
+            livrarr_external_data::ProviderOutcome::Success(detail) => Ok(detail.cover_url.clone()),
             _ => Ok(None),
         }
     }

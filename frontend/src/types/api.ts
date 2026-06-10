@@ -16,10 +16,15 @@ export type GrabStatus =
 export type EnrichmentStatus =
   | "unenriched"
   | "enriched"
-  | "failed"
+  | "thin"
+  | "failed";
+export type IdentityStatus =
+  | "pending"
+  | "confirmed"
+  | "provisional"
   | "conflict"
-  | "identity_pending"
-  | "needs_review";
+  | "needs_review"
+  | "not_found";
 export type QueueStatus =
   | "downloading"
   | "queued"
@@ -146,6 +151,14 @@ export interface WorkSearchResult {
   detailUrl?: string | null;
   rating?: string | null;
   isbn13?: string | null;
+  /** Opaque handle to the per-provider payloads cached during this search; echo
+   * it back in the add request so the server reuses them network-free. */
+  candidateId?: string | null;
+  /** Federated work anchors carried from discovery so the add path trusts the
+   * pick (no re-resolve). */
+  hcKey?: string | null;
+  grKey?: string | null;
+  asin?: string | null;
 }
 
 export interface PreaddCoverCandidate {
@@ -167,6 +180,12 @@ export interface AddWorkRequest {
   detailUrl?: string | null;
   coverManual?: boolean;
   isbn13?: string | null;
+  /** Echoed from the selected search result so the server reuses the cached
+   * provider payloads instead of re-querying. */
+  candidateId?: string | null;
+  hcKey?: string | null;
+  grKey?: string | null;
+  asin?: string | null;
 }
 
 export interface AddWorkResponse {
@@ -219,6 +238,7 @@ export interface WorkDetailResponse {
   rating: number | null;
   ratingCount: number | null;
   enrichmentStatus: EnrichmentStatus;
+  identityStatus: IdentityStatus;
   enrichedAt: string | null;
   enrichmentSource: string | null;
   coverManual: boolean;
@@ -869,6 +889,8 @@ export interface ScanProgressResponse {
 export interface ScannedFile {
   path: string;
   filename: string;
+  /** Path relative to the scan root (e.g. `Author/Book/file.epub`), for folder context. */
+  relPath: string;
   mediaType: MediaType;
   size: number;
   parsed: ParsedFile | null;
@@ -894,6 +916,16 @@ export interface OlMatch {
   author: string;
   coverUrl: string | null;
   existingWorkId: number | null;
+  // #97: federated anchors + reuse handle carried from discovery, so import can
+  // land the work Confirmed (and reuse the cached payload) instead of ISBN-only.
+  candidateId?: string | null;
+  hcKey?: string | null;
+  grKey?: string | null;
+  asin?: string | null;
+  isbn13?: string | null;
+  year?: number | null;
+  source?: string | null;
+  language?: string | null;
 }
 
 export interface ManualImportItem {
@@ -903,6 +935,15 @@ export interface ManualImportItem {
   author: string;
   deleteExisting: boolean;
   language?: string;
+  // #97: forward the picked match's anchors + cover so the work is created
+  // Confirmed (it enriches directly, skipping the flaky ISBN convergence).
+  candidateId?: string | null;
+  hcKey?: string | null;
+  grKey?: string | null;
+  asin?: string | null;
+  coverUrl?: string | null;
+  isbn?: string | null;
+  year?: number | null;
 }
 
 export interface ManualImportResponse {
@@ -1035,4 +1076,16 @@ export interface ListImportSummary {
 
 export interface ListImportUndoResponse {
   worksRemoved: number;
+}
+
+// Cross-format resume
+export interface ResumePromptDTO {
+  format: "ebook" | "audiobook";
+  position: string;
+  label: string;
+}
+
+export interface AnchorDTO {
+  cfi: string;
+  ts: number;
 }

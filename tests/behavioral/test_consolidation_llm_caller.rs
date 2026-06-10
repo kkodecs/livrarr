@@ -12,9 +12,9 @@ use std::time::Duration;
 use axum::{routing::post, Router};
 use livrarr_domain::services::*;
 use livrarr_domain::settings::MetadataConfig;
+use livrarr_external_data::live_config::LiveMetadataConfig;
+use livrarr_external_data::llm_caller_service::LlmCallerImpl;
 use livrarr_http::HttpClient;
-use livrarr_metadata::live_config::LiveMetadataConfig;
-use livrarr_metadata::llm_caller_service::LlmCallerImpl;
 
 /// Helper: build a LiveMetadataConfig for tests with given endpoint/key/model.
 fn test_live_config(endpoint: &str, api_key: &str, model: &str) -> LiveMetadataConfig {

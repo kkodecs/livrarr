@@ -1179,6 +1179,44 @@ impl ImportRunner {
             let monitor_ebook = has_ebook_file || rd_book.monitored.unwrap_or(false);
             let monitor_audiobook = has_audiobook_file;
 
+            // Seed the source identifiers (REQ-006): the Goodreads work id maps
+            // to gr_key, plus the edition ISBN/ASIN, each normalized through the
+            // domain authority so add() persists them as anchors at create. The
+            // background resolver converges any missing anchors afterward.
+            let seed_anchors = {
+                use livrarr_domain::identity::CapturedIdentity;
+                use livrarr_domain::normalization::{
+                    normalize_asin, normalize_gr_key, normalize_isbn13, AsinNorm,
+                };
+                let gr_key = rd_book
+                    .foreign_book_id
+                    .as_deref()
+                    .and_then(normalize_gr_key);
+                let mut isbn_13 = isbn.as_deref().and_then(normalize_isbn13);
+                let mut asin_anchor = None;
+                if let Some(raw_asin) = asin.as_deref() {
+                    match normalize_asin(raw_asin) {
+                        AsinNorm::Isbn13(folded) => isbn_13 = isbn_13.or(Some(folded)),
+                        AsinNorm::Asin(canonical) => asin_anchor = Some(canonical),
+                        AsinNorm::Invalid => {}
+                    }
+                }
+                if gr_key.is_some() || isbn_13.is_some() || asin_anchor.is_some() {
+                    Some(CapturedIdentity {
+                        ol_key: None,
+                        gr_key,
+                        hc_key: None,
+                        isbn_13,
+                        asin: asin_anchor,
+                        title: title.to_string(),
+                        author_name: author_name.to_string(),
+                        language: language.clone(),
+                    })
+                } else {
+                    None
+                }
+            };
+
             let source_data = SourceProviderData {
                 description,
                 isbn,
@@ -1211,6 +1249,7 @@ impl ImportRunner {
                 },
                 identity: IdentityState::Pending {
                     reason: PendingReason::NoCandidates,
+                    seed_anchors,
                     top_candidates: vec![],
                 },
                 candidate_id: None,

@@ -321,6 +321,10 @@ export default function SearchPage() {
       detailUrl: work.detailUrl,
       coverManual,
       isbn13: work.isbn13,
+      candidateId: work.candidateId,
+      hcKey: work.hcKey,
+      grKey: work.grKey,
+      asin: work.asin,
     })
       .then((data: AddWorkResponse) => {
         setPickerWork(null);
@@ -416,7 +420,7 @@ function CoverPicker({
             <img
               src={cover.url}
               alt=""
-              className="h-28 w-20 object-cover bg-zinc-700"
+              className="h-60 w-40 object-cover bg-zinc-700"
             />
             {selectedUrl === cover.url && (
               <div className="absolute inset-0 flex items-center justify-center bg-brand/20">
@@ -430,7 +434,7 @@ function CoverPicker({
         ))}
 
         {isLoading && (
-          <div className="flex items-center justify-center h-28 w-20 rounded border border-dashed border-zinc-600">
+          <div className="flex items-center justify-center h-60 w-40 rounded border border-dashed border-zinc-600">
             <Loader2 size={16} className="animate-spin text-muted" />
           </div>
         )}
@@ -441,7 +445,7 @@ function CoverPicker({
             setIsManual(false);
           }}
           className={cn(
-            "flex items-center justify-center h-28 w-20 rounded border-2 text-xs text-muted transition-colors",
+            "flex items-center justify-center h-60 w-40 rounded border-2 text-xs text-muted transition-colors",
             selectedUrl === null
               ? "border-brand bg-brand/10 text-brand"
               : "border-dashed border-zinc-600 hover:border-zinc-500",

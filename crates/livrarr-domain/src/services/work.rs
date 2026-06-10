@@ -144,6 +144,17 @@ pub struct RefreshWorkResult {
     pub merge_deferred: bool,
 }
 
+/// Outcome of a single user-triggered "retry all incomplete" sweep.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct RetrySummary {
+    /// Incomplete works found and swept (Failed, Unenriched, or identity-Pending).
+    pub total: usize,
+    /// Works that reached a settled+enriched state after the pass.
+    pub recovered: usize,
+    /// Works still incomplete after the pass (left for a later retry).
+    pub still_incomplete: usize,
+}
+
 // Dead: bulk refresh is implemented at the handler layer
 // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g
 // (handler-level spawning for long-running background work). This type
@@ -205,6 +216,21 @@ pub struct LookupResponse {
     pub raw_available: bool,
 }
 
+/// One parsed manual-import file's best-guess query for the eager auto-match
+/// pass (#97). `id` ties the match back to the originating file (results are
+/// returned as `(id, LookupResult)` pairs); the eager matcher groups these by
+/// `author` so one author-scoped provider query serves all of that author's
+/// files, then matches each `title` — or the embedded `isbn`, which pins the
+/// exact edition — against the author's returned corpus.
+#[derive(Debug, Clone)]
+pub struct EagerQuery {
+    pub id: usize,
+    pub title: String,
+    pub author: String,
+    pub language: Option<String>,
+    pub isbn: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorkServiceError {
     #[error("work not found")]
@@ -232,6 +258,19 @@ pub trait WorkService: Send + Sync {
         user_id: UserId,
         candidate: crate::identity::WorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError>;
+    /// Resolve a raw identity harvest into a [`crate::identity::ResolvedIdentity`]
+    /// through the shared multi-provider resolver — the single place identity is
+    /// decided, so every creation path agrees on what a book is (P1). `tier`
+    /// selects interactive (synchronous; a person is waiting) vs background (bulk).
+    /// With no resolver configured or no usable anchor in the harvest, returns a
+    /// `Pending` identity (anchors preserved) and no conflict — never a fabricated
+    /// `Confirmed`.
+    async fn resolve_identity(
+        &self,
+        user_id: UserId,
+        harvest: crate::identity::RawHarvest,
+        tier: crate::identity::LatencyTier,
+    ) -> Result<crate::identity::ResolvedIdentity, WorkServiceError>;
     async fn get(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError>;
     async fn get_detail(
         &self,
@@ -266,6 +305,14 @@ pub trait WorkService: Send + Sync {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<RefreshWorkResult, WorkServiceError>;
+    /// User-triggered bulk recovery (REQ-011 / PO §7): sweep every "incomplete"
+    /// work for the user — Failed, Unenriched, or identity-Pending — and re-run
+    /// each through the one road in a **single pass, no recurring loop**. A
+    /// Pending work re-resolves identity first (the convergence the deleted
+    /// background job used to do); the rest re-enrich via [`Self::refresh`].
+    /// Replaces the removed `enrichment_retry_tick`.
+    async fn retry_all_incomplete(&self, user_id: UserId)
+        -> Result<RetrySummary, WorkServiceError>;
     // Dead: bulk refresh is implemented at the handler layer
     // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g.
     // Restore here only if the spawn pattern is ever moved into services.
@@ -284,9 +331,27 @@ pub trait WorkService: Send + Sync {
     async fn lookup(&self, req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError>;
     async fn lookup_filtered(
         &self,
+        user_id: UserId,
         req: LookupRequest,
         raw: bool,
     ) -> Result<LookupResponse, WorkServiceError>;
+    /// Eager, bulk best-guess discovery for manual import (#97). Groups
+    /// `queries` by author and issues one author-scoped query per provider
+    /// (Google Books `inauthor:`, OpenLibrary `author:`) instead of one search
+    /// per title — imports cluster heavily by author, so this collapses N
+    /// title searches into ~one call per author per provider. Each query's
+    /// title is then matched locally against the author's returned corpus.
+    ///
+    /// Suggestion-only: no resolver call, so the returned `LookupResult` carries
+    /// `candidate_id: None`. Identity is locked later at create time by
+    /// `add`'s resolve-at-pick. Queries with no confident corpus match are
+    /// omitted from the result; each present entry pairs the query `id` with
+    /// its best match.
+    async fn eager_match_by_author(
+        &self,
+        user_id: UserId,
+        queries: Vec<EagerQuery>,
+    ) -> Result<Vec<(usize, LookupResult)>, WorkServiceError>;
     async fn search_works(
         &self,
         user_id: UserId,
@@ -294,12 +359,6 @@ pub trait WorkService: Send + Sync {
         page: u32,
         page_size: u32,
     ) -> Result<(Vec<Work>, i64), WorkServiceError>;
-    async fn download_cover_from_url(
-        &self,
-        user_id: i64,
-        work_id: i64,
-        cover_url: &str,
-    ) -> Result<(), WorkServiceError>;
     fn try_start_bulk_refresh(&self, user_id: i64) -> bool;
     fn finish_bulk_refresh(&self, user_id: i64);
 }

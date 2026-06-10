@@ -170,17 +170,50 @@ impl LlmCaller for StubLlmCaller {
 // StubEnrichmentWorkflow — returns canned enrichment result
 // =============================================================================
 
+#[derive(Clone)]
 pub struct StubEnrichmentWorkflow {
     should_fail: bool,
+    call_count: Arc<AtomicUsize>,
+    work_ids: Arc<Mutex<Vec<WorkId>>>,
+    reset_call_count: Arc<AtomicUsize>,
+    reset_work_ids: Arc<Mutex<Vec<WorkId>>>,
 }
 
 impl StubEnrichmentWorkflow {
     pub fn succeeding() -> Self {
-        Self { should_fail: false }
+        Self {
+            should_fail: false,
+            call_count: Arc::new(AtomicUsize::new(0)),
+            work_ids: Arc::new(Mutex::new(Vec::new())),
+            reset_call_count: Arc::new(AtomicUsize::new(0)),
+            reset_work_ids: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     pub fn failing() -> Self {
-        Self { should_fail: true }
+        Self {
+            should_fail: true,
+            call_count: Arc::new(AtomicUsize::new(0)),
+            work_ids: Arc::new(Mutex::new(Vec::new())),
+            reset_call_count: Arc::new(AtomicUsize::new(0)),
+            reset_work_ids: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+
+    pub fn work_ids(&self) -> Vec<WorkId> {
+        self.work_ids.lock().unwrap().clone()
+    }
+
+    pub fn reset_call_count(&self) -> usize {
+        self.reset_call_count.load(Ordering::SeqCst)
+    }
+
+    pub fn reset_work_ids(&self) -> Vec<WorkId> {
+        self.reset_work_ids.lock().unwrap().clone()
     }
 }
 
@@ -188,9 +221,13 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
     async fn enrich_work(
         &self,
         _user_id: UserId,
-        _work_id: WorkId,
+        work_id: WorkId,
         _mode: EnrichmentMode,
+        _candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.work_ids.lock().unwrap().push(work_id);
+
         if self.should_fail {
             return Err(EnrichmentWorkflowError::Queue("stub failure".into()));
         }
@@ -203,14 +240,18 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
             provider_outcomes: HashMap::new(),
             cover_resolution: None,
             audiobook_cover_resolution: None,
+            identity_not_found: false,
+            changed: true,
         })
     }
 
     async fn reset_for_manual_refresh(
         &self,
         _user_id: UserId,
-        _work_id: WorkId,
+        work_id: WorkId,
     ) -> Result<(), EnrichmentWorkflowError> {
+        self.reset_call_count.fetch_add(1, Ordering::SeqCst);
+        self.reset_work_ids.lock().unwrap().push(work_id);
         Ok(())
     }
 

@@ -41,6 +41,11 @@ pub trait HasBookmarkService: Clone + Send + Sync + 'static {
     fn bookmark_service(&self) -> &Self::BookmarkSvc;
 }
 
+pub trait HasCrossFormatService: Clone + Send + Sync + 'static {
+    type CrossFormatSvc: livrarr_domain::services::CrossFormatService + Send + Sync + 'static;
+    fn cross_format_service(&self) -> &Self::CrossFormatSvc;
+}
+
 pub trait HasAuthorService: Clone + Send + Sync + 'static {
     type AuthorSvc: AuthorService + Send + Sync + 'static;
     fn author_service(&self) -> &Self::AuthorSvc;
@@ -236,10 +241,6 @@ pub trait HasCoverCache: Clone + Send + Sync + 'static {
     fn cover_proxy_cache(&self) -> &Self::CoverCache;
 }
 
-pub trait HasEnrichmentNotify: Clone + Send + Sync + 'static {
-    fn enrichment_notify(&self) -> &tokio::sync::Notify;
-}
-
 pub trait HasCoverService: Clone + Send + Sync + 'static {
     type CoverSvc: CoverService + Send + Sync + 'static;
     fn cover_service(&self) -> &Self::CoverSvc;
@@ -268,6 +269,7 @@ pub trait AppContext:
     + HasFileService
     + HasChapterService
     + HasBookmarkService
+    + HasCrossFormatService
     + HasAuthorService
     + HasSeriesService
     + HasSeriesQueryService
@@ -307,7 +309,6 @@ pub trait AppContext:
     + HasRssSync
     + HasSystem
     + HasCoverCache
-    + HasEnrichmentNotify
     + HasCoverService
     + HasPreaddCoverService
     + HasHmacKey
@@ -320,6 +321,7 @@ impl<T> AppContext for T where
         + HasFileService
         + HasChapterService
         + HasBookmarkService
+        + HasCrossFormatService
         + HasAuthorService
         + HasSeriesService
         + HasSeriesQueryService
@@ -359,7 +361,6 @@ impl<T> AppContext for T where
         + HasRssSync
         + HasSystem
         + HasCoverCache
-        + HasEnrichmentNotify
         + HasCoverService
         + HasPreaddCoverService
         + HasHmacKey

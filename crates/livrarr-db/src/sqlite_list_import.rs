@@ -17,6 +17,7 @@ impl ListImportDb for SqliteDb {
         author: &str,
         isbn_13: Option<&str>,
         isbn_10: Option<&str>,
+        goodreads_book_id: Option<&str>,
         year: Option<i32>,
         source_status: Option<&str>,
         source_rating: Option<f32>,
@@ -26,9 +27,10 @@ impl ListImportDb for SqliteDb {
     ) -> Result<(), DbError> {
         sqlx::query(
             "INSERT INTO list_import_previews \
-             (preview_id, user_id, row_index, title, author, isbn_13, isbn_10, year, \
-              source_status, source_rating, preview_status, source, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (preview_id, user_id, row_index, title, author, isbn_13, isbn_10, \
+              goodreads_book_id, year, source_status, source_rating, preview_status, \
+              source, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(preview_id)
         .bind(user_id)
@@ -37,6 +39,7 @@ impl ListImportDb for SqliteDb {
         .bind(author)
         .bind(isbn_13)
         .bind(isbn_10)
+        .bind(goodreads_book_id)
         .bind(year)
         .bind(source_status)
         .bind(source_rating)
@@ -140,6 +143,7 @@ impl ListImportDb for SqliteDb {
                 author: r.try_get("author").unwrap_or_default(),
                 isbn_13: r.try_get("isbn_13").ok(),
                 isbn_10: r.try_get("isbn_10").ok(),
+                goodreads_book_id: r.try_get("goodreads_book_id").ok().flatten(),
                 year: r.try_get("year").ok().flatten(),
             })),
             None => Ok(None),

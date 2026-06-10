@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Response};
 
 use crate::context::{
     HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasEmailService,
-    HasEnrichmentNotify, HasEnrichmentWorkflow, HasFileService, HasIdentityResolver,
-    HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkService,
+    HasEnrichmentWorkflow, HasFileService, HasIdentityResolver, HasNotificationService,
+    HasSeriesQueryService, HasTagService, HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
@@ -17,8 +17,8 @@ use crate::{
     RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
 use livrarr_domain::services::{
-    AuthorService, CreateNotificationRequest, EmailService, EnrichmentWorkflow, FileService,
-    IdentityResolver, NotificationService, SeriesQueryService, TagService, WorkService,
+    AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
+    SeriesQueryService, WorkService,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -114,7 +114,7 @@ where
 
 pub async fn lookup<S: HasWorkService>(
     State(state): State<S>,
-    _ctx: AuthContext,
+    ctx: AuthContext,
     Query(q): Query<LookupQuery>,
 ) -> Result<Json<LookupApiResponse>, ApiError> {
     let req = livrarr_domain::services::LookupRequest {
@@ -123,7 +123,10 @@ pub async fn lookup<S: HasWorkService>(
     };
     let raw = q.raw.unwrap_or(false);
 
-    let resp = state.work_service().lookup_filtered(req, raw).await?;
+    let resp = state
+        .work_service()
+        .lookup_filtered(ctx.user.id, req, raw)
+        .await?;
 
     let results = resp
         .results
@@ -143,6 +146,11 @@ pub async fn lookup<S: HasWorkService>(
             language: r.language,
             detail_url: r.detail_url,
             rating: r.rating,
+            candidate_id: r.candidate_id,
+            isbn_13: r.isbn_13,
+            hc_key: r.hc_key,
+            gr_key: r.gr_key,
+            asin: r.asin,
         })
         .collect();
 
@@ -158,7 +166,6 @@ pub async fn add<
     S: HasWorkService
         + HasAuthorService
         + HasSeriesQueryService
-        + HasEnrichmentNotify
         + HasEnrichmentWorkflow
         + HasIdentityResolver,
 >(
@@ -167,10 +174,7 @@ pub async fn add<
     Json(req): Json<AddWorkRequest>,
 ) -> Result<Json<AddWorkResponse>, ApiError> {
     let author_name_for_gr = req.author_name.clone();
-    use livrarr_domain::identity::{
-        IdentityState, LatencyTier, PendingReason, Resolution, WorkCandidate, WorkSeed,
-        WorkSeedFields,
-    };
+    use livrarr_domain::identity::{LatencyTier, RawHarvest, WorkCandidate, WorkSeedFields};
 
     let language = req
         .language
@@ -178,62 +182,54 @@ pub async fn add<
         .map(livrarr_domain::normalize_language)
         .unwrap_or_else(|| "en".to_string());
 
-    let cover_is_manual = req.cover_manual && req.cover_url.is_some();
+    // The UI hands back the picked cover in its proxied display form
+    // (`/api/v1/coverproxy?url=<encoded>`); persist the real provider URL so it
+    // is a usable cover source (a proxied, leading-`/` value is dropped by the
+    // DB cover-URL backstop and the manual pick never sticks).
+    let cover_url = req
+        .cover_url
+        .as_deref()
+        .map(livrarr_domain::unproxy_cover_url);
+    let cover_is_manual = req.cover_manual && cover_url.is_some();
 
-    let identity = if req.ol_key.is_some() {
-        let seed = WorkSeed {
-            ol_key: req.ol_key.clone(),
-            gr_key: None,
-            hc_key: None,
-            isbn_13: req.isbn_13.clone(),
-            asin: None,
-            title: Some(req.title.clone()),
-            author_name: Some(req.author_name.clone()),
-            language: Some(language.clone()),
-            series_name: None,
-            year: req.year,
-            user_confirmed: true,
-        };
-        let resolution = state
-            .identity_resolver()
-            .resolve(ctx.user.id, &seed, LatencyTier::Interactive)
-            .await
-            .map_err(|e| ApiError::Internal(format!("identity resolve: {e}")))?;
-        match resolution {
-            Resolution::Resolved {
-                identity, method, ..
-            } => IdentityState::Confirmed {
-                anchors: identity,
-                method,
-                score: None,
+    // Resolve identity through the shared resolver — the one place every door
+    // turns raw anchors into a Confirmed/Pending/Conflict badge (P1). Boundary
+    // sanitization (normalize + drop malformed anchors) happens inside
+    // resolve_identity; an isbn/asin-only pick still fans out to find a work anchor.
+    let resolved = state
+        .work_service()
+        .resolve_identity(
+            ctx.user.id,
+            RawHarvest {
+                ol_key: req.ol_key.clone(),
+                gr_key: req.gr_key.clone(),
+                hc_key: req.hc_key.clone(),
+                isbn: req.isbn_13.clone(),
+                asin: req.asin.clone(),
+                title: Some(req.title.clone()),
+                author_name: Some(req.author_name.clone()),
+                language: Some(language.clone()),
+                series_name: None,
+                year: req.year,
+                user_confirmed: true,
             },
-            Resolution::NeedsConfirmation { candidates } => IdentityState::Pending {
-                reason: PendingReason::LowConfidence,
-                top_candidates: candidates,
-            },
-            Resolution::Unresolved { reason, .. } => IdentityState::Pending {
-                reason,
-                top_candidates: vec![],
-            },
-            Resolution::Conflict { conflict, .. } => {
-                let work = state
-                    .work_service()
-                    .get(ctx.user.id, conflict.existing_work_id)
-                    .await?;
-                let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None, None);
-                return Ok(Json(AddWorkResponse {
-                    work: detail,
-                    author_created: false,
-                    messages: vec!["identity conflict: existing work has a different anchor".into()],
-                }));
-            }
-        }
-    } else {
-        IdentityState::Pending {
-            reason: PendingReason::NoCandidates,
-            top_candidates: vec![],
-        }
-    };
+            LatencyTier::Interactive,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("identity resolve: {e}")))?;
+    if let Some(conflict) = resolved.conflict {
+        let work = state
+            .work_service()
+            .get(ctx.user.id, conflict.existing_work_id)
+            .await?;
+        let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None, None);
+        return Ok(Json(AddWorkResponse {
+            work: detail,
+            author_created: false,
+            messages: vec!["identity conflict: existing work has a different anchor".into()],
+        }));
+    }
+    let identity = resolved.identity;
 
     let candidate = WorkCandidate {
         fields: WorkSeedFields {
@@ -242,14 +238,14 @@ pub async fn add<
             language,
             author_ol_key: req.author_ol_key,
             year: req.year,
-            cover_url: req.cover_url,
+            cover_url,
             detail_url: req.detail_url,
             description: None,
             series_name: None,
             series_position: None,
         },
         identity,
-        candidate_id: None,
+        candidate_id: req.candidate_id,
         source_provider_data: None,
         file_path: None,
         delete_existing_after_import: false,
@@ -259,7 +255,10 @@ pub async fn add<
         provenance_setter: None,
         import_id: None,
         cover_manual: cover_is_manual,
-        skip_sync_enrichment: true,
+        // Funnel through the one road: enrichment + cover/tag materialization run
+        // synchronously via the pipeline, reusing the candidate's cached discovery
+        // payloads (zero-network when the search cache is still warm).
+        skip_sync_enrichment: false,
     };
 
     let result = state.work_service().add(ctx.user.id, candidate).await?;
@@ -324,44 +323,6 @@ pub async fn add<
                 }
             });
         }
-    }
-
-    // Phase 2: background enrichment for metadata + potential cover upgrade
-    {
-        let s = state.clone();
-        let user_id = ctx.user.id;
-        let work_id = result.work.id;
-        let phase1_had_cover = result.cover_mtime.is_some();
-        tokio::spawn(async move {
-            if !phase1_had_cover {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-            match s
-                .enrichment_workflow()
-                .enrich_work(
-                    user_id,
-                    work_id,
-                    livrarr_domain::services::EnrichmentMode::Background,
-                )
-                .await
-            {
-                Ok(r) => {
-                    if !r.work.cover_manual {
-                        if let Some(ref url) = r.work.cover_url {
-                            let _ = s
-                                .work_service()
-                                .download_cover_from_url(user_id, work_id, url)
-                                .await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(work_id, "background enrichment failed: {e}");
-                }
-            }
-        });
     }
 
     let detail = crate::types::work::work_to_detail_with_cover_mtime(
@@ -665,30 +626,16 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
         let mut failed = 0usize;
 
         for work in &works {
-            let result = match s.work_service().refresh(user_id, work.id).await {
-                Ok(r) => r,
+            // refresh() funnels through run_unified, which materializes covers and
+            // tags itself — the handler does not re-download or re-tag (REQ-001).
+            match s.work_service().refresh(user_id, work.id).await {
+                Ok(_) => {
+                    enriched += 1;
+                }
                 Err(e) => {
                     tracing::warn!(work_id = work.id, "refresh_all: refresh failed: {e}");
                     failed += 1;
-                    continue;
                 }
-            };
-
-            if !result.work.cover_manual {
-                if let Some(ref cover_url) = result.work.cover_url {
-                    let _ = s
-                        .work_service()
-                        .download_cover_from_url(user_id, work.id, cover_url)
-                        .await;
-                }
-            }
-
-            enriched += 1;
-            if !result.taggable_items.is_empty() {
-                let _ = s
-                    .tag_service()
-                    .retag_library_items(&result.work, &result.taggable_items)
-                    .await;
             }
         }
 
@@ -710,6 +657,61 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
             .await
         {
             tracing::warn!("create_notification failed: {e}");
+        }
+
+        s.work_service().finish_bulk_refresh(user_id);
+    });
+
+    Ok(axum::http::StatusCode::ACCEPTED)
+}
+
+/// User-triggered bulk recovery (REQ-011): sweep every incomplete work — Failed,
+/// Unenriched, or identity-Pending — and re-run each through the one road in a
+/// single pass. Replaces the deleted background `enrichment_retry` job (REQ-001):
+/// recovery is now an explicit user action, not a recurring loop. Shares the
+/// `try_start_bulk_refresh` guard with `refresh_all` so only one bulk sweep runs
+/// per user at a time; the work happens in a spawned one-shot and the response is
+/// an immediate 202.
+pub async fn retry_all_incomplete<S: HasWorkService + HasNotificationService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let user_id = ctx.user.id;
+
+    if !state.work_service().try_start_bulk_refresh(user_id) {
+        return Err(ApiError::Conflict {
+            reason: "Bulk operation already in progress".to_string(),
+        });
+    }
+
+    let s = state.clone();
+    tokio::spawn(async move {
+        match s.work_service().retry_all_incomplete(user_id).await {
+            Ok(summary) => {
+                if let Err(e) = s
+                    .notification_service()
+                    .create(CreateNotificationRequest {
+                        user_id,
+                        notification_type: livrarr_domain::NotificationType::BulkEnrichmentComplete,
+                        ref_key: None,
+                        message: format!(
+                            "Retry complete: {}/{} recovered, {} still incomplete",
+                            summary.recovered, summary.total, summary.still_incomplete
+                        ),
+                        data: serde_json::json!({
+                            "total": summary.total,
+                            "recovered": summary.recovered,
+                            "still_incomplete": summary.still_incomplete,
+                        }),
+                    })
+                    .await
+                {
+                    tracing::warn!("create_notification failed: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("retry_all_incomplete failed: {e}");
+            }
         }
 
         s.work_service().finish_bulk_refresh(user_id);

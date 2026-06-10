@@ -1,0 +1,51 @@
+# Architectural Contract — cross-format-resume
+# Machine-checkable rules for the compliance gate.
+#
+# Revised after architecture review round 1: the broad `sha256` forbidden_pattern
+# was removed — it false-positived the REQUIRED small-EPUB hash (REQ-002) and
+# existing legitimate sha2 usage (auth_crypto.rs, coverproxy.rs). The
+# "no m4b hashing" and "no cross-format position compare" rules are not cleanly
+# grep-scopeable in this contract format, so they are carried as IR invariants
+# (ir-v1 data_flow.invariants) and enforced by the cross-family reviewer, not a regex.
+
+metadata:
+  feature: "cross-format-resume"
+  spec_ref: "spec-cross-format-resume.md"
+  ir_ref: "ir-v1-cross-format-resume.yaml"
+
+# Which modules may NOT depend on which other modules.
+module_dependency:
+  - source: "livrarr-handlers"
+    forbidden_targets:
+      - "livrarr-db"
+      - "livrarr-metadata"
+      - "livrarr-tagwrite"
+      - "livrarr-download"
+    rationale: "Compile wall (insight 9b). handlers-cross-format binds HasCrossFormatService and stays generic over S: AppContext. Authoritative check: cargo tree -p livrarr-handlers."
+  - source: "livrarr-domain"
+    forbidden_targets:
+      - "livrarr-db"
+      - "livrarr-library"
+      - "livrarr-handlers"
+      - "livrarr-server"
+      - "livrarr-metadata"
+      - "livrarr-tagwrite"
+      - "livrarr-download"
+      - "livrarr-external-data"
+      - "livrarr-enrichment"
+    rationale: "domain is the sink of the dependency graph — domain-kash and CrossFormatService depend on nothing in-workspace. (DB traits KashLinkDb/CrossFormatStateDb live in livrarr-db, not domain.)"
+
+# Code patterns that must never appear (machine-checkable only).
+forbidden_pattern:
+  - pattern: 'INSERT\s+OR\s+REPLACE'
+    description: "SQLite INSERT OR REPLACE in any cross-format DB code (kash_links / cross_format_state upserts)."
+    severity: "P1"
+    rationale: "Banned project-wide (insight 20) — deletes+reinserts (loses FK children / fires cascades). Use INSERT ... ON CONFLICT (...) DO UPDATE."
+
+# Reviewer-enforced invariants (NOT machine patterns — carried here for traceability,
+# checked by the cross-family reviewer against ir-v1 data_flow.invariants):
+#   INV-1: No m4b/audio content is hashed or fully read in v1 (audio identity = container
+#          duration only). The small EPUB IS hashed to match epub_hash (REQ-002) — allowed.
+#          Bridged from spec ST-002 / ST-008 / ST-009.
+#   INV-2: Never compare the opaque per-format `position` TEXT across formats (audio seconds
+#          vs ebook CFI). Cross-format ordering goes through the audio timestamp + .kash anchors.

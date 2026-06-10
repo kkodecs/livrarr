@@ -7,6 +7,7 @@ pub mod config;
 pub mod context;
 pub mod cover;
 pub mod coverproxy;
+pub mod cross_format;
 pub mod download_client;
 pub mod filesystem;
 pub mod history;
