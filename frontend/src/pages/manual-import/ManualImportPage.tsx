@@ -391,7 +391,7 @@ export default function ManualImportPage() {
         {!scanMutation.isPending && olTotal > 0 && olCompleted < olTotal && (
           <div className="mb-3 space-y-1">
             <div className="flex items-center justify-between text-xs text-muted">
-              <span>Matching against OpenLibrary...</span>
+              <span>Matching against Google Books + OpenLibrary...</span>
               <span>{olCompleted}/{olTotal}</span>
             </div>
             <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
@@ -486,8 +486,11 @@ export default function ManualImportPage() {
 
                         {/* Filename */}
                         <td className="px-3 py-2">
-                          <div className="font-mono text-xs text-zinc-300 truncate max-w-xs" title={f.filename}>
-                            {f.filename}
+                          <div
+                            className="font-mono text-xs text-zinc-300 truncate max-w-xs"
+                            title={f.relPath || f.filename}
+                          >
+                            {f.relPath || f.filename}
                           </div>
                           {f.parsed && (
                             <div className="text-xs text-muted mt-0.5">
