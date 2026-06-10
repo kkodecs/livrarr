@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Book Information tab — mockup (metadata-modularization, step 6)</title>
+<style>
+  :root {
+    --bg: #09090b;
+    --panel: #18181b;
+    --panel-2: #141416;
+    --border: #27272a;
+    --border-soft: rgba(255,255,255,0.06);
+    --t1: #f4f4f5;   /* primary  */
+    --t2: #d4d4d8;   /* values   */
+    --t3: #a1a1aa;   /* labels   */
+    --muted: #71717a;
+    --accent: #818cf8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--t1);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Inter", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: 40px 20px 80px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+
+  .doc-note {
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 28px;
+    color: var(--t3);
+    font-size: 12.5px;
+    background: var(--panel-2);
+  }
+  .doc-note b { color: var(--t2); }
+  .doc-note code { color: var(--accent); background: rgba(129,140,248,.08); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+  /* ---- mock browser/app chrome ---- */
+  .app {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 10px 40px rgba(0,0,0,.4);
+  }
+  .crumb {
+    padding: 18px 24px 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .title-row {
+    padding: 4px 24px 16px;
+    display: flex; align-items: baseline; gap: 12px;
+  }
+  .title-row h1 { font-size: 20px; margin: 0; font-weight: 600; letter-spacing: -.01em; }
+  .title-row .by { color: var(--t3); font-size: 14px; }
+
+  /* ---- tabs ---- */
+  .tabs { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+  .tab {
+    padding: 10px 14px; font-size: 13.5px; color: var(--t3);
+    border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: default;
+  }
+  .tab.active { color: var(--t1); border-bottom-color: var(--accent); font-weight: 500; }
+  .tab .new { color: var(--accent); font-size: 9px; vertical-align: super; margin-left: 4px; letter-spacing: .04em; }
+
+  .tabbody { padding: 24px; }
+
+  /* ---- section card ---- */
+  .section { max-width: 620px; }
+  .section + .section { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--border); }
+  .sec-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    margin-bottom: 4px;
+  }
+  .sec-head h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--t1); }
+  .sec-sub { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
+
+  /* ---- badge ---- */
+  .badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 4px 10px 4px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 500; line-height: 1;
+    border: 1px solid var(--bd); background: var(--bgc); color: var(--fg);
+    white-space: nowrap;
+  }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot); flex: none; }
+  .badge .qm {
+    width: 14px; height: 14px; border-radius: 50%; font-size: 9px; line-height: 14px;
+    text-align: center; color: var(--muted); border: 1px solid var(--border);
+    margin-left: 1px;
+  }
+
+  /* badge color variants */
+  .v-green   { --fg:#4ade80; --bgc:rgba(74,222,128,.10); --bd:rgba(74,222,128,.28); --dot:#22c55e; }
+  .v-blue    { --fg:#60a5fa; --bgc:rgba(96,165,250,.10); --bd:rgba(96,165,250,.28); --dot:#3b82f6; }
+  .v-amber   { --fg:#fbbf24; --bgc:rgba(251,191,36,.10); --bd:rgba(251,191,36,.28); --dot:#f59e0b; }
+  .v-red     { --fg:#f87171; --bgc:rgba(248,113,113,.10); --bd:rgba(248,113,113,.30); --dot:#ef4444; }
+  .v-orange  { --fg:#fb923c; --bgc:rgba(251,146,60,.10); --bd:rgba(251,146,60,.30); --dot:#f97316; }
+  .v-zinc    { --fg:#a1a1aa; --bgc:rgba(161,161,170,.08); --bd:rgba(161,161,170,.22); --dot:#71717a; }
+
+  /* ---- field rows ---- */
+  dl { margin: 0; }
+  .row { display: flex; gap: 16px; padding: 7px 0; border-bottom: 1px solid var(--border-soft); }
+  .row dt { width: 132px; flex: none; color: var(--t3); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding-top: 1px; }
+  .row dd { margin: 0; color: var(--t2); font-size: 13.5px; }
+  .row dd .em { color: var(--muted); }
+
+  .refresh {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--t2);
+    border: 1px solid var(--border); background: var(--panel);
+    padding: 5px 10px; border-radius: 7px; cursor: default;
+  }
+
+  .cover-note { margin-top: 12px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .cover-note .pill { font-size: 10px; color: var(--accent); border: 1px solid rgba(129,140,248,.3); background: rgba(129,140,248,.08); padding: 1px 7px; border-radius: 999px; }
+
+  /* ---- caption above each example app ---- */
+  .scn { margin: 36px 0 10px; }
+  .scn .k { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .scn .v { font-size: 14px; color: var(--t2); margin-top: 2px; }
+  .scn .v b { color: var(--t1); }
+
+  /* ---- matrix of states (compact) ---- */
+  .matrix { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .mcard { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--panel); }
+  .mcard .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .mcard .pair { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+  .mcard .pair .line { display: flex; align-items: center; gap: 10px; }
+  .mcard .pair .line span.h { width: 56px; flex: none; font-size: 11px; color: var(--t3); }
+
+  /* ---- legend ---- */
+  .legend { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); overflow: hidden; }
+  .legend .lhead { padding: 10px 16px; font-size: 12px; font-weight: 600; color: var(--t1); background: var(--panel-2); border-bottom: 1px solid var(--border); }
+  .legend .lrow { display: flex; gap: 14px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border-soft); }
+  .legend .lrow:last-child { border-bottom: none; }
+  .legend .lrow .b { width: 132px; flex: none; }
+  .legend .lrow .desc { font-size: 12.5px; color: var(--t3); }
+  .legend .lrow .desc .enum { color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; }
+
+  h2.block { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 48px 0 10px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="doc-note">
+    <b>Mockup — step 6, metadata-modularization.</b> The book-detail tab <b>"Metadata" → "Book Information"</b>
+    (the word "metadata" leaves the user's view, spec §3). Two stacked sections, each owning a status badge
+    <b>in context under its header</b>. This is the design-stage artifact for a UX glance — not the final React.
+    Internal enums map to these labels: identity <code>pending/confirmed/provisional/conflict/needs_review</code>;
+    details <code>unenriched→Pending</code>, <code>enriched→Enriched</code>, <code>thin→Sparse</code>.
+  </div>
+
+  <!-- ============ PRIMARY EXAMPLE: happy path ============ -->
+  <div class="scn">
+    <div class="k">Primary example</div>
+    <div class="v"><b>Identified &amp; enriched</b> — the happy path, all fields populated.</div>
+  </div>
+
+  <div class="app">
+    <div class="crumb">Library › Works</div>
+    <div class="title-row"><h1>Project Hail Mary</h1><span class="by">Andy Weir</span></div>
+    <div class="tabs">
+      <div class="tab">Library Files</div>
+      <div class="tab">Search</div>
+      <div class="tab">History</div>
+      <div class="tab active">Book Information<span class="new">RENAMED</span></div>
+    </div>
+
+    <div class="tabbody">
+
+      <!-- IDENTITY -->
+      <div class="section">
+        <div class="sec-head">
+          <h3>Identity</h3>
+          <button class="refresh">⟳ Refresh</button>
+        </div>
+        <p class="sec-sub">Which book this is — catalog match &amp; identifiers.</p>
+        <span class="badge v-green" title="Locked to a master catalog record.">
+          <span class="dot"></span>Confirmed<span class="qm">?</span>
+        </span>
+        <dl style="margin-top:14px;">
+          <div class="row"><dt>Edition</dt><dd>Hardcover · 2021 · Ballantine Books</dd></div>
+          <div class="row"><dt>Open Library</dt><dd>OL32171943W</dd></div>
+          <div class="row"><dt>Hardcover</dt><dd>the-martian/project-hail-mary</dd></div>
+          <div class="row"><dt>Goodreads</dt><dd>54493401</dd></div>
+          <div class="row"><dt>ISBN-13</dt><dd>9780593135204</dd></div>
+          <div class="row"><dt>ASIN</dt><dd>B08FHBV4ZX</dd></div>
+        </dl>
+      </div>
+
+      <!-- DETAILS -->
+      <div class="section">
+        <div class="sec-head"><h3>Details</h3></div>
+        <p class="sec-sub">What we know about it — description, series, genres, cover.</p>
+        <span class="badge v-green" title="Real info present (≥1 meaningful field).">
+          <span class="dot"></span>Enriched<span class="qm">?</span>
+        </span>
+        <dl style="margin-top:14px;">
+          <div class="row"><dt>Description</dt><dd>A lone astronaut must save Earth from disaster in this cosmic adventure…</dd></div>
+          <div class="row"><dt>Series</dt><dd><span class="em">—</span></dd></div>
+          <div class="row"><dt>Genres</dt><dd>Science Fiction, Adventure</dd></div>
+          <div class="row"><dt>Publisher</dt><dd>Ballantine Books</dd></div>
+          <div class="row"><dt>Language</dt><dd>EN</dd></div>
+          <div class="row"><dt>Pages</dt><dd>476</dd></div>
+        </dl>
+        <div class="cover-note">
+          <span class="pill">fast-then-upgrade</span>
+          Cover is a lazy backfill asset — it may appear <i>after</i> this badge already reads "Enriched" (REQ-019). It never gates completion.
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ============ STATE MATRIX: why two machines ============ -->
+  <h2 class="block">The two machines are independent (REQ-014)</h2>
+  <div class="doc-note" style="border-style:solid;">
+    The old single status couldn't tell <b>"which book is this?"</b> apart from <b>"we know the book, found no info."</b>
+    Two badges, two tracks, two different user actions. These three states were previously inexpressible or conflated:
+  </div>
+
+  <div class="matrix">
+    <div class="mcard">
+      <div class="lbl">We know the book — but nobody has details</div>
+      <div class="pair">
+        <div class="line"><span class="h">Identity</span><span class="badge v-green"><span class="dot"></span>Confirmed</span></div>
+        <div class="line"><span class="h">Details</span><span class="badge v-zinc"><span class="dot"></span>Sparse</span></div>
+      </div>
+    </div>
+    <div class="mcard">
+      <div class="lbl">Can't tell which book — so details are held</div>
+      <div class="pair">
+        <div class="line"><span class="h">Identity</span><span class="badge v-orange"><span class="dot"></span>Needs Review</span></div>
+        <div class="line"><span class="h">Details</span><span class="badge v-amber"><span class="dot"></span>Pending</span></div>
+      </div>
+    </div>
+    <div class="mcard">
+      <div class="lbl">ISBN-matched, no master record yet</div>
+      <div class="pair">
+        <div class="line"><span class="h">Identity</span><span class="badge v-blue"><span class="dot"></span>Provisional</span></div>
+        <div class="line"><span class="h">Details</span><span class="badge v-green"><span class="dot"></span>Enriched</span></div>
+      </div>
+    </div>
+    <div class="mcard">
+      <div class="lbl">Sources disagree on the match</div>
+      <div class="pair">
+        <div class="line"><span class="h">Identity</span><span class="badge v-red"><span class="dot"></span>Conflict</span></div>
+        <div class="line"><span class="h">Details</span><span class="badge v-amber"><span class="dot"></span>Pending</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ LEGEND ============ -->
+  <h2 class="block">Badge legend &amp; copy</h2>
+
+  <div class="legend">
+    <div class="lhead">Identity — “which book is this?”</div>
+    <div class="lrow"><div class="b"><span class="badge v-amber"><span class="dot"></span>Pending</span></div><div class="desc">Still matching; only a fuzzy title/author guess so far. <span class="enum">pending</span></div></div>
+    <div class="lrow"><div class="b"><span class="badge v-green"><span class="dot"></span>Confirmed</span></div><div class="desc">Locked to a master catalog record. <span class="enum">confirmed</span></div></div>
+    <div class="lrow"><div class="b"><span class="badge v-blue"><span class="dot"></span>Provisional</span></div><div class="desc">Identified by ISBN (barcode); no master record yet — may later upgrade to Confirmed. <span class="enum">provisional</span></div></div>
+    <div class="lrow"><div class="b"><span class="badge v-red"><span class="dot"></span>Conflict</span></div><div class="desc">Sources disagree; needs the user. <span class="enum">conflict</span></div></div>
+    <div class="lrow"><div class="b"><span class="badge v-orange"><span class="dot"></span>Needs Review</span></div><div class="desc">Couldn't match; needs the user. <span class="enum">needs_review</span></div></div>
+  </div>
+
+  <div class="legend" style="margin-top:18px;">
+    <div class="lhead">Details — “what do we know about it?”</div>
+    <div class="lrow"><div class="b"><span class="badge v-amber"><span class="dot"></span>Pending</span></div><div class="desc">Details not fetched yet. <span class="enum">unenriched</span></div></div>
+    <div class="lrow"><div class="b"><span class="badge v-green"><span class="dot"></span>Enriched</span></div><div class="desc">Real info present — ≥1 meaningful field. Does <b>not</b> require a cover. <span class="enum">enriched</span></div></div>
+    <div class="lrow"><div class="b"><span class="badge v-zinc"><span class="dot"></span>Sparse</span></div><div class="desc">Known book, but providers returned almost nothing — a <i>settled</i> outcome, not “still loading.” <span class="enum">thin</span></div></div>
+  </div>
+
+</div>
+</body>
+</html>
