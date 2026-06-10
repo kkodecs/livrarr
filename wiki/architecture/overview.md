@@ -1,32 +1,44 @@
 # Architecture Overview
 
-Livrarr is a 13-crate Rust workspace (10 core application crates + `livrarr-jobs`, `livrarr-cli`, `livrarr-behavioral`) with a React/TypeScript frontend. All dependency arrows point toward `livrarr-domain`. `livrarr-server` is the composition root — it depends on everything, nothing depends on it. Authoritative member list: `Cargo.toml` `[workspace].members`.
+Livrarr is a 17-crate Rust workspace (14 application crates + `livrarr-jobs`, `livrarr-cli`, `livrarr-behavioral`) with a React/TypeScript frontend. All dependency arrows point toward `livrarr-domain`. `livrarr-server` is the composition root — it depends on everything, nothing depends on it. Authoritative member list: `Cargo.toml` `[workspace].members`. This page documents the **live** graph; the **intended** topology — which code must conform to — is the canonical model at `architecture/canonical-model.yaml`.
 
 ## Crate Dependency Graph
 
 ```
 livrarr-domain (foundation — entities, traits, enums, errors)
 │
-├── livrarr-http        → domain (composable HTTP client middleware via tower)
-├── livrarr-db          → domain (SQLite via sqlx, all SQL queries, migrations)
-├── livrarr-library     → domain (import pipeline, file layout, CWA copy)
-│                         (renamed from livrarr-organize in Phase 5)
-├── livrarr-tagwrite    → domain (EPUB/M4B/MP3 metadata tag writing)
-├── livrarr-matching    → domain (M1-M4 matching engine, extract/reconcile)
-├── livrarr-jobs        → domain (JobService trait ONLY — compile-wall-safe job
-│                         triggering; job impls live in livrarr-server)
+├── livrarr-http          → domain (composable HTTP client middleware via tower)
+├── livrarr-db            → domain (SQLite via sqlx, all SQL queries, migrations)
+├── livrarr-tagwrite      → domain (EPUB/M4B/MP3 tag writing; audio writers disabled — OOM)
+├── livrarr-matching      → domain (M1-M4 matching engine, extract/reconcile)
+├── livrarr-jobs          → domain (JobService trait ONLY — compile-wall-safe job
+│                           triggering; job impls live in livrarr-server)
 │
-├── livrarr-handlers    → domain, http, matching (ALL route handlers, generic over AppContext)
-│                         COMPILE WALL: must NOT depend on db, metadata, tagwrite, download
-├── livrarr-metadata    → domain, http (enrichment pipeline, provider clients, LLM)
-├── livrarr-download    → domain, http (Prowlarr, qBit, indexer clients)
+├── livrarr-external-data → domain, http (provider substrate: transport, normalize, GCRA
+│                           rate-limit, circuit breaker, payload cache; home of
+│                           NormalizedWorkDetail / ProviderOutcome)
+├── livrarr-identity      → domain, external-data, http ("what work is this?" — resolvers;
+│                           never names enrichment)
+├── livrarr-enrichment    → domain, external-data, db, http ("fill the record" — merge
+│                           engine, provider retry queue; never names identity)
+├── livrarr-materialize   → domain, http, tagwrite (the save home: covers + tag projection)
+├── livrarr-library       → domain, db, tagwrite (import pipeline, file layout, CWA copy;
+│                           tagwrite edge is conformance backlog — intent: via materialize)
+├── livrarr-download      → domain, http, db (indexers + qBit/SAB/Transmission clients)
+├── livrarr-metadata      → domain, http, db, matching, external-data, identity, enrichment,
+│                           materialize (shrinking orchestrator: work_service spine)
 │
-├── livrarr-behavioral  → domain, db, metadata, download, library, tagwrite (cross-crate tests)
-├── livrarr-cli         → domain (thin HTTP API client — stub binary)
+├── livrarr-handlers      → domain, http, matching (ALL route handlers, generic over AppContext)
+│                           COMPILE WALL: must NOT depend on db, metadata, tagwrite, download
+│                           (nor the metadata extractions)
 │
-├── livrarr-server      → ALL (composition root: axum, AppState, jobs, service impls)
-│                         Zero route handlers — all routing delegates to livrarr-handlers
-└── frontend            → (React SPA, communicates via HTTP API only)
+├── livrarr-behavioral    → db, domain, download, external-data, handlers, http, library,
+│                           matching, materialize, metadata (cross-crate tests)
+├── livrarr-cli           → (stub binary — no internal deps currently)
+│
+├── livrarr-server        → ALL (composition root: axum, AppState, jobs, service impls)
+│                           Zero route handlers — all routing delegates to livrarr-handlers
+└── frontend              → (React SPA, communicates via HTTP API only)
 ```
 
 ## Key Architectural Invariants
