@@ -25,6 +25,60 @@ pub use types::{
     MatchProvider, MatchResult,
 };
 
+/// Variant-title normalization for Tier-A auto-match (REQ-020), applied to
+/// both candidate and file-derived titles BEFORE m3 string scoring. Folds the
+/// four documented form classes — trailing "(Unabridged)" edition markers,
+/// ": <subtitle>, Book N" tails, translated-subtitle variants (compare base
+/// segments when titles differ only after the first colon), and diacritics
+/// (NFKD, combining marks dropped) — plus lowercase + whitespace collapse.
+/// Acceptance comes from normalization only: the `should_auto_confirm`
+/// threshold and cluster-confidence requirements are untouched (the
+/// false-positive guard).
+pub fn normalize_title_variants(title: &str) -> String {
+    let mut t = title.trim();
+
+    // Trailing "(Unabridged)" edition marker, case-insensitive.
+    if let Some(open) = t.rfind('(') {
+        let after = &t[open + 1..];
+        if let Some(close) = after.find(')') {
+            let inner = after[..close].trim();
+            let rest = after[close + 1..].trim();
+            if rest.is_empty() && inner.eq_ignore_ascii_case("unabridged") {
+                t = t[..open].trim_end();
+            }
+        }
+    }
+
+    // Translated-subtitle and ": <subtitle>, Book N" classes: the segment
+    // before the first colon is the comparison key (subtitles are the part
+    // that varies across editions and translations).
+    if let Some(idx) = t.find(':') {
+        let base = t[..idx].trim_end();
+        if !base.is_empty() {
+            t = base;
+        }
+    }
+
+    // ", Book N" tail when no colon precedes it.
+    if let Some(comma) = t.rfind(',') {
+        let tail_lower = t[comma + 1..].trim().to_lowercase();
+        if let Some(num) = tail_lower.strip_prefix("book ") {
+            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                t = t[..comma].trim_end();
+            }
+        }
+    }
+
+    let key = m4_scoring::normalize(t);
+    if key.is_empty() {
+        // Degenerate inputs (e.g. a bare marker or leading colon): fall back
+        // to the plain normalization of the whole title.
+        m4_scoring::normalize(title)
+    } else {
+        key
+    }
+}
+
 /// Parsed output from a release title string (M3 + side-channel metadata).
 #[derive(Debug)]
 pub struct ParsedRelease {

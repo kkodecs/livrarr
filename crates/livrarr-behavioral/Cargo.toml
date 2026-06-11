@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true, features = ["test-helpers"] }
+livrarr-tagwrite = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
@@ -368,3 +369,43 @@ path = "../../tests/behavioral/test_s6_retry_all_incomplete.rs"
 [[test]]
 name = "test_cross_format_resume"
 path = "../../tests/behavioral/test_cross_format_resume.rs"
+
+[[test]]
+name = "test_mc_instrumentation"
+path = "../../tests/behavioral/test_mc_instrumentation.rs"
+
+[[test]]
+name = "test_mc_anchor_grounding"
+path = "../../tests/behavioral/test_mc_anchor_grounding.rs"
+
+[[test]]
+name = "test_mc_merge_guards"
+path = "../../tests/behavioral/test_mc_merge_guards.rs"
+
+[[test]]
+name = "test_mc_dissent"
+path = "../../tests/behavioral/test_mc_dissent.rs"
+
+[[test]]
+name = "test_mc_identity_completion"
+path = "../../tests/behavioral/test_mc_identity_completion.rs"
+
+[[test]]
+name = "test_mc_refresh_orchestration"
+path = "../../tests/behavioral/test_mc_refresh_orchestration.rs"
+
+[[test]]
+name = "test_mc_add_doors"
+path = "../../tests/behavioral/test_mc_add_doors.rs"
+
+[[test]]
+name = "test_mc_bulk_guard"
+path = "../../tests/behavioral/test_mc_bulk_guard.rs"
+
+[[test]]
+name = "test_mc_filters_covers_pins"
+path = "../../tests/behavioral/test_mc_filters_covers_pins.rs"
+
+[[test]]
+name = "test_mc_matching_variants"
+path = "../../tests/behavioral/test_mc_matching_variants.rs"

@@ -1,0 +1,702 @@
+# IR v2 — Operational
+# Feature: metadata-correctness (Sprint B). Extends ir-v1-metadata-correctness.yaml.
+# Structural content (components, libraries, shared types, dependency graph) lives in
+# IR v1; this file adds pseudocode, call annotations, conditions, and TDD directives
+# for every NEW or CHANGED function. All EXISTING signatures verified by direct read
+# on main @ ac296ad (survey citations re-verified 2026-06-11).
+#
+# Grounding corrections vs IR v1 (verified against source):
+#   1. BulkRefreshGuard is defined in livrarr-domain (not livrarr-metadata): the
+#      WorkService trait (livrarr-domain/src/services/work.rs:253+) declares
+#      try_start_bulk_refresh, so the guard type must be nameable from domain.
+#   2. REQ-005's residual edge is chapter EXTRACTION, not tag writing: the import
+#      save path already routes through livrarr-materialize (verified: zero tag-write
+#      calls in livrarr-library; import_workflow.rs:282 calls
+#      livrarr_tagwrite::extract_m4b_chapters — a read). Design: ChapterExtractor
+#      trait in domain, impl in server, injected into library.
+#   3. WorkFilter is consumed only by WorkServiceImpl::list (work_service.rs:1052,
+#      in-memory retains) — REQ-015's language facet is a service-level retain; no
+#      db change. IR v1's requirements_map listed livrarr-db for REQ-015; corrected:
+#      db is NOT touched by REQ-015.
+#   4. The bulk-refresh loop stays in the handler (established handler-spawning
+#      pattern, wiki insight 9g); IR v1's WorkService::refresh_all_filtered is
+#      replaced by: handler builds WorkFilter from request params and owns the loop.
+#
+# Annotation convention (review r2 R-004): calls whose target is a function
+# DECLARED IN THIS IR are annotated EXISTING with target "...(declared in this
+# IR)" — the compliance checker rejects NEW annotations targeting declared
+# functions. Such calls are NEW CODE; "EXISTING" means "exists in the IR
+# universe", not "exists on main today".
+
+metadata:
+  feature: "metadata-correctness"
+  stage: v2-operational
+  spec_ref: "spec-metadata-correctness.md"
+  ir_v1_ref: "ir-v1-metadata-correctness.yaml"
+
+# Mirrored from IR v1 because the compliance gate resolves LIBRARY call
+# annotations against THIS file's list (gate friction noted: the template says
+# don't duplicate IR v1 content, but check_compliance reads approved_libraries
+# from IR v2). IR v1 remains the authoritative list; keep in sync.
+approved_libraries:
+  - { name: "sqlx", version: "0.8", usage: "call-record + dissent tables, eviction, merge UPDATE" }
+  - { name: "chrono", version: "workspace", usage: "timestamps" }
+  - { name: "image", version: "0.25", usage: "cover dimension decode" }
+  - { name: "tracing", version: "0.1", usage: "instrumentation" }
+  - { name: "tracing-appender", version: "0.2", usage: "daily rolling appender" }
+  - { name: "serde", version: "workspace", usage: "API DTOs" }
+  - { name: "trait-variant", version: "workspace", usage: "async service traits" }
+  - { name: "tokio", version: "workspace", usage: "spawn, channels, spawn_blocking, guards" }
+  - { name: "unicode-normalization", version: "0.1", usage: "diacritic folding" }
+  - { name: "rapidfuzz", version: "0.5", usage: "existing matcher core" }
+  - { name: "regex", version: "1", usage: "variant-form parsing" }
+
+modules:
+  # ================================================================ livrarr-domain
+  - name: livrarr-domain
+    responsibility: "Shared vocabulary: call-record types + sink trait, stats service trait, dissent types, AnchorQuery, ChapterExtractor, RAII BulkRefreshGuard, Release home, WorkFilter.language, LogSurfaceStatus. REQ-001/002/003/004/005/006/013/014/015/016."
+    dependencies: []
+    module_invariants:
+      - "ProviderCallSink stays sync + dyn-safe (NOT trait_variant): callable from any crate without a db edge or generics explosion; implementations must never block the caller."
+      - "BulkRefreshGuard releases its slot on Drop unconditionally — no method exists to leak it."
+    capability_survey:
+      - { capability: "per-provider call recording", existing_source: "none (ProviderHealthState in livrarr-server is in-memory ok/error only, state.rs:665; zero persisted timing anywhere — ST-008)", reuse_decision: rewrite, rationale: "nothing persists outcomes today; new types + sink trait" }
+      - { capability: "provider stats query service", existing_source: "ProviderHealthState::statuses() (server/state.rs:704)", reuse_decision: rewrite, rationale: "replaced by record-fed 24h aggregates (REQ-002 'replaces the ok/error-only view'); ProviderHealthState retired" }
+      - { capability: "dissent recording", existing_source: "none (whole-work Conflict short-circuit at enrichment lib.rs:692-710 discards instead of recording)", reuse_decision: rewrite, rationale: "#110: per-field/provider isolation with queryable records is new" }
+      - { capability: "anchor-only fetch vocabulary", existing_source: "ProviderClient::fetch(&Work) tier chains ending in text search (provider_client.rs:757-861, google_books.rs:177-200)", reuse_decision: wrap, rationale: "AnchorQuery enum names exactly the anchor tiers; text tiers stay on lookup/identity surfaces only" }
+      - { capability: "m4b chapter extraction contract", existing_source: "livrarr_tagwrite::extract_m4b_chapters (called from library import_workflow.rs:282)", reuse_decision: wrap, rationale: "REQ-005: trait in domain + server impl removes library's last tagwrite use; extraction logic unchanged" }
+      - { capability: "bulk-refresh slot guard", existing_source: "bulk_refresh_users HashSet + bool try_start/finish (work_service.rs:67,1961-1969)", reuse_decision: wrap, rationale: "same slot set, RAII ownership: Drop releases on every exit path incl. panic unwind (AC-018)" }
+      - { capability: "release entity", existing_source: "the legacy release-search struct in livrarr-download/src/lib.rs:199 (all-primitive fields)", reuse_decision: reuse, rationale: "field-for-field relocation to the spine home; behavior unchanged (REQ-004)" }
+    public_api:
+      types:
+        - kind: struct
+          name: BulkRefreshGuard
+          fields:
+            - { name: slots, type: "Arc<std::sync::Mutex<std::collections::HashSet<i64>>>" }
+            - { name: user_id, type: "i64" }
+      functions:
+        - name: "ProviderCallSink::record"
+          inputs: [{ name: rec, type: ProviderCallRecord }]
+          output: "()"
+          errors: []
+          pseudocode:
+            - "trait contract: accept the record and return immediately (fire-and-forget)"
+            - "implementations enqueue for asynchronous persistence; on a full queue, drop the record and count the drop — never block or propagate errors to the instrumented call path"
+          call_annotations:
+            - { call: "enqueue to channel", type: NEW, target: "impl-specific (server CallSinkTask)" }
+          forbidden_behaviors:
+            - "blocking the calling task"
+            - "carrying payload bodies, filenames, or credentials in detail (LLM/privacy boundary: outcome class + short error class only)"
+          tdd_directives:
+            - "record() returns in O(1) even when the persistence backend is wedged (stub sink with a full channel)"
+        - name: "ChapterExtractor::extract_m4b_chapters"
+          inputs: [{ name: path, type: "&Path" }]
+          output: "Result<Vec<AudiobookChapter>, ChapterExtractionError>"
+          errors: ["ChapterExtractionError"]
+          pseudocode:
+            - "trait contract mirroring the existing livrarr_tagwrite::extract_m4b_chapters signature so the server impl is a one-line delegation"
+          call_annotations:
+            - { call: "livrarr_tagwrite::extract_m4b_chapters", type: EXISTING, target: "livrarr-tagwrite (delegated in the server impl only)" }
+          tdd_directives:
+            - "library import behavioral tests pass unchanged with the trait-injected extractor (AC-006 second clause)"
+        - name: "BulkRefreshGuard::drop"
+          inputs: []
+          output: "()"
+          errors: []
+          pseudocode:
+            - "lock slots; remove user_id; (Mutex poisoning: use lock().unwrap_or_else(PoisonError::into_inner) so a panicked peer cannot wedge release)"
+          call_annotations:
+            - { call: "Mutex::lock", type: STDLIB, target: "std::sync::Mutex" }
+          postconditions:
+            - "the user's bulk slot is free; a subsequent try_start_bulk_refresh(user_id) returns Some"
+          tdd_directives:
+            - "guard dropped during panic unwind releases the slot (catch_unwind test, AC-018)"
+            - "guard moved into a tokio task that is aborted still releases the slot"
+
+  # ================================================================ livrarr-db
+  - name: livrarr-db
+    responsibility: "Migrations 059 (provider_call_records), 060 (work_field_dissents), 061 (drop works.metadata_source). Call-record write/query/eviction. Dissent write/query. apply_enrichment_merge hardened (REQ-007 structural + REQ-009 no-clobber)."
+    dependencies: [livrarr-domain]
+    module_invariants:
+      - "New tables use ON-CONFLICT upserts; OR-REPLACE forms are banned (contract pattern + insight 20)."
+      - "All writes scoped by user_id (tenant rule) except call records, which are system-scoped (provider telemetry carries no user data)."
+    capability_survey:
+      - { capability: "per-(work,provider) state table", existing_source: "provider_retry_state (migration 029, sqlite_retry_state.rs)", reuse_decision: reuse, rationale: "schema/index pattern copied for the two new tables" }
+      - { capability: "merge write site", existing_source: "apply_enrichment_merge (sqlite_work.rs:866-1062)", reuse_decision: rewrite, rationale: "REQ-007: anchor columns leave the UPDATE entirely; REQ-009: cover_url/language gain populated-never-NULLed guards" }
+      - { capability: "retention/eviction", existing_source: "none in migrations 001-058", reuse_decision: rewrite, rationale: "first bounded table; age + count eviction, oldest first (PO: 30d/100k)" }
+      - { capability: "cover dimension writer", existing_source: "update_cover_dimensions (db lib.rs:282 trait, sqlite_work.rs:661 impl, verified zero callers)", reuse_decision: reuse, rationale: "REQ-017 wires the existing dead writer; signature untouched" }
+    public_api:
+      types: []
+      functions:
+        - name: record_provider_calls
+          inputs: [{ name: batch, type: "Vec<ProviderCallRecord>" }]
+          output: "Result<(), DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "single transaction; multi-row INSERT into provider_call_records (no conflict target — append-only log with autoincrement id)"
+            - "columns: provider, operation, work_id (nullable), started_at, duration_ms, outcome, detail"
+          call_annotations:
+            - { call: "sqlx::query batch insert", type: LIBRARY, target: "sqlx" }
+          tdd_directives:
+            - "AC-001: records inserted for each operation class survive a pool reopen (restart simulation)"
+        - name: query_provider_stats_24h
+          inputs: []
+          output: "Result<Vec<ProviderStats>, DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "one aggregate query over records with started_at >= now-24h, grouped by provider:"
+            - "calls_24h = COUNT(*); success_rate = successes over (count minus skipped/cached classes); median_latency_ms over network-outcome rows only (skips/cached excluded from latency)"
+            - "last_error = (detail, started_at) of newest row with outcome in (error, timeout, rate_limited); last_success = newest success started_at"
+          call_annotations:
+            - { call: "sqlx::query aggregate", type: LIBRARY, target: "sqlx" }
+          decisions:
+            - { key: "latency denominator", value: "network outcomes only", rationale: "skipped_no_anchor/skipped_policy/cached rows have ~0 duration and would fake the median (ST-010 baseline comparability)" }
+          tdd_directives:
+            - "AC-003: aggregates match a hand-computed fixture set incl. mixed outcome classes"
+        - name: evict_call_records
+          inputs: [{ name: policy, type: RetentionPolicy }]
+          output: "Result<u64, DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "DELETE rows older than max_age_days"
+            - "if remaining count > max_records: DELETE oldest (count - max_records) by id ascending"
+            - "return total deleted"
+          call_annotations:
+            - { call: "sqlx::query delete", type: LIBRARY, target: "sqlx" }
+          tdd_directives:
+            - "AC-002: store stays within bounds under simulated overflow; oldest evicted first"
+        - name: record_field_dissents
+          inputs: [{ name: user_id, type: UserId }, { name: work_id, type: WorkId }, { name: dissents, type: "Vec<FieldDissent>" }]
+          output: "Result<(), DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "transaction: DELETE existing dissent rows for work_id with merge_generation < incoming generation (supersede)"
+            - "insert incoming rows (work_id, provider, field, offered_value, winning_value, reason, merge_generation, recorded_at)"
+          call_annotations:
+            - { call: "sqlx::query", type: LIBRARY, target: "sqlx" }
+          postconditions:
+            - "dissents are queryable per work (providers, fields, values — REQ-014 wording) and reflect the newest merge generation"
+          tdd_directives:
+            - "AC-016: dissent rows present after a conflicted merge; superseded rows gone after the next merge"
+        - name: "migration 061 — drop works.metadata_source"
+          inputs: []
+          output: "n/a (SQL migration)"
+          errors: []
+          pseudocode:
+            - "NEW migration file (numbering after current max 058, adjusted to land after 059/060): ALTER TABLE works DROP COLUMN metadata_source"
+            - "applied migrations are never edited (insight 19); the add-column migration 012 stays untouched"
+          call_annotations:
+            - { call: "sqlx::migrate! embedded runner", type: LIBRARY, target: "sqlx" }
+          tdd_directives:
+            - "AC-020: post-migrate schema has no metadata_source column (PRAGMA table_info assertion); a workspace scan finds zero .rs references to the column (review r1 G-R-002)"
+        - name: apply_enrichment_merge
+          inputs: [{ name: req, type: ApplyEnrichmentMergeRequest }]
+          output: "Result<ApplyMergeOutcome, DbError>"
+          errors: ["DbError"]
+          pseudocode:
+            - "MODIFIED existing fn (sqlite_work.rs:866). Type change upstream: UpdateWorkEnrichmentDbRequest loses hc_key/gr_key/ol_key/isbn_13/asin fields; ApplyEnrichmentMergeRequest loses external_id_updates (REQ-007 made structural — anchor data cannot reach this statement)"
+            - "UPDATE column list drops the five anchor columns entirely"
+            - "cover_url bind becomes guarded: only overwrite when incoming is non-empty (populated value never replaced by NULL/empty) — same guard shape as the existing asin guard"
+            - "language bind becomes guarded the same way (REQ-009: NULLed language flips foreign policy)"
+            - "existing optimistic merge_generation check and status-only path unchanged"
+          call_annotations:
+            - { call: "sqlx::query UPDATE", type: LIBRARY, target: "sqlx" }
+          invariants:
+            - "no anchor column appears in any enrichment-merge SQL (AC-009 inline-store clause)"
+            - "a populated cover_url/language is never overwritten by NULL or empty string (AC-011)"
+          tdd_directives:
+            - "AC-008 (F1 fixture): forensic starting state + full merge → zero anchor changes, series_name stays NULL"
+            - "AC-011: update carrying NULL for populated cover_url/language leaves stored values byte-identical"
+
+  # ================================================================ livrarr-external-data
+  - name: livrarr-external-data
+    responsibility: "Anchor-only enrichment fetch surface per provider + call recording at the client boundary (covers lookup, identity, enrich, cover ops in one place). REQ-001/006."
+    dependencies: [livrarr-domain, livrarr-http]
+    module_invariants:
+      - "fetch_by_anchor never constructs a text-search request: its input type admits no title/author (AC-007)."
+      - "Every public client call emits exactly one ProviderCallRecord (including NotConfigured and rate-limit rejections)."
+    capability_survey:
+      - { capability: "per-provider fetch chains", existing_source: "ProviderClient::fetch(&Work) (provider_client.rs:42-52) with internal tiers: GR provider_client.rs:757-861 (gr_key → isbn+LLM → LLM key → title/author+LLM), GB google_books.rs:177-200 (isbn → intitle/inauthor), HC :273 (isbn → title/author), OL :422 (isbn → ol_key → title/author), Audnexus :174 (asin → title), Audible (internal)", reuse_decision: wrap, rationale: "anchor tiers extracted into fetch_by_anchor; text tiers remain only behind the existing lookup/identity entry points (REQ-006). fetch(&Work) is removed from the enrichment dispatch path" }
+      - { capability: "transport cache", existing_source: "transport_cache.rs cache_take (consume-once, 300s)", reuse_decision: reuse, rationale: "unchanged; Cached records are emitted by the enrichment pipeline at the cache_take hit (lib.rs:1256-1259), not here" }
+      - { capability: "provider name strings", existing_source: "provider_name() (enrichment lib.rs:635-647): hardcover/openlibrary/goodreads/audnexus/google_books/audible", reuse_decision: reuse, rationale: "record.provider uses these canonical strings; handler maps to display names" }
+    public_api:
+      types: []
+      functions:
+        - name: "ProviderClient::fetch_by_anchor"
+          inputs: [{ name: query, type: AnchorQuery }, { name: language, type: "Option<&str>" }]
+          output: "ProviderOutcome<NormalizedWorkDetail>"
+          errors: []
+          pseudocode:
+            - "match (self, query): each provider accepts exactly the spec's anchor mapping (REQ-006) — GoogleBooks: Isbn13; Goodreads: GrKey ONLY (the existing GR ISBN→LLM disambiguation tier is an identity-surface capability consumed by anchor completion, never an enrichment fetch); Hardcover: HcKey or Isbn13; OpenLibrary: OlKey or Isbn13; Audnexus/Audible: Asin"
+            - "a (provider, query-kind) mismatch is a programming error surfaced as NotFound + warn (the queue derives queries, so mismatch should be unreachable)"
+            - "run the provider's existing anchor-tier request/parse code (moved, not rewritten) with pacing/timeout/breaker behavior unchanged"
+            - "no branch may fall through to a title/author search — those code paths live only behind the lookup/identity entry points"
+            - "start timer before the request; on return emit ProviderCallRecord{provider, operation: Enrich, duration, outcome mapped from ProviderOutcome} via the injected sink"
+          call_annotations:
+            - { call: "existing per-provider anchor request/parse fns", type: EXISTING, target: "provider modules (goodreads.rs, google_books.rs, hardcover.rs, openlibrary.rs, audnexus.rs, audible.rs)" }
+            - { call: "ProviderCallSink::record", type: EXISTING, target: "livrarr-domain (declared in this IR)" }
+            - { call: "reqwest via HttpClient", type: EXISTING, target: "livrarr-http" }
+          preconditions:
+            data_invariants: ["query value is non-empty (queue derives only from present anchors)"]
+          forbidden_behaviors:
+            - "constructing any request URL containing title or author terms"
+            - "GR: any endpoint other than autocomplete/detail-by-key (ST-012); GB: any keyless call (ST-014)"
+          decisions:
+            - { key: "outcome mapping", value: "Success→Success; NotFound→NotFound; NotConfigured→SkippedPolicy; WillRetry(RateLimited)→RateLimited; WillRetry(Timeout)→Timeout; PermanentFailure→Error. LlmRejected arises on Identity-operation records (GR disambiguation during resolution/completion), never on Enrich records", rationale: "REQ-001's enum is the reporting vocabulary; ProviderOutcome is the control-flow vocabulary — explicit map, no catch-all; REQ-006 keeps every LLM-disambiguation tier off the enrichment surface" }
+            - { key: "recording at client boundary", value: "all four operations (lookup/identity/enrich/cover) record inside client methods with the operation passed by the caller context", rationale: "one choke covers every call site; pipeline-level skips (no anchor, policy, cached) are recorded by the layer that decides them since no client call happens" }
+          tdd_directives:
+            - "AC-007: with Goodreads reachable and gr_key absent, no GR request is issued and no text-search URL is constructible (type-level: a test that tries to express a title query via AnchorQuery must not compile — compile-fail test)"
+            - "each provider × anchor-kind: request URL matches the existing anchor-tier shape (regression against current behavior)"
+
+  # ================================================================ livrarr-identity
+  - name: livrarr-identity
+    responsibility: "Anchor completion on refresh (REQ-008) built on the existing convergence path; add-time resolution extended to ASIN (REQ-010). Identity-operation records (REQ-001)."
+    dependencies: [livrarr-domain, livrarr-external-data, livrarr-http]
+    module_invariants:
+      - "Completion never adopts a fuzzy match: deterministic anchors or LLM-confirmed only; failure leaves the anchor absent (spec principle: a skipped provider beats a wrong merge)."
+    capability_survey:
+      - { capability: "refresh-time anchor completion", existing_source: "converge_identity_pending (async_resolver.rs:20-85): builds WorkSeed from work, resolver.resolve(Background), merge_missing_anchors on Resolved", reuse_decision: wrap, rationale: "exactly the completion shape; complete_anchors adds (a) the caller-supplied suppression filter, (b) an AnchorCompletionReport return for recording + scatter gating, (c) runs for anchor-incomplete Confirmed works, not just Pending" }
+      - { capability: "anchor persistence", existing_source: "WorkIdentityRepository::merge_missing_anchors (domain trait; sqlite impl routes every write through confirm_anchor — verified sqlite_work_identity.rs:203-238)", reuse_decision: reuse, rationale: "monotonicity is already enforced at this surface; identity stays db-crate-free (generic over the domain trait, existing precedent)" }
+      - { capability: "LLM disambiguation", existing_source: "GR resolution tiers in provider_client.rs:757-861 + llm_identity_verify (async_resolver.rs:87-143)", reuse_decision: reuse, rationale: "REQ-008's 'LLM where the provider requires it' is the existing GR behavior" }
+      - { capability: "ASIN resolution at add", existing_source: "resolver fan-out (english_identity_resolver.rs) — currently resolves ol/gr/hc/isbn; CapturedIdentity already carries asin (identity.rs:114-127)", reuse_decision: wrap, rationale: "REQ-010/Sprint-E prerequisite: add an Audnexus/Audible leg to the fan-out so CapturedIdentity.asin populates when deterministically resolvable" }
+    public_api:
+      types: []
+      functions:
+        - name: complete_anchors
+          inputs: [{ name: resolver, type: "&impl EnglishIdentityResolver" }, { name: repo, type: "&impl WorkIdentityRepository" }, { name: user_id, type: UserId }, { name: work, type: "&Work" }, { name: suppressed_providers, type: "&[String]" }, { name: sink, type: "&Arc<dyn ProviderCallSink>" }]
+          output: "Result<AnchorCompletionReport, WorkIdentityError>"
+          errors: ["WorkIdentityError"]
+          pseudocode:
+            - "if work has all five anchors OR identity_status is Conflict: return empty report (nothing to complete / paused pending user)"
+            - "if every missing anchor's source provider is in suppressed_providers: return report with all skipped(suppressed) — zero network (REQ-008 boundedness)"
+            - "build WorkSeed from work's existing anchors + title/author/language (existing converge shape)"
+            - "resolver.resolve(user_id, seed, LatencyTier::Background) — emits Identity-operation records inside the client layer"
+            - "on Resolved{identity}: repo.merge_missing_anchors(work_id, identity) — appends only missing types via confirm_anchor (monotonic; established anchors untouched)"
+            - "on Unresolved/NeedsConfirmation/Conflict: no anchor writes; report skipped(not_found) per unresolved provider — caller records the terminal outcome into retry suppression"
+            - "return report listing resolved (anchor_type, value) and skipped (provider, reason)"
+          call_annotations:
+            - { call: "resolver.resolve", type: EXISTING, target: "IdentityResolver trait (domain) / LiveEnglishIdentityResolver" }
+            - { call: "repo.merge_missing_anchors", type: EXISTING, target: "WorkIdentityRepository (domain trait)" }
+            - { call: "ProviderCallSink::record", type: EXISTING, target: "livrarr-domain (declared in this IR)" }
+          preconditions:
+            domain_state: ["work was loaded in this refresh pass (fresh anchor view)"]
+          postconditions:
+            - "no established anchor changed; only absent anchor types may now be present (AC-010)"
+          forbidden_behaviors:
+            - "first-hit adoption of a text-search result"
+            - "writing identity state for Conflict-status works"
+          tdd_directives:
+            - "AC-010: gr_key-less work whose completion confirms gains gr_key; unconfirmable completion leaves it absent and the provider skipped"
+            - "suppressed providers produce zero resolver calls (record assertions)"
+
+  # ================================================================ livrarr-enrichment
+  - name: livrarr-enrichment
+    responsibility: "Anchor-grounded dispatch (skip+record without anchor), per-field/provider dissent replacing the whole-work conflict discard, no identity writes out of merge, Cached/policy-skip records. REQ-001/006/007/012/013/014."
+    dependencies: [livrarr-domain, livrarr-external-data, livrarr-db, livrarr-http]
+    module_invariants:
+      - "MergeOutput carries no anchor values and no external-id requests (the fields are deleted — REQ-007 structural across stores 1 and 3; store 2, the ledger, has no merge write today: verified)."
+      - "A dissent excludes at most one provider's (or one field's) contribution; the merge always proceeds with the rest (REQ-014)."
+    capability_survey:
+      - { capability: "scatter dispatch", existing_source: "DefaultProviderQueue::dispatch_enrichment — JoinSet per provider calling client.fetch(&work_arc) (provider_queue.rs:432-435)", reuse_decision: wrap, rationale: "dispatch now derives Option<AnchorQuery> per provider from the work's anchors; Some → fetch_by_anchor, None → skip + SkippedNoAnchor record, no task spawned" }
+      - { capability: "whole-work conflict handling", existing_source: "merge_impl conflict short-circuit (lib.rs:692-710, verified verbatim): any OutcomeClass::Conflict → MergeOutput{conflict_detected, work_update: None, status Unenriched}", reuse_decision: rewrite, rationale: "#110 root: replace block-everything with exclude-that-provider + FieldDissent(PayloadMismatch) rows; conflict_detected field retires with it" }
+      - { capability: "foreign provider drop", existing_source: "drop_language_incompatible_providers (lib.rs:478-497), called once at the merge entry (lib.rs:435)", reuse_decision: reuse, rationale: "REQ-012 pins it; rule documentation stays at this site; HC/OL drops also emit SkippedPolicy records (they produce no fetch when the applicability closure excludes them — the record comes from whichever layer drops them)" }
+      - { capability: "language incompatibility detection", existing_source: "NormalizedWorkDetail.language (per-payload, types.rs:6-36) + work.language", reuse_decision: reuse, rationale: "REQ-013: payload language known + incompatible with work language → text fields (description, subtitle, series_name, genres) become FieldDissent(LanguageIncompatible) instead of writes; unknown language unaffected" }
+      - { capability: "external-id emission", existing_source: "merge_impl collection of additional_isbns/additional_asins → UpsertExternalIdRequest (lib.rs:951-973) → ExternalIdDb upsert", reuse_decision: rewrite, rationale: "REQ-007: deleted outright; identity track owns external_ids (the F1 incident wrote 3 wrong ASINs through this path)" }
+      - { capability: "cached-payload path", existing_source: "transport cache_take hit inside enrich_work (lib.rs:1256-1276) → merge_from_cached", reuse_decision: reuse, rationale: "hook: emit one Cached record per provider payload served from the cache" }
+      - { capability: "LLM-reject accounting", existing_source: "LiveLlmValidator (llm_validator.rs:247-252) — verified DORMANT: the main pipeline no longer calls validate (lib.rs Step 8.5 removed)", reuse_decision: reuse, rationale: "LlmRejected records therefore originate in the GR client's LLM disambiguation tiers (identity-grade), not the dormant validator — recorded at the client boundary" }
+    public_api:
+      types: []
+      functions:
+        - name: "DefaultProviderQueue::dispatch_enrichment"
+          inputs: [{ name: work, type: "&Work" }, { name: context, type: EnrichmentContext }]
+          output: "Result<ScatterGatherResult, ProviderQueueError>"
+          errors: ["ProviderQueueError"]
+          pseudocode:
+            - "MODIFIED existing fn. for each applicable provider (existing applicability/language closure unchanged):"
+            - "derive Option<AnchorQuery> exactly per REQ-006's table: GoogleBooks←isbn_13; Goodreads←gr_key ONLY (an isbn_13 without gr_key does NOT produce a GR fetch — review r1 P0); Hardcover←hc_key else isbn_13; OpenLibrary←ol_key else isbn_13; Audnexus/Audible←asin"
+            - "None → record SkippedNoAnchor via sink; outcome map gets a synthetic skipped entry; spawn nothing (REQ-006)"
+            - "Some(q) → spawn JoinSet task: client.fetch_by_anchor(q, work.language) (replaces client.fetch(&work))"
+            - "circuit breaker / pacing / retry-budget handling unchanged around the new call"
+          call_annotations:
+            - { call: "ProviderClient::fetch_by_anchor", type: EXISTING, target: "livrarr-external-data (declared in this IR)" }
+            - { call: "ProviderCallSink::record", type: EXISTING, target: "livrarr-domain (declared in this IR)" }
+            - { call: "JoinSet::spawn", type: LIBRARY, target: "tokio" }
+          invariants:
+            - "no enrichment dispatch path can reach a text-search tier (the dispatch layer holds no title/author inputs to pass)"
+          tdd_directives:
+            - "AC-007: work without gr_key + GR reachable → zero GR tasks, one SkippedNoAnchor record"
+            - "REQ-006 GR-mapping pin: a work with isbn_13 but NO gr_key produces zero Goodreads calls and one skipped_no_anchor GR record (the ISBN must not leak into a GR query)"
+            - "AC-008 companion: F1 fixture works produce skips, never wrong-book payloads"
+        - name: merge_impl
+          inputs: [{ name: inputs, type: MergeInput }]
+          output: "Result<MergeOutput, MergeError>"
+          errors: ["MergeError"]
+          pseudocode:
+            - "MODIFIED existing fn (lib.rs:680). DELETE the conflict short-circuit (lib.rs:692-710)"
+            - "instead: providers whose outcome class is Conflict are excluded from eligible_providers; each contributes FieldDissent{provider, reason: PayloadMismatch, fields: the fields that provider would have won, offered/winning values} (REQ-014: provider-level granularity follows the existing Conflict-outcome definition)"
+            - "REQ-013 pass over remaining eligible payloads: on a foreign work, a payload with known incompatible language has its text fields (description, subtitle, series_name, genres) excluded per-field → FieldDissent{reason: LanguageIncompatible}; non-text fields unaffected; unknown language unaffected"
+            - "priority merge proceeds over the surviving contributions exactly as today"
+            - "DELETE the external-id collection block (lib.rs:951-973) and the external_id_updates output field"
+            - "building the work update: anchor fields no longer exist on UpdateWorkEnrichmentDbRequest (struct change) — provider anchor values in payloads are simply never read"
+            - "MergeOutput gains dissents: Vec<FieldDissent>; conflict_detected field is deleted (its only producer was the short-circuit)"
+          call_annotations:
+            - { call: "drop_language_incompatible_providers", type: EXISTING, target: "livrarr-enrichment lib.rs:478" }
+            - { call: "existing priority-merge helpers", type: EXISTING, target: "livrarr-enrichment merge internals" }
+          invariants:
+            - "a merge with N dissenting providers and M agreeing ones writes the M contributions (AC-016: dissent never blocks)"
+          decisions:
+            - { key: "whole-work Conflict outcome retirement", value: "EnrichmentStatus is computed from surviving contributions; the Unenriched-on-conflict path is gone", rationale: "REQ-014: #110's discard semantics replaced by isolation + record; identity-level conflicts (IdentityConflict) keep their separate user-facing flow untouched" }
+          tdd_directives:
+            - "AC-016: one conflicted provider + two clean → clean fields written, dissent recorded queryably, no whole-merge discard"
+            - "AC-015: known-English description on a French work → dissent row, field unwritten; unknown-language payload unaffected"
+            - "AC-014 regression: HC/OL payloads on a foreign work produce zero writes on cached and network paths"
+        - name: "EnrichmentServiceImpl::enrich_work"
+          inputs: [{ name: user_id, type: UserId }, { name: work_id, type: WorkId }, { name: mode, type: EnrichmentMode }, { name: candidate_id, type: "Option<CandidateId>" }]
+          output: "Result<EnrichmentResult, EnrichmentError>"
+          errors: ["EnrichmentError"]
+          pseudocode:
+            - "MODIFIED existing fn — signature unchanged (the one road). Deltas only:"
+            - "cache_take hit (lib.rs:1256): emit one Cached record per provider payload consumed"
+            - "after merge: persist merge_output.dissents via record_field_dissents (enrichment→db edge, legal)"
+            - "build_apply_request no longer carries external-id updates (field deleted)"
+            - "EnrichmentResult.dissents populated for callers; identity_not_found no longer fed by conflict_detected (field gone) — it keeps only its existing identity-track sources"
+          call_annotations:
+            - { call: "record_field_dissents", type: EXISTING, target: "livrarr-db (declared in this IR)" }
+            - { call: "TransportCache::cache_take", type: EXISTING, target: "livrarr-external-data transport_cache.rs" }
+            - { call: "build_apply_request", type: EXISTING, target: "livrarr-enrichment lib.rs:374" }
+          tdd_directives:
+            - "AC-001: a refresh produces Enrich records for every provider attempted or skipped"
+            - "AC-009: merge with anchor-bearing payloads → all three stores untouched (inline columns byte-identical, external_ids row set unchanged, zero ledger writes)"
+
+  # ================================================================ livrarr-metadata
+  - name: livrarr-metadata
+    responsibility: "Refresh ordering (completion before scatter), add-door identity leg, list language facet, cover-dimension persistence, lookup records. REQ-001/008/010/015/017."
+    dependencies: [livrarr-domain, livrarr-db, livrarr-external-data, livrarr-identity, livrarr-enrichment, livrarr-materialize, livrarr-http, livrarr-matching]
+    capability_survey:
+      - { capability: "refresh flow", existing_source: "WorkServiceImpl::refresh (work_service.rs:1305-1346): lock → reset → run_unified_enrichment(Manual)", reuse_decision: wrap, rationale: "completion step slots between reset and enrichment; everything else unchanged" }
+      - { capability: "suppression state for completion bounds", existing_source: "ProviderRetryStateDb (db lib.rs:2038-2096): get/list_retry_states, record_terminal_outcome, suppressed_passes/next_attempt_at columns (migration 029)", reuse_decision: reuse, rationale: "REQ-008 final text names these semantics; orchestrator reads the list, passes provider names to complete_anchors, records completion outcomes back" }
+      - { capability: "add-door enrichment gate", existing_source: "finish_created_work skip gate (work_service.rs:2673, verified): skip_sync_enrichment && source_provider_data.is_none() → Unenriched return; comment references a background retry job REMOVED in S6", reuse_decision: rewrite, rationale: "#144: the gate's premise is dead; anchor-less candidates get an identity leg + the standard sync enrichment instead of permanent Unenriched" }
+      - { capability: "cover materialization", existing_source: "run_unified_enrichment step 5 (work_service.rs:2858-2905): MaterializeRequest → LiveMaterializeService::materialize", reuse_decision: wrap, rationale: "MaterializeOutcome gains per-slot SavedCover dims; orchestrator persists via the existing dead writer update_cover_dimensions" }
+      - { capability: "list filtering", existing_source: "WorkServiceImpl::list (work_service.rs:1052-1100): in-memory retain per filter field", reuse_decision: reuse, rationale: "language is one more retain — matches the established pattern; no db change" }
+      - { capability: "discovery fan-out recording", existing_source: "lookup_filtered (work_service.rs:1628-1766) + lookup_* per-provider fns", reuse_decision: reuse, rationale: "per-provider lookups flow through external-data clients → recorded at the client boundary with operation=Lookup; no orchestrator change beyond threading the operation context" }
+    public_api:
+      types: []
+      functions:
+        - name: "WorkServiceImpl::refresh"
+          inputs: [{ name: user_id, type: UserId }, { name: work_id, type: WorkId }]
+          output: "Result<RefreshWorkResult, WorkServiceError>"
+          errors: ["WorkServiceError"]
+          pseudocode:
+            - "MODIFIED existing fn. after the existing reset steps, before run_unified_enrichment:"
+            - "(ordering is safe — verified: reset_enrichment_for_refresh (sqlite_work.rs:1272) and reset_for_manual_refresh (sqlite_work.rs:1066) reset only works-row state; NEITHER touches provider_retry_state, so completion suppression survives plain refresh; only reset_all_retry_states (sqlite_retry_state.rs:269, explicit-retry path) deletes it)"
+            - "suppressed = db.list_retry_states(user_id, work_id) filtered to providers whose row has a phase2-terminal last_outcome OR next_attempt_at in the future (the existing suppression/backoff semantics REQ-008 names)"
+            - "report = identity::complete_anchors(resolver, repo, user_id, &work, suppressed, sink)"
+            - "for each skipped(not_found) in report: db.record_terminal_outcome(user_id, work_id, provider, OutcomeClass::NotFound, None) — full existing signature (db lib.rs:2039+); per the existing impl this clears next_attempt_at/first_suppressed_at and the terminal row then gates the next completion attempt (AC-010 suppression clause)"
+            - "resume paths: explicit user retry (retry_all_incomplete / existing reset_all_retry_states) — existing; identity-input change: the user anchor-edit path additionally calls reset_all_retry_states(user_id, work_id) so completion re-attempts after an edit (REQ-008 resume clause — new call on the existing edit handler)"
+            - "reload work if report.resolved non-empty (fresh anchors feed the scatter)"
+            - "run_unified_enrichment(user_id, &work, None, Manual, None) — unchanged"
+          call_annotations:
+            - { call: "complete_anchors", type: EXISTING, target: "livrarr-identity (declared in this IR)" }
+            - { call: "ProviderRetryStateDb::list_retry_states / record_terminal_outcome", type: EXISTING, target: "livrarr-db lib.rs:2038+" }
+            - { call: "run_unified_enrichment", type: EXISTING, target: "work_service.rs:2806" }
+          invariants:
+            - "completion precedes scatter on every refresh door (single + bulk + retry share this fn — verified: handler loops call refresh)"
+          tdd_directives:
+            - "AC-010 end-to-end: completion-then-scatter ordering observable via record timestamps; suppression honored on consecutive refresh (second refresh: zero resolver calls for the not-found provider)"
+            - "resume matrix: explicit retry re-attempts completion; user anchor edit re-attempts completion; plain consecutive refresh does not"
+        - name: "WorkServiceImpl::ensure_identity_and_enrichment"
+          inputs: [{ name: user_id, type: UserId }, { name: work, type: "&Work" }, { name: candidate_seed, type: "title/author/language harvest from the candidate" }, { name: source_provider_data, type: "Option<SourceProviderData>" }, { name: candidate_id, type: "Option<CandidateId>" }]
+          output: "(EnrichmentStatus, bool)"
+          errors: []
+          pseudocode:
+            - "NEW shared decision helper — the single road every add outcome takes (review r1 R-002: the early existing-work returns were off-road):"
+            - "if the work is anchor-less: build WorkSeed from candidate_seed (title/author/language) and call resolver.resolve(user_id, &seed, LatencyTier::Interactive) DIRECTLY — NOT WorkService::resolve_identity, which hard-filters anchor-less seeds to Pending(NoCandidates) with zero fan-out (verified work_service.rs:911-931; review r2 R-002). The resolver itself requires only seed_has_signal and fans out per-provider via the full fetch tier chain — title/author included — which is exactly the identity surface where text tiers legally remain post-REQ-006 (verified english_identity_resolver.rs:61-110)"
+            - "resolver is the existing Option field on WorkServiceImpl (work_service.rs:73); when None (legacy back-compat composition), skip the identity leg with a warn — production composes it (#97 path)"
+            - "on Resolution::Resolved{identity}: persist via repo.merge_missing_anchors (incl. asin — the resolver's new ASIN leg) + set identity status per existing add semantics; on Unresolved/NeedsConfirmation/Conflict: existing state handling, no fuzzy adoption"
+            - "if identity permits (existing Pending/Conflict/NeedsReview gate) AND the work needs enrichment (enrichment_status is Unenriched/Failed OR source_provider_data is Some): run_unified_enrichment(user_id, work, source_provider_data, Background, candidate_id)"
+            - "else: return current status unchanged (an already-Enriched dedup match is NOT re-enriched by a plain re-add — behavior preserved)"
+          call_annotations:
+            - { call: "resolver.resolve", type: EXISTING, target: "LiveEnglishIdentityResolver (english_identity_resolver.rs:61) via the existing WorkServiceImpl.resolver field" }
+            - { call: "WorkIdentityRepository::merge_missing_anchors", type: EXISTING, target: "livrarr-db sqlite_work_identity.rs:203" }
+            - { call: "run_unified_enrichment", type: EXISTING, target: "work_service.rs:2806" }
+          postconditions:
+            - "AC-012: an add through ANY door/branch yields resolved anchors + enrichment_status != Unenriched while providers are reachable"
+          tdd_directives:
+            - "RED directive (review r2 R-002): a candidate seed with ONLY title/author/language performs resolver/provider fan-out (provider calls observed) and persists resolved anchors — proving the anchor-less path actually resolves, not just that the helper is reached"
+            - "AC-012 fixture: anchor-less GB candidate → anchors present (incl. ASIN when resolvable) + sync enrichment ran"
+            - "already-Enriched dedup re-add: no enrichment re-run, status untouched (behavior-preservation pin)"
+        - name: "WorkServiceImpl::add + finish_created_work"
+          inputs: [{ name: "(existing params)", type: "unchanged" }]
+          output: "Result<AddWorkResult, WorkServiceError>"
+          errors: ["WorkServiceError"]
+          pseudocode:
+            - "MODIFIED existing fns. finish_created_work: DELETE the gate at work_service.rs:2673 (skip_sync_enrichment && source_provider_data.is_none() → Unenriched; its premise — a background retry job — was removed in S6); call ensure_identity_and_enrichment instead"
+            - "the three existing-work return branches in add (anchor match :491-537, no-anchor adopt :541-602, normalized dedup :604+ incl. the race-loser path) keep their conflict-preflight + additive anchor merge, then call ensure_identity_and_enrichment instead of the source_provider_data-only conditional (review r1 R-002: these doors previously returned existing works untouched — an anchor-less re-add of an Unenriched work stayed Unenriched forever)"
+            - "skip_sync_enrichment field is removed from WorkCandidate (its only purpose was the dead gate; field removal kills the bypass class — insight 46 door→road)"
+          call_annotations:
+            - { call: "ensure_identity_and_enrichment", type: EXISTING, target: "livrarr-metadata (declared in this IR)" }
+            - { call: "preflight_and_merge_anchors", type: EXISTING, target: "work_service.rs (existing, unchanged)" }
+          tdd_directives:
+            - "door audit suite (one test per add outcome): existing-work anchor match, normalized no-anchor adopt, normalized dedup, created-confirmed, created-pending, race-loser — each reaches ensure_identity_and_enrichment (record/spy assertions)"
+            - "AC-012 via the adopt branch: anchor-less candidate matching an Unenriched anchor-less existing work → identity leg + sync enrichment run"
+            - "compile check: no WorkCandidate construction site carries skip_sync_enrichment (field gone)"
+        - name: "WorkServiceImpl::list"
+          inputs: [{ name: user_id, type: UserId }, { name: filter, type: WorkFilter }]
+          output: "Result<Vec<Work>, WorkServiceError>"
+          errors: ["WorkServiceError"]
+          pseudocode:
+            - "MODIFIED existing fn (work_service.rs:1052): add one retain — if filter.language is Some(lang): works.retain(w.language == lang)"
+          call_annotations:
+            - { call: "existing retains/sort", type: EXISTING, target: "work_service.rs:1069-1097" }
+          tdd_directives:
+            - "AC-017 unit slice: language=fr selects exactly the French works; combined facets intersect"
+        - name: "WorkServiceImpl::run_unified_enrichment"
+          inputs: [{ name: "(existing params)", type: "unchanged (work_service.rs:2818)" }]
+          output: "(EnrichmentStatus, bool)"
+          errors: []
+          pseudocode:
+            - "MODIFIED existing fn, step 5 (materialize) only:"
+            - "MaterializeOutcome now returns Option<SavedCover> per slot (ebook/audiobook)"
+            - "for each saved cover: db.update_cover_dimensions(user_id, work_id, w, h) — first caller of the existing writer"
+            - "user-locked covers: materialize skips network re-resolution (existing CoverTrust::User behavior) but when the stored file exists and the work's dimensions are unset, decode the stored file and persist dims — URL and trust untouched (REQ-017 trust-independent clause)"
+            - "cover fetches emit Cover-operation records at the client/http boundary"
+          call_annotations:
+            - { call: "MaterializeService::materialize", type: EXISTING, target: "livrarr-materialize lib.rs (existing trait)" }
+            - { call: "update_cover_dimensions", type: EXISTING, target: "livrarr-db sqlite_work.rs:661" }
+          tdd_directives:
+            - "AC-019: new cover row has non-NULL dims matching the file; pre-existing cover backfills on next refresh; user-locked cover gains dims with URL+trust unchanged"
+
+  # ================================================================ livrarr-handlers
+  - name: livrarr-handlers
+    responsibility: "Provider panel + truthful log section; refresh_all takes the active filters; RAII guard adoption. REQ-002/003/015/016."
+    dependencies: [livrarr-domain, livrarr-http, livrarr-matching, livrarr-jobs]
+    capability_survey:
+      - { capability: "Has* capability bounds", existing_source: "context.rs GAT pattern (HasWorkService verified: associated type + accessor)", reuse_decision: reuse, rationale: "two new traits: HasProviderStats, HasLogSurface — same shape" }
+      - { capability: "status handlers", existing_source: "system.rs status (:31-46, joins the stale livrarr.txt path — ST-007's lying surface) + health_summary (:99-191, ProviderHealthState-fed)", reuse_decision: rewrite, rationale: "status reports LogSurfaceStatus truth; health_summary's metadata_providers section feeds from 24h stats" }
+      - { capability: "bulk refresh handler", existing_source: "refresh_all (work.rs:588-665): no params, bool guard, spawn loop, finish in-task (leaks on panic)", reuse_decision: rewrite, rationale: "REQ-015 filter params + REQ-016 guard moved into the task (Drop releases on every exit incl. panic)" }
+    public_api:
+      types: []
+      functions:
+        - name: refresh_all
+          inputs: [{ name: state, type: "S: HasWorkService + HasTagService + HasNotificationService" }, { name: filter_params, type: "Query<RefreshAllParams> — language, monitored, enrichment_status, media_type, all optional" }]
+          output: "StatusCode 202 | 409"
+          errors: ["ApiError"]
+          pseudocode:
+            - "MODIFIED existing handler (work.rs:588). guard = work_service().try_start_bulk_refresh(user_id) — None → 409 (unchanged semantics for genuine concurrent runs)"
+            - "filter = WorkFilter from params (language/monitored/enrichment_status/media_type; no params = all works — AC-017 no-filter clause)"
+            - "works = work_service().list(user_id, filter) — refresh-what-I-see"
+            - "tokio::spawn(async move { _guard = guard; per-work refresh loop (existing warn-and-continue); completion notification (existing) }) — guard owned by the task: completion, error, panic unwind, and abort all release via Drop; the explicit finish calls are deleted"
+            - "return 202 immediately (unchanged)"
+          call_annotations:
+            - { call: "try_start_bulk_refresh", type: EXISTING, target: "WorkService trait (signature change declared in this IR's decisions)" }
+            - { call: "WorkService::list", type: EXISTING, target: "livrarr-metadata (declared in this IR)" }
+            - { call: "tokio::spawn", type: LIBRARY, target: "tokio" }
+          decisions:
+            - { key: "WorkService trait change", value: "try_start_bulk_refresh(&self, user_id) -> Option<BulkRefreshGuard>; finish_bulk_refresh deleted from the trait", rationale: "REQ-016: a forgettable explicit release is the leak vector; Drop is unforgettable. Guard type lives in livrarr-domain (correction 1)" }
+          tdd_directives:
+            - "AC-018: panicking refresh loop → subsequent bulk refresh accepted without restart; concurrent duplicate still 409"
+            - "AC-017: each facet + intersection scopes exactly (behavioral, via records of which works refreshed)"
+        - name: provider_stats
+          inputs: [{ name: state, type: "S: HasProviderStats" }]
+          output: "Json<Vec<ProviderStats>>"
+          errors: ["ApiError"]
+          pseudocode:
+            - "NEW handler, admin-gated like health_summary: state.provider_stats().provider_stats_24h() → Json"
+            - "providers with zero 24h records still appear (seed from the applicable-provider set) with empty stats — the panel must not hide a silent provider"
+          call_annotations:
+            - { call: "ProviderStatsService::provider_stats_24h", type: EXISTING, target: "livrarr-domain trait (declared in this IR)" }
+          tdd_directives:
+            - "AC-003: panel payload carries count/rate/median/last_error/last_success per provider"
+        - name: status
+          inputs: [{ name: state, type: "S: HasDataDir + HasStartupTime + HasSystem + HasLogSurface" }]
+          output: "Json<SystemStatus>"
+          errors: ["ApiError"]
+          pseudocode:
+            - "MODIFIED existing handler (system.rs:31): replace the hardcoded livrarr.txt join with state.log_surface(): active daily rolling path + fs::metadata(path).modified() as last-write time + init_error passthrough (loud error state)"
+          call_annotations:
+            - { call: "HasLogSurface accessor", type: EXISTING, target: "livrarr-handlers context.rs (declared in this IR)" }
+            - { call: "std::fs::metadata", type: STDLIB, target: "std::fs" }
+          tdd_directives:
+            - "AC-004: reported path is the daily rolling file; last-write advances with activity; unwritable log dir → visible error in the payload"
+
+  # ================================================================ livrarr-server
+  - name: livrarr-server
+    responsibility: "Sink impl + wiring, retention job, truthful tracing init, stats service impl, ProviderHealthState retirement, dead-guard removal, ChapterExtractor impl. REQ-001/002/003/016."
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data, livrarr-identity, livrarr-enrichment, livrarr-metadata, livrarr-download, livrarr-library, livrarr-tagwrite, livrarr-materialize, livrarr-jobs, livrarr-handlers]
+    capability_survey:
+      - { capability: "background jobs", existing_source: "JobRunner::spawn_job idiom (jobs/mod.rs:77-121): name + interval + panic-isolated tick", reuse_decision: reuse, rationale: "retention sweep registers as one more job" }
+      - { capability: "tracing init", existing_source: "init_tracing (main.rs:972-1037): silent dir-creation swallow at :1008, daily roller at :1009, stale livrarr.txt status pointer", reuse_decision: rewrite, rationale: "REQ-003: capture failure, surface on status + stderr" }
+      - { capability: "client construction", existing_source: "three ProviderClient construction blocks (main.rs ~310-385, ~490-540, ~580-600)", reuse_decision: reuse, rationale: "sink threads as one more constructor arg at all three sites" }
+      - { capability: "dead duplicate guard", existing_source: "AppState.refresh_in_progress (state.rs:142; constructed main.rs:589; zero readers — verified)", reuse_decision: rewrite, rationale: "deleted; the single guard lives behind WorkService" }
+    public_api:
+      types: []
+      functions:
+        - name: "CallSinkTask (impl ProviderCallSink for SqliteCallSink)"
+          inputs: [{ name: rec, type: ProviderCallRecord }]
+          output: "()"
+          errors: []
+          pseudocode:
+            - "record(): bounded mpsc try_send(rec); on Full: increment dropped counter (tracing warn, rate-limited) — never block (ST-010: overhead negligible)"
+            - "writer task: batch up to 64 records or 2s window → record_provider_calls(batch); on db error warn and drop batch (telemetry must never take down enrichment)"
+            - "graceful shutdown: drain channel via CancellationToken-aware select (insight 36 sleep rule)"
+          call_annotations:
+            - { call: "mpsc::channel", type: LIBRARY, target: "tokio" }
+            - { call: "record_provider_calls", type: EXISTING, target: "livrarr-db (declared in this IR)" }
+          decisions:
+            - { key: "channel bound", value: "4096", rationale: "a bulk refresh at ~6 providers x 144 works is <1k records; 4096 absorbs bursts without measurable memory" }
+          tdd_directives:
+            - "full channel: record() returns immediately, drop counter increments, no deadlock"
+        - name: retention_sweep_tick
+          inputs: [{ name: state, type: AppState }, { name: cancel, type: CancellationToken }]
+          output: "Result<(), String>"
+          errors: []
+          pseudocode:
+            - "NEW job tick registered via spawn_job('call_record_retention', 6h): evict_call_records(RetentionPolicy{30d, 100k}); log evicted count"
+          call_annotations:
+            - { call: "evict_call_records", type: EXISTING, target: "livrarr-db (declared in this IR)" }
+            - { call: "JobRunner::spawn_job", type: EXISTING, target: "livrarr-server jobs/mod.rs:77" }
+          tdd_directives:
+            - "AC-002 rides the db test; tick-level test asserts the job is registered with the runner"
+        - name: init_tracing
+          inputs: [{ name: log, type: "&LogConfig" }, { name: log_buffer, type: "Arc<LogBuffer>" }, { name: data_dir, type: "&Path" }]
+          output: "(Arc<LogLevelHandle>, LogSurfaceStatus)"
+          errors: []
+          pseudocode:
+            - "MODIFIED existing fn (main.rs:972). replace the silent dir-creation swallow at :1008 with: match create_dir_all(log_dir) — on Err(e): eprintln startup message + LogSurfaceStatus{active_path, init_error: Some(e)}; skip the file layer (console + ring buffer still work); on Ok: probe writability (open a temp append handle) so a read-only dir is caught at startup too (#102's vector)"
+            - "active_path = log_dir/livrarr.log.<today> (the tracing-appender daily naming the roller actually produces)"
+            - "LogSurfaceStatus stored on AppState; status handler reads it via the accessor-newtype pattern (compile wall, wiki insight 9f)"
+          call_annotations:
+            - { call: "std::fs::create_dir_all", type: STDLIB, target: "std::fs" }
+            - { call: "tracing_appender::rolling::daily", type: LIBRARY, target: "tracing-appender" }
+          tdd_directives:
+            - "AC-004: unwritable data dir → stderr message emitted + init_error populated + server still boots"
+      # composition changes carried as decisions (no standalone functions):
+    module_invariants:
+      - "ProviderHealthState and AppState.refresh_in_progress are deleted; health_summary's provider section reads the stats service (REQ-002 'replaces'), the guard reads WorkService. No dual sources of truth remain."
+
+  # ================================================================ livrarr-library + materialize
+  - name: livrarr-library
+    responsibility: "Chapter extraction via injected ChapterExtractor; livrarr-tagwrite removed from Cargo.toml (REQ-005 residual — the save path already conforms)."
+    dependencies: [livrarr-domain, livrarr-db, livrarr-materialize]
+    capability_survey:
+      - { capability: "import-time chapter extraction", existing_source: "import_workflow.rs:282,346,352 — the ONLY remaining tagwrite uses in the crate (verified by scan; tag writes already left in S7)", reuse_decision: wrap, rationale: "generic ChapterExtractor param replaces the direct crate call; spawn_blocking stays in the impl (insight 10)" }
+    public_api:
+      types: []
+      functions:
+        - name: "import chapter extraction call sites"
+          inputs: [{ name: extractor, type: "E: ChapterExtractor (new generic on the import workflow)" }]
+          output: "unchanged"
+          errors: []
+          pseudocode:
+            - "MODIFIED: import_workflow.rs:282 calls extractor.extract_m4b_chapters(&path) instead of livrarr_tagwrite::extract_m4b_chapters; the two error-branch matches (:346,:352) switch to the domain error type"
+            - "Cargo.toml: livrarr-tagwrite dependency line deleted (AC-006 cargo tree check)"
+          call_annotations:
+            - { call: "ChapterExtractor::extract_m4b_chapters", type: EXISTING, target: "livrarr-domain (declared in this IR)" }
+            - { call: "tokio::task::spawn_blocking", type: LIBRARY, target: "tokio" }
+          tdd_directives:
+            - "AC-006: cargo tree -p livrarr-library shows no livrarr-tagwrite; import behavioral tests (EPUB tags written via materialize, audio skipped, chapters extracted) pass unchanged"
+
+  - name: livrarr-materialize
+    responsibility: "Cover save returns stored-image dimensions (REQ-017); save surface otherwise unchanged (REQ-005's home already exists)."
+    dependencies: [livrarr-domain, livrarr-http, livrarr-tagwrite]
+    capability_survey:
+      - { capability: "cover save", existing_source: "download_cover_to_disk + cover_file_path (lib.rs, covers_dir/{work_id}.jpg pattern); MaterializeService::materialize is the existing one-save-home entry (called from run_unified_enrichment)", reuse_decision: wrap, rationale: "decode dims at the moment the bytes are written — the only place the file is guaranteed fresh" }
+    public_api:
+      types: []
+      functions:
+        - name: "LiveMaterializeService::materialize"
+          inputs: [{ name: request, type: MaterializeRequest }]
+          output: "Result<MaterializeOutcome, MaterializeError>"
+          errors: ["MaterializeError"]
+          pseudocode:
+            - "MODIFIED existing fn: after a cover slot's bytes land on disk, decode width/height from the bytes (image crate, header-only decode via image::load_from_memory dimensions — spawn_blocking, insight 10)"
+            - "MaterializeOutcome gains saved_cover / saved_audiobook_cover: Option<SavedCover{path, width, height}>"
+            - "dimension decode failure: warn + None — never fails the materialize (cover saved is better than cover rejected over a dims read)"
+          call_annotations:
+            - { call: "image::load_from_memory", type: LIBRARY, target: "image" }
+            - { call: "write_tags_batch", type: EXISTING, target: "livrarr-materialize lib.rs:192 (unchanged)" }
+            - { call: "tokio::task::spawn_blocking", type: LIBRARY, target: "tokio" }
+          tdd_directives:
+            - "saved cover returns dims matching a known fixture image; corrupt image → cover still saved, dims None"
+
+  # ================================================================ livrarr-download + matching + behavioral
+  - name: livrarr-download
+    responsibility: "Switch to the domain Release type (REQ-004); zero behavior change."
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db]
+    capability_survey:
+      - { capability: "release search result type", existing_source: "the legacy struct at livrarr-download/src/lib.rs:199 (9 primitive fields, verified) + uses in DownloadService::search and behavioral tests", reuse_decision: reuse, rationale: "field-for-field move to livrarr-domain; download imports it; AC-005 bans the old name workspace-wide" }
+    public_api:
+      types: []
+      functions:
+        - name: "type relocation (no fn changes)"
+          inputs: []
+          output: "n/a"
+          errors: []
+          pseudocode:
+            - "define Release in livrarr-domain (fields per IR v1); delete the local struct; update download + behavioral-test imports; search/grab/RSS signatures now name Release"
+          call_annotations:
+            - { call: "Release (type use)", type: EXISTING, target: "livrarr-domain (declared in this IR)" }
+          tdd_directives:
+            - "AC-005: search/grab/RSS behavioral tests pass unchanged; workspace scan finds no legacy name (contract pattern goes green)"
+
+  - name: livrarr-matching
+    responsibility: "Tier-A variant-title acceptance (REQ-020): four form classes, no new false positives."
+    dependencies: [livrarr-domain]
+    capability_survey:
+      - { capability: "title normalization for matching", existing_source: "m3_string.rs scoring + should_auto_confirm (lib.rs:121-131, cluster confidence >= High && score >= 0.90); unicode-normalization already a dep", reuse_decision: wrap, rationale: "variant folding becomes a pre-scoring normalization layer feeding the existing scorer — the 0.90 threshold and confidence logic stay untouched (false-positive guard)" }
+    public_api:
+      types: []
+      functions:
+        - name: normalize_title_variants
+          inputs: [{ name: title, type: "&str" }]
+          output: "String"
+          errors: []
+          pseudocode:
+            - "NEW normalization applied to both candidate and file-derived titles before m3 string scoring:"
+            - "strip trailing parenthetical edition markers — '(Unabridged)' and case variants"
+            - "fold ': <subtitle>, Book N' → base title (detect ', Book <digits>' tail after a colon segment)"
+            - "diacritic folding: NFKD decompose + drop combining marks (unicode-normalization)"
+            - "translated-subtitle handling: when titles differ only after the first colon, compare base segments (the variant class where subtitles are translations)"
+            - "lowercase + whitespace collapse (mirror existing normalize conventions)"
+          call_annotations:
+            - { call: "unicode_normalization::nfkd", type: LIBRARY, target: "unicode-normalization" }
+            - { call: "m3 string scorer", type: EXISTING, target: "livrarr-matching m3_string.rs" }
+          forbidden_behaviors:
+            - "loosening the should_auto_confirm threshold or cluster-confidence requirement (variant acceptance must come from normalization, not laxer scoring)"
+          tdd_directives:
+            - "AC-022: the four staging fixtures (pinned at Tests stage, one per form class) auto-match at Tier-A"
+            - "existing match suite green with zero new false positives (run full m1-m4 + reconcile suites)"
+
+  - name: livrarr-behavioral
+    responsibility: "Regression pins REQ-011/012/019 + the new suites' home (test bodies land at the Tests stage per the pipeline)."
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data, livrarr-identity, livrarr-enrichment, livrarr-metadata, livrarr-download, livrarr-library, livrarr-tagwrite, livrarr-materialize, livrarr-jobs, livrarr-handlers]
+    capability_survey:
+      - { capability: "behavioral harness", existing_source: "crates/livrarr-behavioral + tests/behavioral (stubs for every service trait, :memory: SQLite)", reuse_decision: reuse, rationale: "pins are new test cases on existing harness machinery; AC-013 (#11 case shape), AC-014 (foreign HC/OL), AC-021 (user-cover survival)" }
+    public_api:
+      types: []
+      functions:
+        - name: "regression pin suite (test cases, bodies land at the Tests stage)"
+          inputs: []
+          output: "n/a (tests)"
+          errors: []
+          pseudocode:
+            - "AC-013 pin (REQ-011): discovery query in language X for the #11 case shape (CJK title via GR autocomplete) → results carry no language stamped from the query term (lookup_goodreads sets language: None — already fixed on main, pinned here)"
+            - "AC-014 pin (REQ-012): foreign work merged with HC/OL payloads present in input → zero HC/OL-sourced field writes, asserted on BOTH the cached path (merge_from_cached) and the network path (merge)"
+            - "AC-021 pin (REQ-019): user-set cover survives single refresh AND bulk refresh byte-identically — URL unchanged, trust stays User"
+          call_annotations:
+            - { call: "behavioral harness stubs + :memory: SQLite", type: EXISTING, target: "livrarr-behavioral existing machinery" }
+          tdd_directives:
+            - "AC-013: regression test on the #11 case shape (query-language never stamped onto results)"
+            - "AC-014: both-paths assertion (cached + network) per the AC text"
+            - "AC-021: byte-identical cover row across single and bulk refresh"
+
+  # ================================================================ ui-frontend
+  - name: ui-frontend
+    responsibility: "Status page provider panel + log section; library language facet; refresh-all sends active filters. REQ-002/003/015."
+    dependencies: []
+    capability_survey:
+      - { capability: "status page sections", existing_source: "existing system-status page components (fed by /system/status + /system/health endpoints)", reuse_decision: wrap, rationale: "provider panel = table component over the new stats endpoint; log section swaps to the truthful payload fields; display-name map for provider keys (google_books → 'Google Books') lives here" }
+      - { capability: "library filters", existing_source: "existing facet controls (monitored / enrichment status / media type); list_paginated already accepts language server-side", reuse_decision: wrap, rationale: "language facet joins the existing controls; Refresh All button unchanged — its request now carries the active filter params (REQ-015, no modal)" }
+    public_api:
+      types: []
+      functions: []

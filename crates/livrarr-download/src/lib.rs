@@ -1,6 +1,7 @@
 pub mod grab_service;
 pub mod release_service;
 
+use livrarr_domain::services::Release;
 use livrarr_domain::{
     DbError, DownloadClient, DownloadClientId, Grab, GrabId, GrabStatus, QueueStatus,
     RemotePathMapping, UserId, WorkId,
@@ -118,7 +119,7 @@ pub trait DownloadService: Send + Sync {
         &self,
         user_id: UserId,
         work_id: WorkId,
-    ) -> Result<Vec<ReleaseSearchResult>, DownloadError>;
+    ) -> Result<Vec<Release>, DownloadError>;
 
     /// Grab a release. Validates, selects client, adds torrent, polls for confirmation.
     async fn grab(&self, user_id: UserId, req: GrabRequest) -> Result<GrabResult, DownloadError>;
@@ -193,19 +194,6 @@ impl Default for GrabResult {
             warning: None,
         }
     }
-}
-
-#[derive(Default)]
-pub struct ReleaseSearchResult {
-    pub title: String,
-    pub indexer: String,
-    pub size: i64,
-    pub guid: String,
-    pub download_url: String,
-    pub seeders: Option<i32>,
-    pub leechers: Option<i32>,
-    pub publish_date: Option<String>,
-    pub categories: Vec<i32>,
 }
 
 pub struct QueueResponse {

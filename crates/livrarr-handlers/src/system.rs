@@ -3,10 +3,11 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::accessors::{ProviderHealthAccessor, RssSyncAccessor, SystemAccessor};
+use crate::accessors::{LogSurfaceAccessor, RssSyncAccessor, SystemAccessor};
 use crate::context::{
     AppContext, HasAppConfigService, HasDataDir, HasDownloadClientSettingsService,
-    HasIndexerSettingsService, HasProviderHealth, HasRssSync, HasStartupTime, HasSystem,
+    HasIndexerSettingsService, HasLogSurface, HasProviderStats, HasRssSync, HasStartupTime,
+    HasSystem,
 };
 use crate::middleware::RequireAdmin;
 use crate::types::api_error::ApiError;
@@ -15,9 +16,10 @@ use crate::types::system::{
     RssSyncStatus, SystemStatus,
 };
 use livrarr_domain::services::{
-    AppConfigService, DownloadClientSettingsService, IndexerSettingsService,
+    AppConfigService, DownloadClientSettingsService, IndexerSettingsService, ProviderStats,
+    ProviderStatsService,
 };
-use livrarr_domain::HealthCheckType;
+use livrarr_domain::{HealthCheckType, MetadataProvider};
 
 pub async fn health<S: Clone + Send + Sync + 'static>(
     State(_state): State<S>,
@@ -29,18 +31,28 @@ pub async fn health<S: Clone + Send + Sync + 'static>(
     }]))
 }
 
-pub async fn status<S: HasDataDir + HasStartupTime + HasSystem>(
+pub async fn status<S: HasDataDir + HasStartupTime + HasSystem + HasLogSurface>(
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
 ) -> Result<Json<SystemStatus>, ApiError> {
     let os_info = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
-    let log_file = state.data_dir().join("logs").join("livrarr.txt");
+
+    // REQ-003: report the daily rolling file the appender actually writes —
+    // not a hardcoded name — plus its last-write time and any init failure.
+    let log_surface = state.log_surface().status();
+    let log_last_write = tokio::fs::metadata(&log_surface.active_path)
+        .await
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(chrono::DateTime::<chrono::Utc>::from);
 
     Ok(Json(SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         os_info,
         data_directory: state.data_dir().display().to_string(),
-        log_file: log_file.display().to_string(),
+        log_file: log_surface.active_path.display().to_string(),
+        log_last_write,
+        log_init_error: log_surface.init_error,
         startup_time: state.startup_time(),
         log_level: state.system().current_log_level(),
     }))
@@ -88,17 +100,69 @@ pub async fn set_log_level<S: HasSystem>(
     Ok(Json(serde_json::json!({ "level": level })))
 }
 
-const KNOWN_PROVIDERS: &[&str] = &[
-    "OpenLibrary",
-    "Hardcover",
-    "Google Books",
-    "Goodreads",
-    "Audnexus",
-    "Audible",
+/// The fetch-capable provider set shown on status panels (excludes the
+/// non-fetch `Llm`/`Readarr` sources).
+const FETCH_PROVIDERS: &[MetadataProvider] = &[
+    MetadataProvider::OpenLibrary,
+    MetadataProvider::Hardcover,
+    MetadataProvider::GoogleBooks,
+    MetadataProvider::Goodreads,
+    MetadataProvider::Audnexus,
+    MetadataProvider::Audible,
 ];
 
+fn display_name(provider: MetadataProvider) -> &'static str {
+    match provider {
+        MetadataProvider::OpenLibrary => "OpenLibrary",
+        MetadataProvider::Hardcover => "Hardcover",
+        MetadataProvider::GoogleBooks => "Google Books",
+        MetadataProvider::Goodreads => "Goodreads",
+        MetadataProvider::Audnexus => "Audnexus",
+        MetadataProvider::Audible => "Audible",
+        MetadataProvider::Llm => "LLM",
+        MetadataProvider::Readarr => "Readarr",
+    }
+}
+
+/// A provider is "in error" when its most recent 24h error is newer than its
+/// most recent success — a recovered provider reads as ok.
+pub(crate) fn current_error_of(stats: &ProviderStats) -> Option<String> {
+    let (msg, err_ts) = stats.last_error.as_ref()?;
+    match stats.last_success {
+        Some(ok_ts) if ok_ts >= *err_ts => None,
+        _ => Some(msg.clone()),
+    }
+}
+
+/// Rolling-24h per-provider call stats for the provider panel (REQ-002).
+/// Providers with zero records still appear with empty stats — the panel
+/// must not hide a silent provider.
+pub async fn provider_stats<S: HasProviderStats>(
+    State(state): State<S>,
+    RequireAdmin(_auth): RequireAdmin,
+) -> Result<Json<Vec<ProviderStats>>, ApiError> {
+    let mut stats = state.provider_stats().provider_stats_24h().await?;
+
+    for &provider in FETCH_PROVIDERS {
+        let key = provider.record_key();
+        if !stats.iter().any(|s| s.provider == key) {
+            stats.push(ProviderStats {
+                provider: key.to_string(),
+                calls_24h: 0,
+                success_rate: 0.0,
+                median_latency_ms: 0,
+                last_error: None,
+                last_success: None,
+            });
+        }
+    }
+    stats.sort_by(|a, b| a.provider.cmp(&b.provider));
+
+    Ok(Json(stats))
+}
+
 pub async fn health_summary<
-    S: HasProviderHealth
+    S: HasProviderStats
         + HasRssSync
         + HasAppConfigService
         + HasDownloadClientSettingsService
@@ -107,14 +171,18 @@ pub async fn health_summary<
     State(state): State<S>,
     RequireAdmin(_auth): RequireAdmin,
 ) -> Result<Json<HealthSummaryResponse>, ApiError> {
-    let provider_errors = state.provider_health().statuses().await;
+    // REQ-002: the provider section is record-fed from the 24h call stats.
+    let provider_stats = state.provider_stats().provider_stats_24h().await?;
 
-    let metadata_providers = KNOWN_PROVIDERS
+    let metadata_providers = FETCH_PROVIDERS
         .iter()
-        .map(|&name| {
-            let error = provider_errors.get(name).cloned();
+        .map(|&provider| {
+            let error = provider_stats
+                .iter()
+                .find(|s| s.provider == provider.record_key())
+                .and_then(current_error_of);
             ProviderStatus {
-                name: name.to_string(),
+                name: display_name(provider).to_string(),
                 status: if error.is_some() { "error" } else { "ok" },
                 last_error: error,
             }

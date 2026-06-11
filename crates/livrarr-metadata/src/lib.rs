@@ -471,6 +471,7 @@ pub mod tests {
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
+                    dissents: Vec::new(),
                 }),
                 StubEnrichmentMode::Partial => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -486,6 +487,7 @@ pub mod tests {
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
+                    dissents: Vec::new(),
                 }),
                 StubEnrichmentMode::AllFail => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -505,6 +507,7 @@ pub mod tests {
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
+                    dissents: Vec::new(),
                 }),
                 StubEnrichmentMode::NotFound => Err(EnrichmentError::WorkNotFound),
                 StubEnrichmentMode::ManualCover => Ok(EnrichmentResult {
@@ -521,6 +524,7 @@ pub mod tests {
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
+                    dissents: Vec::new(),
                 }),
                 StubEnrichmentMode::LlmFallback => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -533,6 +537,7 @@ pub mod tests {
                     provider_outcomes: std::collections::HashMap::new(),
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
+                    dissents: Vec::new(),
                 }),
             }
         }

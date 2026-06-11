@@ -6,6 +6,41 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // =============================================================================
+// TagwriteChapterExtractor — the real extraction delegate for import tests
+// (mirrors the server's ChapterExtractorImpl so import behavior is identical;
+// livrarr-library itself no longer carries a tagwrite edge — REQ-005)
+// =============================================================================
+
+pub struct TagwriteChapterExtractor;
+
+impl ChapterExtractor for TagwriteChapterExtractor {
+    fn extract_m4b_chapters(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<ChapterExtractionResult, ChapterExtractionError> {
+        match livrarr_tagwrite::extract_m4b_chapters(path) {
+            Ok(r) => Ok(ChapterExtractionResult {
+                chapters: r
+                    .chapters
+                    .into_iter()
+                    .map(|c| ExtractedChapter {
+                        title: c.title,
+                        start_time_secs: c.start_time_secs,
+                    })
+                    .collect(),
+                duration_secs: r.duration_secs,
+            }),
+            Err(livrarr_tagwrite::ChapterExtractionError::IoError(e)) => {
+                Err(ChapterExtractionError::IoError(e))
+            }
+            Err(livrarr_tagwrite::ChapterExtractionError::ParseError(e)) => {
+                Err(ChapterExtractionError::ParseError(e))
+            }
+        }
+    }
+}
+
+// =============================================================================
 // StubHttpFetcher — returns canned responses
 // =============================================================================
 

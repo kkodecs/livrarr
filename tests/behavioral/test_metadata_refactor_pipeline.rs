@@ -239,9 +239,25 @@ fn service(
 async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
     // AC-001
     let db = create_test_db().await;
-    let (user_id, add_box_work) = seed_user_and_work(&db, "add-box", "Add Box Title").await;
+    let user = db
+        .create_user(CreateUserDbRequest {
+            username: "add-box".to_string(),
+            password_hash: "hash".to_string(),
+            role: UserRole::Admin,
+            api_key_hash: "api-add-box".to_string(),
+        })
+        .await
+        .expect("test user should be created");
+    let user_id = user.id;
+    // REQ-007: anchors arrive at creation (identity capture), never from the
+    // merge — the first-created row carries the gr anchor; the add-box door's
+    // create dedups onto the same row.
     let author_page_work =
         seed_work_for_user(&db, user_id, "Add Box Title", Some("gr-refactor")).await;
+    let (add_box_work, _) = db
+        .create_work(work_req(user_id, "Add Box Title", "Contract Author"))
+        .await
+        .expect("test work should be created");
 
     let queue = StubProviderQueue::with_persisted_plans(
         db.clone(),

@@ -81,6 +81,9 @@ mod audnexus_tracer_tests {
                 author_name: "Tracer Author".to_string(),
                 author_id: None,
                 ol_key: None,
+                // REQ-006: the Audnexus dispatch derives its ASIN anchor from
+                // the work — matches the canned tracer response.
+                asin: Some("B07TRACER01".to_string()),
                 year: Some(2024),
                 cover_url: None,
                 ..Default::default()

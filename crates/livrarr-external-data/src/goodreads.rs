@@ -469,7 +469,7 @@ pub const GOODREADS_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWeb
 
 /// Failure modes from a Goodreads HTTP fetch. Callers map these onto
 /// `ProviderOutcome` (queue path) or per-call retry / fallback decisions
-/// (legacy English / foreign paths in `livrarr-server`).
+/// (identity and series surfaces).
 #[derive(Debug, Clone)]
 pub enum GoodreadsFetchError {
     /// Response body matched the anti-bot indicator heuristic.
@@ -524,11 +524,10 @@ pub fn extract_gr_key(detail_url: &str) -> Option<String> {
 /// Fetch a Goodreads HTML page. Adds the Chrome UA header, treats
 /// non-success status and anti-bot challenge pages as errors.
 ///
-/// Used by both the queue path (`GoodreadsClient` in `provider_client`) and
-/// the legacy English/foreign paths in `livrarr-server`. Pacing is the
-/// caller's responsibility — queue dispatch goes through the per-provider
-/// `TokenBucket`; legacy paths still call `state.goodreads_rate_limiter`
-/// before invoking this.
+/// Used by the queue path (`GoodreadsClient` in `provider_client`) and the
+/// identity/series surfaces. Pacing is the caller's responsibility — queue
+/// dispatch goes through the per-provider `TokenBucket`; other surfaces
+/// apply their own Goodreads rate limiting before invoking this.
 pub async fn fetch_goodreads_html(
     http: &HttpClient,
     url: &str,
@@ -651,8 +650,7 @@ struct LlmExtractionResult {
 /// (provider-agnostic OpenAI-compat).
 ///
 /// Used as a fallback inside `GoodreadsClient::fetch` when direct JSON-LD +
-/// regex parsing returns nothing useful. Lifts the legacy
-/// `enrich_foreign_work` LLM-extraction logic out of livrarr-server.
+/// regex parsing returns nothing useful.
 ///
 /// Privacy: the prompt body contains only the cleaned page HTML and a
 /// language hint. NO user-private fields (filenames, work IDs, etc.).

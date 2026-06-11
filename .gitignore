@@ -26,3 +26,16 @@ tools/
 .env
 .understand-anything/
 kash/
+
+# Internal process docs — not for public repo
+docs/metadata-lifecycle-audit-brief.md
+docs/metadata-lifecycle-audit-scout.md
+docs/metadata-lifecycle-audit-deep-passes.md
+docs/overnight-status.md
+docs/overnight-modularization-run.md
+docs/test-findings.md
+docs/design-wcc-reintegration.md
+docs/speed-baseline-*.md
+docs/manual-test-*.md
+docs/goodreads-autocomplete-validation.md
+docs/archive/

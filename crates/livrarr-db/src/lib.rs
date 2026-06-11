@@ -1,18 +1,20 @@
 use serde::Deserialize;
 
 pub use livrarr_domain::services::ProgressKind;
+pub use livrarr_domain::services::{ProviderCallRecord, ProviderStats};
 pub use livrarr_domain::settings::{
     EmailConfig, MediaManagementConfig, MetadataConfig, NamingConfig, ProwlarrConfig,
 };
 pub use livrarr_domain::{
     ApplyMergeOutcome, AudiobookChapter, Author, AuthorId, Bookmark, CrossFormatState, DbError,
     DownloadClient, DownloadClientId, DownloadClientImplementation, EnrichmentStatus, EventType,
-    ExternalIdRowId, ExternalIdType, FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent,
-    HistoryFilter, HistoryId, Import, Indexer, IndexerConfig, IndexerId, IndexerRssState, KashLink,
-    LibraryItem, LibraryItemId, LlmProvider, MediaType, MergeResolved, MetadataProvider,
-    NarrationType, NewKashLink, Notification, NotificationId, NotificationType, OutcomeClass,
-    PlaybackProgress, ProvenanceSetter, RemotePathMapping, RemotePathMappingId, RootFolder,
-    RootFolderId, Series, Session, TagStatus, User, UserId, UserRole, Work, WorkField, WorkId,
+    ExternalIdRowId, ExternalIdType, FieldDissent, FieldProvenance, Grab, GrabId, GrabStatus,
+    HistoryEvent, HistoryFilter, HistoryId, Import, Indexer, IndexerConfig, IndexerId,
+    IndexerRssState, KashLink, LibraryItem, LibraryItemId, LlmProvider, MediaType, MergeResolved,
+    MetadataProvider, NarrationType, NewKashLink, Notification, NotificationId, NotificationType,
+    OutcomeClass, PlaybackProgress, ProvenanceSetter, RemotePathMapping, RemotePathMappingId,
+    RootFolder, RootFolderId, Series, Session, TagStatus, User, UserId, UserRole, Work, WorkField,
+    WorkId,
 };
 
 pub mod pool;
@@ -26,6 +28,7 @@ mod sqlite_config;
 mod sqlite_cross_format_state;
 mod sqlite_download_client;
 mod sqlite_external_id;
+mod sqlite_field_dissents;
 mod sqlite_grab;
 mod sqlite_history;
 mod sqlite_identity_conflict;
@@ -38,6 +41,7 @@ mod sqlite_metadata_cache;
 mod sqlite_notification;
 mod sqlite_playback_progress;
 mod sqlite_provenance;
+mod sqlite_provider_calls;
 mod sqlite_provider_policy;
 mod sqlite_remote_path_mapping;
 mod sqlite_retry_state;
@@ -420,11 +424,6 @@ pub struct UpdateWorkEnrichmentDbRequest {
     pub duration_seconds: Option<i32>,
     pub publisher: Option<String>,
     pub publish_date: Option<String>,
-    pub ol_key: Option<String>,
-    pub gr_key: Option<String>,
-    pub hc_key: Option<String>,
-    pub isbn_13: Option<String>,
-    pub asin: Option<String>,
     pub narrator: Option<Vec<String>>,
     pub narration_type: Option<NarrationType>,
     pub abridged: Option<bool>,
@@ -2001,7 +2000,6 @@ pub struct ApplyEnrichmentMergeRequest {
     pub new_enrichment_status: EnrichmentStatus,
     pub provenance_upserts: Vec<SetFieldProvenanceRequest>,
     pub provenance_deletes: Vec<WorkField>,
-    pub external_id_updates: Vec<UpsertExternalIdRequest>,
 }
 
 #[trait_variant::make(Send)]
@@ -2115,4 +2113,60 @@ pub trait ExternalIdDb: Send + Sync {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<Vec<ExternalId>, DbError>;
+}
+
+// ---------------------------------------------------------------------------
+// Provider Call Records (REQ-001) + Field Dissents (REQ-014)
+// ---------------------------------------------------------------------------
+
+/// Retention bounds for the provider call-record store (REQ-001): records are
+/// evicted oldest-first once either bound is exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    pub max_age_days: u32,
+    pub max_records: u64,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self {
+            max_age_days: 30,
+            max_records: 100_000,
+        }
+    }
+}
+
+/// Persisted per-provider call records (REQ-001). System-scoped — provider
+/// telemetry carries no user data, so these queries take no user_id (deliberate
+/// exception to the tenant rule).
+#[trait_variant::make(Send)]
+pub trait ProviderCallRecordDb: Send + Sync {
+    /// Append a batch in one transaction (append-only log, no conflict target).
+    async fn record_provider_calls(&self, batch: Vec<ProviderCallRecord>) -> Result<(), DbError>;
+
+    /// Rolling-24h aggregates per provider for the status panel (REQ-002).
+    /// Median latency covers network outcomes only; skipped/cached rows are
+    /// excluded from the latency denominator.
+    async fn query_provider_stats_24h(&self) -> Result<Vec<ProviderStats>, DbError>;
+
+    /// Evict to the retention bounds, oldest first; returns rows deleted.
+    async fn evict_call_records(&self, policy: RetentionPolicy) -> Result<u64, DbError>;
+}
+
+/// Per-work field dissents (REQ-014): queryable record of excluded merge
+/// contributions. A work's new merge generation supersedes its prior rows.
+#[trait_variant::make(Send)]
+pub trait FieldDissentDb: Send + Sync {
+    async fn record_field_dissents(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        dissents: Vec<FieldDissent>,
+    ) -> Result<(), DbError>;
+
+    async fn list_field_dissents(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<FieldDissent>, DbError>;
 }

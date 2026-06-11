@@ -18,7 +18,15 @@ pub struct SystemStatus {
     pub version: String,
     pub os_info: String,
     pub data_directory: String,
+    /// The daily rolling log file the appender actually writes (REQ-003).
     pub log_file: String,
+    /// Last write time of the active log file; `None` when it doesn't exist.
+    #[serde(default)]
+    pub log_last_write: Option<DateTime<Utc>>,
+    /// Log-dir creation/write failure captured at startup — surfaced loudly
+    /// instead of swallowed (REQ-003, #102's vector).
+    #[serde(default)]
+    pub log_init_error: Option<String>,
     pub startup_time: DateTime<Utc>,
     pub log_level: String,
 }

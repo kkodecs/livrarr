@@ -109,6 +109,23 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
                 .flatten()
                 .collect();
 
+        // Identity fan-outs are otherwise forensically invisible (per-client
+        // sinks instrument the anchor-fetch surface, not this road) — log the
+        // responder shapes the quorum will arbitrate.
+        for (provider, d) in &responders {
+            tracing::debug!(
+                provider = provider.record_key(),
+                title = d.title.as_deref().unwrap_or(""),
+                has_author = d.author_name.is_some(),
+                ol = d.ol_key.is_some(),
+                gr = d.gr_key.is_some(),
+                hc = d.hc_key.is_some(),
+                isbn = d.isbn_13.is_some(),
+                asin = d.asin.is_some(),
+                "identity fan-out responder"
+            );
+        }
+
         // REQ-024: a Goodreads key the seed did NOT carry is trusted only if the
         // payload Goodreads already returned matches the resolved identity — no
         // extra network. Strip it otherwise (anti-bot / LLM-misresolved edition).
@@ -151,6 +168,22 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
         }
 
         let mut resolution = run_quorum(&responders, seed);
+
+        match &resolution {
+            Resolution::Resolved { identity, .. } => tracing::debug!(
+                ol = identity.ol_key.as_deref().unwrap_or(""),
+                gr = identity.gr_key.as_deref().unwrap_or(""),
+                hc = identity.hc_key.as_deref().unwrap_or(""),
+                isbn = identity.isbn_13.as_deref().unwrap_or(""),
+                asin = identity.asin.as_deref().unwrap_or(""),
+                "identity quorum resolved"
+            ),
+            Resolution::Conflict { .. } => tracing::debug!("identity quorum: conflict (tie)"),
+            Resolution::NeedsConfirmation { .. } => {
+                tracing::debug!("identity quorum: needs confirmation")
+            }
+            Resolution::Unresolved { .. } => tracing::debug!("identity quorum: unresolved"),
+        }
 
         // Tier-B downgrade (REQ-011): a clear quorum winner that rests on no
         // resolving hard identifier is still a guess — require confirmation rather
@@ -197,8 +230,14 @@ impl LiveEnglishIdentityResolver {
         }
 
         // Audiobook axis: an ASIN reaches Audible interactively; Audnexus is
-        // background-only (REQ-021).
-        if seed.asin.is_some() {
+        // background-only (REQ-021). REQ-010: a seed without an ASIN but with
+        // title+author still gets the leg, so add-time resolution can populate
+        // CapturedIdentity.asin when deterministically resolvable — the
+        // Audible client's own match guard and the quorum arbitrate; a fuzzy
+        // hit is never adopted as identity.
+        let audio_axis =
+            seed.asin.is_some() || (seed.title.is_some() && seed.author_name.is_some());
+        if audio_axis {
             out.push(MetadataProvider::Audible);
             if tier == LatencyTier::Background {
                 out.push(MetadataProvider::Audnexus);
@@ -395,9 +434,21 @@ fn anchor_count(d: &NormalizedWorkDetail) -> usize {
     d.ol_key.is_some() as usize + d.gr_key.is_some() as usize + d.hc_key.is_some() as usize
 }
 
-/// Two provider results agree if they returned the same work anchor of any type,
-/// or the same normalized title + a shared author token (edition variance
-/// corroborates; a genuinely different work does not — REQ-018).
+/// Two provider results agree if they returned the same work anchor of any
+/// type, or the same normalized title + a shared author token (edition
+/// variance corroborates; a genuinely different work does not — REQ-018).
+///
+/// A payload with no author ABSTAINS from the author comparison rather than
+/// vetoing it (the REQ-025 missing-data principle, #148): agreement then
+/// requires the stricter bar of exact normalized-title equality, so an
+/// authorless provider can corroborate the same title but a fuzzy variant
+/// cannot ride in on a missing field.
+///
+/// A shared edition bridge (ISBN/ASIN) corroborates ONLY in the absence of
+/// contradicting text evidence (#148): it clusters a key-only payload (e.g.
+/// an OL detail fetched by that very ISBN) with its edition-mates, but a
+/// shared ISBN carrying flatly disagreeing titles is an ISBN collision —
+/// AC-020 surfaces that as a conflict, never a silent merge.
 fn agree(a: &NormalizedWorkDetail, b: &NormalizedWorkDetail) -> bool {
     if opt_eq(&a.ol_key, &b.ol_key) || opt_eq(&a.gr_key, &b.gr_key) || opt_eq(&a.hc_key, &b.hc_key)
     {
@@ -407,7 +458,26 @@ fn agree(a: &NormalizedWorkDetail, b: &NormalizedWorkDetail) -> bool {
     let bt = b.title.as_deref().unwrap_or("");
     let aa = a.author_name.as_deref().unwrap_or("");
     let ba = b.author_name.as_deref().unwrap_or("");
-    title_matches(at, bt) && author_matches(aa, ba)
+    let sa = token_set(&aa.to_lowercase());
+    let sb = token_set(&ba.to_lowercase());
+
+    let text_agrees = if sa.is_empty() || sb.is_empty() {
+        let na = normalize_match_title(at);
+        let nb = normalize_match_title(bt);
+        !na.is_empty() && na == nb
+    } else {
+        title_matches(at, bt) && author_matches(aa, ba)
+    };
+    if text_agrees {
+        return true;
+    }
+
+    let titles_contradict = {
+        let na = normalize_match_title(at);
+        let nb = normalize_match_title(bt);
+        !na.is_empty() && !nb.is_empty() && !title_matches(at, bt)
+    };
+    (opt_eq(&a.isbn_13, &b.isbn_13) || opt_eq(&a.asin, &b.asin)) && !titles_contradict
 }
 
 fn opt_eq(a: &Option<String>, b: &Option<String>) -> bool {
@@ -566,4 +636,173 @@ fn author_matches(a: &str, b: &str) -> bool {
         return false;
     }
     sa.intersection(&sb).next().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detail(
+        title: &str,
+        author: Option<&str>,
+        ol_key: Option<&str>,
+        hc_key: Option<&str>,
+    ) -> NormalizedWorkDetail {
+        NormalizedWorkDetail {
+            title: Some(title.to_string()),
+            author_name: author.map(str::to_string),
+            ol_key: ol_key.map(str::to_string),
+            hc_key: hc_key.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn seed(title: &str, author: &str) -> WorkSeed {
+        WorkSeed {
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            isbn_13: Some("9780000000002".to_string()),
+            asin: None,
+            title: Some(title.to_string()),
+            author_name: Some(author.to_string()),
+            language: Some("en".to_string()),
+            series_name: None,
+            year: None,
+            user_confirmed: false,
+        }
+    }
+
+    // #148: an authorless provider answer (Hardcover) corroborates an
+    // identically-titled answer instead of vetoing it into a quorum tie.
+    #[test]
+    fn authorless_responder_agrees_on_exact_normalized_title() {
+        let hc = detail("Summer Knight", None, None, Some("341498"));
+        let ol = detail("Summer Knight", Some("Jim Butcher"), Some("OL123W"), None);
+        assert!(agree(&hc, &ol));
+    }
+
+    // The abstention path holds the STRICTER bar: a non-colon title variant
+    // that would pass the jaccard gate with an author present does not
+    // corroborate an authorless payload.
+    #[test]
+    fn authorless_responder_requires_exact_title_not_fuzzy() {
+        let hc = detail("Summer Knight", None, None, Some("341498"));
+        let variant = detail(
+            "Summer Knight, Book 4",
+            Some("Jim Butcher"),
+            Some("OL999W"),
+            None,
+        );
+        assert!(!agree(&hc, &variant));
+    }
+
+    #[test]
+    fn authored_responders_keep_the_author_gate() {
+        let a = detail("Hunger", Some("Knut Hamsun"), Some("OL1W"), None);
+        let b = detail("Hunger", Some("Roxane Gay"), Some("OL2W"), None);
+        assert!(!agree(&a, &b));
+    }
+
+    // The live 2026-06-11 refresh shape: OL responds key-only (no title, no
+    // author — the detail payload pre-title-fix) but shares the ISBN it was
+    // resolved from with HC/GB. Bridge equality must cluster it so the
+    // ol_key reaches the captured identity.
+    #[test]
+    fn quorum_captures_ol_key_from_keyonly_payload_via_isbn_bridge() {
+        let isbn = "9780451458926";
+        let mut responders = HashMap::new();
+        responders.insert(
+            MetadataProvider::OpenLibrary,
+            NormalizedWorkDetail {
+                ol_key: Some("OL85586W".to_string()),
+                isbn_13: Some(isbn.to_string()),
+                ..Default::default()
+            },
+        );
+        responders.insert(
+            MetadataProvider::Hardcover,
+            NormalizedWorkDetail {
+                title: Some("Summer Knight".to_string()),
+                author_name: Some("Jim Butcher".to_string()),
+                hc_key: Some("341498".to_string()),
+                isbn_13: Some(isbn.to_string()),
+                ..Default::default()
+            },
+        );
+        responders.insert(
+            MetadataProvider::GoogleBooks,
+            NormalizedWorkDetail {
+                title: Some("Summer Knight".to_string()),
+                author_name: Some("Jim Butcher".to_string()),
+                isbn_13: Some(isbn.to_string()),
+                ..Default::default()
+            },
+        );
+
+        match run_quorum(&responders, &seed("Summer Knight", "Jim Butcher")) {
+            Resolution::Resolved { identity, .. } => {
+                assert_eq!(identity.ol_key.as_deref(), Some("OL85586W"));
+                assert_eq!(identity.hc_key.as_deref(), Some("341498"));
+                assert_eq!(identity.isbn_13.as_deref(), Some(isbn));
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    // AC-020 protection survives bridge equality: a shared ISBN carrying
+    // flatly disagreeing titles is an ISBN collision — never an agreement.
+    #[test]
+    fn shared_isbn_with_contradicting_titles_does_not_agree() {
+        let a = NormalizedWorkDetail {
+            title: Some("Dune".to_string()),
+            author_name: Some("Frank Herbert".to_string()),
+            ol_key: Some("OL-DUNE".to_string()),
+            isbn_13: Some("9780441013593".to_string()),
+            ..Default::default()
+        };
+        let b = NormalizedWorkDetail {
+            title: Some("Different Book".to_string()),
+            author_name: Some("Other Author".to_string()),
+            hc_key: Some("HC-OTHER".to_string()),
+            isbn_13: Some("9780441013593".to_string()),
+            ..Default::default()
+        };
+        assert!(!agree(&a, &b));
+    }
+
+    // A bare-key payload sharing NOTHING (no title, no bridge) still cannot
+    // cluster — a lone unverifiable key never rides into the identity.
+    #[test]
+    fn keyonly_payload_without_shared_bridge_stays_unclustered() {
+        let a = NormalizedWorkDetail {
+            gr_key: Some("10266".to_string()),
+            ..Default::default()
+        };
+        let b = detail("Summer Knight", Some("Jim Butcher"), Some("OL85586W"), None);
+        assert!(!agree(&a, &b));
+    }
+
+    // The #148 shape end to end: HC (hc_key, authorless) + OL (ol_key,
+    // authored), same title — one cluster, Resolved, both anchors captured.
+    #[test]
+    fn quorum_resolves_authorless_hc_with_ol_pair() {
+        let mut responders = HashMap::new();
+        responders.insert(
+            MetadataProvider::Hardcover,
+            detail("Summer Knight", None, None, Some("341498")),
+        );
+        responders.insert(
+            MetadataProvider::OpenLibrary,
+            detail("Summer Knight", Some("Jim Butcher"), Some("OL123W"), None),
+        );
+
+        match run_quorum(&responders, &seed("Summer Knight", "Jim Butcher")) {
+            Resolution::Resolved { identity, .. } => {
+                assert_eq!(identity.ol_key.as_deref(), Some("OL123W"));
+                assert_eq!(identity.hc_key.as_deref(), Some("341498"));
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
 }

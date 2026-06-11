@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 use livrarr_db::{DownloadClientDb, IndexerDb};
 use livrarr_server::config::{AppConfig, LogFormat, LogLevel};
 use livrarr_server::router::build_router;
-use livrarr_server::state::{AppState, ProviderHealthState};
+use livrarr_server::state::AppState;
 
 /// Validate an LLM endpoint URL at startup (best-effort, non-fatal).
 fn validate_llm_endpoint_startup(endpoint: &str) -> Result<(), String> {
@@ -69,7 +69,7 @@ async fn main() {
 
     // Step 3: Initialize tracing.
     let log_buffer = Arc::new(livrarr_server::state::LogBuffer::new());
-    let log_level_handle = init_tracing(&config.log, log_buffer.clone(), &data_dir);
+    let (log_level_handle, log_surface) = init_tracing(&config.log, log_buffer.clone(), &data_dir);
 
     info!("Livrarr starting — data directory: {}", data_dir.display());
 
@@ -165,6 +165,13 @@ async fn main() {
         livrarr_http::fetcher::HttpFetcherImpl::new().expect("failed to build HTTP fetcher");
     let job_runner = livrarr_server::jobs::JobRunner::new();
 
+    // Provider call-record sink (REQ-001): bounded fire-and-forget channel +
+    // batching writer. Shares the job cancellation token; the handle is
+    // awaited after job shutdown so the final drain completes.
+    let (call_sink, call_sink_handle) =
+        livrarr_server::call_sink::spawn_call_sink(db.clone(), job_runner.cancel_token());
+    let call_sink: Arc<dyn livrarr_domain::services::ProviderCallSink> = Arc::new(call_sink);
+
     // Phase 1.5 plumbing: build the live DefaultProviderQueue + EnrichmentServiceImpl
     // from a startup-time snapshot of MetadataConfig. Live config changes (token
     // added, URL changed) require a server restart for now — runtime reload comes
@@ -246,7 +253,8 @@ async fn main() {
                     http_client.clone(),
                     cfg_snapshot.audnexus_url.clone(),
                 ),
-            ),
+            )
+            .with_call_sink(call_sink.clone()),
             queue_cfg(P::Audnexus),
         );
 
@@ -255,7 +263,8 @@ async fn main() {
             P::OpenLibrary,
             livrarr_external_data::ProviderClient::OpenLibrary(
                 livrarr_external_data::OpenLibraryClient::new(http_client.clone()),
-            ),
+            )
+            .with_call_sink(call_sink.clone()),
             queue_cfg(P::OpenLibrary),
         );
 
@@ -270,7 +279,8 @@ async fn main() {
                     http_client.clone(),
                     live_metadata_config.clone(),
                 ),
-            ),
+            )
+            .with_call_sink(call_sink.clone()),
             queue_cfg(P::Hardcover),
         );
 
@@ -280,7 +290,8 @@ async fn main() {
             .with_live_config(live_metadata_config.clone());
         builder = builder.add_provider(
             P::Goodreads,
-            livrarr_external_data::ProviderClient::Goodreads(gr_client),
+            livrarr_external_data::ProviderClient::Goodreads(gr_client)
+                .with_call_sink(call_sink.clone()),
             queue_cfg(P::Goodreads),
         );
 
@@ -292,7 +303,8 @@ async fn main() {
                     http_client.clone(),
                     live_metadata_config.clone(),
                 ),
-            ),
+            )
+            .with_call_sink(call_sink.clone()),
             queue_cfg(P::GoogleBooks),
         );
 
@@ -304,7 +316,8 @@ async fn main() {
                     http_client.clone(),
                     5 * 60,
                 ),
-            ),
+            )
+            .with_call_sink(call_sink.clone()),
             queue_cfg(P::Audible),
         );
 
@@ -320,6 +333,10 @@ async fn main() {
                 P::Goodreads | P::Audnexus | P::GoogleBooks | P::Audible
             )
         }));
+
+        // Pipeline-level skip records (no anchor / policy) flow through the
+        // queue's own sink seam (REQ-001).
+        builder = builder.with_call_sink(call_sink.clone());
 
         let db_arc = Arc::new(db.clone());
         let queue = Arc::new(builder.build(db_arc.clone()));
@@ -366,7 +383,8 @@ async fn main() {
                 llm_caller,
                 llm_configured,
             )
-            .with_transport_cache(transport_cache.clone()),
+            .with_transport_cache(transport_cache.clone())
+            .with_call_sink(call_sink.clone()),
         );
         (queue, service)
     };
@@ -375,7 +393,6 @@ async fn main() {
     let svc_enrichment = enrichment_service.clone();
     let import_semaphore = Arc::new(tokio::sync::Semaphore::new(2));
     let data_dir_arc = Arc::new(data_dir.clone());
-    let provider_health = Arc::new(ProviderHealthState::new());
     let cover_proxy_cache = Arc::new(livrarr_server::infra::cover_cache::CoverProxyCache::new());
     let rss_last_run = Arc::new(std::sync::atomic::AtomicI64::new(0));
     let rss_sync_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -391,6 +408,7 @@ async fn main() {
         svc_db.clone(),
         import_semaphore.clone(),
         data_dir_arc.clone(),
+        Arc::new(livrarr_server::chapter_extractor::ChapterExtractorImpl),
     ));
     let tag_service_arc = Arc::new(livrarr_server::tag_service::LiveTagService::new(
         import_io_arc.clone(),
@@ -488,7 +506,11 @@ async fn main() {
                 ),
             ),
         );
+        // Thread the call-record sink through every client (REQ-001).
         clients
+            .into_iter()
+            .map(|(p, c)| (p, c.with_call_sink(call_sink.clone())))
+            .collect::<std::collections::HashMap<_, _>>()
     };
     // Multi-provider identity resolver. A single instance is shared between the
     // Add-Work handler's resolve() (AppState.identity_resolver) and the search
@@ -580,13 +602,11 @@ async fn main() {
         data_dir: data_dir_arc.clone(),
         startup_time: chrono::Utc::now(),
         job_runner: Some(job_runner.clone()),
-        provider_health: provider_health.clone(),
         cover_proxy_cache: cover_proxy_cache.clone(),
         goodreads_rate_limiter: Arc::new(livrarr_server::state::GoodreadsRateLimiter::new()),
         live_metadata_config: live_metadata_config.clone(),
         log_buffer: log_buffer.clone(),
         log_level_handle: log_level_handle.clone(),
-        refresh_in_progress: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         import_semaphore: import_semaphore.clone(),
         grab_search_cache: Arc::new(livrarr_server::state::GrabSearchCache::new()),
         rss_last_run: rss_last_run.clone(),
@@ -797,9 +817,13 @@ async fn main() {
             log_buffer: log_buffer.clone(),
             log_level_handle: log_level_handle.clone(),
         },
-        provider_health_accessor: livrarr_server::state::ProviderHealthAccessorImpl(
-            provider_health.clone(),
-        ),
+        provider_stats_service: Arc::new(livrarr_server::state::LiveProviderStatsService::new(
+            svc_db.clone(),
+        )),
+        log_surface_accessor: livrarr_server::state::LogSurfaceAccessorImpl {
+            log_dir: data_dir.join("logs"),
+            init_error: log_surface.init_error.clone(),
+        },
         live_metadata_config_accessor: livrarr_server::state::LiveMetadataConfigAccessorImpl(
             live_metadata_config.clone(),
         ),
@@ -870,6 +894,11 @@ async fn main() {
                     ),
                 ),
             );
+            // Thread the call-record sink through every client (REQ-001).
+            let preadd_clients = preadd_clients
+                .into_iter()
+                .map(|(p, c)| (p, c.with_call_sink(call_sink.clone())))
+                .collect();
             Arc::new(m::preadd_cover_service::LivePreaddCoverService::new(
                 preadd_clients,
             ))
@@ -941,6 +970,9 @@ async fn main() {
     // Await job completion (cancel already signalled above).
     job_runner.shutdown().await;
 
+    // Drain the call-record sink (its writer shares the job cancel token).
+    let _ = call_sink_handle.await;
+
     livrarr_db::pool::release_pid_lock(&data_dir);
     info!("Livrarr stopped");
 }
@@ -974,7 +1006,10 @@ fn init_tracing(
     log: &livrarr_server::config::LogConfig,
     log_buffer: Arc<livrarr_server::state::LogBuffer>,
     data_dir: &std::path::Path,
-) -> Arc<livrarr_server::state::LogLevelHandle> {
+) -> (
+    Arc<livrarr_server::state::LogLevelHandle>,
+    livrarr_domain::LogSurfaceStatus,
+) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
@@ -1003,26 +1038,34 @@ fn init_tracing(
     // In-memory ring buffer for UI
     let buf_layer = LogBufferLayer(log_buffer);
 
-    // File output: {data_dir}/logs/livrarr.txt (Servarr convention)
+    // File output: {data_dir}/logs/livrarr.log.<date> (daily roller).
+    // REQ-003: a dir-creation or writability failure is captured and surfaced
+    // (stderr now, status page later) — never swallowed; the file layer is
+    // skipped so console + ring buffer keep working and the server boots.
     let log_dir = data_dir.join("logs");
-    std::fs::create_dir_all(&log_dir).ok();
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "livrarr.log");
-    let file_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = if use_json {
-        Box::new(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_target(false)
-                .with_ansi(false)
-                .with_writer(file_appender),
-        )
-    } else {
-        Box::new(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_ansi(false)
-                .with_writer(file_appender),
-        )
-    };
+    let surface = livrarr_server::log_surface::prepare_log_surface(&log_dir);
+    let file_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
+        if surface.init_error.is_none() {
+            let file_appender = tracing_appender::rolling::daily(&log_dir, "livrarr.log");
+            Some(if use_json {
+                Box::new(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_target(false)
+                        .with_ansi(false)
+                        .with_writer(file_appender),
+                )
+            } else {
+                Box::new(
+                    tracing_subscriber::fmt::layer()
+                        .with_target(false)
+                        .with_ansi(false)
+                        .with_writer(file_appender),
+                )
+            })
+        } else {
+            None
+        };
 
     tracing_subscriber::registry()
         .with(filter)
@@ -1031,10 +1074,13 @@ fn init_tracing(
         .with(buf_layer)
         .init();
 
-    Arc::new(livrarr_server::state::LogLevelHandle::new(
-        reload_handle,
-        level,
-    ))
+    (
+        Arc::new(livrarr_server::state::LogLevelHandle::new(
+            reload_handle,
+            level,
+        )),
+        surface,
+    )
 }
 
 /// Tracing layer that captures formatted log lines into a shared ring buffer.

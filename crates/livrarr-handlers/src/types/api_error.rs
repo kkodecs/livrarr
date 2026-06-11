@@ -103,6 +103,17 @@ pub enum ApiError {
 
 // --- Service error -> ApiError mappings ---
 
+impl From<livrarr_domain::services::ServiceError> for ApiError {
+    fn from(e: livrarr_domain::services::ServiceError) -> Self {
+        use livrarr_domain::services::ServiceError;
+        match e {
+            ServiceError::NotFound => ApiError::NotFound,
+            ServiceError::Db(db_err) => ApiError::Db(db_err),
+            ServiceError::Internal(msg) => ApiError::Internal(msg),
+        }
+    }
+}
+
 impl From<livrarr_domain::services::AuthorServiceError> for ApiError {
     fn from(e: livrarr_domain::services::AuthorServiceError) -> Self {
         use livrarr_domain::services::AuthorServiceError;

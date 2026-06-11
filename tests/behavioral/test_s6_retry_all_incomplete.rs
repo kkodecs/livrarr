@@ -310,10 +310,11 @@ async fn retry_all_incomplete_re_resolves_identity_pending_work() {
         summary.total, 1,
         "AC-S6-3: identity-Pending work is part of the incomplete sweep even when enrichment is already Enriched"
     );
-    assert_eq!(
-        ol.call_count(),
-        1,
-        "AC-S6-3: Pending identity must be re-resolved through the resolver"
+    assert!(
+        ol.call_count() >= 1,
+        "AC-S6-3: Pending identity must be re-resolved through the resolver \
+         (refresh now ALSO runs REQ-008 anchor completion, so the sweep may \
+         legitimately resolve more than once)"
     );
     assert_same_work_ids(workflow.work_ids(), &[pending.id]);
 

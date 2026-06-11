@@ -1,6 +1,4 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
 
 pub use crate::infra::cache::{
     cleanup_manual_import_scans, GrabSearchCache, ManualImportScanMap, ManualImportScanState,
@@ -13,7 +11,6 @@ pub use crate::infra::rate_limiter::{
 
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_http::HttpClient;
-use tokio::sync::RwLock;
 
 use crate::auth_crypto::RealAuthCrypto;
 use crate::auth_service::ServerAuthService;
@@ -127,7 +124,6 @@ pub struct AppState {
     pub data_dir: Arc<std::path::PathBuf>,
     pub startup_time: chrono::DateTime<chrono::Utc>,
     pub job_runner: Option<crate::jobs::JobRunner>,
-    pub provider_health: Arc<ProviderHealthState>,
     pub cover_proxy_cache: Arc<crate::infra::cover_cache::CoverProxyCache>,
     pub goodreads_rate_limiter: Arc<GoodreadsRateLimiter>,
     /// Shared, mutable snapshot of `MetadataConfig`. The
@@ -139,7 +135,6 @@ pub struct AppState {
     pub live_metadata_config: livrarr_external_data::live_config::LiveMetadataConfig,
     pub log_buffer: Arc<LogBuffer>,
     pub log_level_handle: Arc<LogLevelHandle>,
-    pub refresh_in_progress: Arc<std::sync::Mutex<HashSet<livrarr_db::UserId>>>,
     /// Limits concurrent imports to avoid blocking poller and exhausting I/O.
     pub import_semaphore: Arc<tokio::sync::Semaphore>,
     pub grab_search_cache: Arc<GrabSearchCache>,
@@ -193,7 +188,10 @@ pub struct AppState {
     // --- Phase 5: infrastructure accessors ---
     pub rss_sync_state: RssSyncState,
     pub system_state: SystemState,
-    pub provider_health_accessor: ProviderHealthAccessorImpl,
+    /// Record-fed provider panel stats (REQ-002).
+    pub provider_stats_service: Arc<LiveProviderStatsService>,
+    /// Truthful log surface for the status page (REQ-003).
+    pub log_surface_accessor: LogSurfaceAccessorImpl,
     pub live_metadata_config_accessor: LiveMetadataConfigAccessorImpl,
     pub cover_proxy_cache_accessor: CoverProxyCacheAccessorImpl,
     pub tag_service: Arc<crate::tag_service::LiveTagService<LiveImportIoService>>,
@@ -212,13 +210,46 @@ pub struct AppState {
 // Accessor trait impls for AppContext infrastructure
 // =============================================================================
 
-/// Wrapper for provider health status — satisfies orphan rule.
-#[derive(Clone)]
-pub struct ProviderHealthAccessorImpl(pub Arc<ProviderHealthState>);
+/// Record-fed provider stats service (REQ-002): thin delegation to the db's
+/// rolling-24h aggregate query.
+pub struct LiveProviderStatsService {
+    db: SqliteDb,
+}
 
-impl livrarr_handlers::accessors::ProviderHealthAccessor for ProviderHealthAccessorImpl {
-    async fn statuses(&self) -> HashMap<String, String> {
-        self.0.statuses().await
+impl LiveProviderStatsService {
+    pub fn new(db: SqliteDb) -> Self {
+        Self { db }
+    }
+}
+
+impl livrarr_domain::services::ProviderStatsService for LiveProviderStatsService {
+    async fn provider_stats_24h(
+        &self,
+    ) -> Result<Vec<livrarr_domain::services::ProviderStats>, livrarr_domain::services::ServiceError>
+    {
+        use livrarr_db::ProviderCallRecordDb;
+        self.db
+            .query_provider_stats_24h()
+            .await
+            .map_err(livrarr_domain::services::ServiceError::from)
+    }
+}
+
+/// Truthful log surface (REQ-003) — satisfies orphan rule. The dated path is
+/// computed at read time so the answer stays correct across midnight
+/// rollover; the init error is fixed at startup.
+#[derive(Clone)]
+pub struct LogSurfaceAccessorImpl {
+    pub log_dir: std::path::PathBuf,
+    pub init_error: Option<String>,
+}
+
+impl livrarr_handlers::accessors::LogSurfaceAccessor for LogSurfaceAccessorImpl {
+    fn status(&self) -> livrarr_domain::LogSurfaceStatus {
+        livrarr_domain::LogSurfaceStatus {
+            active_path: crate::log_surface::active_log_path(&self.log_dir),
+            init_error: self.init_error.clone(),
+        }
     }
 }
 
@@ -317,11 +348,11 @@ use livrarr_handlers::context::{
     HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService, HasHmacKey,
     HasHttpClient, HasIdentityConflictService, HasIdentityResolver, HasImportIoService,
     HasImportService, HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService,
-    HasListService, HasLiveConfig, HasManualImportScan, HasManualImportService, HasMatchingService,
-    HasNotificationService, HasPreaddCoverService, HasProviderHealth, HasQueueService,
-    HasReadarrImportWorkflow, HasReleaseService, HasRemotePathMappingService, HasRootFolderService,
-    HasRssSync, HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime,
-    HasSystem, HasTagService, HasTrustedOrigins, HasWorkService,
+    HasListService, HasLiveConfig, HasLogSurface, HasManualImportScan, HasManualImportService,
+    HasMatchingService, HasNotificationService, HasPreaddCoverService, HasProviderStats,
+    HasQueueService, HasReadarrImportWorkflow, HasReleaseService, HasRemotePathMappingService,
+    HasRootFolderService, HasRssSync, HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService,
+    HasStartupTime, HasSystem, HasTagService, HasTrustedOrigins, HasWorkService,
 };
 
 impl HasWorkService for AppState {
@@ -598,10 +629,17 @@ impl HasStartupTime for AppState {
     }
 }
 
-impl HasProviderHealth for AppState {
-    type ProviderHealth = ProviderHealthAccessorImpl;
-    fn provider_health(&self) -> &Self::ProviderHealth {
-        &self.provider_health_accessor
+impl HasProviderStats for AppState {
+    type ProviderStatsSvc = LiveProviderStatsService;
+    fn provider_stats(&self) -> &Self::ProviderStatsSvc {
+        &self.provider_stats_service
+    }
+}
+
+impl HasLogSurface for AppState {
+    type LogSurface = LogSurfaceAccessorImpl;
+    fn log_surface(&self) -> &Self::LogSurface {
+        &self.log_surface_accessor
     }
 }
 
@@ -657,60 +695,6 @@ impl HasTrustedOrigins for AppState {
     type TrustedOrigins = TrustedOriginsRebuilderImpl;
     fn trusted_origins(&self) -> &Self::TrustedOrigins {
         &self.trusted_origins_rebuilder
-    }
-}
-
-/// In-memory provider error tracking with 1-hour TTL.
-/// "Not Responding" status for providers that had HTTP/network failures.
-pub struct ProviderHealthState {
-    errors: RwLock<HashMap<String, (String, Instant)>>,
-}
-
-const ERROR_TTL_SECS: u64 = 3600; // 1 hour
-
-impl Default for ProviderHealthState {
-    fn default() -> Self {
-        Self {
-            errors: RwLock::new(HashMap::new()),
-        }
-    }
-}
-
-impl ProviderHealthState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Record a provider failure.
-    pub async fn set_error(&self, provider: &str, message: String) {
-        self.errors
-            .write()
-            .await
-            .insert(provider.to_string(), (message, Instant::now()));
-    }
-
-    /// Clear error for a provider (on successful query).
-    pub async fn clear_error(&self, provider: &str) {
-        self.errors.write().await.remove(provider);
-    }
-
-    /// Purge errors for providers not in the given set (on registry rebuild).
-    pub async fn purge_stale(&self, active_providers: &HashSet<String>) {
-        self.errors
-            .write()
-            .await
-            .retain(|k, _| active_providers.contains(k));
-    }
-
-    /// Get current error statuses, excluding expired (>1 hour) entries.
-    pub async fn statuses(&self) -> HashMap<String, String> {
-        let mut errors = self.errors.write().await;
-        let cutoff = Instant::now() - std::time::Duration::from_secs(ERROR_TTL_SECS);
-        errors.retain(|_, (_, ts)| *ts > cutoff);
-        errors
-            .iter()
-            .map(|(k, (msg, _))| (k.clone(), msg.clone()))
-            .collect()
     }
 }
 

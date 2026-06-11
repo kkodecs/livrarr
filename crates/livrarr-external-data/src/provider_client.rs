@@ -16,10 +16,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use livrarr_domain::{MetadataProvider, Work};
+use livrarr_domain::services::{
+    CallOperation, CallOutcomeClass, ProviderCallRecord, ProviderCallSink,
+};
+use livrarr_domain::{AnchorQuery, MetadataProvider, WillRetryReason, Work};
 use livrarr_http::HttpClient;
 
-use crate::audnexus::{query_audnexus, AudnexusCache};
+use crate::audnexus::{query_audnexus, query_audnexus_by_asin, AudnexusCache, AudnexusResult};
 use crate::goodreads::{self, GoodreadsDetailResult, GoodreadsFetchError, GOODREADS_BASE_URL};
 use crate::hardcover::query_hardcover;
 use crate::openlibrary::query_ol_detail;
@@ -52,6 +55,84 @@ impl ProviderClient {
         }
     }
 
+    /// Anchor-only enrichment fetch (REQ-006). Each provider accepts exactly
+    /// the spec's anchor mapping — GoogleBooks: Isbn13; Goodreads: GrKey ONLY
+    /// (the GR ISBN→LLM tier is an identity-surface capability, never an
+    /// enrichment fetch); Hardcover: HcKey or Isbn13; OpenLibrary: OlKey or
+    /// Isbn13; Audnexus/Audible: Asin. No branch falls back to text search —
+    /// those paths live only behind the lookup/identity entry points. A
+    /// (provider, query-kind) mismatch is NotFound + warn. Emits one
+    /// Enrich-operation ProviderCallRecord per call through the injected sink.
+    pub async fn fetch_by_anchor(
+        &self,
+        query: AnchorQuery,
+        language: Option<&str>,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        let provider = self.provider();
+        if !anchor_kind_accepted(provider, &query) {
+            tracing::warn!(
+                provider = provider.record_key(),
+                "fetch_by_anchor: anchor kind not accepted by this provider — \
+                 queue derivation bug; returning NotFound"
+            );
+            return ProviderOutcome::NotFound;
+        }
+        let started_at = Utc::now();
+        let t0 = std::time::Instant::now();
+        let outcome = match (self, &query) {
+            (Self::Stub(s), _) => s.fire().await,
+            (Self::Audnexus(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin).await,
+            (Self::Hardcover(h), q) => h.fetch_by_anchor_query(q).await,
+            (Self::OpenLibrary(o), q) => o.fetch_by_anchor_query(q).await,
+            (Self::Goodreads(g), AnchorQuery::GrKey(key)) => {
+                g.fetch_detail_by_key(key, language).await
+            }
+            (Self::GoogleBooks(g), AnchorQuery::Isbn13(isbn)) => g.fetch_by_isbn(isbn).await,
+            (Self::Audible(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin).await,
+            // Unreachable: the acceptance gate above filtered every other pairing.
+            _ => return ProviderOutcome::NotFound,
+        };
+        if let Some(sink) = self.sink_ref() {
+            let (class, detail) = outcome_record_class(&outcome);
+            sink.record(ProviderCallRecord {
+                provider: provider.record_key().to_string(),
+                operation: CallOperation::Enrich,
+                work_id: None,
+                started_at,
+                duration_ms: t0.elapsed().as_millis() as i64,
+                outcome: class,
+                detail,
+            });
+        }
+        outcome
+    }
+
+    fn sink_ref(&self) -> Option<&Arc<dyn ProviderCallSink>> {
+        match self {
+            Self::Stub(_) => None,
+            Self::Audnexus(a) => a.call_sink.as_ref(),
+            Self::Hardcover(h) => h.call_sink.as_ref(),
+            Self::OpenLibrary(o) => o.call_sink.as_ref(),
+            Self::Goodreads(g) => g.call_sink.as_ref(),
+            Self::GoogleBooks(g) => g.sink_ref(),
+            Self::Audible(a) => a.sink_ref(),
+        }
+    }
+
+    /// Inject the call-record sink (REQ-001) into the wrapped client.
+    /// Stub clients are test doubles and don't record.
+    pub fn with_call_sink(self, sink: Arc<dyn ProviderCallSink>) -> Self {
+        match self {
+            Self::Stub(c) => Self::Stub(c),
+            Self::Audnexus(c) => Self::Audnexus(c.with_call_sink(sink)),
+            Self::Hardcover(c) => Self::Hardcover(c.with_call_sink(sink)),
+            Self::OpenLibrary(c) => Self::OpenLibrary(c.with_call_sink(sink)),
+            Self::Goodreads(c) => Self::Goodreads(c.with_call_sink(sink)),
+            Self::GoogleBooks(c) => Self::GoogleBooks(c.with_call_sink(sink)),
+            Self::Audible(c) => Self::Audible(c.with_call_sink(sink)),
+        }
+    }
+
     pub fn provider(&self) -> MetadataProvider {
         match self {
             Self::Stub(s) => s.provider,
@@ -73,6 +154,65 @@ impl ProviderClient {
             | Self::Goodreads(_)
             | Self::GoogleBooks(_)
             | Self::Audible(_) => 0,
+        }
+    }
+}
+
+/// REQ-006 anchor mapping: which anchor kinds each provider's enrichment
+/// surface accepts. GR is GrKey ONLY (its ISBN→LLM tier is an identity-surface
+/// capability); HC/OL accept their own key or ISBN; Audnexus/Audible are
+/// ASIN-keyed; GB is ISBN-keyed. Llm/Readarr are never scatter providers.
+fn anchor_kind_accepted(provider: MetadataProvider, query: &AnchorQuery) -> bool {
+    matches!(
+        (provider, query),
+        (MetadataProvider::GoogleBooks, AnchorQuery::Isbn13(_))
+            | (MetadataProvider::Goodreads, AnchorQuery::GrKey(_))
+            | (
+                MetadataProvider::Hardcover,
+                AnchorQuery::HcKey(_) | AnchorQuery::Isbn13(_)
+            )
+            | (
+                MetadataProvider::OpenLibrary,
+                AnchorQuery::OlKey(_) | AnchorQuery::Isbn13(_)
+            )
+            | (
+                MetadataProvider::Audnexus | MetadataProvider::Audible,
+                AnchorQuery::Asin(_)
+            )
+    )
+}
+
+/// REQ-001 outcome mapping: ProviderOutcome (the control-flow vocabulary) →
+/// CallOutcomeClass (the reporting vocabulary), explicit per variant.
+/// Conflict/Suppressed never originate from a client fetch; they map to Error
+/// with a detail tag rather than a catch-all.
+fn outcome_record_class(
+    outcome: &ProviderOutcome<NormalizedWorkDetail>,
+) -> (CallOutcomeClass, Option<String>) {
+    match outcome {
+        ProviderOutcome::Success(_) => (CallOutcomeClass::Success, None),
+        ProviderOutcome::NotFound => (CallOutcomeClass::NotFound, None),
+        ProviderOutcome::NotConfigured => (
+            CallOutcomeClass::SkippedPolicy,
+            Some("not_configured".to_string()),
+        ),
+        ProviderOutcome::WillRetry { reason, .. } => match reason {
+            WillRetryReason::Timeout => (CallOutcomeClass::Timeout, None),
+            WillRetryReason::RateLimit => (CallOutcomeClass::RateLimited, None),
+            WillRetryReason::AntiBotBlock => (
+                CallOutcomeClass::RateLimited,
+                Some("anti_bot_block".to_string()),
+            ),
+            WillRetryReason::ServerError => {
+                (CallOutcomeClass::Error, Some("server_error".to_string()))
+            }
+        },
+        ProviderOutcome::PermanentFailure { reason } => {
+            (CallOutcomeClass::Error, Some(format!("{reason:?}")))
+        }
+        ProviderOutcome::Conflict { .. } => (CallOutcomeClass::Error, Some("conflict".to_string())),
+        ProviderOutcome::Suppressed { .. } => {
+            (CallOutcomeClass::Error, Some("suppressed".to_string()))
         }
     }
 }
@@ -123,7 +263,11 @@ impl StubProviderClient {
         self.call_count.load(Ordering::SeqCst)
     }
 
-    async fn fetch(&self, _work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    /// Shared scripted-call body for both fetch surfaces: counts the call,
+    /// honors the configured delay/panic, returns the scripted outcome. The
+    /// enum-level anchor-kind gate runs BEFORE this, so a mismatched
+    /// fetch_by_anchor never increments the count (AC-007).
+    async fn fire(&self) -> ProviderOutcome<NormalizedWorkDetail> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;
@@ -135,6 +279,10 @@ impl StubProviderClient {
             );
         }
         self.outcome.lock().unwrap().clone()
+    }
+
+    async fn fetch(&self, _work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+        self.fire().await
     }
 }
 
@@ -155,6 +303,8 @@ pub struct AudnexusClient {
     base_url: String,
     retry_backoff_secs: i64,
     cache: AudnexusCache,
+    #[allow(dead_code)] // read at green: REQ-001 record emission
+    call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
 impl AudnexusClient {
@@ -164,7 +314,14 @@ impl AudnexusClient {
             base_url: base_url.into(),
             retry_backoff_secs: 5 * 60,
             cache: crate::audnexus::AudnexusCache::new(),
+            call_sink: None,
         }
+    }
+
+    /// Inject the call-record sink (REQ-001).
+    pub fn with_call_sink(mut self, sink: Arc<dyn ProviderCallSink>) -> Self {
+        self.call_sink = Some(sink);
+        self
     }
 
     pub fn with_retry_backoff(mut self, secs: i64) -> Self {
@@ -184,52 +341,7 @@ impl AudnexusClient {
         .await;
 
         match result {
-            Ok(Some(audnexus)) => {
-                let narrator = if audnexus.narrators_empty {
-                    None
-                } else {
-                    Some(audnexus.narrators)
-                };
-                let mut payload = NormalizedWorkDetail {
-                    title: None,
-                    subtitle: None,
-                    original_title: None,
-                    author_name: None,
-                    description: None,
-                    year: None,
-                    series_name: None,
-                    series_position: None,
-                    genres: None,
-                    language: None,
-                    page_count: None,
-                    duration_seconds: audnexus.duration_seconds,
-                    publisher: None,
-                    publish_date: None,
-                    hc_key: None,
-                    gr_key: None,
-                    ol_key: None,
-                    isbn_13: None,
-                    asin: audnexus.asin.clone(),
-                    narrator,
-                    // Legacy parity: a non-empty narrators list implies human
-                    // narration (Audnexus doesn't expose narration_type explicitly).
-                    narration_type: if audnexus.narrators_empty {
-                        None
-                    } else {
-                        Some(livrarr_domain::NarrationType::Human)
-                    },
-                    abridged: None,
-                    rating: None,
-                    rating_count: None,
-                    cover_url: audnexus.cover_url.clone(),
-                    additional_isbns: Vec::new(),
-                    additional_asins: Vec::new(),
-                };
-                if let Some(asin) = audnexus.asin {
-                    payload.additional_asins.push(asin);
-                }
-                ProviderOutcome::Success(Box::new(payload))
-            }
+            Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
             Ok(None) => ProviderOutcome::NotFound,
             Err(_) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
@@ -237,6 +349,67 @@ impl AudnexusClient {
             },
         }
     }
+
+    /// Anchor-only fetch (REQ-006): ASIN lookup with no title/author fallback.
+    async fn fetch_by_asin(&self, asin: &str) -> ProviderOutcome<NormalizedWorkDetail> {
+        match query_audnexus_by_asin(&self.http, &self.base_url, asin, &self.cache).await {
+            Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
+            Ok(None) => ProviderOutcome::NotFound,
+            Err(_) => ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
+            },
+        }
+    }
+}
+
+/// Map a parsed Audnexus hit onto the normalized payload shape (shared by the
+/// work-seeded and anchor-only fetch surfaces).
+fn audnexus_payload(audnexus: AudnexusResult) -> NormalizedWorkDetail {
+    let narrator = if audnexus.narrators_empty {
+        None
+    } else {
+        Some(audnexus.narrators)
+    };
+    let mut payload = NormalizedWorkDetail {
+        title: None,
+        subtitle: None,
+        original_title: None,
+        author_name: None,
+        description: None,
+        year: None,
+        series_name: None,
+        series_position: None,
+        genres: None,
+        language: None,
+        page_count: None,
+        duration_seconds: audnexus.duration_seconds,
+        publisher: None,
+        publish_date: None,
+        hc_key: None,
+        gr_key: None,
+        ol_key: None,
+        isbn_13: None,
+        asin: audnexus.asin.clone(),
+        narrator,
+        // Legacy parity: a non-empty narrators list implies human
+        // narration (Audnexus doesn't expose narration_type explicitly).
+        narration_type: if audnexus.narrators_empty {
+            None
+        } else {
+            Some(livrarr_domain::NarrationType::Human)
+        },
+        abridged: None,
+        rating: None,
+        rating_count: None,
+        cover_url: audnexus.cover_url.clone(),
+        additional_isbns: Vec::new(),
+        additional_asins: Vec::new(),
+    };
+    if let Some(asin) = audnexus.asin {
+        payload.additional_asins.push(asin);
+    }
+    payload
 }
 
 /// Real-network Hardcover adapter. Wraps `crate::hardcover::query_hardcover`
@@ -255,6 +428,8 @@ pub struct HardcoverClient {
     /// Also exposes `llm_*` fields for the inner llm_disambiguate fallback.
     live_config: crate::live_config::LiveMetadataConfig,
     retry_backoff_secs: i64,
+    #[allow(dead_code)] // read at green: REQ-001 record emission
+    call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
 impl HardcoverClient {
@@ -263,12 +438,76 @@ impl HardcoverClient {
             http,
             live_config,
             retry_backoff_secs: 5 * 60,
+            call_sink: None,
         }
+    }
+
+    /// Inject the call-record sink (REQ-001).
+    pub fn with_call_sink(mut self, sink: Arc<dyn ProviderCallSink>) -> Self {
+        self.call_sink = Some(sink);
+        self
     }
 
     pub fn with_retry_backoff(mut self, secs: i64) -> Self {
         self.retry_backoff_secs = secs;
         self
+    }
+
+    /// Anchor-only fetch (REQ-006). ISBN is the working anchor tier; no
+    /// by-hc_key detail query exists in the current Hardcover integration, so
+    /// the HcKey arm is a recorded gap that reports NotFound rather than
+    /// falling back to text search.
+    async fn fetch_by_anchor_query(
+        &self,
+        query: &AnchorQuery,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        let cfg = self.live_config.snapshot();
+        if !cfg.hardcover_enabled {
+            return ProviderOutcome::NotConfigured;
+        }
+        let token = match cfg
+            .hardcover_api_token
+            .as_deref()
+            .map(|t| {
+                t.trim()
+                    .trim_start_matches("Bearer ")
+                    .trim_start_matches("bearer ")
+            })
+            .filter(|t| !t.is_empty())
+        {
+            Some(t) => t.to_string(),
+            None => return ProviderOutcome::NotConfigured,
+        };
+        match query {
+            AnchorQuery::Isbn13(isbn) => {
+                let normalized = livrarr_domain::normalize_isbn(isbn);
+                match crate::hardcover::query_hardcover_by_isbn(
+                    &self.http,
+                    &normalized,
+                    &token,
+                    cfg.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(hc)) => self.build_success(hc, &token).await,
+                    Ok(None) => ProviderOutcome::NotFound,
+                    Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
+                        reason: livrarr_domain::WillRetryReason::ServerError,
+                        next_attempt_at: Utc::now()
+                            + chrono::Duration::seconds(self.retry_backoff_secs),
+                    },
+                    Err(_) => ProviderOutcome::NotFound,
+                }
+            }
+            AnchorQuery::HcKey(key) => {
+                tracing::warn!(
+                    hc_key = %key,
+                    "Hardcover by-key enrichment fetch has no existing query path — NotFound"
+                );
+                ProviderOutcome::NotFound
+            }
+            _ => ProviderOutcome::NotFound,
+        }
     }
 
     async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
@@ -368,7 +607,7 @@ impl HardcoverClient {
             title: hc.title,
             subtitle: hc.subtitle,
             original_title: hc.original_title,
-            author_name: None,
+            author_name: hc.author_name,
             description: hc.description,
             year,
             series_name: hc.series_name,
@@ -405,6 +644,8 @@ impl HardcoverClient {
 pub struct OpenLibraryClient {
     http: HttpClient,
     retry_backoff_secs: i64,
+    #[allow(dead_code)] // read at green: REQ-001 record emission
+    call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
 impl OpenLibraryClient {
@@ -412,12 +653,57 @@ impl OpenLibraryClient {
         Self {
             http,
             retry_backoff_secs: 5 * 60,
+            call_sink: None,
         }
+    }
+
+    /// Inject the call-record sink (REQ-001).
+    pub fn with_call_sink(mut self, sink: Arc<dyn ProviderCallSink>) -> Self {
+        self.call_sink = Some(sink);
+        self
     }
 
     pub fn with_retry_backoff(mut self, secs: i64) -> Self {
         self.retry_backoff_secs = secs;
         self
+    }
+
+    /// Anchor-only fetch (REQ-006): ol_key direct detail, or ISBN resolved to
+    /// an OL work key first; no title/author fallback on this surface.
+    async fn fetch_by_anchor_query(
+        &self,
+        query: &AnchorQuery,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        match query {
+            AnchorQuery::OlKey(key) => self.detail_by_key(key).await,
+            AnchorQuery::Isbn13(isbn) => {
+                let normalized = livrarr_domain::normalize_isbn(isbn);
+                match self.isbn_lookup(&normalized).await {
+                    Ok(Some(ol_work_key)) => self.detail_by_key(&ol_work_key).await,
+                    Ok(None) => ProviderOutcome::NotFound,
+                    Err(_) => ProviderOutcome::WillRetry {
+                        reason: livrarr_domain::WillRetryReason::ServerError,
+                        next_attempt_at: Utc::now()
+                            + chrono::Duration::seconds(self.retry_backoff_secs),
+                    },
+                }
+            }
+            _ => ProviderOutcome::NotFound,
+        }
+    }
+
+    /// OL detail fetch by work key. `query_ol_detail`'s error is an opaque
+    /// string (parse and transport are indistinguishable), so a miss maps to
+    /// NotFound — mirroring the seeded fetch's tier behavior, never a text
+    /// search.
+    async fn detail_by_key(&self, ol_key: &str) -> ProviderOutcome<NormalizedWorkDetail> {
+        match query_ol_detail(&self.http, ol_key).await {
+            Ok(detail) => ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail))),
+            Err(e) => {
+                tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail miss");
+                ProviderOutcome::NotFound
+            }
+        }
     }
 
     async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
@@ -476,6 +762,7 @@ impl OpenLibraryClient {
             .cover_id
             .map(|id| format!("https://covers.openlibrary.org/b/id/{id}-L.jpg"));
         NormalizedWorkDetail {
+            title: detail.title,
             description: detail.description,
             ol_key: Some(ol_key.to_string()),
             isbn_13: detail.isbn_13,
@@ -590,6 +877,23 @@ impl OpenLibraryClient {
     }
 }
 
+/// GR-sourced candidate text (a search/autocomplete hit's title + author) —
+/// the only text allowed to vouch for a freshly resolved gr_key when the
+/// detail page won't parse (#148). Never the work's own title: a
+/// hallucinated key must not self-verify.
+#[derive(Debug, Clone)]
+struct GrCandidateText {
+    title: String,
+    author: Option<String>,
+}
+
+/// A resolved GR detail target plus the candidate text that chose it
+/// (absent on the established-key and LLM-direct tiers).
+struct ResolvedGrDetail {
+    url: String,
+    candidate: Option<GrCandidateText>,
+}
+
 /// Real-network Goodreads adapter. Wraps the lifted
 /// `crate::goodreads::{search_goodreads, fetch_goodreads_detail}`
 /// helpers and maps their errors onto `ProviderOutcome<NormalizedWorkDetail>`.
@@ -628,6 +932,8 @@ pub struct GoodreadsClient {
     /// configured. None means the client wasn't given a live-config handle
     /// (test / smoke-test path); LLM fallback disabled.
     live_config: Option<crate::live_config::LiveMetadataConfig>,
+    #[allow(dead_code)] // read at green: REQ-001 record emission
+    call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
 impl GoodreadsClient {
@@ -637,7 +943,14 @@ impl GoodreadsClient {
             base_url: base_url.into(),
             retry_backoff_secs: 5 * 60,
             live_config: None,
+            call_sink: None,
         }
+    }
+
+    /// Inject the call-record sink (REQ-001).
+    pub fn with_call_sink(mut self, sink: Arc<dyn ProviderCallSink>) -> Self {
+        self.call_sink = Some(sink);
+        self
     }
 
     pub fn with_retry_backoff(mut self, secs: i64) -> Self {
@@ -654,15 +967,100 @@ impl GoodreadsClient {
         self
     }
 
+    /// Anchor-only fetch (REQ-006): detail page by gr_key — the only GR
+    /// enrichment surface (autocomplete/detail-by-key endpoints, ST-012). The
+    /// search/disambiguation tiers live behind the identity entry points,
+    /// never here.
+    async fn fetch_detail_by_key(
+        &self,
+        gr_key: &str,
+        language: Option<&str>,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        let detail_url = goodreads::detail_url_for_gr_key(&self.base_url, gr_key);
+        let html = match goodreads::fetch_goodreads_html(&self.http, &detail_url).await {
+            Ok(h) => h,
+            Err(err) => return self.map_fetch_err(err),
+        };
+        if let Some(detail) = goodreads::parse_detail_html(&html) {
+            return ProviderOutcome::Success(Box::new(self.normalize(&detail_url, detail)));
+        }
+        if let Some(res) = self.llm_extract_payload(&html, language, &detail_url).await {
+            return match res {
+                Ok(mut payload) => {
+                    if payload.gr_key.is_none() {
+                        payload.gr_key = Some(gr_key.to_string());
+                    }
+                    ProviderOutcome::Success(Box::new(payload))
+                }
+                Err(err) => self.map_fetch_err(err),
+            };
+        }
+        ProviderOutcome::NotFound
+    }
+
+    /// LLM extraction fallback for a fetched detail page (foreign-language
+    /// HTML where JSON-LD/regex parsing misses). Returns None when the LLM is
+    /// not configured or its extraction also parses nothing — callers fall
+    /// through; Some(Err) carries fetch-class errors.
+    async fn llm_extract_payload(
+        &self,
+        html: &str,
+        language: Option<&str>,
+        detail_url: &str,
+    ) -> Option<Result<NormalizedWorkDetail, GoodreadsFetchError>> {
+        let live = self.live_config.as_ref()?;
+        let cfg = live.snapshot();
+        if !cfg.llm_enabled {
+            return None;
+        }
+        let key = cfg
+            .llm_api_key
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())?;
+        let endpoint = cfg
+            .llm_endpoint
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())?;
+        let model = cfg
+            .llm_model
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("gemini-3.1-flash-lite-preview");
+        let language_hint = language
+            .and_then(crate::language::get_language_info)
+            .map(|info| info.english_name)
+            .unwrap_or("the original");
+        match goodreads::extract_with_llm(
+            &self.http,
+            endpoint,
+            key,
+            model,
+            html,
+            language_hint,
+            detail_url,
+        )
+        .await
+        {
+            Ok(payload) => Some(Ok(payload)),
+            Err(GoodreadsFetchError::Parse) => None,
+            Err(err) => Some(Err(err)),
+        }
+    }
+
     async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
         let had_gr_key = work.gr_key.as_deref().is_some_and(|k| !k.is_empty());
-        let detail_url = match self.resolve_detail_url(work).await {
-            Ok(Some(url)) => url,
+        let resolved = match self.resolve_detail_url(work).await {
+            Ok(Some(resolved)) => resolved,
             Ok(None) => return ProviderOutcome::NotFound,
             Err(err) => return self.map_fetch_err(err),
         };
+        let detail_url = resolved.url;
 
-        // Extract gr_key from the resolved URL so we can persist it even if page fetch fails.
+        // Extract gr_key from the resolved URL so the key survives a page
+        // fetch/parse failure.
         let resolved_gr_key = goodreads::extract_gr_key(&detail_url);
 
         // Direct parse path. On Parse failure, optionally fall through to
@@ -671,15 +1069,17 @@ impl GoodreadsClient {
         let html = match goodreads::fetch_goodreads_html(&self.http, &detail_url).await {
             Ok(h) => h,
             Err(err) => {
-                // Page fetch failed, but if we resolved a new gr_key via LLM,
-                // return a minimal Success so the merge engine persists the key.
                 if !had_gr_key {
-                    if let Some(ref key) = resolved_gr_key {
-                        tracing::info!(gr_key = %key, "GR page fetch failed but persisting LLM-resolved key");
-                        return ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
-                            gr_key: Some(key.clone()),
-                            ..Default::default()
-                        }));
+                    if let Some(payload) = self
+                        .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
+                        .await
+                    {
+                        tracing::info!(
+                            gr_key = payload.gr_key.as_deref().unwrap_or(""),
+                            verified = payload.title.is_some(),
+                            "GR page fetch failed; returning key payload"
+                        );
+                        return ProviderOutcome::Success(Box::new(payload));
                     }
                 }
                 return self.map_fetch_err(err);
@@ -692,72 +1092,99 @@ impl GoodreadsClient {
 
         // Direct parse yielded nothing. Try LLM extraction when live config
         // has LLM enabled + key + endpoint set.
-        if let Some(live) = &self.live_config {
-            let cfg = live.snapshot();
-            let key = cfg
-                .llm_api_key
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
-            let endpoint = cfg
-                .llm_endpoint
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
-            if let (true, Some(endpoint), Some(key)) = (cfg.llm_enabled, endpoint, key) {
-                let model = cfg
-                    .llm_model
-                    .as_deref()
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("gemini-3.1-flash-lite-preview");
-                let language_hint = work
-                    .language
-                    .as_deref()
-                    .and_then(crate::language::get_language_info)
-                    .map(|info| info.english_name)
-                    .unwrap_or("the original");
-                match goodreads::extract_with_llm(
-                    &self.http,
-                    endpoint,
-                    key,
-                    model,
-                    &html,
-                    language_hint,
-                    &detail_url,
-                )
-                .await
-                {
-                    Ok(mut payload) => {
-                        if payload.gr_key.is_none() {
-                            payload.gr_key = resolved_gr_key;
-                        }
-                        return ProviderOutcome::Success(Box::new(payload));
+        if let Some(res) = self
+            .llm_extract_payload(&html, work.language.as_deref(), &detail_url)
+            .await
+        {
+            match res {
+                Ok(mut payload) => {
+                    if payload.gr_key.is_none() {
+                        payload.gr_key = resolved_gr_key;
                     }
-                    Err(GoodreadsFetchError::Parse) => {}
-                    Err(err) => return self.map_fetch_err(err),
+                    return ProviderOutcome::Success(Box::new(payload));
                 }
+                Err(err) => return self.map_fetch_err(err),
             }
         }
 
-        // All parse paths failed. If we have a new LLM-resolved key, persist it.
+        // All parse paths failed; fall back to a key payload carrying
+        // whatever GR-sourced candidate text can vouch for the key.
         if !had_gr_key {
-            if let Some(ref key) = resolved_gr_key {
-                tracing::info!(gr_key = %key, "GR parse failed but persisting LLM-resolved key");
-                return ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
-                    gr_key: Some(key.clone()),
-                    ..Default::default()
-                }));
+            if let Some(payload) = self
+                .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
+                .await
+            {
+                tracing::info!(
+                    gr_key = payload.gr_key.as_deref().unwrap_or(""),
+                    verified = payload.title.is_some(),
+                    "GR parse failed; returning key payload"
+                );
+                return ProviderOutcome::Success(Box::new(payload));
             }
         }
 
         ProviderOutcome::NotFound
     }
 
-    async fn resolve_detail_url(&self, work: &Work) -> Result<Option<String>, GoodreadsFetchError> {
-        // 1. work.gr_key — canonical GR identity.
+    /// Build the parse-failure fallback payload for a freshly resolved key.
+    ///
+    /// A bare key is unverifiable (REQ-024 strips it on the identity surface
+    /// and the quorum can't cluster a text-less payload — #148), so the
+    /// payload carries GR-SOURCED candidate text: the search hit that chose
+    /// the key when one exists, else one autocomplete lookup confirming the
+    /// key (LLM-direct keys arrive with no GR data at all). The work's own
+    /// title is never stamped — a hallucinated key must not self-verify.
+    async fn fallback_key_payload(
+        &self,
+        work: &Work,
+        resolved_gr_key: &Option<String>,
+        candidate: &Option<GrCandidateText>,
+    ) -> Option<NormalizedWorkDetail> {
+        let key = resolved_gr_key.as_ref()?;
+
+        let confirmed = match candidate {
+            Some(c) => Some(c.clone()),
+            None => self.confirm_key_via_search(work, key).await,
+        };
+
+        let (title, author_name) = match confirmed {
+            Some(c) => (Some(c.title), c.author),
+            None => (None, None),
+        };
+        Some(NormalizedWorkDetail {
+            title,
+            author_name,
+            gr_key: Some(key.clone()),
+            ..Default::default()
+        })
+    }
+
+    /// One search round-trip to vouch for an LLM-direct key: returns the
+    /// matching hit's text only when the hit's own gr_key equals the key.
+    async fn confirm_key_via_search(&self, work: &Work, key: &str) -> Option<GrCandidateText> {
+        let hits =
+            goodreads::search_goodreads(&self.http, &self.base_url, &work.title, &work.author_name)
+                .await
+                .ok()?;
+        hits.iter()
+            .find(|h| goodreads::extract_gr_key(&h.detail_url).as_deref() == Some(key))
+            .map(|h| GrCandidateText {
+                title: h.title.clone(),
+                author: h.author.clone(),
+            })
+    }
+
+    async fn resolve_detail_url(
+        &self,
+        work: &Work,
+    ) -> Result<Option<ResolvedGrDetail>, GoodreadsFetchError> {
+        // 1. work.gr_key — canonical GR identity. No candidate text: the key
+        // is already established, nothing needs vouching.
         if let Some(key) = work.gr_key.as_deref().filter(|k| !k.is_empty()) {
-            return Ok(Some(goodreads::detail_url_for_gr_key(&self.base_url, key)));
+            return Ok(Some(ResolvedGrDetail {
+                url: goodreads::detail_url_for_gr_key(&self.base_url, key),
+                candidate: None,
+            }));
         }
 
         // 2. ISBN search — exact match via isbn: prefix query.
@@ -779,10 +1206,16 @@ impl GoodreadsClient {
                         {
                             Ok(Some(idx)) => {
                                 tracing::info!(isbn = %normalized, chosen_idx = idx, "LLM selected GR ISBN result");
-                                return Ok(Some(goodreads::resolve_detail_url(
-                                    &self.base_url,
-                                    &hits[idx].detail_url,
-                                )));
+                                return Ok(Some(ResolvedGrDetail {
+                                    url: goodreads::resolve_detail_url(
+                                        &self.base_url,
+                                        &hits[idx].detail_url,
+                                    ),
+                                    candidate: Some(GrCandidateText {
+                                        title: hits[idx].title.clone(),
+                                        author: hits[idx].author.clone(),
+                                    }),
+                                }));
                             }
                             Ok(None) => {
                                 tracing::debug!(isbn = %normalized, "LLM declined all GR ISBN candidates");
@@ -805,24 +1238,11 @@ impl GoodreadsClient {
         let title = &work.title;
         let author = &work.author_name;
 
-        // 3. Ask LLM for the GR key directly — fast, no scraping.
-        if let Some(live) = &self.live_config {
-            let cfg = live.snapshot();
-            match gr_llm_key_lookup(&self.http, cfg.as_ref(), title, author).await {
-                Ok(Some(key)) => {
-                    tracing::info!(title = %title, gr_key = %key, "LLM resolved GR key directly");
-                    return Ok(Some(goodreads::detail_url_for_gr_key(&self.base_url, &key)));
-                }
-                Ok(None) => {
-                    tracing::debug!(title = %title, "LLM returned no GR key");
-                }
-                Err(e) => {
-                    tracing::debug!(title = %title, error = %e, "LLM GR key lookup unavailable");
-                }
-            }
-        }
-
-        // 4. Fallback: search GR by title+author + LLM disambiguation.
+        // 3. Search GR by title+author (autocomplete — GR's own data) + LLM
+        // disambiguation among the REAL hits. Runs before any LLM-recalled
+        // key: a key chosen from live hits cannot be a hallucination, and it
+        // arrives with candidate text that can vouch for it (#148; PO
+        // decision 2026-06-11 after a live LLM-direct key proved wrong).
         let mut hits =
             goodreads::search_goodreads(&self.http, &self.base_url, title, author).await?;
 
@@ -835,25 +1255,51 @@ impl GoodreadsClient {
             }
         }
 
-        if hits.is_empty() {
-            return Ok(None);
+        if !hits.is_empty() {
+            if let Some(live) = &self.live_config {
+                let cfg = live.snapshot();
+                match gr_llm_disambiguate(&self.http, cfg.as_ref(), title, author, &hits).await {
+                    Ok(Some(idx)) => {
+                        tracing::info!(title = %title, chosen_idx = idx, "LLM selected GR search result");
+                        return Ok(Some(ResolvedGrDetail {
+                            url: goodreads::resolve_detail_url(
+                                &self.base_url,
+                                &hits[idx].detail_url,
+                            ),
+                            candidate: Some(GrCandidateText {
+                                title: hits[idx].title.clone(),
+                                author: hits[idx].author.clone(),
+                            }),
+                        }));
+                    }
+                    Ok(None) => {
+                        tracing::debug!(title = %title, "LLM declined all GR candidates");
+                    }
+                    Err(e) => {
+                        tracing::debug!(title = %title, error = %e, "GR LLM disambiguation unavailable");
+                    }
+                }
+            }
         }
 
+        // 4. Last resort: ask the LLM to recall the GR key from its own
+        // knowledge — hallucination-prone, so the downstream quarantine
+        // (confirm-or-drop, REQ-024) is what makes this safe to keep.
         if let Some(live) = &self.live_config {
             let cfg = live.snapshot();
-            match gr_llm_disambiguate(&self.http, cfg.as_ref(), title, author, &hits).await {
-                Ok(Some(idx)) => {
-                    tracing::info!(title = %title, chosen_idx = idx, "LLM selected GR search result");
-                    return Ok(Some(goodreads::resolve_detail_url(
-                        &self.base_url,
-                        &hits[idx].detail_url,
-                    )));
+            match gr_llm_key_lookup(&self.http, cfg.as_ref(), title, author).await {
+                Ok(Some(key)) => {
+                    tracing::info!(title = %title, gr_key = %key, "LLM resolved GR key directly (unconfirmed)");
+                    return Ok(Some(ResolvedGrDetail {
+                        url: goodreads::detail_url_for_gr_key(&self.base_url, &key),
+                        candidate: None,
+                    }));
                 }
                 Ok(None) => {
-                    tracing::debug!(title = %title, "LLM declined all GR candidates");
+                    tracing::debug!(title = %title, "LLM returned no GR key");
                 }
                 Err(e) => {
-                    tracing::debug!(title = %title, error = %e, "GR LLM disambiguation unavailable");
+                    tracing::debug!(title = %title, error = %e, "LLM GR key lookup unavailable");
                 }
             }
         }

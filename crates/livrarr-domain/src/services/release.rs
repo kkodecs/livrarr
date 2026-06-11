@@ -61,6 +61,22 @@ pub struct GrabRequest {
     pub source: GrabSource,
 }
 
+/// An indexer search result eligible for grabbing — the canonical entity
+/// (spine: Release). Relocated field-for-field from livrarr-download
+/// (REQ-004); search/grab/RSS behavior unchanged.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Release {
+    pub title: String,
+    pub indexer: String,
+    pub size: i64,
+    pub guid: String,
+    pub download_url: String,
+    pub seeders: Option<i32>,
+    pub leechers: Option<i32>,
+    pub publish_date: Option<String>,
+    pub categories: Vec<i32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrabSource {

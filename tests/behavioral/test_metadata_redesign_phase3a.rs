@@ -177,6 +177,7 @@ impl EnrichmentWorkflow for RecordingEnrichment {
             audiobook_cover_resolution: None,
             identity_not_found: false,
             changed: true,
+            dissents: Vec::new(),
         })
     }
 

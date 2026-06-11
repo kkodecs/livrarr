@@ -459,11 +459,17 @@ pub async fn scan<S: ManualImportHandlerContext>(
         .map(|&i| {
             let parsed = parsed_files.get(i).and_then(|p| p.as_ref());
             parsed.and_then(|p| {
+                // Embedded identifiers give an exact key match (#149/#151):
+                // a junk-titled file still matches its ISBN-anchored work.
                 livrarr_matching::work_dedup::find_matching_work(
                     &existing_works,
                     &p.title,
                     &p.author,
-                    &Default::default(),
+                    &livrarr_matching::work_dedup::ProviderKeys {
+                        isbn_13: p.isbn.as_deref(),
+                        asin: p.asin.as_deref(),
+                        ..Default::default()
+                    },
                 )
                 .map(|w| w.id)
             })
@@ -1116,7 +1122,6 @@ async fn find_or_create_work<
         provenance_setter: None,
         import_id: None,
         cover_manual: false,
-        skip_sync_enrichment: false,
     };
 
     match state.work_service().add(user_id, candidate).await {

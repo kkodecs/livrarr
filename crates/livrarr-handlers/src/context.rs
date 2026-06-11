@@ -4,14 +4,15 @@ use livrarr_domain::services::{
     EnrichmentWorkflow, FileService, GrabService, HistoryService, IdentityConflictService,
     IdentityResolver, ImportIoService, ImportService, ImportWorkflow, IndexerCredentialService,
     IndexerSettingsService, ListService, ManualImportService, MatchingService, NotificationService,
-    QueueService, ReadarrImportWorkflow, ReleaseService, RemotePathMappingService,
-    RootFolderService, RssSyncWorkflow, SeriesQueryService, SeriesService, TagService, WorkService,
+    ProviderStatsService, QueueService, ReadarrImportWorkflow, ReleaseService,
+    RemotePathMappingService, RootFolderService, RssSyncWorkflow, SeriesQueryService,
+    SeriesService, TagService, WorkService,
 };
 use livrarr_http::HttpClient;
 
 use crate::accessors::{
-    CoverProxyCacheAccessor, LiveMetadataConfigAccessor, ManualImportScanAccessor,
-    ProviderHealthAccessor, RssSyncAccessor, SystemAccessor,
+    CoverProxyCacheAccessor, LiveMetadataConfigAccessor, LogSurfaceAccessor,
+    ManualImportScanAccessor, RssSyncAccessor, SystemAccessor,
 };
 use crate::types::auth::AuthService as AuthServiceTrait;
 
@@ -216,9 +217,17 @@ pub trait HasStartupTime: Clone + Send + Sync + 'static {
     fn startup_time(&self) -> chrono::DateTime<chrono::Utc>;
 }
 
-pub trait HasProviderHealth: Clone + Send + Sync + 'static {
-    type ProviderHealth: ProviderHealthAccessor + Send + Sync + 'static;
-    fn provider_health(&self) -> &Self::ProviderHealth;
+/// Record-fed provider panel stats (REQ-002, replaces the ok/error-only
+/// provider health view).
+pub trait HasProviderStats: Clone + Send + Sync + 'static {
+    type ProviderStatsSvc: ProviderStatsService + Send + Sync + 'static;
+    fn provider_stats(&self) -> &Self::ProviderStatsSvc;
+}
+
+/// Truthful log surface for the status page (REQ-003).
+pub trait HasLogSurface: Clone + Send + Sync + 'static {
+    type LogSurface: LogSurfaceAccessor + Send + Sync + 'static;
+    fn log_surface(&self) -> &Self::LogSurface;
 }
 
 pub trait HasLiveConfig: Clone + Send + Sync + 'static {
@@ -304,7 +313,8 @@ pub trait AppContext:
     + HasHttpClient
     + HasDataDir
     + HasStartupTime
-    + HasProviderHealth
+    + HasProviderStats
+    + HasLogSurface
     + HasLiveConfig
     + HasRssSync
     + HasSystem
@@ -356,7 +366,8 @@ impl<T> AppContext for T where
         + HasHttpClient
         + HasDataDir
         + HasStartupTime
-        + HasProviderHealth
+        + HasProviderStats
+        + HasLogSurface
         + HasLiveConfig
         + HasRssSync
         + HasSystem

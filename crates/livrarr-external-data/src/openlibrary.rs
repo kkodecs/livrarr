@@ -1,14 +1,16 @@
-//! OpenLibrary REST client (work-detail enrichment).
-//!
-//! Lifted out of `livrarr-server/src/handlers/enrichment.rs` so the same code
-//! can serve the legacy direct path AND `ProviderClient::OpenLibrary` behind
-//! `DefaultProviderQueue`. Behavior unchanged from the original.
+//! OpenLibrary REST client (work-detail enrichment), consumed via
+//! `ProviderClient::OpenLibrary` (queue dispatch and the identity-resolution
+//! fan-out).
 
 use livrarr_http::HttpClient;
 
 /// Parsed subset of an OpenLibrary work detail + first edition with ISBN.
 #[derive(Debug, Clone)]
 pub struct OlDetailResult {
+    /// The work's title — identity arbitration clusters responders by
+    /// title/author when no shared key exists, so a title-less payload is
+    /// unclusterable and its ol_key gets discarded (#148).
+    pub title: Option<String>,
     pub description: Option<String>,
     pub isbn_13: Option<String>,
     pub cover_id: Option<i64>,
@@ -33,6 +35,12 @@ pub async fn query_ol_detail(http: &HttpClient, ol_key: &str) -> Result<OlDetail
     }
 
     let data: serde_json::Value = resp.json().await.map_err(|e| format!("parse: {e}"))?;
+
+    let title = data
+        .get("title")
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
 
     let description = data.get("description").and_then(|d| {
         d.as_str().map(|s| s.to_string()).or_else(|| {
@@ -67,6 +75,7 @@ pub async fn query_ol_detail(http: &HttpClient, ol_key: &str) -> Result<OlDetail
     }
 
     Ok(OlDetailResult {
+        title,
         description,
         isbn_13,
         cover_id,

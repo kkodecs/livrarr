@@ -1,10 +1,10 @@
 use axum::extract::State;
 use axum::Json;
 
-use crate::accessors::{LiveMetadataConfigAccessor, ProviderHealthAccessor, RssSyncAccessor};
+use crate::accessors::{LiveMetadataConfigAccessor, RssSyncAccessor};
 use crate::context::{
     HasAppConfigService, HasEmailService, HasHttpClient, HasIndexerSettingsService, HasLiveConfig,
-    HasProviderHealth, HasRssSync, HasRssSyncWorkflow,
+    HasProviderStats, HasRssSync, HasRssSyncWorkflow,
 };
 
 use crate::middleware::RequireAdmin;
@@ -13,7 +13,9 @@ use crate::{
     MetadataConfigResponse, NamingConfigResponse, UpdateEmailApiRequest,
     UpdateMediaManagementApiRequest, UpdateMetadataApiRequest,
 };
-use livrarr_domain::services::{AppConfigService, IndexerSettingsService, RssSyncWorkflow};
+use livrarr_domain::services::{
+    AppConfigService, IndexerSettingsService, ProviderStatsService, RssSyncWorkflow,
+};
 
 struct RssSyncGuard<'a, R: RssSyncAccessor>(&'a R);
 impl<R: RssSyncAccessor> Drop for RssSyncGuard<'_, R> {
@@ -24,6 +26,19 @@ impl<R: RssSyncAccessor> Drop for RssSyncGuard<'_, R> {
 use livrarr_domain::settings::{
     UpdateEmailParams, UpdateMediaManagementParams, UpdateMetadataParams, UpdateProwlarrParams,
 };
+
+/// Current per-provider error map for the metadata config page, derived from
+/// the 24h call records (REQ-002): record-key → most recent error message,
+/// present only when the error is newer than the last success.
+async fn provider_error_map<S: HasProviderStats>(
+    state: &S,
+) -> Result<std::collections::HashMap<String, String>, ApiError> {
+    let stats = state.provider_stats().provider_stats_24h().await?;
+    Ok(stats
+        .iter()
+        .filter_map(|s| crate::system::current_error_of(s).map(|e| (s.provider.clone(), e)))
+        .collect())
+}
 
 fn clean_token(token: &str) -> String {
     let trimmed = token.trim();
@@ -105,12 +120,12 @@ pub async fn update_media_management<S: HasAppConfigService>(
     }))
 }
 
-pub async fn get_metadata<S: HasAppConfigService + HasProviderHealth>(
+pub async fn get_metadata<S: HasAppConfigService + HasProviderStats>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<Json<MetadataConfigResponse>, ApiError> {
     let cfg = state.app_config_service().get_metadata_config().await?;
-    let provider_status = state.provider_health().statuses().await;
+    let provider_status = provider_error_map(&state).await?;
     Ok(Json(metadata_to_response(cfg, provider_status)))
 }
 
@@ -154,7 +169,7 @@ fn validate_llm_endpoint(endpoint: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub async fn update_metadata<S: HasAppConfigService + HasProviderHealth + HasLiveConfig>(
+pub async fn update_metadata<S: HasAppConfigService + HasProviderStats + HasLiveConfig>(
     State(state): State<S>,
     _admin: RequireAdmin,
     Json(req): Json<UpdateMetadataApiRequest>,
@@ -244,7 +259,7 @@ pub async fn update_metadata<S: HasAppConfigService + HasProviderHealth + HasLiv
 
     state.live_metadata_config().replace(cfg.clone());
 
-    let provider_status = state.provider_health().statuses().await;
+    let provider_status = provider_error_map(&state).await?;
     Ok(Json(metadata_to_response(cfg, provider_status)))
 }
 

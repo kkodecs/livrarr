@@ -61,6 +61,7 @@ fn no_filter() -> WorkFilter {
         author_id: None,
         monitored: None,
         enrichment_status: None,
+        language: None,
         sort_by: None,
         sort_dir: None,
         media_type: None,
@@ -112,7 +113,6 @@ fn make_candidate(title: &str, author: &str, ol_key: Option<&str>) -> WorkCandid
         provenance_setter: None,
         import_id: None,
         cover_manual: false,
-        skip_sync_enrichment: false,
     }
 }
 

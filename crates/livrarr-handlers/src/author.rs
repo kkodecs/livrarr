@@ -175,6 +175,7 @@ pub async fn get<S: HasAuthorService + HasWorkService>(
                 monitored: None,
                 enrichment_status: None,
                 media_type: None,
+                language: None,
                 sort_by: None,
                 sort_dir: None,
             },

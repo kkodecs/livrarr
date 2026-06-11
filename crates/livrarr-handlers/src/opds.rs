@@ -346,6 +346,7 @@ pub async fn author_works<S: OpdsHandlerContext>(
                 monitored: None,
                 enrichment_status: None,
                 media_type: None,
+                language: None,
                 sort_by: None,
                 sort_dir: None,
             },

@@ -1,7 +1,7 @@
 //! Behavioral contract tests for MergeEngine::merge covering priority resolution,
-//! last-known-good preservation, provenance ownership semantics, conflict blocking,
-//! merge status classification, external ID collection, and documented priority
-//! model behavior for metadata enrichment.
+//! last-known-good preservation, provenance ownership semantics, conflict
+//! dissent-isolation (REQ-014), merge status classification, and documented
+//! priority model behavior for metadata enrichment.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use chrono::Utc;
 use livrarr_db::SetFieldProvenanceRequest;
 use livrarr_domain::{
-    EnrichmentStatus, ExternalIdType, FieldProvenance, MetadataProvider as MetadataSource,
-    NarrationType, OutcomeClass, ProvenanceSetter, UserId, Work, WorkField, WorkId,
+    EnrichmentStatus, FieldProvenance, MetadataProvider as MetadataSource, NarrationType,
+    OutcomeClass, ProvenanceSetter, UserId, Work, WorkField, WorkId,
 };
 use livrarr_external_data::NormalizedWorkDetail;
 use livrarr_metadata::{
@@ -155,13 +155,6 @@ fn provenance_upsert(output: &MergeOutput, field: WorkField) -> Option<&SetField
 
 fn has_provenance_delete(output: &MergeOutput, field: WorkField) -> bool {
     output.provenance_deletes.contains(&field)
-}
-
-fn has_external_id_update(output: &MergeOutput, id_type: ExternalIdType, id_value: &str) -> bool {
-    output
-        .external_id_updates
-        .iter()
-        .any(|req| req.id_type == id_type && req.id_value == id_value && req.work_id == WORK_ID)
 }
 
 fn assert_no_field_mutation(output: &MergeOutput, field: WorkField) {
@@ -334,16 +327,11 @@ async fn test_merge_engine_purity_same_inputs_same_observable_output() {
     let first = merge(&engine, input.clone()).await;
     let second = merge(&engine, input).await;
 
-    assert_eq!(first.conflict_detected, second.conflict_detected);
     assert_eq!(first.enrichment_status, second.enrichment_status);
     assert_eq!(resolved(&first).subtitle, resolved(&second).subtitle);
     assert_eq!(resolved(&first).description, resolved(&second).description);
     assert_eq!(resolved(&first).cover_url, resolved(&second).cover_url);
     assert_eq!(first.provenance_deletes, second.provenance_deletes);
-    assert_eq!(
-        first.external_id_updates.len(),
-        second.external_id_updates.len()
-    );
     assert_eq!(first.provenance_upserts.len(), 1);
     assert_eq!(second.provenance_upserts.len(), 1);
     assert_eq!(
@@ -458,8 +446,10 @@ async fn test_merge_engine_provider_owned_field_is_replaced_by_priority_model() 
 }
 
 #[tokio::test]
-async fn test_merge_engine_conflict_blocks_all_mutations() {
-    // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: any conflict blocks field writes and clears all mutation collections
+async fn test_merge_engine_conflict_is_isolated_and_clean_providers_merge() {
+    // REQ-014 (metadata-correctness) | Contract: MergeEngine::merge | Behavior: a
+    // Conflict provider is excluded (dissent-isolated); clean providers'
+    // contributions merge normally — the old whole-merge block is retired.
     let engine = make_engine();
 
     let input = MergeInput {
@@ -485,16 +475,20 @@ async fn test_merge_engine_conflict_blocks_all_mutations() {
 
     let output = merge(&engine, input).await;
 
-    assert!(output.conflict_detected);
-    assert!(output.work_update.is_none());
-    assert!(output.provenance_upserts.is_empty());
-    assert!(output.provenance_deletes.is_empty());
-    assert!(output.external_id_updates.is_empty());
+    assert_eq!(
+        resolved(&output).description.as_deref(),
+        Some("provider description"),
+        "REQ-014: a dissenting provider never blocks the clean contributions"
+    );
+    assert!(provenance_upsert(&output, WorkField::Description).is_some());
 }
 
 #[tokio::test]
-async fn test_merge_engine_conflict_sets_status_conflict() {
-    // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: conflict detection sets enrichment status to Conflict
+async fn test_merge_engine_conflict_alone_writes_no_fields() {
+    // REQ-014 (metadata-correctness) | Contract: MergeEngine::merge | Behavior: a
+    // sole Conflict provider contributes nothing — no field writes, no
+    // provenance. The Unenriched-on-conflict sentinel is retired; identity
+    // conflicts live in IdentityStatus, not in enrichment status.
     let engine = make_engine();
 
     let input = MergeInput {
@@ -514,11 +508,11 @@ async fn test_merge_engine_conflict_sets_status_conflict() {
 
     let output = merge(&engine, input).await;
 
-    assert_eq!(output.enrichment_status, EnrichmentStatus::Unenriched);
     assert!(
-        output.conflict_detected,
-        "a per-provider Conflict class signals conflict_detected; enrichment stays Unenriched and the caller writes IdentityStatus::NotFound"
+        output.work_update.is_none(),
+        "REQ-014: zero surviving contributions → nothing to write (status-only apply)"
     );
+    assert!(output.provenance_upserts.is_empty());
 }
 
 #[tokio::test]
@@ -671,58 +665,6 @@ async fn test_merge_engine_provider_owned_field_without_replacement_produces_pro
 }
 
 #[tokio::test]
-async fn test_merge_engine_success_provider_additional_ids_produce_external_id_updates() {
-    // REQ-ID: R-02, R-06 | Contract: MergeEngine::merge | Behavior: success-provider additional ISBNs and ASINs are emitted as external ID updates
-    let engine = make_engine();
-
-    let input = MergeInput {
-        current_work: work_with(None, Some("current description"), Some("current cover")),
-        current_provenance: vec![],
-        provider_results: HashMap::from([
-            (
-                MetadataSource::Goodreads,
-                success(NormalizedWorkDetail {
-                    additional_isbns: vec!["9781234567890".to_string()],
-                    additional_asins: vec!["B00TEST123".to_string()],
-                    ..empty_detail()
-                }),
-            ),
-            (
-                MetadataSource::Hardcover,
-                success(NormalizedWorkDetail {
-                    additional_isbns: vec!["9781111111111".to_string()],
-                    ..empty_detail()
-                }),
-            ),
-        ]),
-        mode: EnrichmentMode::Background,
-        priority_model: custom_priority(
-            vec![MetadataSource::Hardcover],
-            vec![MetadataSource::Hardcover],
-            vec![MetadataSource::Goodreads],
-        ),
-    };
-
-    let output = merge(&engine, input).await;
-
-    assert!(has_external_id_update(
-        &output,
-        ExternalIdType::Isbn13,
-        "9781234567890"
-    ));
-    assert!(has_external_id_update(
-        &output,
-        ExternalIdType::Isbn13,
-        "9781111111111"
-    ));
-    assert!(has_external_id_update(
-        &output,
-        ExternalIdType::Asin,
-        "B00TEST123"
-    ));
-}
-
-#[tokio::test]
 async fn test_merge_engine_hard_refresh_replaces_provider_owned_populated_field() {
     // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: hard refresh treats provider-owned populated fields as replaceable candidates
     let engine = make_engine();
@@ -782,7 +724,6 @@ async fn test_merge_engine_manual_mode_preserves_last_known_good_for_will_retry(
 
     let output = merge(&engine, input).await;
 
-    assert!(!output.conflict_detected);
     assert_eq!(
         resolved(&output).description.as_deref(),
         Some("current description")
@@ -811,7 +752,6 @@ async fn test_merge_engine_manual_mode_preserves_last_known_good_for_suppressed(
 
     let output = merge(&engine, input).await;
 
-    assert!(!output.conflict_detected);
     assert_eq!(
         resolved(&output).cover_url.as_deref(),
         Some("current cover")
@@ -847,7 +787,6 @@ async fn test_merge_engine_hard_refresh_preserves_last_known_good_for_will_retry
 
     let output = merge(&engine, input).await;
 
-    assert!(!output.conflict_detected);
     assert_eq!(
         resolved(&output).description.as_deref(),
         Some("current description")
@@ -883,7 +822,6 @@ async fn test_merge_engine_hard_refresh_suppressed_coercion_is_observable() {
 
     let output = merge(&engine, input).await;
 
-    assert!(!output.conflict_detected);
     assert!(
         output.work_update.is_some(),
         "Suppressed must be coerced in HardRefresh mode"
@@ -921,7 +859,6 @@ async fn test_merge_engine_hard_refresh_suppressed_preserves_last_known_good_val
 
     let output = merge(&engine, input).await;
 
-    assert!(!output.conflict_detected);
     assert_eq!(resolved(&output).title.as_deref(), Some("current title"));
 }
 
@@ -1116,7 +1053,6 @@ async fn test_merge_engine_audio_fields_use_audio_priority_model_not_content_pri
         Some(&vec!["Audio Narrator".to_string()])
     );
     assert_eq!(resolved(&output).duration_seconds, Some(2222));
-    assert_eq!(resolved(&output).asin.as_deref(), Some("AUDIOASIN2"));
     assert_eq!(
         resolved(&output).narration_type,
         Some(NarrationType::Unabridged)
@@ -1129,10 +1065,6 @@ async fn test_merge_engine_audio_fields_use_audio_priority_model_not_content_pri
     let duration_upsert = provenance_upsert(&output, WorkField::DurationSeconds)
         .expect("expected provenance upsert for duration_seconds");
     assert_eq!(duration_upsert.source, Some(MetadataSource::Audnexus));
-
-    let asin_upsert =
-        provenance_upsert(&output, WorkField::Asin).expect("expected provenance upsert for asin");
-    assert_eq!(asin_upsert.source, Some(MetadataSource::Audnexus));
 
     let narration_type_upsert = provenance_upsert(&output, WorkField::NarrationType)
         .expect("expected provenance upsert for narration_type");
@@ -1338,11 +1270,10 @@ async fn test_merge_network_path_foreign_drops_english_openlibrary_and_hardcover
     )
     .await;
 
-    assert!(!output.conflict_detected);
-    let resolved = resolved(&output);
-    assert_eq!(
-        resolved.description, None,
-        "foreign work must not take English OpenLibrary/Hardcover description on the network path (#133/REQ-027)"
+    assert!(
+        output.work_update.is_none(),
+        "foreign work must not take English OpenLibrary/Hardcover description on the network \
+         path (#133/REQ-027); with zero surviving contributions there is nothing to write"
     );
     assert!(
         provenance_upsert(&output, WorkField::Description).is_none(),

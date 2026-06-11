@@ -695,7 +695,6 @@ where
                         provenance_setter: Some(ProvenanceSetter::AutoAdded),
                         import_id: None,
                         cover_manual: false,
-                        skip_sync_enrichment: false,
                     },
                 )
                 .await

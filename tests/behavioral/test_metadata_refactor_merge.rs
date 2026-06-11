@@ -119,30 +119,6 @@ async fn full_enrichment_merge_makes_zero_llm_calls() {
 }
 
 #[tokio::test]
-async fn cached_merge_without_gr_key_preserves_existing_gr_key() {
-    // AC-004
-    let engine = DefaultMergeEngine::new(PriorityModel::english());
-    let mut provider_detail = detail();
-    provider_detail.gr_key = None;
-
-    let output = engine
-        .merge_from_cached(
-            work(),
-            HashMap::from([(MetadataProvider::Hardcover, provider_detail)]),
-            vec![],
-            Some("en"),
-        )
-        .await
-        .expect("cached merge should complete");
-
-    assert_eq!(
-        update(output).gr_key,
-        Some("existing-gr".to_string()),
-        "a provider miss must not blank the existing Goodreads key"
-    );
-}
-
-#[tokio::test]
 async fn user_set_series_and_cover_survive_refresh() {
     // AC-005
     let engine = DefaultMergeEngine::new(PriorityModel::english());

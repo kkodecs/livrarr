@@ -27,7 +27,7 @@ pub use maintenance::recover_interrupted_state;
 
 use self::author_monitor::author_monitor_tick;
 use self::download_poller::download_poller_tick;
-use self::maintenance::{session_cleanup_tick, state_map_cleanup_tick};
+use self::maintenance::{call_record_retention_tick, session_cleanup_tick, state_map_cleanup_tick};
 use self::rss_sync::rss_sync_tick;
 use self::tag_convergence::tag_convergence_tick;
 
@@ -115,8 +115,15 @@ impl JobRunner {
         self.spawn_job(
             "tag_convergence",
             Duration::from_secs(60),
-            state,
+            state.clone(),
             tag_convergence_tick,
+        )
+        .await;
+        self.spawn_job(
+            "call_record_retention",
+            Duration::from_secs(6 * 3600),
+            state,
+            call_record_retention_tick,
         )
         .await;
     }

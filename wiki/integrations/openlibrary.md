@@ -7,7 +7,7 @@ OL is one of Livrarr's primary metadata providers. This page is the canonical re
 - **OL is currently 403-blocking our User-Agent.** The string `Livrarr/<version>` shipped without a contact field, violating OL's published policy. OL added `Livrarr` (and subsequently `LivrarrBot` and `KkodecsBookBot`) to a substring/identifier blocklist.
 - **Apology + clarification email sent to `openlibrary@archive.org`** on 2026-05-25 (see `build/correspondence/2026-05-25-openlibrary-ua-apology.txt`).
 - **Standing instruction: NO MORE UA CHANGES until OL responds.** Every test from our IPs teaches OL's automated systems to escalate. New identifiers we try just get burned.
-- **Deployed UA** (saguaro + bazaar both running this): `KkodecsBookBot/<version> (Livrarr; kkodecs@proton.me; https://github.com/kkodecs/livrarr)`. This UA is *also* currently blocked, but it's the right format for when OL clears the block.
+- **Deployed UA**: `KkodecsBookBot/<version> (Livrarr; kkodecs@proton.me; https://github.com/kkodecs/livrarr)`. This UA is *also* currently blocked, but it's the right format for when OL clears the block.
 - **User-facing impact:** search returns empty for English titles, enrichment stalls on OL `will_retry` (eventually `permanent_failure` → partial-success commit from HC + GR), some covers fail to backfill, bibliography matching misses works whose primary key wasn't anchored.
 - **Tracking:** GH [#83](https://github.com/kkodecs/livrarr/issues/83) (UA fix), [#73](https://github.com/kkodecs/livrarr/issues/73) (search fallback when OL unavailable).
 

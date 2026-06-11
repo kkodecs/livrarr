@@ -68,6 +68,8 @@ struct AudibleSearchResponse {
 pub struct AudibleCatalogClient {
     pub http: livrarr_http::HttpClient,
     pub retry_backoff_secs: i64,
+    #[allow(dead_code)] // read at green: REQ-001 record emission
+    call_sink: Option<std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 
 impl AudibleCatalogClient {
@@ -75,6 +77,40 @@ impl AudibleCatalogClient {
         Self {
             http,
             retry_backoff_secs,
+            call_sink: None,
+        }
+    }
+
+    /// Inject the call-record sink (REQ-001).
+    pub fn with_call_sink(
+        mut self,
+        sink: std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>,
+    ) -> Self {
+        self.call_sink = Some(sink);
+        self
+    }
+
+    pub(crate) fn sink_ref(
+        &self,
+    ) -> Option<&std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>> {
+        self.call_sink.as_ref()
+    }
+
+    /// Anchor-only fetch (REQ-006): catalog lookup by ASIN. The stored anchor
+    /// is canonical identity, so no title rescoring applies here — the scoring
+    /// in the seeded fetch guards wrong-ASIN adoption on the text path, which
+    /// does not exist on this surface.
+    pub async fn fetch_by_asin(&self, asin: &str) -> crate::ProviderOutcome<NormalizedWorkDetail> {
+        match lookup_audible_by_asin(&self.http, asin).await {
+            Ok(Some(product)) => {
+                crate::ProviderOutcome::Success(Box::new(map_audible_to_detail(&product)))
+            }
+            Ok(None) => crate::ProviderOutcome::NotFound,
+            Err(_) => crate::ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: chrono::Utc::now()
+                    + chrono::Duration::seconds(self.retry_backoff_secs),
+            },
         }
     }
 

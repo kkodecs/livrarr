@@ -1,8 +1,5 @@
-//! Hardcover GraphQL client.
-//!
-//! Lifted out of `livrarr-server/src/handlers/enrichment.rs` so the same code
-//! can serve the legacy direct path AND `ProviderClient::Hardcover` behind
-//! `DefaultProviderQueue`. Behavior unchanged from the original.
+//! Hardcover GraphQL client, consumed via `ProviderClient::Hardcover` (queue
+//! dispatch and the identity-resolution fan-out).
 
 use livrarr_domain::settings::MetadataConfig;
 use livrarr_http::HttpClient;
@@ -32,6 +29,7 @@ pub const HARDCOVER_API_URL: &str = "https://api.hardcover.app/v1/graphql";
 #[derive(Debug, Clone)]
 pub struct HardcoverResult {
     pub title: Option<String>,
+    pub author_name: Option<String>,
     pub subtitle: Option<String>,
     pub original_title: Option<String>,
     pub description: Option<String>,
@@ -46,6 +44,19 @@ pub struct HardcoverResult {
     pub cover_url: Option<String>,
     pub rating: Option<f64>,
     pub rating_count: Option<i32>,
+}
+
+/// First non-empty credited author from a search hit's `author_names` array.
+/// Identity arbitration compares provider answers by title + author — an
+/// authorless payload can manufacture a false quorum split (#148).
+fn doc_author_name(doc: &Value) -> Option<String> {
+    doc.get("author_names")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// Search Hardcover for a book matching `title` + `author`. Tier 1 = exact
@@ -239,6 +250,7 @@ pub async fn query_hardcover(
 
     Ok(HardcoverResult {
         title: hc_title,
+        author_name: doc_author_name(doc),
         subtitle: None,
         original_title: None,
         description,
@@ -572,6 +584,7 @@ pub async fn query_hardcover_by_isbn(
 
         return Ok(Some(HardcoverResult {
             title: hc_title,
+            author_name: doc_author_name(doc),
             subtitle: None,
             original_title: None,
             description,
@@ -590,4 +603,28 @@ pub async fn query_hardcover_by_isbn(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doc_author_name_takes_first_credited_author() {
+        let doc = serde_json::json!({"author_names": ["Jim Butcher", "Co Writer"]});
+        assert_eq!(doc_author_name(&doc).as_deref(), Some("Jim Butcher"));
+    }
+
+    #[test]
+    fn doc_author_name_absent_empty_or_blank_is_none() {
+        assert_eq!(doc_author_name(&serde_json::json!({})), None);
+        assert_eq!(
+            doc_author_name(&serde_json::json!({"author_names": []})),
+            None
+        );
+        assert_eq!(
+            doc_author_name(&serde_json::json!({"author_names": ["  "]})),
+            None
+        );
+    }
 }

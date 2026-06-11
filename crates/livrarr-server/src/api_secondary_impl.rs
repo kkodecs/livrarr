@@ -666,7 +666,9 @@ impl SystemApi for SecondaryApiImpl {
             version: "0.1.0-test".into(),
             os_info: "Linux test".into(),
             data_directory: self.data_dir.clone(),
-            log_file: format!("{}/logs/livrarr.txt", self.data_dir),
+            log_file: format!("{}/logs/livrarr.log", self.data_dir),
+            log_last_write: None,
+            log_init_error: None,
             startup_time: Utc::now(),
             log_level: "info".into(),
         })

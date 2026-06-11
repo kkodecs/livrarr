@@ -8,8 +8,8 @@ use livrarr_db::{
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::{
-    FailedFile, ImportResult, ImportWorkflow, ImportWorkflowError, ImportedFile, ScanConfirmation,
-    SkippedFile,
+    ChapterExtractionError, ChapterExtractor, FailedFile, ImportResult, ImportWorkflow,
+    ImportWorkflowError, ImportedFile, ScanConfirmation, SkippedFile,
 };
 use livrarr_domain::{
     classify_file, sanitize_path_component, DbError, EventType, GrabId, GrabStatus, MediaType,
@@ -26,6 +26,9 @@ pub struct ImportWorkflowImpl<D> {
     import_locks: KeyedMutex<(UserId, WorkId)>,
     _import_semaphore: Arc<tokio::sync::Semaphore>,
     _data_dir: Arc<PathBuf>,
+    /// Injected M4B chapter extraction (REQ-005): the library crate holds no
+    /// tagwrite edge; the composition root supplies the delegate.
+    extractor: Arc<dyn ChapterExtractor>,
 }
 
 impl<D> ImportWorkflowImpl<D> {
@@ -33,12 +36,14 @@ impl<D> ImportWorkflowImpl<D> {
         db: D,
         import_semaphore: Arc<tokio::sync::Semaphore>,
         data_dir: Arc<PathBuf>,
+        extractor: Arc<dyn ChapterExtractor>,
     ) -> Self {
         Self {
             db,
             import_locks: KeyedMutex::new(),
             _import_semaphore: import_semaphore,
             _data_dir: data_dir,
+            extractor,
         }
     }
 }
@@ -62,7 +67,16 @@ where
         user_id: UserId,
         work_id: WorkId,
     ) {
-        extract_chapters_and_kash(&self.db, item_id, target, media_type, user_id, work_id).await;
+        extract_chapters_and_kash(
+            &self.db,
+            &self.extractor,
+            item_id,
+            target,
+            media_type,
+            user_id,
+            work_id,
+        )
+        .await;
     }
 }
 
@@ -268,6 +282,7 @@ async fn try_extract_chapters<D: ChapterDb>(
     target: &Path,
     media_type: MediaType,
     db: &D,
+    extractor: &Arc<dyn ChapterExtractor>,
 ) -> Option<f64> {
     let mut container_duration: Option<f64> = None;
     let ext = target
@@ -278,9 +293,9 @@ async fn try_extract_chapters<D: ChapterDb>(
 
     if ext.as_str() == "m4b" {
         let path = target.to_path_buf();
+        let extractor = extractor.clone();
         let result =
-            tokio::task::spawn_blocking(move || livrarr_tagwrite::extract_m4b_chapters(&path))
-                .await;
+            tokio::task::spawn_blocking(move || extractor.extract_m4b_chapters(&path)).await;
 
         match result {
             Ok(Ok(extraction)) => {
@@ -343,13 +358,13 @@ async fn try_extract_chapters<D: ChapterDb>(
                     }
                 }
             }
-            Ok(Err(livrarr_tagwrite::ChapterExtractionError::ParseError(_))) => {
+            Ok(Err(ChapterExtractionError::ParseError(_))) => {
                 tracing::warn!(item_id, "corrupt M4B — marking parse_error");
                 let _ = db
                     .update_chapter_scan_result(item_id, "parse_error", None)
                     .await;
             }
-            Ok(Err(livrarr_tagwrite::ChapterExtractionError::IoError(e))) => {
+            Ok(Err(ChapterExtractionError::IoError(e))) => {
                 tracing::warn!(item_id, error = %e, "chapter extraction I/O error — will retry");
             }
             Err(e) => {
@@ -527,6 +542,7 @@ where
 /// paths that do not re-parse the container.
 async fn extract_chapters_and_kash<D>(
     db: &D,
+    extractor: &Arc<dyn ChapterExtractor>,
     item_id: livrarr_domain::LibraryItemId,
     target: &Path,
     media_type: MediaType,
@@ -535,7 +551,7 @@ async fn extract_chapters_and_kash<D>(
 ) where
     D: ChapterDb + LibraryItemDb + KashLinkDb + RootFolderDb + Send + Sync,
 {
-    let extracted_duration = try_extract_chapters(item_id, target, media_type, db).await;
+    let extracted_duration = try_extract_chapters(item_id, target, media_type, db, extractor).await;
     let is_m4b = target
         .extension()
         .and_then(|e| e.to_str())
@@ -893,7 +909,13 @@ where
                         });
                         warnings.push(format!("adopted orphaned file: {}", target_path));
                         extract_chapters_and_kash(
-                            &self.db, item.id, &target, media_type, user_id, work_id,
+                            &self.db,
+                            &self.extractor,
+                            item.id,
+                            &target,
+                            media_type,
+                            user_id,
+                            work_id,
                         )
                         .await;
                     }
@@ -949,7 +971,13 @@ where
                                 cwa_copied: false,
                             });
                             extract_chapters_and_kash(
-                                &self.db, item.id, &target, media_type, user_id, work_id,
+                                &self.db,
+                                &self.extractor,
+                                item.id,
+                                &target,
+                                media_type,
+                                user_id,
+                                work_id,
                             )
                             .await;
                         }

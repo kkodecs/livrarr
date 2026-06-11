@@ -1,0 +1,83 @@
+# Architectural Contract — metadata-correctness (Sprint B)
+# Machine-checkable rules enforced by the compliance gate (design: IR v2 text;
+# code: grep -rnE over source_dirs [crates, src] — note migrations/*.sql are
+# inside that tree, which constrains pattern shapes).
+# Candidate disposition for every System Truth with a populated Forbids column
+# is recorded in st_forbids_disposition below (adopt / PO-decide / not-machine-
+# expressible) per the armed-gates protocol.
+
+metadata:
+  feature: "metadata-correctness"
+  spec_ref: "spec-metadata-correctness.md"
+  ir_ref: "ir-v1-metadata-correctness.yaml"
+
+# Which modules may NOT depend on which other modules
+module_dependency:
+  - source: livrarr-library
+    forbidden_targets:
+      - livrarr-tagwrite
+    rationale: "REQ-005 / amendment S1: import save routes through livrarr-materialize, the one save home. AC-006 additionally checks 'cargo tree -p livrarr-library' shows no livrarr-tagwrite."
+  - source: livrarr-external-data
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-server
+    rationale: "Substrate seam (canonical model): external-data depends only on domain + http. Call recording (REQ-001) crosses to storage via the domain ProviderCallSink trait, never a db edge."
+  - source: livrarr-identity
+    forbidden_targets:
+      - livrarr-enrichment
+      - livrarr-db
+    rationale: "Identity and enrichment are non-dependent siblings (one-way identity->enrichment via CapturedIdentity). Identity has no db edge: anchor completion returns AnchorCompletionReport; the orchestrator persists via the identity repository (REQ-008)."
+  - source: livrarr-enrichment
+    forbidden_targets:
+      - livrarr-identity
+    rationale: "One-way street: enrichment consumes CapturedIdentity, never calls into identity. Detected contradictions surface as dissent records / events, not identity writes (REQ-007)."
+  - source: livrarr-handlers
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-metadata
+      - livrarr-tagwrite
+      - livrarr-download
+    rationale: "Existing compile wall, pinned: handlers stay generic over Has* capability traits; provider stats and log surface arrive via new narrow traits, not new dependencies."
+
+# Code patterns that must never appear (live rules — each verified against
+# current source for false positives before adoption).
+# Gate timing (applies to every rule below): the design gate scans IR v2 TEXT
+# only; source is scanned exclusively at the CODE gate, which runs after
+# implementation. A rule may therefore be deliberately RED against today's
+# source when its hits are exactly the targets this feature removes — such
+# rules are marked expected_red_until below and go green with the named REQ.
+forbidden_pattern:
+  - pattern: '\bReleaseSearchResult\b'
+    description: "The legacy release-search type name must not appear in workspace source after the REQ-004 rename (AC-005). Docs/spec prose exempt (not under source_dirs)."
+    severity: P1
+    expected_red_until: "REQ-004 implementation (Code stage) — current hits are the rename targets themselves: the struct definition and its uses in crates/livrarr-download/src/lib.rs plus behavioral-test references (tests/ is outside source_dirs)."
+    rationale: "Clears canonical deliberate-red 1 of 2 (entity spine: Release). Deliberately red pre-rename (review r1 finding R-001, both families): the only current matches are the symbols REQ-004 deletes, so the rule goes green with the rename and then guards against reintroduction. Post-rename verification: zero legitimate uses remain under crates/ + src/. IR v2 prose must reference 'the legacy release-search type', not the literal, to avoid self-tripping the design-gate text scan."
+  - pattern: 'INSERT OR REPLACE INTO'
+    description: "INSERT OR REPLACE is banned project-wide; use INSERT ... ON CONFLICT (...) DO UPDATE SET. Applies to the new provider_call_records / work_field_dissents writers."
+    severity: P0
+    rationale: "Existing project rule (wiki insight 20): OR REPLACE deletes-and-reinserts, firing ON DELETE CASCADE and resetting rowids. Pattern includes 'INTO' because a doc comment at livrarr-db/src/lib.rs:1523 cites the bare phrase while documenting the ban itself."
+  - pattern: 'create_dir_all\([^)]*\)\s*\.ok\(\)'
+    description: "Directory-creation failures must not be silently swallowed; REQ-003 requires log-dir failure to surface on the status page and stderr (#102's vector)."
+    severity: P1
+    expected_red_until: "REQ-003 implementation (Code stage) — the single current hit IS the target: livrarr-server/src/main.rs:1008."
+    rationale: "Verified single current hit (the exact REQ-003 target) — the pattern goes green with the fix and then guards against reintroduction anywhere in crates/ + src/."
+
+# Disposition of every ST Forbids column (armed-gates protocol: adopt as machine
+# pattern, flag for PO decision, or record why it is not machine-expressible).
+# This section is documentation — only forbidden_pattern entries above are live.
+st_forbids_disposition:
+  - { st: ST-001/ST-002, forbids: "re-implementing the HC/OL foreign filter; treating audit claims as current", disposition: "design rule — REQ-012 pins the existing merge-chokepoint guard with behavioral tests (AC-014); no machine pattern" }
+  - { st: ST-003, forbids: "assuming refresh is anchor-safe; assuming langRestrict protects the ISBN path", disposition: "structural — AnchorQuery makes enrichment text-search unconstructible (AC-007); anchor-bind regex NOT adoptable: identity-track writers legitimately bind anchor columns (sqlite_work_identity.rs:71-95,180-188,535) and WHERE clauses share the textual form (sqlite_work.rs:693)" }
+  - { st: ST-004, forbids: "any fix that leaves the raw anchor binds in place", disposition: "structural — ApplyEnrichmentMergeRequest loses anchor fields entirely, so the merge UPDATE cannot carry them (AC-008/009/011 verify behaviorally); same regex limitation as ST-003" }
+  - { st: ST-006, forbids: "treating inline columns as the only anchor store", disposition: "behavioral — AC-009 asserts all three stores untouched by merge (inline columns byte-identical, zero external-id upserts, zero ledger writes)" }
+  - { st: ST-007, forbids: "rebuilding the appender; leaving .ok() swallowing failures", disposition: "ADOPTED — create_dir_all .ok() pattern above; truthful path surface is REQ-003/AC-004" }
+  - { st: ST-008, forbids: "Sprint E before/after claims without REQ-001", disposition: "process rule — instrumentation is the sprint opener; not code-expressible" }
+  - { st: ST-009, forbids: "specing cache-hit work against a nonexistent cache", disposition: "scope rule — cache work excluded (Non-Requirements); not code-expressible" }
+  - { st: ST-011, forbids: "adding HC/OL to the foreign scatter", disposition: "design rule — applicability closure unchanged; AC-014 behavioral pin" }
+  - { st: ST-012, forbids: "tests/prototypes hitting GR /search; first-hit fallback designs", disposition: "PO-DECIDE — pattern 'goodreads\\.com/search' is NOT adoptable today: live construction sites exist outside Sprint B scope (livrarr-metadata/src/series_query_service.rs:252,919 — the Sprint C series flow — and llm_scraper.rs:287) plus #[ignore]d live-fetch tests (livrarr-external-data/src/goodreads.rs:1082-1130). RESOLVED (PO, 2026-06-10): option (b) approved — pattern adoption deferred to Sprint C's contract when the series flow is reworked. The live-call-site finding stands recorded: the burned endpoint has runtime call sites today (series flow)." }
+  - { st: ST-013, forbids: "new code reading metadata_source", disposition: "not machine-expressible as a flat pattern — the immutable add-column migration (012) and the new drop migration both legitimately contain the literal, and source_dirs scans migrations/*.sql; AC-020 ('no code references it') covers it behaviorally + review" }
+  - { st: ST-014, forbids: "keyless-GB assumptions in tests; unbudgeted GB call patterns", disposition: "design/test rule — keyless GB returns NotConfigured with zero outbound calls (verified code-read); pacing/budget tuning is Sprint E scope" }
+  - { st: ST-015, forbids: "raw OL probing; new OL UA strings", disposition: "policy rule — standing PO decision (OL pause); not regex-expressible (UA strings are config/code-shaped, any literal ban would be trivially incomplete); enforced at review" }

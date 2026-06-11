@@ -31,7 +31,10 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use livrarr_db::{DbError, ProviderRetryStateDb};
-use livrarr_domain::{MetadataProvider, OutcomeClass, PermanentFailureReason, Work, WorkId};
+use livrarr_domain::services::{CallOperation, CallOutcomeClass, ProviderCallRecord};
+use livrarr_domain::{
+    AnchorQuery, MetadataProvider, OutcomeClass, PermanentFailureReason, Work, WorkId,
+};
 use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use tokio::task::JoinSet;
 use tracing::warn;
@@ -61,6 +64,57 @@ impl From<InitialCircuitState> for CircuitState {
             InitialCircuitState::Open => Self::Open,
             InitialCircuitState::HalfOpen => Self::HalfOpen,
         }
+    }
+}
+
+/// REQ-006 anchor derivation: the anchor query each provider's enrichment
+/// fetch uses, from the work's stored anchors. Empty/whitespace values count
+/// as absent. Hardcover prefers ISBN (the working by-key path — see the HcKey
+/// gap note in provider_client.rs); OpenLibrary prefers its own key.
+fn derive_anchor_query(provider: MetadataProvider, work: &Work) -> Option<AnchorQuery> {
+    fn present(v: &Option<String>) -> Option<String> {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+    match provider {
+        MetadataProvider::GoogleBooks => present(&work.isbn_13).map(AnchorQuery::Isbn13),
+        MetadataProvider::Goodreads => present(&work.gr_key).map(AnchorQuery::GrKey),
+        MetadataProvider::Hardcover => present(&work.isbn_13)
+            .map(AnchorQuery::Isbn13)
+            .or_else(|| present(&work.hc_key).map(AnchorQuery::HcKey)),
+        MetadataProvider::OpenLibrary => present(&work.ol_key)
+            .map(AnchorQuery::OlKey)
+            .or_else(|| present(&work.isbn_13).map(AnchorQuery::Isbn13)),
+        MetadataProvider::Audnexus | MetadataProvider::Audible => {
+            present(&work.asin).map(AnchorQuery::Asin)
+        }
+        // Never scatter providers; no anchor surface exists for them.
+        MetadataProvider::Llm | MetadataProvider::Readarr => None,
+    }
+}
+
+/// Pipeline-level skip/pacing record (REQ-001): emitted by the queue when it
+/// decides not to call (or not to pace through) a provider, since no client
+/// call happens that could record itself.
+fn record_queue_skip(
+    sink: &Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
+    provider: MetadataProvider,
+    work_id: WorkId,
+    outcome: CallOutcomeClass,
+    detail: Option<&str>,
+) {
+    if let Some(sink) = sink {
+        sink.record(ProviderCallRecord {
+            provider: provider.record_key().to_string(),
+            operation: CallOperation::Enrich,
+            work_id: Some(work_id),
+            started_at: Utc::now(),
+            duration_ms: 0,
+            outcome,
+            detail: detail.map(str::to_string),
+        });
     }
 }
 
@@ -256,6 +310,7 @@ struct ProviderEntry {
 pub struct DefaultProviderQueueBuilder {
     providers: HashMap<MetadataProvider, ProviderEntry>,
     applicability: Option<ApplicabilityRule>,
+    call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 
 impl Default for DefaultProviderQueueBuilder {
@@ -269,7 +324,18 @@ impl DefaultProviderQueueBuilder {
         Self {
             providers: HashMap::new(),
             applicability: None,
+            call_sink: None,
         }
+    }
+
+    /// Inject the call-record sink (REQ-001): the queue records pipeline-level
+    /// skips (no anchor, policy) through it — no client call happens for those.
+    pub fn with_call_sink(
+        mut self,
+        sink: Arc<dyn livrarr_domain::services::ProviderCallSink>,
+    ) -> Self {
+        self.call_sink = Some(sink);
+        self
     }
 
     pub fn add_provider(
@@ -329,6 +395,7 @@ impl DefaultProviderQueueBuilder {
             providers: Arc::new(self.providers),
             applicability,
             retry_db,
+            call_sink: self.call_sink,
         }
     }
 }
@@ -341,6 +408,8 @@ where
     providers: Arc<HashMap<MetadataProvider, ProviderEntry>>,
     applicability: ApplicabilityRule,
     retry_db: Arc<DB>,
+    #[allow(dead_code)] // read at green: REQ-006 skip records via REQ-001 sink
+    call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 
 /// Outcome of one provider's phase-1 dispatch, before terminal-budget conversion
@@ -377,16 +446,18 @@ where
         let mut outcomes: HashMap<MetadataProvider, ProviderOutcome<NormalizedWorkDetail>> =
             HashMap::new();
 
-        // Partition providers into: skip (not applicable / restart-resumed),
-        // suppress-due-to-open-circuit, and dispatch. The dispatch tuple carries
-        // clones of the per-provider rate limiter + concurrency semaphore so the
-        // spawned task can acquire them independently.
+        // Partition providers into: skip (not applicable / anchor-less /
+        // restart-resumed), suppress-due-to-open-circuit, and dispatch. The
+        // dispatch tuple carries clones of the per-provider rate limiter +
+        // concurrency semaphore so the spawned task can acquire them
+        // independently, plus the derived anchor query (REQ-006).
         struct DispatchEntry {
             provider: MetadataProvider,
             client: ProviderClient,
             config: ProviderQueueConfig,
             rate_limiter: Arc<TokenBucket>,
             concurrency: Arc<Semaphore>,
+            anchor: AnchorQuery,
         }
         let mut to_dispatch: Vec<DispatchEntry> = Vec::new();
         let mut suppressed_open: Vec<(MetadataProvider, ProviderQueueConfig)> = Vec::new();
@@ -395,8 +466,32 @@ where
             let provider = *provider;
 
             if !(self.applicability)(provider, work) {
+                // Policy skip (e.g. the language applicability rule): recorded
+                // by this layer since no client call happens (REQ-001).
+                record_queue_skip(
+                    &self.call_sink,
+                    provider,
+                    work.id,
+                    CallOutcomeClass::SkippedPolicy,
+                    Some("not_applicable"),
+                );
                 continue;
             }
+
+            // REQ-006: enrichment fetches only by stored anchor. No anchor for
+            // this provider → no fetch, a SkippedNoAnchor record, a NotFound
+            // outcome (anchor acquisition is the identity track's job).
+            let Some(anchor) = derive_anchor_query(provider, work) else {
+                record_queue_skip(
+                    &self.call_sink,
+                    provider,
+                    work.id,
+                    CallOutcomeClass::SkippedNoAnchor,
+                    None,
+                );
+                outcomes.insert(provider, ProviderOutcome::NotFound);
+                continue;
+            };
 
             // Restart safety: skip if the row is already terminal.
             if existing_terminal_outcome(self.retry_db.as_ref(), work.user_id, work.id, provider)
@@ -418,25 +513,39 @@ where
                 config: entry.config.clone(),
                 rate_limiter: entry.rate_limiter.clone(),
                 concurrency: entry.concurrency.clone(),
+                anchor,
             });
         }
 
         // Phase 1: scatter — spawn each provider call. Panic isolation via JoinSet.
         // Each spawned task waits on the per-provider concurrency semaphore + token
-        // bucket BEFORE invoking client.fetch. Permit drops on task return / panic.
+        // bucket BEFORE invoking the anchor-grounded fetch. Permit drops on task
+        // return / panic.
         let mut set: JoinSet<(MetadataProvider, DispatchedOutcome)> = JoinSet::new();
-        let work_arc = Arc::new(work.clone());
+        let language = work.language.clone();
+        let dispatch_work_id = work.id;
         for d in &to_dispatch {
             let provider = d.provider;
             let client = d.client.clone();
             let rate_limiter = d.rate_limiter.clone();
             let concurrency = d.concurrency.clone();
-            let work_arc = work_arc.clone();
+            let anchor = d.anchor.clone();
+            let language = language.clone();
+            let sink = self.call_sink.clone();
             set.spawn(async move {
                 // Concurrency permit first (held for the full call duration).
                 let _permit = concurrency.acquire_owned().await;
                 // Then rate-limit token (token bucket pacing).
                 if rate_limiter.acquire().await.is_err() {
+                    // The fetch never happened — the queue records the pacing
+                    // rejection (clients record only real calls).
+                    record_queue_skip(
+                        &sink,
+                        provider,
+                        dispatch_work_id,
+                        CallOutcomeClass::RateLimited,
+                        Some("queue_pacing_rejected"),
+                    );
                     return (
                         provider,
                         DispatchedOutcome::Returned(ProviderOutcome::WillRetry {
@@ -445,7 +554,7 @@ where
                         }),
                     );
                 }
-                let outcome = client.fetch(&work_arc).await;
+                let outcome = client.fetch_by_anchor(anchor, language.as_deref()).await;
                 (provider, DispatchedOutcome::Returned(outcome))
             });
         }

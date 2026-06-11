@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use livrarr_domain::services::{
     FetchRequest, HttpFetcher, HttpMethod, MaterializeError, MaterializeOutcome,
-    MaterializeRequest, MaterializeService, MaterializeTags, RateBucket, UserAgentProfile,
+    MaterializeRequest, MaterializeService, MaterializeTags, RateBucket, SavedCover,
+    UserAgentProfile,
 };
 use livrarr_tagwrite::{write_tags_batch, TagMetadata};
 
@@ -80,6 +81,27 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
     }
 }
 
+/// Decode width/height from freshly written cover bytes (REQ-017). Full-image
+/// decode on a blocking thread (insight 10). Failure is warn + `None` — a
+/// saved cover is better than a cover rejected over a dims read.
+async fn decode_cover_dims(bytes: Vec<u8>) -> Option<(i32, i32)> {
+    let decoded = tokio::task::spawn_blocking(move || {
+        image::load_from_memory(&bytes).map(|img| (img.width() as i32, img.height() as i32))
+    })
+    .await;
+    match decoded {
+        Ok(Ok(dims)) => Some(dims),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "cover dimension decode failed; dims not recorded");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "cover dimension decode task failed; dims not recorded");
+            None
+        }
+    }
+}
+
 /// Convert the domain tag mirror to the tagwrite type at the crate boundary
 /// (insight 9e: no tagwrite types in domain signatures). Fields are 1:1.
 fn to_tag_metadata(tags: MaterializeTags) -> TagMetadata {
@@ -147,12 +169,19 @@ where
                     )
                     .await
                     .map_err(|e| MaterializeError::CoverDownload(e.to_string()))?;
+                    let path = cover_file_path(&request.covers_dir, request.work_id, "");
+                    outcome.ebook_cover_path = Some(path.to_string_lossy().into_owned());
+                    // REQ-017: dims decoded from the bytes just written — the
+                    // only moment the file is guaranteed fresh.
+                    outcome.saved_cover =
+                        decode_cover_dims(bytes.clone())
+                            .await
+                            .map(|(width, height)| SavedCover {
+                                path,
+                                width,
+                                height,
+                            });
                     ebook_cover_bytes = Some(bytes);
-                    outcome.ebook_cover_path = Some(
-                        cover_file_path(&request.covers_dir, request.work_id, "")
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
                 }
             }
         }
@@ -162,7 +191,7 @@ where
         if !audiobook.user_locked {
             if let Some(url) = audiobook.chosen_new_url.as_deref() {
                 if audiobook.current_url.as_deref() != Some(url) {
-                    download_cover_to_disk(
+                    let bytes = download_cover_to_disk(
                         &*self.http,
                         url,
                         &request.covers_dir,
@@ -171,11 +200,16 @@ where
                     )
                     .await
                     .map_err(|e| MaterializeError::CoverDownload(e.to_string()))?;
-                    outcome.audiobook_cover_path = Some(
-                        cover_file_path(&request.covers_dir, request.work_id, "_audiobook")
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
+                    let path = cover_file_path(&request.covers_dir, request.work_id, "_audiobook");
+                    outcome.audiobook_cover_path = Some(path.to_string_lossy().into_owned());
+                    outcome.saved_audiobook_cover =
+                        decode_cover_dims(bytes)
+                            .await
+                            .map(|(width, height)| SavedCover {
+                                path,
+                                width,
+                                height,
+                            });
                 }
             }
         }

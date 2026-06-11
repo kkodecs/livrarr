@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use id3::TagLike;
-use rbook::Ebook;
 
 use crate::types::{Confidence, Extraction, ExtractionSource};
 
@@ -25,21 +24,23 @@ pub fn extract_embedded(
 fn extract_epub(path: &Path) -> Option<Extraction> {
     use livrarr_domain::normalization::{normalize_isbn13, normalize_language};
 
-    let book = rbook::Epub::new(path).ok()?;
+    let book = rbook::Epub::open(path).ok()?;
     let metadata = book.metadata();
 
     let raw_title = metadata.title().map(|t| decode_xml_entities(t.value()));
     let raw_author = metadata
         .creators()
-        .first()
+        .next()
         .map(|c| decode_xml_entities(c.value()));
     let raw_language = metadata.language().map(|l| l.value().to_string());
 
     let title = raw_title.and_then(|t| sanitize_title(&t, path))?;
     let author = raw_author.and_then(|a| sanitize_author(&a));
 
-    // Harvest ISBN from dc:identifier elements, stripping common URI prefixes
-    let isbn = metadata.get("identifier").iter().find_map(|el| {
+    // Harvest ISBN from dc:identifier elements, stripping common URI prefixes.
+    // (rbook 0.7 fixed the 0.4 parser bug that dropped every metadata element
+    // after an empty self-closing one, e.g. <dc:format/> — #151.)
+    let isbn = metadata.identifiers().find_map(|el| {
         let raw = el.value();
         let stripped = raw
             .strip_prefix("ISBN:")
@@ -50,11 +51,16 @@ fn extract_epub(path: &Path) -> Option<Extraction> {
         normalize_isbn13(stripped)
     });
 
-    // Harvest the publication year from dc:date (best-effort; first 4-digit run).
+    // Harvest the publication year from dc:date (typed parse first, then the
+    // legacy best-effort first-4-digit-run fallback on the raw value).
     let year = metadata
-        .get("date")
-        .iter()
-        .find_map(|el| parse_year(el.value()));
+        .published()
+        .map(|dt| i32::from(dt.date().year()))
+        .or_else(|| {
+            metadata
+                .published_entry()
+                .and_then(|el| parse_year(el.value()))
+        });
 
     // Normalize through the single authority; an unrecognized language is left
     // absent rather than stored raw (REQ-005). The widened ISO-639-1 table makes

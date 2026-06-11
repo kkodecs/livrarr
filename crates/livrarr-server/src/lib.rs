@@ -157,10 +157,13 @@ impl From<crate::readarr_import_service::ReadarrImportError> for ApiError {
 pub mod api_secondary_impl;
 pub mod auth_crypto;
 pub mod auth_service;
+pub mod call_sink;
+pub mod chapter_extractor;
 pub mod config;
 pub mod cover_service;
 pub mod infra;
 pub mod jobs;
+pub mod log_surface;
 pub mod rate_limit;
 pub use livrarr_matching as matching;
 pub mod email_service;

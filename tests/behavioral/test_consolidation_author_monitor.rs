@@ -229,10 +229,17 @@ impl WorkService for StubWorkService {
         Ok((vec![], 0))
     }
 
-    fn try_start_bulk_refresh(&self, _user_id: i64) -> bool {
-        true
+    fn try_start_bulk_refresh(
+        &self,
+        user_id: i64,
+    ) -> Option<livrarr_domain::services::BulkRefreshGuard> {
+        Some(livrarr_domain::services::BulkRefreshGuard::new(
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::from([
+                user_id,
+            ]))),
+            user_id,
+        ))
     }
-    fn finish_bulk_refresh(&self, _user_id: i64) {}
 }
 
 // =============================================================================

@@ -59,7 +59,7 @@ export default function ManualImportPage() {
       setFiles(
         data.files.map((f) => ({
           ...f,
-          selected: !!(f.parsed?.title && f.parsed?.author) && !f.hasExistingMediaType,
+          selected: !!(f.parsed?.title && f.parsed?.author) && !f.hasExistingMediaType && !f.existingWorkId,
           deleteExisting: false,
         })),
       );
@@ -84,12 +84,13 @@ export default function ManualImportPage() {
                 if (!updated) return f;
                 // Deselect if OL discovered same media type already imported.
                 const newlyDuplicate = !f.hasExistingMediaType && updated.hasExistingMediaType;
+                const newlyInLibrary = !f.existingWorkId && !!updated.existingWorkId;
                 return {
                   ...f,
                   match: updated.match,
                   existingWorkId: updated.existingWorkId,
                   hasExistingMediaType: updated.hasExistingMediaType,
-                  selected: newlyDuplicate ? false : f.selected,
+                  selected: newlyDuplicate || newlyInLibrary ? false : f.selected,
                 };
               }),
             );
@@ -541,6 +542,15 @@ export default function ManualImportPage() {
                                   duplicate
                                 </Link>
                               )}
+                              {!hasSameMedia && workId && (
+                                <Link
+                                  to={`/work/${workId}`}
+                                  className="ml-1.5 rounded bg-emerald-900/50 px-1.5 py-0.5 text-xs text-emerald-300 hover:underline"
+                                  title="Already in your library without this format — the file will attach to it"
+                                >
+                                  in library
+                                </Link>
+                              )}
                               {f.selected && hasSameMedia && (
                                 <label className="mt-1 flex items-center gap-1.5 text-xs text-muted">
                                   <input
@@ -571,6 +581,15 @@ export default function ManualImportPage() {
                                   className="ml-1.5 rounded bg-yellow-900/50 px-1.5 py-0.5 text-xs text-yellow-300 hover:underline"
                                 >
                                   duplicate
+                                </Link>
+                              )}
+                              {!hasSameMedia && workId && (
+                                <Link
+                                  to={`/work/${workId}`}
+                                  className="ml-1.5 rounded bg-emerald-900/50 px-1.5 py-0.5 text-xs text-emerald-300 hover:underline"
+                                  title="Already in your library without this format — the file will attach to it"
+                                >
+                                  in library
                                 </Link>
                               )}
                             </div>

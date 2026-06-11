@@ -37,7 +37,12 @@ pub fn score_candidate(extraction: &Extraction, candidate: &MatchCandidate) -> f
 
     // Compute similarities.
     let title_sim = if has_title {
-        string_similarity(title_ext, &candidate.title)
+        title_similarity_with_variants(
+            title_ext,
+            &candidate.title,
+            seq_ext,
+            candidate.series_position,
+        )
     } else {
         0.0
     };
@@ -77,7 +82,12 @@ pub fn fails_hard_gate(extraction: &Extraction, candidate: &MatchCandidate) -> b
     let title_ext = extraction.title.as_deref().unwrap_or("");
     let author_ext = extraction.author.as_deref();
 
-    let title_sim = string_similarity(title_ext, &candidate.title);
+    let title_sim = title_similarity_with_variants(
+        title_ext,
+        &candidate.title,
+        extraction.series_position,
+        candidate.series_position,
+    );
 
     if author_ext.is_none() || author_ext.is_some_and(|a| a.is_empty()) {
         return true;
@@ -91,6 +101,25 @@ pub fn fails_hard_gate(extraction: &Extraction, candidate: &MatchCandidate) -> b
 // ---------------------------------------------------------------------------
 // String similarity
 // ---------------------------------------------------------------------------
+
+/// Title similarity with REQ-020 variant folding layered on top of the plain
+/// string similarity. When both titles fold to the same variant key, the pair
+/// is a Tier-A variant match and scores 1.0 — UNLESS both sides carry known,
+/// conflicting series positions (same-series sibling volumes share a base
+/// title; the volume number is the discriminator). Folding never lowers a
+/// score: the full-string similarity is the floor.
+fn title_similarity_with_variants(a: &str, b: &str, pos_a: Option<f64>, pos_b: Option<f64>) -> f64 {
+    let full = string_similarity(a, b);
+    if let (Some(x), Some(y)) = (pos_a, pos_b) {
+        if (x - y).abs() >= 0.01 {
+            return full;
+        }
+    }
+    if crate::normalize_title_variants(a) == crate::normalize_title_variants(b) {
+        return 1.0;
+    }
+    full
+}
 
 /// Compute similarity between two strings.
 /// Returns max of normalized Levenshtein and token-set Levenshtein.

@@ -17,6 +17,24 @@ import type {
 import { SUPPORTED_LANGUAGES } from "@/types/api";
 import { ApiError } from "@/api/client";
 
+
+const SOURCE_NAMES: Record<string, string> = {
+  openlibrary: "OpenLibrary",
+  goodreads: "Goodreads",
+  google_books: "Google Books",
+  hardcover: "Hardcover",
+  audnexus: "Audnexus",
+  audible: "Audible",
+};
+
+/** Provider record-keys (possibly "+"-joined for federated results) → display names. */
+function prettySource(source: string): string {
+  return source
+    .split("+")
+    .map((key) => SOURCE_NAMES[key] ?? key)
+    .join(" + ");
+}
+
 export default function SearchPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -393,7 +411,7 @@ function OlResult({
         )}
         {work.source && (
           <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/12 text-blue-300">
-            {work.source}
+            {prettySource(work.source)}
           </span>
         )}
       </div>

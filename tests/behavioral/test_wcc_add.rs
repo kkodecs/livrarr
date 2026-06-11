@@ -148,7 +148,6 @@ fn confirmed_candidate(identity: CapturedIdentity) -> WorkCandidate {
         provenance_setter: Some(ProvenanceSetter::Import),
         import_id: None,
         cover_manual: false,
-        skip_sync_enrichment: true,
     }
 }
 
@@ -215,7 +214,6 @@ fn pending_candidate_from_unresolved_isbn() -> WorkCandidate {
         provenance_setter: Some(ProvenanceSetter::Import),
         import_id: None,
         cover_manual: false,
-        skip_sync_enrichment: true,
     }
 }
 
@@ -413,7 +411,6 @@ async fn test_wcc_add_reqs_014_015_add_reuses_cached_payloads_in_process_without
     // finish_created_work -> run_unified_enrichment -> enrich_work step 2.5.
     let mut candidate = confirmed_candidate(isbn_identity());
     candidate.candidate_id = Some(candidate_id);
-    candidate.skip_sync_enrichment = false;
     // Cover-less: the only HTTP a candidate_id-backed add could then issue would be
     // a provider re-query, which it must not.
     candidate.fields.cover_url = None;

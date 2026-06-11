@@ -435,9 +435,6 @@ impl WorkDb for SqliteDb {
              duration_seconds = COALESCE(?, duration_seconds), \
              publisher = COALESCE(?, publisher), \
              publish_date = COALESCE(?, publish_date), \
-             hc_key = COALESCE(?, hc_key), \
-             isbn_13 = COALESCE(?, isbn_13), \
-             asin = COALESCE(?, asin), \
              narrator = COALESCE(?, narrator), \
              narration_type = COALESCE(?, narration_type), \
              abridged = COALESCE(?, abridged), \
@@ -463,9 +460,6 @@ impl WorkDb for SqliteDb {
         .bind(req.duration_seconds)
         .bind(req.publisher.as_deref())
         .bind(req.publish_date.as_deref())
-        .bind(req.hc_key.as_deref())
-        .bind(req.isbn_13.as_deref())
-        .bind(req.asin.as_deref())
         .bind(narrator_json.as_deref())
         .bind(narration_type_val)
         .bind(req.abridged)
@@ -909,16 +903,22 @@ impl WorkDb for SqliteDb {
                 .as_deref()
                 .map(livrarr_domain::normalize_for_matching);
 
+            // REQ-007: no anchor columns (hc_key/gr_key/ol_key/isbn_13/asin)
+            // in this UPDATE — anchors move exclusively via the identity
+            // track. REQ-009: None/empty cover_url and language never clobber
+            // populated values (COALESCE + empty-filtered binds).
             sqlx::query(
                 "UPDATE works SET \
-                 title = ?, subtitle = ?, original_title = ?, author_name = ?, \
+                 title = COALESCE(?, title), subtitle = ?, original_title = ?, \
+                 author_name = COALESCE(?, author_name), \
                  normalized_title = COALESCE(?, normalized_title), \
                  normalized_author = COALESCE(?, normalized_author), \
                  description = ?, year = ?, series_name = ?, series_position = ?, \
-                 genres = ?, language = ?, page_count = ?, duration_seconds = ?, \
-                 publisher = ?, publish_date = ?, hc_key = ?, gr_key = ?, ol_key = ?, \
-                 isbn_13 = ?, asin = COALESCE(?, asin), narrator = ?, narration_type = ?, \
-                 abridged = ?, rating = ?, rating_count = ?, cover_url = ?, \
+                 genres = ?, language = COALESCE(?, language), page_count = ?, \
+                 duration_seconds = ?, publisher = ?, publish_date = ?, \
+                 narrator = ?, narration_type = ?, \
+                 abridged = ?, rating = ?, rating_count = ?, \
+                 cover_url = COALESCE(?, cover_url), \
                  enrichment_source = ?, enrichment_status = ?, enriched_at = ?, \
                  merge_generation = merge_generation + 1 \
                  WHERE id = ? AND user_id = ?",
@@ -934,22 +934,19 @@ impl WorkDb for SqliteDb {
             .bind(u.series_name.as_deref())
             .bind(u.series_position)
             .bind(genres_json.as_deref())
-            .bind(u.language.as_deref())
+            .bind(u.language.as_deref().filter(|s| !s.is_empty()))
             .bind(u.page_count)
             .bind(u.duration_seconds)
             .bind(u.publisher.as_deref())
             .bind(u.publish_date.as_deref())
-            .bind(u.hc_key.as_deref())
-            .bind(u.gr_key.as_deref())
-            .bind(u.ol_key.as_deref())
-            .bind(u.isbn_13.as_deref())
-            .bind(u.asin.as_deref())
             .bind(narrator_json.as_deref())
             .bind(narration_type_val)
             .bind(u.abridged)
             .bind(u.rating)
             .bind(u.rating_count)
-            .bind(absolute_http_cover_url(u.cover_url.as_deref()))
+            .bind(absolute_http_cover_url(
+                u.cover_url.as_deref().filter(|s| !s.is_empty()),
+            ))
             .bind(u.enrichment_source.as_deref())
             .bind(status_str)
             .bind(&now)
@@ -1042,21 +1039,8 @@ impl WorkDb for SqliteDb {
                 .map_err(map_db_err)?;
         }
 
-        // Write external ID upserts.
-        for eid in &req.external_id_updates {
-            let id_type_str = to_str(eid.id_type);
-            sqlx::query(
-                "INSERT INTO external_ids (work_id, id_type, id_value) \
-                 VALUES (?, ?, ?) \
-                 ON CONFLICT(work_id, id_type, id_value) DO NOTHING",
-            )
-            .bind(eid.work_id)
-            .bind(&id_type_str)
-            .bind(&eid.id_value)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
-        }
+        // REQ-007: the merge never writes external_ids — the identity track
+        // owns all three anchor stores.
 
         tx.commit().await.map_err(map_db_err)?;
         Ok(ApplyMergeOutcome::Applied)

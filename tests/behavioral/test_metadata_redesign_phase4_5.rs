@@ -410,7 +410,6 @@ async fn llm_merge_failure_falls_back_to_deterministic_merge_instead_of_erroring
         .await
         .expect("LLM failure should fall back to deterministic merge");
 
-    assert!(!output.conflict_detected);
     assert_eq!(output.enrichment_status, EnrichmentStatus::Enriched);
     assert_eq!(
         resolved(&output).description.as_deref(),
@@ -456,7 +455,6 @@ async fn llm_merge_identity_conflict_returns_conflict_signal_to_caller() {
         .await
         .expect("conflict is a valid outcome");
 
-    assert!(output.conflict_detected);
     assert_eq!(output.enrichment_status, EnrichmentStatus::Conflict);
     assert!(output.work_update.is_none());
     assert!(output.provenance_upserts.is_empty());

@@ -1,10 +1,5 @@
-//! Audnexus REST client.
-//!
-//! Lifted out of `livrarr-server/src/handlers/enrichment.rs` so the same code
-//! can serve both:
-//!   - the existing inline enrichment pipeline (still on the legacy direct path), and
-//!   - `ProviderClient::Audnexus`, the first real-network adapter wired through
-//!     `DefaultProviderQueue` (Phase 1.5 tracer).
+//! Audnexus REST client, consumed via `ProviderClient::Audnexus` (queue
+//! dispatch and the identity-resolution fan-out).
 
 use livrarr_http::HttpClient;
 use std::num::NonZeroUsize;
@@ -64,9 +59,8 @@ pub async fn query_audnexus(
 
     // Try by ASIN first.
     if let Some(asin) = asin {
-        let url = format!("{base}/books/{asin}");
-        if let Some(result) = cached_fetch(http, &url, cache).await? {
-            return Ok(Some(parse_audnexus(&result, Some(asin))));
+        if let Some(result) = query_audnexus_by_asin(http, base_url, asin, cache).await? {
+            return Ok(Some(result));
         }
     }
 
@@ -89,6 +83,23 @@ pub async fn query_audnexus(
     }
 
     Ok(None)
+}
+
+/// ASIN-only Audnexus lookup — the anchor tier of [`query_audnexus`], exposed
+/// separately for the anchor-grounded enrichment surface (REQ-006): no
+/// title/author fallback exists on this path.
+pub async fn query_audnexus_by_asin(
+    http: &HttpClient,
+    base_url: &str,
+    asin: &str,
+    cache: &AudnexusCache,
+) -> Result<Option<AudnexusResult>, String> {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{base}/books/{asin}");
+    match cached_fetch(http, &url, cache).await? {
+        Some(result) => Ok(Some(parse_audnexus(&result, Some(asin)))),
+        None => Ok(None),
+    }
 }
 
 async fn cached_fetch(
@@ -191,11 +202,9 @@ pub fn parse_audnexus(data: &serde_json::Value, asin_hint: Option<&str>) -> Audn
     }
 }
 
-/// Pre-existing minimal query-string encoder. Only escapes the five characters
-/// the legacy callers actually exercised. Carried forward verbatim from the
-/// original `livrarr-server/src/handlers/enrichment.rs` to preserve behavior
-/// during the lift; switching to the `urlencoding` crate is a separate change
-/// because it would alter encoding semantics.
+/// Minimal query-string encoder: escapes only the five characters its
+/// callers exercise. Switching to the `urlencoding` crate is a deliberate
+/// non-change — it would alter encoding semantics.
 fn urlencoding(s: &str) -> String {
     s.replace(' ', "+")
         .replace('&', "%26")

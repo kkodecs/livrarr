@@ -13,6 +13,17 @@ pub enum WorkIdentityError {
     Db(String),
 }
 
+/// Outcome of refresh-time identity anchor completion (REQ-008): what the
+/// identity track newly established, and which providers were skipped and why.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnchorCompletionReport {
+    /// (anchor_type, value) newly established via the identity track.
+    pub resolved: Vec<(String, String)>,
+    /// (provider, reason) — reason is one of "suppressed", "not_found",
+    /// "unresolvable".
+    pub skipped: Vec<(String, String)>,
+}
+
 #[trait_variant::make(Send)]
 pub trait WorkIdentityRepository: Send + Sync {
     async fn confirm_anchor(

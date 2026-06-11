@@ -6,9 +6,7 @@
 //! - Case-insensitive header matching
 //! - Missing optional columns
 //!
-//! Moved from livrarr-server to livrarr-metadata: colocated with
-//! ListServiceImpl since it has no server deps and is only consumed
-//! by the list import service.
+//! Consumed only by the list import service (`ListServiceImpl`).
 
 use std::collections::HashMap;
 

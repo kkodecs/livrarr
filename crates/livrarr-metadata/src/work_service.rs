@@ -338,12 +338,26 @@ fn interleave_by(lists: Vec<Vec<LookupResult>>, chunk: usize) -> Vec<LookupResul
 }
 
 /// Map a resolved/confirmable identity into a wire `LookupResult`, carrying the
-/// federated anchors + the `candidate_id` payload handle (REQ-014/R-009).
+/// federated anchors + the `candidate_id` payload handle (REQ-014/R-009) and
+/// the contributing providers as the result's source attribution (#147 — a
+/// source-less result renders chip-less in the search UI).
 fn lookup_result_from_captured(
     captured: livrarr_domain::identity::CapturedIdentity,
     candidate_id: Option<livrarr_domain::identity::CandidateId>,
     cover_url: Option<String>,
+    sources: &[livrarr_domain::MetadataProvider],
 ) -> LookupResult {
+    let source = if sources.is_empty() {
+        None
+    } else {
+        Some(
+            sources
+                .iter()
+                .map(|p| p.record_key())
+                .collect::<Vec<_>>()
+                .join("+"),
+        )
+    };
     LookupResult {
         ol_key: captured.ol_key,
         title: captured.title,
@@ -354,8 +368,8 @@ fn lookup_result_from_captured(
         description: None,
         series_name: None,
         series_position: None,
-        source: None,
-        source_type: None,
+        source_type: source.clone(),
+        source,
         language: captured.language,
         detail_url: None,
         rating: None,
@@ -383,10 +397,18 @@ fn lookup_results_from_resolution(
             identity,
             Some(candidate_id),
             None,
+            &[],
         )],
         Resolution::NeedsConfirmation { candidates } => candidates
             .into_iter()
-            .map(|c| lookup_result_from_captured(c.anchors, Some(c.candidate_id), c.cover_url))
+            .map(|c| {
+                lookup_result_from_captured(
+                    c.anchors,
+                    Some(c.candidate_id),
+                    c.cover_url,
+                    &c.sources,
+                )
+            })
             .collect(),
         Resolution::Unresolved { .. } | Resolution::Conflict { .. } => Vec::new(),
     }
@@ -434,6 +456,7 @@ where
         + LibraryItemDb
         + ProvenanceDb
         + EnrichmentRetryDb
+        + livrarr_db::ProviderRetryStateDb
         + ConfigDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
@@ -505,25 +528,18 @@ where
                         .get_work(user_id, existing_id)
                         .await
                         .map_err(WorkServiceError::Db)?;
-                    let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
-                        // identity_not_found is for the new-work add path; these
-                        // existing/matched-work re-enrich paths keep their identity.
-                        // No candidate_id: re-enrich existing work from network.
-                        let (status, _) = self
-                            .run_unified_enrichment(
-                                user_id,
-                                &work,
-                                candidate.source_provider_data,
-                                EnrichmentMode::Background,
-                                None,
-                            )
-                            .await;
-                        let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
-                        (refreshed, status)
-                    } else {
-                        let status = work.enrichment_status;
-                        (work, status)
-                    };
+                    // REQ-010: the matched work takes the same identity +
+                    // enrichment road as every other add outcome (the
+                    // existing-work doors previously bypassed it).
+                    let (enrichment_status, _identity_not_found) = self
+                        .ensure_identity_and_enrichment(
+                            user_id,
+                            work.id,
+                            candidate.source_provider_data,
+                            None,
+                        )
+                        .await;
+                    let work = self.db.get_work(user_id, work.id).await.unwrap_or(work);
                     return Ok(AddWorkResult {
                         work,
                         created: false,
@@ -566,29 +582,21 @@ where
                         .get_work(user_id, existing.id)
                         .await
                         .map_err(WorkServiceError::Db)?;
-                    let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
-                        // identity_not_found is for the new-work add path; these
-                        // existing/matched-work re-enrich paths keep their identity.
-                        // No candidate_id: re-enrich existing work from network.
-                        let (status, _) = self
-                            .run_unified_enrichment(
-                                user_id,
-                                &existing,
-                                candidate.source_provider_data.clone(),
-                                EnrichmentMode::Background,
-                                None,
-                            )
-                            .await;
-                        let refreshed = self
-                            .db
-                            .get_work(user_id, existing.id)
-                            .await
-                            .unwrap_or(existing);
-                        (refreshed, status)
-                    } else {
-                        let status = existing.enrichment_status;
-                        (existing, status)
-                    };
+                    // REQ-010: the adopted work takes the same identity +
+                    // enrichment road as every other add outcome.
+                    let (enrichment_status, _identity_not_found) = self
+                        .ensure_identity_and_enrichment(
+                            user_id,
+                            existing.id,
+                            candidate.source_provider_data.clone(),
+                            None,
+                        )
+                        .await;
+                    let work = self
+                        .db
+                        .get_work(user_id, existing.id)
+                        .await
+                        .unwrap_or(existing);
                     return Ok(AddWorkResult {
                         work,
                         created: false,
@@ -622,25 +630,17 @@ where
                         .get_work(user_id, work.id)
                         .await
                         .map_err(WorkServiceError::Db)?;
-                    let (work, enrichment_status) = if candidate.source_provider_data.is_some() {
-                        // identity_not_found is for the new-work add path; these
-                        // existing/matched-work re-enrich paths keep their identity.
-                        // No candidate_id: re-enrich existing work from network.
-                        let (status, _) = self
-                            .run_unified_enrichment(
-                                user_id,
-                                &work,
-                                candidate.source_provider_data.clone(),
-                                EnrichmentMode::Background,
-                                None,
-                            )
-                            .await;
-                        let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
-                        (refreshed, status)
-                    } else {
-                        let status = work.enrichment_status;
-                        (work, status)
-                    };
+                    // REQ-010: the deduped work takes the same identity +
+                    // enrichment road as every other add outcome.
+                    let (enrichment_status, _identity_not_found) = self
+                        .ensure_identity_and_enrichment(
+                            user_id,
+                            work.id,
+                            candidate.source_provider_data.clone(),
+                            None,
+                        )
+                        .await;
+                    let work = self.db.get_work(user_id, work.id).await.unwrap_or(work);
                     return Ok(AddWorkResult {
                         work,
                         created: false,
@@ -763,7 +763,6 @@ where
                     author_created,
                     author_id,
                     candidate.source_provider_data,
-                    candidate.skip_sync_enrichment,
                     derived_identity,
                     candidate.candidate_id.as_ref(),
                 )
@@ -872,17 +871,16 @@ where
                         })?;
                 }
 
-                // Identity gate (REQ-015): a Pending identity HOLDS the enrich
-                // fan-out — finish_created_work skips enrichment for held identity
-                // states. Display/cover (best-in-hand) is still materialized and
-                // never gated; the retry job converges identity, then enriches.
+                // A Pending identity reaches ensure_identity_and_enrichment via
+                // finish_created_work: the add-time identity leg may resolve it
+                // (REQ-010); a still-held identity skips the fan-out there.
+                // Display/cover (best-in-hand) is materialized either way.
                 self.finish_created_work(
                     user_id,
                     work,
                     author_created,
                     author_id,
                     candidate.source_provider_data,
-                    candidate.skip_sync_enrichment,
                     derived_identity,
                     candidate.candidate_id.as_ref(),
                 )
@@ -1077,6 +1075,9 @@ where
                 MediaType::Ebook => w.monitor_ebook,
                 MediaType::Audiobook => w.monitor_audiobook,
             });
+        }
+        if let Some(ref language) = filter.language {
+            works.retain(|w| w.language.as_deref() == Some(language.as_str()));
         }
         if let Some(sort_by) = filter.sort_by {
             let dir = filter.sort_dir.unwrap_or(SortDirection::Asc);
@@ -1322,6 +1323,82 @@ where
             .await
         {
             tracing::warn!("enrichment reset_for_manual_refresh failed: {e}");
+        }
+
+        // REQ-008: identity anchor-completion precedes the scatter on every
+        // refresh door (single + bulk + retry funnel through this fn).
+        // Suppression is the existing retry-state semantics — a phase2-terminal
+        // last_outcome or a future next_attempt_at parks the provider until an
+        // explicit retry reset or an identity edit; neither refresh reset
+        // touches provider_retry_state, so suppression survives plain refresh.
+        let mut work = work;
+        if let Some(resolver) = self.resolver.as_ref() {
+            let now = chrono::Utc::now();
+            let suppressed: Vec<String> = self
+                .db
+                .list_retry_states(user_id, work_id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| {
+                    s.last_outcome.is_some_and(|o| o.is_phase2_terminal())
+                        || s.next_attempt_at.is_some_and(|t| t > now)
+                })
+                .map(|s| s.provider.record_key().to_string())
+                .collect();
+            // Identity-operation call records originate at the client layer.
+            let sink: Arc<dyn livrarr_domain::services::ProviderCallSink> =
+                Arc::new(livrarr_domain::services::NoopCallSink);
+            match crate::async_resolver::complete_anchors(
+                resolver.as_ref(),
+                &self.db,
+                user_id,
+                &work,
+                &suppressed,
+                &sink,
+            )
+            .await
+            {
+                Ok(report) => {
+                    // Only a no-candidates completion ("not_found") parks the
+                    // provider (REQ-008 boundedness). A resolved pass that
+                    // merely lacked a provider's anchor ("unresolvable") and
+                    // an ambiguous arbitration outcome ("ambiguous" — tie or
+                    // needs-confirmation) record nothing and may be
+                    // re-attempted next refresh.
+                    for (provider, reason) in &report.skipped {
+                        if reason == "not_found" {
+                            if let Some(p) = provider_from_record_key(provider) {
+                                if let Err(e) = self
+                                    .db
+                                    .record_terminal_outcome(
+                                        user_id,
+                                        work_id,
+                                        p,
+                                        livrarr_domain::OutcomeClass::NotFound,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        work_id,
+                                        "completion terminal record failed: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if !report.resolved.is_empty() {
+                        // Fresh anchors feed the scatter.
+                        if let Ok(w) = self.db.get_work(user_id, work_id).await {
+                            work = w;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(work_id, "anchor completion failed; scatter proceeds: {e}");
+                }
+            }
         }
 
         // Unified enrichment: provider dispatch, merge, cover download, tag sync.
@@ -1958,14 +2035,24 @@ where
             .map_err(WorkServiceError::Db)
     }
 
-    fn try_start_bulk_refresh(&self, user_id: i64) -> bool {
-        let mut guard = self.bulk_refresh_users.lock().unwrap();
-        guard.insert(user_id)
-    }
-
-    fn finish_bulk_refresh(&self, user_id: i64) {
-        let mut guard = self.bulk_refresh_users.lock().unwrap();
-        guard.remove(&user_id);
+    fn try_start_bulk_refresh(
+        &self,
+        user_id: i64,
+    ) -> Option<livrarr_domain::services::BulkRefreshGuard> {
+        let inserted = {
+            // Poison-proof: a panicked peer must not wedge the slot set.
+            let mut slots = self
+                .bulk_refresh_users
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            slots.insert(user_id)
+        };
+        inserted.then(|| {
+            livrarr_domain::services::BulkRefreshGuard::new(
+                self.bulk_refresh_users.clone(),
+                user_id,
+            )
+        })
     }
 }
 
@@ -2122,7 +2209,7 @@ where
                     description: None,
                     series_name: r.series_name,
                     series_position: r.series_position,
-                    source: Some("Goodreads".to_string()),
+                    source: Some("goodreads".to_string()),
                     source_type: Some("goodreads".to_string()),
                     // Discovery has no language — don't fabricate it from the query
                     // term (#11 / 三体=es). Enrichment supplies the real one.
@@ -2236,8 +2323,8 @@ where
                     description: None,
                     series_name: None,
                     series_position: None,
-                    source: None,
-                    source_type: None,
+                    source: Some("openlibrary".to_string()),
+                    source_type: Some("openlibrary".to_string()),
                     language: Some(lang.to_string()),
                     detail_url: None,
                     rating: None,
@@ -2307,7 +2394,9 @@ where
                     .image_links
                     .as_ref()
                     .and_then(livrarr_external_data::google_books::normalize_cover_url);
-                let language = vi.language.clone().or_else(|| Some(lang_norm.clone()));
+                // REQ-011: never stamp the query language onto a result — a
+                // payload without one stays language-unknown (#11, GB path).
+                let language = vi.language.clone();
 
                 Some(LookupResult {
                     ol_key: None,
@@ -2565,6 +2654,134 @@ where
         }
     }
 
+    /// REQ-010 (#144): the single identity+enrichment decision EVERY add
+    /// outcome takes (created, anchor-matched, adopted, deduped, race-loser).
+    /// An anchor-less work first runs the add-time identity leg via the
+    /// composed resolver — `resolve_identity` is the wrong vehicle (it
+    /// hard-filters anchor-less seeds to Pending with zero fan-out); the
+    /// resolver's own fan-out is the identity surface where text tiers
+    /// legally remain post-REQ-006. Enrichment then runs only when the
+    /// identity permits and the work needs it — an already-Enriched dedup
+    /// re-add is never re-enriched.
+    async fn ensure_identity_and_enrichment(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        source_provider_data: Option<SourceProviderData>,
+        candidate_id: Option<livrarr_domain::identity::CandidateId>,
+    ) -> (EnrichmentStatus, bool) {
+        use livrarr_domain::identity::{LatencyTier, Resolution, WorkSeed};
+        use livrarr_domain::IdentityStatus;
+
+        let mut work = match self.db.get_work(user_id, work_id).await {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(
+                    work_id,
+                    "ensure_identity_and_enrichment: get_work failed: {e}"
+                );
+                return (EnrichmentStatus::Failed, false);
+            }
+        };
+
+        let anchorless = work.ol_key.is_none()
+            && work.gr_key.is_none()
+            && work.hc_key.is_none()
+            && work.isbn_13.is_none()
+            && work.asin.is_none();
+        if anchorless && work.identity_status != IdentityStatus::Conflict {
+            if let Some(resolver) = self.resolver.as_ref() {
+                let seed = WorkSeed {
+                    ol_key: None,
+                    gr_key: None,
+                    hc_key: None,
+                    isbn_13: None,
+                    asin: None,
+                    title: Some(work.title.clone()),
+                    author_name: Some(work.author_name.clone()),
+                    language: work.language.clone(),
+                    series_name: work.series_name.clone(),
+                    year: work.year,
+                    user_confirmed: false,
+                };
+                match resolver
+                    .resolve(user_id, &seed, LatencyTier::Interactive)
+                    .await
+                {
+                    Ok(Resolution::Resolved { identity, .. }) => {
+                        if let Err(e) = self.db.merge_missing_anchors(work.id, &identity).await {
+                            tracing::warn!(
+                                work_id,
+                                "add-time identity leg: anchor merge failed: {e}"
+                            );
+                        } else {
+                            // A work anchor confirms identity; a bridge-only
+                            // resolve is the de-facto Provisional badge.
+                            let status = if identity.ol_key.is_some()
+                                || identity.gr_key.is_some()
+                                || identity.hc_key.is_some()
+                            {
+                                IdentityStatus::Confirmed
+                            } else {
+                                IdentityStatus::Provisional
+                            };
+                            if let Err(e) =
+                                self.db.set_identity_status(user_id, work.id, status).await
+                            {
+                                tracing::warn!(
+                                    work_id,
+                                    "add-time identity leg: status write failed: {e}"
+                                );
+                            }
+                            if let Ok(w) = self.db.get_work(user_id, work.id).await {
+                                work = w;
+                            }
+                        }
+                    }
+                    // No fuzzy adoption: Unresolved/NeedsConfirmation/Conflict
+                    // keep the existing identity state.
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(work_id, "add-time identity leg failed: {e}");
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    work_id,
+                    "no resolver composed — skipping add-time identity leg"
+                );
+            }
+        }
+
+        // Identity gate (unchanged shape): a held identity does not enrich
+        // here — the fan-out waits for identity convergence.
+        if matches!(
+            work.identity_status,
+            IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
+        ) {
+            return (work.enrichment_status, false);
+        }
+
+        // Needs-enrichment gate: Unenriched/Failed or fresh source data; an
+        // already-Enriched dedup re-add returns untouched.
+        let needs = matches!(
+            work.enrichment_status,
+            EnrichmentStatus::Unenriched | EnrichmentStatus::Failed
+        ) || source_provider_data.is_some();
+        if !needs {
+            return (work.enrichment_status, false);
+        }
+
+        self.run_unified_enrichment(
+            user_id,
+            &work,
+            source_provider_data,
+            EnrichmentMode::Background,
+            candidate_id,
+        )
+        .await
+    }
+
     async fn handle_race_loser(
         &self,
         user_id: UserId,
@@ -2573,23 +2790,10 @@ where
         author_id: Option<i64>,
         source_provider_data: Option<SourceProviderData>,
     ) -> Result<AddWorkResult, WorkServiceError> {
-        let (work, enrichment_status) = if source_provider_data.is_some() {
-            // No candidate_id: race-loser re-enriches from network (no candidate reuse).
-            let (status, _) = self
-                .run_unified_enrichment(
-                    user_id,
-                    &work,
-                    source_provider_data,
-                    EnrichmentMode::Background,
-                    None,
-                )
-                .await;
-            let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
-            (refreshed, status)
-        } else {
-            let status = work.enrichment_status;
-            (work, status)
-        };
+        let (enrichment_status, _identity_not_found) = self
+            .ensure_identity_and_enrichment(user_id, work.id, source_provider_data, None)
+            .await;
+        let work = self.db.get_work(user_id, work.id).await.unwrap_or(work);
         Ok(AddWorkResult {
             work,
             created: false,
@@ -2610,7 +2814,6 @@ where
         author_created: bool,
         author_id: Option<i64>,
         source_provider_data: Option<SourceProviderData>,
-        skip_sync_enrichment: bool,
         derived_identity: livrarr_domain::IdentityStatus,
         candidate_id: Option<&livrarr_domain::identity::CandidateId>,
     ) -> Result<AddWorkResult, WorkServiceError> {
@@ -2667,84 +2870,11 @@ where
                 .await;
         }
 
-        // Skip sync enrichment: return Unenriched immediately (REQ-009).
-        // Background retry job will pick up works with Unenriched status.
-        // Readarr imports (source_provider_data.is_some()) still get sync enrichment.
-        if skip_sync_enrichment && source_provider_data.is_none() {
-            let updated_work = self
-                .db
-                .get_work(user_id, work.id)
-                .await
-                .map_err(WorkServiceError::Db)?;
-            let cover_mtime =
-                crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
-                    crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
-                });
-            let audiobook_cover_mtime =
-                crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id).or_else(
-                    || {
-                        crate::cover::audiobook_cover_file_mtime(
-                            &self.data_dir.join("covers"),
-                            updated_work.id,
-                        )
-                    },
-                );
-            return Ok(AddWorkResult {
-                work: updated_work,
-                created: true,
-                author_created,
-                author_id,
-                messages: vec![],
-                cover_mtime,
-                audiobook_cover_mtime,
-                enrichment_status: EnrichmentStatus::Unenriched,
-            });
-        }
-
-        // Identity gate (REQ-015): the enrich fan-out runs only for a settled
-        // identity (Confirmed/Provisional). A held identity (Pending/Conflict/
-        // NeedsReview) does not enrich here — the cover above is never gated, but
-        // the provider fan-out waits for identity convergence.
-        if matches!(
-            derived_identity,
-            IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
-        ) {
-            let updated_work = self
-                .db
-                .get_work(user_id, work.id)
-                .await
-                .map_err(WorkServiceError::Db)?;
-            let cover_mtime =
-                crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
-                    crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
-                });
-            let audiobook_cover_mtime =
-                crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id).or_else(
-                    || {
-                        crate::cover::audiobook_cover_file_mtime(
-                            &self.data_dir.join("covers"),
-                            updated_work.id,
-                        )
-                    },
-                );
-            return Ok(AddWorkResult {
-                work: updated_work,
-                created: true,
-                author_created,
-                author_id,
-                messages: vec![],
-                cover_mtime,
-                audiobook_cover_mtime,
-                enrichment_status: EnrichmentStatus::Unenriched,
-            });
-        }
-
         let (enrichment_status, identity_not_found) = self
-            .run_unified_enrichment(
+            .ensure_identity_and_enrichment(
                 user_id,
-                &work,
+                work.id,
                 source_provider_data,
-                EnrichmentMode::Background,
                 candidate_id.cloned(),
             )
             .await;
@@ -2916,14 +3046,72 @@ where
 
         let materialize =
             livrarr_materialize::LiveMaterializeService::new(Arc::new(self.http.clone()));
-        if let Err(e) =
-            livrarr_domain::services::MaterializeService::materialize(&materialize, mat_req).await
+        match livrarr_domain::services::MaterializeService::materialize(&materialize, mat_req).await
         {
-            tracing::warn!(work_id, "run_unified_enrichment: materialize failed: {e}");
+            Ok(outcome) => {
+                // REQ-017: persist freshly decoded ebook-cover dimensions via
+                // the existing writer. (The audiobook slot has no dims writer
+                // today — its SavedCover is computed but not yet persisted.)
+                if let Some(saved) = outcome.saved_cover.as_ref() {
+                    if let Err(e) = self
+                        .db
+                        .update_cover_dimensions(user_id, work_id, saved.width, saved.height)
+                        .await
+                    {
+                        tracing::warn!(work_id, "cover dimension persist failed: {e}");
+                    }
+                } else if post_enrich_work.cover_width == 0 && post_enrich_work.cover_url.is_some()
+                {
+                    // REQ-017 trust-independent backfill: nothing was saved this
+                    // pass (incl. user-locked covers) but the stored file exists
+                    // and the work has no dims — decode the stored image once.
+                    let path = self
+                        .data_dir
+                        .join("covers")
+                        .join(user_id.to_string())
+                        .join(format!("{work_id}.jpg"));
+                    if let Ok(bytes) = tokio::fs::read(&path).await {
+                        let dims = tokio::task::spawn_blocking(move || {
+                            image::load_from_memory(&bytes)
+                                .map(|img| (img.width() as i32, img.height() as i32))
+                                .ok()
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some((w, h)) = dims {
+                            if let Err(e) = self
+                                .db
+                                .update_cover_dimensions(user_id, work_id, w, h)
+                                .await
+                            {
+                                tracing::warn!(work_id, "cover dimension backfill failed: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(work_id, "run_unified_enrichment: materialize failed: {e}");
+            }
         }
 
         (final_status, identity_not_found)
     }
+}
+
+/// Reverse of `MetadataProvider::record_key` for completion skip reports.
+fn provider_from_record_key(key: &str) -> Option<livrarr_domain::MetadataProvider> {
+    use livrarr_domain::MetadataProvider as P;
+    Some(match key {
+        "hardcover" => P::Hardcover,
+        "openlibrary" => P::OpenLibrary,
+        "goodreads" => P::Goodreads,
+        "audnexus" => P::Audnexus,
+        "google_books" => P::GoogleBooks,
+        "audible" => P::Audible,
+        _ => return None,
+    })
 }
 
 async fn write_addtime_provenance<D: ProvenanceDb>(

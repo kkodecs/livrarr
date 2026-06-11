@@ -21,7 +21,7 @@ use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use futures::future::BoxFuture;
 use livrarr_db::{
     create_test_db, ApplyEnrichmentMergeRequest, CreateUserDbRequest, CreateWorkDbRequest, DbError,
-    ExternalIdDb, ProvenanceDb, ProviderRetryStateDb, SetFieldProvenanceRequest,
+    ExternalIdDb, FieldDissentDb, ProvenanceDb, ProviderRetryStateDb, SetFieldProvenanceRequest,
     UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, UpsertExternalIdRequest, UserDb,
     WorkDb, WorkDbCreate,
 };
@@ -666,6 +666,27 @@ impl ExternalIdDb for SequencedApplyDb {
     }
 }
 
+impl FieldDissentDb for SequencedApplyDb {
+    async fn record_field_dissents(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        dissents: Vec<livrarr_domain::FieldDissent>,
+    ) -> Result<(), DbError> {
+        self.inner
+            .record_field_dissents(user_id, work_id, dissents)
+            .await
+    }
+
+    async fn list_field_dissents(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<livrarr_domain::FieldDissent>, DbError> {
+        self.inner.list_field_dissents(user_id, work_id).await
+    }
+}
+
 fn make_work_req(user_id: UserId, title: &str, author: &str) -> CreateWorkDbRequest {
     CreateWorkDbRequest {
         user_id,
@@ -752,7 +773,6 @@ fn scatter_result(
 
 fn merge_output_success(title: &str) -> MergeOutput {
     MergeOutput {
-        conflict_detected: false,
         work_update: Some(MergeResolved::new(UpdateWorkEnrichmentDbRequest {
             title: Some(title.to_string()),
             subtitle: None,
@@ -768,11 +788,6 @@ fn merge_output_success(title: &str) -> MergeOutput {
             duration_seconds: None,
             publisher: None,
             publish_date: None,
-            hc_key: None,
-            gr_key: Some("gr/work/123".to_string()),
-            ol_key: Some("OL999W".to_string()),
-            isbn_13: Some("9781234567890".to_string()),
-            asin: Some("B00TEST123".to_string()),
             narrator: None,
             narration_type: None,
             abridged: Some(false),
@@ -790,37 +805,25 @@ fn merge_output_success(title: &str) -> MergeOutput {
             cleared: false,
         }],
         provenance_deletes: vec![],
-        external_id_updates: vec![
-            UpsertExternalIdRequest {
-                work_id: 0,
-                id_type: livrarr_domain::ExternalIdType::Isbn13,
-                id_value: "9780000000001".to_string(),
-            },
-            UpsertExternalIdRequest {
-                work_id: 0,
-                id_type: livrarr_domain::ExternalIdType::Asin,
-                id_value: "B00EXTRA1".to_string(),
-            },
-        ],
         enrichment_status: EnrichmentStatus::Enriched,
         enrichment_source: Some("goodreads".to_string()),
         cover_resolution: None,
         audiobook_cover_resolution: None,
+        dissents: Vec::new(),
     }
 }
 
 fn merge_output_conflict() -> MergeOutput {
     MergeOutput {
-        conflict_detected: true,
         work_update: None,
         provenance_upserts: vec![],
         provenance_deletes: vec![],
-        external_id_updates: vec![],
-        // Conflict is signaled by conflict_detected; enrichment stays Unenriched.
+        // Conflict providers are dissent-isolated; this stub returns a no-write output.
         enrichment_status: EnrichmentStatus::Unenriched,
         enrichment_source: None,
         cover_resolution: None,
         audiobook_cover_resolution: None,
+        dissents: Vec::new(),
     }
 }
 
@@ -830,7 +833,15 @@ fn make_service<DB>(
     merge_engine: StubMergeEngine,
 ) -> impl EnrichmentService
 where
-    DB: WorkDb + ProvenanceDb + ProviderRetryStateDb + ExternalIdDb + Clone + Send + Sync + 'static,
+    DB: WorkDb
+        + ProvenanceDb
+        + ProviderRetryStateDb
+        + ExternalIdDb
+        + FieldDissentDb
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     livrarr_metadata::EnrichmentServiceImpl::new(
         db,
@@ -1000,11 +1011,6 @@ async fn set_work_language<DB: WorkDb>(db: &DB, work: &Work, language: &str) -> 
                 duration_seconds: work.duration_seconds,
                 publisher: work.publisher.clone(),
                 publish_date: work.publish_date.clone(),
-                hc_key: work.hc_key.clone(),
-                gr_key: work.gr_key.clone(),
-                ol_key: work.ol_key.clone(),
-                isbn_13: work.isbn_13.clone(),
-                asin: work.asin.clone(),
                 narrator: work.narrator.clone(),
                 narration_type: work.narration_type,
                 abridged: Some(work.abridged),
@@ -1016,7 +1022,6 @@ async fn set_work_language<DB: WorkDb>(db: &DB, work: &Work, language: &str) -> 
             new_enrichment_status: work.enrichment_status,
             provenance_upserts: vec![],
             provenance_deletes: vec![],
-            external_id_updates: vec![],
         })
         .await
         .unwrap();
@@ -1051,11 +1056,6 @@ async fn mark_work_enriched<DB: WorkDb>(db: &DB, work: &Work) -> Work {
                 duration_seconds: work.duration_seconds,
                 publisher: work.publisher.clone(),
                 publish_date: work.publish_date.clone(),
-                hc_key: work.hc_key.clone(),
-                gr_key: work.gr_key.clone(),
-                ol_key: work.ol_key.clone(),
-                isbn_13: work.isbn_13.clone(),
-                asin: work.asin.clone(),
                 narrator: work.narrator.clone(),
                 narration_type: work.narration_type,
                 abridged: Some(work.abridged),
@@ -1067,7 +1067,6 @@ async fn mark_work_enriched<DB: WorkDb>(db: &DB, work: &Work) -> Work {
             new_enrichment_status: EnrichmentStatus::Enriched,
             provenance_upserts: vec![],
             provenance_deletes: vec![],
-            external_id_updates: vec![],
         })
         .await
         .unwrap();
@@ -1609,8 +1608,8 @@ macro_rules! enrichment_service_tests {
         }
 
         #[tokio::test]
-        async fn test_enrichment_service_enrich_work_conflict_path_writes_status_only_conflict() {
-            // REQ-ID: R-02, R-22 | Contract: EnrichmentService::enrich_work | Behavior: merge conflict causes status-only apply with work.enrichment_status set to Conflict
+        async fn test_enrichment_service_enrich_work_conflict_path_writes_status_only() {
+            // REQ-ID: R-02, R-22, REQ-014 | Contract: EnrichmentService::enrich_work | Behavior: a no-write merge output causes a status-only apply; the merge does not signal identity_not_found
             let h = <$harness as DbTestHarness>::setup().await;
             let user_id = h.user_id();
             let work = seed_work(h.db(), user_id).await;
@@ -1646,11 +1645,14 @@ macro_rules! enrichment_service_tests {
 
             let persisted = h.db().get_work(user_id, work.id).await.unwrap();
             assert_eq!(persisted.title, original_title);
-            assert_eq!(persisted.enrichment_status, EnrichmentStatus::Unenriched);
-            assert_eq!(result.enrichment_status, EnrichmentStatus::Unenriched);
+            // REQ-011/REQ-014: no Success outcome → resolve_status yields Failed
+            // (transient, retried later); the Unenriched-on-conflict sentinel is
+            // retired.
+            assert_eq!(persisted.enrichment_status, EnrichmentStatus::Failed);
+            assert_eq!(result.enrichment_status, EnrichmentStatus::Failed);
             assert!(
-                result.identity_not_found,
-                "all-rejected enrichment signals identity_not_found (the caller writes IdentityStatus::NotFound)"
+                !result.identity_not_found,
+                "REQ-014: the merge no longer signals identity_not_found — it keeps identity-track sources only"
             );
             assert_eq!(
                 result.provider_outcomes,

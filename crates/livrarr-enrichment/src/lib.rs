@@ -10,11 +10,10 @@ use std::sync::Arc;
 
 use livrarr_db::{
     ApplyEnrichmentMergeRequest, SetFieldProvenanceRequest, UpdateWorkEnrichmentDbRequest,
-    UpsertExternalIdRequest,
 };
 use livrarr_domain::{
-    ApplyMergeOutcome, DbError, EnrichmentStatus, FieldProvenance, MergeResolved, NarrationType,
-    RequestPriority, UserId, WillRetryReason, Work, WorkField, WorkId,
+    ApplyMergeOutcome, DbError, DissentReason, EnrichmentStatus, FieldProvenance, MergeResolved,
+    NarrationType, RequestPriority, UserId, WillRetryReason, Work, WorkField, WorkId,
 };
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 
@@ -102,6 +101,9 @@ pub struct EnrichmentResult {
     /// cover resolution. Drives the materialize gate in the wrapper
     /// (REQ-012): cover download + retag runs only when changed=true.
     pub changed: bool,
+    /// Per-field/per-provider dissents recorded by this merge (REQ-014):
+    /// excluded contributions, persisted queryably; never block the merge.
+    pub dissents: Vec<livrarr_domain::FieldDissent>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -325,15 +327,16 @@ pub struct MergeInput {
 /// TEMP(pk-tdd): output of MergeEngine::merge.
 #[derive(Debug, Clone)]
 pub struct MergeOutput {
-    pub conflict_detected: bool,
     pub work_update: Option<MergeResolved<UpdateWorkEnrichmentDbRequest>>,
     pub provenance_upserts: Vec<SetFieldProvenanceRequest>,
     pub provenance_deletes: Vec<WorkField>,
-    pub external_id_updates: Vec<UpsertExternalIdRequest>,
     pub enrichment_status: EnrichmentStatus,
     pub enrichment_source: Option<String>,
     pub cover_resolution: Option<livrarr_domain::CoverResolution>,
     pub audiobook_cover_resolution: Option<livrarr_domain::CoverResolution>,
+    /// Per-field/per-provider dissents (REQ-014): contributions excluded at
+    /// provider or field granularity; the merge proceeds with the rest.
+    pub dissents: Vec<livrarr_domain::FieldDissent>,
 }
 
 /// TEMP(pk-tdd): error from MergeEngine::merge.
@@ -387,14 +390,6 @@ pub fn build_apply_request(
             ..p.clone()
         })
         .collect();
-    let external_id_updates = merge_output
-        .external_id_updates
-        .iter()
-        .map(|e| UpsertExternalIdRequest {
-            work_id,
-            ..e.clone()
-        })
-        .collect();
     ApplyEnrichmentMergeRequest {
         user_id,
         work_id,
@@ -403,7 +398,6 @@ pub fn build_apply_request(
         new_enrichment_status: merge_output.enrichment_status,
         provenance_upserts,
         provenance_deletes: merge_output.provenance_deletes.clone(),
-        external_id_updates,
     }
 }
 
@@ -433,8 +427,12 @@ impl MergeEngine for DefaultMergeEngine {
         // caller is configured. Language routing (REQ-014/#133) is enforced here at
         // the single chokepoint both the cached and network entry paths funnel through,
         // so a foreign work can never take English OpenLibrary/Hardcover metadata.
+        // `had_providers` is captured BEFORE the policy drop: providers that were
+        // attempted but all excluded yield a status-only output (REQ-014), while an
+        // empty dispatch re-materializes current state as before.
+        let had_providers = !inputs.provider_results.is_empty();
         let inputs = drop_language_incompatible_providers(inputs);
-        merge_impl(inputs)
+        merge_impl(inputs, had_providers)
     }
 
     /// Merge from already-fetched per-provider payloads — zero provider network
@@ -635,20 +633,14 @@ fn non_blank_owned(s: &str) -> Option<String> {
 
 /// Lowercase name for a MetadataProvider (for enrichment_source).
 fn provider_name(p: livrarr_domain::MetadataProvider) -> &'static str {
-    match p {
-        livrarr_domain::MetadataProvider::Hardcover => "hardcover",
-        livrarr_domain::MetadataProvider::OpenLibrary => "openlibrary",
-        livrarr_domain::MetadataProvider::Goodreads => "goodreads",
-        livrarr_domain::MetadataProvider::Audnexus => "audnexus",
-        livrarr_domain::MetadataProvider::Llm => "llm",
-        livrarr_domain::MetadataProvider::Readarr => "readarr",
-        livrarr_domain::MetadataProvider::GoogleBooks => "google_books",
-        livrarr_domain::MetadataProvider::Audible => "audible",
-    }
+    p.record_key()
 }
 
 /// The ordered list of fields that we merge. SortTitle is excluded because
 /// NormalizedWorkDetail and UpdateWorkEnrichmentDbRequest don't carry it.
+/// Anchor fields (ol_key/hc_key/gr_key/isbn_13/asin) are deliberately absent
+/// (REQ-007): provider anchor values are never read by the merge — anchors
+/// move exclusively via the identity track.
 const MERGE_FIELDS: &[WorkField] = &[
     WorkField::Title,
     WorkField::Subtitle,
@@ -664,11 +656,6 @@ const MERGE_FIELDS: &[WorkField] = &[
     WorkField::DurationSeconds,
     WorkField::Publisher,
     WorkField::PublishDate,
-    WorkField::OlKey,
-    WorkField::HcKey,
-    WorkField::GrKey,
-    WorkField::Isbn13,
-    WorkField::Asin,
     WorkField::Narrator,
     WorkField::NarrationType,
     WorkField::Abridged,
@@ -676,8 +663,44 @@ const MERGE_FIELDS: &[WorkField] = &[
     WorkField::RatingCount,
 ];
 
-/// Core merge implementation.
-fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
+/// Text fields covered by the REQ-013 language-dissent pass.
+const TEXT_DISSENT_FIELDS: &[WorkField] = &[
+    WorkField::Description,
+    WorkField::Subtitle,
+    WorkField::SeriesName,
+    WorkField::Genres,
+];
+
+fn is_text_dissent_field(field: WorkField) -> bool {
+    TEXT_DISSENT_FIELDS.contains(&field)
+}
+
+/// Display text for a field value, used for dissent rows; `None` when absent.
+fn field_value_text(value: &FieldValue) -> Option<String> {
+    match value {
+        FieldValue::Str(v) => v.clone(),
+        FieldValue::Int(v) => v.map(|n| n.to_string()),
+        FieldValue::Float(v) => v.map(|n| n.to_string()),
+        FieldValue::Bool(v) => v.map(|b| b.to_string()),
+        FieldValue::Strings(v) => v.as_ref().map(|s| s.join(", ")),
+        FieldValue::NarrationType(v) => v.map(|n| format!("{n:?}")),
+    }
+}
+
+/// snake_case column name for a work field — the serde vocabulary shared
+/// with the provenance store.
+fn work_field_name(field: WorkField) -> String {
+    serde_json::to_value(field)
+        .expect("WorkField serialization is infallible")
+        .as_str()
+        .expect("WorkField serializes to a string")
+        .to_string()
+}
+
+/// Core merge implementation. `had_providers` reflects the pre-drop input set
+/// (see `MergeEngine::merge`): only a merge that attempted providers and lost
+/// them all to exclusion produces a status-only (`work_update: None`) output.
+fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, MergeError> {
     let pm = &inputs.priority_model;
 
     // 1. Validate priority model: if ANY category is empty, error.
@@ -689,25 +712,10 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         return Err(MergeError::EmptyPriorityModel);
     }
 
-    // 2. Conflict detection: if ANY provider has Conflict class, block.
-    let has_conflict = inputs
-        .provider_results
-        .values()
-        .any(|o| o.class == livrarr_domain::OutcomeClass::Conflict);
-
-    if has_conflict {
-        return Ok(MergeOutput {
-            conflict_detected: true,
-            work_update: None,
-            provenance_upserts: Vec::new(),
-            provenance_deletes: Vec::new(),
-            external_id_updates: Vec::new(),
-            enrichment_status: EnrichmentStatus::Unenriched,
-            enrichment_source: None,
-            cover_resolution: None,
-            audiobook_cover_resolution: None,
-        });
-    }
+    // 2. REQ-014 (#110): a provider with a Conflict outcome is excluded from
+    // the merge and its offered contribution is recorded as PayloadMismatch
+    // dissent rows — the merge always proceeds with the remaining providers.
+    // (Identity-level conflicts keep their separate IdentityStatus flow.)
 
     // 3. Determine which providers are merge-eligible based on mode.
     let eligible_providers: HashMap<
@@ -720,8 +728,7 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
             match inputs.mode {
                 EnrichmentMode::Background => outcome.class.can_merge(),
                 EnrichmentMode::Manual | EnrichmentMode::HardRefresh => {
-                    // Only Conflict blocks in manual/hard-refresh, and we've
-                    // already handled that above.
+                    // Conflict providers are dissent-isolated, never merged.
                     outcome.class != livrarr_domain::OutcomeClass::Conflict
                 }
             }
@@ -738,6 +745,73 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
 
     let user_id = inputs.current_work.user_id;
     let work_id = inputs.current_work.id;
+
+    // Dissent seeds: (provider, field, offered value, reason). Materialized
+    // into FieldDissent rows after the field loop, because winning values
+    // need the final resolved state.
+    let mut dissent_seeds: Vec<(
+        livrarr_domain::MetadataProvider,
+        WorkField,
+        String,
+        DissentReason,
+    )> = Vec::new();
+
+    // REQ-014: every field a Conflict provider offered becomes a
+    // PayloadMismatch dissent row (its whole contribution is excluded).
+    for (provider, outcome) in &inputs.provider_results {
+        if outcome.class != livrarr_domain::OutcomeClass::Conflict {
+            continue;
+        }
+        let Some(ref detail) = outcome.payload else {
+            continue; // nothing offered, nothing to record
+        };
+        for &field in MERGE_FIELDS {
+            if let Some(offered) = field_value_text(&extract_provider_field(field, detail)) {
+                dissent_seeds.push((*provider, field, offered, DissentReason::PayloadMismatch));
+            }
+        }
+    }
+
+    // REQ-013: on a foreign-language work, an eligible payload whose language
+    // is KNOWN and incompatible contributes no text fields — each suppressed
+    // value becomes a LanguageIncompatible dissent. Unknown (None) payload
+    // language is unaffected; non-text fields are unaffected.
+    let work_is_foreign = matches!(
+        livrarr_external_data::language::provider_priority(inputs.current_work.language.as_deref()),
+        livrarr_external_data::language::ProviderPriority::Foreign
+    );
+    let work_lang = inputs
+        .current_work
+        .language
+        .as_deref()
+        .map(livrarr_domain::normalize_language);
+    let language_incompatible: std::collections::HashSet<livrarr_domain::MetadataProvider> =
+        if work_is_foreign {
+            eligible_providers
+                .iter()
+                .filter_map(|(provider, detail)| {
+                    let payload_lang = non_blank(&(*detail)?.language)
+                        .map(|l| livrarr_domain::normalize_language(&l))?;
+                    (Some(&payload_lang) != work_lang.as_ref()).then_some(*provider)
+                })
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+    for provider in &language_incompatible {
+        if let Some(Some(detail)) = eligible_providers.get(provider) {
+            for &field in TEXT_DISSENT_FIELDS {
+                if let Some(offered) = field_value_text(&extract_provider_field(field, detail)) {
+                    dissent_seeds.push((
+                        *provider,
+                        field,
+                        offered,
+                        DissentReason::LanguageIncompatible,
+                    ));
+                }
+            }
+        }
+    }
 
     // 4. Resolve each field.
     let mut provenance_upserts = Vec::new();
@@ -775,6 +849,11 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         let mut winner: Option<(livrarr_domain::MetadataProvider, FieldValue)> = None;
 
         for &provider in priority_list {
+            // REQ-013: language-incompatible providers never win text fields
+            // (their offered values are already dissent seeds).
+            if is_text_dissent_field(field) && language_incompatible.contains(&provider) {
+                continue;
+            }
             if let Some(Some(detail)) = eligible_providers.get(&provider) {
                 let val = extract_provider_field(field, detail);
                 if val.is_some() {
@@ -927,11 +1006,6 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         duration_seconds: get_int(WorkField::DurationSeconds),
         publisher: get_str(WorkField::Publisher),
         publish_date: get_str(WorkField::PublishDate),
-        ol_key: get_str(WorkField::OlKey),
-        gr_key: get_str(WorkField::GrKey),
-        hc_key: get_str(WorkField::HcKey),
-        isbn_13: get_str(WorkField::Isbn13),
-        asin: get_str(WorkField::Asin),
         narrator: get_strings(WorkField::Narrator),
         narration_type: get_narration_type(WorkField::NarrationType),
         abridged: get_bool(WorkField::Abridged),
@@ -948,40 +1022,47 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
             .or_else(|| inputs.current_work.cover_url.clone()),
     };
 
-    // 8. External ID collection: from all Success providers.
-    let mut external_id_updates = Vec::new();
-    for (provider, outcome) in &inputs.provider_results {
-        if outcome.class == livrarr_domain::OutcomeClass::Success {
-            if let Some(ref detail) = outcome.payload {
-                for isbn in &detail.additional_isbns {
-                    external_id_updates.push(UpsertExternalIdRequest {
-                        work_id,
-                        id_type: livrarr_domain::ExternalIdType::Isbn13,
-                        id_value: isbn.clone(),
-                    });
-                }
-                for asin_val in &detail.additional_asins {
-                    external_id_updates.push(UpsertExternalIdRequest {
-                        work_id,
-                        id_type: livrarr_domain::ExternalIdType::Asin,
-                        id_value: asin_val.clone(),
-                    });
-                }
-                let _ = provider; // used above via iteration
-            }
-        }
-    }
+    // 8. Materialize dissent rows (REQ-014): winning values come from the
+    // final resolved state. merge_generation 0 is a placeholder — the
+    // persisting caller stamps the applied generation (the engine has no
+    // db-generation knowledge).
+    let recorded_at = chrono::Utc::now();
+    let dissents: Vec<livrarr_domain::FieldDissent> = dissent_seeds
+        .into_iter()
+        .map(
+            |(provider, field, offered, reason)| livrarr_domain::FieldDissent {
+                work_id,
+                provider: provider.record_key().to_string(),
+                field: work_field_name(field),
+                offered_value: offered,
+                winning_value: resolved_values.get(&field).and_then(field_value_text),
+                reason,
+                merge_generation: 0,
+                recorded_at,
+            },
+        )
+        .collect();
+
+    // REQ-014: providers were attempted but ALL were excluded (conflicted or
+    // policy-dropped) — there is nothing to write, the apply is status-only.
+    // With ANY eligible provider — or an empty dispatch — the update is
+    // emitted as before (the last-known-good echo preserves current values
+    // under the db's direct binds).
+    let work_update = if had_providers && eligible_providers.is_empty() {
+        None
+    } else {
+        Some(MergeResolved::new(work_update))
+    };
 
     Ok(MergeOutput {
-        conflict_detected: false,
-        work_update: Some(MergeResolved::new(work_update)),
+        work_update,
         provenance_upserts,
         provenance_deletes,
-        external_id_updates,
         enrichment_status,
         enrichment_source,
         cover_resolution,
         audiobook_cover_resolution,
+        dissents,
     })
 }
 
@@ -999,25 +1080,16 @@ fn merge_impl(inputs: MergeInput) -> Result<MergeOutput, MergeError> {
 ///   NotConfigured, WillRetry, PermanentFailure, Suppressed, or NotFound. This
 ///   is the transient "try later" state; the background job will retry.
 ///
-/// Special case: when `conflict_detected = true`, the merge blocked on a
-/// per-provider identity conflict — the merge output status (`Unenriched`) is
-/// a sentinel for a distinct non-enrichment condition and is preserved as-is.
-///
 /// The merge engine's own `enrichment_status` already handles Enriched/Thin
 /// correctly; this function only overrides to `Failed` when appropriate.
+/// (REQ-014: the whole-work Conflict outcome is retired — status is computed
+/// from surviving contributions; conflicted providers are dissent-isolated.)
 fn resolve_status(
     merge_status: EnrichmentStatus,
-    conflict_detected: bool,
     provider_results: &HashMap<livrarr_domain::MetadataProvider, ReconstructedOutcome>,
 ) -> EnrichmentStatus {
     if merge_status == EnrichmentStatus::Enriched {
         return EnrichmentStatus::Enriched;
-    }
-    // A merge-level conflict (per-provider Conflict class) is a distinct
-    // non-enrichment condition — preserve Unenriched as the sentinel so the
-    // caller can write IdentityStatus::NotFound.
-    if conflict_detected {
-        return merge_status;
     }
     // If ANY provider had a Success outcome (even an empty one), the work is at
     // most Thin — we know the book, we just found no useful metadata.
@@ -1110,6 +1182,30 @@ impl Drop for SweepLocksOnDrop {
 type SourceDataStore =
     tokio::sync::Mutex<HashMap<(UserId, WorkId), livrarr_domain::services::SourceProviderData>>;
 
+/// Stamp the applied merge's generation onto the dissent rows and persist
+/// them (REQ-014). An empty batch clears stale rows from earlier generations
+/// (a clean re-merge resolves prior dissents). Persistence failures are
+/// logged, never propagated — dissent bookkeeping must not fail an applied
+/// merge. Returns the stamped rows for the caller's result.
+async fn persist_dissents<DB: livrarr_db::FieldDissentDb>(
+    db: &DB,
+    user_id: UserId,
+    work_id: WorkId,
+    merge_generation: i64,
+    mut dissents: Vec<livrarr_domain::FieldDissent>,
+) -> Vec<livrarr_domain::FieldDissent> {
+    for d in &mut dissents {
+        d.merge_generation = merge_generation;
+    }
+    if let Err(e) = db
+        .record_field_dissents(user_id, work_id, dissents.clone())
+        .await
+    {
+        tracing::warn!(work_id, error = %e, "failed to persist merge dissents");
+    }
+    dissents
+}
+
 /// Enrichment service implementation.
 /// Generic over DB, Q (ProviderQueue), ME (MergeEngine), V (LlmValidator),
 /// and L (LlmCaller for cover gate disambiguation).
@@ -1137,6 +1233,11 @@ pub struct EnrichmentServiceImpl<DB, Q, ME, V, L = crate::StubNoLlm> {
     /// (AC-001 / REQ-014/015). Set via `with_transport_cache`; `None` in
     /// contexts where no resolver is composed (tests, CLI tools).
     transport_cache: Option<Arc<livrarr_external_data::transport_cache::TransportCache>>,
+    /// Fire-and-forget instrumentation sink (REQ-001). Records emitted here
+    /// are pipeline-level (cache-served payloads); per-network-call records
+    /// come from the clients and the queue. `None` in compositions that don't
+    /// record (tests, CLI tools).
+    call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 
 impl<DB, Q, ME, V, L> EnrichmentServiceImpl<DB, Q, ME, V, L>
@@ -1145,6 +1246,7 @@ where
         + livrarr_db::ProvenanceDb
         + livrarr_db::ProviderRetryStateDb
         + livrarr_db::ExternalIdDb
+        + livrarr_db::FieldDissentDb
         + Send
         + Sync
         + 'static,
@@ -1171,7 +1273,18 @@ where
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             source_data_store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             transport_cache: None,
+            call_sink: None,
         }
+    }
+
+    /// Wire the provider-call instrumentation sink (REQ-001). The server
+    /// composition root sets this; `None` (the default) records nothing.
+    pub fn with_call_sink(
+        mut self,
+        sink: Arc<dyn livrarr_domain::services::ProviderCallSink>,
+    ) -> Self {
+        self.call_sink = Some(sink);
+        self
     }
 
     /// Wire the transport cache (produced by the identity resolver at composition
@@ -1204,6 +1317,7 @@ where
         + livrarr_db::ProvenanceDb
         + livrarr_db::ProviderRetryStateDb
         + livrarr_db::ExternalIdDb
+        + livrarr_db::FieldDissentDb
         + Send
         + Sync
         + 'static,
@@ -1260,6 +1374,22 @@ where
                 );
                 return None;
             }
+            // REQ-001: each cache-served payload consumed by this merge is a
+            // recorded fetch attempt (outcome Cached).
+            if let Some(sink) = &self.call_sink {
+                let started_at = chrono::Utc::now();
+                for provider in payloads.keys() {
+                    sink.record(livrarr_domain::services::ProviderCallRecord {
+                        provider: provider.record_key().to_string(),
+                        operation: livrarr_domain::services::CallOperation::Enrich,
+                        work_id: Some(work_id),
+                        started_at,
+                        duration_ms: 0,
+                        outcome: livrarr_domain::services::CallOutcomeClass::Cached,
+                        detail: None,
+                    });
+                }
+            }
             // Snapshot generation + provenance for CAS correctness; a DB read
             // failure here returns None → network fallback (never empty
             // provenance, which would silently drop user field-locks).
@@ -1280,9 +1410,18 @@ where
                 ApplyMergeOutcome::Applied
                 | ApplyMergeOutcome::NoChange
                 | ApplyMergeOutcome::Deferred => {
+                    // The merge applied at `generation`; apply_enrichment_merge
+                    // bumps by one, so its dissent rows carry generation + 1.
+                    let dissents = persist_dissents(
+                        self.db.as_ref(),
+                        user_id,
+                        work_id,
+                        generation + 1,
+                        merge_output.dissents,
+                    )
+                    .await;
                     let result_work = self.db.get_work(user_id, work_id).await.ok()?;
                     let changed = merge_output.work_update.is_some()
-                        || !merge_output.external_id_updates.is_empty()
                         || merge_output.cover_resolution.is_some()
                         || merge_output.audiobook_cover_resolution.is_some();
                     Some(EnrichmentResult {
@@ -1295,8 +1434,11 @@ where
                         provider_outcomes: HashMap::new(),
                         cover_resolution: merge_output.cover_resolution,
                         audiobook_cover_resolution: merge_output.audiobook_cover_resolution,
-                        identity_not_found: merge_output.conflict_detected,
+                        // The merge no longer signals identity (REQ-014);
+                        // identity_not_found keeps its identity-track sources only.
+                        identity_not_found: false,
                         changed,
+                        dissents,
                     })
                 }
                 ApplyMergeOutcome::Superseded => {
@@ -1372,6 +1514,7 @@ where
                 audiobook_cover_resolution: None,
                 identity_not_found: false,
                 changed: false,
+                dissents: Vec::new(),
             });
         }
 
@@ -1466,8 +1609,9 @@ where
         }
 
         // Step 8.5 removed (REQ-005): LLM identity validation no longer runs in
-        // the pipeline. `identity_not_found` is derived solely from
-        // `merge_output.conflict_detected` (per-provider Conflict class).
+        // the pipeline. Per-provider Conflict outcomes are dissent-isolated by
+        // the merge (REQ-014); identity_not_found keeps its identity-track
+        // sources only.
 
         // Cover gate: for English works with an OL key, filter GR cover_urls
         // through the deterministic Jaccard gate before merge (REQ-017).
@@ -1540,11 +1684,8 @@ where
 
             // REQ-011: apply resolve_status before persisting — the DB must store
             // the same status that is returned to the caller.
-            merge_output.enrichment_status = resolve_status(
-                merge_output.enrichment_status,
-                merge_output.conflict_detected,
-                &reconstructed,
-            );
+            merge_output.enrichment_status =
+                resolve_status(merge_output.enrichment_status, &reconstructed);
 
             let apply_req = build_apply_request(&merge_output, user_id, work_id, generation);
 
@@ -1554,10 +1695,19 @@ where
                 ApplyMergeOutcome::Applied
                 | ApplyMergeOutcome::NoChange
                 | ApplyMergeOutcome::Deferred => {
-                    // Success — build result
+                    // Success — build result. The merge applied at `generation`;
+                    // apply_enrichment_merge bumps by one, so its dissent rows
+                    // carry generation + 1.
+                    let dissents = persist_dissents(
+                        self.db.as_ref(),
+                        user_id,
+                        work_id,
+                        generation + 1,
+                        merge_output.dissents,
+                    )
+                    .await;
                     let result_work = self.db.get_work(user_id, work_id).await?;
                     let changed = merge_output.work_update.is_some()
-                        || !merge_output.external_id_updates.is_empty()
                         || merge_output.cover_resolution.is_some()
                         || merge_output.audiobook_cover_resolution.is_some();
                     return Ok(EnrichmentResult {
@@ -1569,10 +1719,11 @@ where
                         provider_outcomes,
                         cover_resolution: merge_output.cover_resolution,
                         audiobook_cover_resolution: merge_output.audiobook_cover_resolution,
-                        // A merge-detected conflict (per-provider Conflict class) signals
-                        // identity-not-found upward.
-                        identity_not_found: merge_output.conflict_detected,
+                        // The merge no longer signals identity (REQ-014);
+                        // identity_not_found keeps its identity-track sources only.
+                        identity_not_found: false,
                         changed,
+                        dissents,
                     });
                 }
                 ApplyMergeOutcome::Superseded => {

@@ -68,6 +68,21 @@ pub struct MaterializeOutcome {
     pub audiobook_cover_path: Option<String>,
     pub tags_written: bool,
     pub skipped_unchanged: bool,
+    /// Stored ebook cover + its decoded dimensions (REQ-017). Materialize has
+    /// no db edge; the orchestrator persists via `update_cover_dimensions`.
+    pub saved_cover: Option<SavedCover>,
+    /// Stored audiobook cover + its decoded dimensions (REQ-017).
+    pub saved_audiobook_cover: Option<SavedCover>,
+}
+
+/// A cover written to disk, with dimensions decoded from the stored bytes
+/// (REQ-017). Decode failure yields `None` upstream — a saved cover is better
+/// than a cover rejected over a dims read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SavedCover {
+    pub path: PathBuf,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// Error from the save step.

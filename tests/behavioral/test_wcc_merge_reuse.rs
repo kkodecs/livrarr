@@ -112,7 +112,6 @@ async fn test_wcc_merge_reuse_ac_012_no_llm_priority_wins_and_null_never_clears_
         .await
         .expect("deterministic no-LLM merge should succeed");
 
-    assert!(!output.conflict_detected);
     assert_eq!(output.enrichment_status, EnrichmentStatus::Enriched);
     assert!(
         output.work_update.is_some(),
@@ -145,7 +144,6 @@ async fn test_wcc_merge_reuse_ac_027_foreign_work_drops_openlibrary_and_hardcove
         .await
         .expect("foreign cached merge should succeed");
 
-    assert!(!output.conflict_detected);
     assert_eq!(output.enrichment_status, EnrichmentStatus::Enriched);
     assert!(
         output.work_update.is_some(),

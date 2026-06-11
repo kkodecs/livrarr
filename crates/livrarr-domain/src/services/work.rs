@@ -115,6 +115,8 @@ pub struct WorkFilter {
     pub monitored: Option<bool>,
     pub enrichment_status: Option<EnrichmentStatus>,
     pub media_type: Option<MediaType>,
+    /// Work language facet (REQ-015): exact match on `works.language`.
+    pub language: Option<String>,
     pub sort_by: Option<WorkSortField>,
     pub sort_dir: Option<SortDirection>,
 }
@@ -359,6 +361,41 @@ pub trait WorkService: Send + Sync {
         page: u32,
         page_size: u32,
     ) -> Result<(Vec<Work>, i64), WorkServiceError>;
-    fn try_start_bulk_refresh(&self, user_id: i64) -> bool;
-    fn finish_bulk_refresh(&self, user_id: i64);
+    /// Acquire the per-user bulk-refresh slot. `None` = a run is already live
+    /// (the handler keeps its 409 semantics). The returned guard releases the
+    /// slot on `Drop` — completion, error return, panic unwind, and task abort
+    /// all free it; a leaked permanent 409 is structurally inexpressible
+    /// (REQ-016).
+    fn try_start_bulk_refresh(&self, user_id: i64) -> Option<BulkRefreshGuard>;
+}
+
+/// RAII slot for the per-user bulk-refresh guard (REQ-016). Acquired via
+/// [`WorkService::try_start_bulk_refresh`]; the slot is freed exclusively by
+/// `Drop` — no method exists to leak it.
+#[derive(Debug)]
+pub struct BulkRefreshGuard {
+    slots: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
+    user_id: i64,
+}
+
+impl BulkRefreshGuard {
+    /// Wrap an already-acquired slot: callers insert `user_id` into `slots`
+    /// (atomically deciding the race) and construct the guard only on success.
+    pub fn new(
+        slots: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
+        user_id: i64,
+    ) -> Self {
+        Self { slots, user_id }
+    }
+}
+
+impl Drop for BulkRefreshGuard {
+    fn drop(&mut self) {
+        // A panicked peer must not wedge release: take the lock through poison.
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        slots.remove(&self.user_id);
+    }
 }

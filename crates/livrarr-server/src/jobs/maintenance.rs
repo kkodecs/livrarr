@@ -4,6 +4,31 @@ use tracing::{debug, error, info, trace, warn};
 use crate::state::AppState;
 use livrarr_db::{GrabDb, ListImportDb, SessionDb};
 
+/// Retention bounds for provider call records (REQ-001): 30 days / 100k rows.
+const CALL_RECORD_RETENTION: livrarr_db::RetentionPolicy = livrarr_db::RetentionPolicy {
+    max_age_days: 30,
+    max_records: 100_000,
+};
+
+/// Evict provider call records past the retention bounds, oldest first
+/// (REQ-001). Registered on a 6h interval.
+pub async fn call_record_retention_tick(
+    state: AppState,
+    _cancel: CancellationToken,
+) -> Result<(), String> {
+    use livrarr_db::ProviderCallRecordDb;
+
+    match state.db.evict_call_records(CALL_RECORD_RETENTION).await {
+        Ok(evicted) => {
+            if evicted > 0 {
+                info!("call-record retention: evicted {evicted} rows");
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!("call-record retention sweep failed: {e}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Startup Recovery (JOBS-003)
 // ---------------------------------------------------------------------------

@@ -996,6 +996,23 @@ pub enum MetadataProvider {
     Audible,
 }
 
+impl MetadataProvider {
+    /// Canonical snake_case provider key used in call records and retry state
+    /// (the REQ-001 reporting vocabulary) — never a display name.
+    pub fn record_key(self) -> &'static str {
+        match self {
+            Self::Hardcover => "hardcover",
+            Self::OpenLibrary => "openlibrary",
+            Self::Goodreads => "goodreads",
+            Self::Audnexus => "audnexus",
+            Self::Llm => "llm",
+            Self::Readarr => "readarr",
+            Self::GoogleBooks => "google_books",
+            Self::Audible => "audible",
+        }
+    }
+}
+
 /// Trust level for a work's cover image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -1229,6 +1246,58 @@ pub enum OutcomeClass {
     Conflict,
     /// Provider was suppressed (circuit open, rate-limit window, etc.).
     Suppressed,
+}
+
+/// Per-field / per-provider merge dissent (REQ-013/014): an excluded
+/// contribution, recorded queryably. A dissent isolates at provider or field
+/// granularity and never discards the work's merge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldDissent {
+    pub work_id: WorkId,
+    /// Canonical provider key (e.g. "google_books").
+    pub provider: String,
+    /// Work column name. Payload-level dissent records one row per affected
+    /// field.
+    pub field: String,
+    pub offered_value: String,
+    pub winning_value: Option<String>,
+    pub reason: DissentReason,
+    pub merge_generation: i64,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Why a contribution was excluded from the merge (REQ-013/014).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DissentReason {
+    /// The provider appears to describe a different book.
+    PayloadMismatch,
+    /// Contradictory value for one field.
+    FieldConflict,
+    /// Known-incompatible payload language on a foreign work (REQ-013).
+    LanguageIncompatible,
+}
+
+/// Anchor-only enrichment fetch vocabulary (REQ-006). The input type admits no
+/// title or author, so no enrichment fetch can construct a text search
+/// (AC-007). Text search exists only behind the lookup/identity surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AnchorQuery {
+    Isbn13(String),
+    GrKey(String),
+    HcKey(String),
+    OlKey(String),
+    Asin(String),
+}
+
+/// Tracing-init outcome surfaced on the status page (REQ-003): the daily
+/// rolling file actually written and any init failure — never swallowed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogSurfaceStatus {
+    /// The daily rolling file the appender actually writes.
+    pub active_path: std::path::PathBuf,
+    /// Log-dir creation/write failure captured at startup (#102's vector).
+    pub init_error: Option<String>,
 }
 
 impl OutcomeClass {

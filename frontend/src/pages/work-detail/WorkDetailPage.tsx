@@ -1530,9 +1530,9 @@ function CoverSection({
           </div>
           <div className="text-xs text-zinc-400 space-y-0.5">
             <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Ebook</p>
-            <p>Trust: <span className="text-zinc-200">{work.coverTrust}</span></p>
+            <p>Trust: <span className="text-zinc-200">{prettyCoverTrust(work.coverTrust)}</span></p>
             {work.coverSource && (
-              <p>Source: <span className="text-zinc-200">{work.coverSource}</span></p>
+              <p>Source: <span className="text-zinc-200">{prettyCoverSource(work.coverSource)}</span></p>
             )}
             {(work.coverWidth > 0 || work.coverHeight > 0) && (
               <p>Size: <span className="text-zinc-200">{work.coverWidth}&times;{work.coverHeight}</span></p>
@@ -1553,9 +1553,9 @@ function CoverSection({
           </div>
           <div className="text-xs text-zinc-400 space-y-0.5">
             <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Audiobook</p>
-            <p>Trust: <span className="text-zinc-200">{work.audiobookCoverTrust}</span></p>
+            <p>Trust: <span className="text-zinc-200">{prettyCoverTrust(work.audiobookCoverTrust)}</span></p>
             {work.audiobookCoverSource && (
-              <p>Source: <span className="text-zinc-200">{work.audiobookCoverSource}</span></p>
+              <p>Source: <span className="text-zinc-200">{prettyCoverSource(work.audiobookCoverSource)}</span></p>
             )}
             {(work.audiobookCoverWidth > 0 || work.audiobookCoverHeight > 0) && (
               <p>Size: <span className="text-zinc-200">{work.audiobookCoverWidth}&times;{work.audiobookCoverHeight}</span></p>
@@ -1606,6 +1606,11 @@ function CoverSection({
                 selecting={selectMutation.isPending}
                 onSelect={(c) => selectMutation.mutate(c)}
                 onUpload={(file) => uploadMutation.mutate({ file, mediaType: "ebook" })}
+                current={
+                  work.coverMtime != null
+                    ? { workId: work.id, coverVersion: work.coverMtime }
+                    : undefined
+                }
               />
               <CoverGrid
                 label="Audiobook"
@@ -1613,6 +1618,15 @@ function CoverSection({
                 selecting={selectMutation.isPending}
                 onSelect={(c) => selectMutation.mutate(c)}
                 onUpload={(file) => uploadMutation.mutate({ file, mediaType: "audiobook" })}
+                current={
+                  work.audiobookCoverMtime != null
+                    ? {
+                        workId: work.id,
+                        coverVersion: work.audiobookCoverMtime,
+                        mediaType: "audiobook",
+                      }
+                    : undefined
+                }
               />
               {ebookCandidates.length === 0 && audioCandidates.length === 0 && (
                 <p className="text-xs text-zinc-500 py-2">No alternative covers found</p>
@@ -1657,23 +1671,67 @@ function CoverSection({
   );
 }
 
+
+const COVER_SOURCE_NAMES: Record<string, string> = {
+  add: "the search result picked at add",
+  import: "the file import match",
+  user: "your upload",
+  openlibrary: "OpenLibrary",
+  goodreads: "Goodreads",
+  google_books: "Google Books",
+  hardcover: "Hardcover",
+  other: "an enrichment provider",
+};
+
+function prettyCoverSource(source: string): string {
+  return COVER_SOURCE_NAMES[source] ?? source;
+}
+
+function prettyCoverTrust(trust: string): string {
+  switch (trust) {
+    case "validated":
+      return "Validated (matched identity)";
+    case "user":
+      return "Your choice (locked)";
+    case "unvalidated":
+      return "Unvalidated";
+    default:
+      return trust;
+  }
+}
+
 function CoverGrid({
   label,
   candidates,
   selecting,
   onSelect,
   onUpload,
+  current,
 }: {
   label: string;
   candidates: CoverCandidate[];
   selecting: boolean;
   onSelect: (c: CoverCandidate) => void;
   onUpload: (file: Blob) => void;
+  current?: { workId: number; coverVersion?: number; mediaType?: "audiobook" };
 }) {
   return (
     <div>
       <span className="text-[10px] font-medium text-zinc-400 uppercase tracking-wider">{label}</span>
       <div className="grid grid-cols-3 gap-2 mt-1">
+        {current && (
+          <div className="relative rounded border border-emerald-700/60">
+            <BookCover
+              workId={current.workId}
+              coverVersion={current.coverVersion}
+              mediaType={current.mediaType}
+              className="h-full w-full rounded"
+            />
+            <span className="absolute bottom-1 left-1 rounded bg-emerald-900/80 px-1 py-0.5 text-[9px] text-emerald-300">
+              current
+            </span>
+          </div>
+        )}
         {candidates.map((c) => (
           <CoverCard
             key={c.candidateId}

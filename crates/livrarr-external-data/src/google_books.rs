@@ -134,6 +134,8 @@ pub struct GoogleBooksClient {
     http: HttpClient,
     live_config: LiveMetadataConfig,
     base_url: String,
+    #[allow(dead_code)] // read at green: REQ-001 record emission
+    call_sink: Option<std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 
 impl GoogleBooksClient {
@@ -142,6 +144,7 @@ impl GoogleBooksClient {
             http,
             live_config,
             base_url: DEFAULT_BASE_URL.to_string(),
+            call_sink: None,
         }
     }
 
@@ -154,7 +157,113 @@ impl GoogleBooksClient {
             http,
             live_config,
             base_url,
+            call_sink: None,
         }
+    }
+
+    /// Inject the call-record sink (REQ-001).
+    pub fn with_call_sink(
+        mut self,
+        sink: std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>,
+    ) -> Self {
+        self.call_sink = Some(sink);
+        self
+    }
+
+    pub(crate) fn sink_ref(
+        &self,
+    ) -> Option<&std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>> {
+        self.call_sink.as_ref()
+    }
+
+    /// Anchor-only fetch (REQ-006): ISBN volumes query with the same key gate,
+    /// transport handling, and ISBN verification as the seeded fetch — and no
+    /// intitle/inauthor fallback.
+    pub async fn fetch_by_isbn(&self, isbn: &str) -> ProviderOutcome<NormalizedWorkDetail> {
+        let cfg = self.live_config.snapshot();
+        let api_key = match cfg
+            .google_books_api_key
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            Some(k) => k.to_string(),
+            None => {
+                tracing::debug!(isbn = isbn, "GoogleBooks: no API key configured");
+                return ProviderOutcome::NotConfigured;
+            }
+        };
+        let url = format!(
+            "{}/volumes?q=isbn:{}",
+            self.base_url,
+            urlencoding::encode(isbn),
+        );
+
+        let resp = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.http
+                .get(&url)
+                .header("X-Goog-Api-Key", &api_key)
+                .send(),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::warn!(isbn = isbn, "GoogleBooks: request failed: {e}");
+                return ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::ServerError,
+                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+                };
+            }
+            Err(_) => {
+                tracing::warn!(isbn = isbn, "GoogleBooks: request timed out");
+                return ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::ServerError,
+                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+                };
+            }
+        };
+
+        let status = resp.status().as_u16();
+        if status != 200 {
+            tracing::warn!(isbn = isbn, status = status, "GoogleBooks: HTTP error");
+            return map_http_error(status);
+        }
+
+        let body = match resp.text().await {
+            Ok(t) => t,
+            Err(_) => {
+                return ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::ServerError,
+                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+                }
+            }
+        };
+
+        let search: GbSearchResponse = match serde_json::from_str(&body) {
+            Ok(s) => s,
+            Err(_) => {
+                return ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::ServerError,
+                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+                }
+            }
+        };
+
+        let Some(items) = search.items.as_ref().filter(|v| !v.is_empty()) else {
+            tracing::debug!(isbn = isbn, "GoogleBooks: no results");
+            return ProviderOutcome::NotFound;
+        };
+        for vol in items.iter().filter_map(|v| v.volume_info.as_ref()) {
+            if verify_isbn_match(isbn, &vol.industry_identifiers) {
+                return ProviderOutcome::Success(Box::new(map_volume_to_detail(vol)));
+            }
+        }
+        tracing::debug!(
+            isbn = isbn,
+            "GoogleBooks: ISBN not verified in returned volumes"
+        );
+        ProviderOutcome::NotFound
     }
 
     pub async fn fetch(

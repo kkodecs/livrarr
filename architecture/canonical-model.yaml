@@ -18,7 +18,7 @@
 #     IR dependency_graph edges BETWEEN CRATES use these names; conceptual
 #     feature-internal edges remain fine and are not seam-gated.
 #   - Deliberate not-yet-conformed entities (reverse-gate reds) stay <= 2, each
-#     logged in amendments[]. Currently 1: Release.
+#     logged in amendments[]. Currently 0.
 
 metadata:
   project: livrarr
@@ -34,7 +34,7 @@ entities:
   - { name: Work, kind: struct, module: livrarr-domain, description: "a book as a concept (work-first); per-media-type monitoring (monitor_ebook / monitor_audiobook); the primary entity everywhere" }
   - { name: Author, kind: struct, module: livrarr-domain, description: "a creator; monitorable (monitored, monitor_new_items, monitor_since)" }
   - { name: Series, kind: struct, module: livrarr-domain, description: "an ordered set of works; enrichment sets per-work name + position strings (first-class series linking is known-deferred work)" }
-  - { name: Release, kind: struct, module: livrarr-domain, description: "DELIBERATE NOT-YET-CONFORMED (see amendments): an indexer search result eligible for grabbing; code carries ReleaseSearchResult (livrarr-download) — rename queued as conformance backlog" }
+  - { name: Release, kind: struct, module: livrarr-domain, description: "an indexer search result eligible for grabbing; lives at livrarr-domain services/release.rs (relocated from livrarr-download's ReleaseSearchResult, Sprint B REQ-004)" }
   - { name: Grab, kind: struct, module: livrarr-domain, description: "a release handed to a download client; its hash is the ownership key through download -> import" }
   - { name: LibraryItem, kind: struct, module: livrarr-domain, description: "a physical media file in the library; owns media_type; the unit of import, playback progress, and tag writes" }
   # Identity & enrichment (the two-track metadata model)
@@ -119,3 +119,4 @@ amendments:
   - { date: 2026-06-10, change: "initial spine authored from the spec corpus — 16 entities, 17-crate seams, data_flow", reason: "canonical-model authoring with the PO; activates the forward (architecture), reverse (canonical), and amendments gates" }
   - { date: 2026-06-10, change: "Release included as deliberate not-yet-conformed (no pub type yet; code carries ReleaseSearchResult)", reason: "settled BIG7 vocabulary (decision D1); conformance backlog = rename, queued in livrarr tracking; deliberate-red budget 1 of 2" }
   - { date: 2026-06-10, change: "livrarr-library seam authored as intent (may depend on livrarr-materialize, no livrarr-tagwrite edge) while live code still depends on tagwrite directly", reason: "one save home (metadata-refactor REQ-012, metadata-modularization REQ-003); the live edge is conformance backlog (decision S1)" }
+  - { date: 2026-06-11, change: "Release conformed — ReleaseSearchResult relocated to livrarr-domain as Release (services/release.rs, Sprint B REQ-004); deliberate-red budget back to 0 of 2", reason: "conformance backlog #141 delivered by metadata-correctness; PO approved closing the deviation (5c walkthrough, 2026-06-11)" }

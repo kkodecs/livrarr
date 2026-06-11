@@ -19,12 +19,10 @@ const ORIGINAL_COVER_URL: &str = "https://example.test/original.jpg";
 
 const MERGED_TITLE: &str = "Merged Title";
 const MERGED_DESCRIPTION: &str = "Merged description";
-const MERGED_GR_KEY: &str = "show/123";
 const MERGED_COVER_URL: &str = "https://example.test/merged.jpg";
 
 const STALE_TITLE: &str = "Stale Title";
 const STALE_DESCRIPTION: &str = "Stale description";
-const STALE_GR_KEY: &str = "show/999";
 const STALE_COVER_URL: &str = "https://example.test/stale.jpg";
 
 const SAMPLE_ISBN10: &str = "0123456789";
@@ -50,7 +48,6 @@ fn resolved_enrichment_update(
     title: &str,
     author_name: &str,
     description: Option<&str>,
-    gr_key: Option<&str>,
     cover_url: Option<&str>,
 ) -> MergeResolved<UpdateWorkEnrichmentDbRequest> {
     MergeResolved::new(UpdateWorkEnrichmentDbRequest {
@@ -68,11 +65,6 @@ fn resolved_enrichment_update(
         duration_seconds: None,
         publisher: None,
         publish_date: None,
-        hc_key: None,
-        gr_key: gr_key.map(str::to_string),
-        ol_key: None,
-        isbn_13: None,
-        asin: None,
         narrator: None,
         narration_type: None,
         abridged: None,
@@ -96,13 +88,11 @@ fn sample_merge_request(
             MERGED_TITLE,
             ORIGINAL_AUTHOR,
             Some(MERGED_DESCRIPTION),
-            Some(MERGED_GR_KEY),
             Some(MERGED_COVER_URL),
         )),
         new_enrichment_status: EnrichmentStatus::Enriched,
         provenance_upserts: vec![],
         provenance_deletes: vec![],
-        external_id_updates: vec![],
     }
 }
 
@@ -119,13 +109,11 @@ fn stale_merge_request(
             STALE_TITLE,
             ORIGINAL_AUTHOR,
             Some(STALE_DESCRIPTION),
-            Some(STALE_GR_KEY),
             Some(STALE_COVER_URL),
         )),
         new_enrichment_status: EnrichmentStatus::Enriched,
         provenance_upserts: vec![],
         provenance_deletes: vec![],
-        external_id_updates: vec![],
     }
 }
 
@@ -145,7 +133,6 @@ fn conflict_merge_request(
         new_enrichment_status: EnrichmentStatus::Failed,
         provenance_upserts: vec![],
         provenance_deletes: vec![],
-        external_id_updates: vec![],
     }
 }
 
@@ -342,7 +329,7 @@ macro_rules! work_db_merge_tests {
 
         #[tokio::test]
         async fn test_work_db_merge_apply_enrichment_merge_writes_work_fields_when_work_update_present() {
-            // REQ-ID: R-02, R-21 | Contract: WorkDb::apply_enrichment_merge | Behavior: writes work metadata fields when work_update is Some and CAS matches, including straight-assignment NULL overwrite semantics for None fields
+            // REQ-ID: R-02, R-21 | Contract: WorkDb::apply_enrichment_merge | Behavior: writes work metadata fields when work_update is Some and CAS matches; anchor columns are never merge-written (REQ-007)
             let (db, u1, _) = $setup().await;
             let work = create_new_work(&db, u1).await;
 
@@ -354,7 +341,10 @@ macro_rules! work_db_merge_tests {
 
             assert_eq!(got.title, MERGED_TITLE);
             assert_eq!(got.description.as_deref(), Some(MERGED_DESCRIPTION));
-            assert_eq!(got.gr_key.as_deref(), Some(MERGED_GR_KEY));
+            assert_eq!(
+                got.gr_key, None,
+                "REQ-007: the merge never writes anchor columns"
+            );
             assert_eq!(got.cover_url.as_deref(), Some(MERGED_COVER_URL));
             assert_eq!(got.year, None);
         }
@@ -419,24 +409,21 @@ macro_rules! work_db_merge_tests {
         }
 
         #[tokio::test]
-        async fn test_work_db_merge_apply_enrichment_merge_writes_external_id_updates_on_apply() {
-            // REQ-ID: R-21 | Contract: WorkDb::apply_enrichment_merge | Behavior: writes external_id_updates when the merge is applied
+        async fn test_work_db_merge_apply_enrichment_merge_never_writes_external_ids_on_apply() {
+            // REQ-ID: R-21, REQ-007 | Contract: WorkDb::apply_enrichment_merge | Behavior: the merge write path never touches external_ids — the request can no longer carry them (field deleted, REQ-007 structural); the identity track owns external_ids
             let (db, u1, _) = $setup().await;
             let work = create_new_work(&db, u1).await;
 
-            let mut req = sample_merge_request(u1, work.id, 0);
-            req.external_id_updates = sample_external_ids(work.id);
+            let req = sample_merge_request(u1, work.id, 0);
 
             db.apply_enrichment_merge(req).await.unwrap();
 
             let ids = db.list_external_ids(u1, work.id).await.unwrap();
 
-            assert!(ids
-                .iter()
-                .any(|id| id.id_type == ExternalIdType::Isbn13 && id.id_value == SAMPLE_ISBN13));
-            assert!(ids
-                .iter()
-                .any(|id| id.id_type == ExternalIdType::Asin && id.id_value == SAMPLE_ASIN));
+            assert!(
+                ids.is_empty(),
+                "REQ-007: the merge write path never touches external_ids"
+            );
         }
 
         #[tokio::test]
@@ -526,7 +513,6 @@ macro_rules! work_db_merge_tests {
 
             let mut stale = stale_merge_request(u1, work.id, 0);
             stale.provenance_upserts = sample_provenance_upserts(u1, work.id);
-            stale.external_id_updates = sample_external_ids(work.id);
 
             let outcome = db.apply_enrichment_merge(stale).await.unwrap();
 

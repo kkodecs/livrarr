@@ -373,6 +373,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/system/health-summary",
             get(livrarr_handlers::system::health_summary::<AppState>),
         )
+        .route(
+            "/system/provider-stats",
+            get(livrarr_handlers::system::provider_stats::<AppState>),
+        )
         // Filesystem browse
         .route(
             "/filesystem",

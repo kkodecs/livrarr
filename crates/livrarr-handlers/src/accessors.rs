@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-
 use livrarr_domain::settings::MetadataConfig;
 
-/// Provider health status — tracks provider errors with TTL.
-pub trait ProviderHealthAccessor: Send + Sync {
-    fn statuses(&self) -> impl std::future::Future<Output = HashMap<String, String>> + Send;
+/// Tracing log surface — the daily rolling file actually written and any
+/// init failure captured at startup (REQ-003). The dated path is computed at
+/// read time so the answer stays truthful across midnight rollover.
+pub trait LogSurfaceAccessor: Send + Sync {
+    fn status(&self) -> livrarr_domain::LogSurfaceStatus;
 }
 
 /// Live metadata config — hot-swappable config for enrichment components.

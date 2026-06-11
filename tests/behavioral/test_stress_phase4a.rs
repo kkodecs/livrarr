@@ -141,7 +141,6 @@ fn make_candidate(title: &str, author: &str) -> WorkCandidate {
         provenance_setter: None,
         import_id: None,
         cover_manual: false,
-        skip_sync_enrichment: false,
     }
 }
 

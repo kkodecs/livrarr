@@ -375,7 +375,12 @@ fn service(db: SqliteDb) -> CrossFormatServiceImpl<SqliteDb, FileServiceImpl<Sql
 fn make_workflow(db: SqliteDb) -> ImportWorkflowImpl<SqliteDb> {
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
     let data_dir = std::sync::Arc::new(std::path::PathBuf::from("/tmp/livrarr-test"));
-    ImportWorkflowImpl::new(db, semaphore, data_dir)
+    ImportWorkflowImpl::new(
+        db,
+        semaphore,
+        data_dir,
+        std::sync::Arc::new(livrarr_behavioral::stubs::TagwriteChapterExtractor),
+    )
 }
 
 // ============================================================================

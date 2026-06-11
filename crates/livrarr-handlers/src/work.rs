@@ -258,7 +258,6 @@ pub async fn add<
         // Funnel through the one road: enrichment + cover/tag materialization run
         // synchronously via the pipeline, reusing the candidate's cached discovery
         // payloads (zero-network when the search cache is still warm).
-        skip_sync_enrichment: false,
     };
 
     let result = state.work_service().add(ctx.user.id, candidate).await?;
@@ -586,17 +585,28 @@ pub async fn refresh<S: HasWorkService>(
     }))
 }
 
+/// Active library filters carried into Refresh All (REQ-015): the sweep
+/// refreshes what the user sees. No params = all works (AC-017).
+#[derive(serde::Deserialize)]
+pub struct RefreshAllParams {
+    pub language: Option<String>,
+    pub monitored: Option<bool>,
+    pub enrichment_status: Option<livrarr_domain::EnrichmentStatus>,
+    pub media_type: Option<livrarr_domain::MediaType>,
+}
+
 pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationService>(
     State(state): State<S>,
     ctx: AuthContext,
+    Query(params): Query<RefreshAllParams>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     let user_id = ctx.user.id;
 
-    if !state.work_service().try_start_bulk_refresh(user_id) {
+    let Some(bulk_guard) = state.work_service().try_start_bulk_refresh(user_id) else {
         return Err(ApiError::Conflict {
             reason: "Refresh already in progress".to_string(),
         });
-    }
+    };
 
     let works = state
         .work_service()
@@ -604,9 +614,10 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
             user_id,
             livrarr_domain::services::WorkFilter {
                 author_id: None,
-                monitored: None,
-                enrichment_status: None,
-                media_type: None,
+                monitored: params.monitored,
+                enrichment_status: params.enrichment_status,
+                media_type: params.media_type,
+                language: params.language,
                 sort_by: None,
                 sort_dir: None,
             },
@@ -615,13 +626,15 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
         .map_err(ApiError::from)?;
 
     if works.is_empty() {
-        state.work_service().finish_bulk_refresh(user_id);
         return Ok(axum::http::StatusCode::ACCEPTED);
     }
 
     let total = works.len();
     let s = state.clone();
     tokio::spawn(async move {
+        // Owns the slot: completion, error, panic unwind, and abort all
+        // release via Drop (REQ-016).
+        let _bulk_guard = bulk_guard;
         let mut enriched = 0usize;
         let mut failed = 0usize;
 
@@ -658,8 +671,6 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
         {
             tracing::warn!("create_notification failed: {e}");
         }
-
-        s.work_service().finish_bulk_refresh(user_id);
     });
 
     Ok(axum::http::StatusCode::ACCEPTED)
@@ -678,14 +689,16 @@ pub async fn retry_all_incomplete<S: HasWorkService + HasNotificationService>(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let user_id = ctx.user.id;
 
-    if !state.work_service().try_start_bulk_refresh(user_id) {
+    let Some(bulk_guard) = state.work_service().try_start_bulk_refresh(user_id) else {
         return Err(ApiError::Conflict {
             reason: "Bulk operation already in progress".to_string(),
         });
-    }
+    };
 
     let s = state.clone();
     tokio::spawn(async move {
+        // Owns the slot: every exit path releases via Drop (REQ-016).
+        let _bulk_guard = bulk_guard;
         match s.work_service().retry_all_incomplete(user_id).await {
             Ok(summary) => {
                 if let Err(e) = s
@@ -713,8 +726,6 @@ pub async fn retry_all_incomplete<S: HasWorkService + HasNotificationService>(
                 tracing::warn!("retry_all_incomplete failed: {e}");
             }
         }
-
-        s.work_service().finish_bulk_refresh(user_id);
     });
 
     Ok(axum::http::StatusCode::ACCEPTED)
