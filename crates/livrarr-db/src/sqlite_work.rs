@@ -1152,6 +1152,65 @@ impl WorkDb for SqliteDb {
         let works: Result<Vec<Work>, DbError> = rows.into_iter().map(row_to_work).collect();
         Ok((works?, total))
     }
+
+    async fn set_work_series_id(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        series_id: Option<i64>,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE works SET series_id = ? WHERE id = ? AND user_id = ?")
+            .bind(series_id)
+            .bind(work_id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        Ok(())
+    }
+
+    async fn normalize_work_series_fields(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        series_name: &str,
+        series_position: Option<f64>,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE works SET series_name = ?, \
+             series_position = COALESCE(series_position, ?) \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(series_name)
+        .bind(series_position)
+        .bind(work_id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(())
+    }
+
+    async fn list_orphan_series_works_all_users(&self) -> Result<Vec<Work>, DbError> {
+        let rows = sqlx::query(
+            "SELECT * FROM works WHERE series_id IS NULL \
+             AND series_name IS NOT NULL AND series_name != '' \
+             AND author_id IS NOT NULL ORDER BY user_id, author_id, series_name",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row_to_work(row) {
+                Ok(w) => results.push(w),
+                Err(e) => {
+                    tracing::warn!("works: skipping corrupt row in orphan-series list: {e}");
+                }
+            }
+        }
+        Ok(results)
+    }
 }
 
 impl crate::WorkDbCreate for SqliteDb {

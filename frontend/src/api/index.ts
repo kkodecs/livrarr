@@ -76,6 +76,9 @@ import type {
   SeriesDetailResponse,
   MonitorSeriesRequest,
   UpdateSeriesRequest,
+  PromoteSeriesRequest,
+  PromoteSeriesResponse,
+  SeriesBooksResponse,
   ResolveGrResponse,
   ListImportPreviewResponse,
   ListImportConfirmRequest,
@@ -247,6 +250,13 @@ export const updateSeries = (seriesId: number, req: UpdateSeriesRequest) =>
     method: "PUT",
     body: JSON.stringify(req),
   });
+export const promoteSeries = (seriesId: number, req: PromoteSeriesRequest) =>
+  apiFetch<PromoteSeriesResponse>(`/series/${seriesId}/promote`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const getSeriesBooks = (seriesId: number) =>
+  apiFetch<SeriesBooksResponse>(`/series/${seriesId}/books`);
 
 // Notifications
 export const listNotifications = (unreadOnly?: boolean) =>

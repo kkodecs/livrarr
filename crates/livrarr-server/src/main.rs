@@ -943,6 +943,9 @@ async fn main() {
         svc_db.clone(),
         data_dir.join("covers"),
     ));
+    tokio::spawn(livrarr_server::jobs::series_backfill::run_series_backfill(
+        svc_db.clone(),
+    ));
 
     info!("Listening on {addr}");
 

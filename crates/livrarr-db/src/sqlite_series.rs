@@ -213,4 +213,63 @@ impl SeriesDb for SqliteDb {
         }
         Ok(results)
     }
+
+    async fn delete_series(&self, user_id: UserId, id: i64) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM series WHERE id = ? AND user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        Ok(())
+    }
+
+    async fn count_works_in_series(&self, user_id: UserId, series_id: i64) -> Result<i64, DbError> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE user_id = ? AND series_id = ?")
+                .bind(user_id)
+                .bind(series_id)
+                .fetch_one(self.pool())
+                .await
+                .map_err(map_db_err)?;
+        Ok(count)
+    }
+
+    async fn relink_series_works(
+        &self,
+        user_id: UserId,
+        from_series_id: i64,
+        to_series_id: i64,
+    ) -> Result<u64, DbError> {
+        let result =
+            sqlx::query("UPDATE works SET series_id = ? WHERE user_id = ? AND series_id = ?")
+                .bind(to_series_id)
+                .bind(user_id)
+                .bind(from_series_id)
+                .execute(self.pool())
+                .await
+                .map_err(map_db_err)?;
+        Ok(result.rows_affected())
+    }
+
+    async fn update_series_identity(
+        &self,
+        user_id: UserId,
+        id: i64,
+        gr_key: &str,
+        work_count: Option<i32>,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE series SET gr_key = ?, work_count = COALESCE(?, work_count) \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(gr_key)
+        .bind(work_count)
+        .bind(id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(())
+    }
 }

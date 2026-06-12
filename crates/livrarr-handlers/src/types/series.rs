@@ -64,6 +64,49 @@ pub struct MonitorSeriesRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PromoteSeriesRequest {
+    /// Picker choice on retry; None on first attempt (exact-match road).
+    pub gr_key: Option<String>,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromoteSeriesResponse {
+    /// "monitoring" | "needsAuthorResolution" | "needsPicker"
+    pub status: String,
+    pub author_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series: Option<SeriesResponse>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<SeriesResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesBooksResponse {
+    /// false for stubs — no gr_key, no roster source; rows are linked works only.
+    pub roster_available: bool,
+    pub rows: Vec<SeriesBookRowResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesBookRowResponse {
+    pub position: Option<f64>,
+    pub in_library: bool,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<i32>,
+    /// Present when `in_library` — the work with its library items, for the
+    /// standard presence indication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work: Option<crate::types::work::WorkDetailResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateSeriesRequest {
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,

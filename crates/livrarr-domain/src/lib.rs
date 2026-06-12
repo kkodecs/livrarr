@@ -907,6 +907,51 @@ pub fn normalize_for_matching(s: &str) -> String {
     result.to_lowercase()
 }
 
+/// Marker prefix for stub series gr_keys (series rows created from work
+/// metadata rather than Goodreads). A real GR series key is numeric, so the
+/// prefix cannot collide. Stub keys are internal — API responses mask them.
+pub const SERIES_STUB_KEY_PREFIX: &str = "stub:";
+
+/// Sentinel `work_count` for stub series: any GR-backed series (real,
+/// smaller roster) beats a stub under the "fewest books wins" assignment
+/// guard; a stub never steals a work. Masked to 0 at the API boundary.
+pub const SERIES_STUB_WORK_COUNT: i32 = i32::MAX;
+
+pub fn is_series_stub_key(gr_key: &str) -> bool {
+    gr_key.starts_with(SERIES_STUB_KEY_PREFIX)
+}
+
+/// Splits a positional suffix off a series name: `"The Wheel of Time, Book 3"`
+/// → `("The Wheel of Time", Some(3.0))`. Recognized suffix forms after the
+/// last comma: `Book N`, `#N`, `Vol N`, `Vol. N`, `Volume N` (N may be
+/// fractional, e.g. `3.5`). A name with no recognized suffix is returned
+/// trimmed, with `None`.
+pub fn split_series_suffix(name: &str) -> (String, Option<f64>) {
+    let trimmed = name.trim();
+    if let Some((prefix, suffix)) = trimmed.rsplit_once(',') {
+        let prefix = prefix.trim();
+        let suffix = suffix.trim();
+        if !prefix.is_empty() {
+            let number_part = suffix
+                .strip_prefix('#')
+                .or_else(|| {
+                    [
+                        "Book", "book", "Volume", "volume", "Vol.", "vol.", "Vol", "vol",
+                    ]
+                    .iter()
+                    .find_map(|kw| suffix.strip_prefix(kw))
+                })
+                .map(str::trim);
+            if let Some(n) = number_part.and_then(|p| p.parse::<f64>().ok()) {
+                if n.is_finite() {
+                    return (prefix.to_string(), Some(n));
+                }
+            }
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
 /// Normalize a language value to an ISO 639-1 two-letter code.
 ///
 /// Delegates to [`crate::normalization::normalize_language`] — the single
@@ -1405,4 +1450,73 @@ pub struct QueueSummary {
     pub total: i64,
     pub downloading: i64,
     pub importing: i64,
+}
+
+#[cfg(test)]
+mod series_suffix_tests {
+    use super::split_series_suffix;
+
+    #[test]
+    fn strips_book_n() {
+        assert_eq!(
+            split_series_suffix("The Wheel of Time, Book 3"),
+            ("The Wheel of Time".to_string(), Some(3.0))
+        );
+    }
+
+    #[test]
+    fn strips_hash_n() {
+        assert_eq!(
+            split_series_suffix("Dresden Files, #12"),
+            ("Dresden Files".to_string(), Some(12.0))
+        );
+    }
+
+    #[test]
+    fn strips_fractional_position() {
+        assert_eq!(
+            split_series_suffix("Saga, Book 3.5"),
+            ("Saga".to_string(), Some(3.5))
+        );
+    }
+
+    #[test]
+    fn strips_volume_forms() {
+        assert_eq!(
+            split_series_suffix("Foo, Volume 2"),
+            ("Foo".to_string(), Some(2.0))
+        );
+        assert_eq!(
+            split_series_suffix("Foo, Vol. 4"),
+            ("Foo".to_string(), Some(4.0))
+        );
+    }
+
+    #[test]
+    fn plain_name_untouched() {
+        assert_eq!(
+            split_series_suffix("The Green Bone Saga"),
+            ("The Green Bone Saga".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn comma_without_positional_suffix_untouched() {
+        assert_eq!(
+            split_series_suffix("Hello, World"),
+            ("Hello, World".to_string(), None)
+        );
+        assert_eq!(
+            split_series_suffix("The Series, 3"),
+            ("The Series, 3".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        assert_eq!(
+            split_series_suffix("  Uplift Saga  "),
+            ("Uplift Saga".to_string(), None)
+        );
+    }
 }

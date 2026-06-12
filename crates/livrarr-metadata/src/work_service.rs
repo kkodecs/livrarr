@@ -458,6 +458,7 @@ where
         + EnrichmentRetryDb
         + livrarr_db::ProviderRetryStateDb
         + ConfigDb
+        + livrarr_db::SeriesDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
@@ -1261,6 +1262,23 @@ where
             }
         }
 
+        // Series reconcile (REQ-001, user origin — always wins): the returned
+        // work carries the new series_name and the pre-edit series_id, which
+        // is exactly the state reconcile arbitrates (relink/unlink + stub GC).
+        // Failures PROPAGATE here: a user-edit unlink/relink has no self-heal
+        // (the startup back-fill only links series_id-NULL works), so a
+        // swallowed error would leave a visibly stale catalog. Reconcile is
+        // idempotent — the client retries the edit safely.
+        if has_series_name {
+            crate::series_link::reconcile_work_series(
+                &self.db,
+                &work,
+                crate::series_link::SeriesLinkOrigin::User,
+            )
+            .await
+            .map_err(WorkServiceError::Db)?;
+        }
+
         Ok(work)
     }
 
@@ -1279,14 +1297,23 @@ where
             .await
             .map_err(WorkServiceError::Db)?;
 
-        self.db
+        let deleted = self
+            .db
             .delete_work(user_id, work_id)
             .await
-            .map(|_| ())
             .map_err(|e| match e {
                 DbError::NotFound { .. } => WorkServiceError::NotFound,
                 other => WorkServiceError::Db(other),
             })?;
+
+        // REQ-001/AC-012: deleting a work unlinks it; GC an unmonitored stub
+        // left with zero linked works.
+        if let Some(series_id) = deleted.series_id {
+            if let Err(e) = crate::series_link::gc_stub_if_empty(&self.db, user_id, series_id).await
+            {
+                tracing::warn!(work_id, series_id, error = %e, "stub GC on work delete failed");
+            }
+        }
 
         delete_cover_files(&self.data_dir, user_id, work_id).await;
 
@@ -2573,6 +2600,8 @@ where
         + LibraryItemDb
         + ProvenanceDb
         + EnrichmentRetryDb
+        + livrarr_db::ProviderRetryStateDb
+        + livrarr_db::SeriesDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
@@ -2826,6 +2855,24 @@ where
             .await
             .map_err(WorkServiceError::Db)?;
 
+        // Series reconcile (REQ-001): a metadata-provided series_name gets a
+        // series row (stub if absent) and the FK link. Worker-created works
+        // arrive already linked (series_id set) — reconcile no-ops on them.
+        // Warn-only by design: a failed link here self-heals at the next
+        // startup back-fill (REQ-002 targets series_id-NULL works), and a
+        // successful add must not fail over series bookkeeping.
+        if work.series_id.is_none() && work.series_name.is_some() {
+            if let Err(e) = crate::series_link::reconcile_work_series(
+                &self.db,
+                &work,
+                crate::series_link::SeriesLinkOrigin::System,
+            )
+            .await
+            {
+                tracing::warn!(work_id = work.id, error = %e, "series reconcile at create failed");
+            }
+        }
+
         // Phase 1: synchronous cover download within 3s budget (REQ-010).
         let is_user_initiated = source_provider_data.is_none();
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
@@ -2927,7 +2974,15 @@ where
 
 impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>
 where
-    D: WorkDb + LibraryItemDb + ProvenanceDb + EnrichmentRetryDb + Send + Sync,
+    D: WorkDb
+        + LibraryItemDb
+        + ProvenanceDb
+        + EnrichmentRetryDb
+        + livrarr_db::SeriesDb
+        + livrarr_db::ProviderRetryStateDb
+        + livrarr_domain::services::WorkIdentityRepository
+        + Send
+        + Sync,
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
@@ -2954,6 +3009,49 @@ where
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> (EnrichmentStatus, bool) {
         let work_id = work.id;
+
+        // REQ-008 parity at the add door: an anchor-poor work starves the
+        // scatter — every provider skips on "no anchor" and the status lands
+        // Failed with zero network (e.g. a GR-link add carries only gr_key,
+        // which no enrich provider consumes). Run the same identity
+        // anchor-completion the refresh door runs, so fresh anchors are in
+        // the DB before the scatter reads it. One-shot per add — the
+        // refresh door keeps the terminal-outcome bookkeeping for its loop.
+        if work.ol_key.is_none()
+            && work.isbn_13.is_none()
+            && work.asin.is_none()
+            && work.hc_key.is_none()
+        {
+            if let Some(resolver) = self.resolver.as_ref() {
+                let now = chrono::Utc::now();
+                let suppressed: Vec<String> = self
+                    .db
+                    .list_retry_states(user_id, work_id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|s| {
+                        s.last_outcome.is_some_and(|o| o.is_phase2_terminal())
+                            || s.next_attempt_at.is_some_and(|t| t > now)
+                    })
+                    .map(|s| s.provider.record_key().to_string())
+                    .collect();
+                let sink: Arc<dyn livrarr_domain::services::ProviderCallSink> =
+                    Arc::new(livrarr_domain::services::NoopCallSink);
+                if let Err(e) = crate::async_resolver::complete_anchors(
+                    resolver.as_ref(),
+                    &self.db,
+                    user_id,
+                    work,
+                    &suppressed,
+                    &sink,
+                )
+                .await
+                {
+                    tracing::warn!(work_id, "add-door anchor completion failed: {e}");
+                }
+            }
+        }
 
         // Step 1: Inject source provider data (Readarr import etc.)
         if let Some(src) = source_provider_data {
@@ -2985,6 +3083,20 @@ where
                 return (EnrichmentStatus::Failed, false);
             }
         };
+
+        // Series reconcile (REQ-001, system origin): an enriched series_name
+        // gets its stub/link; a work already linked to a GR-backed series is
+        // left alone (string-only — system writes never displace GR-grounded
+        // assignment, AC-021).
+        if let Err(e) = crate::series_link::reconcile_work_series(
+            &self.db,
+            &post_enrich_work,
+            crate::series_link::SeriesLinkOrigin::System,
+        )
+        .await
+        {
+            tracing::warn!(work_id, error = %e, "series reconcile after enrichment failed");
+        }
 
         let final_status = enrich_result.enrichment_status;
         let identity_not_found = enrich_result.identity_not_found;

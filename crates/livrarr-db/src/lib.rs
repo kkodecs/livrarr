@@ -48,6 +48,7 @@ mod sqlite_retry_state;
 mod sqlite_root_folder;
 mod sqlite_series;
 mod sqlite_series_cache;
+mod sqlite_series_roster;
 mod sqlite_session;
 mod sqlite_user;
 mod sqlite_work;
@@ -293,6 +294,34 @@ pub trait WorkDb: Send + Sync {
 
     /// Delete work. Returns deleted work for file cleanup.
     async fn delete_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError>;
+
+    /// Set (or NULL) a work's series_id directly — the series-reconcile link
+    /// path. Unlike `SeriesDb::link_work_to_series` this performs NO
+    /// assignment-guard arbitration and touches no other column; the caller
+    /// (series_link service) owns the arbitration rules.
+    async fn set_work_series_id(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        series_id: Option<i64>,
+    ) -> Result<(), DbError>;
+
+    /// Rewrite a work's series_name to its normalized form and fill
+    /// series_position from an extracted positional suffix — position is
+    /// written only when the work has none (COALESCE; an existing position is
+    /// never clobbered).
+    async fn normalize_work_series_fields(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        series_name: &str,
+        series_position: Option<f64>,
+    ) -> Result<(), DbError>;
+
+    /// All-users listing of works carrying an orphan series string: non-empty
+    /// series_name, NULL series_id, non-NULL author_id. System back-fill job
+    /// only (cross-user by design, like the chapter back-fill listing).
+    async fn list_orphan_series_works_all_users(&self) -> Result<Vec<Work>, DbError>;
 
     /// Check if user already has a work with given ol_key.
     ///
@@ -1479,6 +1508,32 @@ pub trait SeriesDb: Send + Sync {
         user_id: UserId,
         author_ids: &[AuthorId],
     ) -> Result<Vec<Series>, DbError>;
+
+    /// Delete a series row. Linked works' series_id is NULLed by the FK
+    /// (ON DELETE SET NULL).
+    async fn delete_series(&self, user_id: UserId, id: i64) -> Result<(), DbError>;
+
+    /// Count works FK-linked to a series.
+    async fn count_works_in_series(&self, user_id: UserId, series_id: i64) -> Result<i64, DbError>;
+
+    /// Relink every work pointing at `from_series_id` to `to_series_id`
+    /// (stub-merge during promotion). Returns the number of works moved.
+    async fn relink_series_works(
+        &self,
+        user_id: UserId,
+        from_series_id: i64,
+        to_series_id: i64,
+    ) -> Result<u64, DbError>;
+
+    /// Set a series' gr_key (stub promotion). When `work_count` is Some it is
+    /// written too; None leaves the stored count untouched.
+    async fn update_series_identity(
+        &self,
+        user_id: UserId,
+        id: i64,
+        gr_key: &str,
+        work_count: Option<i32>,
+    ) -> Result<(), DbError>;
 }
 
 #[trait_variant::make(Send)]
@@ -1493,6 +1548,39 @@ pub trait SeriesCacheDb: Send + Sync {
     ) -> Result<AuthorSeriesCache, DbError>;
 
     async fn delete_series_cache(&self, author_id: i64) -> Result<(), DbError>;
+}
+
+/// One parsed roster entry of a GR series page (REQ-010): a primary work of
+/// the series, as scraped by the monitor worker's fetch road.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesRosterEntry {
+    pub title: String,
+    pub gr_key: String,
+    pub position: Option<f64>,
+    pub year: Option<i32>,
+}
+
+/// Persisted roster of a series (one row per series; FK CASCADE).
+#[derive(Debug, Clone)]
+pub struct SeriesRoster {
+    pub series_id: i64,
+    pub entries: Vec<SeriesRosterEntry>,
+    pub fetched_at: String,
+}
+
+#[trait_variant::make(Send)]
+pub trait SeriesRosterDb: Send + Sync {
+    async fn get_series_roster(&self, series_id: i64) -> Result<Option<SeriesRoster>, DbError>;
+
+    /// Upsert the roster for a series (worker write-through or first-expand
+    /// fetch). An empty entry list is stored too — "fetched, found none" must
+    /// not refetch on every expansion.
+    async fn save_series_roster(
+        &self,
+        series_id: i64,
+        entries: &[SeriesRosterEntry],
+    ) -> Result<SeriesRoster, DbError>;
 }
 
 /// One row of the persistent (work, provider) metadata cache (REQ-009). The

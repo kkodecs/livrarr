@@ -19,6 +19,7 @@ pub mod http_llm;
 pub mod list_service;
 pub mod llm_scraper;
 pub mod preadd_cover_service;
+pub mod series_link;
 pub mod series_query_service;
 pub mod series_service;
 pub mod work_service;

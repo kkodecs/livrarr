@@ -409,3 +409,7 @@ path = "../../tests/behavioral/test_mc_filters_covers_pins.rs"
 [[test]]
 name = "test_mc_matching_variants"
 path = "../../tests/behavioral/test_mc_matching_variants.rs"
+
+[[test]]
+name = "test_series_roster"
+path = "../../tests/behavioral/test_series_roster.rs"

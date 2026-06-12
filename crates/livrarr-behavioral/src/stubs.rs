@@ -384,6 +384,23 @@ impl SeriesQueryService for StubSeriesQueryService {
     ) -> Result<(), SeriesServiceError> {
         Ok(())
     }
+
+    async fn promote_stub(
+        &self,
+        _user_id: UserId,
+        _series_id: i64,
+        _explicit_gr_key: Option<String>,
+    ) -> Result<PromoteStubOutcome, SeriesServiceError> {
+        Err(SeriesServiceError::NotFound)
+    }
+
+    async fn series_books(
+        &self,
+        _user_id: UserId,
+        _series_id: i64,
+    ) -> Result<SeriesBooksView, SeriesServiceError> {
+        Err(SeriesServiceError::NotFound)
+    }
 }
 
 // =============================================================================

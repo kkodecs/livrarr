@@ -335,6 +335,33 @@ impl WorkDb for SequencedApplyDb {
         self.inner.delete_work(user_id, id).await
     }
 
+    async fn set_work_series_id(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        series_id: Option<i64>,
+    ) -> Result<(), DbError> {
+        self.inner
+            .set_work_series_id(user_id, work_id, series_id)
+            .await
+    }
+
+    async fn normalize_work_series_fields(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        series_name: &str,
+        series_position: Option<f64>,
+    ) -> Result<(), DbError> {
+        self.inner
+            .normalize_work_series_fields(user_id, work_id, series_name, series_position)
+            .await
+    }
+
+    async fn list_orphan_series_works_all_users(&self) -> Result<Vec<Work>, DbError> {
+        self.inner.list_orphan_series_works_all_users().await
+    }
+
     async fn work_exists_by_ol_key(&self, user_id: UserId, ol_key: &str) -> Result<bool, DbError> {
         self.inner.work_exists_by_ol_key(user_id, ol_key).await
     }

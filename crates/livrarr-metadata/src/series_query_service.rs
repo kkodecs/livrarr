@@ -1,9 +1,9 @@
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use livrarr_db::{
     AuthorDb, CreateSeriesDbRequest, LibraryItemDb, LinkWorkToSeriesRequest, SeriesCacheDb,
-    SeriesCacheEntry, SeriesDb, WorkDb,
+    SeriesCacheEntry, SeriesDb, SeriesRosterDb, SeriesRosterEntry, WorkDb,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
@@ -31,9 +31,215 @@ impl<D, F, W, L> SeriesQueryServiceImpl<D, F, W, L> {
     }
 }
 
+impl<D, F, W, L> SeriesQueryServiceImpl<D, F, W, L>
+where
+    D: SeriesDb
+        + AuthorDb
+        + WorkDb
+        + LibraryItemDb
+        + SeriesCacheDb
+        + SeriesRosterDb
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    F: HttpFetcher + Clone + Send + Sync + 'static,
+    W: WorkService + Send + Sync + 'static,
+    L: LlmCaller + Send + Sync,
+{
+    /// REQ-010 amendment 2: resolve a stub's GR identity on expand WITHOUT
+    /// monitoring — the REQ-009 exact-match road only (no picker, no author
+    /// resolution). Returns roster entries on success; `None` means the
+    /// caller degrades to linked works and the stub row stays unchanged.
+    /// Adoption (gr_key + real roster size, sentinel never leaks) happens
+    /// only with a non-empty roster in hand.
+    /// Load a series' FK-linked works with their library items, sorted by
+    /// position — the shared road of `get_detail` and `series_books`.
+    async fn linked_series_works(
+        &self,
+        user_id: UserId,
+        series_id: i64,
+        author_id: AuthorId,
+    ) -> Result<Vec<SeriesWorkView>, SeriesServiceError> {
+        let all_works = self
+            .db
+            .list_works_by_author(user_id, author_id)
+            .await
+            .map_err(SeriesServiceError::Db)?;
+        let mut series_works: Vec<&Work> = all_works
+            .iter()
+            .filter(|w| w.series_id == Some(series_id))
+            .collect();
+        series_works.sort_by(|a, b| {
+            let pa = a.series_position.unwrap_or(f64::MAX);
+            let pb = b.series_position.unwrap_or(f64::MAX);
+            pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let work_ids: Vec<i64> = series_works.iter().map(|w| w.id).collect();
+        let items = self
+            .db
+            .list_library_items_by_work_ids(user_id, &work_ids)
+            .await
+            .map_err(SeriesServiceError::Db)?;
+        let mut items_by_work: std::collections::HashMap<i64, Vec<LibraryItem>> =
+            std::collections::HashMap::with_capacity(work_ids.len());
+        for item in items {
+            items_by_work.entry(item.work_id).or_default().push(item);
+        }
+
+        Ok(series_works
+            .iter()
+            .map(|w| SeriesWorkView {
+                work: (*w).clone(),
+                library_items: items_by_work.remove(&w.id).unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    /// Silent author resolution — the same rule the resolve-gr handler
+    /// auto-links with: first autocomplete candidate at name similarity
+    /// ≥ 0.90 (livrarr_matching::author_similarity is the authority).
+    /// Persists the adopted key. `None` = genuinely ambiguous; caller
+    /// degrades (expansion) or surfaces the picker (promotion).
+    async fn silently_resolve_author_key(
+        &self,
+        user_id: UserId,
+        author: &livrarr_domain::Author,
+    ) -> Option<String> {
+        let candidates = SeriesQueryService::resolve_gr_candidates(self, user_id, author.id)
+            .await
+            .ok()?;
+        let first = candidates.first()?;
+        if livrarr_matching::author_similarity(&author.name, &first.name) < 0.90 {
+            return None;
+        }
+        let gr_key = first.gr_key.clone();
+        self.db
+            .update_author(
+                user_id,
+                author.id,
+                livrarr_db::UpdateAuthorDbRequest {
+                    name: None,
+                    sort_name: None,
+                    ol_key: None,
+                    gr_key: Some(Some(gr_key.clone())),
+                    monitored: None,
+                    monitor_new_items: None,
+                    monitor_since: None,
+                },
+            )
+            .await
+            .ok()?;
+        tracing::info!(author = %author.name, gr_key = %gr_key, "author silently resolved");
+        Some(gr_key)
+    }
+
+    async fn silently_resolve_stub_roster(
+        &self,
+        user_id: UserId,
+        series: &Series,
+    ) -> Option<Vec<SeriesRosterEntry>> {
+        let author = self.db.get_author(user_id, series.author_id).await.ok()?;
+        if author.gr_key.is_none()
+            && self
+                .silently_resolve_author_key(user_id, &author)
+                .await
+                .is_none()
+        {
+            tracing::debug!(series = %series.name, author = %author.name,
+                "silent resolution: author has no GR key and auto-link was ambiguous");
+            return None;
+        }
+
+        let view =
+            match SeriesQueryService::list_author_series(self, user_id, series.author_id, false)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::debug!(series = %series.name, error = %e,
+                    "silent resolution: author series list unavailable");
+                    return None;
+                }
+            };
+        let normalized = normalize_for_matching(&series.name);
+        let matches: Vec<&AuthorSeriesItemView> = view
+            .series
+            .iter()
+            .filter(|e| !e.gr_key.is_empty() && normalize_for_matching(&e.name) == normalized)
+            .collect();
+        let [single] = matches.as_slice() else {
+            tracing::debug!(series = %series.name, candidates = matches.len(),
+                "silent resolution: no single exact name match");
+            return None;
+        };
+        let gr_key = single.gr_key.clone();
+
+        // Collision: another row for this author already owns the key — use
+        // its roster for display only; rows merge only via promotion (REQ-009).
+        let existing = self
+            .db
+            .list_series_for_author(user_id, series.author_id)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|s| s.id != series.id && s.gr_key == gr_key);
+        if let Some(other) = existing {
+            if let Ok(Some(roster)) = self.db.get_series_roster(other.id).await {
+                return Some(roster.entries);
+            }
+            let books = fetch_series_roster_pages(&self.fetcher, &gr_key)
+                .await
+                .ok()?;
+            let entries = to_roster_entries(&books);
+            if !entries.is_empty() {
+                let _ = self.db.save_series_roster(other.id, &entries).await;
+            }
+            return Some(entries);
+        }
+
+        // Fetch first; adopt only with a non-empty roster in hand — an empty
+        // parse would write work_count = 0, which wins the ST-007 guard.
+        let books = match fetch_series_roster_pages(&self.fetcher, &gr_key).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::debug!(series = %series.name, gr_key = %gr_key, error = %e,
+                    "silent resolution: roster fetch failed");
+                return None;
+            }
+        };
+        let entries = to_roster_entries(&books);
+        if entries.is_empty() {
+            tracing::debug!(series = %series.name, gr_key = %gr_key,
+                "silent resolution: roster parsed empty — not adopting");
+            return None;
+        }
+        self.db.save_series_roster(series.id, &entries).await.ok()?;
+        if let Err(e) = self
+            .db
+            .update_series_identity(user_id, series.id, &gr_key, Some(entries.len() as i32))
+            .await
+        {
+            tracing::warn!(series = %series.name, error = %e, "silent stub adoption failed");
+        }
+        tracing::info!(series = %series.name, gr_key = %gr_key, "stub silently resolved on expand");
+        Some(entries)
+    }
+}
+
 impl<D, F, W, L> SeriesQueryService for SeriesQueryServiceImpl<D, F, W, L>
 where
-    D: SeriesDb + AuthorDb + WorkDb + LibraryItemDb + SeriesCacheDb + Clone + Send + Sync + 'static,
+    D: SeriesDb
+        + AuthorDb
+        + WorkDb
+        + LibraryItemDb
+        + SeriesCacheDb
+        + SeriesRosterDb
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     F: HttpFetcher + Clone + Send + Sync + 'static,
     W: WorkService + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
@@ -124,46 +330,9 @@ where
                 other => SeriesServiceError::Db(other),
             })?;
 
-        let all_works = self
-            .db
-            .list_works_by_author(user_id, series.author_id)
-            .await
-            .map_err(SeriesServiceError::Db)?;
-
-        let mut series_works: Vec<&Work> = all_works
-            .iter()
-            .filter(|w| w.series_id == Some(series_id))
-            .collect();
-        series_works.sort_by(|a, b| {
-            let pa = a.series_position.unwrap_or(f64::MAX);
-            let pb = b.series_position.unwrap_or(f64::MAX);
-            pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let work_ids: Vec<i64> = series_works.iter().map(|w| w.id).collect();
-        let items = self
-            .db
-            .list_library_items_by_work_ids(user_id, &work_ids)
-            .await
-            .map_err(SeriesServiceError::Db)?;
-
-        // Pre-index items by work_id to avoid O(works×items) filtering.
-        let mut items_by_work: std::collections::HashMap<i64, Vec<LibraryItem>> =
-            std::collections::HashMap::with_capacity(work_ids.len());
-        for item in items {
-            items_by_work.entry(item.work_id).or_default().push(item);
-        }
-
-        let works = series_works
-            .iter()
-            .map(|w| {
-                let work_items = items_by_work.remove(&w.id).unwrap_or_default();
-                SeriesWorkView {
-                    work: (*w).clone(),
-                    library_items: work_items,
-                }
-            })
-            .collect();
+        let works = self
+            .linked_series_works(user_id, series_id, series.author_id)
+            .await?;
 
         Ok(SeriesDetailView {
             id: series.id,
@@ -199,6 +368,15 @@ where
                 DbError::NotFound { .. } => SeriesServiceError::NotFound,
                 other => SeriesServiceError::Db(other),
             })?;
+
+        // REQ-009: monitoring is never enabled without a resolved gr_key — a
+        // stub must go through the promotion road, not the flag toggle.
+        if crate::series_link::is_stub_key(&series.gr_key) && (monitor_ebook || monitor_audiobook) {
+            return Err(SeriesServiceError::Validation {
+                field: "gr_key".into(),
+                message: "Series has no Goodreads key — promote it to start monitoring".into(),
+            });
+        }
 
         let updated = self
             .db
@@ -241,31 +419,10 @@ where
                 other => SeriesServiceError::Db(other),
             })?;
 
-        // Primary: JSON autocomplete API (structured, React-proof)
-        let candidates = resolve_gr_candidates_json(&self.fetcher, &author.name).await;
-        if !candidates.is_empty() {
-            return Ok(candidates);
-        }
-
-        // Fallback: HTML scraping (in case JSON API changes)
-        let url = format!(
-            "https://www.goodreads.com/search?q={}&search_type=authors",
-            urlencoding::encode(&author.name)
-        );
-
-        let html = fetch_gr_html(&self.fetcher, &url).await?;
-
-        let candidates: Vec<GrAuthorCandidateView> =
-            livrarr_external_data::goodreads::parse_author_search_html(&html)
-                .into_iter()
-                .map(|c| GrAuthorCandidateView {
-                    gr_key: c.gr_key,
-                    name: c.name,
-                    profile_url: format!("https://www.goodreads.com{}", c.profile_url),
-                })
-                .collect();
-
-        Ok(candidates)
+        // JSON autocomplete API is the only road (REQ-005/ST-012): no GR
+        // `/search` HTML fallback. Empty means "author not found on
+        // Goodreads" — an honest outcome, never a scrape.
+        Ok(resolve_gr_candidates_json(&self.fetcher, &author.name).await)
     }
 
     async fn list_author_series(
@@ -283,38 +440,37 @@ where
                 other => SeriesServiceError::Db(other),
             })?;
 
-        let gr_key = author
-            .gr_key
-            .as_deref()
-            .ok_or_else(|| SeriesServiceError::Validation {
-                field: "gr_key".into(),
-                message: "Author has no Goodreads key".into(),
-            })?;
-
-        let cache = self.db.get_series_cache(author_id).await.unwrap_or(None);
-        let (filtered_entries, raw_entries_opt, fetched_at) = if let Some(cached) = cache {
-            (cached.entries, cached.raw_entries, Some(cached.fetched_at))
-        } else {
-            let raw_entries =
-                fetch_author_series_pages(&self.fetcher, gr_key, &author.name).await?;
-            let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
-                .await
-                .unwrap_or_else(|| raw_entries.clone());
-            let llm_changed = entries.len() != raw_entries.len();
-            let saved = self
-                .db
-                .save_series_cache(
-                    author_id,
-                    &entries,
-                    if llm_changed {
-                        Some(raw_entries.as_slice())
-                    } else {
-                        None
-                    },
-                )
-                .await
-                .map_err(SeriesServiceError::Db)?;
-            (saved.entries, saved.raw_entries, Some(saved.fetched_at))
+        // REQ-003 degraded mode: an author with no gr_key cannot reach GR,
+        // but their DB-backed series (stubs included) must still be served —
+        // the GR cache/fetch leg is skipped, never an error.
+        let (filtered_entries, raw_entries_opt, fetched_at) = match author.gr_key.as_deref() {
+            None => (Vec::new(), None, None),
+            Some(gr_key) => {
+                let cache = self.db.get_series_cache(author_id).await.unwrap_or(None);
+                if let Some(cached) = cache {
+                    (cached.entries, cached.raw_entries, Some(cached.fetched_at))
+                } else {
+                    let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+                    let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
+                        .await
+                        .unwrap_or_else(|| raw_entries.clone());
+                    let llm_changed = entries.len() != raw_entries.len();
+                    let saved = self
+                        .db
+                        .save_series_cache(
+                            author_id,
+                            &entries,
+                            if llm_changed {
+                                Some(raw_entries.as_slice())
+                            } else {
+                                None
+                            },
+                        )
+                        .await
+                        .map_err(SeriesServiceError::Db)?;
+                    (saved.entries, saved.raw_entries, Some(saved.fetched_at))
+                }
+            }
         };
 
         let raw_available = raw_entries_opt.is_some();
@@ -375,7 +531,7 @@ where
             })?;
 
         let _ = self.db.delete_series_cache(author_id).await;
-        let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key, &author.name).await?;
+        let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
         let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
             .await
             .unwrap_or_else(|| raw_entries.clone());
@@ -515,55 +671,25 @@ where
                 other => SeriesServiceError::Db(other),
             })?;
 
-        let mut all_books = Vec::new();
-        let mut page = 1;
-
-        loop {
-            let url = if page == 1 {
-                format!("https://www.goodreads.com/series/{}", series_gr_key)
-            } else {
-                format!(
-                    "https://www.goodreads.com/series/{}?page={}",
-                    series_gr_key, page
-                )
-            };
-
-            let html = fetch_gr_html(&self.fetcher, &url).await?;
-            let (books, has_next) =
-                livrarr_external_data::goodreads::parse_series_detail_html(&html);
-
-            if books.is_empty() {
-                break;
-            }
-
-            all_books.extend(books);
-
-            if !has_next || page >= 10 {
-                break;
-            }
-
-            page += 1;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        // Filter to primary works: integer positions (1.0, 2.0, ...).
-        let primary_books: Vec<_> = all_books
-            .into_iter()
-            .filter(|b| {
-                b.position
-                    .map(|p| p > 0.0 && p.fract() == 0.0)
-                    .unwrap_or(false)
-            })
-            .collect();
+        let all_books = fetch_series_roster_pages(&self.fetcher, &series_gr_key).await?;
 
         tracing::info!(
             series = %series_name,
             author = %author.name,
-            books = primary_books.len(),
+            books = all_books.len(),
             "series detail fetched (primary works only)"
         );
 
-        let all_books = primary_books;
+        // Roster write-through (REQ-010): persist the fetch this run already
+        // paid for, so expansions never re-hit GR. Before the cancellation
+        // check on purpose — a cancelled run still yields a roster.
+        if let Err(e) = self
+            .db
+            .save_series_roster(series_id, &to_roster_entries(&all_books))
+            .await
+        {
+            tracing::warn!(series = %series_name, error = %e, "roster write-through failed");
+        }
 
         // Re-read current series flags (cancellation guard).
         let series = self
@@ -731,6 +857,204 @@ where
 
         Ok(())
     }
+
+    async fn promote_stub(
+        &self,
+        user_id: UserId,
+        series_id: i64,
+        explicit_gr_key: Option<String>,
+    ) -> Result<PromoteStubOutcome, SeriesServiceError> {
+        let series = self
+            .db
+            .get_series(user_id, series_id)
+            .await
+            .map_err(SeriesServiceError::Db)?
+            .ok_or(SeriesServiceError::NotFound)?;
+
+        let author_id = series.author_id;
+
+        // Already GR-backed: nothing to resolve.
+        if !crate::series_link::is_stub_key(&series.gr_key) {
+            return Ok(PromoteStubOutcome::Resolved {
+                author_id,
+                series_id: series.id,
+                gr_key: series.gr_key,
+                name: series.name,
+            });
+        }
+
+        let author = self
+            .db
+            .get_author(user_id, author_id)
+            .await
+            .map_err(|e| match e {
+                DbError::NotFound { .. } => SeriesServiceError::NotFound,
+                other => SeriesServiceError::Db(other),
+            })?;
+
+        // REQ-009: the series-list fetch hard-requires an author gr_key.
+        // Try the silent road first (same ≥0.90 similarity rule as the
+        // resolve-gr auto-link); only genuine ambiguity surfaces the
+        // author-candidate flow.
+        if author.gr_key.is_none()
+            && self
+                .silently_resolve_author_key(user_id, &author)
+                .await
+                .is_none()
+        {
+            return Ok(PromoteStubOutcome::NeedsAuthorResolution { author_id });
+        }
+
+        let adopted_gr_key = match explicit_gr_key.filter(|k| !k.is_empty()) {
+            Some(k) => k,
+            None => {
+                // Exact normalized-name match among the author's GR series.
+                let view = self.list_author_series(user_id, author_id, false).await?;
+                let normalized_stub = normalize_for_matching(&series.name);
+                let matches: Vec<&AuthorSeriesItemView> = view
+                    .series
+                    .iter()
+                    .filter(|e| {
+                        !e.gr_key.is_empty() && normalize_for_matching(&e.name) == normalized_stub
+                    })
+                    .collect();
+                match matches.as_slice() {
+                    [single] => single.gr_key.clone(),
+                    _ => {
+                        return Ok(PromoteStubOutcome::NeedsPicker {
+                            author_id,
+                            candidates: view
+                                .series
+                                .into_iter()
+                                .filter(|e| !e.gr_key.is_empty())
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        };
+
+        // Collision (REQ-009/AC-018): the resolved gr_key already belongs to
+        // another row for this author — merge the stub into it.
+        let existing = self
+            .db
+            .list_series_for_author(user_id, author_id)
+            .await
+            .map_err(SeriesServiceError::Db)?
+            .into_iter()
+            .find(|s| s.id != series.id && s.gr_key == adopted_gr_key);
+
+        if let Some(survivor) = existing {
+            self.db
+                .relink_series_works(user_id, series.id, survivor.id)
+                .await
+                .map_err(SeriesServiceError::Db)?;
+            self.db
+                .delete_series(user_id, series.id)
+                .await
+                .map_err(SeriesServiceError::Db)?;
+            return Ok(PromoteStubOutcome::Resolved {
+                author_id,
+                series_id: survivor.id,
+                gr_key: adopted_gr_key,
+                name: survivor.name,
+            });
+        }
+
+        // Adopt in place — row id and work links survive (REQ-008). The
+        // sentinel work_count stays until the monitor worker writes the real
+        // GR roster size moments later.
+        self.db
+            .update_series_identity(user_id, series.id, &adopted_gr_key, None)
+            .await
+            .map_err(SeriesServiceError::Db)?;
+
+        Ok(PromoteStubOutcome::Resolved {
+            author_id,
+            series_id: series.id,
+            gr_key: adopted_gr_key,
+            name: series.name,
+        })
+    }
+
+    async fn series_books(
+        &self,
+        user_id: UserId,
+        series_id: i64,
+    ) -> Result<SeriesBooksView, SeriesServiceError> {
+        let series = self
+            .db
+            .get_series(user_id, series_id)
+            .await
+            .map_err(SeriesServiceError::Db)?
+            .ok_or(SeriesServiceError::NotFound)?;
+
+        let author = self
+            .db
+            .get_author(user_id, series.author_id)
+            .await
+            .map_err(|e| match e {
+                DbError::NotFound { .. } => SeriesServiceError::NotFound,
+                other => SeriesServiceError::Db(other),
+            })?;
+
+        // FK-linked works + their library items (shared road with get_detail).
+        let linked = self
+            .linked_series_works(user_id, series_id, series.author_id)
+            .await?;
+
+        // Stubs resolve silently on first expand (REQ-010 amendment 2): the
+        // REQ-009 exact-match road, monitoring untouched. On any failure the
+        // expansion degrades to linked works — never an error, no adoption.
+        if crate::series_link::is_stub_key(&series.gr_key) {
+            match self.silently_resolve_stub_roster(user_id, &series).await {
+                Some(entries) => {
+                    return Ok(SeriesBooksView {
+                        roster_available: true,
+                        rows: merge_roster_with_works(&entries, linked, &author.name),
+                    });
+                }
+                None => {
+                    let rows = linked
+                        .into_iter()
+                        .map(|sw| SeriesBookRow::InLibrary {
+                            position: sw.work.series_position,
+                            entry: Box::new(sw),
+                        })
+                        .collect();
+                    return Ok(SeriesBooksView {
+                        roster_available: false,
+                        rows,
+                    });
+                }
+            }
+        }
+
+        // Persisted roster; fetch + store exactly once when absent (AC-022) —
+        // an empty parse result is stored too, so it never refetches.
+        let entries = match self
+            .db
+            .get_series_roster(series_id)
+            .await
+            .map_err(SeriesServiceError::Db)?
+        {
+            Some(roster) => roster.entries,
+            None => {
+                let books = fetch_series_roster_pages(&self.fetcher, &series.gr_key).await?;
+                let entries = to_roster_entries(&books);
+                self.db
+                    .save_series_roster(series_id, &entries)
+                    .await
+                    .map_err(SeriesServiceError::Db)?;
+                entries
+            }
+        };
+
+        Ok(SeriesBooksView {
+            roster_available: true,
+            rows: merge_roster_with_works(&entries, linked, &author.name),
+        })
+    }
 }
 
 // =============================================================================
@@ -760,6 +1084,144 @@ async fn fetch_gr_html<F: HttpFetcher>(
         return Err(SeriesServiceError::GoodreadsUnavailable);
     }
     String::from_utf8(resp.body).map_err(|_| SeriesServiceError::GoodreadsUnavailable)
+}
+
+/// Fetch + parse a GR series' detail pages (ST-008 road: paged, ≤10 pages,
+/// 1s pacing), filtered to primary works (integer positions) — the same set
+/// `work_count` counts. Shared by the monitor worker and the first-expand
+/// roster fetch (REQ-010).
+async fn fetch_series_roster_pages<F: HttpFetcher>(
+    fetcher: &F,
+    series_gr_key: &str,
+) -> Result<Vec<livrarr_external_data::goodreads::GoodreadsSeriesBook>, SeriesServiceError> {
+    let mut all_books = Vec::new();
+    let mut page = 1;
+
+    loop {
+        let url = if page == 1 {
+            format!("https://www.goodreads.com/series/{}", series_gr_key)
+        } else {
+            format!(
+                "https://www.goodreads.com/series/{}?page={}",
+                series_gr_key, page
+            )
+        };
+
+        let html = fetch_gr_html(fetcher, &url).await?;
+        let (books, has_next) = livrarr_external_data::goodreads::parse_series_detail_html(&html);
+
+        if books.is_empty() {
+            break;
+        }
+
+        all_books.extend(books);
+
+        if !has_next || page >= 10 {
+            break;
+        }
+
+        page += 1;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    // Filter to primary works: integer positions (1.0, 2.0, ...).
+    Ok(all_books
+        .into_iter()
+        .filter(|b| {
+            b.position
+                .map(|p| p > 0.0 && p.fract() == 0.0)
+                .unwrap_or(false)
+        })
+        .collect())
+}
+
+fn to_roster_entries(
+    books: &[livrarr_external_data::goodreads::GoodreadsSeriesBook],
+) -> Vec<SeriesRosterEntry> {
+    books
+        .iter()
+        .map(|b| SeriesRosterEntry {
+            title: b.title.clone(),
+            gr_key: b.gr_key.clone(),
+            position: b.position,
+            year: b.year,
+        })
+        .collect()
+}
+
+/// REQ-010 merge: every roster entry becomes a row — in-library when a linked
+/// work matches (normalized GR key first, then the shared work-matching
+/// authority), missing otherwise. Linked works no roster entry claimed are
+/// appended, never dropped. Pure — unit-tested below.
+fn merge_roster_with_works(
+    roster: &[SeriesRosterEntry],
+    works: Vec<SeriesWorkView>,
+    author_name: &str,
+) -> Vec<SeriesBookRow> {
+    use livrarr_domain::normalization::normalize_gr_key;
+
+    let work_refs: Vec<Work> = works.iter().map(|sw| sw.work.clone()).collect();
+    let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, sw) in works.iter().enumerate() {
+        if let Some(k) = sw.work.gr_key.as_deref().and_then(normalize_gr_key) {
+            by_key.entry(k).or_insert(i);
+        }
+    }
+
+    let mut sorted: Vec<&SeriesRosterEntry> = roster.iter().collect();
+    sorted.sort_by(|a, b| {
+        let pa = a.position.unwrap_or(f64::MAX);
+        let pb = b.position.unwrap_or(f64::MAX);
+        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut slots: Vec<Option<SeriesWorkView>> = works.into_iter().map(Some).collect();
+    let mut rows = Vec::with_capacity(sorted.len());
+
+    for entry in sorted {
+        let idx = normalize_gr_key(&entry.gr_key)
+            .and_then(|k| by_key.get(&k).copied())
+            .or_else(|| {
+                livrarr_matching::work_dedup::find_matching_work(
+                    &work_refs,
+                    &entry.title,
+                    author_name,
+                    &livrarr_matching::work_dedup::ProviderKeys {
+                        gr_key: Some(&entry.gr_key),
+                        ..Default::default()
+                    },
+                )
+                .and_then(|m| work_refs.iter().position(|w| w.id == m.id))
+            });
+
+        match idx.and_then(|i| slots[i].take()) {
+            Some(sw) => rows.push(SeriesBookRow::InLibrary {
+                position: entry.position.or(sw.work.series_position),
+                entry: Box::new(sw),
+            }),
+            None => rows.push(SeriesBookRow::Missing {
+                position: entry.position,
+                title: entry.title.clone(),
+                year: entry.year,
+            }),
+        }
+    }
+
+    // Linked works the roster didn't claim — appended, never dropped.
+    let mut leftovers: Vec<SeriesWorkView> = slots.into_iter().flatten().collect();
+    leftovers.sort_by(|a, b| {
+        let pa = a.work.series_position.unwrap_or(f64::MAX);
+        let pb = b.work.series_position.unwrap_or(f64::MAX);
+        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for sw in leftovers {
+        rows.push(SeriesBookRow::InLibrary {
+            position: sw.work.series_position,
+            entry: Box::new(sw),
+        });
+    }
+
+    rows
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -859,7 +1321,6 @@ async fn resolve_gr_candidates_json<F: HttpFetcher>(
 async fn fetch_author_series_pages<F: HttpFetcher>(
     fetcher: &F,
     gr_author_id: &str,
-    author_name: &str,
 ) -> Result<Vec<SeriesCacheEntry>, SeriesServiceError> {
     // Primary: HTML series list page (has proper gr_keys for monitoring)
     let mut all_entries = Vec::new();
@@ -892,67 +1353,10 @@ async fn fetch_author_series_pages<F: HttpFetcher>(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    if !all_entries.is_empty() {
-        return Ok(all_entries);
-    }
-
-    // Fallback: extract series from book search results (React-proof, no gr_keys)
-    let entries = fetch_series_from_book_search(fetcher, author_name).await;
-    Ok(entries)
-}
-
-async fn fetch_series_from_book_search<F: HttpFetcher>(
-    fetcher: &F,
-    gr_author_id: &str,
-) -> Vec<SeriesCacheEntry> {
-    static RE_SERIES_IN_TITLE: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"\(([^,]+),\s*#[\d.]+\)").unwrap());
-    static RE_BOOK_TITLE: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"itemprop='name'[^>]*>([^<]+)").unwrap());
-
-    let mut series_counts: std::collections::HashMap<String, i32> =
-        std::collections::HashMap::new();
-
-    for page in 1..=3 {
-        let url = format!(
-            "https://www.goodreads.com/search?q={}&search_type=books&page={}",
-            gr_author_id, page
-        );
-
-        let html = match fetch_gr_html(fetcher, &url).await {
-            Ok(h) => h,
-            Err(_) => break,
-        };
-
-        let titles: Vec<String> = RE_BOOK_TITLE
-            .captures_iter(&html)
-            .map(|c| c[1].to_string())
-            .collect();
-
-        if titles.is_empty() {
-            break;
-        }
-
-        for title in &titles {
-            if let Some(cap) = RE_SERIES_IN_TITLE.captures(title) {
-                let name = cap[1].trim().to_string();
-                *series_counts.entry(name).or_insert(0) += 1;
-            }
-        }
-
-        if page < 3 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-
-    series_counts
-        .into_iter()
-        .map(|(name, count)| SeriesCacheEntry {
-            name,
-            gr_key: String::new(),
-            book_count: count,
-        })
-        .collect()
+    // No GR `/search` fallback (REQ-005/ST-012): the series-list pages are
+    // the only road. An empty result is an honest empty result — series
+    // names from work metadata surface via DB stubs instead.
+    Ok(all_entries)
 }
 
 fn build_merged_series_list(
@@ -960,7 +1364,8 @@ fn build_merged_series_list(
     db_series: &[Series],
     works: &[Work],
 ) -> Vec<AuthorSeriesItemView> {
-    cache_entries
+    let mut matched_db_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut views: Vec<AuthorSeriesItemView> = cache_entries
         .iter()
         .map(|ce| {
             let db_match = if ce.gr_key.is_empty() {
@@ -970,6 +1375,7 @@ fn build_merged_series_list(
             };
 
             let (id, monitor_ebook, monitor_audiobook) = if let Some(s) = db_match {
+                matched_db_ids.insert(s.id);
                 (Some(s.id), s.monitor_ebook, s.monitor_audiobook)
             } else {
                 (None, false, false)
@@ -994,7 +1400,34 @@ fn build_merged_series_list(
                 works_in_library,
             }
         })
-        .collect()
+        .collect();
+
+    // REQ-003: DB rows (stubs included) that matched no cache entry are
+    // appended, never dropped — FK-counted. A stub's gr_key is exposed as
+    // empty: "stub:" keys are internal, and the UI hides GR links for
+    // keyless series.
+    for s in db_series {
+        if matched_db_ids.contains(&s.id) {
+            continue;
+        }
+        let works_in_library = works.iter().filter(|w| w.series_id == Some(s.id)).count() as i64;
+        let is_stub = crate::series_link::is_stub_key(&s.gr_key);
+        views.push(AuthorSeriesItemView {
+            id: Some(s.id),
+            name: s.name.clone(),
+            gr_key: if is_stub {
+                String::new()
+            } else {
+                s.gr_key.clone()
+            },
+            book_count: if is_stub { 0 } else { s.work_count },
+            monitor_ebook: s.monitor_ebook,
+            monitor_audiobook: s.monitor_audiobook,
+            works_in_library,
+        });
+    }
+
+    views
 }
 
 async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
@@ -1084,4 +1517,134 @@ async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
     }
 
     Some(cleaned)
+}
+
+#[cfg(test)]
+mod roster_merge_tests {
+    use super::*;
+
+    fn entry(title: &str, gr_key: &str, position: Option<f64>) -> SeriesRosterEntry {
+        SeriesRosterEntry {
+            title: title.to_string(),
+            gr_key: gr_key.to_string(),
+            position,
+            year: None,
+        }
+    }
+
+    fn linked_work(
+        id: i64,
+        title: &str,
+        gr_key: Option<&str>,
+        position: Option<f64>,
+    ) -> SeriesWorkView {
+        SeriesWorkView {
+            work: Work {
+                id,
+                title: title.to_string(),
+                author_name: "Jim Butcher".to_string(),
+                gr_key: gr_key.map(str::to_string),
+                series_position: position,
+                ..Default::default()
+            },
+            library_items: vec![],
+        }
+    }
+
+    fn titles(rows: &[SeriesBookRow]) -> Vec<(String, bool)> {
+        rows.iter()
+            .map(|r| match r {
+                SeriesBookRow::InLibrary { entry, .. } => (entry.work.title.clone(), true),
+                SeriesBookRow::Missing { title, .. } => (title.clone(), false),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn matches_by_normalized_gr_key() {
+        let roster = vec![entry("Storm Front", "12345.Storm_Front", Some(1.0))];
+        let works = vec![linked_work(
+            1,
+            "Storm Front (different title casing)",
+            Some("12345"),
+            Some(1.0),
+        )];
+        let rows = merge_roster_with_works(&roster, works, "Jim Butcher");
+        assert!(matches!(rows[0], SeriesBookRow::InLibrary { .. }));
+    }
+
+    #[test]
+    fn falls_back_to_title_match_when_no_key() {
+        let roster = vec![entry("Storm Front", "99999", Some(1.0))];
+        let works = vec![linked_work(1, "Storm Front", None, Some(1.0))];
+        let rows = merge_roster_with_works(&roster, works, "Jim Butcher");
+        assert!(matches!(rows[0], SeriesBookRow::InLibrary { .. }));
+    }
+
+    #[test]
+    fn unmatched_entry_is_missing() {
+        let roster = vec![
+            entry("Storm Front", "1", Some(1.0)),
+            entry("Fool Moon", "2", Some(2.0)),
+        ];
+        let works = vec![linked_work(1, "Storm Front", Some("1"), Some(1.0))];
+        let rows = merge_roster_with_works(&roster, works, "Jim Butcher");
+        assert_eq!(
+            titles(&rows),
+            vec![
+                ("Storm Front".to_string(), true),
+                ("Fool Moon".to_string(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn linked_work_absent_from_roster_is_appended_never_dropped() {
+        let roster = vec![entry("Storm Front", "1", Some(1.0))];
+        let works = vec![
+            linked_work(1, "Storm Front", Some("1"), Some(1.0)),
+            linked_work(2, "Side Jobs", Some("777"), Some(12.5)),
+        ];
+        let rows = merge_roster_with_works(&roster, works, "Jim Butcher");
+        assert_eq!(
+            titles(&rows),
+            vec![
+                ("Storm Front".to_string(), true),
+                ("Side Jobs".to_string(), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn rows_follow_roster_position_order() {
+        let roster = vec![
+            entry("Fool Moon", "2", Some(2.0)),
+            entry("Storm Front", "1", Some(1.0)),
+        ];
+        let rows = merge_roster_with_works(&roster, vec![], "Jim Butcher");
+        assert_eq!(
+            titles(&rows),
+            vec![
+                ("Storm Front".to_string(), false),
+                ("Fool Moon".to_string(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn one_work_claimed_once_second_entry_reads_missing() {
+        let roster = vec![
+            entry("Storm Front", "1", Some(1.0)),
+            entry("Storm Front (Reissue)", "1", Some(2.0)),
+        ];
+        let works = vec![linked_work(1, "Storm Front", Some("1"), Some(1.0))];
+        let rows = merge_roster_with_works(&roster, works, "Jim Butcher");
+        assert_eq!(
+            titles(&rows),
+            vec![
+                ("Storm Front".to_string(), true),
+                ("Storm Front (Reissue)".to_string(), false)
+            ]
+        );
+    }
 }

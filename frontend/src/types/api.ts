@@ -398,6 +398,19 @@ export interface GrAuthorCandidate {
   profileUrl: string;
 }
 
+export interface PromoteSeriesRequest {
+  grKey?: string | null;
+  monitorEbook: boolean;
+  monitorAudiobook: boolean;
+}
+
+export interface PromoteSeriesResponse {
+  status: "monitoring" | "needsAuthorResolution" | "needsPicker";
+  authorId: number;
+  series?: SeriesResponse;
+  candidates?: SeriesResponse[];
+}
+
 export interface SeriesWithAuthorResponse {
   id: number;
   name: string;
@@ -426,6 +439,19 @@ export interface SeriesDetailResponse {
 export interface ResolveGrResponse {
   candidates: GrAuthorCandidate[];
   autoLinked?: boolean;
+}
+
+export interface SeriesBookRowResponse {
+  position: number | null;
+  inLibrary: boolean;
+  title: string;
+  year?: number | null;
+  work?: WorkDetailResponse;
+}
+
+export interface SeriesBooksResponse {
+  rosterAvailable: boolean;
+  rows: SeriesBookRowResponse[];
 }
 
 // Notifications

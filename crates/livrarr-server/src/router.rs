@@ -319,6 +319,14 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             get(livrarr_handlers::series::get_detail::<AppState>)
                 .put(livrarr_handlers::series::update_series::<AppState>),
         )
+        .route(
+            "/series/{id}/promote",
+            post(livrarr_handlers::series::promote_series::<AppState>),
+        )
+        .route(
+            "/series/{id}/books",
+            get(livrarr_handlers::series::series_books::<AppState>),
+        )
         // Queue
         .route("/queue", get(livrarr_handlers::queue::list::<AppState>))
         .route(
