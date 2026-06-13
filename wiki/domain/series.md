@@ -1,41 +1,85 @@
 # Series
 
-An ordered collection of related works. Globally shared per user. Sourced from Goodreads.
+An ordered collection of related works. Globally shared per user. GR-backed rows are
+sourced from Goodreads; **stub** rows are sourced from work metadata (sprint-c-series,
+2026-06-12).
 
 ## Data Source
 
-Series data comes exclusively from Goodreads (GR). A series cannot exist without a `gr_key`. This is a scoped exception to Principle 6 (degrade gracefully) — the author detail page simply doesn't show the series section if the author has no `gr_key`.
+Two kinds of rows:
+- **GR-backed:** `gr_key` is a real (numeric) Goodreads series key. Created by the
+  monitor flow or by stub promotion/silent resolution.
+- **Stub:** created from a work's `series_name` metadata (back-fill or ongoing
+  reconcile). `gr_key = "stub:" + normalize_for_matching(name)` — internal marker,
+  **masked to `""` at the API boundary** (UI hides GR links for keyless series).
+  `work_count = i32::MAX` sentinel (see Work Assignment), masked to 0 at the API.
 
 ## Identity
 
-- Identity is `gr_key`, not name. Name is display-only, updated on refresh.
-- Uniqueness: `(user_id, author_id, gr_key)` — a co-authored series (same `gr_key`) can exist independently under each author.
+- GR-backed identity is `gr_key`; stub identity is the normalized name (encoded in
+  the stub key). Uniqueness: `(user_id, author_id, gr_key)` — gives per-name stub
+  uniqueness with no schema change.
+- Promotion (stub → monitored) resolves a real gr_key (exact normalized-name match
+  on the author's GR series; picker on ambiguity; author auto-link at ≥0.90 name
+  similarity first) and adopts it **in place** — row id and work links survive. A
+  gr_key collision with an existing row merges the stub into it (works relinked,
+  stub deleted).
+- Silent resolution: the first expansion of a stub runs the same exact-match road
+  (no picker, no modals, monitoring untouched) and adopts key + real roster size
+  together — never adopts on an empty roster parse.
 
 ## Monitoring
 
-Per-media-type monitoring: `monitor_ebook` and `monitor_audiobook` are independent booleans.
+Per-media-type: `monitor_ebook` / `monitor_audiobook`. Stubs are created unmonitored;
+**monitoring is never enabled without a resolved gr_key** (the flag-toggle road
+rejects stubs; promotion is the road). When monitored: missing works created (cap 50)
+and flags propagate to linked works; unmonitoring clears them.
 
-When a series is monitored:
-- Missing works are created and their corresponding `monitor_ebook`/`monitor_audiobook` flags set
-- Unmonitoring clears monitoring flags on associated works
-- Everything downstream (search, grab, import) uses existing per-work monitoring
+## Work Assignment (REQ-001 reconcile, series_link.rs)
 
-## Work Assignment
+- A work links to ≤1 series via `series_id`. The reconcile runs at create, user edit,
+  post-enrichment, and the idempotent startup back-fill (`jobs/series_backfill.rs`).
+- Arbitration: a **user edit** of `series_name` always relinks; a **system** write
+  (enrichment/merge/back-fill) never displaces a GR-backed link (string-only update).
+- The worker's guarded link is unchanged: "most specific (fewest books) wins" via
+  `work_count`. `work_count` remains the **GR roster size** (never a library count —
+  see spec ST-007); the stub sentinel (`i32::MAX`) means GR-backed rows can claim
+  works away from stubs, never the reverse.
+- GC: an **unmonitored stub** left with zero linked works is deleted (unlink, relink
+  away, or work deletion); monitored series are never auto-deleted.
+- NULL-author works (author deleted) are skipped — `series_name` stays display-only;
+  the recurring back-fill heals them if an author appears.
+- Q-002 normalization: `"X, Book 3"` → stub `"X"`, work's `series_name` rewritten,
+  `series_position` filled only when absent (`split_series_suffix` in livrarr-domain).
+- Error semantics: user-edit reconcile failures **propagate** (no self-heal exists);
+  create-path failures warn only (startup back-fill self-heals links).
 
-- A work links to at most one series via `series_id`
-- Display-only `series_name`/`series_position` may exist independently (legacy data, bibliography adds)
-- When a work appears in multiple GR series, assigned to the most specific (fewest books)
-- Assignment guard: only update `series_id` if current is NULL or new series has smaller `work_count`
+## Roster (REQ-010, series_roster table)
+
+Persisted GR roster per series (parsed primary works: title/gr_key/position/year),
+migration 062, FK CASCADE. Written by the monitor worker (write-through of the fetch
+it already does) and once on first expansion; **expansions never refetch** (a parsed-
+empty result is stored too). `GET /series/{id}/books` merges roster ↔ linked works:
+normalized GR key first, then `find_matching_work` (the same matcher as linking —
+one authority), claim-once, linked works never dropped. Display-only road: never
+creates works, never writes FKs.
+
+## Anti-bot (ST-012)
+
+The series path makes **zero** GR `/search` requests — autocomplete JSON for author
+candidates, `/series/{key}` + `/series/list?id=` pages for rosters/lists. The old
+books-search synthesis and authors-search HTML fallback are deleted; do not
+reintroduce.
 
 ## Cache
 
-`author_series_cache` stores series list per author with `fetched_at` timestamp. Invalid JSON → cache miss → re-fetch from GR.
+`author_series_cache` (per-author series list, LLM-cleaned + raw) and `series_roster`
+(per-series roster). Invalid JSON → cache miss → refetch. Author list endpoint runs
+degraded for key-less authors (DB rows still served); DB rows matching no cache entry
+are appended, never dropped.
 
 ## Non-Goals (v1)
 
-- Foreign language series
-- Hardcover series data
-- Series-level indexer search
-- Manual series editing/assignment
-- Overlapping/meta-series support
-- Auto-merge of duplicate works
+- Foreign language series; cross-name series dedup (#112 — e.g. Enderverse variants)
+- Hardcover series data; series-level indexer search
+- Overlapping/meta-series; auto-merge of duplicate works

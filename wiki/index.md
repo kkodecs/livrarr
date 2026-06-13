@@ -23,7 +23,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 - [BIG7 Overview](domain/big7.md) — the seven core entities and their relationships
 - [Work](domain/work.md) — primary entity, lifecycle, provenance, semantics
 - [Author](domain/author.md) — lifecycle, monitoring, relationship to works
-- [Series](domain/series.md) — Goodreads-sourced, per-media-type monitoring, assignment rules
+- [Series](domain/series.md) — GR-backed rows + metadata stubs (sprint-c), reconcile arbitration, persisted rosters, promotion/silent resolution, ST-012 zero-/search
 - [Release](domain/release.md) — transient search results, protocol routing, RSS sync matching
 - [Grab](domain/grab.md) — download lifecycle, import lock, queue visibility
 - [LibraryItem](domain/library-item.md) — file lifecycle, import path, CWA
