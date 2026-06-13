@@ -15,6 +15,8 @@ pub struct ConfirmRequest {
     pub preview_id: String,
     pub row_indices: Vec<usize>,
     pub import_id: Option<String>,
+    /// Language for every work this confirm creates (REQ-003).
+    pub language: Option<String>,
 }
 
 pub async fn preview<S: HasListService>(
@@ -59,6 +61,7 @@ pub async fn confirm<S: HasListService>(
             &req.preview_id,
             req.import_id.as_deref(),
             &req.row_indices,
+            req.language.as_deref(),
         )
         .await?;
     Ok(Json(result))

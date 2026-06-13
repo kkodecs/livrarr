@@ -34,6 +34,10 @@ pub struct SeriesWithAuthorResponse {
     pub book_count: i32,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    /// The persisted per-series language choice (REQ-003).
+    pub monitor_language: Option<String>,
+    /// Pre-fill for the monitor dialog: dominant language of linked works.
+    pub suggested_language: Option<String>,
     pub works_in_library: i64,
     pub author_id: AuthorId,
     pub author_name: String,
@@ -60,6 +64,9 @@ pub struct MonitorSeriesRequest {
     pub gr_key: String,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    /// Language for works this monitor creates (REQ-003); absent = leave the
+    /// persisted setting unchanged.
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +76,9 @@ pub struct PromoteSeriesRequest {
     pub gr_key: Option<String>,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    /// Language choice made at the initial monitor action — rides every step
+    /// of the promotion flow (REQ-003).
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,6 +120,8 @@ pub struct SeriesBookRowResponse {
 pub struct UpdateSeriesRequest {
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    /// New language for monitor-created works (REQ-003); absent = unchanged.
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

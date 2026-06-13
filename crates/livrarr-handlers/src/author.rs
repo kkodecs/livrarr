@@ -24,6 +24,7 @@ fn author_to_response(a: &Author) -> AuthorResponse {
         gr_key: a.gr_key.clone(),
         monitored: a.monitored,
         monitor_new_items: a.monitor_new_items,
+        monitor_language: a.monitor_language.clone(),
         added_at: a.added_at.to_rfc3339(),
     }
 }
@@ -134,6 +135,7 @@ pub async fn add<S: HasAuthorService + HasSeriesQueryService>(
                                             gr_key: Some(Some(first.gr_key.clone())),
                                             monitored: None,
                                             monitor_new_items: None,
+                                            monitor_language: None,
                                         },
                                     )
                                     .await;
@@ -227,6 +229,9 @@ pub async fn update<S: HasAuthorService>(
                 gr_key: req.gr_key,
                 monitored: req.monitored.flatten(),
                 monitor_new_items: req.monitor_new_items.flatten(),
+                monitor_language: req
+                    .monitor_language
+                    .map(|opt| opt.map(|s| livrarr_domain::normalize_language(&s))),
             },
         )
         .await?;

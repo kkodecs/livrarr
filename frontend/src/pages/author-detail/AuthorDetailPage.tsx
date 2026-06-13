@@ -25,6 +25,7 @@ import {
   resolveGr,
 } from "@/api";
 import type { SeriesResponse } from "@/types/api";
+import { SUPPORTED_LANGUAGES } from "@/types/api";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
@@ -64,8 +65,11 @@ export default function AuthorDetailPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: (req: { monitored?: boolean; monitorNewItems?: boolean }) =>
-      updateAuthor(authorId, req),
+    mutationFn: (req: {
+      monitored?: boolean;
+      monitorNewItems?: boolean;
+      monitorLanguage?: string;
+    }) => updateAuthor(authorId, req),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["author", id] });
       queryClient.invalidateQueries({ queryKey: ["authors"] });
@@ -90,6 +94,34 @@ export default function AuthorDetailPage() {
   if (!data) return <ErrorState error={new Error("Author not found")} />;
 
   const { author, works } = data;
+
+  // Pre-fill for the monitor language: the dominant language among this
+  // author's library works; a tie or an all-language-less set suggests
+  // nothing (the selector falls back to English).
+  const suggestedLanguage = (() => {
+    const counts = new Map<string, number>();
+    for (const w of works) {
+      if (w.language) counts.set(w.language, (counts.get(w.language) ?? 0) + 1);
+    }
+    let best: string | null = null;
+    let bestN = 0;
+    let tied = false;
+    for (const [lang, n] of counts) {
+      if (n > bestN) {
+        best = lang;
+        bestN = n;
+        tied = false;
+      } else if (n === bestN) {
+        tied = true;
+      }
+    }
+    return tied ? null : best;
+  })();
+  // Once monitoring is on, show only the persisted truth; the suggestion is a
+  // pre-fill for the not-yet-monitored state and is persisted the moment
+  // monitoring is enabled.
+  const displayedLanguage =
+    author.monitorLanguage ?? (author.monitored ? "en" : (suggestedLanguage ?? "en"));
 
   return (
     <>
@@ -141,7 +173,13 @@ export default function AuthorDetailPage() {
             {works.length} {works.length === 1 ? "work" : "works"}
           </span>
           <button
-            onClick={() => updateMutation.mutate({ monitored: !author.monitored })}
+            onClick={() =>
+              updateMutation.mutate(
+                author.monitored
+                  ? { monitored: false }
+                  : { monitored: true, monitorLanguage: displayedLanguage },
+              )
+            }
             disabled={updateMutation.isPending}
             className={cn(
               "inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-xs transition-colors",
@@ -178,6 +216,21 @@ export default function AuthorDetailPage() {
             Monitor New
             <HelpTip text="Auto-add new works by this author when detected." />
           </button>
+          <span className="inline-flex items-center gap-1.5">
+            <select
+              value={displayedLanguage}
+              onChange={(e) => updateMutation.mutate({ monitorLanguage: e.target.value })}
+              disabled={updateMutation.isPending}
+              className="h-7 rounded border border-border bg-zinc-800 px-2 text-xs text-zinc-100"
+            >
+              {SUPPORTED_LANGUAGES.map((lang) => (
+                <option key={lang.code} value={lang.code}>
+                  {lang.flag} {lang.englishName}
+                </option>
+              ))}
+            </select>
+            <HelpTip text="Language for works the monitor auto-adds. Pre-filled from this author's library." />
+          </span>
         </div>
 
         {/* Works list */}
@@ -403,6 +456,9 @@ function SeriesSection({
   const [monitoringKey, setMonitoringKey] = useState<string | null>(null);
   const [resolveOpen, setResolveOpen] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
+  // Language for works the monitors in this section create (REQ-003) — one
+  // choice per author block, defaulted to the author's persisted setting.
+  const [language, setLanguage] = useState(author.monitorLanguage ?? "en");
 
   // Only show if author has grKey.
   const hasGrKey = !!author.grKey;
@@ -427,7 +483,7 @@ function SeriesSection({
   const monitorMutation = useMutation({
     mutationFn: (params: { grKey: string; monitorEbook: boolean; monitorAudiobook: boolean }) => {
       setMonitoringKey(params.grKey);
-      return monitorSeries(authorId, params);
+      return monitorSeries(authorId, { ...params, language });
     },
     onSuccess: () => {
       setMonitoringKey(null);
@@ -533,6 +589,18 @@ function SeriesSection({
             Refresh
           </button>
         )}
+        <select
+          value={language}
+          onChange={(e) => setLanguage(e.target.value)}
+          className="ml-auto h-6 rounded border border-border bg-zinc-800 px-1 text-xs text-zinc-100"
+        >
+          {SUPPORTED_LANGUAGES.map((lang) => (
+            <option key={lang.code} value={lang.code}>
+              {lang.flag} {lang.code}
+            </option>
+          ))}
+        </select>
+        <HelpTip text="Language stamped on works the monitors here add. Pre-filled from this author's setting." />
       </div>
       {!hasSeries && !isFetching && (
         <p className="text-sm text-zinc-500">No series found on Goodreads.</p>

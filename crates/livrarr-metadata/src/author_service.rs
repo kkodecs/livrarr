@@ -57,6 +57,7 @@ where
                         monitored: None,
                         monitor_new_items: None,
                         monitor_since: None,
+                        monitor_language: None,
                     },
                 )
                 .await
@@ -142,6 +143,7 @@ where
             monitored,
             monitor_new_items,
             monitor_since,
+            monitor_language: req.monitor_language,
         };
 
         self.db
@@ -391,6 +393,7 @@ where
                     monitored: None,
                     monitor_new_items: None,
                     monitor_since: None,
+                    monitor_language: None,
                 },
             )
             .await;

@@ -71,6 +71,7 @@ impl AuthorApi for SecondaryApiImpl {
                         monitored: None,
                         monitor_new_items: None,
                         monitor_since: None,
+                        monitor_language: None,
                     },
                 )
                 .await
@@ -167,6 +168,7 @@ impl AuthorApi for SecondaryApiImpl {
             monitored,
             monitor_new_items,
             monitor_since: None,
+            monitor_language: None,
         };
         if monitored == Some(true) && !author.monitored {
             db_req.monitor_since = Some(Utc::now());
@@ -736,6 +738,7 @@ fn author_to_response(a: &Author) -> AuthorResponse {
         gr_key: a.gr_key.clone(),
         monitored: a.monitored,
         monitor_new_items: a.monitor_new_items,
+        monitor_language: a.monitor_language.clone(),
         added_at: a.added_at.to_rfc3339(),
     }
 }

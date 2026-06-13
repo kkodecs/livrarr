@@ -21,6 +21,7 @@ import type {
   ListImportPreviewResponse,
   ListImportConfirmRowResult,
 } from "@/types/api";
+import { SUPPORTED_LANGUAGES } from "@/types/api";
 
 type Phase = "idle" | "uploading" | "previewed" | "confirming" | "done";
 
@@ -32,6 +33,7 @@ export default function ListImportPage() {
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [preview, setPreview] = useState<ListImportPreviewResponse | null>(null);
+  const [language, setLanguage] = useState("en");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [results, setResults] = useState<ListImportConfirmRowResult[]>([]);
@@ -123,6 +125,7 @@ export default function ListImportPage() {
           previewId: preview.previewId,
           rowIndices: batch,
           importId,
+          language,
         });
         importId = resp.importId;
         allResults.push(...resp.results);
@@ -311,6 +314,17 @@ export default function ListImportPage() {
                 </p>
               </div>
               <div className="flex gap-2">
+                <select
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value)}
+                  className="h-8 rounded border border-border bg-zinc-800 px-2 text-sm text-zinc-100"
+                >
+                  {SUPPORTED_LANGUAGES.map((lang) => (
+                    <option key={lang.code} value={lang.code}>
+                      {lang.flag} {lang.englishName}
+                    </option>
+                  ))}
+                </select>
                 <button onClick={reset} className="btn btn-secondary text-sm">
                   Cancel
                 </button>

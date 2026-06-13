@@ -324,6 +324,7 @@ export interface UpdateAuthorRequest {
   monitored?: boolean | null;
   monitorNewItems?: boolean | null;
   grKey?: string | null;
+  monitorLanguage?: string | null;
 }
 
 export interface AuthorResponse {
@@ -334,6 +335,7 @@ export interface AuthorResponse {
   grKey: string | null;
   monitored: boolean;
   monitorNewItems: boolean;
+  monitorLanguage: string | null;
   addedAt: string;
 }
 
@@ -385,11 +387,13 @@ export interface MonitorSeriesRequest {
   grKey: string;
   monitorEbook: boolean;
   monitorAudiobook: boolean;
+  language?: string | null;
 }
 
 export interface UpdateSeriesRequest {
   monitorEbook: boolean;
   monitorAudiobook: boolean;
+  language?: string | null;
 }
 
 export interface GrAuthorCandidate {
@@ -402,6 +406,7 @@ export interface PromoteSeriesRequest {
   grKey?: string | null;
   monitorEbook: boolean;
   monitorAudiobook: boolean;
+  language?: string | null;
 }
 
 export interface PromoteSeriesResponse {
@@ -418,6 +423,8 @@ export interface SeriesWithAuthorResponse {
   bookCount: number;
   monitorEbook: boolean;
   monitorAudiobook: boolean;
+  monitorLanguage: string | null;
+  suggestedLanguage: string | null;
   worksInLibrary: number;
   authorId: number;
   authorName: string;
@@ -1078,6 +1085,7 @@ export interface ListImportConfirmRequest {
   previewId: string;
   rowIndices: number[];
   importId?: string;
+  language?: string | null;
 }
 
 export interface ListImportConfirmRowResult {

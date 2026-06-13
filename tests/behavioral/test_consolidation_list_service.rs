@@ -185,7 +185,7 @@ async fn test_list_confirm_adds_selected_rows() {
     // StubHttpFetcher has no responses queued, so OL lookup will fail for all rows.
     // This is expected — tests that need OL lookup should queue responses.
     let result = svc
-        .confirm(USER, &preview.preview_id, None, &row_indices)
+        .confirm(USER, &preview.preview_id, None, &row_indices, None)
         .await
         .unwrap();
 
@@ -207,7 +207,7 @@ async fn test_list_confirm_expired_preview_returns_error() {
     let svc = make_service().await;
 
     let result = svc
-        .confirm(USER, "nonexistent-preview-id", None, &[0])
+        .confirm(USER, "nonexistent-preview-id", None, &[0], None)
         .await;
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -226,7 +226,7 @@ async fn test_list_complete_marks_import_completed() {
 
     let preview = svc.preview(USER, single_row_csv_bytes()).await.unwrap();
     let result = svc
-        .confirm(USER, &preview.preview_id, None, &[0])
+        .confirm(USER, &preview.preview_id, None, &[0], None)
         .await
         .unwrap();
 
@@ -486,7 +486,10 @@ async fn test_list_preview_survives_service_restart() {
         ListServiceImpl::new(db.clone(), work_svc2, stub_http(), NoOpBibliographyTrigger);
 
     // Confirm using the second service instance — preview rows are still in DB.
-    let result = svc2.confirm(USER, &preview_id, None, &[0]).await.unwrap();
+    let result = svc2
+        .confirm(USER, &preview_id, None, &[0], None)
+        .await
+        .unwrap();
     assert!(!result.import_id.is_empty());
     assert_eq!(result.results.len(), 1);
 }
@@ -499,7 +502,7 @@ async fn test_list_confirm_batched_first_call_creates_import_id() {
 
     // Confirm only the first row, no import_id yet.
     let result = svc
-        .confirm(USER, &preview.preview_id, None, &[0])
+        .confirm(USER, &preview.preview_id, None, &[0], None)
         .await
         .unwrap();
 
@@ -508,7 +511,13 @@ async fn test_list_confirm_batched_first_call_creates_import_id() {
 
     // Confirm second row with same import_id (batched additive).
     let result2 = svc
-        .confirm(USER, &preview.preview_id, Some(&result.import_id), &[1])
+        .confirm(
+            USER,
+            &preview.preview_id,
+            Some(&result.import_id),
+            &[1],
+            None,
+        )
         .await
         .unwrap();
 
@@ -522,7 +531,7 @@ async fn test_list_confirm_on_completed_import_returns_conflict() {
 
     let preview = svc.preview(USER, single_row_csv_bytes()).await.unwrap();
     let result = svc
-        .confirm(USER, &preview.preview_id, None, &[0])
+        .confirm(USER, &preview.preview_id, None, &[0], None)
         .await
         .unwrap();
 
@@ -531,7 +540,13 @@ async fn test_list_confirm_on_completed_import_returns_conflict() {
 
     // Try to confirm more rows on the completed import.
     let result2 = svc
-        .confirm(USER, &preview.preview_id, Some(&result.import_id), &[0])
+        .confirm(
+            USER,
+            &preview.preview_id,
+            Some(&result.import_id),
+            &[0],
+            None,
+        )
         .await;
 
     assert!(result2.is_err());
@@ -565,7 +580,7 @@ async fn test_list_confirm_on_undone_import_returns_conflict() {
 
     // Try to confirm with the undone import_id.
     let result = svc
-        .confirm(USER, &preview.preview_id, Some(import_id), &[0])
+        .confirm(USER, &preview.preview_id, Some(import_id), &[0], None)
         .await;
 
     assert!(result.is_err());
@@ -585,7 +600,7 @@ async fn test_list_confirm_partial_failures_do_not_fail_batch() {
     let row_indices: Vec<usize> = preview.rows.iter().map(|r| r.row_index).collect();
 
     let result = svc
-        .confirm(USER, &preview.preview_id, None, &row_indices)
+        .confirm(USER, &preview.preview_id, None, &row_indices, None)
         .await
         .unwrap();
 

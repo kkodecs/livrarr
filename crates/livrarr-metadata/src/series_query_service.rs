@@ -127,6 +127,7 @@ where
                     monitored: None,
                     monitor_new_items: None,
                     monitor_since: None,
+                    monitor_language: None,
                 },
             )
             .await
@@ -291,6 +292,14 @@ where
                         })
                         .map(|w| w.id)
                 });
+                // Q-002 pre-fill: the dominant language among the series' linked
+                // works; a tie or an all-language-less set yields None (the UI
+                // defaults the selector). Shared rule with the monitor-enable guard.
+                let suggested_language = series_works.and_then(|ws| {
+                    livrarr_domain::seed::dominant_language(
+                        ws.iter().map(|w| w.language.as_deref()),
+                    )
+                });
                 SeriesListView {
                     id: s.id,
                     name: s.name.clone(),
@@ -298,6 +307,8 @@ where
                     book_count: s.work_count,
                     monitor_ebook: s.monitor_ebook,
                     monitor_audiobook: s.monitor_audiobook,
+                    monitor_language: s.monitor_language.clone(),
+                    suggested_language,
                     works_in_library,
                     author_id: s.author_id,
                     author_name,
@@ -353,6 +364,7 @@ where
         series_id: i64,
         monitor_ebook: bool,
         monitor_audiobook: bool,
+        language: Option<String>,
     ) -> Result<UpdateSeriesView, SeriesServiceError> {
         let series = self
             .db
@@ -380,7 +392,13 @@ where
 
         let updated = self
             .db
-            .update_series_flags(user_id, series_id, monitor_ebook, monitor_audiobook)
+            .update_series_flags(
+                user_id,
+                series_id,
+                monitor_ebook,
+                monitor_audiobook,
+                language.as_deref().map(livrarr_domain::normalize_language),
+            )
             .await
             .map_err(SeriesServiceError::Db)?;
 
@@ -632,6 +650,10 @@ where
                 gr_key: req.gr_key.clone(),
                 monitor_ebook: req.monitor_ebook,
                 monitor_audiobook: req.monitor_audiobook,
+                monitor_language: req
+                    .language
+                    .as_deref()
+                    .map(livrarr_domain::normalize_language),
                 work_count: cache_entry.book_count,
             })
             .await
@@ -769,18 +791,19 @@ where
             }
 
             // No match — create new work via WorkService::add() (M2 single creation gate).
-            use livrarr_domain::identity::{
-                IdentityState, PendingReason, WorkCandidate, WorkSeedFields,
-            };
+            use livrarr_domain::identity::{IdentityState, PendingReason};
+            use livrarr_domain::seed::{seed_series_monitor, SeedInput, SeedLanguage};
             match self
                 .work_service
                 .add(
                     author.user_id,
-                    WorkCandidate {
-                        fields: WorkSeedFields {
+                    seed_series_monitor(
+                        SeedInput {
                             title: book.title.clone(),
                             author_name: author.name.clone(),
-                            language: "en".into(),
+                            language: SeedLanguage::resolve(
+                                current.as_ref().and_then(|s| s.monitor_language.as_deref()),
+                            ),
                             author_ol_key: None,
                             year: book.year,
                             cover_url: None,
@@ -789,7 +812,7 @@ where
                             series_name: Some(series_name.clone()),
                             series_position: book.position,
                         },
-                        identity: IdentityState::Pending {
+                        IdentityState::Pending {
                             reason: PendingReason::NoCandidates,
                             // Carry the source GR anchor (REQ-006) so the work persists its
                             // gr_key at create and the background resolver converges it — a
@@ -811,17 +834,10 @@ where
                             }),
                             top_candidates: vec![],
                         },
-                        candidate_id: None,
-                        source_provider_data: None,
-                        file_path: None,
-                        delete_existing_after_import: false,
-                        series_id: Some(series_id),
-                        monitor_ebook: Some(monitor_ebook),
-                        monitor_audiobook: Some(monitor_audiobook),
-                        provenance_setter: Some(ProvenanceSetter::AutoAdded),
-                        import_id: None,
-                        cover_manual: false,
-                    },
+                        series_id,
+                        monitor_ebook,
+                        monitor_audiobook,
+                    ),
                 )
                 .await
             {

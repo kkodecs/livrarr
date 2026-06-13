@@ -3,6 +3,7 @@ pub mod kash;
 pub mod keyed_mutex;
 pub mod normalization;
 pub mod readarr;
+pub mod seed;
 pub mod services;
 pub mod settings;
 pub mod text_norm;
@@ -464,6 +465,9 @@ pub struct Author {
     pub monitored: bool,
     pub monitor_new_items: bool,
     pub monitor_since: Option<DateTime<Utc>>,
+    /// The user's language choice for monitor-created works (REQ-003).
+    /// `None` = never configured; the seed builder applies the system default.
+    pub monitor_language: Option<String>,
     pub added_at: DateTime<Utc>,
 }
 
@@ -477,6 +481,9 @@ pub struct Series {
     pub gr_key: String,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    /// The user's language choice for monitor-created works (REQ-003).
+    /// `None` = never configured; the seed builder applies the system default.
+    pub monitor_language: Option<String>,
     pub work_count: i32,
     pub added_at: DateTime<Utc>,
 }

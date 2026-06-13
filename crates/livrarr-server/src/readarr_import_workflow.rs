@@ -13,7 +13,6 @@ use livrarr_domain::services::{
 };
 use livrarr_domain::{
     derive_sort_name, normalize_for_matching, sanitize_path_component, Import, MediaType,
-    ProvenanceSetter,
 };
 
 use livrarr_http::HttpClient;
@@ -1231,14 +1230,13 @@ impl ImportRunner {
                 series_position: series_position_f64.map(|p| p.to_string()),
             };
 
-            use livrarr_domain::identity::{
-                IdentityState, PendingReason, WorkCandidate, WorkSeedFields,
-            };
-            let candidate = WorkCandidate {
-                fields: WorkSeedFields {
+            use livrarr_domain::identity::{IdentityState, PendingReason};
+            use livrarr_domain::seed::{seed_readarr_import, SeedInput, SeedLanguage};
+            let candidate = seed_readarr_import(
+                SeedInput {
                     title: title.to_string(),
                     author_name: author_name.to_string(),
-                    language: language.unwrap_or_else(|| "en".to_string()),
+                    language: SeedLanguage::resolve(language.as_deref()),
                     author_ol_key: None,
                     year,
                     cover_url,
@@ -1247,22 +1245,16 @@ impl ImportRunner {
                     series_name,
                     series_position: series_position_f64,
                 },
-                identity: IdentityState::Pending {
+                IdentityState::Pending {
                     reason: PendingReason::NoCandidates,
                     seed_anchors,
                     top_candidates: vec![],
                 },
-                candidate_id: None,
-                source_provider_data: Some(source_data),
-                file_path: None,
-                delete_existing_after_import: false,
-                series_id: None,
-                monitor_ebook: Some(monitor_ebook),
-                monitor_audiobook: Some(monitor_audiobook),
-                provenance_setter: Some(ProvenanceSetter::Import),
-                import_id: Some(self.import_id.clone()),
-                cover_manual: false,
-            };
+                source_data,
+                monitor_ebook,
+                monitor_audiobook,
+                self.import_id.clone(),
+            );
 
             preps.push(Prep {
                 rd_book_id: rd_book.id,

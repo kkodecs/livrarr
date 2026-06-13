@@ -172,6 +172,7 @@ where
         gr_key: stub_key_for(clean_name),
         monitor_ebook: false,
         monitor_audiobook: false,
+        monitor_language: None,
         work_count: STUB_WORK_COUNT,
     })
     .await
@@ -407,7 +408,7 @@ mod tests {
             .unwrap()
             .unwrap();
         // Monitor it (DB-level; the service-level stub guard is a different road).
-        db.update_series_flags(user_id, sid, true, false)
+        db.update_series_flags(user_id, sid, true, false, None)
             .await
             .unwrap();
 
@@ -519,6 +520,7 @@ mod tests {
                 gr_key: "45175".to_string(),
                 monitor_ebook: true,
                 monitor_audiobook: false,
+                monitor_language: None,
                 work_count: 14,
             })
             .await
@@ -562,6 +564,7 @@ mod tests {
                 gr_key: "45175".to_string(),
                 monitor_ebook: true,
                 monitor_audiobook: false,
+                monitor_language: None,
                 work_count: 14,
             })
             .await
@@ -599,6 +602,7 @@ mod tests {
                 gr_key: "45175".to_string(),
                 monitor_ebook: true,
                 monitor_audiobook: false,
+                monitor_language: None,
                 work_count: 14,
             })
             .await

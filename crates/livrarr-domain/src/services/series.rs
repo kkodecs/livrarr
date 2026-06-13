@@ -39,6 +39,11 @@ pub struct SeriesListView {
     pub book_count: i32,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    /// The persisted per-series language choice (REQ-003).
+    pub monitor_language: Option<String>,
+    /// Pre-fill for the monitor dialog: the dominant language among the
+    /// series' FK-linked works; `None` when the series has none.
+    pub suggested_language: Option<String>,
     pub works_in_library: i64,
     pub author_id: i64,
     pub author_name: String,
@@ -131,6 +136,9 @@ pub struct MonitorSeriesServiceRequest {
     pub gr_key: String,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    /// The user's language choice for works this monitor creates (REQ-003);
+    /// `None` leaves the persisted setting unchanged.
+    pub language: Option<String>,
 }
 
 #[derive(Debug)]
@@ -196,6 +204,7 @@ pub trait SeriesQueryService: Send + Sync {
         series_id: i64,
         monitor_ebook: bool,
         monitor_audiobook: bool,
+        language: Option<String>,
     ) -> Result<UpdateSeriesView, SeriesServiceError>;
     async fn resolve_gr_candidates(
         &self,

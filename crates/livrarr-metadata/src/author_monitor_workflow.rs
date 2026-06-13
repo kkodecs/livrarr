@@ -23,7 +23,15 @@ struct OlWorkEntry {
     /// OL uses "first_publish_date" which may be a year string like "2024"
     /// or a full date like "January 1, 2024".
     first_publish_date: Option<String>,
+    /// Credited authors — present in the payload the monitor already fetches;
+    /// the anthology screen counts them (REQ-004a).
+    authors: Option<Vec<OlEntryAuthor>>,
 }
+
+/// One credited-author entry. The screen needs only the count, so nothing is
+/// deserialized from it.
+#[derive(Debug, serde::Deserialize)]
+struct OlEntryAuthor {}
 
 impl OlWorkEntry {
     fn ol_key(&self) -> Option<&str> {
@@ -39,6 +47,158 @@ impl OlWorkEntry {
                 .and_then(|tok| tok.parse::<i32>().ok())
         })
     }
+
+    /// Credited-author count; a missing or empty array counts as 1, so the
+    /// anthology class never fires on it (REQ-004a).
+    fn author_count(&self) -> usize {
+        match self.authors.as_ref() {
+            Some(v) if !v.is_empty() => v.len(),
+            _ => 1,
+        }
+    }
+}
+
+/// Anthology threshold (REQ-004a): every junk anthology in the ST-007 sample
+/// had ≥6 credited authors; the max observed on a clean work is 5.
+const ANTHOLOGY_AUTHOR_THRESHOLD: usize = 6;
+
+/// Title keywords that mark publisher bundles (REQ-004b).
+const BUNDLE_KEYWORDS: [&str; 6] = [
+    "omnibus",
+    "box set",
+    "boxed set",
+    "collection set",
+    "series set",
+    "books in one",
+];
+
+/// High-precision study-guide keywords (REQ-004e). "Notes on" and
+/// "Analysis of" are deliberately absent — they match real literary titles.
+const SUMMARY_KEYWORDS: [&str; 6] = [
+    "summary of",
+    "study guide",
+    "sparknotes",
+    "cliffsnotes",
+    "workbook",
+    "quotes from",
+];
+
+/// Bundle vocabulary + connective stopwords stripped by the self-titled
+/// bundle rule (REQ-004c).
+const SELF_TITLED_STRIP: [&str; 13] = [
+    "set",
+    "box",
+    "boxed",
+    "collection",
+    "books",
+    "novels",
+    "omnibus",
+    "volume",
+    "by",
+    "the",
+    "of",
+    "a",
+    "and",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JunkClass {
+    Anthology,
+    BundleKeyword,
+    SelfTitledBundle,
+    MalformedTitle,
+    SummaryKeyword,
+    MissingTitle,
+}
+
+impl JunkClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            JunkClass::Anthology => "anthology",
+            JunkClass::BundleKeyword => "bundle_keyword",
+            JunkClass::SelfTitledBundle => "self_titled_bundle",
+            JunkClass::MalformedTitle => "malformed_title",
+            JunkClass::SummaryKeyword => "summary_keyword",
+            JunkClass::MissingTitle => "missing_title",
+        }
+    }
+}
+
+/// REQ-004/REQ-005 quality screen: decides whether a bibliography entry looks
+/// like a real primary work. Deterministic — no network, no LLM. Returns the
+/// matched junk class, or `None` for a clean entry.
+fn screen_entry(entry: &OlWorkEntry, author_name: &str) -> Option<JunkClass> {
+    let title = match entry.title.as_deref() {
+        Some(t) if !crate::title_cleanup::clean_title(t).is_empty() => t,
+        _ => return Some(JunkClass::MissingTitle),
+    };
+    if entry.author_count() >= ANTHOLOGY_AUTHOR_THRESHOLD {
+        return Some(JunkClass::Anthology);
+    }
+    // Malformed entries are screened, not repaired — no guessing a plausible
+    // title (REQ-004d).
+    if title.contains('\n') || title.contains("  ") {
+        return Some(JunkClass::MalformedTitle);
+    }
+    let lower = title.to_lowercase();
+    if BUNDLE_KEYWORDS.iter().any(|k| lower.contains(k)) || books_range_form(&lower) {
+        return Some(JunkClass::BundleKeyword);
+    }
+    if SUMMARY_KEYWORDS.iter().any(|k| lower.contains(k)) {
+        return Some(JunkClass::SummaryKeyword);
+    }
+    if is_self_titled_bundle(&lower, author_name) {
+        return Some(JunkClass::SelfTitledBundle);
+    }
+    None
+}
+
+/// Matches "books 1-4" / "books 1–4" range forms (REQ-004b).
+fn books_range_form(lower: &str) -> bool {
+    let Some(idx) = lower.find("books") else {
+        return false;
+    };
+    let rest = lower[idx + 5..].trim_start();
+    let digits_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if digits_end == 0 {
+        return false;
+    }
+    let mut after = rest[digits_end..].trim_start().chars();
+    matches!(after.next(), Some('-' | '–' | '—'))
+        && after
+            .as_str()
+            .trim_start()
+            .starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// REQ-004c: normalized title minus the author's name tokens, bundle
+/// vocabulary, stopwords, and digits — an empty remainder means the title is
+/// just a self-titled bundle label ("Jim Butcher Set"). A real title that
+/// merely contains the author's name keeps a substantive token and passes
+/// ("Persuasion by Jane Austen" → "persuasion").
+fn is_self_titled_bundle(lower_title: &str, author_name: &str) -> bool {
+    let author_lower = author_name.to_lowercase();
+    let author_tokens: std::collections::HashSet<&str> = author_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut saw_any = false;
+    for tok in lower_title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+    {
+        saw_any = true;
+        if author_tokens.contains(tok)
+            || SELF_TITLED_STRIP.contains(&tok)
+            || tok.chars().all(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        return false;
+    }
+    saw_any
 }
 
 pub struct AuthorMonitorWorkflowImpl<D, W, H> {
@@ -116,6 +276,7 @@ where
             new_works_found: 0,
             works_added: 0,
             notifications_created: 0,
+            entries_screened: 0,
         };
 
         // Index-based loop with retry map for 429 handling (matches handler).
@@ -268,6 +429,7 @@ where
             let cleaned_author_ref = &cleaned_author;
             let author_ref = &author;
             let ol_key_ref = &ol_key;
+            let mut entries_screened = 0usize;
             let eligible: Vec<(String, i32, String)> = works_response
                 .entries
                 .iter()
@@ -277,6 +439,19 @@ where
                         .iter()
                         .any(|(ol, _gr)| ol.as_deref() == Some(stripped_ol_key.as_str()))
                     {
+                        return None;
+                    }
+                    // REQ-004/REQ-005 quality screen — before the year gate (so a
+                    // screened entry never counts as "found") and before the
+                    // auto-add/notification fork (a reject produces neither).
+                    if let Some(class) = screen_entry(entry, &author.name) {
+                        entries_screened += 1;
+                        tracing::debug!(
+                            ol_key = %stripped_ol_key,
+                            title = ?entry.title,
+                            class = class.as_str(),
+                            "author monitor: entry screened out"
+                        );
                         return None;
                     }
                     let year = match entry.publish_year() {
@@ -299,6 +474,7 @@ where
                 })
                 .collect();
 
+            report.entries_screened += entries_screened;
             report.new_works_found += eligible.len();
 
             struct EntryOutcome {
@@ -315,14 +491,15 @@ where
                     );
 
                     if author_ref.monitor_new_items {
-                        use livrarr_domain::identity::{
-                            IdentityMethod, IdentityState, WorkCandidate, WorkSeedFields,
-                        };
-                        let candidate = WorkCandidate {
-                            fields: WorkSeedFields {
+                        use livrarr_domain::identity::{IdentityMethod, IdentityState};
+                        use livrarr_domain::seed::{seed_author_monitor, SeedInput, SeedLanguage};
+                        let candidate = seed_author_monitor(
+                            SeedInput {
                                 title: work_title.clone(),
                                 author_name: cleaned_author_ref.clone(),
-                                language: "en".into(),
+                                language: SeedLanguage::resolve(
+                                    author_ref.monitor_language.as_deref(),
+                                ),
                                 author_ol_key: Some(ol_key_ref.clone()),
                                 year: Some(year),
                                 cover_url: None,
@@ -331,7 +508,7 @@ where
                                 series_name: None,
                                 series_position: None,
                             },
-                            identity: IdentityState::Confirmed {
+                            IdentityState::Confirmed {
                                 anchors: livrarr_domain::identity::CapturedIdentity {
                                     ol_key: Some(stripped_ol_key.clone()),
                                     gr_key: None,
@@ -345,17 +522,7 @@ where
                                 method: IdentityMethod::TitleAuthorSearch,
                                 score: None,
                             },
-                            candidate_id: None,
-                            source_provider_data: None,
-                            file_path: None,
-                            delete_existing_after_import: false,
-                            series_id: None,
-                            monitor_ebook: None,
-                            monitor_audiobook: None,
-                            provenance_setter: Some(ProvenanceSetter::AutoAdded),
-                            import_id: None,
-                            cover_manual: false,
-                        };
+                        );
                         match self.work_service.add(author_ref.user_id, candidate).await {
                             Ok(_work) => {
                                 let notif_ok = self
@@ -445,5 +612,123 @@ where
         }
 
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod screen_tests {
+    use super::*;
+
+    /// Raw OL JSON in the sampled shape (ST-007), exercising the extended
+    /// deserialization — not pre-parsed structs (AC-008).
+    fn entry_json(title: &str, author_count: usize) -> OlWorkEntry {
+        let authors: Vec<serde_json::Value> = (0..author_count)
+            .map(|i| {
+                serde_json::json!({
+                    "author": { "key": format!("/authors/OL{i}A") },
+                    "type": { "key": "/type/author_role" }
+                })
+            })
+            .collect();
+        let raw = serde_json::json!({
+            "key": "/works/OL1W",
+            "title": title,
+            "authors": authors,
+        });
+        serde_json::from_value(raw).expect("entry deserializes")
+    }
+
+    #[test]
+    fn sampled_junk_is_screened() {
+        // Verbatim ST-007 junk exemplars, by class.
+        let cases = [
+            (entry_json("Blood Lite", 23), JunkClass::Anthology),
+            (entry_json("Urban Enemies", 6), JunkClass::Anthology), // threshold boundary
+            (
+                entry_json("Jim Butcher Box Set", 1),
+                JunkClass::BundleKeyword,
+            ),
+            (
+                entry_json("Jim Butcher's the Dresden Files Omnibus Volume 2", 1),
+                JunkClass::BundleKeyword,
+            ),
+            (
+                entry_json(
+                    "Jim Butcher The Dresden Files Series 5 Books Collection Set",
+                    1,
+                ),
+                JunkClass::BundleKeyword,
+            ),
+            (
+                entry_json("Jim Butcher - Dresden Files : Books 1-4", 1),
+                JunkClass::BundleKeyword,
+            ),
+            (
+                entry_json("Jim Butcher Set", 1),
+                JunkClass::SelfTitledBundle,
+            ),
+            (
+                entry_json(
+                    "Ghost Story\n            \n                Dresden Files",
+                    1,
+                ),
+                JunkClass::MalformedTitle,
+            ),
+            (
+                entry_json("1984 SparkNotes Literature Guide", 1),
+                JunkClass::SummaryKeyword,
+            ),
+        ];
+        for (entry, expected) in cases {
+            let got = screen_entry(&entry, "Jim Butcher");
+            assert_eq!(
+                got,
+                Some(expected),
+                "title {:?} should screen as {expected:?}",
+                entry.title
+            );
+        }
+    }
+
+    #[test]
+    fn sampled_real_titles_pass() {
+        // False-positive guard (AC-009): real titles from the sampled feeds,
+        // including the author-name-containment case and a co-authored work
+        // at the threshold boundary (5 credited authors).
+        let author = "Jane Austen";
+        for (title, count) in [
+            ("Persuasion by Jane Austen", 1),
+            ("Mansfield Park (Jane Austen Novels Book 5)", 1),
+            ("Pride and Prejudice", 1),
+            ("Storm Front", 1),
+            ("Dead Beat", 1),
+            ("Working Together", 5),
+        ] {
+            let entry = entry_json(title, count);
+            assert_eq!(
+                screen_entry(&entry, author),
+                None,
+                "real title {title:?} must pass the screen"
+            );
+        }
+    }
+
+    #[test]
+    fn title_less_entry_is_screened_not_unknown() {
+        // AC-010: no work named "Unknown" can be created.
+        let raw = serde_json::json!({ "key": "/works/OL2W" });
+        let entry: OlWorkEntry = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            screen_entry(&entry, "Jim Butcher"),
+            Some(JunkClass::MissingTitle)
+        );
+    }
+
+    #[test]
+    fn missing_authors_array_counts_as_one() {
+        let raw = serde_json::json!({ "key": "/works/OL3W", "title": "Storm Front" });
+        let entry: OlWorkEntry = serde_json::from_value(raw).unwrap();
+        assert_eq!(entry.author_count(), 1);
+        assert_eq!(screen_entry(&entry, "Jim Butcher"), None);
     }
 }

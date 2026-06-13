@@ -42,6 +42,7 @@ pub struct UpdateAuthorRequest {
     pub gr_key: Option<Option<String>>,
     pub monitored: Option<bool>,
     pub monitor_new_items: Option<bool>,
+    pub monitor_language: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize)]

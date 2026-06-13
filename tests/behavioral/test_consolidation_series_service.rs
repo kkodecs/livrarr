@@ -57,10 +57,56 @@ async fn seed_series(db: &SqliteDb, user_id: i64, name: &str) -> livrarr_domain:
         gr_key: format!("gr_{name}"),
         monitor_ebook: false,
         monitor_audiobook: false,
+        monitor_language: None,
         work_count: 5,
     })
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn test_series_monitor_language_change_persists_without_restamp() {
+    // AC-007 (series half): changing a monitored series' language persists and
+    // governs future adds only; None leaves the setting untouched; the upsert
+    // road (monitor action) also updates it.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let series = seed_series(&db, user_id, "Lang Series").await;
+    assert_eq!(series.monitor_language, None);
+
+    // Monitor action persists a concrete language via the upsert road.
+    let monitored = db
+        .upsert_series(CreateSeriesDbRequest {
+            user_id,
+            author_id: series.author_id,
+            name: series.name.clone(),
+            gr_key: series.gr_key.clone(),
+            monitor_ebook: true,
+            monitor_audiobook: false,
+            monitor_language: Some("de".into()),
+            work_count: 5,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        monitored.id, series.id,
+        "upsert keys on (user, author, gr_key)"
+    );
+    assert_eq!(monitored.monitor_language.as_deref(), Some("de"));
+
+    // The flag-update road changes the language when Some...
+    let updated = db
+        .update_series_flags(user_id, series.id, true, false, Some("fr".into()))
+        .await
+        .unwrap();
+    assert_eq!(updated.monitor_language.as_deref(), Some("fr"));
+
+    // ...and leaves it untouched when None (flag-only toggles never clear it).
+    let untouched = db
+        .update_series_flags(user_id, series.id, true, true, None)
+        .await
+        .unwrap();
+    assert_eq!(untouched.monitor_language.as_deref(), Some("fr"));
 }
 
 #[tokio::test]

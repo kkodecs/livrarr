@@ -537,6 +537,8 @@ pub struct UpdateAuthorDbRequest {
     pub monitored: Option<bool>,
     pub monitor_new_items: Option<bool>,
     pub monitor_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// `None` = leave unchanged; `Some(None)` = clear back to unset.
+    pub monitor_language: Option<Option<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1456,6 +1458,8 @@ pub struct CreateSeriesDbRequest {
     pub gr_key: String,
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
+    /// `None` = leave an existing row's setting untouched (and unset on insert).
+    pub monitor_language: Option<String>,
     pub work_count: i32,
 }
 
@@ -1478,12 +1482,16 @@ pub trait SeriesDb: Send + Sync {
     async fn upsert_series(&self, req: CreateSeriesDbRequest) -> Result<Series, DbError>;
 
     /// Update monitoring flags on a series and propagate to linked works.
+    /// `monitor_language`: `Some` persists a new language for monitor-created
+    /// works; `None` leaves the existing setting untouched. Never re-stamps
+    /// linked works.
     async fn update_series_flags(
         &self,
         user_id: UserId,
         id: i64,
         monitor_ebook: bool,
         monitor_audiobook: bool,
+        monitor_language: Option<String>,
     ) -> Result<Series, DbError>;
 
     /// Update work_count for a series.

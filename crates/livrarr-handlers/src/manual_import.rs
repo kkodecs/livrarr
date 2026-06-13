@@ -1031,7 +1031,7 @@ async fn find_or_create_work<
         result
     };
 
-    use livrarr_domain::identity::{LatencyTier, RawHarvest, WorkCandidate, WorkSeedFields};
+    use livrarr_domain::identity::{LatencyTier, RawHarvest};
     // #97 (MatchCluster harvest): the file itself is the richest seed. Re-read
     // its embedded metadata at import (EPUB dc:identifier ISBN, Audible ASIN,
     // dc:language) and fill the identity gaps the picked candidate didn't carry.
@@ -1069,11 +1069,9 @@ async fn find_or_create_work<
 
     // Language priority: the file's embedded dc:language (authoritative for this
     // edition), then the picked candidate's language, then English.
-    let language = file_language
-        .or_else(|| item.language.clone())
-        .as_deref()
-        .map(livrarr_domain::normalize_language)
-        .unwrap_or_else(|| "en".to_string());
+    let language = livrarr_domain::seed::SeedLanguage::resolve(
+        file_language.or_else(|| item.language.clone()).as_deref(),
+    );
 
     let resolved = state
         .work_service()
@@ -1087,7 +1085,7 @@ async fn find_or_create_work<
                 asin,
                 title: Some(item.title.clone()),
                 author_name: Some(item.author.clone()),
-                language: Some(language.clone()),
+                language: Some(language.as_str().to_string()),
                 series_name: item.series_name.clone(),
                 year: item.year,
                 user_confirmed: true,
@@ -1098,8 +1096,8 @@ async fn find_or_create_work<
         .map_err(|e| ApiError::Internal(format!("identity resolve: {e}")))?;
     let identity = resolved.identity;
     let author_ol_key = item.author_ol_key.clone().or(author_ol_key);
-    let candidate = WorkCandidate {
-        fields: WorkSeedFields {
+    let candidate = livrarr_domain::seed::seed_manual_import(
+        livrarr_domain::seed::SeedInput {
             title: item.title.clone(),
             author_name: item.author.clone(),
             language,
@@ -1112,17 +1110,8 @@ async fn find_or_create_work<
             series_position: item.series_position,
         },
         identity,
-        candidate_id: item.candidate_id.clone(),
-        source_provider_data: None,
-        file_path: None,
-        delete_existing_after_import: false,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
-        provenance_setter: None,
-        import_id: None,
-        cover_manual: false,
-    };
+        item.candidate_id.clone(),
+    );
 
     match state.work_service().add(user_id, candidate).await {
         Ok(result) => Ok(result.work.id),

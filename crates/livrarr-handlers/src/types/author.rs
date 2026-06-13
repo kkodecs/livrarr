@@ -52,6 +52,8 @@ pub struct UpdateAuthorApiRequest {
     pub monitor_new_items: Option<Option<bool>>,
     #[serde(default, deserialize_with = "super::double_option::deserialize")]
     pub gr_key: Option<Option<String>>,
+    #[serde(default, deserialize_with = "super::double_option::deserialize")]
+    pub monitor_language: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,6 +66,8 @@ pub struct AuthorResponse {
     pub gr_key: Option<String>,
     pub monitored: bool,
     pub monitor_new_items: bool,
+    /// The persisted monitor language choice (REQ-003).
+    pub monitor_language: Option<String>,
     pub added_at: String,
 }
 

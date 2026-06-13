@@ -12,6 +12,7 @@ import {
   promoteSeries,
   resolveGr,
   updateAuthor,
+  updateSeries,
 } from "@/api";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
@@ -29,6 +30,7 @@ import type {
   SeriesResponse,
   SeriesWithAuthorResponse,
 } from "@/types/api";
+import { SUPPORTED_LANGUAGES } from "@/types/api";
 
 export default function SeriesPage() {
   const queryClient = useQueryClient();
@@ -125,6 +127,13 @@ function SeriesRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [flow, setFlow] = useState<PromoteFlow>(null);
+  // Language for works this monitor creates (REQ-003) — pre-filled from the
+  // persisted choice, else the dominant language of the linked works. Held at
+  // row level so it rides every step of the promote flow (picker / author
+  // resolution retries reuse the same mutation body).
+  const [language, setLanguage] = useState(
+    s.monitorLanguage ?? s.suggestedLanguage ?? "en",
+  );
   const isMonitored = s.monitorEbook || s.monitorAudiobook;
   // A stub has no Goodreads key; its count is the FK-linked library count.
   const isStub = !s.grKey;
@@ -136,6 +145,7 @@ function SeriesRow({
         grKey: params.grKey ?? null,
         monitorEbook: params.flags.monitorEbook,
         monitorAudiobook: params.flags.monitorAudiobook,
+        language,
       }),
     onSuccess: (resp: PromoteSeriesResponse, params) => {
       if (resp.status === "monitoring") {
@@ -155,6 +165,19 @@ function SeriesRow({
     onError: () => {
       toast.error("Failed to start monitoring");
     },
+  });
+
+  // Language change on an already-monitored series (REQ-003/AC-007): persists
+  // the setting only — existing works are never re-stamped.
+  const languageMutation = useMutation({
+    mutationFn: (code: string) =>
+      updateSeries(s.id, {
+        monitorEbook: s.monitorEbook,
+        monitorAudiobook: s.monitorAudiobook,
+        language: code,
+      }),
+    onSuccess: () => onChanged(),
+    onError: () => toast.error("Failed to update series language"),
   });
 
   return (
@@ -216,12 +239,37 @@ function SeriesRow({
           {s.monitorAudiobook && (
             <span className="text-green-600">Audiobook</span>
           )}
+          {isMonitored && (
+            <select
+              value={s.monitorLanguage ?? "en"}
+              onChange={(e) => languageMutation.mutate(e.target.value)}
+              disabled={languageMutation.isPending}
+              className="h-6 rounded border border-border bg-zinc-800 px-1 text-xs text-zinc-100"
+            >
+              {SUPPORTED_LANGUAGES.map((lang) => (
+                <option key={lang.code} value={lang.code}>
+                  {lang.flag} {lang.code}
+                </option>
+              ))}
+            </select>
+          )}
           {!isMonitored &&
             (promoteMutation.isPending ? (
               <Loader2 size={14} className="animate-spin text-brand" />
             ) : (
               <div className="flex items-center gap-1.5">
                 <span className="hidden sm:inline text-zinc-500">Monitor:</span>
+                <select
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value)}
+                  className="h-6 rounded border border-border bg-zinc-800 px-1 text-xs text-zinc-100"
+                >
+                  {SUPPORTED_LANGUAGES.map((lang) => (
+                    <option key={lang.code} value={lang.code}>
+                      {lang.flag} {lang.code}
+                    </option>
+                  ))}
+                </select>
                 {(
                   [
                     ["Ebook", { monitorEbook: true, monitorAudiobook: false }],
@@ -583,6 +631,9 @@ function AuthorSeriesExpander({
 }) {
   const queryClient = useQueryClient();
   const [monitoringKey, setMonitoringKey] = useState<string | null>(null);
+  // Language for works these monitors create (REQ-003) — one choice per
+  // author block, defaulted to the author's persisted monitor language.
+  const [language, setLanguage] = useState(author.monitorLanguage ?? "en");
 
   const { data, isLoading } = useQuery({
     queryKey: ["series", author.id],
@@ -598,7 +649,7 @@ function AuthorSeriesExpander({
       monitorAudiobook: boolean;
     }) => {
       setMonitoringKey(params.grKey);
-      return monitorSeries(author.id, params);
+      return monitorSeries(author.id, { ...params, language });
     },
     onSuccess: () => {
       setMonitoringKey(null);
@@ -636,6 +687,22 @@ function AuthorSeriesExpander({
             <p className="px-3 py-2 text-xs text-zinc-500">
               All series already monitored.
             </p>
+          )}
+          {!isLoading && unmonitoredSeries.length > 0 && (
+            <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-500">
+              <span>Language for monitored adds:</span>
+              <select
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+                className="h-6 rounded border border-border bg-zinc-800 px-1 text-xs text-zinc-100"
+              >
+                {SUPPORTED_LANGUAGES.map((lang) => (
+                  <option key={lang.code} value={lang.code}>
+                    {lang.flag} {lang.code}
+                  </option>
+                ))}
+              </select>
+            </div>
           )}
           {unmonitoredSeries.map((s) => (
             <div

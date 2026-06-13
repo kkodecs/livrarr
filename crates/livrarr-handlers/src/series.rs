@@ -39,6 +39,8 @@ pub async fn list_all<S: HasSeriesQueryService>(
                 book_count: if is_stub { 0 } else { v.book_count },
                 monitor_ebook: v.monitor_ebook,
                 monitor_audiobook: v.monitor_audiobook,
+                monitor_language: v.monitor_language,
+                suggested_language: v.suggested_language,
                 works_in_library: v.works_in_library,
                 author_id: v.author_id,
                 author_name: v.author_name,
@@ -133,6 +135,7 @@ pub async fn resolve_gr<S: HasSeriesQueryService + HasAuthorService>(
                             gr_key: Some(Some(first.gr_key.clone())),
                             monitored: None,
                             monitor_new_items: None,
+                            monitor_language: None,
                         },
                     )
                     .await?;
@@ -243,6 +246,7 @@ pub async fn monitor_series<S: HasSeriesQueryService>(
                 gr_key: req.gr_key.clone(),
                 monitor_ebook: req.monitor_ebook,
                 monitor_audiobook: req.monitor_audiobook,
+                language: req.language.clone(),
             },
         )
         .await?;
@@ -366,6 +370,7 @@ pub async fn promote_series<S: HasSeriesQueryService>(
                 gr_key: gr_key.clone(),
                 monitor_ebook: req.monitor_ebook,
                 monitor_audiobook: req.monitor_audiobook,
+                language: req.language.clone(),
             },
         )
         .await?;
@@ -487,7 +492,13 @@ pub async fn update_series<S: HasSeriesQueryService>(
 ) -> Result<Json<SeriesResponse>, ApiError> {
     let view = state
         .series_query_service()
-        .update_flags(ctx.user.id, id, req.monitor_ebook, req.monitor_audiobook)
+        .update_flags(
+            ctx.user.id,
+            id,
+            req.monitor_ebook,
+            req.monitor_audiobook,
+            req.language.clone(),
+        )
         .await?;
 
     let masked_gr_key = if livrarr_domain::is_series_stub_key(&view.gr_key) {

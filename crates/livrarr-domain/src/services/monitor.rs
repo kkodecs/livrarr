@@ -8,6 +8,9 @@ pub struct MonitorReport {
     pub new_works_found: usize,
     pub works_added: usize,
     pub notifications_created: usize,
+    /// Bibliography entries rejected by the REQ-004 quality screen — never
+    /// added, never notified, debug-logged with the matched class.
+    pub entries_screened: usize,
 }
 
 #[derive(Debug, thiserror::Error)]

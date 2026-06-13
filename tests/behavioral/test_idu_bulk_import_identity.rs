@@ -119,7 +119,7 @@ async fn confirm_first_row(svc: &TestListService, user_id: UserId, csv: Vec<u8>)
         .await
         .expect("preview Goodreads CSV");
     let result = svc
-        .confirm(user_id, &preview.preview_id, None, &[0])
+        .confirm(user_id, &preview.preview_id, None, &[0], None)
         .await
         .expect("confirm selected row");
 

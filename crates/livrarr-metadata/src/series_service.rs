@@ -48,7 +48,7 @@ where
         let series = self.get(user_id, series_id).await?;
 
         self.db
-            .update_series_flags(user_id, series.id, monitored, monitored)
+            .update_series_flags(user_id, series.id, monitored, monitored, None)
             .await
             .map_err(SeriesServiceError::Db)
     }

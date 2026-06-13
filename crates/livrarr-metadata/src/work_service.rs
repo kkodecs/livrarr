@@ -12,20 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-fn iso639_1_to_3(code: &str) -> &str {
-    match code {
-        "nl" => "dut",
-        "fr" => "fre",
-        "de" => "ger",
-        "it" => "ita",
-        "ja" => "jpn",
-        "ko" => "kor",
-        "pl" => "pol",
-        "es" => "spa",
-        "en" => "eng",
-        other => other,
-    }
-}
+use livrarr_domain::seed::{iso639_1_to_3, lookup_term_to_seed, seed_carries_identifier};
 
 pub struct StubNoLlm;
 
@@ -250,43 +237,6 @@ fn conflict_source_for(setter: ProvenanceSetter) -> livrarr_domain::identity::Co
         ProvenanceSetter::AutoAdded => ConflictSource::AuthorMonitor,
         ProvenanceSetter::Provider | ProvenanceSetter::System => ConflictSource::ManualAdd,
     }
-}
-
-/// Parse a `lookup_filtered` search term into a discovery WorkSeed. An `isbn:`
-/// prefix with a valid ISBN seeds the bridge; anything else seeds the title.
-fn lookup_term_to_seed(term: &str, lang: &str) -> livrarr_domain::identity::WorkSeed {
-    let isbn_13 = term
-        .strip_prefix("isbn:")
-        .and_then(|rest| livrarr_domain::normalization::normalize_isbn13(rest.trim()));
-    let title = if isbn_13.is_some() {
-        None
-    } else {
-        Some(term.to_string())
-    };
-    livrarr_domain::identity::WorkSeed {
-        ol_key: None,
-        gr_key: None,
-        hc_key: None,
-        isbn_13,
-        asin: None,
-        title,
-        author_name: None,
-        language: Some(lang.to_string()),
-        series_name: None,
-        year: None,
-        user_confirmed: false,
-    }
-}
-
-/// True when a search term resolved to a hard identifier (e.g. an `isbn:`
-/// lookup) — the signal the identity resolver needs. A bare-title term carries
-/// none and is served as a free-text discovery search by the legacy chain.
-fn seed_carries_identifier(seed: &livrarr_domain::identity::WorkSeed) -> bool {
-    seed.isbn_13.is_some()
-        || seed.asin.is_some()
-        || seed.ol_key.is_some()
-        || seed.gr_key.is_some()
-        || seed.hc_key.is_some()
 }
 
 /// Take one provider's discovery result (relevance-ordered), logging a failure or

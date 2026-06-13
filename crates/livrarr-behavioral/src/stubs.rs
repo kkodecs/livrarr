@@ -328,6 +328,7 @@ impl SeriesQueryService for StubSeriesQueryService {
         _series_id: i64,
         _monitor_ebook: bool,
         _monitor_audiobook: bool,
+        _language: Option<String>,
     ) -> Result<UpdateSeriesView, SeriesServiceError> {
         Err(SeriesServiceError::NotFound)
     }

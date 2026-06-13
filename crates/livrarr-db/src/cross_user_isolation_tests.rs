@@ -14,9 +14,231 @@ mod tests {
         CreateDownloadClientDbRequest, CreateGrabDbRequest, CreateImportDbRequest,
         CreateLibraryItemDbRequest, CreateSeriesDbRequest, CreateUserDbRequest,
         CreateWorkDbRequest, DbError, DownloadClientDb, DownloadClientImplementation, GrabDb,
-        GrabStatus, ImportDb, LibraryItemDb, MediaType, RootFolderDb, SeriesDb, TagStatus, UserDb,
-        UserId, UserRole, WorkDb, WorkId,
+        GrabStatus, ImportDb, LibraryItemDb, MediaType, RootFolderDb, SeriesDb, TagStatus,
+        UpdateAuthorDbRequest, UserDb, UserId, UserRole, WorkDb, WorkId,
     };
+
+    // -------------------------------------------------------------------------
+    // Monitor-enable language guarantee (sprint-d REQ-002/REQ-003, code-r3 fix):
+    // a monitored author/series never carries a NULL language, no matter which
+    // surface flips the toggle — the DB write chokepoint fills the smart default.
+    // -------------------------------------------------------------------------
+
+    async fn mk_user(db: &impl UserDb, name: &str) -> UserId {
+        db.create_user(CreateUserDbRequest {
+            username: name.to_string(),
+            password_hash: "h".to_string(),
+            role: UserRole::User,
+            api_key_hash: format!("k_{name}"),
+        })
+        .await
+        .expect("create user")
+        .id
+    }
+
+    async fn mk_work_with_lang(
+        db: &(impl WorkDb + crate::WorkDbCreate),
+        user_id: UserId,
+        author_id: AuthorId,
+        series_id: Option<i64>,
+        title: &str,
+        lang: &str,
+    ) {
+        db.create_work(CreateWorkDbRequest {
+            user_id,
+            title: title.to_string(),
+            author_name: "A".to_string(),
+            normalized_title: title.to_lowercase(),
+            normalized_author: "a".to_string(),
+            author_id: Some(author_id),
+            ol_key: None,
+            gr_key: None,
+            year: None,
+            cover_url: None,
+            language: Some(lang.to_string()),
+            import_id: None,
+            series_id,
+            series_name: None,
+            series_position: None,
+            monitor_ebook: false,
+            monitor_audiobook: false,
+            source_provider_json: None,
+            isbn_13: None,
+            asin: None,
+            description: None,
+            cover_manual: false,
+        })
+        .await
+        .expect("create work");
+    }
+
+    #[tokio::test]
+    async fn monitor_enable_fills_dominant_language_when_none_chosen() {
+        let db = create_test_db().await;
+        let user = mk_user(&db, "u").await;
+        let author = db
+            .create_author(CreateAuthorDbRequest {
+                user_id: user,
+                name: "Fr Author".to_string(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .expect("author");
+        mk_work_with_lang(&db, user, author.id, None, "Un", "fr").await;
+        mk_work_with_lang(&db, user, author.id, None, "Deux", "fr").await;
+
+        // Bare enable — the AuthorsPage list-toggle shape: monitored=true, no language.
+        let updated = db
+            .update_author(
+                user,
+                author.id,
+                UpdateAuthorDbRequest {
+                    name: None,
+                    sort_name: None,
+                    ol_key: None,
+                    gr_key: None,
+                    monitored: Some(true),
+                    monitor_new_items: None,
+                    monitor_since: None,
+                    monitor_language: None,
+                },
+            )
+            .await
+            .expect("enable monitor");
+        assert_eq!(
+            updated.monitor_language.as_deref(),
+            Some("fr"),
+            "a bare monitor-enable fills the dominant library language"
+        );
+
+        // Series side: German works, bare flag-enable (SeriesDetailPage toggle shape).
+        let series = db
+            .upsert_series(CreateSeriesDbRequest {
+                user_id: user,
+                author_id: author.id,
+                name: "De Series".to_string(),
+                gr_key: "770".to_string(),
+                monitor_ebook: false,
+                monitor_audiobook: false,
+                monitor_language: None,
+                work_count: 2,
+            })
+            .await
+            .expect("series");
+        assert_eq!(series.monitor_language, None, "unmonitored stays NULL");
+        mk_work_with_lang(&db, user, author.id, Some(series.id), "S1", "de").await;
+        mk_work_with_lang(&db, user, author.id, Some(series.id), "S2", "de").await;
+        let s = db
+            .update_series_flags(user, series.id, true, false, None)
+            .await
+            .expect("enable series");
+        assert_eq!(s.monitor_language.as_deref(), Some("de"));
+    }
+
+    #[tokio::test]
+    async fn monitor_enable_falls_back_to_en_and_explicit_choice_wins() {
+        let db = create_test_db().await;
+        let user = mk_user(&db, "u").await;
+        // No works → tie/empty → "en".
+        let empty = db
+            .create_author(CreateAuthorDbRequest {
+                user_id: user,
+                name: "Empty".to_string(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .expect("author");
+        let en = db
+            .update_author(
+                user,
+                empty.id,
+                UpdateAuthorDbRequest {
+                    name: None,
+                    sort_name: None,
+                    ol_key: None,
+                    gr_key: None,
+                    monitored: Some(true),
+                    monitor_new_items: None,
+                    monitor_since: None,
+                    monitor_language: None,
+                },
+            )
+            .await
+            .expect("enable");
+        assert_eq!(en.monitor_language.as_deref(), Some("en"));
+
+        // An explicit choice always wins over the smart default.
+        let explicit = db
+            .create_author(CreateAuthorDbRequest {
+                user_id: user,
+                name: "Explicit".to_string(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .expect("author");
+        mk_work_with_lang(&db, user, explicit.id, None, "X", "fr").await;
+        let chose = db
+            .update_author(
+                user,
+                explicit.id,
+                UpdateAuthorDbRequest {
+                    name: None,
+                    sort_name: None,
+                    ol_key: None,
+                    gr_key: None,
+                    monitored: Some(true),
+                    monitor_new_items: None,
+                    monitor_since: None,
+                    monitor_language: Some(Some("ja".to_string())),
+                },
+            )
+            .await
+            .expect("enable");
+        assert_eq!(
+            chose.monitor_language.as_deref(),
+            Some("ja"),
+            "explicit choice wins over the dominant-language default"
+        );
+
+        // Airtight invariant (PO 2026-06-13): an EXPLICIT clear (Some(None)) on a
+        // monitored author re-fills the smart default — "monitored ⇒ never NULL"
+        // holds even against a deliberate clear, not just an unset field.
+        let cleared = db
+            .update_author(
+                user,
+                explicit.id,
+                UpdateAuthorDbRequest {
+                    name: None,
+                    sort_name: None,
+                    ol_key: None,
+                    gr_key: None,
+                    monitored: Some(true),
+                    monitor_new_items: None,
+                    monitor_since: None,
+                    monitor_language: Some(None),
+                },
+            )
+            .await
+            .expect("clear");
+        assert_eq!(
+            cleared.monitor_language.as_deref(),
+            Some("fr"),
+            "clear-while-monitored re-fills the dominant language (no NULL hole)"
+        );
+        assert!(cleared.monitored);
+    }
 
     // -------------------------------------------------------------------------
     // Seed helper
@@ -394,6 +616,7 @@ mod tests {
                 gr_key: "gr-series-a".to_string(),
                 monitor_ebook: false,
                 monitor_audiobook: false,
+                monitor_language: None,
                 work_count: 3,
             })
             .await
@@ -407,6 +630,7 @@ mod tests {
                 gr_key: "gr-series-b".to_string(),
                 monitor_ebook: false,
                 monitor_audiobook: false,
+                monitor_language: None,
                 work_count: 5,
             })
             .await

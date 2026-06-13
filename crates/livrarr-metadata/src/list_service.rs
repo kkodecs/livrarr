@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use livrarr_db::ListImportDb;
 use livrarr_domain::services::*;
-use livrarr_domain::{ProvenanceSetter, UserId};
+use livrarr_domain::UserId;
 
 use livrarr_external_data::parsers::{self, CsvSource, ParseError};
 
@@ -55,10 +55,10 @@ where
         &self,
         user_id: UserId,
         row: &livrarr_db::ListImportPreviewRow,
+        language: Option<&str>,
     ) -> livrarr_domain::identity::WorkCandidate {
         use livrarr_domain::identity::{
-            CapturedIdentity, IdentityState, LatencyTier, PendingReason, RawHarvest, WorkCandidate,
-            WorkSeedFields,
+            CapturedIdentity, IdentityState, LatencyTier, PendingReason, RawHarvest,
         };
         use livrarr_domain::normalization::{normalize_gr_key, normalize_isbn13};
 
@@ -118,11 +118,11 @@ where
             }
         };
 
-        WorkCandidate {
-            fields: WorkSeedFields {
+        livrarr_domain::seed::seed_list_import(
+            livrarr_domain::seed::SeedInput {
                 title: row.title.clone(),
                 author_name: row.author.clone(),
-                language: "en".into(),
+                language: livrarr_domain::seed::SeedLanguage::resolve(language),
                 author_ol_key: None,
                 year: row.year,
                 cover_url: None,
@@ -133,16 +133,7 @@ where
             },
             identity,
             candidate_id,
-            source_provider_data: None,
-            file_path: None,
-            delete_existing_after_import: false,
-            series_id: None,
-            monitor_ebook: None,
-            monitor_audiobook: None,
-            provenance_setter: Some(ProvenanceSetter::Imported),
-            import_id: None,
-            cover_manual: false,
-        }
+        )
     }
 }
 
@@ -291,6 +282,7 @@ where
         preview_id: &str,
         import_id: Option<&str>,
         row_indices: &[usize],
+        language: Option<&str>,
     ) -> Result<ListConfirmResponse, ListServiceError> {
         // Validate preview exists for this user.
         let preview_count = self
@@ -394,7 +386,9 @@ where
                 // resolver (same path as the interactive Add-Work door), then add.
                 // A resolvable row lands Confirmed; a miss lands Pending without
                 // blocking the import.
-                let add_req = self.resolve_candidate_from_row(user_id, &row).await;
+                let add_req = self
+                    .resolve_candidate_from_row(user_id, &row, language)
+                    .await;
 
                 match self.work_service.add(user_id, add_req).await {
                     Ok(add_result) if !add_result.created => RowOutcome {

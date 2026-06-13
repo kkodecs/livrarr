@@ -294,6 +294,7 @@ async fn seed_monitored_author(
             monitored: Some(true),
             monitor_new_items: Some(monitor_new_items),
             monitor_since,
+            monitor_language: None,
         },
     )
     .await

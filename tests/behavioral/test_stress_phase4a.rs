@@ -279,13 +279,19 @@ async fn test_list_confirm_on_completed_import_returns_conflict() {
     let svc = make_list_service().await;
     let preview = svc.preview(1, single_row_csv_bytes()).await.unwrap();
     let confirmed = svc
-        .confirm(1, &preview.preview_id, None, &[0])
+        .confirm(1, &preview.preview_id, None, &[0], None)
         .await
         .unwrap();
     svc.complete(1, &confirmed.import_id).await.unwrap();
 
     let result = svc
-        .confirm(1, &preview.preview_id, Some(&confirmed.import_id), &[0])
+        .confirm(
+            1,
+            &preview.preview_id,
+            Some(&confirmed.import_id),
+            &[0],
+            None,
+        )
         .await;
 
     assert!(matches!(result, Err(ListServiceError::Conflict(_))));

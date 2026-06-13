@@ -38,6 +38,9 @@ fn row_to_author(row: sqlx::sqlite::SqliteRow) -> Result<Author, DbError> {
         import_id: row
             .try_get("import_id")
             .map_err(|e| DbError::Io(Box::new(e)))?,
+        monitor_language: row
+            .try_get("monitor_language")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         monitored: row
             .try_get::<bool, _>("monitored")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -47,6 +50,29 @@ fn row_to_author(row: sqlx::sqlite::SqliteRow) -> Result<Author, DbError> {
         monitor_since: monitor_since_str.map(|s| parse_dt(&s)).transpose()?,
         added_at: parse_dt(&added_at_str)?,
     })
+}
+
+impl SqliteDb {
+    /// The language to stamp on a newly-monitored author with no prior choice:
+    /// the dominant language among the author's library works, else "en"
+    /// (REQ-003 Q-001, shared rule via `livrarr_domain::seed::dominant_language`).
+    async fn monitored_default_language_for_author(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<String, DbError> {
+        let langs: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT language FROM works WHERE user_id = ? AND author_id = ?")
+                .bind(user_id)
+                .bind(author_id)
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_db_err)?;
+        Ok(
+            livrarr_domain::seed::dominant_language(langs.iter().map(|l| l.as_deref()))
+                .unwrap_or_else(|| livrarr_domain::seed::DEFAULT_SEED_LANGUAGE.to_string()),
+        )
+    }
 }
 
 impl AuthorDb for SqliteDb {
@@ -124,10 +150,29 @@ impl AuthorDb for SqliteDb {
         let monitored = req.monitored.unwrap_or(current.monitored);
         let monitor_new_items = req.monitor_new_items.unwrap_or(current.monitor_new_items);
         let monitor_since = req.monitor_since.or(current.monitor_since);
+        // Resolve the chosen value first: an explicit set or explicit clear
+        // (Some(_)) wins; an absent field (None) preserves the current value.
+        let chosen = match req.monitor_language {
+            Some(v) => v,
+            None => current.monitor_language,
+        };
+        // Enable guard (REQ-002/REQ-003): "monitored ⇒ never NULL" is absolute.
+        // Whenever the author ends up monitored with no language — unset OR
+        // explicitly cleared — the smart default (dominant library language,
+        // else "en") is persisted. This is the one place the invariant holds,
+        // independent of which UI surface flipped the toggle.
+        let monitor_language = if monitored && chosen.is_none() {
+            Some(
+                self.monitored_default_language_for_author(user_id, id)
+                    .await?,
+            )
+        } else {
+            chosen
+        };
 
         sqlx::query(
             "UPDATE authors SET name = ?, sort_name = ?, ol_key = ?, gr_key = ?, \
-             monitored = ?, monitor_new_items = ?, monitor_since = ? \
+             monitored = ?, monitor_new_items = ?, monitor_since = ?, monitor_language = ? \
              WHERE id = ? AND user_id = ?",
         )
         .bind(&name)
@@ -137,6 +182,7 @@ impl AuthorDb for SqliteDb {
         .bind(monitored)
         .bind(monitor_new_items)
         .bind(monitor_since.map(|dt| dt.to_rfc3339()))
+        .bind(&monitor_language)
         .bind(id)
         .bind(user_id)
         .execute(self.pool())

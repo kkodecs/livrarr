@@ -174,13 +174,10 @@ pub async fn add<
     Json(req): Json<AddWorkRequest>,
 ) -> Result<Json<AddWorkResponse>, ApiError> {
     let author_name_for_gr = req.author_name.clone();
-    use livrarr_domain::identity::{LatencyTier, RawHarvest, WorkCandidate, WorkSeedFields};
+    use livrarr_domain::identity::{LatencyTier, RawHarvest};
+    use livrarr_domain::seed::{seed_add_box, SeedInput, SeedLanguage};
 
-    let language = req
-        .language
-        .as_deref()
-        .map(livrarr_domain::normalize_language)
-        .unwrap_or_else(|| "en".to_string());
+    let language = SeedLanguage::resolve(req.language.as_deref());
 
     // The UI hands back the picked cover in its proxied display form
     // (`/api/v1/coverproxy?url=<encoded>`); persist the real provider URL so it
@@ -208,7 +205,7 @@ pub async fn add<
                 asin: req.asin.clone(),
                 title: Some(req.title.clone()),
                 author_name: Some(req.author_name.clone()),
-                language: Some(language.clone()),
+                language: Some(language.as_str().to_string()),
                 series_name: None,
                 year: req.year,
                 user_confirmed: true,
@@ -231,8 +228,11 @@ pub async fn add<
     }
     let identity = resolved.identity;
 
-    let candidate = WorkCandidate {
-        fields: WorkSeedFields {
+    // Funnel through the one road: enrichment + cover/tag materialization run
+    // synchronously via the pipeline, reusing the candidate's cached discovery
+    // payloads (zero-network when the search cache is still warm).
+    let candidate = seed_add_box(
+        SeedInput {
             title: req.title,
             author_name: req.author_name,
             language,
@@ -245,20 +245,9 @@ pub async fn add<
             series_position: None,
         },
         identity,
-        candidate_id: req.candidate_id,
-        source_provider_data: None,
-        file_path: None,
-        delete_existing_after_import: false,
-        series_id: None,
-        monitor_ebook: None,
-        monitor_audiobook: None,
-        provenance_setter: None,
-        import_id: None,
-        cover_manual: cover_is_manual,
-        // Funnel through the one road: enrichment + cover/tag materialization run
-        // synchronously via the pipeline, reusing the candidate's cached discovery
-        // payloads (zero-network when the search cache is still warm).
-    };
+        req.candidate_id,
+        cover_is_manual,
+    );
 
     let result = state.work_service().add(ctx.user.id, candidate).await?;
 
@@ -310,6 +299,7 @@ pub async fn add<
                                             gr_key: Some(Some(first.gr_key.clone())),
                                             monitored: None,
                                             monitor_new_items: None,
+                                            monitor_language: None,
                                         },
                                     )
                                     .await;

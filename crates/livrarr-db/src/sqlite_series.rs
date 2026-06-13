@@ -25,6 +25,9 @@ fn row_to_series(row: sqlx::sqlite::SqliteRow) -> Result<Series, DbError> {
         gr_key: row
             .try_get("gr_key")
             .map_err(|e| DbError::Io(Box::new(e)))?,
+        monitor_language: row
+            .try_get("monitor_language")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         monitor_ebook: row
             .try_get::<bool, _>("monitor_ebook")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -36,6 +39,57 @@ fn row_to_series(row: sqlx::sqlite::SqliteRow) -> Result<Series, DbError> {
             .map_err(|e| DbError::Io(Box::new(e)))?,
         added_at: crate::sqlite_common::parse_dt(&added_at_str)?,
     })
+}
+
+impl SqliteDb {
+    /// The language to stamp on a newly-monitored series with no prior choice:
+    /// the dominant language among the series' linked works, else "en"
+    /// (REQ-003 Q-001, shared rule via `livrarr_domain::seed::dominant_language`).
+    async fn monitored_default_language_for_series(
+        &self,
+        user_id: UserId,
+        series_id: i64,
+    ) -> Result<String, DbError> {
+        let langs: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT language FROM works WHERE user_id = ? AND series_id = ?")
+                .bind(user_id)
+                .bind(series_id)
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_db_err)?;
+        Ok(
+            livrarr_domain::seed::dominant_language(langs.iter().map(|l| l.as_deref()))
+                .unwrap_or_else(|| livrarr_domain::seed::DEFAULT_SEED_LANGUAGE.to_string()),
+        )
+    }
+
+    /// Enable guard (REQ-002/REQ-003): a monitored series must never carry a NULL
+    /// language. Every monitor-enabling write (`upsert_series` monitor/promote,
+    /// `update_series_flags` toggle) calls this after persisting, so the smart
+    /// default is guaranteed regardless of which UI surface flipped the toggle.
+    /// No-op when the series isn't monitored or already has a language.
+    async fn ensure_monitored_series_language(
+        &self,
+        user_id: UserId,
+        series_id: i64,
+    ) -> Result<(), DbError> {
+        let Some(s) = self.get_series(user_id, series_id).await? else {
+            return Ok(());
+        };
+        if (s.monitor_ebook || s.monitor_audiobook) && s.monitor_language.is_none() {
+            let default = self
+                .monitored_default_language_for_series(user_id, series_id)
+                .await?;
+            sqlx::query("UPDATE series SET monitor_language = ? WHERE id = ? AND user_id = ?")
+                .bind(&default)
+                .bind(series_id)
+                .bind(user_id)
+                .execute(self.pool())
+                .await
+                .map_err(map_db_err)?;
+        }
+        Ok(())
+    }
 }
 
 impl SeriesDb for SqliteDb {
@@ -76,11 +130,12 @@ impl SeriesDb for SqliteDb {
     async fn upsert_series(&self, req: CreateSeriesDbRequest) -> Result<Series, DbError> {
         let now = Utc::now().to_rfc3339();
         let id = sqlx::query(
-            "INSERT INTO series (user_id, author_id, name, gr_key, monitor_ebook, monitor_audiobook, work_count, added_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO series (user_id, author_id, name, gr_key, monitor_ebook, monitor_audiobook, monitor_language, work_count, added_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(user_id, author_id, gr_key) DO UPDATE SET \
              monitor_ebook = excluded.monitor_ebook, \
              monitor_audiobook = excluded.monitor_audiobook, \
+             monitor_language = COALESCE(excluded.monitor_language, series.monitor_language), \
              name = excluded.name, \
              work_count = excluded.work_count \
              RETURNING id",
@@ -91,6 +146,7 @@ impl SeriesDb for SqliteDb {
         .bind(&req.gr_key)
         .bind(req.monitor_ebook)
         .bind(req.monitor_audiobook)
+        .bind(&req.monitor_language)
         .bind(req.work_count)
         .bind(&now)
         .fetch_one(self.pool())
@@ -99,6 +155,8 @@ impl SeriesDb for SqliteDb {
         .try_get::<i64, _>("id")
         .map_err(|e| DbError::Io(Box::new(e)))?;
 
+        self.ensure_monitored_series_language(req.user_id, id)
+            .await?;
         self.get_series(req.user_id, id)
             .await?
             .ok_or(DbError::NotFound { entity: "series" })
@@ -110,12 +168,16 @@ impl SeriesDb for SqliteDb {
         id: i64,
         monitor_ebook: bool,
         monitor_audiobook: bool,
+        monitor_language: Option<String>,
     ) -> Result<Series, DbError> {
         sqlx::query(
-            "UPDATE series SET monitor_ebook = ?, monitor_audiobook = ? WHERE id = ? AND user_id = ?",
+            "UPDATE series SET monitor_ebook = ?, monitor_audiobook = ?, \
+             monitor_language = COALESCE(?, monitor_language) \
+             WHERE id = ? AND user_id = ?",
         )
         .bind(monitor_ebook)
         .bind(monitor_audiobook)
+        .bind(&monitor_language)
         .bind(id)
         .bind(user_id)
         .execute(self.pool())
@@ -134,6 +196,7 @@ impl SeriesDb for SqliteDb {
         .await
         .map_err(map_db_err)?;
 
+        self.ensure_monitored_series_language(user_id, id).await?;
         self.get_series(user_id, id)
             .await?
             .ok_or(DbError::NotFound { entity: "series" })

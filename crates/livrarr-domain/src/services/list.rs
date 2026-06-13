@@ -130,6 +130,7 @@ pub trait ListService: Send + Sync {
         preview_id: &str,
         import_id: Option<&str>,
         row_indices: &[usize],
+        language: Option<&str>,
     ) -> Result<ListConfirmResponse, ListServiceError>;
 
     async fn complete(&self, user_id: UserId, import_id: &str) -> Result<(), ListServiceError>;

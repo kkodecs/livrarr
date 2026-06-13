@@ -22,6 +22,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
         new_works_found: 0,
         works_added: 0,
         notifications_created: 0,
+        entries_screened: 0,
     };
 
     for user in &users {
@@ -38,6 +39,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
                 total_report.new_works_found += report.new_works_found;
                 total_report.works_added += report.works_added;
                 total_report.notifications_created += report.notifications_created;
+                total_report.entries_screened += report.entries_screened;
             }
             Err(MonitorError::AlreadyRunning) => return Ok(()),
             Err(e) => {
@@ -53,6 +55,7 @@ pub async fn author_monitor_tick(state: AppState, cancel: CancellationToken) -> 
         new_works = total_report.new_works_found,
         added = total_report.works_added,
         notifications = total_report.notifications_created,
+        screened = total_report.entries_screened,
         "author monitor complete"
     );
 

@@ -285,6 +285,7 @@ async fn test_author_update_name_changes() {
                 gr_key: None,
                 monitor_new_items: None,
                 monitored: None,
+                monitor_language: None,
             },
         )
         .await
@@ -329,6 +330,7 @@ async fn test_author_update_none_name_unchanged() {
                 gr_key: None,
                 monitor_new_items: None,
                 monitored: Some(true),
+                monitor_language: None,
             },
         )
         .await
@@ -362,6 +364,7 @@ async fn test_author_update_nonexistent_returns_not_found() {
                 gr_key: None,
                 monitor_new_items: None,
                 monitored: None,
+                monitor_language: None,
             },
         )
         .await;

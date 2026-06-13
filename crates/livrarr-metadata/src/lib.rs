@@ -17,7 +17,6 @@ pub mod cover_alternatives;
 pub mod enrichment_workflow_service;
 pub mod http_llm;
 pub mod list_service;
-pub mod llm_scraper;
 pub mod preadd_cover_service;
 pub mod series_link;
 pub mod series_query_service;
@@ -50,43 +49,8 @@ pub use livrarr_enrichment::{
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 
 // =============================================================================
-// Metadata Provider Trait
+// Provider result types
 // =============================================================================
-
-#[trait_variant::make(Send)]
-pub trait MetadataProvider: Send + Sync {
-    fn name(&self) -> &str;
-    async fn search_works(&self, query: &str) -> Result<Vec<ProviderSearchResult>, MetadataError>;
-    async fn search_authors(&self, query: &str)
-        -> Result<Vec<ProviderAuthorResult>, MetadataError>;
-    async fn fetch_work_detail(
-        &self,
-        provider_key: &str,
-    ) -> Result<ProviderWorkDetail, MetadataError>;
-}
-
-#[derive(Debug, Clone)]
-pub struct ProviderSearchResult {
-    pub provider_key: String,
-    pub title: String,
-    pub author_name: Option<String>,
-    pub year: Option<i32>,
-    pub cover_url: Option<String>,
-    pub isbn: Option<String>,
-    pub publisher: Option<String>,
-    pub source: String,
-    pub source_type: String,
-    pub language: String,
-    /// Detail page URL for enrichment (e.g., Goodreads book page). Server-side only.
-    pub detail_url: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProviderAuthorResult {
-    pub provider_key: String,
-    pub name: String,
-    pub work_count: Option<i32>,
-}
 
 #[derive(Debug, Clone)]
 pub struct ProviderWorkDetail {
@@ -251,129 +215,6 @@ pub struct AuthorSearchResult {
     pub ol_key: String,
     pub name: String,
     pub work_count: Option<i32>,
-}
-
-// =============================================================================
-// OpenLibraryProvider — configurable test double
-// =============================================================================
-
-#[cfg(test)]
-enum OlProviderMode {
-    Works(Vec<ProviderSearchResult>),
-    Authors(Vec<ProviderAuthorResult>),
-    Detail(Box<ProviderWorkDetail>),
-    Error(MetadataErrorKind),
-}
-
-// MetadataError isn't Clone, so store a reconstructible kind
-#[cfg(test)]
-enum MetadataErrorKind {
-    NotConfigured,
-    Timeout(Duration),
-    RateLimited,
-    AuthFailed,
-    RequestFailed(String),
-    InvalidResponse(String),
-    NoMatch,
-    UnsupportedOperation,
-    AntiBotChallenge,
-}
-
-#[cfg(test)]
-impl MetadataErrorKind {
-    fn to_error(&self) -> MetadataError {
-        match self {
-            Self::NotConfigured => MetadataError::NotConfigured,
-            Self::Timeout(d) => MetadataError::Timeout(*d),
-            Self::RateLimited => MetadataError::RateLimited,
-            Self::AuthFailed => MetadataError::AuthFailed,
-            Self::RequestFailed(s) => MetadataError::RequestFailed(s.clone()),
-            Self::InvalidResponse(s) => MetadataError::InvalidResponse(s.clone()),
-            Self::NoMatch => MetadataError::NoMatch,
-            Self::UnsupportedOperation => MetadataError::UnsupportedOperation,
-            Self::AntiBotChallenge => MetadataError::AntiBotChallenge,
-        }
-    }
-}
-
-#[cfg(test)]
-pub struct OpenLibraryProvider {
-    mode: OlProviderMode,
-}
-
-#[cfg(test)]
-impl OpenLibraryProvider {
-    pub fn new_test(results: Vec<ProviderSearchResult>) -> Self {
-        Self {
-            mode: OlProviderMode::Works(results),
-        }
-    }
-
-    pub fn new_test_authors(results: Vec<ProviderAuthorResult>) -> Self {
-        Self {
-            mode: OlProviderMode::Authors(results),
-        }
-    }
-
-    pub fn new_test_detail(detail: ProviderWorkDetail) -> Self {
-        Self {
-            mode: OlProviderMode::Detail(Box::new(detail)),
-        }
-    }
-
-    pub fn new_test_err(err: MetadataError) -> Self {
-        let kind = match err {
-            MetadataError::NotConfigured => MetadataErrorKind::NotConfigured,
-            MetadataError::Timeout(d) => MetadataErrorKind::Timeout(d),
-            MetadataError::RateLimited => MetadataErrorKind::RateLimited,
-            MetadataError::AuthFailed => MetadataErrorKind::AuthFailed,
-            MetadataError::RequestFailed(s) => MetadataErrorKind::RequestFailed(s),
-            MetadataError::InvalidResponse(s) => MetadataErrorKind::InvalidResponse(s),
-            MetadataError::NoMatch => MetadataErrorKind::NoMatch,
-            MetadataError::UnsupportedOperation => MetadataErrorKind::UnsupportedOperation,
-            MetadataError::AntiBotChallenge => MetadataErrorKind::AntiBotChallenge,
-        };
-        Self {
-            mode: OlProviderMode::Error(kind),
-        }
-    }
-}
-
-#[cfg(test)]
-impl MetadataProvider for OpenLibraryProvider {
-    fn name(&self) -> &str {
-        "openlibrary"
-    }
-
-    async fn search_works(&self, _query: &str) -> Result<Vec<ProviderSearchResult>, MetadataError> {
-        match &self.mode {
-            OlProviderMode::Works(r) => Ok(r.clone()),
-            OlProviderMode::Error(k) => Err(k.to_error()),
-            _ => Ok(vec![]),
-        }
-    }
-
-    async fn search_authors(
-        &self,
-        _query: &str,
-    ) -> Result<Vec<ProviderAuthorResult>, MetadataError> {
-        match &self.mode {
-            OlProviderMode::Authors(r) => Ok(r.clone()),
-            OlProviderMode::Error(k) => Err(k.to_error()),
-            _ => Ok(vec![]),
-        }
-    }
-
-    async fn fetch_work_detail(
-        &self,
-        _provider_key: &str,
-    ) -> Result<ProviderWorkDetail, MetadataError> {
-        match &self.mode {
-            OlProviderMode::Detail(d) => Ok(*d.clone()),
-            OlProviderMode::Error(k) => Err(k.to_error()),
-            _ => Err(MetadataError::NoMatch),
-        }
-    }
 }
 
 // =============================================================================

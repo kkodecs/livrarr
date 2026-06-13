@@ -178,7 +178,7 @@ async fn test_wcc_path_seams_ac_007_026_list_confirm_persists_gr_key_and_isbn_fr
         .await
         .expect("preview Goodreads CSV");
     let result = svc
-        .confirm(user_id, &preview.preview_id, None, &[0])
+        .confirm(user_id, &preview.preview_id, None, &[0], None)
         .await
         .expect("confirm selected row");
     let works = svc
@@ -283,6 +283,7 @@ async fn test_wcc_path_seams_ac_025_author_monitor_create_persists_native_ol_anc
             monitored: Some(true),
             monitor_new_items: Some(true),
             monitor_since: None,
+            monitor_language: None,
         },
     )
     .await
