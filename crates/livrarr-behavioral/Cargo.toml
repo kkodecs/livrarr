@@ -395,6 +395,10 @@ name = "test_mc_refresh_orchestration"
 path = "../../tests/behavioral/test_mc_refresh_orchestration.rs"
 
 [[test]]
+name = "test_se_refresh_gate"
+path = "../../tests/behavioral/test_se_refresh_gate.rs"
+
+[[test]]
 name = "test_mc_add_doors"
 path = "../../tests/behavioral/test_mc_add_doors.rs"
 

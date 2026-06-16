@@ -1302,78 +1302,89 @@ where
             tracing::warn!("enrichment reset_for_manual_refresh failed: {e}");
         }
 
-        // REQ-008: identity anchor-completion precedes the scatter on every
-        // refresh door (single + bulk + retry funnel through this fn).
-        // Suppression is the existing retry-state semantics — a phase2-terminal
-        // last_outcome or a future next_attempt_at parks the provider until an
-        // explicit retry reset or an identity edit; neither refresh reset
-        // touches provider_retry_state, so suppression survives plain refresh.
+        // REQ-008 + REQ-001 (sprint-e-refresh-gate): identity anchor-completion
+        // precedes the scatter on every refresh door (single + bulk + retry
+        // funnel through this fn), but ONLY for works that are not yet
+        // Confirmed. A Confirmed work already holds its work anchor; re-chasing
+        // the remaining missing anchors (e.g. an unresolvable gr_key, incl. an
+        // LLM chase) on every refresh is wasted synchronous work and is the
+        // dominant refresh cost. The status is read from the pre-reset snapshot
+        // (Q-002): reset_for_manual_refresh only promotes upward from NotFound
+        // and never demotes Confirmed, so a just-recovered work still completes.
+        //
+        // NOTE: a manual refresh DELETES provider_retry_state (via
+        // reset_for_manual_refresh) before this point, so provider suppression
+        // does NOT survive a plain refresh. The anchor-poor completion inside
+        // run_unified_enrichment (door 2) is a separate path and still runs for
+        // works missing every hard anchor (e.g. a GR-only work).
         let mut work = work;
-        if let Some(resolver) = self.resolver.as_ref() {
-            let now = chrono::Utc::now();
-            let suppressed: Vec<String> = self
-                .db
-                .list_retry_states(user_id, work_id)
+        if work.identity_status != IdentityStatus::Confirmed {
+            if let Some(resolver) = self.resolver.as_ref() {
+                let now = chrono::Utc::now();
+                let suppressed: Vec<String> = self
+                    .db
+                    .list_retry_states(user_id, work_id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|s| {
+                        s.last_outcome.is_some_and(|o| o.is_phase2_terminal())
+                            || s.next_attempt_at.is_some_and(|t| t > now)
+                    })
+                    .map(|s| s.provider.record_key().to_string())
+                    .collect();
+                // Identity-operation call records originate at the client layer.
+                let sink: Arc<dyn livrarr_domain::services::ProviderCallSink> =
+                    Arc::new(livrarr_domain::services::NoopCallSink);
+                match crate::async_resolver::complete_anchors(
+                    resolver.as_ref(),
+                    &self.db,
+                    user_id,
+                    &work,
+                    &suppressed,
+                    &sink,
+                )
                 .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|s| {
-                    s.last_outcome.is_some_and(|o| o.is_phase2_terminal())
-                        || s.next_attempt_at.is_some_and(|t| t > now)
-                })
-                .map(|s| s.provider.record_key().to_string())
-                .collect();
-            // Identity-operation call records originate at the client layer.
-            let sink: Arc<dyn livrarr_domain::services::ProviderCallSink> =
-                Arc::new(livrarr_domain::services::NoopCallSink);
-            match crate::async_resolver::complete_anchors(
-                resolver.as_ref(),
-                &self.db,
-                user_id,
-                &work,
-                &suppressed,
-                &sink,
-            )
-            .await
-            {
-                Ok(report) => {
-                    // Only a no-candidates completion ("not_found") parks the
-                    // provider (REQ-008 boundedness). A resolved pass that
-                    // merely lacked a provider's anchor ("unresolvable") and
-                    // an ambiguous arbitration outcome ("ambiguous" — tie or
-                    // needs-confirmation) record nothing and may be
-                    // re-attempted next refresh.
-                    for (provider, reason) in &report.skipped {
-                        if reason == "not_found" {
-                            if let Some(p) = provider_from_record_key(provider) {
-                                if let Err(e) = self
-                                    .db
-                                    .record_terminal_outcome(
-                                        user_id,
-                                        work_id,
-                                        p,
-                                        livrarr_domain::OutcomeClass::NotFound,
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        work_id,
-                                        "completion terminal record failed: {e}"
-                                    );
+                {
+                    Ok(report) => {
+                        // Only a no-candidates completion ("not_found") parks the
+                        // provider (REQ-008 boundedness). A resolved pass that
+                        // merely lacked a provider's anchor ("unresolvable") and
+                        // an ambiguous arbitration outcome ("ambiguous" — tie or
+                        // needs-confirmation) record nothing and may be
+                        // re-attempted next refresh.
+                        for (provider, reason) in &report.skipped {
+                            if reason == "not_found" {
+                                if let Some(p) = provider_from_record_key(provider) {
+                                    if let Err(e) = self
+                                        .db
+                                        .record_terminal_outcome(
+                                            user_id,
+                                            work_id,
+                                            p,
+                                            livrarr_domain::OutcomeClass::NotFound,
+                                            None,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            work_id,
+                                            "completion terminal record failed: {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
-                    }
-                    if !report.resolved.is_empty() {
-                        // Fresh anchors feed the scatter.
-                        if let Ok(w) = self.db.get_work(user_id, work_id).await {
-                            work = w;
+                        if !report.resolved.is_empty() {
+                            // Fresh anchors feed the scatter.
+                            if let Ok(w) = self.db.get_work(user_id, work_id).await {
+                                work = w;
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(work_id, "anchor completion failed; scatter proceeds: {e}");
+                    Err(e) => {
+                        tracing::warn!(work_id, "anchor completion failed; scatter proceeds: {e}");
+                    }
                 }
             }
         }
