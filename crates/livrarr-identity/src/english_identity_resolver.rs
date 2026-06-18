@@ -454,6 +454,15 @@ fn agree(a: &NormalizedWorkDetail, b: &NormalizedWorkDetail) -> bool {
     {
         return true;
     }
+    // Provably different identities never merge on a fuzzy title: the SAME anchor
+    // type carrying DIFFERENT values means two distinct works. Mirrors the AC-020
+    // ISBN-collision guard, extended to work keys.
+    if opt_differs(&a.ol_key, &b.ol_key)
+        || opt_differs(&a.gr_key, &b.gr_key)
+        || opt_differs(&a.hc_key, &b.hc_key)
+    {
+        return false;
+    }
     let at = a.title.as_deref().unwrap_or("");
     let bt = b.title.as_deref().unwrap_or("");
     let aa = a.author_name.as_deref().unwrap_or("");
@@ -482,6 +491,12 @@ fn agree(a: &NormalizedWorkDetail, b: &NormalizedWorkDetail) -> bool {
 
 fn opt_eq(a: &Option<String>, b: &Option<String>) -> bool {
     matches!((a, b), (Some(x), Some(y)) if x == y)
+}
+
+/// Both present and unequal — a provable conflict (vs `opt_eq`, both present and
+/// equal). Used to veto merging works whose same-type anchor holds different values.
+fn opt_differs(a: &Option<String>, b: &Option<String>) -> bool {
+    matches!((a, b), (Some(x), Some(y)) if x != y)
 }
 
 fn captured_from_seed(seed: &WorkSeed) -> CapturedIdentity {
@@ -769,6 +784,45 @@ mod tests {
             ..Default::default()
         };
         assert!(!agree(&a, &b));
+    }
+
+    // C1: `normalize_match_title` truncates at ':' — two different books in the
+    // same series ("The Dresden Files: Summer Knight" vs "The Dresden Files:
+    // Dead Beat") both normalize to "the dresden files", making `agree()` cluster
+    // them together. This test proves the bug: same-series, different-subtitle
+    // entries MUST NOT cluster when they have no shared anchor.
+    #[test]
+    fn c1_colon_truncation_causes_same_series_cross_book_clustering() {
+        // Step 1: prove normalize_match_title collapses both to the same prefix.
+        let summer_knight_normalized = normalize_match_title("The Dresden Files: Summer Knight");
+        let dead_beat_normalized = normalize_match_title("The Dresden Files: Dead Beat");
+        assert_eq!(
+            summer_knight_normalized, dead_beat_normalized,
+            "BUG CONFIRMED: both titles collapse to {:?} — subtitle is lost",
+            summer_knight_normalized
+        );
+
+        // Step 2: prove agree() clusters two different books as a result.
+        let summer_knight = detail(
+            "The Dresden Files: Summer Knight",
+            Some("Jim Butcher"),
+            Some("OL_SUMMER"),
+            None,
+        );
+        let dead_beat = detail(
+            "The Dresden Files: Dead Beat",
+            Some("Jim Butcher"),
+            Some("OL_DEAD_BEAT"),
+            None,
+        );
+        // These are different books with different OL anchors. agree() must return
+        // false — but due to C1, the colon truncation makes title_matches() return
+        // true, so agree() incorrectly returns true.
+        assert!(
+            !agree(&summer_knight, &dead_beat),
+            "BUG CONFIRMED: agree() clustered two different Dresden Files books \
+             because colon truncation collapsed both titles to 'the dresden files'"
+        );
     }
 
     // A bare-key payload sharing NOTHING (no title, no bridge) still cannot
