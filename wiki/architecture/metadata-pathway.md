@@ -159,16 +159,14 @@ uses the same unified enrichment path.
 
 ### Background Retry Job
 
-The retry job lives in `crates/livrarr-server/src/jobs/enrichment.rs`.
-
-It finds:
-
-- works with retryable provider states due now
-- stale unenriched works from interrupted adds
-- failed works without provider retry state
-
-It then calls `EnrichmentWorkflow::enrich_work(..., EnrichmentMode::Background)`
-under a timeout and downloads covers when the refreshed work has a cover URL.
+**Removed (regression — see [work-creation-pipeline.md](work-creation-pipeline.md)).** The
+recurring background retry job (`jobs/enrichment.rs`, `enrichment_retry_tick`) no longer
+exists. Its replacement, `WorkService::retry_all_incomplete` (`services/work.rs:310`), is
+**user-triggered, single-pass, no recurring loop** — reachable only from a POST route, not
+a scheduler. Consequence: identity-`Pending` works created by batch/monitor paths
+(series-monitor, Readarr import, list-import-on-error) are not converged automatically,
+violating M9's "never silent limbo" convergence requirement (REQ-022). Restoring an
+automatic convergence sweep is the Sprint E prerequisite.
 
 ### RSS Sync
 

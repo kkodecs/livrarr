@@ -1,5 +1,16 @@
 # Wiki Change Log
 
+## 2026-06-14 — Work-creation pipeline mapped; M9 convergence gap documented
+
+**New page:**
+- architecture/work-creation-pipeline.md — the five phases (identify → seed → create → enrich → materialize, with file:line anchors), the per-door identify matrix (which doors resolve at the door vs seed Pending), and the **M9 convergence gap**: series-monitor + Readarr-import seed `identity-pending` BY DESIGN (M9 permits it), but the automatic convergence M9 mandates was removed (`enrichment_retry_tick` gone; `retry_all_incomplete` user-triggered only; `bulk_resolver::resolve_bulk` unused) → Pending works sit in the "silent limbo" M9 forbids → REQ-022 violation. Flagged as the Sprint E prerequisite (#144 remainder).
+
+**Updated pages:**
+- architecture/metadata-pathway.md — § "Background Retry Job" was stale (pointed at `jobs/enrichment.rs`, which no longer exists). Corrected: the recurring retry job was removed; convergence is now user-triggered via `retry_all_incomplete` (no recurring loop) — which is the M9 gap.
+- insights.md — new insight 54 (the M9 convergence gap; seeding-Pending is by design, the missing auto-convergence is the regression).
+
+**Context:** session tracing why series-monitor + Readarr works land unidentified and empty. Corrected a mid-thread "it's an oversight" verdict against principle M9 — seeding Pending is deliberate; the missing automatic convergence is the real (binding-principle) regression. Grounded in code (door call sites, `identity.rs`, `work_service.rs`) + M9.
+
 ## 2026-06-10 — Canonical model authored; 13→17 crate corrections
 
 **New artifact:**

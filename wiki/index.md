@@ -9,6 +9,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 - [Overview](architecture/overview.md) — crate dependency graph, key invariants, composition root
 - [Enrichment Pipeline](architecture/enrichment-pipeline.md) — provider stack, enrichment modes, provenance, privacy
 - [Metadata Pathway](architecture/metadata-pathway.md) — current add/enrich/merge/cover/tag flow, entry points, and improvement opportunities
+- [Work-Creation Pipeline](architecture/work-creation-pipeline.md) — the five phases (identify → seed → create → enrich → materialize), the per-door identify matrix, and the M9 convergence gap (series-monitor + Readarr Pending limbo)
 - [Grab System](architecture/grab-system.md) — indexers, download clients, import lock, orphan adoption
 - [Library Management](architecture/library-management.md) — filesystem layout, import pipeline, tag writing, CWA
 - [Import Pipeline](architecture/import-pipeline.md) — scan → classify → copy → tag → CWA → track (detailed)
