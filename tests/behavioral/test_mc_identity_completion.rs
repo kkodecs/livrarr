@@ -283,6 +283,7 @@ fn quorum_tie() -> Resolution {
             gr_key: None,
             ..captured_with_gr()
         },
+        tied: Vec::new(),
     }
 }
 

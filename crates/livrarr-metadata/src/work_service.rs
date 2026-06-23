@@ -953,7 +953,9 @@ where
                 candidate_id,
                 conflict: None,
             },
-            Resolution::Conflict { conflict, captured } => ResolvedIdentity {
+            Resolution::Conflict {
+                conflict, captured, ..
+            } => ResolvedIdentity {
                 language: captured.language.clone(),
                 identity: IdentityState::Pending {
                     reason: PendingReason::LowConfidence,

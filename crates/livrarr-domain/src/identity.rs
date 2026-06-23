@@ -237,6 +237,11 @@ pub enum Resolution {
     Conflict {
         conflict: NewIdentityConflict,
         captured: CapturedIdentity,
+        /// Captured anchors of every tied cluster at a quorum tie (Q-008), so a
+        /// settled work can be checked for a contradiction sitting on a
+        /// non-representative cluster (AC-018). `captured` stays the
+        /// representative; `tied` carries the full set. Empty when not a tie.
+        tied: Vec<CapturedIdentity>,
     },
     /// Transient — a provider abstained; `Some(candidate_id)` if any payload was
     /// fetched so the create can still reuse it. Converges later.
@@ -245,6 +250,40 @@ pub enum Resolution {
         reason: PendingReason,
         candidate_id: Option<CandidateId>,
     },
+}
+
+/// Caller patience for the identity engine (`settle_identity`) — the only
+/// caller-visible knob (REQ-005). Exactly two modes (Q-003): `Interactive`
+/// (a person is waiting) and `Background` (unattended). Maps onto `LatencyTier`
+/// for the resolve call (Interactive→Interactive, Background→Background); the
+/// resolver's `Bulk` tier is deferred background pacing (§4), not a mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityMode {
+    Interactive,
+    Background,
+}
+
+/// Which raw `Resolution` verdict the engine acted on, for audit/logging
+/// (REQ-008). The engine maps the raw four variants (ST-002), never the legacy
+/// `LowConfidence` / `PendingReason` buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolverVerdictKind {
+    Resolved,
+    NeedsConfirmation,
+    Conflict,
+    Unresolved,
+}
+
+/// Audit-only report of a `settle_identity` run (REQ-008): the badge before and
+/// after, which anchor types were newly merged, and which verdict drove it
+/// (`None` when the terminal guard skipped resolution — REQ-006). The engine has
+/// already performed every write; no caller persists anything from this report.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentityReport {
+    pub prior_status: crate::IdentityStatus,
+    pub final_status: crate::IdentityStatus,
+    pub anchors_merged: Vec<String>,
+    pub verdict: Option<ResolverVerdictKind>,
 }
 
 /// The shared identity outcome a creation path receives from

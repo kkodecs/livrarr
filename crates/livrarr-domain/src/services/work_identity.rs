@@ -54,6 +54,15 @@ pub trait WorkIdentityRepository: Send + Sync {
     /// match as needs-review — never an indefinite background-retry loop (REQ-026).
     async fn set_needs_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError>;
 
+    /// Raise the badge to `Confirmed` (REQ-003/008) — a work anchor (OL/GR/HC)
+    /// fixed the identity. Writes only the `identity_status` column for the one
+    /// work; the engine calls it solely on a monotonic raise.
+    async fn set_identity_confirmed(&self, work_id: WorkId) -> Result<(), WorkIdentityError>;
+
+    /// Raise the badge to `Provisional` (REQ-003/008) — an ISBN/ASIN bridge with
+    /// no work anchor yet. Writes only the `identity_status` column for the one work.
+    async fn set_identity_provisional(&self, work_id: WorkId) -> Result<(), WorkIdentityError>;
+
     async fn verify_anchor_cache_consistency(
         &self,
     ) -> Result<Vec<ConsistencyDivergence>, WorkIdentityError>;
@@ -71,12 +80,14 @@ pub trait WorkIdentityRepository: Send + Sync {
     ) -> Result<Vec<WorkIdentityAnchor>, WorkIdentityError>;
 
     /// Fill anchor types the existing work lacks from `incoming`; never
-    /// overwrites a confirmed anchor (additive convergence).
+    /// overwrites a confirmed anchor (additive convergence). Returns the anchor
+    /// types it actually confirmed — the single source of truth for the
+    /// `anchors_merged` audit list (REQ-008).
     async fn merge_missing_anchors(
         &self,
         work_id: WorkId,
         incoming: &CapturedIdentity,
-    ) -> Result<(), WorkIdentityError>;
+    ) -> Result<Vec<AnchorType>, WorkIdentityError>;
 
     /// For each work-anchor type the existing work holds with a differing
     /// incoming value, produce a conflict attributed to `source` (the creation

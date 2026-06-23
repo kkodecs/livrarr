@@ -417,3 +417,11 @@ path = "../../tests/behavioral/test_mc_matching_variants.rs"
 [[test]]
 name = "test_series_roster"
 path = "../../tests/behavioral/test_series_roster.rs"
+
+[[test]]
+name = "test_unified_identity_path"
+path = "../../tests/behavioral/test_unified_identity_path.rs"
+
+[[test]]
+name = "test_uip_resolver_tied"
+path = "../../tests/behavioral/test_uip_resolver_tied.rs"

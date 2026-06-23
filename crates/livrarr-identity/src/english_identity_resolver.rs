@@ -366,26 +366,33 @@ pub fn run_quorum(
     let top = &competing[0];
     let no_majority = competing.len() > 1 && competing[1].len() == top.len();
     if no_majority {
-        let rep = items[top[0]];
+        let tie_len = top.len();
+        // Q-008/AC-018: project every tied cluster with the same most-anchored
+        // projection the winning path uses, so a settled-work contradiction on a
+        // non-representative cluster — or on a cluster whose provider-sorted-first
+        // member is a bridge — stays detectable (R-001). Winner/clustering unchanged.
+        let tied: Vec<CapturedIdentity> = competing
+            .iter()
+            .take_while(|c| c.len() == tie_len)
+            .map(|c| project_cluster(c, &items, seed))
+            .collect();
+        let rep_idx = *top
+            .iter()
+            .max_by_key(|&&i| anchor_count(items[i]))
+            .expect("non-empty cluster");
+        let rep = items[rep_idx];
         return Resolution::Conflict {
             conflict: quorum_tie_conflict(rep, seed),
-            captured: captured_from_detail(rep, seed),
+            captured: project_cluster(top, &items, seed),
+            tied,
         };
     }
 
-    // The winning cluster's representative is its most-anchored member; merge any
-    // anchors/bridges the other members contribute (convergence adds, never
-    // clobbers) — including a corroborating anchorless member's ISBN.
-    let rep_idx = *top
-        .iter()
-        .max_by_key(|&&idx| anchor_count(items[idx]))
-        .expect("non-empty cluster");
-    let mut captured = captured_from_detail(items[rep_idx], seed);
-    for &idx in top {
-        captured.merge_missing(&captured_from_detail(items[idx], seed));
-    }
+    // The winning cluster projects to its most-anchored member plus every
+    // anchor/bridge the other members contribute (convergence adds, never
+    // clobbers) — the same projection the tie branch uses (R-001).
     Resolution::Resolved {
-        identity: captured,
+        identity: project_cluster(top, &items, seed),
         method: method_for_seed(seed),
         candidate_id: CandidateId(String::new()),
     }
@@ -425,13 +432,15 @@ fn method_for_seed(seed: &WorkSeed) -> IdentityMethod {
 /// work identity in the quorum. An edition bridge (isbn/asin) alone does not: an
 /// ISBN is a bridge to an anchor, never a lock on its own (REQ-018/020).
 fn has_work_anchor(d: &NormalizedWorkDetail) -> bool {
-    d.ol_key.as_deref().is_some_and(|v| !v.is_empty())
-        || d.gr_key.as_deref().is_some_and(|v| !v.is_empty())
-        || d.hc_key.as_deref().is_some_and(|v| !v.is_empty())
+    d.ol_key.as_deref().is_some_and(|v| !v.trim().is_empty())
+        || d.gr_key.as_deref().is_some_and(|v| !v.trim().is_empty())
+        || d.hc_key.as_deref().is_some_and(|v| !v.trim().is_empty())
 }
 
 fn anchor_count(d: &NormalizedWorkDetail) -> usize {
-    d.ol_key.is_some() as usize + d.gr_key.is_some() as usize + d.hc_key.is_some() as usize
+    d.ol_key.as_deref().is_some_and(|v| !v.trim().is_empty()) as usize
+        + d.gr_key.as_deref().is_some_and(|v| !v.trim().is_empty()) as usize
+        + d.hc_key.as_deref().is_some_and(|v| !v.trim().is_empty()) as usize
 }
 
 /// Two provider results agree if they returned the same work anchor of any
@@ -499,13 +508,22 @@ fn opt_differs(a: &Option<String>, b: &Option<String>) -> bool {
     matches!((a, b), (Some(x), Some(y)) if x != y)
 }
 
+/// Strip a blank anchor value to `None`. A `Some("")` (or whitespace-only)
+/// value would be counted by `anchor_count` yet rejected by `confirm_anchor`
+/// (`InvalidAnchorValue` — it checks `value.trim().is_empty()`), which aborts
+/// the settle. Stripping it at the projection point guarantees no projected
+/// `CapturedIdentity` ever carries a blank anchor.
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.trim().is_empty())
+}
+
 fn captured_from_seed(seed: &WorkSeed) -> CapturedIdentity {
     CapturedIdentity {
-        ol_key: seed.ol_key.clone(),
-        gr_key: seed.gr_key.clone(),
-        hc_key: seed.hc_key.clone(),
-        isbn_13: seed.isbn_13.clone(),
-        asin: seed.asin.clone(),
+        ol_key: non_blank(seed.ol_key.clone()),
+        gr_key: non_blank(seed.gr_key.clone()),
+        hc_key: non_blank(seed.hc_key.clone()),
+        isbn_13: non_blank(seed.isbn_13.clone()),
+        asin: non_blank(seed.asin.clone()),
         title: seed.title.clone().unwrap_or_default(),
         author_name: seed.author_name.clone().unwrap_or_default(),
         language: seed.language.clone(),
@@ -514,11 +532,11 @@ fn captured_from_seed(seed: &WorkSeed) -> CapturedIdentity {
 
 fn captured_from_detail(d: &NormalizedWorkDetail, seed: &WorkSeed) -> CapturedIdentity {
     CapturedIdentity {
-        ol_key: d.ol_key.clone(),
-        gr_key: d.gr_key.clone(),
-        hc_key: d.hc_key.clone(),
-        isbn_13: d.isbn_13.clone().or_else(|| seed.isbn_13.clone()),
-        asin: d.asin.clone().or_else(|| seed.asin.clone()),
+        ol_key: non_blank(d.ol_key.clone()),
+        gr_key: non_blank(d.gr_key.clone()),
+        hc_key: non_blank(d.hc_key.clone()),
+        isbn_13: non_blank(d.isbn_13.clone()).or_else(|| non_blank(seed.isbn_13.clone())),
+        asin: non_blank(d.asin.clone()).or_else(|| non_blank(seed.asin.clone())),
         title: d
             .title
             .clone()
@@ -531,6 +549,28 @@ fn captured_from_detail(d: &NormalizedWorkDetail, seed: &WorkSeed) -> CapturedId
             .unwrap_or_default(),
         language: d.language.clone().or_else(|| seed.language.clone()),
     }
+}
+
+/// Project a cluster to a single `CapturedIdentity`: the most-anchored member
+/// as the base, then merge every member's missing anchors/bridges (additive,
+/// never clobbering). This is exactly the winning (`Resolved`) path's
+/// projection, extracted so the no-majority tie branch reuses it — a tied
+/// cluster whose provider-sorted-first member is an edition bridge must still
+/// expose the work anchor a later member carries (R-001).
+fn project_cluster(
+    cluster: &[usize],
+    items: &[&NormalizedWorkDetail],
+    seed: &WorkSeed,
+) -> CapturedIdentity {
+    let rep_idx = *cluster
+        .iter()
+        .max_by_key(|&&i| anchor_count(items[i]))
+        .expect("non-empty cluster");
+    let mut cap = captured_from_detail(items[rep_idx], seed);
+    for &i in cluster {
+        cap.merge_missing(&captured_from_detail(items[i], seed));
+    }
+    cap
 }
 
 fn incoming_from_detail(d: &NormalizedWorkDetail, seed: &WorkSeed) -> IncomingConflictPayload {

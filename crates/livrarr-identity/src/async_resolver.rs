@@ -8,8 +8,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use livrarr_domain::identity::{
-    CapturedIdentity, ConflictSource, IdentityConflictKind, IncomingConflictPayload, LatencyTier,
-    NewIdentityConflict, PendingReason, Resolution, WorkSeed,
+    CapturedIdentity, ConflictSource, IdentityConflictKind, IdentityMode, IdentityReport,
+    IncomingConflictPayload, LatencyTier, NewIdentityConflict, PendingReason, Resolution,
+    ResolverVerdictKind, WorkSeed,
 };
 use livrarr_domain::services::{
     AnchorCompletionReport, LlmCallRequest, LlmCaller, LlmPurpose, ProviderCallSink,
@@ -288,6 +289,148 @@ fn seed_from_work(work: &Work) -> WorkSeed {
         year: work.year,
         user_confirmed: false,
     }
+}
+
+/// The one identity authority (REQ-001): resolve a work's identity, map the
+/// verdict × current badge to a final `IdentityStatus` monotonically (REQ-003/004),
+/// perform the badge + anchor writes itself (REQ-008), and return an audit
+/// `IdentityReport`. Respects terminal states (REQ-006), idempotent (REQ-007),
+/// never terminalizes a transient `Unresolved` (ST-002), writes zero enrichment
+/// (REQ-004). Supersedes `converge_identity_pending` / `complete_anchors` by
+/// adding the badge flip they omit (ST-003); engine only — no caller is wired
+/// (spec §4). `mode` is the sole patience knob (REQ-005); `source` attributes any
+/// raised conflict (the engine is shared by all doors, so it cannot assume one).
+pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityRepository>(
+    resolver: &R,
+    repo: &D,
+    user_id: UserId,
+    work: &Work,
+    mode: IdentityMode,
+    source: ConflictSource,
+) -> Result<IdentityReport, WorkIdentityError> {
+    let prior = work.identity_status;
+
+    // REQ-006 terminal guard: Conflict / NotFound / NeedsReview are terminal —
+    // no resolve runs, no write, verdict None (idempotent no-op; AC-010/AC-012).
+    if matches!(
+        prior,
+        IdentityStatus::Conflict | IdentityStatus::NotFound | IdentityStatus::NeedsReview
+    ) {
+        return Ok(IdentityReport {
+            prior_status: prior,
+            final_status: prior,
+            anchors_merged: Vec::new(),
+            verdict: None,
+        });
+    }
+
+    let seed = seed_from_work(work);
+    let tier = match mode {
+        IdentityMode::Interactive => LatencyTier::Interactive,
+        IdentityMode::Background => LatencyTier::Background,
+    };
+    let resolution = resolver.resolve(user_id, &seed, tier).await?;
+
+    let mut anchors_merged = Vec::new();
+    let mut final_status = prior;
+    let verdict;
+
+    match resolution {
+        Resolution::Resolved { identity, .. } => {
+            anchors_merged = repo
+                .merge_missing_anchors(work.id, &identity)
+                .await?
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect();
+            // REQ-003: a work anchor (OL/GR/HC) confirms; an ISBN/ASIN bridge only
+            // is provisional (mirrors derived_identity_status).
+            let target = if has_work_anchor(&identity) {
+                IdentityStatus::Confirmed
+            } else {
+                IdentityStatus::Provisional
+            };
+            // REQ-004/007 monotonic raise: write only on a strict upward move.
+            if target == IdentityStatus::Confirmed && prior != IdentityStatus::Confirmed {
+                repo.set_identity_confirmed(work.id).await?;
+                final_status = IdentityStatus::Confirmed;
+            } else if target == IdentityStatus::Provisional && prior == IdentityStatus::Pending {
+                repo.set_identity_provisional(work.id).await?;
+                final_status = IdentityStatus::Provisional;
+            }
+            verdict = ResolverVerdictKind::Resolved;
+        }
+        Resolution::Unresolved { captured, .. } => {
+            // ST-002: any Unresolved (incl. NoCandidates) is transient — absorb
+            // partial anchors, never change the badge, stay eligible to retry.
+            anchors_merged = repo
+                .merge_missing_anchors(work.id, &captured)
+                .await?
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect();
+            verdict = ResolverVerdictKind::Unresolved;
+        }
+        Resolution::NeedsConfirmation { .. } => {
+            // REQ-005: ambiguous candidates — mode decides ONLY on a Pending work.
+            // Background surfaces NeedsReview; Interactive leaves it Pending for a
+            // user pick. A settled work is never downgraded by a weak verdict.
+            if prior == IdentityStatus::Pending && matches!(mode, IdentityMode::Background) {
+                repo.set_needs_review(work.id).await?;
+                final_status = IdentityStatus::NeedsReview;
+            }
+            verdict = ResolverVerdictKind::NeedsConfirmation;
+        }
+        Resolution::Conflict {
+            conflict,
+            captured,
+            tied,
+        } => {
+            if prior == IdentityStatus::Pending {
+                // A fresh Pending work has no established anchor — the tie itself
+                // is the conflict to surface (AC-007).
+                repo.raise_identity_conflict(conflict).await?;
+                final_status = IdentityStatus::Conflict;
+            } else {
+                // Settled work (REQ-003 From-Provisional/From-Confirmed, D-Q008):
+                // contradiction-based, never kind-based — check the established
+                // anchor against the representative AND every tied cluster (AC-018).
+                let mut contradictions = Vec::new();
+                for candidate in std::iter::once(&captured).chain(tied.iter()) {
+                    contradictions.extend(
+                        repo.detect_conflicting_anchors(work.id, candidate, source)
+                            .await?,
+                    );
+                }
+                if !contradictions.is_empty() {
+                    for c in contradictions {
+                        repo.raise_identity_conflict(c).await?;
+                    }
+                    final_status = IdentityStatus::Conflict;
+                }
+            }
+            verdict = ResolverVerdictKind::Conflict;
+        }
+    }
+
+    Ok(IdentityReport {
+        prior_status: prior,
+        final_status,
+        anchors_merged,
+        verdict: Some(verdict),
+    })
+}
+
+/// A captured identity carries a work anchor iff one of OL/GR/HC is present and
+/// non-empty (the REQ-003 Confirmed-vs-Provisional split).
+fn has_work_anchor(identity: &CapturedIdentity) -> bool {
+    [
+        identity.ol_key.as_deref(),
+        identity.gr_key.as_deref(),
+        identity.hc_key.as_deref(),
+    ]
+    .iter()
+    .any(|a| a.map(|s| !s.is_empty()).unwrap_or(false))
 }
 
 fn is_terminal_pending(reason: PendingReason) -> bool {

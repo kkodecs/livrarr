@@ -205,7 +205,7 @@ impl WorkIdentityRepository for SqliteDb {
         &self,
         work_id: WorkId,
         incoming: &CapturedIdentity,
-    ) -> Result<(), WorkIdentityError> {
+    ) -> Result<Vec<AnchorType>, WorkIdentityError> {
         let existing = self.list_anchors(work_id).await?;
         let confirmed_types: std::collections::HashSet<String> = existing
             .iter()
@@ -221,21 +221,19 @@ impl WorkIdentityRepository for SqliteDb {
             (AnchorType::ASIN, incoming.asin.as_deref()),
         ];
 
+        let mut merged = Vec::new();
         for &(anchor_type_str, maybe_value) in anchors {
             if let Some(value) = maybe_value {
                 if !confirmed_types.contains(anchor_type_str) {
-                    self.confirm_anchor(
-                        work_id,
-                        AnchorType::new(anchor_type_str),
-                        value,
-                        AnchorSetter::Import,
-                    )
-                    .await?;
+                    let anchor_type = AnchorType::new(anchor_type_str);
+                    self.confirm_anchor(work_id, anchor_type.clone(), value, AnchorSetter::Import)
+                        .await?;
+                    merged.push(anchor_type);
                 }
             }
         }
 
-        Ok(())
+        Ok(merged)
     }
 
     async fn detect_conflicting_anchors(
@@ -404,6 +402,24 @@ impl WorkIdentityRepository for SqliteDb {
 
     async fn set_needs_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
         sqlx::query("UPDATE works SET identity_status = 'needs_review' WHERE id = ?1")
+            .bind(work_id)
+            .execute(self.pool())
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn set_identity_confirmed(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
+        sqlx::query("UPDATE works SET identity_status = 'confirmed' WHERE id = ?1")
+            .bind(work_id)
+            .execute(self.pool())
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn set_identity_provisional(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
+        sqlx::query("UPDATE works SET identity_status = 'provisional' WHERE id = ?1")
             .bind(work_id)
             .execute(self.pool())
             .await
