@@ -423,5 +423,9 @@ name = "test_unified_identity_path"
 path = "../../tests/behavioral/test_unified_identity_path.rs"
 
 [[test]]
+name = "test_id_completeness"
+path = "../../tests/behavioral/test_id_completeness.rs"
+
+[[test]]
 name = "test_uip_resolver_tied"
 path = "../../tests/behavioral/test_uip_resolver_tied.rs"

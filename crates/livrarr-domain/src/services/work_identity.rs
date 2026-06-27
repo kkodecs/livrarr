@@ -115,4 +115,46 @@ pub trait WorkIdentityRepository: Send + Sync {
     /// goodreads_work anchor rows. Idempotent. SQL cannot call the normalizer,
     /// so this is a Rust step, not a .sql migration (REQ-002; ir-v2 D-014).
     async fn backfill_gr_numeric(&self) -> Result<(), WorkIdentityError>;
+
+    /// Persist a fuzzy (title/author-matched) anchor guess to the ledger only —
+    /// `confidence='pending'`, `setter='auto_search'`. MUST NOT write any
+    /// `works.*` column: the pending-guess firewall (REQ-004) keeps an
+    /// unverified guess out of the synced identity until a user affirms it.
+    /// Never downgrades an already-confirmed anchor of the same value
+    /// (monotonic, REQ-008).
+    async fn record_pending_anchor(
+        &self,
+        work_id: WorkId,
+        anchor_type: AnchorType,
+        value: &str,
+    ) -> Result<(), WorkIdentityError>;
+
+    /// Increment the durable per-(work, anchor) convergence attempt counter,
+    /// creating the row at 1 on first failure. Read back via
+    /// [`Self::list_anchor_dead_ends`] to gate further chasing (REQ-009).
+    async fn bump_anchor_attempt(
+        &self,
+        work_id: WorkId,
+        anchor_type: AnchorType,
+    ) -> Result<(), WorkIdentityError>;
+
+    /// List a work's durable dead-end attempt counters — one row per anchor
+    /// type that has failed at least once.
+    async fn list_anchor_dead_ends(
+        &self,
+        work_id: WorkId,
+    ) -> Result<Vec<AnchorDeadEnd>, WorkIdentityError>;
+
+    /// Clear one anchor type's dead-end counter — called the moment that anchor
+    /// is successfully harvested, so a later loss of it is chased afresh
+    /// (REQ-009).
+    async fn clear_anchor_dead_end(
+        &self,
+        work_id: WorkId,
+        anchor_type: AnchorType,
+    ) -> Result<(), WorkIdentityError>;
+
+    /// Clear ALL of a work's dead-end counters — called only by the single-work
+    /// manual "try again" refresh, never by a routine background tick (REQ-009).
+    async fn clear_anchor_dead_ends(&self, work_id: WorkId) -> Result<(), WorkIdentityError>;
 }

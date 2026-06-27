@@ -55,6 +55,43 @@ pub enum AnchorSetter {
     Redirect,
 }
 
+/// How a resolver matched a given anchor. `Hard` — the provider's raw record
+/// shares a hard identifier the seed already carries, so the anchor is safe to
+/// sync into `works.*`. `Fuzzy` — the anchor came from a title/author match
+/// only, so it is held as a pending guess until the user affirms it (REQ-004).
+/// An in-memory routing signal from the resolver to the harvest write-step; the
+/// ledger persists `AnchorConfidence`/`AnchorSetter`, not this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchBasis {
+    Hard,
+    Fuzzy,
+}
+
+/// Per-anchor [`MatchBasis`] sidecar produced alongside a [`CapturedIdentity`]
+/// by the resolver's cluster projection. Mirrors the five anchor fields of
+/// `CapturedIdentity`; `None` means the captured identity carries no such
+/// anchor. Rides only on the harvest-writing resolution verdicts.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnchorProvenance {
+    pub ol_key: Option<MatchBasis>,
+    pub gr_key: Option<MatchBasis>,
+    pub hc_key: Option<MatchBasis>,
+    pub isbn_13: Option<MatchBasis>,
+    pub asin: Option<MatchBasis>,
+}
+
+/// A durable per-(work, anchor) retry counter: how many background convergence
+/// attempts have failed to obtain a missing anchor. At or above the configured
+/// threshold the anchor is a dead-end and is no longer chased; a successful
+/// harvest clears the counter (REQ-009).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnchorDeadEnd {
+    pub work_id: WorkId,
+    pub anchor_type: AnchorType,
+    pub attempt_count: u32,
+    pub last_attempt_at: DateTime<Utc>,
+}
+
 // ---------------------------------------------------------------------------
 // Resolution types
 // ---------------------------------------------------------------------------
@@ -229,6 +266,10 @@ pub enum Resolution {
         identity: CapturedIdentity,
         method: IdentityMethod,
         candidate_id: CandidateId,
+        /// Per-anchor hard-vs-fuzzy basis for `identity`, computed by the cluster
+        /// projection. Drives the harvest write-step's safe/guessed split
+        /// (REQ-003/004): hard anchors sync to `works.*`, fuzzy ones are held.
+        provenance: AnchorProvenance,
     },
     /// Tier B/C — no resolving hard id; each candidate carries its own
     /// `candidate_id`.
@@ -249,6 +290,10 @@ pub enum Resolution {
         captured: CapturedIdentity,
         reason: PendingReason,
         candidate_id: Option<CandidateId>,
+        /// Per-anchor basis for the partial anchors `captured` carries (an
+        /// Unresolved verdict still harvests only-missing anchors). Default
+        /// (all-`None`) when nothing was captured.
+        provenance: AnchorProvenance,
     },
 }
 
@@ -458,6 +503,10 @@ pub enum ConflictSource {
     SeriesMonitor,
     AuthorMonitor,
     Refresh,
+    /// The user-triggered "retry incomplete" re-processing path (insertion C).
+    ManualRetry,
+    /// The background convergence loop re-processing a work.
+    Convergence,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

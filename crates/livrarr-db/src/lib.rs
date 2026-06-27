@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 pub use livrarr_domain::services::ProgressKind;
@@ -393,6 +394,27 @@ pub trait WorkDb: Send + Sync {
         &self,
         user_id: UserId,
         work_id: WorkId,
+    ) -> Result<(), DbError>;
+
+    /// Select works due for a background convergence pass (REQ-006/009): identity
+    /// still pending, OR confirmed/provisional with incomplete enrichment, OR
+    /// confirmed/provisional with a chaseable missing anchor (NULL, not already a
+    /// pending guess, not at the dead-end `threshold`). Only the missing-anchor
+    /// branch is chaseable-gated. Oldest-first, capped at `limit`.
+    async fn list_convergence_due(
+        &self,
+        user_id: UserId,
+        now: DateTime<Utc>,
+        threshold: u32,
+        limit: i64,
+    ) -> Result<Vec<WorkId>, DbError>;
+
+    /// Set (or clear, when `at` is `None`) a work's next-convergence-due time.
+    async fn set_next_convergence_at(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        at: Option<DateTime<Utc>>,
     ) -> Result<(), DbError>;
 
     /// TEMP(pk-tdd): compile-only scaffold — list works in Conflict status.

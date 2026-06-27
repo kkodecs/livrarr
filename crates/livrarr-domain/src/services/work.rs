@@ -253,6 +253,18 @@ pub enum WorkServiceError {
     Db(#[from] DbError),
 }
 
+/// Outcome of one [`WorkService::converge_work`] pass, driving the background
+/// convergence job's next-attempt pacing. `Completed` — identity and enrichment
+/// are both satisfied; stop selecting the work. `Terminal` — a dead-end was
+/// reached (needs-review / conflict / not-found); stop. `StillIncomplete` —
+/// progress made or mid-flight; re-select after the cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvergeOutcome {
+    Completed,
+    StillIncomplete,
+    Terminal,
+}
+
 #[trait_variant::make(Send)]
 pub trait WorkService: Send + Sync {
     async fn add(
@@ -367,6 +379,19 @@ pub trait WorkService: Send + Sync {
     /// all free it; a leaked permanent 409 is structurally inexpressible
     /// (REQ-016).
     fn try_start_bulk_refresh(&self, user_id: i64) -> Option<BulkRefreshGuard>;
+
+    /// Run one background convergence pass over a single work: settle a chaseable
+    /// identity anchor (or terminalize an exhausted Pending work), run background
+    /// enrichment when identity permits, and account dead-end retry counters.
+    /// Called by the convergence job tick — a job cannot reach the private
+    /// orchestration helpers, so this is the public entry point. `threshold` is
+    /// the per-anchor dead-end attempt limit (REQ-009).
+    async fn converge_work(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        threshold: u32,
+    ) -> Result<ConvergeOutcome, WorkServiceError>;
 }
 
 /// RAII slot for the per-user bulk-refresh guard (REQ-016). Acquired via

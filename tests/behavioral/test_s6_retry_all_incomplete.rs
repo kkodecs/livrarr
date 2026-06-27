@@ -325,7 +325,11 @@ async fn retry_all_incomplete_re_resolves_identity_pending_work() {
     assert_eq!(
         saved.identity_status,
         IdentityStatus::Confirmed,
-        "AC-S6-3: resolver-provided work anchor should promote Pending to Confirmed during the sweep"
+        "FLM: title+author match confirms identity during the retry sweep"
     );
-    assert_eq!(saved.ol_key.as_deref(), Some(RESOLVED_OL_KEY));
+    assert_eq!(
+        saved.ol_key.as_deref(),
+        Some(RESOLVED_OL_KEY),
+        "FLM: title+author match syncs ol_key to works.*"
+    );
 }

@@ -81,6 +81,15 @@ impl WorkService for StubWorkService {
         todo!("stub: not exercised by author-monitor tests")
     }
 
+    async fn converge_work(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _threshold: u32,
+    ) -> Result<livrarr_domain::services::ConvergeOutcome, WorkServiceError> {
+        todo!("stub: not exercised by author-monitor tests")
+    }
+
     async fn resolve_identity(
         &self,
         _user_id: UserId,

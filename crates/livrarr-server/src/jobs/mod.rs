@@ -18,6 +18,7 @@ use livrarr_db::{CreateNotificationDbRequest, NotificationDb, UserDb};
 use livrarr_domain::{NotificationType, UserRole};
 
 pub mod author_monitor;
+pub mod convergence;
 pub mod download_poller;
 pub mod maintenance;
 pub mod repair;
@@ -27,6 +28,7 @@ pub mod tag_convergence;
 pub use maintenance::recover_interrupted_state;
 
 use self::author_monitor::author_monitor_tick;
+use self::convergence::convergence_tick;
 use self::download_poller::download_poller_tick;
 use self::maintenance::{call_record_retention_tick, session_cleanup_tick, state_map_cleanup_tick};
 use self::rss_sync::rss_sync_tick;
@@ -78,6 +80,9 @@ impl JobRunner {
 
     /// Start all interval jobs. Call once after AppState is constructed.
     pub async fn start(&self, state: AppState) {
+        // Convergence cadence is operator-configurable (the only job whose
+        // interval is not hardcoded) — it gates the REQ-007 provider volume.
+        let convergence_interval = Duration::from_secs(state.config.convergence.interval_secs);
         self.spawn_job(
             "download_poller",
             Duration::from_secs(60),
@@ -118,6 +123,13 @@ impl JobRunner {
             Duration::from_secs(60),
             state.clone(),
             tag_convergence_tick,
+        )
+        .await;
+        self.spawn_job(
+            "convergence",
+            convergence_interval,
+            state.clone(),
+            convergence_tick,
         )
         .await;
         self.spawn_job(

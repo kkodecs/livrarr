@@ -1,5 +1,6 @@
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 
 use axum::response::{IntoResponse, Response};
@@ -7,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use crate::context::{
     HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasEmailService,
     HasEnrichmentWorkflow, HasFileService, HasIdentityResolver, HasNotificationService,
-    HasSeriesQueryService, HasTagService, HasWorkService,
+    HasSeriesQueryService, HasTagService, HasWorkIdentityRepository, HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
@@ -16,9 +17,10 @@ use crate::{
     AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse, LookupApiResponse,
     RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
+use livrarr_domain::identity::{AnchorConfidence, AnchorSetter, AnchorType};
 use livrarr_domain::services::{
     AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
-    SeriesQueryService, WorkService,
+    SeriesQueryService, WorkIdentityRepository, WorkService, WorkServiceError,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -250,6 +252,18 @@ pub async fn add<
     );
 
     let result = state.work_service().add(ctx.user.id, candidate).await?;
+
+    // Background refresh: fill in anchors (GR/HC/ASIN) that initial enrichment
+    // misses because they require the identity road to run first.
+    if result.created {
+        let s = state.clone();
+        let uid = ctx.user.id;
+        let wid = result.work.id;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let _ = s.work_service().refresh(uid, wid).await;
+        });
+    }
 
     if result.author_created {
         if let Some(author_id) = result.author_id {
@@ -833,4 +847,114 @@ pub async fn author_search<S: HasAuthorMonitorWorkflow>(
         }
     });
     axum::http::StatusCode::ACCEPTED
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingAnchorDto {
+    pub anchor_type: String,
+    pub value: String,
+    pub setter: String,
+}
+
+/// Canonical string form of an [`AnchorSetter`] for the DTO (matches the
+/// snake_case ledger values, e.g. `auto_search`).
+fn anchor_setter_str(setter: AnchorSetter) -> &'static str {
+    match setter {
+        AnchorSetter::User => "user",
+        AnchorSetter::AutoIsbn => "auto_isbn",
+        AnchorSetter::AutoSearch => "auto_search",
+        AnchorSetter::Import => "import",
+        AnchorSetter::Redirect => "redirect",
+    }
+}
+
+/// List a work's pending (unaffirmed) identity guesses (REQ-005).
+pub async fn list_pending_anchors<S: HasWorkIdentityRepository + HasWorkService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path(work_id): Path<i64>,
+) -> Result<Json<Vec<PendingAnchorDto>>, ApiError> {
+    // R-3: the repo methods are work-id-only (no user scope), so verify ownership
+    // via the user-scoped service first — another user's work must read as 404,
+    // and a real service error must surface as 500, not be masked as not-found.
+    state
+        .work_service()
+        .get(ctx.user.id, work_id)
+        .await
+        .map_err(|e| match e {
+            WorkServiceError::NotFound => ApiError::NotFound,
+            other => ApiError::Internal(other.to_string()),
+        })?;
+
+    let anchors = state
+        .work_identity_repo()
+        .list_anchors(work_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let dtos = anchors
+        .into_iter()
+        .filter(|a| a.confidence == AnchorConfidence::Pending && !a.anchor_value.is_empty())
+        .map(|a| PendingAnchorDto {
+            anchor_type: a.anchor_type.as_str().to_string(),
+            value: a.anchor_value,
+            setter: anchor_setter_str(a.setter).to_string(),
+        })
+        .collect();
+
+    Ok(Json(dtos))
+}
+
+/// Affirm a pending identity guess: promote it to a confirmed anchor (synced into
+/// `works.*`) and kick a background enrichment for the now-unlocked provider
+/// (REQ-005).
+pub async fn affirm_pending_anchor<S: HasWorkIdentityRepository + HasWorkService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path((work_id, anchor_type)): Path<(i64, String)>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = ctx.user.id;
+
+    // R-3: confirm_anchor mutates works.* with no user scope — verify ownership
+    // before any mutation so a cross-user affirm cannot touch another's work.
+    state
+        .work_service()
+        .get(user_id, work_id)
+        .await
+        .map_err(|e| match e {
+            WorkServiceError::NotFound => ApiError::NotFound,
+            other => ApiError::Internal(other.to_string()),
+        })?;
+
+    let anchor_type = AnchorType::new(anchor_type);
+
+    // Resolve the pending guess of this type to its value; 404 if none to affirm.
+    let anchors = state
+        .work_identity_repo()
+        .list_anchors(work_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let value = anchors
+        .into_iter()
+        .find(|a| a.confidence == AnchorConfidence::Pending && a.anchor_type == anchor_type)
+        .map(|a| a.anchor_value)
+        .ok_or(ApiError::NotFound)?;
+
+    // The user verified it: promote pending→confirmed and sync works.*.
+    state
+        .work_identity_repo()
+        .confirm_anchor(work_id, anchor_type, &value, AnchorSetter::User)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // Fire-and-forget the enrichment the newly-confirmed anchor unlocks.
+    let s = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = s.work_service().refresh(user_id, work_id).await {
+            tracing::debug!(work_id, "post-affirm background enrichment skipped: {e}");
+        }
+    });
+
+    Ok(StatusCode::NO_CONTENT)
 }

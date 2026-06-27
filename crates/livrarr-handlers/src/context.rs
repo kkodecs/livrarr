@@ -6,7 +6,7 @@ use livrarr_domain::services::{
     IndexerSettingsService, ListService, ManualImportService, MatchingService, NotificationService,
     ProviderStatsService, QueueService, ReadarrImportWorkflow, ReleaseService,
     RemotePathMappingService, RootFolderService, RssSyncWorkflow, SeriesQueryService,
-    SeriesService, TagService, WorkService,
+    SeriesService, TagService, WorkIdentityRepository, WorkService,
 };
 use livrarr_http::HttpClient;
 
@@ -25,6 +25,11 @@ use crate::types::auth::AuthService as AuthServiceTrait;
 pub trait HasWorkService: Clone + Send + Sync + 'static {
     type WorkSvc: WorkService + Send + Sync + 'static;
     fn work_service(&self) -> &Self::WorkSvc;
+}
+
+pub trait HasWorkIdentityRepository: Clone + Send + Sync + 'static {
+    type WorkIdentityRepo: WorkIdentityRepository + Send + Sync + 'static;
+    fn work_identity_repo(&self) -> &Self::WorkIdentityRepo;
 }
 
 pub trait HasFileService: Clone + Send + Sync + 'static {

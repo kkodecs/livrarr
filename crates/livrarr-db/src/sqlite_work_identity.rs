@@ -585,4 +585,114 @@ impl WorkIdentityRepository for SqliteDb {
 
         Ok(())
     }
+
+    async fn record_pending_anchor(
+        &self,
+        work_id: WorkId,
+        anchor_type: AnchorType,
+        value: &str,
+    ) -> Result<(), WorkIdentityError> {
+        if value.trim().is_empty() {
+            return Err(WorkIdentityError::InvalidAnchorValue);
+        }
+        // A fuzzy-guessed anchor lives only in the ledger as a pending guess: it
+        // never syncs the denormalized works.* column enrichment reads, so a wrong
+        // guess can be neither fetched nor displayed until a user affirms it. The
+        // ON CONFLICT guard refuses to downgrade an already-confirmed anchor.
+        let now = Utc::now().to_rfc3339();
+        let anchor_type_str = anchor_type.as_str().to_string();
+
+        sqlx::query(
+            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
+             VALUES (?1, ?2, ?3, 'pending', 'auto_search', ?4, (SELECT user_id FROM works WHERE id = ?1))
+             ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
+                 confidence = 'pending',
+                 setter = 'auto_search',
+                 set_at = ?4
+             WHERE work_identity_anchors.confidence != 'confirmed'",
+        )
+        .bind(work_id)
+        .bind(&anchor_type_str)
+        .bind(value)
+        .bind(&now)
+        .execute(self.pool())
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn bump_anchor_attempt(
+        &self,
+        work_id: WorkId,
+        anchor_type: AnchorType,
+    ) -> Result<(), WorkIdentityError> {
+        let now = Utc::now().to_rfc3339();
+        let anchor_type_str = anchor_type.as_str().to_string();
+        sqlx::query(
+            "INSERT INTO work_anchor_dead_ends (work_id, anchor_type, attempt_count, last_attempt_at, user_id)
+             VALUES (?1, ?2, 1, ?3, (SELECT user_id FROM works WHERE id = ?1))
+             ON CONFLICT (work_id, anchor_type) DO UPDATE SET
+                 attempt_count = attempt_count + 1,
+                 last_attempt_at = ?3",
+        )
+        .bind(work_id)
+        .bind(&anchor_type_str)
+        .bind(&now)
+        .execute(self.pool())
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn list_anchor_dead_ends(
+        &self,
+        work_id: WorkId,
+    ) -> Result<Vec<AnchorDeadEnd>, WorkIdentityError> {
+        let rows: Vec<(String, i64, String)> = sqlx::query_as(
+            "SELECT anchor_type, attempt_count, last_attempt_at
+             FROM work_anchor_dead_ends WHERE work_id = ?1",
+        )
+        .bind(work_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(anchor_type, attempt_count, last_attempt_at)| AnchorDeadEnd {
+                    work_id,
+                    anchor_type: AnchorType::new(anchor_type),
+                    attempt_count: attempt_count as u32,
+                    last_attempt_at: chrono::DateTime::parse_from_rfc3339(&last_attempt_at)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                },
+            )
+            .collect())
+    }
+
+    async fn clear_anchor_dead_end(
+        &self,
+        work_id: WorkId,
+        anchor_type: AnchorType,
+    ) -> Result<(), WorkIdentityError> {
+        sqlx::query("DELETE FROM work_anchor_dead_ends WHERE work_id = ?1 AND anchor_type = ?2")
+            .bind(work_id)
+            .bind(anchor_type.as_str())
+            .execute(self.pool())
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn clear_anchor_dead_ends(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
+        sqlx::query("DELETE FROM work_anchor_dead_ends WHERE work_id = ?1")
+            .bind(work_id)
+            .execute(self.pool())
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
+    }
 }

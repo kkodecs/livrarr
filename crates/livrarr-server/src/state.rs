@@ -206,6 +206,13 @@ pub struct AppState {
     pub trusted_origins_rebuilder: TrustedOriginsRebuilderImpl,
 }
 
+impl livrarr_handlers::context::HasWorkIdentityRepository for AppState {
+    type WorkIdentityRepo = SqliteDb;
+    fn work_identity_repo(&self) -> &Self::WorkIdentityRepo {
+        &self.db
+    }
+}
+
 // =============================================================================
 // Accessor trait impls for AppContext infrastructure
 // =============================================================================

@@ -541,7 +541,11 @@ impl HardcoverClient {
             .await
             {
                 Ok(Some(hc)) => {
-                    return self.build_success(hc, &token).await;
+                    if let ProviderOutcome::Success(mut p) = self.build_success(hc, &token).await {
+                        p.isbn_13 = Some(normalized.clone());
+                        return ProviderOutcome::Success(p);
+                    }
+                    return ProviderOutcome::NotFound;
                 }
                 Ok(None) => {
                     tracing::debug!(isbn = %normalized, "HC ISBN search: no verified match");
@@ -713,9 +717,9 @@ impl OpenLibraryClient {
             match self.isbn_lookup(&normalized).await {
                 Ok(Some(ol_work_key)) => match query_ol_detail(&self.http, &ol_work_key).await {
                     Ok(detail) => {
-                        return ProviderOutcome::Success(Box::new(
-                            self.build_payload(&ol_work_key, detail),
-                        ));
+                        let mut payload = self.build_payload(&ol_work_key, detail);
+                        payload.isbn_13 = Some(normalized.clone());
+                        return ProviderOutcome::Success(Box::new(payload));
                     }
                     Err(e) => {
                         tracing::debug!(isbn = %normalized, error = %e, "OL ISBN detail miss");
@@ -760,7 +764,7 @@ impl OpenLibraryClient {
     ) -> NormalizedWorkDetail {
         let cover_url = detail
             .cover_id
-            .map(|id| format!("https://covers.openlibrary.org/b/id/{id}-L.jpg"));
+            .map(|id| format!("https://covers.openlibrary.org/b/id/{id}-L.jpg?default=false"));
         NormalizedWorkDetail {
             title: detail.title,
             description: detail.description,
@@ -892,6 +896,7 @@ struct GrCandidateText {
 struct ResolvedGrDetail {
     url: String,
     candidate: Option<GrCandidateText>,
+    via_isbn: Option<String>,
 }
 
 /// Real-network Goodreads adapter. Wraps the lifted
@@ -1057,6 +1062,7 @@ impl GoodreadsClient {
             Ok(None) => return ProviderOutcome::NotFound,
             Err(err) => return self.map_fetch_err(err),
         };
+        let via_isbn = resolved.via_isbn;
         let detail_url = resolved.url;
 
         // Extract gr_key from the resolved URL so the key survives a page
@@ -1070,7 +1076,7 @@ impl GoodreadsClient {
             Ok(h) => h,
             Err(err) => {
                 if !had_gr_key {
-                    if let Some(payload) = self
+                    if let Some(mut payload) = self
                         .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
                         .await
                     {
@@ -1079,6 +1085,9 @@ impl GoodreadsClient {
                             verified = payload.title.is_some(),
                             "GR page fetch failed; returning key payload"
                         );
+                        if let Some(ref isbn) = via_isbn {
+                            payload.isbn_13 = Some(isbn.clone());
+                        }
                         return ProviderOutcome::Success(Box::new(payload));
                     }
                 }
@@ -1087,7 +1096,11 @@ impl GoodreadsClient {
         };
 
         if let Some(detail) = goodreads::parse_detail_html(&html) {
-            return ProviderOutcome::Success(Box::new(self.normalize(&detail_url, detail)));
+            let mut payload = self.normalize(&detail_url, detail);
+            if let Some(ref isbn) = via_isbn {
+                payload.isbn_13 = Some(isbn.clone());
+            }
+            return ProviderOutcome::Success(Box::new(payload));
         }
 
         // Direct parse yielded nothing. Try LLM extraction when live config
@@ -1101,6 +1114,9 @@ impl GoodreadsClient {
                     if payload.gr_key.is_none() {
                         payload.gr_key = resolved_gr_key;
                     }
+                    if let Some(ref isbn) = via_isbn {
+                        payload.isbn_13 = Some(isbn.clone());
+                    }
                     return ProviderOutcome::Success(Box::new(payload));
                 }
                 Err(err) => return self.map_fetch_err(err),
@@ -1110,7 +1126,7 @@ impl GoodreadsClient {
         // All parse paths failed; fall back to a key payload carrying
         // whatever GR-sourced candidate text can vouch for the key.
         if !had_gr_key {
-            if let Some(payload) = self
+            if let Some(mut payload) = self
                 .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
                 .await
             {
@@ -1119,6 +1135,9 @@ impl GoodreadsClient {
                     verified = payload.title.is_some(),
                     "GR parse failed; returning key payload"
                 );
+                if let Some(ref isbn) = via_isbn {
+                    payload.isbn_13 = Some(isbn.clone());
+                }
                 return ProviderOutcome::Success(Box::new(payload));
             }
         }
@@ -1184,6 +1203,7 @@ impl GoodreadsClient {
             return Ok(Some(ResolvedGrDetail {
                 url: goodreads::detail_url_for_gr_key(&self.base_url, key),
                 candidate: None,
+                via_isbn: None,
             }));
         }
 
@@ -1215,6 +1235,7 @@ impl GoodreadsClient {
                                         title: hits[idx].title.clone(),
                                         author: hits[idx].author.clone(),
                                     }),
+                                    via_isbn: Some(normalized.clone()),
                                 }));
                             }
                             Ok(None) => {
@@ -1270,6 +1291,7 @@ impl GoodreadsClient {
                                 title: hits[idx].title.clone(),
                                 author: hits[idx].author.clone(),
                             }),
+                            via_isbn: None,
                         }));
                     }
                     Ok(None) => {
@@ -1293,6 +1315,7 @@ impl GoodreadsClient {
                     return Ok(Some(ResolvedGrDetail {
                         url: goodreads::detail_url_for_gr_key(&self.base_url, &key),
                         candidate: None,
+                        via_isbn: None,
                     }));
                 }
                 Ok(None) => {

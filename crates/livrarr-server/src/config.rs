@@ -23,6 +23,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub log: LogConfig,
+
+    #[serde(default)]
+    pub convergence: ConvergenceConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +141,56 @@ pub enum LogFormat {
 }
 
 // ---------------------------------------------------------------------------
+// ConvergenceConfig
+// ---------------------------------------------------------------------------
+
+/// [convergence] section — the background identity/enrichment completion sweep.
+///
+/// Ships disabled (`enabled = false`). Activation is an operational decision
+/// gated on the worst-case provider-volume estimate for the target library
+/// (REQ-007). `interval_secs` is both the tick cadence and the back-off applied
+/// to a still-incomplete work's next due time; `batch_size` caps how many works
+/// one tick processes per user; `attempt_threshold` is the per-anchor dead-end
+/// limit (a missing anchor is abandoned after this many failed chase attempts).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConvergenceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "default_convergence_interval_secs")]
+    pub interval_secs: u64,
+
+    #[serde(default = "default_convergence_batch_size")]
+    pub batch_size: i64,
+
+    #[serde(default = "default_convergence_attempt_threshold")]
+    pub attempt_threshold: u32,
+}
+
+impl Default for ConvergenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_convergence_interval_secs(),
+            batch_size: default_convergence_batch_size(),
+            attempt_threshold: default_convergence_attempt_threshold(),
+        }
+    }
+}
+
+fn default_convergence_interval_secs() -> u64 {
+    3600
+}
+
+fn default_convergence_batch_size() -> i64 {
+    25
+}
+
+fn default_convergence_attempt_threshold() -> u32 {
+    3
+}
+
+// ---------------------------------------------------------------------------
 // ConfigError
 // ---------------------------------------------------------------------------
 
@@ -202,6 +255,27 @@ pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
         }
     }
 
+    // convergence values must be positive — a zero interval would busy-loop the
+    // job runner; a non-positive batch or threshold is degenerate.
+    if config.convergence.interval_secs == 0 {
+        return Err(ConfigError::InvalidValue {
+            field: "convergence.interval_secs".to_string(),
+            message: "interval_secs must be at least 1".to_string(),
+        });
+    }
+    if config.convergence.batch_size < 1 {
+        return Err(ConfigError::InvalidValue {
+            field: "convergence.batch_size".to_string(),
+            message: "batch_size must be at least 1".to_string(),
+        });
+    }
+    if config.convergence.attempt_threshold < 1 {
+        return Err(ConfigError::InvalidValue {
+            field: "convergence.attempt_threshold".to_string(),
+            message: "attempt_threshold must be at least 1".to_string(),
+        });
+    }
+
     Ok(())
 }
 
@@ -233,10 +307,16 @@ fn parse_cidr(cidr: &str) -> Result<(), String> {
 ///
 /// Satisfies: RUNTIME-CONFIG-003
 pub fn warn_unknown_keys(raw: &toml::Value) {
-    const KNOWN_ROOT: &[&str] = &["server", "auth", "log"];
+    const KNOWN_ROOT: &[&str] = &["server", "auth", "log", "convergence"];
     const KNOWN_SERVER: &[&str] = &["bind_address", "port", "url_base"];
     const KNOWN_AUTH: &[&str] = &["external_header", "trusted_proxies"];
     const KNOWN_LOG: &[&str] = &["level", "format"];
+    const KNOWN_CONVERGENCE: &[&str] = &[
+        "enabled",
+        "interval_secs",
+        "batch_size",
+        "attempt_threshold",
+    ];
 
     if let Some(table) = raw.as_table() {
         for key in table.keys() {
@@ -265,6 +345,14 @@ pub fn warn_unknown_keys(raw: &toml::Value) {
             for key in log.keys() {
                 if !KNOWN_LOG.contains(&key.as_str()) {
                     warn!("Unknown config key: log.{key}");
+                }
+            }
+        }
+
+        if let Some(convergence) = table.get("convergence").and_then(|v| v.as_table()) {
+            for key in convergence.keys() {
+                if !KNOWN_CONVERGENCE.contains(&key.as_str()) {
+                    warn!("Unknown config key: convergence.{key}");
                 }
             }
         }

@@ -75,10 +75,13 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
         if seed.user_confirmed
             && (seed.ol_key.is_some() || seed.gr_key.is_some() || seed.hc_key.is_some())
         {
+            let identity = captured_from_seed(seed);
+            let provenance = provenance_all_hard(&identity);
             return Ok(Resolution::Resolved {
-                identity: captured_from_seed(seed),
+                identity,
                 method: method_for_seed(seed),
                 candidate_id: CandidateId(Uuid::new_v4().to_string()),
+                provenance,
             });
         }
 
@@ -153,17 +156,20 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
         // seed is transiently unresolved and converges on a later pass (REQ-025).
         if responders.is_empty() {
             let captured = captured_from_seed(seed);
+            let provenance = provenance_all_hard(&captured);
             if seed_has_hard_id(seed) {
                 return Ok(Resolution::Resolved {
                     identity: captured,
                     method: method_for_seed(seed),
                     candidate_id,
+                    provenance,
                 });
             }
             return Ok(Resolution::Unresolved {
                 captured,
                 reason: PendingReason::NoCandidates,
                 candidate_id: None,
+                provenance,
             });
         }
 
@@ -308,10 +314,13 @@ pub fn run_quorum(
     entries.sort_by_key(|(p, _)| format!("{p:?}"));
     let items: Vec<&NormalizedWorkDetail> = entries.into_iter().map(|(_, d)| d).collect();
     if items.is_empty() {
+        let captured = captured_from_seed(seed);
+        let provenance = provenance_all_hard(&captured);
         return Resolution::Unresolved {
-            captured: captured_from_seed(seed),
+            captured,
             reason: PendingReason::NoCandidates,
             candidate_id: None,
+            provenance,
         };
     }
 
@@ -374,7 +383,7 @@ pub fn run_quorum(
         let tied: Vec<CapturedIdentity> = competing
             .iter()
             .take_while(|c| c.len() == tie_len)
-            .map(|c| project_cluster(c, &items, seed))
+            .map(|c| project_cluster(c, &items, seed).0)
             .collect();
         let rep_idx = *top
             .iter()
@@ -383,7 +392,7 @@ pub fn run_quorum(
         let rep = items[rep_idx];
         return Resolution::Conflict {
             conflict: quorum_tie_conflict(rep, seed),
-            captured: project_cluster(top, &items, seed),
+            captured: project_cluster(top, &items, seed).0,
             tied,
         };
     }
@@ -391,10 +400,12 @@ pub fn run_quorum(
     // The winning cluster projects to its most-anchored member plus every
     // anchor/bridge the other members contribute (convergence adds, never
     // clobbers) — the same projection the tie branch uses (R-001).
+    let (identity, provenance) = project_cluster(top, &items, seed);
     Resolution::Resolved {
-        identity: project_cluster(top, &items, seed),
+        identity,
         method: method_for_seed(seed),
         candidate_id: CandidateId(String::new()),
+        provenance,
     }
 }
 
@@ -551,26 +562,99 @@ fn captured_from_detail(d: &NormalizedWorkDetail, seed: &WorkSeed) -> CapturedId
     }
 }
 
-/// Project a cluster to a single `CapturedIdentity`: the most-anchored member
-/// as the base, then merge every member's missing anchors/bridges (additive,
-/// never clobbering). This is exactly the winning (`Resolved`) path's
-/// projection, extracted so the no-majority tie branch reuses it — a tied
-/// cluster whose provider-sorted-first member is an edition bridge must still
-/// expose the work anchor a later member carries (R-001).
+/// Project a cluster to a single `CapturedIdentity` plus the per-anchor
+/// [`AnchorProvenance`] describing how each anchor matched. The identity is
+/// byte-identical to the pre-provenance projection (most-anchored member as the
+/// base, then additive merge of every member's missing anchors — never
+/// clobbering). Provenance records, per anchor, the [`MatchBasis`] of the FIRST
+/// detail to contribute it; the basis is read from each RAW detail (never from
+/// `cap`, whose isbn/asin may be seed-backfilled — reading `cap` would misread
+/// the seed bridge as Hard). Extracted so the no-majority tie branch reuses it
+/// (R-001).
 fn project_cluster(
     cluster: &[usize],
     items: &[&NormalizedWorkDetail],
     seed: &WorkSeed,
-) -> CapturedIdentity {
+) -> (CapturedIdentity, AnchorProvenance) {
     let rep_idx = *cluster
         .iter()
         .max_by_key(|&&i| anchor_count(items[i]))
         .expect("non-empty cluster");
     let mut cap = captured_from_detail(items[rep_idx], seed);
-    for &i in cluster {
-        cap.merge_missing(&captured_from_detail(items[i], seed));
+    let mut prov = AnchorProvenance::default();
+    let rep_basis = basis_of(items[rep_idx], seed);
+    if cap.ol_key.is_some() {
+        prov.ol_key = Some(rep_basis);
     }
-    cap
+    if cap.gr_key.is_some() {
+        prov.gr_key = Some(rep_basis);
+    }
+    if cap.hc_key.is_some() {
+        prov.hc_key = Some(rep_basis);
+    }
+    if cap.isbn_13.is_some() {
+        prov.isbn_13 = Some(rep_basis);
+    }
+    if cap.asin.is_some() {
+        prov.asin = Some(rep_basis);
+    }
+    for &i in cluster {
+        let had_ol = cap.ol_key.is_some();
+        let had_gr = cap.gr_key.is_some();
+        let had_hc = cap.hc_key.is_some();
+        let had_isbn = cap.isbn_13.is_some();
+        let had_asin = cap.asin.is_some();
+        cap.merge_missing(&captured_from_detail(items[i], seed));
+        let basis = basis_of(items[i], seed);
+        if !had_ol && cap.ol_key.is_some() {
+            prov.ol_key = Some(basis);
+        }
+        if !had_gr && cap.gr_key.is_some() {
+            prov.gr_key = Some(basis);
+        }
+        if !had_hc && cap.hc_key.is_some() {
+            prov.hc_key = Some(basis);
+        }
+        if !had_isbn && cap.isbn_13.is_some() {
+            prov.isbn_13 = Some(basis);
+        }
+        if !had_asin && cap.asin.is_some() {
+            prov.asin = Some(basis);
+        }
+    }
+    (cap, prov)
+}
+
+/// The [`MatchBasis`] of a single provider detail: `Hard` iff the RAW record
+/// shares a hard identifier the seed already carries (an exact cross-reference),
+/// otherwise `Fuzzy` (it matched on title/author only). Every anchor a given
+/// detail contributes shares this basis. Reads the raw detail, NOT a
+/// seed-backfilled `CapturedIdentity` (the safe/guessed split, REQ-003/004).
+fn basis_of(detail: &NormalizedWorkDetail, seed: &WorkSeed) -> MatchBasis {
+    let shares = opt_eq(&seed.ol_key, &detail.ol_key)
+        || opt_eq(&seed.gr_key, &detail.gr_key)
+        || opt_eq(&seed.hc_key, &detail.hc_key)
+        || opt_eq(&seed.isbn_13, &detail.isbn_13)
+        || opt_eq(&seed.asin, &detail.asin);
+    if shares {
+        MatchBasis::Hard
+    } else {
+        MatchBasis::Fuzzy
+    }
+}
+
+/// Provenance for an identity captured directly from the seed (a user's pick or
+/// the work's own seeded ids): every present anchor is `Hard` — a seed's own
+/// identifiers are established, not fuzzy guesses.
+fn provenance_all_hard(cap: &CapturedIdentity) -> AnchorProvenance {
+    let hard = |v: &Option<String>| v.as_ref().map(|_| MatchBasis::Hard);
+    AnchorProvenance {
+        ol_key: hard(&cap.ol_key),
+        gr_key: hard(&cap.gr_key),
+        hc_key: hard(&cap.hc_key),
+        isbn_13: hard(&cap.isbn_13),
+        asin: hard(&cap.asin),
+    }
 }
 
 fn incoming_from_detail(d: &NormalizedWorkDetail, seed: &WorkSeed) -> IncomingConflictPayload {

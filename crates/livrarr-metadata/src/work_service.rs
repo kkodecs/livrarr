@@ -226,6 +226,45 @@ impl livrarr_domain::services::TagService for StubTagService {
     }
 }
 
+/// The dead-end attempt threshold above which a missing anchor is no longer
+/// chased (REQ-009, PO-locked at 3). The background convergence job reads its
+/// threshold from `[convergence]` config; the synchronous refresh gate uses
+/// this default directly.
+const DEAD_END_THRESHOLD: u32 = 3;
+
+/// The hard-anchor types still worth chasing on a work: a `works.*` column that
+/// is NULL, holds no pending (fuzzy-guessed) ledger row, and has not reached the
+/// dead-end attempt `threshold`. Shared by the refresh gate (Insertion B) and the
+/// background convergence loop so both agree on what "still obtainable" means
+/// (REQ-006, RE-007).
+fn chaseable_anchor_types(
+    work: &Work,
+    anchors: &[livrarr_domain::identity::WorkIdentityAnchor],
+    dead_ends: &[livrarr_domain::identity::AnchorDeadEnd],
+    threshold: u32,
+) -> Vec<livrarr_domain::identity::AnchorType> {
+    use livrarr_domain::identity::{AnchorConfidence, AnchorType};
+    [
+        (AnchorType::OL_WORK, work.ol_key.is_none()),
+        (AnchorType::GR_WORK, work.gr_key.is_none()),
+        (AnchorType::HC_WORK, work.hc_key.is_none()),
+        (AnchorType::ISBN_13, work.isbn_13.is_none()),
+        (AnchorType::ASIN, work.asin.is_none()),
+    ]
+    .into_iter()
+    .filter(|&(anchor_type, missing)| {
+        missing
+            && !anchors.iter().any(|a| {
+                a.anchor_type.as_str() == anchor_type && a.confidence == AnchorConfidence::Pending
+            })
+            && !dead_ends
+                .iter()
+                .any(|d| d.anchor_type.as_str() == anchor_type && d.attempt_count >= threshold)
+    })
+    .map(|(anchor_type, _)| AnchorType::new(anchor_type))
+    .collect()
+}
+
 /// Map a candidate's provenance to the conflict-attribution source so a raised
 /// identity conflict reflects the creation path that produced it (REQ-020, D-017).
 fn conflict_source_for(setter: ProvenanceSetter) -> livrarr_domain::identity::ConflictSource {
@@ -439,6 +478,23 @@ where
         // (REQ-014/016, D-013) — written at create and used to gate enrichment.
         let derived_identity = candidate.identity.derived_identity_status();
 
+        // The originating door's identity patience (REQ-005) + conflict
+        // attribution (REQ-020), threaded to the one identity road through the
+        // chokepoint (ensure_identity_and_enrichment / settle_identity).
+        // Spawned/batch import doors resolve in Background; a person-facing add
+        // resolves Interactive. Author-monitor seeds a hard key and never reaches
+        // the anchorless leg (the RE-009 exception).
+        let identity_setter = candidate
+            .provenance_setter
+            .unwrap_or(ProvenanceSetter::User);
+        let identity_source = conflict_source_for(identity_setter);
+        let identity_mode = match identity_setter {
+            ProvenanceSetter::Import | ProvenanceSetter::Imported => {
+                livrarr_domain::identity::IdentityMode::Background
+            }
+            _ => livrarr_domain::identity::IdentityMode::Interactive,
+        };
+
         match &candidate.identity {
             IdentityState::Confirmed { anchors, .. } => {
                 // Step 1: anchor match over the work-anchor types the candidate
@@ -488,6 +544,8 @@ where
                             work.id,
                             candidate.source_provider_data,
                             None,
+                            identity_mode,
+                            identity_source,
                         )
                         .await;
                     let work = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -541,6 +599,8 @@ where
                             existing.id,
                             candidate.source_provider_data.clone(),
                             None,
+                            identity_mode,
+                            identity_source,
                         )
                         .await;
                     let work = self
@@ -589,6 +649,8 @@ where
                             work.id,
                             candidate.source_provider_data.clone(),
                             None,
+                            identity_mode,
+                            identity_source,
                         )
                         .await;
                     let work = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -669,6 +731,8 @@ where
                             author_created,
                             author_id,
                             candidate.source_provider_data,
+                            identity_mode,
+                            identity_source,
                         )
                         .await;
                 }
@@ -716,6 +780,8 @@ where
                     candidate.source_provider_data,
                     derived_identity,
                     candidate.candidate_id.as_ref(),
+                    identity_mode,
+                    identity_source,
                 )
                 .await
             }
@@ -797,6 +863,8 @@ where
                             author_created,
                             author_id,
                             candidate.source_provider_data,
+                            identity_mode,
+                            identity_source,
                         )
                         .await;
                 }
@@ -834,6 +902,8 @@ where
                     candidate.source_provider_data,
                     derived_identity,
                     candidate.candidate_id.as_ref(),
+                    identity_mode,
+                    identity_source,
                 )
                 .await
             }
@@ -919,6 +989,7 @@ where
                 identity,
                 method,
                 candidate_id,
+                ..
             } => ResolvedIdentity {
                 language: identity.language.clone(),
                 identity: IdentityState::Confirmed {
@@ -943,6 +1014,7 @@ where
                 captured,
                 reason,
                 candidate_id,
+                ..
             } => ResolvedIdentity {
                 language: captured.language.clone(),
                 identity: IdentityState::Pending {
@@ -1304,88 +1376,48 @@ where
             tracing::warn!("enrichment reset_for_manual_refresh failed: {e}");
         }
 
-        // REQ-008 + REQ-001 (sprint-e-refresh-gate): identity anchor-completion
-        // precedes the scatter on every refresh door (single + bulk + retry
-        // funnel through this fn), but ONLY for works that are not yet
-        // Confirmed. A Confirmed work already holds its work anchor; re-chasing
-        // the remaining missing anchors (e.g. an unresolvable gr_key, incl. an
-        // LLM chase) on every refresh is wasted synchronous work and is the
-        // dominant refresh cost. The status is read from the pre-reset snapshot
-        // (Q-002): reset_for_manual_refresh only promotes upward from NotFound
-        // and never demotes Confirmed, so a just-recovered work still completes.
+        // REQ-002/REQ-006 (id-completeness): re-chase a work's still-obtainable
+        // hard anchors via the one identity road on every refresh door (single +
+        // bulk + retry all funnel through here). "Obtainable" = a NULL works.*
+        // column with no pending guess and below the dead-end threshold
+        // (chaseable_anchor_types). This SUPERSEDES the Sprint-E `!= Confirmed`
+        // gate (insight 55): a Confirmed work missing a secondary id is now
+        // topped up, while a fully-anchored or fully-dead-ended work skips the
+        // resolver fan-out entirely — the cost Sprint-E removed. settle_identity
+        // is the identity authority; the smart-skip it deliberately lacks
+        // (ST-002) is re-applied here via the chaseable gate.
         //
-        // NOTE: a manual refresh DELETES provider_retry_state (via
-        // reset_for_manual_refresh) before this point, so provider suppression
-        // does NOT survive a plain refresh. The anchor-poor completion inside
-        // run_unified_enrichment (door 2) is a separate path and still runs for
-        // works missing every hard anchor (e.g. a GR-only work).
+        // NOTE: reset_for_manual_refresh above already DELETED provider_retry_state,
+        // so a refresh always re-attempts providers — no suppression survives.
         let mut work = work;
-        if work.identity_status != IdentityStatus::Confirmed {
-            if let Some(resolver) = self.resolver.as_ref() {
-                let now = chrono::Utc::now();
-                let suppressed: Vec<String> = self
-                    .db
-                    .list_retry_states(user_id, work_id)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|s| {
-                        s.last_outcome.is_some_and(|o| o.is_phase2_terminal())
-                            || s.next_attempt_at.is_some_and(|t| t > now)
-                    })
-                    .map(|s| s.provider.record_key().to_string())
-                    .collect();
-                // Identity-operation call records originate at the client layer.
-                let sink: Arc<dyn livrarr_domain::services::ProviderCallSink> =
-                    Arc::new(livrarr_domain::services::NoopCallSink);
-                match crate::async_resolver::complete_anchors(
+        if let Some(resolver) = self.resolver.as_ref() {
+            let anchors = self.db.list_anchors(work.id).await.unwrap_or_default();
+            let dead_ends = self
+                .db
+                .list_anchor_dead_ends(work.id)
+                .await
+                .unwrap_or_default();
+            if !chaseable_anchor_types(&work, &anchors, &dead_ends, DEAD_END_THRESHOLD).is_empty() {
+                match crate::async_resolver::settle_identity(
                     resolver.as_ref(),
                     &self.db,
                     user_id,
                     &work,
-                    &suppressed,
-                    &sink,
+                    livrarr_domain::identity::IdentityMode::Interactive,
+                    livrarr_domain::identity::ConflictSource::Refresh,
                 )
                 .await
                 {
-                    Ok(report) => {
-                        // Only a no-candidates completion ("not_found") parks the
-                        // provider (REQ-008 boundedness). A resolved pass that
-                        // merely lacked a provider's anchor ("unresolvable") and
-                        // an ambiguous arbitration outcome ("ambiguous" — tie or
-                        // needs-confirmation) record nothing and may be
-                        // re-attempted next refresh.
-                        for (provider, reason) in &report.skipped {
-                            if reason == "not_found" {
-                                if let Some(p) = provider_from_record_key(provider) {
-                                    if let Err(e) = self
-                                        .db
-                                        .record_terminal_outcome(
-                                            user_id,
-                                            work_id,
-                                            p,
-                                            livrarr_domain::OutcomeClass::NotFound,
-                                            None,
-                                        )
-                                        .await
-                                    {
-                                        tracing::warn!(
-                                            work_id,
-                                            "completion terminal record failed: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        if !report.resolved.is_empty() {
-                            // Fresh anchors feed the scatter.
-                            if let Ok(w) = self.db.get_work(user_id, work_id).await {
-                                work = w;
-                            }
+                    Ok(_) => {
+                        if let Ok(w) = self.db.get_work(user_id, work_id).await {
+                            work = w;
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(work_id, "anchor completion failed; scatter proceeds: {e}");
+                        tracing::warn!(
+                            work_id,
+                            "refresh identity settle failed; scatter proceeds: {e}"
+                        );
                     }
                 }
             }
@@ -1417,11 +1449,6 @@ where
         &self,
         user_id: UserId,
     ) -> Result<livrarr_domain::services::RetrySummary, WorkServiceError> {
-        use livrarr_domain::identity::{
-            AnchorSetter, AnchorType, LatencyTier, Resolution, WorkSeed,
-        };
-        use livrarr_domain::services::IdentityResolver;
-
         // Single pass over every "incomplete" work — Failed, Unenriched, or
         // identity-Pending — filtered in memory (like refresh_all). This REPLACES
         // the deleted background retry job: user-triggered, one pass, no recurring
@@ -1445,51 +1472,26 @@ where
         let mut recovered = 0usize;
 
         for work in &incomplete {
-            // A Pending work re-resolves identity first — the convergence the
-            // deleted job's identity source used to perform. Go straight to the
-            // resolver (not resolve_identity, which gates on a hard anchor) so a
-            // title+author seed still fans out. The promoted anchor survives the
-            // refresh below (reset_enrichment_for_refresh touches only enrichment).
+            // A Pending work re-resolves identity first via the one identity road
+            // (settle_identity) — Background mode so Audnexus stays eligible
+            // (REQ-001). The promoted anchor survives the refresh below
+            // (reset_enrichment_for_refresh touches only enrichment).
             if work.identity_status == IdentityStatus::Pending {
-                if let Some(resolver) = self.resolver.clone() {
-                    let seed = WorkSeed {
-                        ol_key: work.ol_key.clone(),
-                        gr_key: work.gr_key.clone(),
-                        hc_key: work.hc_key.clone(),
-                        isbn_13: work.isbn_13.clone(),
-                        asin: work.asin.clone(),
-                        title: Some(work.title.clone()),
-                        author_name: Some(work.author_name.clone()),
-                        language: work.language.clone(),
-                        series_name: work.series_name.clone(),
-                        year: work.year,
-                        user_confirmed: false,
-                    };
-                    if let Ok(Resolution::Resolved { identity, .. }) = resolver
-                        .resolve(user_id, &seed, LatencyTier::Background)
-                        .await
+                if let Some(resolver) = self.resolver.as_ref() {
+                    if let Err(e) = crate::async_resolver::settle_identity(
+                        resolver.as_ref(),
+                        &self.db,
+                        user_id,
+                        work,
+                        livrarr_domain::identity::IdentityMode::Background,
+                        livrarr_domain::identity::ConflictSource::ManualRetry,
+                    )
+                    .await
                     {
-                        // Persist the OL anchor when present (confirm_anchor writes
-                        // work_identity_anchors + the denormalized ol_key column).
-                        if let Some(ol_key) = identity.ol_key.as_deref() {
-                            let _ = self
-                                .db
-                                .confirm_anchor(
-                                    work.id,
-                                    AnchorType::new(AnchorType::OL_WORK),
-                                    ol_key,
-                                    AnchorSetter::AutoSearch,
-                                )
-                                .await;
-                        }
-                        // Settle the badge for ANY Resolved: confirm_anchor writes the
-                        // anchor but never the status, and resolve_identity (the
-                        // interactive door) confirms regardless of ol_key — match it,
-                        // or a Resolved-without-OL work stays stuck Pending.
-                        let _ = self
-                            .db
-                            .set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
-                            .await;
+                        tracing::warn!(
+                            work_id = work.id,
+                            "retry-incomplete identity settle failed: {e}"
+                        );
                     }
                 }
             }
@@ -1655,7 +1657,7 @@ where
         // results, instead of returning the first that answers. Goodreads joins
         // as a co-equal provider via its WAF-free autocomplete endpoint. Each
         // lookup is timeout-bounded so a slow scrape can't stall the search.
-        let provider_timeout = Duration::from_secs(8);
+        let provider_timeout = Duration::from_secs(10);
         let (gb, ol, hc, gr) = tokio::join!(
             tokio::time::timeout(provider_timeout, self.lookup_google_books(&term, lang)),
             tokio::time::timeout(provider_timeout, self.lookup_openlibrary(&term, lang)),
@@ -2043,6 +2045,153 @@ where
                 user_id,
             )
         })
+    }
+
+    async fn converge_work(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        threshold: u32,
+    ) -> Result<ConvergeOutcome, WorkServiceError> {
+        use livrarr_domain::identity::{
+            AnchorConfidence, AnchorType, ConflictSource, IdentityMode,
+        };
+        use livrarr_domain::IdentityStatus;
+
+        // Fresh row (R-10): the job hands us an id; re-read so we settle on truth.
+        let work = self.get(user_id, work_id).await?;
+        let was_pending = work.identity_status == IdentityStatus::Pending;
+
+        // The anchor slots that are currently NULL on works.*.
+        let missing_of = |w: &Work| -> Vec<String> {
+            [
+                (AnchorType::OL_WORK, w.ol_key.is_none()),
+                (AnchorType::GR_WORK, w.gr_key.is_none()),
+                (AnchorType::HC_WORK, w.hc_key.is_none()),
+                (AnchorType::ISBN_13, w.isbn_13.is_none()),
+                (AnchorType::ASIN, w.asin.is_none()),
+            ]
+            .into_iter()
+            .filter(|(_, missing)| *missing)
+            .map(|(t, _)| t.to_string())
+            .collect()
+        };
+        let before_missing = missing_of(&work);
+        let holds_anchor = before_missing.len() < 5;
+
+        let anchors = self.db.list_anchors(work_id).await.unwrap_or_default();
+        let dead_ends = self
+            .db
+            .list_anchor_dead_ends(work_id)
+            .await
+            .unwrap_or_default();
+        let chaseable = chaseable_anchor_types(&work, &anchors, &dead_ends, threshold);
+
+        // Step 0 — Pending dead-end (M9 / the convergence trap). settle_identity treats
+        // a NoCandidates Unresolved as TRANSIENT (ST-002) and keeps the work Pending, so
+        // re-settling a hopeless Pending work would fan out to providers every cadence
+        // forever. Terminalize to NeedsReview when a Pending work has no identity path:
+        // it holds NO hard anchor to resolve from (an anchorless, title-only work is not
+        // chased in the background), OR every still-missing anchor is already
+        // pending-guessed / at the dead-end threshold (chaseable empty).
+        //
+        // DIVERGENCE from ir-v2 convergence-orchestration step 0: the IR's
+        // `chaseable.is_empty()` (missing-based) does NOT catch an anchorless Pending
+        // work (all 5 missing -> chaseable non-empty). The behavioral contract
+        // (test_id_completeness converge_work_terminal, "Converge Pending No Chase")
+        // requires it to terminalize on the first pass — hence the `!holds_anchor`
+        // clause. [Flagged for cross-family review; Codex authored that test.]
+        if was_pending && (!holds_anchor || chaseable.is_empty()) {
+            self.db.set_needs_review(work_id).await.map_err(|e| {
+                WorkServiceError::Validation(format!("convergence set_needs_review failed: {e}"))
+            })?;
+            return Ok(ConvergeOutcome::Terminal);
+        }
+
+        // Step 1 — identity / ID-chasing leg via the one identity road. Settle ONLY when
+        // a chaseable missing anchor remains (R-5): a fully-anchored or fully-dead-ended
+        // Confirmed work is never fanned out; a Pending work that reached here still
+        // holds a chaseable bridge. Background keeps Audnexus eligible; Convergence
+        // attributes any raised conflict.
+        let mut work = work;
+        if !chaseable.is_empty() {
+            if let Some(resolver) = self.resolver.as_ref() {
+                if let Err(e) = crate::async_resolver::settle_identity(
+                    resolver.as_ref(),
+                    &self.db,
+                    user_id,
+                    &work,
+                    IdentityMode::Background,
+                    ConflictSource::Convergence,
+                )
+                .await
+                {
+                    tracing::warn!(work_id, "convergence identity settle failed: {e}");
+                }
+                work = self.get(user_id, work_id).await?;
+            }
+        }
+
+        // Step 2 — enrichment leg (Background path — NEVER refresh, RE-005). Runs when
+        // identity permits (settled) and enrichment is still incomplete.
+        let identity_permits = !matches!(
+            work.identity_status,
+            IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
+        );
+        let enrichment_incomplete = matches!(
+            work.enrichment_status,
+            EnrichmentStatus::Unenriched | EnrichmentStatus::Failed
+        );
+        if identity_permits && enrichment_incomplete {
+            let _ = self
+                .run_unified_enrichment(user_id, &work, None, EnrichmentMode::Background, None)
+                .await;
+            work = self.get(user_id, work_id).await?;
+        }
+
+        // Step 3 — dead-end accounting (R-1/R-2). A harvested anchor clears its counter;
+        // a chaseable anchor still missing and unguessed gets +1 (an at-threshold anchor
+        // is already excluded from `chaseable`, so it is never re-bumped).
+        let still_missing = missing_of(&work);
+        let anchors_after = self.db.list_anchors(work_id).await.unwrap_or_default();
+        let pending_after: Vec<String> = anchors_after
+            .iter()
+            .filter(|a| a.confidence == AnchorConfidence::Pending)
+            .map(|a| a.anchor_type.as_str().to_string())
+            .collect();
+        for t in &before_missing {
+            if !still_missing.contains(t) {
+                let _ = self
+                    .db
+                    .clear_anchor_dead_end(work_id, AnchorType::new(t))
+                    .await;
+            }
+        }
+        for at in &chaseable {
+            let key = at.as_str().to_string();
+            if still_missing.contains(&key) && !pending_after.contains(&key) {
+                let _ = self.db.bump_anchor_attempt(work_id, at.clone()).await;
+            }
+        }
+
+        // Step 4 — outcome for the job's pacing.
+        let outcome = if matches!(
+            work.identity_status,
+            IdentityStatus::NeedsReview | IdentityStatus::Conflict | IdentityStatus::NotFound
+        ) {
+            ConvergeOutcome::Terminal
+        } else if matches!(
+            work.identity_status,
+            IdentityStatus::Confirmed | IdentityStatus::Provisional
+        ) && matches!(
+            work.enrichment_status,
+            EnrichmentStatus::Enriched | EnrichmentStatus::Thin
+        ) {
+            ConvergeOutcome::Completed
+        } else {
+            ConvergeOutcome::StillIncomplete
+        };
+        Ok(outcome)
     }
 }
 
@@ -2506,12 +2655,7 @@ where
                     .and_then(|v| v.as_str())
                     .unwrap_or("Unknown")
                     .to_string();
-                let isbn_13 = doc.get("isbns").and_then(|v| v.as_array()).and_then(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .find(|s| s.len() == 13 && (s.starts_with("978") || s.starts_with("979")))
-                        .map(|s| s.to_string())
-                });
+
                 let cover_url = doc
                     .pointer("/image/url")
                     .and_then(|v| v.as_str())
@@ -2538,7 +2682,7 @@ where
                     language: None,
                     detail_url: None,
                     rating: None,
-                    isbn_13,
+                    isbn_13: None,
                     candidate_id: None,
                     hc_key,
                     gr_key: None,
@@ -2648,21 +2792,21 @@ where
 
     /// REQ-010 (#144): the single identity+enrichment decision EVERY add
     /// outcome takes (created, anchor-matched, adopted, deduped, race-loser).
-    /// An anchor-less work first runs the add-time identity leg via the
-    /// composed resolver — `resolve_identity` is the wrong vehicle (it
-    /// hard-filters anchor-less seeds to Pending with zero fan-out); the
-    /// resolver's own fan-out is the identity surface where text tiers
-    /// legally remain post-REQ-006. Enrichment then runs only when the
-    /// identity permits and the work needs it — an already-Enriched dedup
-    /// re-add is never re-enriched.
+    /// An anchor-less work first runs the add-time identity leg via the one
+    /// identity road (`settle_identity`) — the engine resolves the seed,
+    /// partitions hard vs fuzzy anchors (REQ-004), and raises the badge itself.
+    /// Enrichment then runs only when the identity permits and the work needs it
+    /// — an already-Enriched dedup re-add is never re-enriched. `(mode, source)`
+    /// are threaded from the originating door (REQ-001/005).
     async fn ensure_identity_and_enrichment(
         &self,
         user_id: UserId,
         work_id: WorkId,
         source_provider_data: Option<SourceProviderData>,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        mode: livrarr_domain::identity::IdentityMode,
+        source: livrarr_domain::identity::ConflictSource,
     ) -> (EnrichmentStatus, bool) {
-        use livrarr_domain::identity::{LatencyTier, Resolution, WorkSeed};
         use livrarr_domain::IdentityStatus;
 
         let mut work = match self.db.get_work(user_id, work_id).await {
@@ -2683,58 +2827,27 @@ where
             && work.asin.is_none();
         if anchorless && work.identity_status != IdentityStatus::Conflict {
             if let Some(resolver) = self.resolver.as_ref() {
-                let seed = WorkSeed {
-                    ol_key: None,
-                    gr_key: None,
-                    hc_key: None,
-                    isbn_13: None,
-                    asin: None,
-                    title: Some(work.title.clone()),
-                    author_name: Some(work.author_name.clone()),
-                    language: work.language.clone(),
-                    series_name: work.series_name.clone(),
-                    year: work.year,
-                    user_confirmed: false,
-                };
-                match resolver
-                    .resolve(user_id, &seed, LatencyTier::Interactive)
-                    .await
+                // The add-time identity leg routes through the one identity road
+                // (settle_identity): resolve the anchorless seed, hard/fuzzy
+                // split (REQ-004), monotonic badge raise. (mode, source) come
+                // from the door.
+                match crate::async_resolver::settle_identity(
+                    resolver.as_ref(),
+                    &self.db,
+                    user_id,
+                    &work,
+                    mode,
+                    source,
+                )
+                .await
                 {
-                    Ok(Resolution::Resolved { identity, .. }) => {
-                        if let Err(e) = self.db.merge_missing_anchors(work.id, &identity).await {
-                            tracing::warn!(
-                                work_id,
-                                "add-time identity leg: anchor merge failed: {e}"
-                            );
-                        } else {
-                            // A work anchor confirms identity; a bridge-only
-                            // resolve is the de-facto Provisional badge.
-                            let status = if identity.ol_key.is_some()
-                                || identity.gr_key.is_some()
-                                || identity.hc_key.is_some()
-                            {
-                                IdentityStatus::Confirmed
-                            } else {
-                                IdentityStatus::Provisional
-                            };
-                            if let Err(e) =
-                                self.db.set_identity_status(user_id, work.id, status).await
-                            {
-                                tracing::warn!(
-                                    work_id,
-                                    "add-time identity leg: status write failed: {e}"
-                                );
-                            }
-                            if let Ok(w) = self.db.get_work(user_id, work.id).await {
-                                work = w;
-                            }
+                    Ok(_) => {
+                        if let Ok(w) = self.db.get_work(user_id, work.id).await {
+                            work = w;
                         }
                     }
-                    // No fuzzy adoption: Unresolved/NeedsConfirmation/Conflict
-                    // keep the existing identity state.
-                    Ok(_) => {}
                     Err(e) => {
-                        tracing::warn!(work_id, "add-time identity leg failed: {e}");
+                        tracing::warn!(work_id, "add-time identity settle failed: {e}");
                     }
                 }
             } else {
@@ -2774,6 +2887,7 @@ where
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_race_loser(
         &self,
         user_id: UserId,
@@ -2781,9 +2895,18 @@ where
         author_created: bool,
         author_id: Option<i64>,
         source_provider_data: Option<SourceProviderData>,
+        mode: livrarr_domain::identity::IdentityMode,
+        source: livrarr_domain::identity::ConflictSource,
     ) -> Result<AddWorkResult, WorkServiceError> {
         let (enrichment_status, _identity_not_found) = self
-            .ensure_identity_and_enrichment(user_id, work.id, source_provider_data, None)
+            .ensure_identity_and_enrichment(
+                user_id,
+                work.id,
+                source_provider_data,
+                None,
+                mode,
+                source,
+            )
             .await;
         let work = self.db.get_work(user_id, work.id).await.unwrap_or(work);
         Ok(AddWorkResult {
@@ -2808,6 +2931,8 @@ where
         source_provider_data: Option<SourceProviderData>,
         derived_identity: livrarr_domain::IdentityStatus,
         candidate_id: Option<&livrarr_domain::identity::CandidateId>,
+        mode: livrarr_domain::identity::IdentityMode,
+        source: livrarr_domain::identity::ConflictSource,
     ) -> Result<AddWorkResult, WorkServiceError> {
         use livrarr_domain::IdentityStatus;
 
@@ -2886,6 +3011,8 @@ where
                 work.id,
                 source_provider_data,
                 candidate_id.cloned(),
+                mode,
+                source,
             )
             .await;
 
@@ -2986,28 +3113,17 @@ where
             && work.hc_key.is_none()
         {
             if let Some(resolver) = self.resolver.as_ref() {
-                let now = chrono::Utc::now();
-                let suppressed: Vec<String> = self
-                    .db
-                    .list_retry_states(user_id, work_id)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|s| {
-                        s.last_outcome.is_some_and(|o| o.is_phase2_terminal())
-                            || s.next_attempt_at.is_some_and(|t| t > now)
-                    })
-                    .map(|s| s.provider.record_key().to_string())
-                    .collect();
-                let sink: Arc<dyn livrarr_domain::services::ProviderCallSink> =
-                    Arc::new(livrarr_domain::services::NoopCallSink);
-                if let Err(e) = crate::async_resolver::complete_anchors(
+                // Same identity anchor-completion the refresh door runs, via the
+                // one identity road (settle_identity). Background mode: this
+                // fires mid-enrichment for an anchor-poor work (e.g. a GR-only
+                // add) so fresh anchors land in the DB before the scatter reads.
+                if let Err(e) = crate::async_resolver::settle_identity(
                     resolver.as_ref(),
                     &self.db,
                     user_id,
                     work,
-                    &suppressed,
-                    &sink,
+                    livrarr_domain::identity::IdentityMode::Background,
+                    livrarr_domain::identity::ConflictSource::Refresh,
                 )
                 .await
                 {
@@ -3173,20 +3289,6 @@ where
 
         (final_status, identity_not_found)
     }
-}
-
-/// Reverse of `MetadataProvider::record_key` for completion skip reports.
-fn provider_from_record_key(key: &str) -> Option<livrarr_domain::MetadataProvider> {
-    use livrarr_domain::MetadataProvider as P;
-    Some(match key {
-        "hardcover" => P::Hardcover,
-        "openlibrary" => P::OpenLibrary,
-        "goodreads" => P::Goodreads,
-        "audnexus" => P::Audnexus,
-        "google_books" => P::GoogleBooks,
-        "audible" => P::Audible,
-        _ => return None,
-    })
 }
 
 async fn write_addtime_provenance<D: ProvenanceDb>(

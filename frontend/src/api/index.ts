@@ -88,6 +88,7 @@ import type {
   HealthSummaryResponse,
   ResumePromptDTO,
   AnchorDTO,
+  PendingAnchorDTO,
 } from "@/types/api";
 
 // Setup
@@ -195,6 +196,13 @@ export const refreshAllWorks = () =>
   apiFetch<void>("/work/refresh", { method: "POST" });
 export const retryAllIncomplete = () =>
   apiFetch<void>("/work/retry-incomplete", { method: "POST" });
+export const getPendingAnchors = (workId: number) =>
+  apiFetch<PendingAnchorDTO[]>(`/work/${workId}/pending-anchors`);
+export const affirmPendingAnchor = (workId: number, anchorType: string) =>
+  apiFetch<void>(
+    `/work/${workId}/pending-anchors/${encodeURIComponent(anchorType)}/affirm`,
+    { method: "POST" },
+  );
 
 // Authors
 export const lookupAuthors = (term: string) =>

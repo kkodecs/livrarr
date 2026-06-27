@@ -865,6 +865,16 @@ pub async fn import<S: ManualImportHandlerContext>(
         results.push(result);
     }
 
+    // Background refresh for each imported work: fills in anchors (GR/HC/ASIN)
+    // that initial enrichment misses because they require the identity road.
+    for work_id in results.iter().filter_map(|r| r.work_id) {
+        let s = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let _ = s.work_service().refresh(user_id, work_id).await;
+        });
+    }
+
     Ok(Json(ImportResponse { results }))
 }
 

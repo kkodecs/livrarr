@@ -265,6 +265,14 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/work/{id}/refresh",
             post(livrarr_handlers::work::refresh::<AppState>),
         )
+        .route(
+            "/work/{id}/pending-anchors",
+            get(livrarr_handlers::work::list_pending_anchors::<AppState>),
+        )
+        .route(
+            "/work/{id}/pending-anchors/{anchor_type}/affirm",
+            post(livrarr_handlers::work::affirm_pending_anchor::<AppState>),
+        )
         // Authors
         .route(
             "/author/lookup",

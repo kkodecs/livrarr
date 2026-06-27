@@ -264,6 +264,29 @@ impl WorkDb for SequencedApplyDb {
         self.inner.get_work(user_id, work_id).await
     }
 
+    async fn list_convergence_due(
+        &self,
+        user_id: UserId,
+        now: chrono::DateTime<chrono::Utc>,
+        threshold: u32,
+        limit: i64,
+    ) -> Result<Vec<WorkId>, DbError> {
+        self.inner
+            .list_convergence_due(user_id, now, threshold, limit)
+            .await
+    }
+
+    async fn set_next_convergence_at(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), DbError> {
+        self.inner
+            .set_next_convergence_at(user_id, work_id, at)
+            .await
+    }
+
     async fn list_works(&self, user_id: UserId) -> Result<Vec<Work>, DbError> {
         self.inner.list_works(user_id).await
     }

@@ -57,8 +57,15 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
     let tmp_path = cover_path.with_extension("jpg.tmp");
     let tmp_clone = tmp_path.clone();
     let target = cover_path.clone();
-    let bytes = resp.body;
-    let bytes_for_write = bytes.clone();
+    // Validate: reject grayscale images (OL placeholder pattern).
+    // If bytes aren't a recognisable image format, pass through unchanged.
+    let raw_bytes = resp.body;
+    if let Ok(img) = image::load_from_memory(&raw_bytes) {
+        if matches!(img.color(), image::ColorType::L8 | image::ColorType::L16 | image::ColorType::La8 | image::ColorType::La16) {
+            return Err("grayscale cover rejected (likely placeholder)".into());
+        }
+    }
+    let bytes_for_write = raw_bytes.clone();
     let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp_clone)?;
@@ -69,7 +76,7 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
     })
     .await;
     match result {
-        Ok(Ok(())) => Ok(bytes),
+        Ok(Ok(())) => Ok(raw_bytes),
         Ok(Err(e)) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             Err(Box::new(e))

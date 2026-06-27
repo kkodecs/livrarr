@@ -940,11 +940,15 @@ pub struct GoodreadsSeriesBook {
     pub gr_key: String,
     pub position: Option<f64>,
     pub year: Option<i32>,
+    pub cover_url: Option<String>,
 }
 
 /// Matches position headers: <h3...>Book 1</h3>, <h3...>Book 2.5</h3>
 static RE_SERIES_HEADING: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?si)<h3[^>]*>\s*Book\s+(\d+(?:\.\d+)?)\s*</h3>"#).unwrap());
+
+static RE_IMG_SRC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"src="(https?://[^"]+)""#).unwrap());
 
 /// Matches book title links after a heading.
 static RE_SERIES_BOOK: LazyLock<Regex> = LazyLock::new(|| {
@@ -1032,11 +1036,24 @@ pub fn parse_series_detail_html(html: &str) -> (Vec<GoodreadsSeriesBook>, bool) 
             title
         };
 
+        let cover_url = RE_IMG_SRC.captures_iter(search_region).find_map(|c| {
+            let url = c[1].to_string();
+            if url.contains("nophoto") || url.contains("loading-trans") {
+                return None;
+            }
+            if validate_cover_url(&url) {
+                Some(crate::provider_util::upscale_cover_url(&url))
+            } else {
+                None
+            }
+        });
+
         results.push(GoodreadsSeriesBook {
             title: clean_title,
             gr_key,
             position: Some(position),
             year,
+            cover_url,
         });
     }
 

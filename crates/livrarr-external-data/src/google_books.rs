@@ -458,6 +458,9 @@ pub fn score_candidates(work_title: &str, work_author: &str, items: &[GbVolume])
 // Field mapping
 // ---------------------------------------------------------------------------
 
+static RE_GB_SERIES: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\((.+?),\s*#(\d+(?:\.\d+)?)\)\s*$").unwrap());
+
 pub fn map_volume_to_detail(vi: &GbVolumeInfo) -> NormalizedWorkDetail {
     let description = vi.description.as_deref().map(strip_html_tags);
     let year = vi
@@ -471,6 +474,11 @@ pub fn map_volume_to_detail(vi: &GbVolumeInfo) -> NormalizedWorkDetail {
         .map(livrarr_domain::normalize_language);
     let cover_url = vi.image_links.as_ref().and_then(normalize_cover_url);
     let isbn_13 = extract_isbn13(&vi.industry_identifiers);
+    let (series_name, series_position) = vi
+        .title
+        .as_deref()
+        .and_then(|t| RE_GB_SERIES.captures(t).map(|c| (Some(c[1].to_string()), c[2].parse::<f64>().ok())))
+        .unwrap_or((None, None));
 
     NormalizedWorkDetail {
         title: vi.title.clone(),
@@ -478,8 +486,8 @@ pub fn map_volume_to_detail(vi: &GbVolumeInfo) -> NormalizedWorkDetail {
         author_name: vi.authors.as_ref().and_then(|a| a.first().cloned()),
         description,
         year,
-        series_name: None,
-        series_position: None,
+        series_name,
+        series_position,
         genres: vi.categories.clone(),
         language,
         page_count: vi.page_count,

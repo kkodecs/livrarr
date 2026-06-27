@@ -1,0 +1,151 @@
+# Architectural Contract — id-completeness
+# Machine-checkable rules enforced by the compliance gate (verify.py code + design).
+#
+# ENFORCEMENT NOTE (read before trusting these to fire automatically):
+#   * forbidden_pattern is a BLUNT global grep over ALL of source_dirs (crates/), via
+#     `grep -rn -E <pattern> crates/` (verify.py:499-507). A match ANYWHERE fails the code gate.
+#     It is safe ONLY for strings that must appear NOWHERE in source. So this contract uses
+#     forbidden_pattern ONLY to enforce DELETIONS (legacy symbols that must be gone post-cutover).
+#     Everything that is a module-scoped or semantic rule is a module_dependency or a
+#     review_enforced_invariant instead. (R-2, r1 gemini P0 — the original draft's `provider_retry_state`
+#     / `refresh(` / `cover_url|enrich_work` patterns would false-positive on legitimate code.)
+#   * module_dependency fires at the code gate ONLY for crates mapped in kk-build config.yaml
+#     `module_paths`; otherwise it is documentary. The AUTHORITATIVE crate-boundary check is
+#     `cargo tree -p <crate>` (must list none of the forbidden targets).
+
+metadata:
+  feature: id-completeness
+  spec_ref: spec-id-completeness.md
+  ir_ref: ir-v1-id-completeness.yaml
+
+module_dependency:
+  - source: livrarr-identity
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-metadata
+      - livrarr-enrichment
+      - livrarr-materialize
+      - livrarr-server
+      - livrarr-handlers
+    rationale: >-
+      resolver-provenance + identity-engine-harvest live here. They reach the database ONLY through
+      livrarr-domain traits (EnglishIdentityResolver, WorkIdentityRepository — incl. the NEW
+      record_pending_anchor / bump_anchor_attempt / list_anchor_dead_ends / clear_anchor_dead_ends,
+      impl'd by SqliteDb). The crate must not depend on livrarr-db nor on the orchestration/enrichment
+      crates. THIS RULE SUBSUMES "the engine writes no enrichment" (REQ-008): livrarr-identity cannot
+      call enrich_work / materialize / set_cover because it cannot depend on those crates — structural,
+      not a grep. Authoritative check: `cargo tree -p livrarr-identity` lists none of the targets. No
+      NEW edge from this feature.
+  - source: livrarr-domain
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-identity
+      - livrarr-metadata
+      - livrarr-enrichment
+      - livrarr-materialize
+      - livrarr-server
+      - livrarr-handlers
+    rationale: >-
+      domain is the sink. The NEW types (MatchBasis, AnchorProvenance, AnchorDeadEnd, the ConflictSource
+      variants) and the NEW WorkIdentityRepository methods add NO upstream edge.
+  - source: livrarr-handlers
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-metadata
+      - livrarr-tagwrite
+      - livrarr-download
+    rationale: >-
+      affirm-api stays behind the compile wall (insight 9b): it binds narrow Has* capability traits and
+      calls WorkIdentityRepository::list_anchors / confirm_anchor via the domain trait surface — no SQL,
+      no direct db/metadata dependency. Authoritative check: `cargo tree -p livrarr-handlers`.
+
+forbidden_pattern:
+  # ONLY deletion-enforcing strings (must appear NOWHERE post-cutover). See ENFORCEMENT NOTE.
+  - pattern: "converge_identity_pending|complete_anchors|is_terminal_pending"
+    description: >-
+      The legacy resolve->badge duplication the engine supersedes MUST be DELETED, not left dead
+      (design-uip-wiring §5). converge_identity_pending (async_resolver.rs:22) and complete_anchors
+      (async_resolver.rs:89) are re-pointed at settle_identity then removed; is_terminal_pending (the
+      buggy NoCandidates-terminalizing helper) is removed once they are gone. After cutover these three
+      symbols must have ZERO occurrences in source. NOTE (codex R-4, P2): the grep is blunt + global over
+      crates/, so ALL occurrences must go — INCLUDING doc comments / prose. The settle_identity doc comment
+      at async_resolver.rs:299 currently reads "Supersedes `converge_identity_pending` / `complete_anchors`";
+      scrub or reword it (and any other comment naming these) at code-stage cutover, not just the function
+      defs/call sites.
+    severity: P0
+    rationale: >-
+      REQ-001 'one identity road' + ST-002 (is_terminal_pending terminalizes NoCandidates, the corrected
+      bug). Safe as a global grep: all three are removed by this feature, so any surviving occurrence is a
+      real incomplete-cutover failure. (Same technique as contract-metadata-refactor.yaml's
+      try_reuse_cached_payloads deletion enforcement.)
+
+# Invariants that CANNOT be a safe global pattern (would false-positive on legitimate code) —
+# enforced by review + behavioral tests + module_dependency / cargo tree. The reviewer and the
+# code-stage auditor check these explicitly.
+review_enforced_invariants:
+  - id: RE-001
+    invariant: >-
+      SAFETY (load-bearing): a pending (fuzzy-guessed) anchor is written by record_pending_anchor to
+      work_identity_anchors ONLY — it MUST NOT write or sync the denormalized works.* column. Enrichment
+      reads IDs only from works.* (derive_anchor_query, provider_queue.rs:69), so this single property is
+      the entire wrong-guess firewall (REQ-004).
+    why_not_grep: "works.* column UPDATEs are pervasive and legitimate across livrarr-db; no string distinguishes a forbidden pending-sync from a legitimate confirmed-sync."
+    enforced_by: "The record_pending_anchor impl (NO works.* UPDATE — the inverse of confirm_anchor sqlite_work_identity.rs:71-103) + the AC-006 safety test (a pending ASIN yields SkippedNoAnchor/NotFound and is absent from works.asin until affirmed) + reviewer inspection of the impl."
+  - id: RE-002
+    invariant: >-
+      Matching logic UNCHANGED: resolver-provenance EXPOSES the basis agree()/run_quorum already decide;
+      it must not alter clustering, quorum, the Tier-B downgrade, or the provider fan-out DECISION. More
+      is reported (AnchorProvenance), the same is decided.
+    why_not_grep: "Not a string — a behavioral equivalence over the resolver's decision outcomes."
+    enforced_by: "Reviewer traces that no agree()/run_quorum/select_providers branch changes outcome; the existing resolver behavioral tests stay green; the new MatchBasis test asserts the tagging is additive."
+  - id: RE-003
+    invariant: >-
+      Provenance is SEED-relative: MatchBasis::Hard requires a hard identifier the WORK already holds,
+      computed on the RAW NormalizedWorkDetail (NOT captured_from_detail's seed-backfilled form, which
+      inherits the seed isbn). Two providers fuzzily corroborating each other on the wrong edition are
+      BOTH Fuzzy (the wrong-book trap).
+    why_not_grep: "A semantic predicate over how each anchor's basis is derived."
+    enforced_by: "Reviewer checks the predicate operates on the raw detail; the audiobook-poster-child test (a title-matched ASIN stays Fuzzy/held) + a shared-isbn-bridge test (Hard)."
+  - id: RE-004
+    invariant: >-
+      The convergence loop's SELECTION + PACING (convergence-job + db-convergence-selector) NEVER read or
+      write provider_retry_state (the provider rate-limit clock — empty for seeded-Pending works, deleted
+      by reset_for_manual_refresh). Convergence selects by STATUS via its own works.next_convergence_at
+      clock (design-convergence §2 / R-007 / R-008).
+    why_not_grep: "provider_retry_state appears legitimately in sqlite_retry_state.rs and the enrichment leg the loop TRIGGERS — a global grep false-positives (this is exactly the R-2 trap)."
+    enforced_by: "Reviewer confirms the convergence tick + list_convergence_due reference only next_convergence_at + work_anchor_dead_ends; the enrichment it triggers uses provider_retry_state normally and is exempt."
+  - id: RE-005
+    invariant: "The convergence loop invokes the BACKGROUND enrichment path, NEVER refresh() (which calls reset_for_manual_refresh and wipes provider_retry_state — design-convergence R-009)."
+    why_not_grep: "`refresh(` matches the method definition (work_service.rs) and every legitimate caller — a global grep would fail the build everywhere."
+    enforced_by: "Reviewer confirms the convergence tick calls the same Background enrichment path add() uses, not refresh()."
+  - id: RE-006
+    invariant: "The identity harvest writes ZERO enrichment/metadata payload during the identity step (REQ-008 one-way: identity -> enrichment, never the reverse)."
+    why_not_grep: "cover_url / enrich_work / set_cover / materialize appear pervasively and legitimately in livrarr-enrichment + livrarr-materialize — a global grep false-positives (the R-2 trap)."
+    enforced_by: "STRUCTURAL via the livrarr-identity module_dependency above (cannot depend on enrichment/materialize) — `cargo tree -p livrarr-identity`. Plus reviewer inspection of the settle_identity write-step."
+  - id: RE-007
+    invariant: >-
+      The loop converges: list_convergence_due selects a work only if it has at least one CHASEABLE
+      missing anchor (missing AND not pending-guessed AND attempt_count < threshold). No re-guess loop
+      (M9), no dead-end churn, no stranding of a chaseable anchor (REQ-006/009; D-CONVERGENCE-GUARDS).
+    why_not_grep: "A predicate over the selector SQL + the per-tick counter logic."
+    enforced_by: "The AC-010 (pending-guess work not re-selected) + AC-004 (all-dead-ended work not re-selected, converges) tests + reviewer trace of the selector predicate."
+  - id: RE-008
+    invariant: "Dead-end detection is in the convergence loop, not settle_identity (the resolver collapses NotFound and timeout to the same None, english_identity_resolver.rs:100 — R-1). A dead-end is a per-(work,anchor) attempt_count >= threshold, durable + clearable."
+    why_not_grep: "A placement + semantic rule."
+    enforced_by: "Reviewer confirms settle_identity does NOT call bump_anchor_attempt (the convergence tick does); the durability test (work_anchor_dead_ends survives reset_for_manual_refresh); the clear-on-try-again test."
+  - id: RE-009
+    invariant: "Author monitor is NOT routed through settle_identity (it asserts a hard OL key). 'Wire every door' = every door that RESOLVES identity (REQ-001, the deliberate exception)."
+    why_not_grep: "An absence-of-wiring assertion on a specific door."
+    enforced_by: "The AC-002 negative test (author monitor adds a work with no resolver fan-out)."
+  - id: RE-010
+    invariant: "Faithful fixtures: behavioral tests drive each door via its REAL entry path (no injected identity state) and assert it settles VIA settle_identity with the expected (mode, source) — not a legacy writer (insight 46)."
+    why_not_grep: "A test-construction discipline."
+    enforced_by: "Reviewer inspects the behavioral tests for injected end-states; real Resolution values + real starting badges on a real create_test_db()."
+  - id: RE-011
+    invariant: "REQ-007 is a BLOCKING pre-activation gate: the convergence job ships disabled-by-default until the worst-case daily Google Books call volume for the widened Confirmed backlog is computed <= GB daily quota AND the live DB is snapshotted (AC-011)."
+    why_not_grep: "An operational pre-activation step, not a source property."
+    enforced_by: "AC-011 (the documented volume calc + snapshot) + the job's disabled-by-default flag; reviewer confirms no default-on path."
+  - id: RE-012
+    invariant: "The engine never WRITES IdentityStatus::NotFound (inherited from the engine contract; NotFound has no live producer, ST-004). The harvest only reads/respects an existing NotFound terminal."
+    why_not_grep: "`set_identity_status(...NotFound)` could in principle appear in a legitimate read/guard context; the engine feature already enforces this, so re-adding a global pattern risks a duplicate false-positive."
+    enforced_by: "Inherited from the engine's own contract (contract-unified-identity-path.yaml) + reviewer check that the harvest adds no NotFound writer."

@@ -61,6 +61,7 @@ import {
 } from "@/utils/format";
 import { BookCover } from "@/components/BookCover";
 import ProgressBadge from "@/components/ProgressBadge";
+import { PendingAnchorBanner } from "@/components/PendingAnchorBanner";
 
 type ReleaseSortField = "title" | "indexer" | "size" | "seeders" | "leechers" | "publishDate";
 import type {
@@ -224,6 +225,8 @@ export default function WorkDetailPage() {
           }
           onEditCover={() => setEditOpen(true)}
         />
+
+        <PendingAnchorBanner workId={work.id} />
 
         <Tabs.Root defaultValue={initialTab} className="mt-6">
           <Tabs.List className="flex overflow-x-auto border-b border-border">

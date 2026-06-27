@@ -1,0 +1,247 @@
+metadata:
+  feature: "unified-identity-path"
+  stage: v2-operational
+  spec_ref: "spec-unified-identity-path.md"
+  ir_v1_ref: "ir-v1-unified-identity-path.yaml"
+  version: 1
+  round1_dispositions: >
+    Design r1: gemini PASS; codex FAIL (R-001 seed_from_work is private, R-002 Skipped variant not in IR v1).
+    BOTH ACCEPTED — R-001: colocate settle_identity in async_resolver.rs (the private seed_from_work + the
+    superseded primitives live there; zero visibility change). R-002: IdentityReport.verdict ->
+    Option<ResolverVerdictKind> (None on the terminal-guard no-op); the Skipped variant is dropped.
+  note: >
+    Extends IR v1 with pseudocode, call annotations, conditions, and TDD directives. IR v1 remains the
+    source of truth for system_architecture, languages, frameworks, shared_types, dependency_graph,
+    domain_entities, and data_flow. This document adds the operational layer only.
+
+# Inherited verbatim from IR v1 so the compliance gate can validate LIBRARY call annotations.
+approved_libraries:
+  - { name: "trait-variant", use: "Send-bounded async trait (existing convention)" }
+  - { name: "thiserror",     use: "WorkIdentityError (existing)" }
+  - { name: "sqlx",          use: "the two new badge-setter UPDATEs in livrarr-db (existing workspace dep)" }
+  - note: "NO new third-party dependency."
+
+modules:
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "domain-identity-engine-types"
+    crate: "livrarr-domain"
+    responsibility: >
+      New shared types (IdentityMode, IdentityReport, ResolverVerdictKind) + two new
+      WorkIdentityRepository method DECLARATIONS (set_identity_confirmed / set_identity_provisional).
+      Types only here; the impls live in db-identity-badge-setters.
+    dependencies: []
+    module_invariants:
+      - "IdentityMode is exactly two variants (Q-003, P5-locked) — never a third."
+      - "IdentityReport is audit-only: nothing reads it back to drive a write (REQ-008)."
+    capability_survey:
+      - { capability: "caller patience knob", existing_source: "LatencyTier (identity.rs:94) — 3-tier resolver pacing", reuse_decision: "NEW: binary IdentityMode that MAPS onto LatencyTier", rationale: "REQ-005 binary patience governs the badge decision; the 3rd tier (Bulk) is deferred pacing (Q-003/D-MODE). LatencyTier is the resolve() input, a different axis." }
+      - { capability: "operation report", existing_source: "AnchorCompletionReport (work_identity.rs:18)", reuse_decision: "NEW: IdentityReport (different shape — prior/final badge + verdict, not anchor-completion)", rationale: "REQ-008 audit of the badge transition" }
+      - { capability: "badge setters Confirmed/Provisional", existing_source: "WorkIdentityRepository already has set_identity_pending / set_needs_review / raise_identity_conflict (work_identity.rs:45-99)", reuse_decision: "NEW: add the 2 missing setters to the SAME trait", rationale: "completes the badge-write surface so the engine owns every transition (REQ-003/008)" }
+    public_api:
+      types:
+        - { kind: enum,   name: "IdentityMode",        note: "Interactive | Background (REQ-005)" }
+        - { kind: struct, name: "IdentityReport",      note: "{ prior_status, final_status, anchors_merged: Vec<String>, verdict: Option<ResolverVerdictKind> } (REQ-008, audit-only; verdict None on the terminal-guard no-op)" }
+        - { kind: enum,   name: "ResolverVerdictKind", note: "Resolved | NeedsConfirmation | Conflict | Unresolved — the 4 raw Resolution variants (matches IR v1). 'no resolve ran' is represented by IdentityReport.verdict = None, NOT a 5th variant (R-002 r1)" }
+        - { kind: "trait-method-decl", name: "WorkIdentityRepository::set_identity_confirmed", note: "async fn(&self, work_id: WorkId) -> Result<(), WorkIdentityError>; impl in db-identity-badge-setters" }
+        - { kind: "trait-method-decl", name: "WorkIdentityRepository::set_identity_provisional", note: "async fn(&self, work_id: WorkId) -> Result<(), WorkIdentityError>; impl in db-identity-badge-setters" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "identity-engine"
+    crate: "livrarr-identity"
+    responsibility: >
+      The one path: settle_identity. Resolve, map (verdict × current badge) → target badge monotonically, perform
+      the writes, return an audit report. IMPLEMENTED in async_resolver.rs, alongside converge_identity_pending /
+      complete_anchors (which it supersedes), so the PRIVATE seed_from_work helper is in scope without a visibility
+      change (R-001 r1).
+    dependencies: ["domain-identity-engine-types", "resolver-conflict-payload"]
+    module_invariants:
+      - "Writes ONLY identity (badge + anchors). Zero enrichment/metadata writes (REQ-004, one-way)."
+      - "Badge moves up only (Pending→Provisional→Confirmed) or to Conflict; never down (REQ-004/007)."
+      - "A no-responders (NoCandidates) / any transient Unresolved is NEVER turned terminal — stays Pending (ST-002). The legacy terminalize-on-no-candidates helper is not called."
+    capability_survey:
+      - { capability: "resolve identity (provider fan-out + quorum)", existing_source: "IdentityResolver::resolve (english_identity_resolver.rs:60)", reuse_decision: "REUSE as-is", rationale: "engine wraps the existing resolver; §4 forbids changing matching" }
+      - { capability: "build a WorkSeed from a Work", existing_source: "seed_from_work — PRIVATE fn (async_resolver.rs:277)", reuse_decision: "REUSE as-is by COLOCATING settle_identity in async_resolver.rs (same-module visibility; zero pub change). Alt (pub(crate) + separate file) rejected — colocation is the smaller change (R-001 r1)", rationale: "same seed converge_identity_pending builds" }
+      - { capability: "merge anchors additively", existing_source: "WorkIdentityRepository::merge_missing_anchors (sqlite_work_identity.rs:204)", reuse_decision: "REUSE", rationale: "monotonic, no-clobber (REQ-004)" }
+      - { capability: "detect established-anchor contradiction", existing_source: "WorkIdentityRepository::detect_conflicting_anchors (sqlite_work_identity.rs:241)", reuse_decision: "REUSE — call once per candidate captured set", rationale: "REQ-003/AC-018 contradiction-based settled rule (D-Q008)" }
+      - { capability: "set NeedsReview / Conflict badge", existing_source: "set_needs_review (sqlite_work_identity.rs:404) / raise_identity_conflict (:309, flips badge to 'conflict')", reuse_decision: "REUSE", rationale: "REQ-005/REQ-003" }
+      - { capability: "the resolve→badge wrapper itself", existing_source: "converge_identity_pending (async_resolver.rs:21), retry_all_incomplete (work_service.rs:1414), ensure_identity_and_enrichment (:2656)", reuse_decision: "SUPERSEDE — settle_identity is the single replacement (ST-003). NOT wired in this feature; the 3 copies stay until the wiring feature (§4/D-NOWIRE).", rationale: "REQ-001 single authority" }
+    public_api:
+      functions:
+        - name: "settle_identity"
+          inputs:
+            - { name: "resolver", type: "&R (R: EnglishIdentityResolver)" }
+            - { name: "repo",     type: "&D (D: WorkIdentityRepository)" }
+            - { name: "user_id",  type: "UserId" }
+            - { name: "work",     type: "&Work" }
+            - { name: "mode",     type: "IdentityMode" }
+            - { name: "source",   type: "ConflictSource" }
+          output: "Result<IdentityReport, WorkIdentityError>"
+          errors: ["WorkIdentityError (resolver/db propagation)"]
+          maps_reqs: ["REQ-001","REQ-002","REQ-003","REQ-004","REQ-005","REQ-006","REQ-007","REQ-008"]
+          pseudocode:
+            - "prior := work.identity_status."
+            - "REQ-006 terminal guard: if prior is Conflict | NotFound | NeedsReview → return IdentityReport{ prior, final_status: prior, anchors_merged: [], verdict: None } (no resolve ran, no write — idempotent no-op; covers AC-010/AC-012). Every resolved branch below sets verdict := Some(<matched Resolution variant>)."
+            - "seed := seed_from_work(work)."
+            - "tier := match mode { Interactive → LatencyTier::Interactive, Background → LatencyTier::Background } (Q-003/D-MODE; Bulk is not a mode)."
+            - "resolution := resolver.resolve(user_id, &seed, tier).await? (the existing fan-out + quorum; the only error path)."
+            - "merged := [] (collect anchor types newly written, for the report)."
+            - "match resolution:"
+            - "  Resolved{ identity, .. }: repo.merge_missing_anchors(work.id, &identity).await? (additive, REQ-004). target := if identity has a work anchor (ol_key|gr_key|hc_key non-empty) → Confirmed else → Provisional (REQ-003, mirrors derived_identity_status). Then MONOTONIC raise (REQ-004/007): if target==Confirmed and prior!=Confirmed → repo.set_identity_confirmed(work.id).await?; else if target==Provisional and prior==Pending → repo.set_identity_provisional(work.id).await?; else no badge write (already at/above target — covers AC-008/AC-011/AC-014). verdict := Resolved."
+            - "  Unresolved{ captured, .. }: repo.merge_missing_anchors(work.id, &captured).await? (absorb partial anchors). NO badge write — a transient/no-responders verdict keeps prior (Pending stays Pending; settled stays settled). ST-002: never terminalized regardless of mode (AC-003/004/006). verdict := Unresolved."
+            - "  NeedsConfirmation{ .. }: if prior==Pending then match mode { Background → repo.set_needs_review(work.id).await? (AC-016); Interactive → no write, stays Pending (AC-017) }. else (settled) → no write; a weak verdict never downgrades a settled badge (REQ-004). verdict := NeedsConfirmation."
+            - "  Conflict{ conflict, captured, tied }: if prior==Pending → repo.raise_identity_conflict(conflict).await? (records the tie row AND flips badge to Conflict; AC-007). else (settled, REQ-003 From-Provisional/From-Confirmed, D-Q008): contradictions := []; for cand in once(captured).chain(tied): contradictions.extend(repo.detect_conflicting_anchors(work.id, &cand, source).await?); if contradictions non-empty → for c in contradictions { repo.raise_identity_conflict(c).await? } (flips to Conflict, AC-018 true-clash branch); else → no write, preserve the settled badge (AC-018 anchorless/non-contradicting branch). verdict := Conflict."
+            - "final_status := the badge now in effect (prior, unless a setter above changed it; tracked locally)."
+            - "return IdentityReport{ prior, final_status, anchors_merged: merged, verdict }."
+          call_annotations:
+            - { call: "seed_from_work",                    type: "EXISTING", target: "livrarr-identity/async_resolver.rs:277 (private helper; settle_identity colocated in this file — R-001 r1)" }
+            - { call: "IdentityResolver::resolve",         type: "EXISTING", target: "livrarr-domain trait (impl english_identity_resolver.rs:60)" }
+            - { call: "WorkIdentityRepository::merge_missing_anchors",    type: "EXISTING", target: "livrarr-domain trait (impl sqlite_work_identity.rs:204)" }
+            - { call: "WorkIdentityRepository::detect_conflicting_anchors", type: "EXISTING", target: "livrarr-domain trait (impl sqlite_work_identity.rs:241)" }
+            - { call: "WorkIdentityRepository::set_needs_review",         type: "EXISTING", target: "livrarr-domain trait (impl sqlite_work_identity.rs:404)" }
+            - { call: "WorkIdentityRepository::raise_identity_conflict",  type: "EXISTING", target: "livrarr-domain trait (impl sqlite_work_identity.rs:309)" }
+            - { call: "WorkIdentityRepository::set_identity_confirmed",   type: "NEW", target: "domain-identity-engine-types / db-identity-badge-setters" }
+            - { call: "WorkIdentityRepository::set_identity_provisional", type: "NEW", target: "domain-identity-engine-types / db-identity-badge-setters" }
+            - { call: "std::iter::once / Iterator::chain", type: "STDLIB", target: "core::iter" }
+          preconditions:
+            - "work is persisted (has a real work.id) and carries its current identity_status + denormalized anchors."
+          postconditions:
+            - "work.identity_status is one of {Pending, Provisional, Confirmed, NeedsReview, Conflict} and >= prior in the monotonic order (Pending<Provisional<Confirmed; Conflict/NeedsReview are terminal side-states), OR unchanged."
+            - "No enrichment/metadata field was written (REQ-004)."
+            - "Any anchor present before the call is still present (no-clobber, REQ-004)."
+          invariants:
+            - "Mode changes ONLY the NeedsConfirmation-on-Pending branch; every other branch is mode-independent (REQ-005, AC-005)."
+          decisions:
+            - { key: "monotonic-raise-inline", value: "compute target then write only if it is a strict raise", rationale: "REQ-004/007 no-downgrade + idempotent re-run; avoids a redundant UPDATE on an already-correct badge" }
+            - { key: "settled-conflict-checks-all-tied", value: "loop detect_conflicting_anchors over captured + every tied cluster", rationale: "D-Q008/AC-018: the contradicting anchor may sit on a non-representative tied cluster (resolver-conflict-payload exposes them)" }
+            - { key: "pending-conflict-raises-resolver-conflict", value: "Pending + Conflict raises resolution.conflict directly (no detect_ call)", rationale: "a Pending work has no established anchor to contradict; the fresh tie itself is the conflict to surface (AC-007)" }
+          tdd_directives:
+            - "AC-001: Pending + Resolved(work anchor) → Confirmed, anchor persisted."
+            - "AC-002: Pending + Resolved(ISBN/ASIN only) → Provisional."
+            - "AC-003/004: Pending + Unresolved(NoCandidates) → stays Pending in BOTH modes (not NeedsReview)."
+            - "AC-006: Pending + Unresolved(OlUnavailable/MalformedResponse) → Pending, captured anchors merged."
+            - "AC-005: a resolvable work reaches the same badge+anchors under Interactive and Background."
+            - "AC-007: Pending + Conflict(quorum tie) → Conflict (terminal)."
+            - "AC-008: Confirmed work + a weaker Resolved(ISBN-only) re-run → stays Confirmed, established anchor intact."
+            - "AC-009: assert no enrichment/cover/description/series field changed across a settle."
+            - "AC-010: Conflict / NeedsReview / NotFound work → untouched (verdict None, no resolve ran)."
+            - "AC-011: re-run on a Confirmed work → no badge change, no duplicate anchor."
+            - "AC-012: engine never writes NotFound; a pre-existing NotFound row is left as-is."
+            - "AC-013: IdentityReport reflects what changed; the work is already written (no caller persist needed)."
+            - "AC-014: Provisional + Resolved(work anchor) → Confirmed, bridge anchors preserved."
+            - "AC-015: Provisional + non-contradicting verdict (ISBN-only / Unresolved / NeedsConfirmation / anchorless QuorumTie) → stays Provisional."
+            - "AC-016: Background + Pending + NeedsConfirmation → NeedsReview."
+            - "AC-017: Interactive + Pending + NeedsConfirmation → stays Pending."
+            - "AC-018 (the L1 case): Confirmed + Conflict where the DIFFERENT same-kind work anchor is on the NON-representative tied cluster → Conflict; Confirmed + anchorless QuorumTie → preserved."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "resolver-conflict-payload"
+    crate: "livrarr-identity (+ livrarr-domain type)"
+    responsibility: "Extend the QuorumTie Conflict payload to carry every tied cluster's anchors (Q-008), so settle_identity can detect a non-representative contradiction. Matching/clustering logic unchanged (§4)."
+    dependencies: ["domain-identity-engine-types"]
+    module_invariants:
+      - "Only the Conflict PAYLOAD grows; run_quorum's clustering, the agree() relation, the anchored-filter, and the winner selection are byte-for-byte unchanged — more is reported, the same is decided."
+    capability_survey:
+      - { capability: "all tied clusters at the tie point", existing_source: "run_quorum no_majority branch (english_identity_resolver.rs:366-373): `competing` is sorted desc and already holds every tied cluster", reuse_decision: "REUSE the data; ADD a projection of it onto the payload", rationale: "the tied clusters are in hand; only the return shape changes" }
+      - { capability: "captured-from-a-cluster", existing_source: "captured_from_detail (english_identity_resolver.rs)", reuse_decision: "REUSE per tied cluster's most-anchored member", rationale: "same projection already used for the representative" }
+    public_api:
+      types:
+        - { kind: "enum-variant-change", name: "Resolution::Conflict", note: "gains `tied: Vec<CapturedIdentity>` alongside the existing `conflict` + `captured`. captured stays (the representative, back-compat)." }
+      functions:
+        - name: "run_quorum (no_majority branch only)"
+          inputs: [{ name: "responders", type: "&HashMap<MetadataProvider, NormalizedWorkDetail>" }, { name: "seed", type: "&WorkSeed" }]
+          output: "Resolution"
+          errors: []
+          maps_reqs: ["REQ-003"]
+          pseudocode:
+            - "(unchanged up to the tie test) competing := anchored-filtered clusters sorted by size desc; top := competing[0]; no_majority := competing.len()>1 && competing[1].len()==top.len()."
+            - "if no_majority: tie_len := top.len(); tied := competing.iter().take_while(|c| c.len()==tie_len).map(|c| captured_from_detail(items[most_anchored_member(c)], seed)).collect()  — every cluster of the tied size, projected to its captured anchors."
+            - "rep := items[top[0]]; return Resolution::Conflict{ conflict: quorum_tie_conflict(rep, seed), captured: captured_from_detail(rep, seed), tied }."
+            - "(every other run_quorum branch — empty, single, majority winner — is unchanged and does not populate `tied`.)"
+          call_annotations:
+            - { call: "captured_from_detail",   type: "EXISTING", target: "livrarr-identity/english_identity_resolver.rs" }
+            - { call: "quorum_tie_conflict",    type: "EXISTING", target: "livrarr-identity/english_identity_resolver.rs" }
+            - { call: "Iterator::take_while/map/collect", type: "STDLIB", target: "core::iter" }
+          decisions:
+            - { key: "tied-on-Resolution-Conflict", value: "place `tied: Vec<CapturedIdentity>` on Resolution::Conflict (not on NewIdentityConflict)", rationale: "settle_identity reads it directly off the verdict; NewIdentityConflict stays the persistence row shape" }
+          tdd_directives:
+            - "an anchored 1-vs-1 tie (OL key X vs OL key Y) returns Conflict with tied containing BOTH X and Y captured sets."
+            - "an anchorless tie returns Conflict with tied sets that carry no work anchor."
+            - "a clear majority winner returns Resolved with empty/absent tied (unchanged)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "db-identity-badge-setters"
+    crate: "livrarr-db"
+    responsibility: "SqliteDb impls of the two new WorkIdentityRepository setters."
+    dependencies: ["domain-identity-engine-types"]
+    module_invariants:
+      - "Each setter writes ONLY the identity_status column for the one work; touches no anchor and no enrichment field."
+    capability_survey:
+      - { capability: "single-work badge UPDATE", existing_source: "set_needs_review (sqlite_work_identity.rs:404) — `UPDATE works SET identity_status=? WHERE id=?`", reuse_decision: "MIRROR exactly, with a different literal", rationale: "consistency with the sibling setter; work id is globally unique" }
+    public_api:
+      functions:
+        - name: "SqliteDb::set_identity_confirmed"
+          inputs: [{ name: "work_id", type: "WorkId" }]
+          output: "Result<(), WorkIdentityError>"
+          errors: ["WorkIdentityError::Db"]
+          maps_reqs: ["REQ-003","REQ-008"]
+          pseudocode:
+            - "sqlx::query(\"UPDATE works SET identity_status = 'confirmed' WHERE id = ?1\").bind(work_id).execute(pool).await, mapping any sqlx error to WorkIdentityError::Db."
+          call_annotations:
+            - { call: "sqlx::query/.bind/.execute", type: "LIBRARY", target: "sqlx" }
+          tdd_directives:
+            - "writes 'confirmed' for the given id; returns Ok; an unknown id is a 0-row Ok (no error)."
+        - name: "SqliteDb::set_identity_provisional"
+          inputs: [{ name: "work_id", type: "WorkId" }]
+          output: "Result<(), WorkIdentityError>"
+          errors: ["WorkIdentityError::Db"]
+          maps_reqs: ["REQ-003","REQ-008"]
+          pseudocode:
+            - "sqlx::query(\"UPDATE works SET identity_status = 'provisional' WHERE id = ?1\").bind(work_id).execute(pool).await, mapping any sqlx error to WorkIdentityError::Db."
+          call_annotations:
+            - { call: "sqlx::query/.bind/.execute", type: "LIBRARY", target: "sqlx" }
+          tdd_directives:
+            - "writes 'provisional' for the given id; returns Ok."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "behavioral-identity-engine-tests"
+    crate: "livrarr-behavioral (test target under tests/behavioral/)"
+    responsibility: >
+      Test doubles for settle_identity. AMENDED 2026-06-21 (Code stage, grounded against the source):
+      the workspace has NO shared WorkIdentityRepository stub — livrarr-behavioral/src/stubs.rs stubs
+      only HttpFetcher/LlmCaller/etc., and WorkIdentityRepository is exercised in tests via the REAL
+      in-memory SqliteDb (create_test_db(), livrarr-db `test-helpers`). So the engine's repo side runs
+      against a real DB (seed a real Work row + real starting identity_status + real anchors) and only
+      the RESOLVER is a scripted double (no live provider fan-out in a test). settle_identity runs
+      through the REAL function; assertions read the badge + anchors back from the DB and inspect the
+      returned IdentityReport. The RED tests are authored cross-family by Codex (OpenAI), not Anthropic.
+    dependencies: ["domain-identity-engine-types"]
+    module_invariants:
+      - "Faithful fixtures (contract reviewer_invariant): real Resolution values + a real starting badge on a real (in-memory) DB; NEVER inject the end-state. Assert by DB read-back + the IdentityReport, never by pre-setting the work's end badge."
+      - "No new stub repo is introduced — the real SqliteDb is the repository under test."
+    capability_survey:
+      - { capability: "WorkIdentityRepository under test", existing_source: "real SqliteDb via create_test_db() (in-memory); the established convention — NO WorkIdentityRepository stub exists in the workspace (grounded 2026-06-21)", reuse_decision: "REUSE the real in-memory SqliteDb; seed Work + starting badge + anchors per case", rationale: "more faithful than a hand-rolled stub for the AC-018 detect_conflicting_anchors / merge_missing_anchors SQL semantics; matches the codebase test pattern (supersedes the r1 plan to extend a stub that does not exist)" }
+      - { capability: "scripted resolver", existing_source: "per-test-file resolver doubles implementing EnglishIdentityResolver (e.g. StubResolver, tests/behavioral/test_wcc_async_resolver.rs:23)", reuse_decision: "NEW small programmable resolver returning a preset Resolution, modeled on StubResolver; local to the new test file", rationale: "the resolver is the only side that cannot be real in a test (faithful-fixture rule)" }
+    public_api:
+      functions:
+        - name: "ScriptedResolver::resolve (test-local double)"
+          inputs: [{ name: "user_id", type: "UserId" }, { name: "seed", type: "&WorkSeed" }, { name: "tier", type: "LatencyTier" }]
+          output: "Result<Resolution, WorkIdentityError>"
+          errors: ["WorkIdentityError"]
+          maps_reqs: ["REQ-001","REQ-005"]
+          pseudocode:
+            - "return the preset Resolution the test configured (Resolved / NeedsConfirmation / Conflict{with tied} / Unresolved); optionally assert tier matches the mode mapping for AC-005."
+          tdd_directives:
+            - "supports a Conflict with a multi-cluster `tied` set so the AC-018 non-representative case runs through the real engine + real detect_conflicting_anchors."
+        - name: "real-DB test harness"
+          inputs: []
+          output: "n/a"
+          maps_reqs: ["REQ-006","REQ-008"]
+          pseudocode:
+            - "create_test_db() -> (db, user_id); INSERT a Work with the case's starting identity_status + seed anchors; settle_identity(&scripted, &db, user_id, &work, mode, source).await; assert identity_status read back from db + merged anchors + the returned IdentityReport (a no-op case asserts the badge is UNCHANGED)."
+          call_annotations:
+            - { call: "create_test_db", type: "EXISTING", target: "livrarr-db test-helpers (in-memory SqliteDb)" }
+        - name: "test registration"
+          inputs: []
+          output: "n/a"
+          pseudocode:
+            - "add a [[test]] entry to crates/livrarr-behavioral/Cargo.toml -> tests/behavioral/test_unified_identity_path.rs; the tests/ dir is NOT auto-discovered (every behavioral test is explicitly registered) — without it verify.py tests sees nothing."

@@ -34,6 +34,7 @@ pub async fn resolve_bulk<R: EnglishIdentityResolver>(
                 },
                 reason: livrarr_domain::identity::PendingReason::OlUnavailable,
                 candidate_id: None,
+                provenance: livrarr_domain::identity::AnchorProvenance::default(),
             });
         (idx, resolution)
     });

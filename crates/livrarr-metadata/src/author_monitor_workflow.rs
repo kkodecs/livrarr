@@ -26,6 +26,8 @@ struct OlWorkEntry {
     /// Credited authors — present in the payload the monitor already fetches;
     /// the anthology screen counts them (REQ-004a).
     authors: Option<Vec<OlEntryAuthor>>,
+    /// OL cover IDs — first positive ID is the primary cover.
+    covers: Option<Vec<i64>>,
 }
 
 /// One credited-author entry. The screen needs only the count, so nothing is
@@ -430,7 +432,7 @@ where
             let author_ref = &author;
             let ol_key_ref = &ol_key;
             let mut entries_screened = 0usize;
-            let eligible: Vec<(String, i32, String)> = works_response
+            let eligible: Vec<(String, i32, String, Option<String>)> = works_response
                 .entries
                 .iter()
                 .filter_map(|entry| {
@@ -470,7 +472,10 @@ where
                     }
                     let raw_title = entry.title.as_deref().unwrap_or("Unknown").to_string();
                     let work_title = crate::title_cleanup::clean_title(&raw_title);
-                    Some((stripped_ol_key, year, work_title))
+                    let cover_url = entry.covers.as_deref()
+                        .and_then(|cs| cs.iter().find(|&&id| id > 0))
+                        .map(|id| format!("https://covers.openlibrary.org/b/id/{id}-L.jpg"));
+                    Some((stripped_ol_key, year, work_title, cover_url))
                 })
                 .collect();
 
@@ -483,7 +488,7 @@ where
             }
 
             let outcomes: Vec<EntryOutcome> = stream::iter(eligible.into_iter())
-                .map(|(stripped_ol_key, year, work_title)| async move {
+                .map(|(stripped_ol_key, year, work_title, cover_url)| async move {
                     tracing::info!(
                         author_id = author_ref.id,
                         year = year,
@@ -502,7 +507,7 @@ where
                                 ),
                                 author_ol_key: Some(ol_key_ref.clone()),
                                 year: Some(year),
-                                cover_url: None,
+                                cover_url,
                                 detail_url: None,
                                 description: None,
                                 series_name: None,

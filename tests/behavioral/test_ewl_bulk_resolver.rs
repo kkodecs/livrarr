@@ -49,6 +49,7 @@ impl EnglishIdentityResolver for TrackingResolver {
                 },
                 reason: PendingReason::MalformedResponse,
                 candidate_id: None,
+                provenance: AnchorProvenance::default(),
             })
         } else {
             Ok(Resolution::Resolved {
@@ -64,6 +65,10 @@ impl EnglishIdentityResolver for TrackingResolver {
                 },
                 method: IdentityMethod::TitleAuthorSearch,
                 candidate_id: CandidateId(String::new()),
+                provenance: AnchorProvenance {
+                    ol_key: Some(MatchBasis::Hard),
+                    ..AnchorProvenance::default()
+                },
             })
         }
     }

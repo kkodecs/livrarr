@@ -108,10 +108,10 @@ async fn seed_gr_keyless_work(db: &SqliteDb, user_id: i64, title: &str) -> Work 
 }
 
 #[tokio::test]
-async fn refresh_completes_missing_gr_key_before_scatter_runs() {
-    // REQ-008/AC-010: refresh runs identity anchor-completion BEFORE the
-    // enrichment scatter; the resolver's fan-out is observed and the completed
-    // anchor is persisted, then the scatter still runs.
+async fn refresh_syncs_gr_key_on_flm_match_then_runs_scatter() {
+    // FLM/REQ-008: refresh runs identity completion BEFORE the enrichment scatter;
+    // the resolver's fan-out is observed, and a title+author (FLM) match syncs
+    // gr_key to works.* immediately — no confirmation needed. Scatter still runs.
     let db = livrarr_db::test_helpers::create_test_db().await;
     let user_id = create_test_user(&db).await;
     let work = seed_gr_keyless_work(&db, user_id, "Completion Before Scatter").await;
@@ -131,28 +131,33 @@ async fn refresh_completes_missing_gr_key_before_scatter_runs() {
 
     assert!(
         ol.call_count() >= 1,
-        "AC-010: refresh must run the completion fan-out for a gr_key-less work"
+        "REQ-008: refresh must run the completion fan-out for a gr_key-less work"
     );
     assert_eq!(workflow.reset_call_count(), 1);
     assert_eq!(
         workflow.call_count(),
         1,
-        "scatter should still run after completion"
+        "scatter should still run after the completion attempt"
     );
     assert_eq!(result.work.id, work.id);
     assert_eq!(
         refreshed.gr_key.as_deref(),
         Some("234225"),
-        "AC-010: completion should persist the missing Goodreads key before scatter"
+        "FLM: title+author match syncs gr_key to works.*"
     );
 }
 
 #[tokio::test]
-async fn terminal_not_found_completion_suppression_survives_plain_refresh() {
-    // REQ-008/AC-010: when EVERY missing anchor's provider is suppressed (here:
-    // only gr_key is missing and Goodreads carries a terminal not-found), a
-    // plain consecutive refresh makes ZERO resolver calls — completion is
-    // bounded; resume needs an identity-input change or explicit retry.
+async fn dead_ended_completion_suppression_survives_plain_refresh() {
+    // REQ-002/REQ-009 (id-completeness): the refresh chaseable gate
+    // (`chaseable_anchor_types`) suppresses re-chasing via the DURABLE
+    // per-(work, anchor) dead-end marker (`work_anchor_dead_ends`), never
+    // `provider_retry_state`. Here gr_key is the only missing anchor and it has
+    // reached the dead-end threshold (3), so a plain refresh makes ZERO resolver
+    // calls, leaves the anchor absent, still runs the scatter once, and the
+    // durable marker survives the refresh (ST-009). The complementary case — a
+    // missing anchor still below threshold IS re-chased — is in
+    // test_id_completeness::..._refresh_gate_confirmed_rechases_only_when_missing_obtainable_id.
     let db = livrarr_db::test_helpers::create_test_db().await;
     let user_id = create_test_user(&db).await;
     let (work, created) = db
@@ -180,15 +185,14 @@ async fn terminal_not_found_completion_suppression_survives_plain_refresh() {
     )
     .await
     .expect("seed hc anchor");
-    db.record_terminal_outcome(
-        user_id,
-        work.id,
-        MetadataProvider::Goodreads,
-        OutcomeClass::NotFound,
-        None,
-    )
-    .await
-    .expect("record terminal provider outcome");
+    // gr_key (the only missing anchor) has hit the dead-end threshold
+    // (DEAD_END_THRESHOLD, PO-locked at 3) — the durable marker the refresh
+    // chaseable gate honors.
+    for _ in 0..3 {
+        db.bump_anchor_attempt(work.id, AnchorType::new(AnchorType::GR_WORK))
+            .await
+            .expect("seed gr_key dead-end at threshold");
+    }
     let workflow = StubEnrichmentWorkflow::succeeding();
     let ol = gr_key_bearing_ol_stub("Suppressed Completion");
     let svc = service_with_resolver(
@@ -198,19 +202,11 @@ async fn terminal_not_found_completion_suppression_survives_plain_refresh() {
     );
 
     svc.refresh(user_id, work.id).await.expect("refresh work");
-    let state = db
-        .get_retry_state(user_id, work.id, MetadataProvider::Goodreads)
-        .await
-        .expect("read retry state");
 
     assert_eq!(
         ol.call_count(),
         0,
-        "AC-010: a fully-suppressed completion makes zero resolver calls"
-    );
-    assert!(
-        state.is_some(),
-        "plain refresh must not clear suppression state"
+        "a dead-ended missing anchor is not re-chased on a plain refresh"
     );
     assert_eq!(
         workflow.call_count(),
@@ -223,7 +219,20 @@ async fn terminal_not_found_completion_suppression_survives_plain_refresh() {
             .expect("read refreshed work")
             .gr_key,
         None,
-        "suppressed completion should leave the missing provider anchor absent"
+        "a dead-ended completion leaves the missing provider anchor absent"
+    );
+    let dead_ends = db
+        .list_anchor_dead_ends(work.id)
+        .await
+        .expect("read dead-ends after refresh");
+    assert_eq!(
+        dead_ends
+            .iter()
+            .find(|d| d.anchor_type.as_str() == AnchorType::GR_WORK)
+            .expect("gr_key dead-end survives plain refresh")
+            .attempt_count,
+        3,
+        "the durable dead-end marker survives a plain refresh (ST-009)"
     );
 }
 

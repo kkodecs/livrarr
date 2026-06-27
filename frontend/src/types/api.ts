@@ -1123,3 +1123,10 @@ export interface AnchorDTO {
   cfi: string;
   ts: number;
 }
+
+/** A fuzzy-matched identifier guess held pending until the user confirms it. */
+export interface PendingAnchorDTO {
+  anchorType: string;
+  value: string;
+  setter: string;
+}

@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
@@ -1055,10 +1055,12 @@ impl WorkDb for SqliteDb {
         // a manual refresh re-derives identity from the work's anchors so it can
         // re-resolve + re-enrich. Other identity states are left untouched — an open
         // `conflict` is a data dispute a refresh must not silently clear, and
-        // confirmed/provisional/pending already re-enrich on their own.
+        // confirmed/provisional/pending already re-enrich on their own. Clearing
+        // next_convergence_at re-derives the work as due-now for the background loop.
         let result = sqlx::query(
             "UPDATE works SET enrichment_status = 'pending', enriched_at = NULL, \
              merge_generation = merge_generation + 1, \
+             next_convergence_at = NULL, \
              identity_status = CASE \
                  WHEN identity_status = 'not_found' AND (ol_key IS NOT NULL OR gr_key IS NOT NULL OR hc_key IS NOT NULL) THEN 'confirmed' \
                  WHEN identity_status = 'not_found' AND (isbn_13 IS NOT NULL OR asin IS NOT NULL) THEN 'provisional' \
@@ -1085,6 +1087,77 @@ impl WorkDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
 
+        Ok(())
+    }
+
+    async fn list_convergence_due(
+        &self,
+        user_id: UserId,
+        now: DateTime<Utc>,
+        threshold: u32,
+        limit: i64,
+    ) -> Result<Vec<WorkId>, DbError> {
+        // Branch (1) identity-pending and branch (2) enrichment-incomplete select
+        // independently; the chaseable-missing-anchor guard scopes ONLY branch (3)
+        // ID-chasing, so a fully-anchored work with failed enrichment is still
+        // selected via (2). A missing anchor is chaseable when it has neither an
+        // outstanding pending guess nor a dead-end at the configured threshold; a
+        // work is selected for ID-chasing if it has at least one such anchor.
+        let now_str = now.to_rfc3339();
+        let threshold = i64::from(threshold);
+        let ids: Vec<WorkId> = sqlx::query_scalar(
+            "SELECT w.id FROM works w
+             WHERE w.user_id = ?1
+               AND (
+                     w.identity_status = 'pending'
+                     OR (w.identity_status IN ('confirmed','provisional')
+                         AND w.enrichment_status NOT IN ('enriched','thin'))
+                     OR (w.identity_status IN ('confirmed','provisional') AND (
+                           (w.ol_key IS NULL
+                              AND NOT EXISTS (SELECT 1 FROM work_identity_anchors a WHERE a.work_id = w.id AND a.anchor_type = 'ol_work' AND a.confidence = 'pending')
+                              AND NOT EXISTS (SELECT 1 FROM work_anchor_dead_ends d WHERE d.work_id = w.id AND d.anchor_type = 'ol_work' AND d.attempt_count >= ?3))
+                        OR (w.gr_key IS NULL
+                              AND NOT EXISTS (SELECT 1 FROM work_identity_anchors a WHERE a.work_id = w.id AND a.anchor_type = 'gr_work' AND a.confidence = 'pending')
+                              AND NOT EXISTS (SELECT 1 FROM work_anchor_dead_ends d WHERE d.work_id = w.id AND d.anchor_type = 'gr_work' AND d.attempt_count >= ?3))
+                        OR (w.hc_key IS NULL
+                              AND NOT EXISTS (SELECT 1 FROM work_identity_anchors a WHERE a.work_id = w.id AND a.anchor_type = 'hc_work' AND a.confidence = 'pending')
+                              AND NOT EXISTS (SELECT 1 FROM work_anchor_dead_ends d WHERE d.work_id = w.id AND d.anchor_type = 'hc_work' AND d.attempt_count >= ?3))
+                        OR (w.isbn_13 IS NULL
+                              AND NOT EXISTS (SELECT 1 FROM work_identity_anchors a WHERE a.work_id = w.id AND a.anchor_type = 'isbn_13' AND a.confidence = 'pending')
+                              AND NOT EXISTS (SELECT 1 FROM work_anchor_dead_ends d WHERE d.work_id = w.id AND d.anchor_type = 'isbn_13' AND d.attempt_count >= ?3))
+                        OR (w.asin IS NULL
+                              AND NOT EXISTS (SELECT 1 FROM work_identity_anchors a WHERE a.work_id = w.id AND a.anchor_type = 'asin' AND a.confidence = 'pending')
+                              AND NOT EXISTS (SELECT 1 FROM work_anchor_dead_ends d WHERE d.work_id = w.id AND d.anchor_type = 'asin' AND d.attempt_count >= ?3))
+                     ))
+                   )
+               AND (w.next_convergence_at IS NULL OR w.next_convergence_at <= ?2)
+             ORDER BY w.added_at ASC
+             LIMIT ?4",
+        )
+        .bind(user_id)
+        .bind(&now_str)
+        .bind(threshold)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(ids)
+    }
+
+    async fn set_next_convergence_at(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        at: Option<DateTime<Utc>>,
+    ) -> Result<(), DbError> {
+        let at_str = at.map(|dt| dt.to_rfc3339());
+        sqlx::query("UPDATE works SET next_convergence_at = ?1 WHERE id = ?2 AND user_id = ?3")
+            .bind(at_str)
+            .bind(work_id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
         Ok(())
     }
 

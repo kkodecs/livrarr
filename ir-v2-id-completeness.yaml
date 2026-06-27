@@ -1,0 +1,476 @@
+metadata:
+  feature: "id-completeness"
+  stage: v2-design
+  spec_ref: "spec-id-completeness.md"
+  ir_v1_ref: "ir-v1-id-completeness.yaml"
+  contract_ref: "contract-id-completeness.yaml"
+  version: 1
+  note: >
+    IR v2 references IR v1 for structure (modules, types, dependency graph) and adds per-function
+    pseudocode + call annotations + capability survey + TDD. All signatures grounded against live source
+    this session (settle_identity/project_cluster/agree/CapturedIdentity read directly; the writers, job
+    pattern, run_unified_enrichment, handler/router pattern, migration numbers grounded via signature
+    survey — re-confirm each at code-stage per the lazy-grounding rule). Design decisions D-V2-* at the end.
+
+modules:
+  # ----------------------------------------------------------------------------
+  - name: "resolver-provenance"
+    crate: "livrarr-identity"
+    capability_survey:
+      - { capability: "per-anchor hard-vs-fuzzy basis", exists_as: "computed transiently inside agree() (english_identity_resolver.rs:461) as a bool, then DISCARDED by project_cluster:560", decision: "EXPOSE it — agree's clustering DECISION is unchanged; project_cluster also emits an AnchorProvenance. No new matching logic." }
+      - { capability: "seed/detail anchor comparison", exists_as: "opt_eq (english_identity_resolver.rs:501), captured_from_detail:533", decision: "REUSE opt_eq for the seed-hard-bridge test; do NOT reuse captured_from_detail (it backfills seed isbn/asin — the wrong-book trap)." }
+    public_api:
+      functions:
+        - name: "project_cluster (MODIFIED, english_identity_resolver.rs:560)"
+          signature: "fn project_cluster(cluster: &[usize], items: &[&NormalizedWorkDetail], seed: &WorkSeed) -> (CapturedIdentity, AnchorProvenance)"
+          pseudocode:
+            - "rep_idx = cluster member with max anchor_count (unchanged)."
+            - "cap = captured_from_detail(items[rep_idx], seed)   # unchanged; may backfill seed isbn/asin into cap"
+            - "prov = AnchorProvenance::default()   # all fields None"
+            - "# tag the rep's contributed anchors, basis computed on the RAW detail items[rep_idx]:"
+            - "for T in [ol_key, gr_key, hc_key, isbn_13, asin]: if cap.T.is_some(): prov.T = Some(basis_of(items[rep_idx], seed))"
+            - "for &i in cluster:"
+            - "    before = cap snapshot of which anchor fields are Some"
+            - "    cap.merge_missing(&captured_from_detail(items[i], seed))   # unchanged additive merge"
+            - "    for T newly set (before.T None, now Some): prov.T = Some(basis_of(items[i], seed))"
+            - "return (cap, prov)"
+          call_annotations:
+            - { call: "captured_from_detail", type: "EXISTING" }
+            - { call: "CapturedIdentity::merge_missing", type: "EXISTING" }
+            - { call: "basis_of", type: "NEW" }
+            - { call: "anchor_count", type: "EXISTING" }
+          invariants:
+            - "The CapturedIdentity returned is byte-identical to today's (only the added AnchorProvenance is new) — the merge order and rep selection are unchanged."
+            - "basis is per-CONTRIBUTING-DETAIL: every anchor a given detail contributes shares that detail's basis."
+          tdd:
+            - "RED: a cluster of {OL(shares seed ol_key), Audible(title-only match, asin, no seed hard id)} → cap.asin Some, prov.asin == Fuzzy; cap.ol_key Some, prov.ol_key == Hard."
+            - "RED: a detail whose ONLY shared field is the seed's backfilled isbn (detail.isbn None, seed.isbn Some) must read Fuzzy — basis_of uses RAW detail.isbn (None), NOT cap.isbn — proves the seed-backfill trap is avoided."
+        - name: "basis_of (NEW helper, english_identity_resolver.rs)"
+          signature: "fn basis_of(detail: &NormalizedWorkDetail, seed: &WorkSeed) -> MatchBasis"
+          pseudocode:
+            - "# Hard iff this provider's RAW record shares ANY hard id the seed already carries."
+            - "shares = (seed.ol_key.is_some() && opt_eq(&seed.ol_key, &detail.ol_key))"
+            - "      || (seed.gr_key.is_some() && opt_eq(&seed.gr_key, &detail.gr_key))"
+            - "      || (seed.hc_key.is_some() && opt_eq(&seed.hc_key, &detail.hc_key))"
+            - "      || (seed.isbn_13.is_some() && opt_eq(&seed.isbn_13, &detail.isbn_13))"
+            - "      || (seed.asin.is_some() && opt_eq(&seed.asin, &detail.asin))"
+            - "if shares { MatchBasis::Hard } else { MatchBasis::Fuzzy }"
+          call_annotations:
+            - { call: "opt_eq", type: "EXISTING" }
+          preconditions: ["detail is the RAW NormalizedWorkDetail from a responder, NOT a seed-backfilled CapturedIdentity."]
+          tdd:
+            - "RED: seed has isbn=X; detail has isbn=X → Hard. detail has isbn=None, title matches → Fuzzy. detail has isbn=Y!=X → Fuzzy (different edition)."
+        - name: "run_quorum (MODIFIED, english_identity_resolver.rs:297)"
+          pseudocode:
+            - "Unchanged clustering + tie logic. The two project_cluster call sites (~381 tie, ~393 winner) now receive (cap, prov)."
+            - "Resolved branch: Resolution::Resolved { identity: cap, provenance: prov, method, candidate_id }."
+            - "Conflict/tie branch: provenance is not needed on the Conflict payload (no harvest write happens on Conflict) — discard the prov from the tie projections."
+          call_annotations:
+            - { call: "project_cluster", type: "EXISTING (MODIFIED signature)" }
+          decisions:
+            - "Provenance rides only on Resolved + Unresolved (the two anchor-bearing, harvest-writing verdicts). Conflict/NeedsConfirmation do not harvest, so they carry none — keeps the Resolution change minimal."
+
+  # ----------------------------------------------------------------------------
+  - name: "identity-engine-harvest"
+    crate: "livrarr-identity"
+    capability_survey:
+      - { capability: "anchor write on resolve", exists_as: "settle_identity Resolved/Unresolved arms call repo.merge_missing_anchors(work.id, &identity) (async_resolver.rs:340-371)", decision: "MODIFY — split by provenance: hard subset via merge_missing_anchors, fuzzy via record_pending_anchor." }
+      - { capability: "badge derivation", exists_as: "has_work_anchor(&identity) (async_resolver.rs:426)", decision: "REUSE but apply to the HARD subset only (a fuzzy work-key must not raise the badge)." }
+    public_api:
+      functions:
+        - name: "settle_identity Resolved/Unresolved arms (MODIFIED, async_resolver.rs:338-372)"
+          pseudocode:
+            - "let (identity, provenance) = match resolution { Resolved{identity, provenance, ..} => (identity, provenance), Unresolved{captured, provenance, ..} => (captured, provenance) }"
+            - "# Partition the harvested anchors by basis."
+            - "hard = CapturedIdentity { each anchor field = identity.field if provenance.field == Some(Hard) else None; title/author/language copied }"
+            - "fuzzy_pairs = [(AnchorType::from(field), value) for each anchor field where provenance.field == Some(Fuzzy) and identity.field == Some(value)]"
+            - "# Hard → confirmed + works.* sync (existing path); returns the types merged."
+            - "anchors_merged = repo.merge_missing_anchors(work.id, &hard).await?  → Vec<String>"
+            - "# Fuzzy → ledger-only hold (NEW writer)."
+            - "for (anchor_type, value) in fuzzy_pairs: repo.record_pending_anchor(work.id, anchor_type, &value).await?"
+            - "# Badge from HARD anchors only (a fuzzy guess never raises the badge)."
+            - "target = if has_work_anchor(&hard) { Confirmed } else if hard.isbn_13.is_some() || hard.asin.is_some() { Provisional } else { Pending }   -- R-12: an EMPTY hard subset (fuzzy-only resolution) must NOT raise to Provisional — it stays Pending (matches derived_identity_status, identity.rs:357)."
+            - "(monotonic-raise badge write — unchanged from the engine: Pending→Confirmed if target Confirmed; Pending→Provisional if target Provisional; target Pending = no raise)"
+            - "verdict = Resolved/Unresolved (unchanged)"
+          call_annotations:
+            - { call: "repo.merge_missing_anchors", type: "EXISTING" }
+            - { call: "repo.record_pending_anchor", type: "NEW" }
+            - { call: "has_work_anchor", type: "EXISTING" }
+            - { call: "repo.set_identity_confirmed / set_identity_provisional", type: "EXISTING" }
+          invariants:
+            - "Fuzzy anchors NEVER reach merge_missing_anchors (which syncs works.*) — they go ONLY to record_pending_anchor (REQ-004 safety)."
+            - "No enrichment write; no badge downgrade; only-missing fill (inherited engine contract, REQ-008)."
+            - "settle_identity does NOT bump dead-ends (R-1) — that is the convergence loop's job."
+          forbidden:
+            - "Do NOT pass the full `identity` (hard+fuzzy) to merge_missing_anchors — that re-introduces the auto-confirm-everything bug REQ-004 forbids."
+          tdd:
+            - "RED (the safety test, AC-006): a Fuzzy asin on a Resolved verdict → works.asin stays NULL, work_identity_anchors has a pending asin row; Audible/Audnexus enrichment yields SkippedNoAnchor."
+            - "RED (AC-005): a Hard gr_key (shared-isbn bridge) → works.gr_key synced, confirmed, enrichment fires."
+            - "RED: a work resolving with ONLY fuzzy anchors stays Pending (badge not raised by a guess)."
+
+  # ----------------------------------------------------------------------------
+  - name: "domain-id-completeness-types"
+    crate: "livrarr-domain"
+    capability_survey:
+      - { capability: "anchor provenance vocabulary", exists_as: "AnchorSetter/AnchorConfidence (identity.rs:42/50) — already model user/auto_isbn/auto_search + confirmed/pending", decision: "REUSE for storage; ADD MatchBasis only as the in-memory routing key (the resolver→engine signal)." }
+      - { capability: "WorkIdentityRepository writers", exists_as: "confirm_anchor/merge_missing_anchors/set_identity_pending (work_identity.rs:26-117)", decision: "ADD record_pending_anchor + bump/list/clear_anchor_dead_end (NOT FOUND today — confirmed by survey)." }
+    public_api:
+      functions:
+        - name: "MatchBasis / AnchorProvenance / AnchorDeadEnd (NEW types) + ConflictSource +ManualRetry +Convergence (EXTEND existing enum) — see IR v1 shared_types"
+          pseudocode: ["Pure data types; no control flow. AnchorProvenance derives Default (all-None). AnchorType is a newtype struct AnchorType(String) with consts OL_WORK/GR_WORK/HC_WORK/ISBN_13/ASIN (NOT an enum — survey §2). ConflictSource (identity.rs:453) GAINS ManualRetry + Convergence (R-9 / Q5) — the two re-processing callers (insertion C, the loop) pass them to settle_identity; without the variants the door-wiring + converge_work pseudocode would not compile."]
+          call_annotations: [{ call: "(none — type definitions)", type: "NEW" }]
+        - name: "WorkIdentityRepository::record_pending_anchor (NEW trait method)"
+          signature: "async fn record_pending_anchor(&self, work_id: WorkId, anchor_type: AnchorType, value: &str) -> Result<(), WorkIdentityError>"
+          pseudocode: ["Trait declaration. Contract: persist a real pending anchor to work_identity_anchors (confidence='pending', setter='auto_search'); MUST NOT write works.*. Impl in db-pending-anchor."]
+          call_annotations: [{ call: "(trait decl; impl in livrarr-db)", type: "NEW" }]
+        - name: "WorkIdentityRepository::bump_anchor_attempt / list_anchor_dead_ends / clear_anchor_dead_end / clear_anchor_dead_ends (NEW)"
+          signature: "async fn bump_anchor_attempt(&self, work_id, anchor_type) -> Result<(),_>; async fn list_anchor_dead_ends(&self, work_id) -> Result<Vec<AnchorDeadEnd>,_>; async fn clear_anchor_dead_end(&self, work_id, anchor_type) -> Result<(),_>  /* per-anchor, on successful harvest (R-2) */; async fn clear_anchor_dead_ends(&self, work_id) -> Result<(),_>  /* whole-work, manual try-again (R-6) */"
+          pseudocode: ["Trait declarations. Impl in db-anchor-dead-end."]
+          call_annotations: [{ call: "(trait decl; impl in livrarr-db)", type: "NEW" }]
+        - name: "WorkService::converge_work (NEW trait method)"
+          signature: "async fn converge_work(&self, user_id: UserId, work_id: WorkId, threshold: u32) -> Result<ConvergeOutcome, WorkServiceError>"
+          pseudocode: ["Trait declaration (the per-work convergence the background job calls — a job cannot call the private run_unified_enrichment, D-V2-CONVERGE-WORK). Impl in convergence-orchestration (livrarr-metadata)."]
+          call_annotations: [{ call: "(trait decl; impl in livrarr-metadata)", type: "NEW" }]
+          decisions:
+            - "ConvergeOutcome (NEW small enum/struct): Completed | StillIncomplete | Terminal — drives the job's next_convergence_at pacing. Defined here (domain)."
+
+  # ----------------------------------------------------------------------------
+  - name: "db-pending-anchor"
+    crate: "livrarr-db"
+    capability_survey:
+      - { capability: "ledger upsert + works.* sync", exists_as: "confirm_anchor (sqlite_work_identity.rs:10-117): INSERT ... ON CONFLICT into work_identity_anchors THEN per-AnchorType UPDATE works SET <col>", decision: "MIRROR the INSERT with confidence='pending'/setter='auto_search'; OMIT the works.* UPDATE block entirely." }
+    public_api:
+      functions:
+        - name: "impl record_pending_anchor for SqliteDb"
+          pseudocode:
+            - "reject blank value (value.trim().is_empty() → WorkIdentityError::InvalidAnchorValue — mirror confirm_anchor)."
+            - "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)"
+            - "VALUES (?work_id, ?anchor_type.as_str(), ?value, 'pending', 'auto_search', ?now_rfc3339, (SELECT user_id FROM works WHERE id = ?work_id))"
+            - "ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET confidence='pending', setter='auto_search', set_at=?now WHERE work_identity_anchors.confidence != 'confirmed'   -- R-7: never downgrade an affirmed anchor (monotonic, REQ-008)"
+            - "# NO `UPDATE works SET <col> = value` — this is the entire safety property."
+          call_annotations:
+            - { call: "sqlx::query", type: "LIBRARY" }
+            - { call: "chrono::Utc::now", type: "LIBRARY" }
+          invariants:
+            - "Zero `UPDATE works` statements in this function body (the firewall — RE-001; reviewer-verified)."
+            - "Does not overwrite a confirmed row: ON CONFLICT only touches a row of the same (work,type,value); a confirmed anchor of a DIFFERENT value coexists (the uniq_primary_confirmed_anchor index covers only confidence='confirmed')."
+            - "Never DOWNGRADES an affirmed (confirmed) same-value row back to pending — the DO UPDATE WHERE confidence != 'confirmed' blocks it (R-7, monotonic REQ-008)."
+          tdd:
+            - "RED: after record_pending_anchor(w, ASIN, 'B0...'), SELECT asin FROM works WHERE id=w → NULL; SELECT confidence FROM work_identity_anchors → 'pending'."
+            - "RED: blank value → InvalidAnchorValue, no row written."
+            - "RED (R-7): a CONFIRMED (affirmed) anchor re-offered as a fuzzy guess of the SAME value stays 'confirmed' (the WHERE guard blocks the downgrade)."
+
+  # ----------------------------------------------------------------------------
+  - name: "db-anchor-dead-end"
+    crate: "livrarr-db"
+    capability_survey:
+      - { capability: "durable per-(work,anchor) marker", exists_as: "NONE — provider_retry_state is the rate-limit clock, deleted by reset_for_manual_refresh (survey §4)", decision: "NEW table work_anchor_dead_ends + migration 064." }
+      - { capability: "migration format", exists_as: "063_monitor_language.sql (highest); comment header + plain SQL + IF NOT EXISTS (survey §7)", decision: "follow it; user_id column included (mirrors work_identity_anchors per-user pattern added in migration 044)." }
+    public_api:
+      functions:
+        - name: "migration 064_work_anchor_dead_ends.sql (NEW)"
+          pseudocode:
+            - "CREATE TABLE IF NOT EXISTS work_anchor_dead_ends ("
+            - "  work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,"
+            - "  anchor_type TEXT NOT NULL,"
+            - "  attempt_count INTEGER NOT NULL DEFAULT 0,"
+            - "  last_attempt_at TEXT NOT NULL,"
+            - "  user_id INTEGER NOT NULL,"
+            - "  PRIMARY KEY (work_id, anchor_type) );"
+            - "# No CHECK(... IN ...) enum constraints (migration-pattern.md / RE-002 lineage)."
+          call_annotations: [{ call: "(SQL migration)", type: "NEW" }]
+        - name: "impl bump_anchor_attempt for SqliteDb"
+          pseudocode:
+            - "INSERT INTO work_anchor_dead_ends (work_id, anchor_type, attempt_count, last_attempt_at, user_id)"
+            - "VALUES (?w, ?t, 1, ?now, (SELECT user_id FROM works WHERE id=?w))"
+            - "ON CONFLICT (work_id, anchor_type) DO UPDATE SET attempt_count = attempt_count + 1, last_attempt_at = ?now"
+          call_annotations: [{ call: "sqlx::query", type: "LIBRARY" }]
+        - name: "impl list_anchor_dead_ends for SqliteDb"
+          pseudocode: ["SELECT work_id, anchor_type, attempt_count, last_attempt_at FROM work_anchor_dead_ends WHERE work_id=?w → Vec<AnchorDeadEnd>"]
+          call_annotations: [{ call: "sqlx::query_as", type: "LIBRARY" }]
+        - name: "impl clear_anchor_dead_end for SqliteDb (per-anchor — R-2)"
+          pseudocode: ["DELETE FROM work_anchor_dead_ends WHERE work_id=?w AND anchor_type=?t   -- converge_work calls this when an anchor is successfully harvested (REQ-009 'a successful harvest clears it')"]
+          call_annotations: [{ call: "sqlx::query", type: "LIBRARY" }]
+        - name: "impl clear_anchor_dead_ends for SqliteDb (whole-work — manual 'try again')"
+          pseudocode: ["DELETE FROM work_anchor_dead_ends WHERE work_id=?w"]
+          call_annotations: [{ call: "sqlx::query", type: "LIBRARY" }]
+          invariants: ["whole-work clear is called ONLY from the single-work manual refresh 'try again' (R-6), never from a routine tick; the per-anchor clear_anchor_dead_end fires on a successful harvest — durable otherwise (REQ-009)."]
+          tdd:
+            - "RED: bump ×3 → list attempt_count=3. clear_anchor_dead_end(w,T) → that T row gone; clear_anchor_dead_ends(w) → all gone. reset_for_manual_refresh does NOT change attempt_count (durability)."
+            - "RED (R-2): converge_work harvesting a previously-bumped anchor clears that anchor's counter."
+
+  # ----------------------------------------------------------------------------
+  - name: "db-convergence-selector"
+    crate: "livrarr-db"
+    capability_survey:
+      - { capability: "convergence due-selection + clock", exists_as: "NONE built (ST-007; list_works_due_for_retry is retry-state-coupled, orphaned)", decision: "NEW per design-convergence-selection-fix §2: next_convergence_at column + list_convergence_due + set_next_convergence_at (migration 065)." }
+      - { capability: "incomplete predicate", exists_as: "parse_enrichment_status maps pending/partial→Unenriched (sqlite_work.rs:179)", decision: "use INVERSION `enrichment_status NOT IN ('enriched','thin')` (design-convergence R-014) — immune to the missed-string class." }
+    public_api:
+      functions:
+        - name: "migration 065_works_next_convergence_at.sql (NEW)"
+          pseudocode:
+            - "ALTER TABLE works ADD COLUMN next_convergence_at TEXT;   -- nullable, UTC RFC3339; NULL = due now"
+            - "CREATE INDEX IF NOT EXISTS idx_works_convergence_due ON works(user_id, next_convergence_at);"
+            - "-- R-11: PLAIN index, NOT partial. The REQ-006 widening makes branch (3) select Confirmed-but-ID-incomplete works that may be enrichment_status='enriched'; a partial index excluding enriched works would not cover them → SQLite full-scans. A plain (user_id, next_convergence_at) index is usable by all three selection branches."
+          call_annotations: [{ call: "(SQL migration)", type: "NEW" }]
+        - name: "WorkDb::list_convergence_due (NEW)"
+          signature: "async fn list_convergence_due(&self, user_id: UserId, now: DateTime<Utc>, threshold: u32, limit: i64) -> Result<Vec<WorkId>, DbError>"
+          pseudocode:
+            - "SELECT w.id FROM works w WHERE w.user_id = ?user"
+            - "  AND ( w.identity_status='pending'                                                                      -- (1) needs identity resolution"
+            - "        OR (w.identity_status IN ('confirmed','provisional') AND w.enrichment_status NOT IN ('enriched','thin'))   -- (2) ENRICHMENT retry — NO chaseable guard (R-4)"
+            - "        OR (w.identity_status IN ('confirmed','provisional') AND <HAS_A_CHASEABLE_MISSING_ANCHOR>) )                  -- (3) ID-CHASING — chaseable guard scoped HERE ONLY (R-4)"
+            - "  AND (w.next_convergence_at IS NULL OR w.next_convergence_at <= ?now)"
+            - "  ORDER BY w.added_at ASC LIMIT ?limit"
+            - "-- R-4: the chaseable guard restricts ONLY branch (3). A fully-anchored work with enrichment_status='failed' has 0 missing"
+            - "--   anchors and MUST still be selected via branch (2); applying the guard globally would strand it."
+            - "-- <HAS_A_CHASEABLE_MISSING_ANCHOR> (D-CONVERGENCE-GUARDS): EXISTS at least one of the 5 anchor columns that is NULL AND has no"
+            - "--   pending guess (no work_identity_anchors row work_id=w,anchor_type=T,confidence='pending') AND is not at-threshold"
+            - "--   (no work_anchor_dead_ends row work_id=w,anchor_type=T,attempt_count >= ?threshold). Exact join pinned at impl; threshold from config."
+          call_annotations:
+            - { call: "sqlx::query_scalar", type: "LIBRARY" }
+          preconditions: ["threshold (default 3) passed in from the job's config."]
+          invariants:
+            - "The chaseable guard restricts ONLY branch (3) ID-chasing: a Confirmed work with no chaseable anchor is not selected for ID-chasing → that path converges (RE-007). Branches (1) identity + (2) enrichment-retry select independently (R-4)."
+            - "Selection is by STATUS + the work's own next_convergence_at, never provider_retry_state (RE-004)."
+          tdd:
+            - "RED (AC-010): a Confirmed work missing gr_key (chaseable) IS selected; the same work once holding a pending gr_key guess is NOT selected via branch (3)."
+            - "RED (AC-004): a Confirmed work whose only missing anchor is at attempt_count=3 is NOT selected via branch (3) (converged)."
+            - "RED (R-4): a FULLY-anchored Confirmed work with enrichment_status='failed' IS selected (branch 2) — 0 missing anchors must not exclude it."
+            - "RED (faithful): a seeded-Pending work with NO provider_retry_state row IS selected (the R-007 bug guard)."
+        - name: "WorkDb::set_next_convergence_at (NEW)"
+          pseudocode: ["UPDATE works SET next_convergence_at = ?at WHERE id=?w AND user_id=?user   (?at = NULL clears it)"]
+          call_annotations: [{ call: "sqlx::query", type: "LIBRARY" }]
+        - name: "reset_for_manual_refresh (MODIFIED, sqlite_work.rs:1048)"
+          pseudocode: ["Existing body unchanged (enrichment_status reset, identity_status heal, DELETE provider_retry_state) PLUS: SET next_convergence_at = NULL (re-derive due-now, design-convergence R-012). Still does NOT touch work_anchor_dead_ends (the explicit clear is separate)."]
+          call_annotations: [{ call: "sqlx::query", type: "EXISTING (one added SET clause)" }]
+
+  # ----------------------------------------------------------------------------
+  - name: "door-wiring"
+    crate: "livrarr-metadata"
+    capability_survey:
+      - { capability: "per-door identity decision", exists_as: "resolver.resolve at ensure_identity_and_enrichment:2706 (Interactive), refresh's legacy anchor-completion call:1326 (gated !=Confirmed), retry_all_incomplete:1462 (Background)", decision: "REPLACE each with settle_identity(self.resolver, &self.db, user_id, &work, MODE, SOURCE)." }
+    public_api:
+      functions:
+        - name: "Insertion A — ensure_identity_and_enrichment anchorless leg (work_service.rs:2706)"
+          pseudocode:
+            - "REPLACE `match resolver.resolve(user_id,&seed,Interactive).await { Resolved{identity,..} => merge+set_status; .. }`"
+            - "WITH  `settle_identity(resolver, &self.db, user_id, &work, mode, source).await?` where (mode, source) are threaded from the door (param on the chokepoint)."
+            - "Per-door (mode,source): add-from-search/manual-add=(Interactive,ManualAdd); per-file-import=(Interactive,ManualImport); list=(Background,ListImport); readarr=(Background,ReadarrImport); series=(Background,SeriesMonitor). Author-monitor: NOT routed."
+          call_annotations:
+            - { call: "settle_identity", type: "EXISTING" }
+          decisions: ["Thread (mode, source) as params into ensure_identity_and_enrichment from each calling door (the chokepoint covers doors 1-6 — design-uip-wiring §3 Q-4: chokepoint chosen)."]
+          tdd: ["RED (AC-001): each door via its REAL entry path settles via settle_identity with the expected (mode,source) (spy resolver / IdentityReport)."]
+        - name: "Insertion B — refresh (work_service.rs:1326-1356)"
+          pseudocode:
+            - "REPLACE the `if work.identity_status != Confirmed { <legacy anchor-completion call>(...) }` block (the helper at async_resolver.rs:89)."
+            - "WITH: compute missing = anchor columns that are NULL on works.*; dead = list_anchor_dead_ends(work.id) at-threshold types; chaseable = missing - pending-guessed - dead."
+            - "if chaseable not empty { settle_identity(resolver, &self.db, user_id, &work, Interactive, Refresh).await? }   # else skip — the smart settle_identity lacks (ST-002), re-added HERE"
+            - "(REQ-009 'try again' — R-6: the SINGLE-WORK manual refresh HANDLER (livrarr-handlers/src/work.rs:562) calls clear_anchor_dead_ends(work_id) BEFORE refresh, so re-checking one book re-attempts its dead-ends; the BULK refresh handler (work.rs:587) does NOT clear. refresh() itself never auto-clears.)"
+          call_annotations:
+            - { call: "settle_identity", type: "EXISTING" }
+            - { call: "self.db.list_anchor_dead_ends", type: "NEW" }
+          decisions: ["REQ-002: chase Confirmed works' missing ids (supersedes the Sprint-E !=Confirmed gate). Gate on chaseable-not-empty, not on the badge."]
+          tdd:
+            - "RED (AC-003): a fully-anchored Confirmed work refresh → NO resolver fan-out (chaseable empty). A Confirmed work missing an obtainable id → DOES re-chase."
+            - "RED (R-6): the single-work refresh handler clears dead-ends then re-attempts; the bulk refresh handler does NOT clear."
+        - name: "Insertion C — retry_all_incomplete (work_service.rs:1462)"
+          pseudocode: ["REPLACE `resolver.resolve(user_id,&seed,Background)` block WITH settle_identity(resolver,&self.db,user_id,&work,Background,ManualRetry).await? — Background keeps Audnexus eligible (R-001)."]
+          call_annotations: [{ call: "settle_identity", type: "EXISTING" }]
+        - name: "Legacy deletion"
+          pseudocode: ["After B re-points: delete the three superseded legacy symbols (the two async_resolver helpers at :89 and :22 + the buggy NoCandidates-terminalizing helper) — exact names in the contract forbidden_pattern + design-uip-wiring §5; SCRUB the settle_identity doc comment (async_resolver.rs:299) that names them (contract R-4)."]
+          call_annotations: [{ call: "(deletion)", type: "EXISTING" }]
+          forbidden: ["Leaving any of the three deleted legacy symbols (named in the contract forbidden_pattern) anywhere in crates/ (incl. comments) — the code gate greps globally."]
+
+  # ----------------------------------------------------------------------------
+  - name: "convergence-orchestration + convergence-job"
+    crate: "livrarr-metadata (converge_work) + livrarr-server (the tick)"
+    capability_survey:
+      - { capability: "background enrichment without refresh", exists_as: "run_unified_enrichment(user_id,&work,None,EnrichmentMode::Background,None) (work_service.rs:2967, private) — does NOT call reset_for_manual_refresh (survey §6)", decision: "REUSE inside converge_work; the job cannot call it (private) so it calls the new converge_work trait method." }
+      - { capability: "periodic job", exists_as: "spawn_job + tag_convergence_tick template (jobs/mod.rs / tag_convergence.rs; loop + cancel.is_cancelled(), interval at registration)", decision: "MIRROR — new convergence_tick registered in start(); interval + batch + threshold from a NEW [convergence] TOML config block (D-V2-CONVERGE-CONFIG)." }
+    public_api:
+      functions:
+        - name: "WorkService::converge_work impl (NEW, livrarr-metadata WorkServiceImpl)"
+          signature: "async fn converge_work(&self, user_id: UserId, work_id: WorkId, threshold: u32) -> Result<ConvergeOutcome, WorkServiceError>"
+          pseudocode:
+            - "work = self.get(user_id, work_id)?   # fresh row (WorkService::get -> Result<Work>, work.rs:276; R-10)"
+            - "was_pending = (work.identity_status == Pending)"
+            - "before_missing = {T in 5 anchor types : works.<col(T)> IS NULL}"
+            - "pending_before = {T : list_anchors(work_id) has a confidence='pending' row of type T}"
+            - "at_threshold = {T : list_anchor_dead_ends(work_id) row T with attempt_count >= threshold}"
+            - "chaseable = before_missing - pending_before - at_threshold   # mirrors selector branch-3 + Insertion B"
+            - "# 0. Pending dead-end (R-8/Gemini): a Pending work whose identity attempts are exhausted (no chaseable anchor left — its work-anchors all hit the threshold) is NOT re-settled. settle_identity treats NoCandidates as transient and KEEPS it Pending (ST-002), so re-settling would fan out to providers every cadence FOREVER. Terminalize instead — the convergence design's 'deterministic dead-end → NeedsReview' (M9: surfaced for review, not silent limbo, not indefinite):"
+            - "if was_pending && chaseable.is_empty(): self.db.set_needs_review(work_id).await?; return Ok(ConvergeOutcome::Terminal)"
+            - "# 1. identity / ID-chasing leg — settle ONLY if chaseable (R-5: a fully-anchored / all-dead-ended Confirmed work is NOT fanned out; a Pending work reaching here still HAS a chaseable identity anchor):"
+            - "if !chaseable.is_empty() && let Some(resolver)=self.resolver.as_ref(): settle_identity(resolver.as_ref(), &self.db, user_id, &work, Background, Convergence).await?"
+            - "work = self.get(user_id, work_id)?   # re-read after settle"
+            - "# 2. enrichment leg (Background path — NEVER refresh) — runs when identity permits + enrichment incomplete:"
+            - "if work identity permits && enrichment incomplete: self.run_unified_enrichment(user_id, &work, None, Background, None).await"
+            - "# 3. dead-end accounting (R-1/R-2): re-read NULL + pending sets AFTER settle/enrich. The bump applies to ALL chaseable-still-missing anchors — incl. a Pending work's missing work-anchors, so after ~3 failed identity ticks chaseable empties and step 0 terminalizes it next tick:"
+            - "still_after = {T : works.<col(T)> IS NULL};  pending_after = {pending types}"
+            - "for T in before_missing where T NOT in still_after: self.db.clear_anchor_dead_end(work_id, T).await?   # harvested → clear counter (R-2)"
+            - "for T in chaseable where T in still_after && T NOT in pending_after: self.db.bump_anchor_attempt(work_id, T).await?   # chaseable+unfilled+unguessed → +1 (R-1: never re-bump an at-threshold anchor)"
+            - "# 4. outcome for the job's pacing:"
+            - "re-read; if identity complete AND enrichment complete → ConvergeOutcome::Completed"
+            - "elif identity terminal (NeedsReview/Conflict/NotFound) → Terminal"
+            - "else → StillIncomplete"
+            - "# SCOPE BOUNDARY (preempt): bounding ENRICHMENT retries (a Confirmed/Provisional work whose enrichment permanently fails, re-selected via selector branch 2 at cadence) is the convergence loop's pre-existing concern (design-convergence-selection-fix), NOT id-completeness — this feature bounds ID-chasing (the 3-strike dead-end) + Pending identity (step 0), not enrichment completeness."
+          call_annotations:
+            - { call: "settle_identity", type: "EXISTING" }
+            - { call: "self.run_unified_enrichment", type: "EXISTING (private, same impl)" }
+            - { call: "self.get (WorkService::get)", type: "EXISTING" }
+            - { call: "self.db.set_needs_review", type: "EXISTING" }
+            - { call: "self.db.list_anchors", type: "EXISTING" }
+            - { call: "self.db.list_anchor_dead_ends", type: "NEW" }
+            - { call: "self.db.bump_anchor_attempt", type: "NEW" }
+            - { call: "self.db.clear_anchor_dead_end", type: "NEW" }
+          invariants:
+            - "NEVER calls refresh() / reset_for_manual_refresh (would wipe provider_retry_state — RE-005)."
+            - "A Pending work is BOUNDED: it settles WHILE it has a chaseable identity anchor; once its anchors all hit the threshold (~3 failed identity ticks) step 0 terminalizes it to NeedsReview (R-8/Gemini) — never an infinite settle loop (settle_identity treats NoCandidates as transient, so the LOOP applies the give-up)."
+            - "settle is chaseable-gated for ALL works (R-5): a fully-anchored / all-dead-ended Confirmed work is never fanned out."
+            - "bump ONLY chaseable anchors still unfilled+unguessed (R-1: an at-threshold anchor is never re-bumped); clear an anchor's counter the moment it is harvested (R-2)."
+          tdd:
+            - "RED (R-8/Gemini): a Pending work that yields Unresolved/NoCandidates ~3× → its work-anchors hit threshold → chaseable empties → next tick converge_work sets NeedsReview + returns Terminal (NOT another settle_identity); it falls out of selection. NO infinite settle loop."
+            - "RED: a Pending work that still HAS a chaseable identity anchor DOES get settle_identity (a resolve attempt)."
+            - "RED (R-5): a fully-anchored Confirmed work selected for enrichment retry → converge_work does NOT call settle_identity (chaseable empty), still runs enrichment."
+            - "RED (R-1): gr_key chaseable + asin already at threshold → only gr_key bumped (if still unfilled); asin NOT re-bumped."
+            - "RED (R-2): a previously-bumped anchor harvested this tick → its counter is cleared."
+            - "RED: converge_work never calls reset_for_manual_refresh (spy) — provider_retry_state survives."
+        - name: "convergence_tick (NEW, livrarr-server/src/jobs/convergence.rs)"
+          signature: "pub async fn convergence_tick(state: AppState, cancel: CancellationToken) -> Result<(), String>"
+          pseudocode:
+            - "if convergence disabled in config (default OFF until REQ-007 gate) → return Ok(())"
+            - "for user in state.db.list_users():   # per-user (job-layer scoping pattern)"
+            - "    if cancel.is_cancelled(): break"
+            - "    due = state.db.list_convergence_due(user.id, now, THRESHOLD, BATCH).await   # THRESHOLD + BATCH from config.convergence (R-8)"
+            - "    for work_id in due:"
+            - "        if cancel.is_cancelled(): break"
+            - "        outcome = state.work_service.converge_work(user.id, work_id, THRESHOLD).await"
+            - "        next = match outcome { Completed|Terminal => None (clear), StillIncomplete => Some(now + cadence) }"
+            - "        state.db.set_next_convergence_at(user.id, work_id, next).await"
+            - "Ok(())"
+          call_annotations:
+            - { call: "state.db.list_convergence_due", type: "NEW" }
+            - { call: "state.work_service.converge_work", type: "NEW" }
+            - { call: "state.db.set_next_convergence_at", type: "NEW" }
+            - { call: "cancel.is_cancelled()", type: "LIBRARY" }
+          decisions:
+            - "The job is THIN: select → converge_work → pace. All orchestration is in converge_work (livrarr-metadata) — the job cannot reach private metadata methods (compile-wall / insight 9g)."
+            - "Registered in jobs/mod.rs start() via spawn_job('convergence', interval_from_config, ...). REQ-007: disabled-by-default; the worst-case GB volume calc + DB snapshot gate first enable (AC-011)."
+          tdd:
+            - "RED: with convergence enabled + a seeded-Pending work, one tick selects+converges it; next_convergence_at is set on a still-incomplete work and cleared on a completed one."
+
+  # ----------------------------------------------------------------------------
+  - name: "affirm-api"
+    crate: "livrarr-handlers (+ server router)"
+    capability_survey:
+      - { capability: "handler pattern", exists_as: "list_open<S: HasIdentityConflictService>(State(ctx), auth) -> Json<Dto> (identity_conflicts.rs:50); Has* trait in context.rs; routes in server/src/router.rs build_router", decision: "MIRROR; add a HasWorkIdentityRepository Has* trait if WorkIdentityRepository is not already exposed (confirm at code stage)." }
+    public_api:
+      functions:
+        - name: "list_pending_anchors<S: HasWorkIdentityRepository + HasWorkService> (NEW, livrarr-handlers/src/work.rs)"
+          signature: "pub async fn list_pending_anchors<S: HasWorkIdentityRepository + HasWorkService>(State(ctx): State<S>, auth: AuthContext, Path(work_id): Path<i64>) -> Result<Json<Vec<PendingAnchorDto>>, ApiError>"
+          pseudocode:
+            - "# R-3 ownership: the repo methods are work-id-only (no user scope) — VERIFY ownership FIRST."
+            - "ctx.work_service().get(auth.user.id, WorkId(work_id)).await.map_err(|e| match e { WorkServiceError::NotFound => ApiError::NotFound, other => ApiError::Internal(other.to_string()) })?   # user-scoped: Err(NotFound) = not owned → 404; OTHER service errors propagate as 500, not hidden as 404 (R-10/Codex)."
+            - "anchors = ctx.work_identity_repo().list_anchors(WorkId(work_id)).await.map_err(Internal)?"
+            - "filter to confidence == Pending; map each to PendingAnchorDto { anchor_type, value, setter }"
+            - "Ok(Json(dtos))"
+          call_annotations:
+            - { call: "ctx.work_service().get", type: "EXISTING" }
+            - { call: "ctx.work_identity_repo().list_anchors", type: "EXISTING" }
+          decisions: ["The pending-guess READ comes from list_anchors (the ledger) — works.* cannot represent a pending guess (Q4). R-3: ownership checked via a user-scoped get_work because the repo methods take work_id only."]
+          tdd:
+            - "RED (AC-009): a work with a pending asin lists it; a work with none lists []."
+            - "RED (R-3 security): requesting another user's work_id → 404, no anchors leaked."
+        - name: "affirm_pending_anchor<S> (NEW, livrarr-handlers/src/work.rs)"
+          signature: "pub async fn affirm_pending_anchor<S: HasWorkIdentityRepository + HasWorkService>(State(ctx), auth, Path((work_id, anchor_type)): Path<(i64,String)>) -> Result<StatusCode, ApiError>"
+          pseudocode:
+            - "# R-3 ownership: confirm_anchor mutates works.* by WHERE id=?2 with NO user scope — VERIFY ownership FIRST."
+            - "ctx.work_service().get(auth.user.id, WorkId(work_id)).await.map_err(|e| match e { WorkServiceError::NotFound => ApiError::NotFound, other => ApiError::Internal(other.to_string()) })?   # user-scoped: Err(NotFound) = not owned → 404; OTHER service errors propagate as 500, not hidden as 404 (R-10/Codex)."
+            - "value = look up the pending row's value via list_anchors filter (anchor_type, confidence=Pending); 404 if none"
+            - "ctx.work_identity_repo().confirm_anchor(WorkId(work_id), AnchorType(anchor_type), &value, AnchorSetter::User).await?   # promote: confirmed + works.* sync"
+            - "spawn Background enrichment for the now-unlocked provider (handler-level tokio::spawn, insight 9g)"
+            - "Ok(StatusCode::NO_CONTENT)"
+          call_annotations:
+            - { call: "ctx.work_service().get", type: "EXISTING" }
+            - { call: "ctx.work_identity_repo().confirm_anchor", type: "EXISTING" }
+            - { call: "tokio::spawn + Background enrich", type: "EXISTING" }
+          invariants: ["affirm uses setter=User (the user verified it) — promotes pending→confirmed and syncs works.*, unlocking enrichment (REQ-005). Ownership verified before any mutation (R-3)."]
+          tdd:
+            - "RED (AC-008): affirm a pending asin → works.asin set, ledger row confidence='confirmed', Audible enrichment then fires."
+            - "RED (R-3 security): user A affirming user B's work_id → 404, B's works.* untouched."
+        - name: "route registration (server/src/router.rs build_router, Works block)"
+          pseudocode:
+            - ".route('/work/{id}/pending-anchors', get(work::list_pending_anchors::<AppState>))"
+            - ".route('/work/{id}/pending-anchors/{anchor_type}/affirm', post(work::affirm_pending_anchor::<AppState>))"
+          call_annotations: [{ call: "axum Router::route", type: "LIBRARY" }]
+
+  # ----------------------------------------------------------------------------
+  - name: "affirm-ui"
+    crate: "frontend (testdata/ui)"
+    capability_survey:
+      - { capability: "non-blocking inline affordance + HelpTip", exists_as: "existing React work-detail components + HelpTip (insight: use HelpTip)", decision: "REUSE; add a subtle inline 'we think this is the audiobook — confirm?' banner reading GET pending-anchors." }
+    public_api:
+      functions:
+        - name: "PendingAnchorAffirm component (NEW)"
+          pseudocode:
+            - "on work-detail mount: fetch GET /work/{id}/pending-anchors (restore-from-source, insight 18)"
+            - "if any pending → render a subtle non-blocking affordance (NOT a modal); per guess a one-click Confirm → POST .../affirm → refetch"
+            - "the work is fully usable with the guess unaffirmed"
+          call_annotations: [{ call: "React Query useQuery/useMutation", type: "LIBRARY" }]
+          decisions: ["Q1 (placement: work-detail inline vs review queue; batch multiple guesses) — RESOLVED at this design: work-detail inline, one affordance listing all of that work's pending guesses. (A global review queue is a later unit.)"]
+
+  # ----------------------------------------------------------------------------
+  - name: "behavioral-id-completeness"
+    crate: "livrarr-behavioral"
+    capability_survey:
+      - { capability: "faithful door tests", exists_as: "create_test_db() in-memory SqliteDb; the engine's 22 behavioral tests use a scripted resolver + real DB (insight: faithful fixtures)", decision: "REUSE the harness; drive each door's REAL entry path, no injected identity state." }
+    public_api:
+      functions:
+        - name: "the test suite (the IR v1 ACs as red tests)"
+          pseudocode:
+            - "AC-001 per door (1-6,8,9): real entry path → assert settle_identity called with expected (mode,source)."
+            - "AC-002: author monitor adds a work with NO resolver fan-out (negative)."
+            - "AC-003: Confirmed fully-anchored refresh → no fan-out; Confirmed missing-id refresh → re-chase."
+            - "AC-004: dead-end at threshold not re-selected; AC-005 hard attach; AC-006 pending-asin firewall; AC-007 record_pending writes ledger-only; AC-008 affirm promotes; AC-009 UI lists pending; AC-010 widened select + no re-guess; AC-012 no enrichment/no-downgrade during harvest."
+            - "Plus the MatchBasis seed-backfill-trap test (resolver-provenance) + the converge_work no-refresh spy."
+          call_annotations: [{ call: "create_test_db / scripted resolver", type: "EXISTING" }]
+          tdd: ["All compile + fail RED before any green implementation (verify.py tests gate). Cross-family: OpenAI authors test bodies, reviewed before they constrain impl."]
+
+decisions:
+  - id: "D-V2-CONVERGE-WORK"
+    title: "Per-work convergence is a WorkService trait method converge_work, called by a thin job tick"
+    decision: >
+      A background job (livrarr-server) cannot call the private run_unified_enrichment / ensure_* helpers on
+      WorkServiceImpl (compile wall + privacy). So the per-work convergence orchestration (settle_identity →
+      Background enrich → dead-end bump) is a NEW public WorkService trait method `converge_work`
+      (livrarr-domain decl, livrarr-metadata impl). The convergence_tick (livrarr-server) is THIN: select via
+      list_convergence_due, call converge_work, pace via set_next_convergence_at. Keeps orchestration in
+      metadata (insight 9g; no orchestration in server jobs).
+    grounded: "run_unified_enrichment is private (survey §6); spawn_job/tick pattern (survey §5)."
+  - id: "D-V2-CONVERGE-CONFIG"
+    title: "Convergence interval + batch + dead-end threshold come from a new TOML [convergence] block"
+    decision: >
+      Existing jobs hardcode their interval at registration (survey §5 — no per-job config field). The
+      convergence loop's cadence is load-bearing for the REQ-007 GB-volume gate, so it is configurable:
+      a new [convergence] TOML block (enabled=false default, interval, batch_size, attempt_threshold=3).
+      No env (Servarr/TOML-only convention). This is a NEW config surface vs the hardcoded-interval jobs —
+      justified by REQ-007 (the cadence is a quota lever) + the PO threshold call (3).
+    grounded: "survey §5: intervals hardcoded in start(); no cadence config field exists."
+  - id: "D-V2-PROVENANCE-SIDECAR"
+    title: "AnchorProvenance is a sidecar on Resolution::Resolved/Unresolved, not a field on CapturedIdentity"
+    decision: >
+      CapturedIdentity is used project-wide (seeds, IdentityState, conflict payloads); widening its fields to
+      carry MatchBasis would ripple far and is unnecessary (provenance is only needed for the harvest
+      write-step). So project_cluster returns (CapturedIdentity, AnchorProvenance) and the two anchor-bearing
+      Resolution verdicts carry the sidecar. CapturedIdentity is byte-unchanged.
+    grounded: "CapturedIdentity shape (survey §2, identity.rs:114); Resolution (survey §3, identity.rs:220)."
+  - id: "D-V2-HARD-SUBSET-MERGE"
+    title: "The harvest writes the HARD subset via merge_missing_anchors, the FUZZY anchors via record_pending_anchor"
+    decision: >
+      settle_identity builds a hard-only CapturedIdentity (fuzzy fields nulled) and passes ONLY that to
+      merge_missing_anchors (existing confirmed + works.* path); each fuzzy (type,value) goes to the new
+      record_pending_anchor (ledger only). The badge is derived from the hard subset (has_work_anchor) so a
+      fuzzy work-key never raises the badge. This keeps the existing confirmed-write path intact and isolates
+      the new safety behavior to the partition + the new writer.
+    grounded: "merge_missing_anchors/confirm_anchor works.* sync (survey §1); has_work_anchor (async_resolver.rs:426, read)."

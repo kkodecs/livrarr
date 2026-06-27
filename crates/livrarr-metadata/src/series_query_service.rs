@@ -806,7 +806,7 @@ where
                             ),
                             author_ol_key: None,
                             year: book.year,
-                            cover_url: None,
+                            cover_url: book.cover_url.clone(),
                             detail_url: None,
                             description: None,
                             series_name: Some(series_name.clone()),
