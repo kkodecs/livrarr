@@ -1333,6 +1333,7 @@ where
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
     ) -> Result<EnrichmentResult, EnrichmentError> {
+        let _enrich_span = livrarr_domain::perf::StageTimer::start("enrich", work_id);
         // Step 1: Acquire per-work lock [I-12]
         let _sweep = SweepLocksOnDrop {
             locks: self.locks.clone(),

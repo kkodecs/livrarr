@@ -29,6 +29,10 @@ pub struct SystemStatus {
     pub log_init_error: Option<String>,
     pub startup_time: DateTime<Utc>,
     pub log_level: String,
+    /// Current process resident memory (physical RAM) in bytes; `None` when
+    /// unavailable (non-Linux or read failure).
+    #[serde(default)]
+    pub rss_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]

@@ -54,6 +54,10 @@ tower_governor = "0.8.0"
 dashmap = "6.1.0"
 regex = "1"
 data-encoding = "2.10.0"
+dhat = { version = "0.3", optional = true }
+
+[features]
+dhat-heap = ["dhat"]
 
 [dev-dependencies]
 livrarr-db = { workspace = true, features = ["test-helpers"] }

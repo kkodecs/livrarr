@@ -553,7 +553,7 @@ pub async fn fetch_goodreads_html(
     Ok(html)
 }
 
-/// Search Goodreads by `title author` and parse the results page.
+/// Search Goodreads by `title author` via the WAF-free autocomplete JSON endpoint.
 pub async fn search_goodreads(
     http: &HttpClient,
     base_url: &str,
@@ -563,9 +563,22 @@ pub async fn search_goodreads(
     let base = base_url.trim_end_matches('/');
     let raw_query = format!("{title} {author}");
     let query = urlencoding::encode(&raw_query);
-    let url = format!("{base}/search?q={query}");
-    let html = fetch_goodreads_html(http, &url).await?;
-    Ok(parse_search_html(&html))
+    let url = format!("{base}/book/auto_complete?format=json&q={query}");
+    let resp = http
+        .get(&url)
+        .header("User-Agent", GOODREADS_USER_AGENT)
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send()
+        .await
+        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(GoodreadsFetchError::HttpStatus(resp.status().as_u16()));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete body: {e}")))?;
+    Ok(parse_autocomplete_json(&body))
 }
 
 pub async fn search_goodreads_by_query(

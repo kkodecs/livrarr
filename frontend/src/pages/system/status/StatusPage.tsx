@@ -12,7 +12,7 @@ import { getSystemStatus, getHealth, getHealthSummary } from "@/api";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
-import { formatAbsoluteDate, formatRelativeDate } from "@/utils/format";
+import { formatAbsoluteDate, formatRelativeDate, formatBytes } from "@/utils/format";
 import { cn } from "@/utils/cn";
 import type { HealthCheckType, ProviderStatusInfo, InfraItemStatus, HealthSummaryResponse } from "@/types/api";
 
@@ -212,6 +212,9 @@ export default function StatusPage() {
     ["Log File", status.logFile],
     ["Startup Time", formatAbsoluteDate(status.startupTime)],
   ];
+  if (status.rssBytes != null) {
+    rows.push(["Memory (RSS)", formatBytes(status.rssBytes)]);
+  }
 
   const checks = healthData ?? [];
 

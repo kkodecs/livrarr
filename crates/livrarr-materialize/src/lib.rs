@@ -24,13 +24,17 @@ fn cover_file_path(covers_dir: &Path, work_id: i64, suffix: &str) -> PathBuf {
 /// writing atomically (tmp + rename) and returning the image bytes so the caller
 /// can embed them in the file tags (R-002). Relocated from livrarr-metadata to
 /// break the cover<->work_service cycle (D-002).
+///
+/// Decodes the image exactly ONCE (in spawn_blocking per insight 10): checks for
+/// grayscale placeholders and extracts dimensions in the same pass. Returns
+/// `(bytes, dims)` so callers never need a second decode.
 pub async fn download_cover_to_disk<H: HttpFetcher>(
     http: &H,
     url: &str,
     covers_dir: &Path,
     work_id: i64,
     suffix: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(Vec<u8>, Option<(i32, i32)>), Box<dyn std::error::Error + Send + Sync>> {
     tokio::fs::create_dir_all(covers_dir).await?;
 
     let req = FetchRequest {
@@ -57,54 +61,49 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
     let tmp_path = cover_path.with_extension("jpg.tmp");
     let tmp_clone = tmp_path.clone();
     let target = cover_path.clone();
-    // Validate: reject grayscale images (OL placeholder pattern).
-    // If bytes aren't a recognisable image format, pass through unchanged.
     let raw_bytes = resp.body;
-    if let Ok(img) = image::load_from_memory(&raw_bytes) {
-        if matches!(img.color(), image::ColorType::L8 | image::ColorType::L16 | image::ColorType::La8 | image::ColorType::La16) {
-            return Err("grayscale cover rejected (likely placeholder)".into());
-        }
-    }
-    let bytes_for_write = raw_bytes.clone();
-    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp_clone)?;
-        f.write_all(&bytes_for_write)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp_clone, &target)
-    })
+
+    // Decode, validate, extract dims, and write — all in one spawn_blocking so
+    // the CPU-heavy JPEG decode never blocks the async executor (insight 10).
+    let result = tokio::task::spawn_blocking(move || {
+            // Single decode: grayscale check + dims. Pass through if the bytes
+            // aren't a recognisable image format (non-fatal per existing policy).
+            let dims = match image::load_from_memory(&raw_bytes) {
+                Ok(img) => {
+                    if matches!(
+                        img.color(),
+                        image::ColorType::L8
+                            | image::ColorType::L16
+                            | image::ColorType::La8
+                            | image::ColorType::La16
+                    ) {
+                        return Err("grayscale cover rejected (likely placeholder)".into());
+                    }
+                    Some((img.width() as i32, img.height() as i32))
+                }
+                Err(_) => None,
+            };
+
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp_clone)?;
+            f.write_all(&raw_bytes)?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp_clone, &target)?;
+            Ok((raw_bytes, dims))
+        },
+    )
     .await;
+
     match result {
-        Ok(Ok(())) => Ok(raw_bytes),
+        Ok(Ok(result)) => Ok(result),
         Ok(Err(e)) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            Err(Box::new(e))
+            Err(e)
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             Err(format!("spawn error: {e}").into())
-        }
-    }
-}
-
-/// Decode width/height from freshly written cover bytes (REQ-017). Full-image
-/// decode on a blocking thread (insight 10). Failure is warn + `None` — a
-/// saved cover is better than a cover rejected over a dims read.
-async fn decode_cover_dims(bytes: Vec<u8>) -> Option<(i32, i32)> {
-    let decoded = tokio::task::spawn_blocking(move || {
-        image::load_from_memory(&bytes).map(|img| (img.width() as i32, img.height() as i32))
-    })
-    .await;
-    match decoded {
-        Ok(Ok(dims)) => Some(dims),
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "cover dimension decode failed; dims not recorded");
-            None
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "cover dimension decode task failed; dims not recorded");
-            None
         }
     }
 }
@@ -167,7 +166,7 @@ where
         if !ebook.user_locked {
             if let Some(url) = ebook.chosen_new_url.as_deref() {
                 if ebook.current_url.as_deref() != Some(url) {
-                    let bytes = download_cover_to_disk(
+                    let (bytes, dims) = download_cover_to_disk(
                         &*self.http,
                         url,
                         &request.covers_dir,
@@ -178,16 +177,12 @@ where
                     .map_err(|e| MaterializeError::CoverDownload(e.to_string()))?;
                     let path = cover_file_path(&request.covers_dir, request.work_id, "");
                     outcome.ebook_cover_path = Some(path.to_string_lossy().into_owned());
-                    // REQ-017: dims decoded from the bytes just written — the
-                    // only moment the file is guaranteed fresh.
-                    outcome.saved_cover =
-                        decode_cover_dims(bytes.clone())
-                            .await
-                            .map(|(width, height)| SavedCover {
-                                path,
-                                width,
-                                height,
-                            });
+                    // REQ-017: dims from the single decode in download_cover_to_disk.
+                    outcome.saved_cover = dims.map(|(width, height)| SavedCover {
+                        path,
+                        width,
+                        height,
+                    });
                     ebook_cover_bytes = Some(bytes);
                 }
             }
@@ -198,7 +193,7 @@ where
         if !audiobook.user_locked {
             if let Some(url) = audiobook.chosen_new_url.as_deref() {
                 if audiobook.current_url.as_deref() != Some(url) {
-                    let bytes = download_cover_to_disk(
+                    let (_, dims) = download_cover_to_disk(
                         &*self.http,
                         url,
                         &request.covers_dir,
@@ -209,14 +204,11 @@ where
                     .map_err(|e| MaterializeError::CoverDownload(e.to_string()))?;
                     let path = cover_file_path(&request.covers_dir, request.work_id, "_audiobook");
                     outcome.audiobook_cover_path = Some(path.to_string_lossy().into_owned());
-                    outcome.saved_audiobook_cover =
-                        decode_cover_dims(bytes)
-                            .await
-                            .map(|(width, height)| SavedCover {
-                                path,
-                                width,
-                                height,
-                            });
+                    outcome.saved_audiobook_cover = dims.map(|(width, height)| SavedCover {
+                        path,
+                        width,
+                        height,
+                    });
                 }
             }
         }

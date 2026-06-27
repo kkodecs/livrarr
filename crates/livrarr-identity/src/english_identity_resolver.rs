@@ -544,7 +544,8 @@ fn captured_from_seed(seed: &WorkSeed) -> CapturedIdentity {
 fn captured_from_detail(d: &NormalizedWorkDetail, seed: &WorkSeed) -> CapturedIdentity {
     CapturedIdentity {
         ol_key: non_blank(d.ol_key.clone()),
-        gr_key: non_blank(d.gr_key.clone()),
+        gr_key: non_blank(d.gr_key.clone())
+            .and_then(|k| livrarr_domain::normalization::normalize_gr_key(&k)),
         hc_key: non_blank(d.hc_key.clone()),
         isbn_13: non_blank(d.isbn_13.clone()).or_else(|| non_blank(seed.isbn_13.clone())),
         asin: non_blank(d.asin.clone()).or_else(|| non_blank(seed.asin.clone())),

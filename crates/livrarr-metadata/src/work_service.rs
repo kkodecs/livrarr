@@ -1361,6 +1361,7 @@ where
         work_id: WorkId,
     ) -> Result<RefreshWorkResult, WorkServiceError> {
         let work = self.get(user_id, work_id).await?;
+        let _refresh_span = livrarr_domain::perf::StageTimer::start("refresh_total", work_id);
 
         let _guard = self.refresh_locks.lock((user_id, work_id)).await;
 
@@ -1391,6 +1392,7 @@ where
         // so a refresh always re-attempts providers — no suppression survives.
         let mut work = work;
         if let Some(resolver) = self.resolver.as_ref() {
+            let _id_span = livrarr_domain::perf::StageTimer::start("identity", work_id);
             let anchors = self.db.list_anchors(work.id).await.unwrap_or_default();
             let dead_ends = self
                 .db
@@ -3237,8 +3239,11 @@ where
 
         let materialize =
             livrarr_materialize::LiveMaterializeService::new(Arc::new(self.http.clone()));
-        match livrarr_domain::services::MaterializeService::materialize(&materialize, mat_req).await
-        {
+        let mat_outcome = {
+            let _mat_span = livrarr_domain::perf::StageTimer::start("materialize", work_id);
+            livrarr_domain::services::MaterializeService::materialize(&materialize, mat_req).await
+        };
+        match mat_outcome {
             Ok(outcome) => {
                 // REQ-017: persist freshly decoded ebook-cover dimensions via
                 // the existing writer. (The audiobook slot has no dims writer

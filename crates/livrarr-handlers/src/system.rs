@@ -55,6 +55,7 @@ pub async fn status<S: HasDataDir + HasStartupTime + HasSystem + HasLogSurface>(
         log_init_error: log_surface.init_error,
         startup_time: state.startup_time(),
         log_level: state.system().current_log_level(),
+        rss_bytes: livrarr_domain::perf::process_rss_bytes(),
     }))
 }
 

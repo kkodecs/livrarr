@@ -822,6 +822,8 @@ export interface SystemStatus {
   logFile: string;
   startupTime: string;
   logLevel: string;
+  /** Current process resident memory in bytes; null when unavailable. */
+  rssBytes?: number | null;
 }
 
 export interface HealthSummaryResponse {

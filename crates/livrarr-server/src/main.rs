@@ -1,3 +1,7 @@
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -45,6 +49,9 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    #[cfg(feature = "dhat-heap")]
+    let _dhat = dhat::Profiler::new_heap();
+
     let cli = Cli::parse();
     let data_dir = cli.data;
     let ui_dir = cli.ui_dir.unwrap_or_else(|| data_dir.join("ui"));

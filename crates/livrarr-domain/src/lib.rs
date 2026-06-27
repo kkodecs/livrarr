@@ -2,6 +2,7 @@ pub mod identity;
 pub mod kash;
 pub mod keyed_mutex;
 pub mod normalization;
+pub mod perf;
 pub mod readarr;
 pub mod seed;
 pub mod services;
