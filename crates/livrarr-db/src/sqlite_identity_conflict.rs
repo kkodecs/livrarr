@@ -6,6 +6,22 @@ use sqlx::SqliteConnection;
 
 use crate::sqlite::SqliteDb;
 
+/// Error type returned by the atomic conflict-apply operations.
+///
+/// `AlreadyResolved` is distinct from `Db` so callers can return a typed
+/// "already closed" response (→ 409 Conflict) rather than a generic 500.
+/// `InvalidAnchorValue` propagates the primary-anchor validation failure
+/// typed so the API layer can return 400 Bad Request.
+#[derive(Debug, thiserror::Error)]
+pub enum ConflictApplyError {
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("invalid anchor value")]
+    InvalidAnchorValue,
+    #[error("conflict already resolved or dismissed")]
+    AlreadyResolved,
+}
+
 #[allow(clippy::type_complexity)]
 type ConflictRow = (
     i64,
@@ -190,13 +206,18 @@ impl SqliteDb {
     /// has no work to act on; routing it through here recomputes a non-existent work
     /// (harmless no-op). That add-time case is deferred to the Phase 2-3 "pick at add"
     /// reshape — documented, not claimed fixed here.
+    ///
+    /// **TOCTOU guard**: the conflict-row UPDATE is performed FIRST inside the tx with
+    /// `AND status = 'open'`. If `rows_affected() == 0` a concurrent resolve/dismiss
+    /// already closed this conflict; we return `ConflictApplyError::AlreadyResolved`
+    /// and the tx is rolled back before any anchor mutations commit.
     pub async fn apply_conflict_resolution(
         &self,
         conflict: &IdentityConflict,
         action: ConflictResolutionAction,
         notes: Option<&str>,
         resolved_at: DateTime<Utc>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), ConflictApplyError> {
         let work_id = conflict.existing_work_id;
         let now = resolved_at.to_rfc3339();
         let action_str = serde_json::to_value(action)
@@ -205,6 +226,27 @@ impl SqliteDb {
             .unwrap_or_else(|| "keep_existing".to_string());
 
         let mut tx = self.pool().begin().await?;
+
+        // ── TOCTOU guard ──────────────────────────────────────────────────────
+        // Claim the conflict row NOW, inside the tx, guarded by `status = 'open'`.
+        // A concurrent resolve/dismiss will have already flipped the status, so
+        // rows_affected will be 0 and we abort before any anchor mutation commits.
+        let guard = sqlx::query(
+            "UPDATE work_identity_conflicts
+             SET status = 'resolved', resolved_at = ?1, resolution_action = ?2,
+                 resolution_notes = ?3
+             WHERE id = ?4 AND status = 'open'",
+        )
+        .bind(&now)
+        .bind(&action_str)
+        .bind(notes)
+        .bind(conflict.id)
+        .execute(&mut *tx)
+        .await?;
+
+        if guard.rows_affected() == 0 {
+            return Err(ConflictApplyError::AlreadyResolved);
+        }
 
         // All incoming anchors as (anchor_type_str, value) pairs — iterated by Merge
         // and by ReplaceAnchor/Merge on QuorumTie (which has no single implicated type).
@@ -264,69 +306,46 @@ impl SqliteDb {
                             AnchorSetter::User,
                         )
                         .await
-                        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+                        .map_err(|e| match e {
+                            WorkIdentityError::InvalidAnchorValue => {
+                                ConflictApplyError::InvalidAnchorValue
+                            }
+                            e => ConflictApplyError::Db(sqlx::Error::Protocol(e.to_string())),
+                        })?;
                     }
                 } else {
                     // QuorumTie has no single implicated anchor type.
                     // ReplaceAnchor on QuorumTie is treated as Merge: adopt the incoming
                     // candidate's anchors as secondary gap-fills (existing anchors are
                     // preserved; no supersede). Badge recompute runs in the tail below.
-                    for &(at, val) in anchors_to_merge {
-                        let val = match val.filter(|v| !v.is_empty()) {
-                            Some(v) => v,
-                            None => continue,
-                        };
-                        let has_confirmed: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM work_identity_anchors
-                             WHERE work_id = ?1 AND anchor_type = ?2 AND confidence = 'confirmed'",
-                        )
-                        .bind(work_id)
-                        .bind(at)
-                        .fetch_one(&mut *tx)
-                        .await?;
-                        if has_confirmed > 0 {
-                            continue;
-                        }
-                        match crate::sqlite_work_identity::confirm_anchor_in_tx(
-                            &mut tx,
-                            work_id,
-                            AnchorType::new(at),
-                            val,
-                            AnchorSetter::User,
-                        )
-                        .await
-                        {
-                            Ok(()) => {}
-                            Err(WorkIdentityError::InvalidAnchorValue) => {
-                                tracing::warn!(
-                                    work_id = %work_id,
-                                    anchor_type = at,
-                                    "quorum-tie replace-anchor: incoming anchor has invalid \
-                                     canonical form — skipping gap-fill for this type"
-                                );
-                            }
-                            Err(e) => return Err(sqlx::Error::Protocol(e.to_string())),
-                        }
-                    }
+                    apply_gap_fills(
+                        &mut tx,
+                        work_id,
+                        anchors_to_merge,
+                        None,
+                        "quorum-tie replace-anchor",
+                    )
+                    .await?;
                 }
             }
 
             ConflictResolutionAction::Merge => {
                 // The primary type is the anchor implicated by the conflict kind.
-                // For QuorumTie, anchor_type_for_kind returns None → all types are secondary
-                // (gap-fill only; no supersede of existing confirmed anchors).
+                // For QuorumTie, anchor_type_for_kind returns None → all types are
+                // secondary (gap-fill only; no supersede of existing confirmed anchors).
                 let primary_type: Option<&str> = anchor_type_for_kind(conflict.kind);
 
-                for &(at, val) in anchors_to_merge {
-                    let val = match val.filter(|v| !v.is_empty()) {
-                        Some(v) => v,
-                        None => continue,
-                    };
+                // Primary anchor: supersede any different existing confirmed anchor,
+                // then validate + confirm the incoming value.
+                // Primary-type canonical validation failure → fail the whole resolution.
+                if let Some(pt) = primary_type {
+                    let primary_val = anchors_to_merge
+                        .iter()
+                        .find(|&&(at, _)| at == pt)
+                        .and_then(|&(_, v)| v)
+                        .filter(|v| !v.is_empty());
 
-                    if primary_type == Some(at) {
-                        // Primary (the conflict's own type): supersede any different existing
-                        // confirmed anchor, then validate + confirm the incoming value.
-                        // Primary-type canonical validation failure → fail the whole resolution.
+                    if let Some(val) = primary_val {
                         sqlx::query(
                             "UPDATE work_identity_anchors
                              SET confidence = 'superseded', superseded_by = ?1
@@ -335,78 +354,35 @@ impl SqliteDb {
                         )
                         .bind(val)
                         .bind(work_id)
-                        .bind(at)
+                        .bind(pt)
                         .execute(&mut *tx)
                         .await?;
 
                         crate::sqlite_work_identity::confirm_anchor_in_tx(
                             &mut tx,
                             work_id,
-                            AnchorType::new(at),
+                            AnchorType::new(pt),
                             val,
                             AnchorSetter::User,
                         )
                         .await
-                        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-                    } else {
-                        // Secondary (gap-fill): add the incoming anchor ONLY if the work has
-                        // no confirmed anchor of this type at all — never overwrite an existing
-                        // User- or machine-set confirmed anchor (Fix 2 / R-001).
-                        let has_confirmed: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM work_identity_anchors
-                             WHERE work_id = ?1 AND anchor_type = ?2 AND confidence = 'confirmed'",
-                        )
-                        .bind(work_id)
-                        .bind(at)
-                        .fetch_one(&mut *tx)
-                        .await?;
-
-                        if has_confirmed > 0 {
-                            // An existing confirmed anchor (User- or machine-set) takes
-                            // precedence; do not overwrite it with a secondary gap-fill.
-                            continue;
-                        }
-
-                        // Secondary-type canonical validation failure → skip + warn; do not
-                        // block the primary resolution (malformed gap-fill data is non-fatal).
-                        match crate::sqlite_work_identity::confirm_anchor_in_tx(
-                            &mut tx,
-                            work_id,
-                            AnchorType::new(at),
-                            val,
-                            AnchorSetter::User,
-                        )
-                        .await
-                        {
-                            Ok(()) => {}
-                            Err(WorkIdentityError::InvalidAnchorValue) => {
-                                tracing::warn!(
-                                    work_id = %work_id,
-                                    anchor_type = at,
-                                    "merge: secondary anchor has invalid canonical form — \
-                                     skipping gap-fill for this type"
-                                );
+                        .map_err(|e| match e {
+                            WorkIdentityError::InvalidAnchorValue => {
+                                ConflictApplyError::InvalidAnchorValue
                             }
-                            Err(e) => return Err(sqlx::Error::Protocol(e.to_string())),
-                        }
+                            e => ConflictApplyError::Db(sqlx::Error::Protocol(e.to_string())),
+                        })?;
                     }
                 }
+
+                // Secondary anchors (gap-fill): add incoming anchors ONLY if the work
+                // has no confirmed anchor of that type at all — never overwrite an
+                // existing User- or machine-set confirmed anchor (Fix 2 / R-001).
+                // Secondary-type canonical validation failure → skip + warn; does not
+                // block the primary resolution (malformed gap-fill data is non-fatal).
+                apply_gap_fills(&mut tx, work_id, anchors_to_merge, primary_type, "merge").await?;
             }
         }
-
-        // Mark the conflict row resolved
-        sqlx::query(
-            "UPDATE work_identity_conflicts
-             SET status = 'resolved', resolved_at = ?1, resolution_action = ?2,
-                 resolution_notes = ?3
-             WHERE id = ?4",
-        )
-        .bind(&now)
-        .bind(&action_str)
-        .bind(notes)
-        .bind(conflict.id)
-        .execute(&mut *tx)
-        .await?;
 
         // Recompute the badge now that this conflict row is resolved.
         // Works for all conflict kinds including QuorumTie.
@@ -427,27 +403,36 @@ impl SqliteDb {
     /// Does NOT re-stamp the existing anchor (the user is not asserting the existing
     /// value is correct — they are only deferring the decision). Re-raise is prevented
     /// by the closed-conflict check inside `detect_conflicting_anchors`.
+    ///
+    /// **TOCTOU guard**: the conflict-row UPDATE is performed FIRST inside the tx with
+    /// `AND status = 'open'`. If `rows_affected() == 0` a concurrent dismiss/resolve
+    /// already closed this conflict; we return `ConflictApplyError::AlreadyResolved`.
     pub async fn apply_conflict_dismiss(
         &self,
         conflict: &IdentityConflict,
         dismissed_at: DateTime<Utc>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), ConflictApplyError> {
         let work_id = conflict.existing_work_id;
         let now = dismissed_at.to_rfc3339();
 
         let mut tx = self.pool().begin().await?;
 
-        sqlx::query(
+        // ── TOCTOU guard ──────────────────────────────────────────────────────
+        let guard = sqlx::query(
             "UPDATE work_identity_conflicts
              SET status = 'dismissed', resolved_at = ?1
-             WHERE id = ?2",
+             WHERE id = ?2 AND status = 'open'",
         )
         .bind(&now)
         .bind(conflict.id)
         .execute(&mut *tx)
         .await?;
 
-        // Recompute the badge now that this conflict row is dismissed
+        if guard.rows_affected() == 0 {
+            return Err(ConflictApplyError::AlreadyResolved);
+        }
+
+        // Recompute the badge now that this conflict row is dismissed.
         let new_status = derive_badge_in_tx(&mut tx, work_id).await?;
         let status_str = identity_status_str(new_status);
         sqlx::query("UPDATE works SET identity_status = ?1 WHERE id = ?2")
@@ -555,6 +540,71 @@ pub(crate) fn identity_status_str(s: IdentityStatus) -> &'static str {
         IdentityStatus::NeedsReview => "needs_review",
         IdentityStatus::NotFound => "not_found",
     }
+}
+
+/// Attempt to confirm each entry in `anchors` as a gap-fill anchor for `work_id`.
+///
+/// "Gap-fill" semantics: a type is only written if the work has **no** existing
+/// confirmed anchor of that type (never overwrites User- or machine-set data).
+///
+/// Behaviour per entry:
+/// - Skip if `at == exclude` (used by `Merge` to bypass the primary type, which is
+///   handled separately with supersede semantics).
+/// - Skip if the incoming value is absent or empty.
+/// - Skip (silently) if a confirmed anchor of that type already exists.
+/// - Skip + warn if `confirm_anchor_in_tx` returns `InvalidAnchorValue` (non-fatal
+///   for gap-fills; malformed secondary data must not block the primary resolution).
+/// - Return `ConflictApplyError::Db` for any other `confirm_anchor_in_tx` error.
+async fn apply_gap_fills(
+    tx: &mut SqliteConnection,
+    work_id: WorkId,
+    anchors: &[(&str, Option<&str>)],
+    exclude: Option<&str>,
+    warn_context: &str,
+) -> Result<(), ConflictApplyError> {
+    for &(at, val) in anchors {
+        if exclude == Some(at) {
+            continue;
+        }
+        let val = match val.filter(|v| !v.is_empty()) {
+            Some(v) => v,
+            None => continue,
+        };
+        let has_confirmed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM work_identity_anchors
+             WHERE work_id = ?1 AND anchor_type = ?2 AND confidence = 'confirmed'",
+        )
+        .bind(work_id)
+        .bind(at)
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_confirmed > 0 {
+            continue;
+        }
+        match crate::sqlite_work_identity::confirm_anchor_in_tx(
+            tx,
+            work_id,
+            AnchorType::new(at),
+            val,
+            AnchorSetter::User,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(WorkIdentityError::InvalidAnchorValue) => {
+                tracing::warn!(
+                    work_id = %work_id,
+                    anchor_type = at,
+                    context = warn_context,
+                    "incoming anchor has invalid canonical form — skipping gap-fill for this type"
+                );
+            }
+            Err(e) => {
+                return Err(ConflictApplyError::Db(sqlx::Error::Protocol(e.to_string())));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_conflict_row(row: ConflictRow) -> Result<IdentityConflict, String> {

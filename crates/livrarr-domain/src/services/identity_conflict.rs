@@ -7,6 +7,8 @@ pub enum ConflictError {
     NotFound,
     #[error("conflict already resolved")]
     AlreadyResolved,
+    #[error("invalid primary anchor value")]
+    InvalidPrimaryAnchor,
     #[error("serialization failed: {0}")]
     SerializationFailed(String),
     #[error("work service failed: {0}")]

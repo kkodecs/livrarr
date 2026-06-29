@@ -33,6 +33,7 @@ mod sqlite_field_dissents;
 mod sqlite_grab;
 mod sqlite_history;
 mod sqlite_identity_conflict;
+pub use sqlite_identity_conflict::ConflictApplyError;
 mod sqlite_import;
 mod sqlite_indexer;
 mod sqlite_kash_link;

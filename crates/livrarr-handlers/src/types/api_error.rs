@@ -321,6 +321,27 @@ impl From<livrarr_domain::services::HistoryServiceError> for ApiError {
     }
 }
 
+impl From<livrarr_domain::services::ConflictError> for ApiError {
+    fn from(e: livrarr_domain::services::ConflictError) -> Self {
+        use livrarr_domain::services::ConflictError;
+        match e {
+            ConflictError::NotFound => ApiError::NotFound,
+            ConflictError::AlreadyResolved => ApiError::Conflict {
+                reason: e.to_string(),
+            },
+            ConflictError::InvalidPrimaryAnchor => ApiError::BadRequest(e.to_string()),
+            ConflictError::Db(msg) => {
+                tracing::error!("conflict db error: {msg}");
+                ApiError::Internal("Something went wrong".to_string())
+            }
+            e => {
+                tracing::error!("conflict error: {e}");
+                ApiError::Internal("Something went wrong".to_string())
+            }
+        }
+    }
+}
+
 impl From<livrarr_domain::services::ManualImportServiceError> for ApiError {
     fn from(e: livrarr_domain::services::ManualImportServiceError) -> Self {
         use livrarr_domain::services::ManualImportServiceError;

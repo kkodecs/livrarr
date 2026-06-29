@@ -7,8 +7,8 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        test_helpers::create_test_db, AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest,
-        CreateWorkDbRequest, UserDb, WorkDb, WorkDbCreate,
+        test_helpers::create_test_db, AuthorDb, ConflictApplyError, CreateAuthorDbRequest,
+        CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb, WorkDbCreate,
     };
     use livrarr_domain::services::WorkIdentityRepository;
     use livrarr_domain::{
@@ -657,9 +657,11 @@ mod tests {
             )
             .await;
 
+        // R-008: must surface as InvalidAnchorValue, not a generic Db/Protocol error
         assert!(
-            result.is_err(),
-            "ReplaceAnchor with non-canonical primary value must return an error"
+            matches!(result, Err(ConflictApplyError::InvalidAnchorValue)),
+            "ReplaceAnchor with non-canonical primary value must return ConflictApplyError::InvalidAnchorValue; \
+             got: {result:?}"
         );
 
         // The conflict row must still be Open (the resolution was rolled back)
@@ -1222,6 +1224,205 @@ mod tests {
             convergence_conflicts.is_empty(),
             "Known-gap (R-003): User-set anchor must be suppressed from Convergence source \
              until Phase 2-3 redirect machinery exists; got: {convergence_conflicts:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // R-007: TOCTOU — second resolve of an already-resolved conflict must fail
+    // -------------------------------------------------------------------------
+
+    /// A second call to `apply_conflict_resolution` on an already-resolved conflict
+    /// must return `ConflictApplyError::AlreadyResolved` and must NOT write any
+    /// additional anchor mutations (rows_affected guard catches the race).
+    #[tokio::test]
+    async fn double_resolve_returns_already_resolved_and_no_double_apply() {
+        let db = create_test_db().await;
+        let s = seed(&db).await;
+
+        db.confirm_anchor(
+            s.work_id,
+            AnchorType::new(AnchorType::OL_WORK),
+            "/works/OL123W",
+            AnchorSetter::AutoSearch,
+        )
+        .await
+        .unwrap();
+
+        let conflict_id = db
+            .raise_identity_conflict(make_ol_conflict(s.user_id, s.work_id, "/works/OL999W"))
+            .await
+            .unwrap();
+
+        let conflict_row = db
+            .get_identity_conflict(conflict_id, s.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // First resolve succeeds
+        db.apply_conflict_resolution(
+            &conflict_row,
+            ConflictResolutionAction::KeepExisting,
+            None,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("first resolve must succeed");
+
+        // Snapshot anchors after the first resolve
+        let anchors_after_first = db.list_anchors(s.work_id).await.unwrap();
+
+        // Second resolve on the same (now-stale) conflict row must fail typed
+        let result = db
+            .apply_conflict_resolution(
+                &conflict_row,
+                ConflictResolutionAction::Merge,
+                None,
+                chrono::Utc::now(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ConflictApplyError::AlreadyResolved)),
+            "second resolve must return ConflictApplyError::AlreadyResolved; got: {result:?}"
+        );
+
+        // Anchors must be unchanged — no double-apply
+        let anchors_after_second = db.list_anchors(s.work_id).await.unwrap();
+        assert_eq!(
+            anchors_after_first.len(),
+            anchors_after_second.len(),
+            "second resolve must not mutate anchors"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // R-007: TOCTOU — second dismiss of an already-dismissed conflict must fail
+    // -------------------------------------------------------------------------
+
+    /// A second call to `apply_conflict_dismiss` on an already-dismissed conflict
+    /// must return `ConflictApplyError::AlreadyResolved`.
+    #[tokio::test]
+    async fn double_dismiss_returns_already_resolved() {
+        let db = create_test_db().await;
+        let s = seed(&db).await;
+
+        db.confirm_anchor(
+            s.work_id,
+            AnchorType::new(AnchorType::OL_WORK),
+            "/works/OL123W",
+            AnchorSetter::AutoSearch,
+        )
+        .await
+        .unwrap();
+
+        let conflict_id = db
+            .raise_identity_conflict(make_ol_conflict(s.user_id, s.work_id, "/works/OL999W"))
+            .await
+            .unwrap();
+
+        let conflict_row = db
+            .get_identity_conflict(conflict_id, s.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // First dismiss succeeds
+        db.apply_conflict_dismiss(&conflict_row, chrono::Utc::now())
+            .await
+            .expect("first dismiss must succeed");
+
+        // Second dismiss on the same stale conflict row must fail typed
+        let result = db
+            .apply_conflict_dismiss(&conflict_row, chrono::Utc::now())
+            .await;
+
+        assert!(
+            matches!(result, Err(ConflictApplyError::AlreadyResolved)),
+            "second dismiss must return ConflictApplyError::AlreadyResolved; got: {result:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // R-008: Merge with invalid primary anchor yields typed InvalidAnchorValue
+    // -------------------------------------------------------------------------
+
+    /// A Merge resolution where the primary anchor value fails canonical validation
+    /// must return `ConflictApplyError::InvalidAnchorValue` (not a generic Db error),
+    /// and must NOT commit anchor mutations or flip the conflict to resolved.
+    ///
+    /// Uses a GR conflict because OL/HC work keys have no canonical form restriction
+    /// (any non-empty string is accepted), whereas GR keys must be numeric.
+    #[tokio::test]
+    async fn merge_invalid_primary_anchor_returns_typed_error() {
+        let db = create_test_db().await;
+        let s = seed(&db).await;
+
+        db.confirm_anchor(
+            s.work_id,
+            AnchorType::new(AnchorType::GR_WORK),
+            "111111",
+            AnchorSetter::AutoSearch,
+        )
+        .await
+        .unwrap();
+
+        // Conflict with a non-canonical GR key (starts with letters — not numeric)
+        let conflict_id = db
+            .raise_identity_conflict(NewIdentityConflict {
+                user_id: s.user_id,
+                existing_work_id: s.work_id,
+                kind: IdentityConflictKind::IncomingDifferentGrKey,
+                incoming: IncomingConflictPayload {
+                    ol_key: None,
+                    gr_key: Some("goodreads:BAD".to_string()), // non-canonical
+                    hc_key: None,
+                    isbn_13: None,
+                    asin: None,
+                    title: "Test Work".to_string(),
+                    author_name: "Test Author".to_string(),
+                    year: None,
+                    cover_url: None,
+                    top_candidates: Vec::new(),
+                },
+                raised_by: ConflictSource::ManualAdd,
+                raised_source_path: None,
+            })
+            .await
+            .unwrap();
+
+        let conflict_row = db
+            .get_identity_conflict(conflict_id, s.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Merge on a non-canonical primary → typed error
+        let result = db
+            .apply_conflict_resolution(
+                &conflict_row,
+                ConflictResolutionAction::Merge,
+                None,
+                chrono::Utc::now(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ConflictApplyError::InvalidAnchorValue)),
+            "Merge with non-canonical primary must return ConflictApplyError::InvalidAnchorValue; \
+             got: {result:?}"
+        );
+
+        // Conflict row must still be Open (the tx was rolled back)
+        let still_open = db
+            .get_identity_conflict(conflict_id, s.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            still_open.status,
+            ConflictStatus::Open,
+            "conflict must remain Open after a failed Merge"
         );
     }
 }

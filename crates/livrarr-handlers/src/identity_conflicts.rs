@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::HasIdentityConflictService;
 use crate::{ApiError, AuthContext};
 use livrarr_domain::identity::*;
-use livrarr_domain::services::IdentityConflictService;
+use livrarr_domain::services::{ConflictError, IdentityConflictService};
 
 #[derive(Debug, Serialize)]
 pub struct IdentityConflictDto {
@@ -121,7 +121,7 @@ pub async fn resolve<S: HasIdentityConflictService>(
     ctx.identity_conflict_service()
         .resolve(id, auth.user.id, body.action, body.notes)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from)?;
 
     Ok(Json(ResolveResponse {
         status: "resolved".to_string(),
@@ -137,7 +137,7 @@ pub async fn dismiss<S: HasIdentityConflictService>(
     ctx.identity_conflict_service()
         .dismiss(id, auth.user.id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e: ConflictError| ApiError::from(e))?;
 
     Ok(StatusCode::NO_CONTENT)
 }

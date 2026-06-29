@@ -69,7 +69,13 @@ impl IdentityConflictService for LiveIdentityConflictService {
         self.db
             .apply_conflict_resolution(&conflict, action, notes.as_deref(), Utc::now())
             .await
-            .map_err(|e| ConflictError::Db(e.to_string()))
+            .map_err(|e| match e {
+                livrarr_db::ConflictApplyError::AlreadyResolved => ConflictError::AlreadyResolved,
+                livrarr_db::ConflictApplyError::InvalidAnchorValue => {
+                    ConflictError::InvalidPrimaryAnchor
+                }
+                livrarr_db::ConflictApplyError::Db(db_err) => ConflictError::Db(db_err.to_string()),
+            })
     }
 
     async fn dismiss(&self, id: i64, user_id: UserId) -> Result<(), ConflictError> {
@@ -91,6 +97,13 @@ impl IdentityConflictService for LiveIdentityConflictService {
         self.db
             .apply_conflict_dismiss(&conflict, Utc::now())
             .await
-            .map_err(|e| ConflictError::Db(e.to_string()))
+            .map_err(|e| match e {
+                livrarr_db::ConflictApplyError::AlreadyResolved => ConflictError::AlreadyResolved,
+                livrarr_db::ConflictApplyError::Db(db_err) => ConflictError::Db(db_err.to_string()),
+                // apply_conflict_dismiss never returns InvalidAnchorValue; map defensively
+                livrarr_db::ConflictApplyError::InvalidAnchorValue => {
+                    ConflictError::Db("unexpected anchor validation error in dismiss".to_string())
+                }
+            })
     }
 }
