@@ -3,6 +3,7 @@ use livrarr_domain::identity::*;
 use livrarr_domain::normalization::{normalize_asin, normalize_gr_key, normalize_isbn13, AsinNorm};
 use livrarr_domain::services::{WorkIdentityError, WorkIdentityRepository};
 use livrarr_domain::WorkId;
+use sqlx::SqliteConnection;
 
 use crate::sqlite::SqliteDb;
 
@@ -800,6 +801,126 @@ impl WorkIdentityRepository for SqliteDb {
         sqlx::query("DELETE FROM work_anchor_dead_ends WHERE work_id = ?1")
             .bind(work_id)
             .execute(self.pool())
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn confirm_anchor_and_recompute_badge(
+        &self,
+        work_id: WorkId,
+        anchor_type: AnchorType,
+        value: &str,
+        setter: AnchorSetter,
+    ) -> Result<(), WorkIdentityError> {
+        // Same value validation as confirm_anchor.
+        if value.trim().is_empty() {
+            return Err(WorkIdentityError::InvalidAnchorValue);
+        }
+        let canonical = match anchor_type.as_str() {
+            AnchorType::ISBN_13 => normalize_isbn13(value).as_deref() == Some(value),
+            AnchorType::GR_WORK => normalize_gr_key(value).as_deref() == Some(value),
+            AnchorType::ASIN => matches!(normalize_asin(value), AsinNorm::Asin(a) if a == value),
+            _ => true,
+        };
+        if !canonical {
+            return Err(WorkIdentityError::InvalidAnchorValue);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let setter_str = serde_json::to_value(setter)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "user".to_string());
+        let anchor_type_str = anchor_type.as_str().to_string();
+
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        // Promote the anchor to confirmed (same SQL as confirm_anchor).
+        sqlx::query(
+            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
+             VALUES (?1, ?2, ?3, 'confirmed', ?4, ?5, (SELECT user_id FROM works WHERE id = ?1))
+             ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
+                 confidence = 'confirmed',
+                 setter = ?4,
+                 set_at = ?5,
+                 superseded_by = NULL,
+                 user_id = (SELECT user_id FROM works WHERE id = ?1)",
+        )
+        .bind(work_id)
+        .bind(&anchor_type_str)
+        .bind(value)
+        .bind(&setter_str)
+        .bind(&now)
+        .execute(&mut *tx as &mut SqliteConnection)
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        // Sync the denormalized works.* column (same as confirm_anchor).
+        match anchor_type.as_str() {
+            AnchorType::OL_WORK => {
+                sqlx::query("UPDATE works SET ol_key = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx as &mut SqliteConnection)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::GR_WORK => {
+                sqlx::query("UPDATE works SET gr_key = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx as &mut SqliteConnection)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::HC_WORK => {
+                sqlx::query("UPDATE works SET hc_key = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx as &mut SqliteConnection)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::ISBN_13 => {
+                sqlx::query("UPDATE works SET isbn_13 = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx as &mut SqliteConnection)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::ASIN => {
+                sqlx::query("UPDATE works SET asin = ?1 WHERE id = ?2")
+                    .bind(value)
+                    .bind(work_id)
+                    .execute(&mut *tx as &mut SqliteConnection)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            _ => {}
+        }
+
+        // Atomically derive the new badge and write it.
+        let badge = crate::sqlite_identity_conflict::derive_badge_in_tx(
+            &mut *tx as &mut SqliteConnection,
+            work_id,
+        )
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        sqlx::query("UPDATE works SET identity_status = ?1 WHERE id = ?2")
+            .bind(crate::sqlite_identity_conflict::identity_status_str(badge))
+            .bind(work_id)
+            .execute(&mut *tx as &mut SqliteConnection)
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        tx.commit()
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
         Ok(())

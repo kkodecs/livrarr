@@ -436,7 +436,7 @@ async fn update_works_column_in_tx(
 
 /// Derive the correct `IdentityStatus` badge from the work's remaining confirmed
 /// anchors and open conflicts (mirrors `derived_identity_status`, D-013).
-async fn derive_badge_in_tx(
+pub(crate) async fn derive_badge_in_tx(
     tx: &mut SqliteConnection,
     work_id: WorkId,
 ) -> Result<IdentityStatus, sqlx::Error> {
@@ -484,7 +484,7 @@ async fn derive_badge_in_tx(
 }
 
 /// Serialize an `IdentityStatus` to the snake_case string stored in the DB.
-fn identity_status_str(s: IdentityStatus) -> &'static str {
+pub(crate) fn identity_status_str(s: IdentityStatus) -> &'static str {
     match s {
         IdentityStatus::Pending => "pending",
         IdentityStatus::Confirmed => "confirmed",

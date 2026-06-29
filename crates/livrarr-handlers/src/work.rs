@@ -941,10 +941,12 @@ pub async fn affirm_pending_anchor<S: HasWorkIdentityRepository + HasWorkService
         .map(|a| a.anchor_value)
         .ok_or(ApiError::NotFound)?;
 
-    // The user verified it: promote pending→confirmed and sync works.*.
+    // The user verified it: promote pending→confirmed, sync works.*, and
+    // immediately recompute + write the identity_status badge in one
+    // atomic transaction (M-020 fix — badge must not wait for bg refresh).
     state
         .work_identity_repo()
-        .confirm_anchor(work_id, anchor_type, &value, AnchorSetter::User)
+        .confirm_anchor_and_recompute_badge(work_id, anchor_type, &value, AnchorSetter::User)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 

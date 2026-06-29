@@ -34,6 +34,19 @@ pub trait WorkIdentityRepository: Send + Sync {
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError>;
 
+    /// Confirm a pending anchor, then atomically derive and persist the
+    /// `identity_status` badge from the updated anchor set (M-020). The badge
+    /// is written in the same transaction as the anchor promotion, so the UI
+    /// reflects the correct status immediately without waiting for background
+    /// refresh. Called exclusively from the user-affirm path.
+    async fn confirm_anchor_and_recompute_badge(
+        &self,
+        work_id: WorkId,
+        anchor_type: AnchorType,
+        value: &str,
+        setter: AnchorSetter,
+    ) -> Result<(), WorkIdentityError>;
+
     async fn supersede_anchor(
         &self,
         work_id: WorkId,
