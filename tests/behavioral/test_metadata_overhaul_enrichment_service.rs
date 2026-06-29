@@ -2648,6 +2648,193 @@ macro_rules! enrichment_service_tests {
             assert_eq!(queue_observer.dispatch_count().await, 1);
         }
 
+        // -----------------------------------------------------------------------
+        // M-010 regression tests: Readarr import payload must reach the merge
+        // -----------------------------------------------------------------------
+
+        #[tokio::test]
+        async fn test_enrich_work_readarr_payload_reaches_merge_as_non_none() {
+            // REQ-ID: M-010 | Contract: enrich_work Step 8 | Behavior: Readarr is
+            // never scattered so it has no DB retry-state row. After the fix the
+            // in-memory payload is used as fallback; before the fix it was silently
+            // dropped (payload=None), contributing zero fields to the merge.
+            let h = <$harness as DbTestHarness>::setup().await;
+            let db = Arc::new(h.db().clone());
+            let user_id = h.user_id();
+            let work = seed_work(h.db(), user_id).await;
+
+            // Queue returns only OpenLibrary:NotFound — Readarr is not in scatter;
+            // it is injected via inject_source_data and appended at Step 4.5.
+            let queue = StubProviderQueue::with_plan(DispatchPlan {
+                result: scatter_result(
+                    work.id,
+                    provider_outcomes_map(&[(MetadataProvider::OpenLibrary, ProviderOutcome::NotFound)]),
+                    true,
+                    false,
+                ),
+                persist_outcomes: Some(persist_scatter_result_hook(db.clone(), user_id)),
+                before_return: None,
+                hold_until: None,
+            });
+
+            let merge_engine = StubMergeEngine::with_output(merge_output_success("Merged Title"));
+            let merge_observer = merge_engine.clone();
+
+            let service = make_service(db.clone(), queue, merge_engine);
+
+            // Pre-inject Readarr source data — the only provider supplying
+            // description and publisher here.
+            service
+                .inject_source_data(
+                    user_id,
+                    work.id,
+                    livrarr_domain::services::SourceProviderData {
+                        description: Some("Readarr-only description".to_string()),
+                        publisher: Some("Readarr Publisher".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+            service
+                .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+                .await
+                .unwrap();
+
+            let seen = merge_observer.inputs().await;
+            assert_eq!(seen.len(), 1, "merge engine must be called exactly once");
+
+            // M-010 regression: before the fix this entry had payload=None.
+            let readarr = seen[0]
+                .provider_results
+                .get(&MetadataProvider::Readarr)
+                .expect("Readarr must appear in merge input provider_results");
+            assert_eq!(readarr.class, OutcomeClass::Success);
+            let payload = readarr
+                .payload
+                .as_ref()
+                .expect("Readarr payload must be Some after M-010 fix, not None");
+            assert_eq!(
+                payload.description.as_deref(),
+                Some("Readarr-only description"),
+                "injected description must reach the merge"
+            );
+            assert_eq!(
+                payload.publisher.as_deref(),
+                Some("Readarr Publisher"),
+                "injected publisher must reach the merge"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_enrich_work_readarr_does_not_override_higher_priority_provider() {
+            // REQ-ID: M-010 | Contract: enrich_work merge priority | Behavior: when
+            // Readarr AND a higher-priority scattered provider both supply a field,
+            // both payloads reach the merge engine (so the engine applies its
+            // priority rules), and the merge engine's output is what gets persisted.
+            let h = <$harness as DbTestHarness>::setup().await;
+            let db = Arc::new(h.db().clone());
+            let user_id = h.user_id();
+            let work = seed_work(h.db(), user_id).await;
+
+            // Goodreads (higher priority than Readarr) returns a description.
+            let queue = StubProviderQueue::with_plan(DispatchPlan {
+                result: scatter_result(
+                    work.id,
+                    provider_outcomes_map(&[(
+                        MetadataProvider::Goodreads,
+                        ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
+                            title: Some("GR Title".to_string()),
+                            description: Some("Goodreads description".to_string()),
+                            author_name: Some("GR Author".to_string()),
+                            ..Default::default()
+                        })),
+                    )]),
+                    true,
+                    false,
+                ),
+                persist_outcomes: Some(persist_scatter_result_hook(db.clone(), user_id)),
+                before_return: None,
+                hold_until: None,
+            });
+
+            // Stub merge engine returns Goodreads description — simulating the
+            // real priority engine choosing GR over Readarr for this field.
+            let merge_engine = StubMergeEngine::with_output(MergeOutput {
+                work_update: Some(MergeResolved::new(UpdateWorkEnrichmentDbRequest {
+                    title: Some("GR Title".to_string()),
+                    author_name: Some("GR Author".to_string()),
+                    description: Some("Goodreads description".to_string()),
+                    ..Default::default()
+                })),
+                provenance_upserts: vec![SetFieldProvenanceRequest {
+                    user_id: 0,
+                    work_id: 0,
+                    field: WorkField::Description,
+                    source: Some(MetadataProvider::Goodreads),
+                    setter: ProvenanceSetter::Provider,
+                    cleared: false,
+                }],
+                provenance_deletes: vec![],
+                enrichment_status: EnrichmentStatus::Enriched,
+                enrichment_source: Some("goodreads".to_string()),
+                cover_resolution: None,
+                audiobook_cover_resolution: None,
+                dissents: vec![],
+            });
+            let merge_observer = merge_engine.clone();
+
+            let service = make_service(db.clone(), queue, merge_engine);
+
+            // Readarr also supplies a description. After M-010 fix it must reach
+            // the merge engine (fixing the drop), but must not override Goodreads.
+            service
+                .inject_source_data(
+                    user_id,
+                    work.id,
+                    livrarr_domain::services::SourceProviderData {
+                        description: Some("Readarr description — must not override GR".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+            let result = service
+                .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+                .await
+                .unwrap();
+
+            let seen = merge_observer.inputs().await;
+            assert_eq!(seen.len(), 1, "merge engine must be called exactly once");
+
+            // Both providers must reach the merge engine with real payloads.
+            let readarr = seen[0]
+                .provider_results
+                .get(&MetadataProvider::Readarr)
+                .expect("Readarr must appear in merge input");
+            assert_eq!(readarr.class, OutcomeClass::Success);
+            assert!(readarr.payload.is_some(), "Readarr payload must be Some after M-010 fix");
+
+            let goodreads = seen[0]
+                .provider_results
+                .get(&MetadataProvider::Goodreads)
+                .expect("Goodreads must appear in merge input");
+            assert_eq!(goodreads.class, OutcomeClass::Success);
+            assert!(goodreads.payload.is_some(), "Goodreads payload must be Some");
+
+            // The merge engine's output (Goodreads description) must be what is
+            // persisted — Readarr must not silently override it.
+            let persisted = h.db().get_work(user_id, work.id).await.unwrap();
+            assert_eq!(
+                persisted.description.as_deref(),
+                Some("Goodreads description"),
+                "merge engine output (GR) must win over Readarr"
+            );
+            assert_eq!(result.enrichment_status, EnrichmentStatus::Enriched);
+        }
+
+        // -----------------------------------------------------------------------
+
         #[tokio::test]
         async fn test_enrichment_service_reset_for_manual_refresh_does_not_affect_other_users_work() {
             // REQ-ID: R-20, R-21 | Contract: EnrichmentService::reset_for_manual_refresh | Behavior: resetting one user's work does not affect another user's work

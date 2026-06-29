@@ -1526,8 +1526,13 @@ where
 
         for (provider, outcome) in &scatter_result.outcomes {
             match outcome {
-                ProviderOutcome::Success(_) => {
-                    // Read back the persisted payload from DB
+                ProviderOutcome::Success(in_mem) => {
+                    // Read back the persisted payload from DB.
+                    // Scattered providers always have a retry-state row with
+                    // `normalized_payload_json` (written by `persist_phase1_outcome`).
+                    // Non-scattered providers (e.g. Readarr import) carry their
+                    // payload only in memory — the DB lookup returns None and we
+                    // fall back to the in-memory value so they contribute to the merge.
                     let retry_state = self.db.get_retry_state(user_id, work_id, *provider).await?;
                     let payload =
                         if let Some(ref state) = retry_state {
@@ -1544,6 +1549,11 @@ where
                         } else {
                             None
                         };
+                    // Fall back to the in-memory payload when the DB has no row.
+                    // Preserves restart-safety for scattered providers (their DB row
+                    // is always found); lets non-scattered providers (Readarr and any
+                    // future additions) reach the merge without special-casing.
+                    let payload = payload.or_else(|| Some((**in_mem).clone()));
                     reconstructed.insert(
                         *provider,
                         ReconstructedOutcome {
