@@ -7,25 +7,19 @@ node_modules/
 .serena/
 .gemini/
 .mcp.json
-readarr-source/
 testdata/
-testdat/
-test_list.txt
 frontend/testdata/
 CLAUDE.md
 GEMINI.md
-HANDOFF.md
 graphify-out/
 scripts/
-tools/
-/src/
+tmp/
 *.swp
 *.swo
 *~
 .DS_Store
 .env
 .understand-anything/
-kash/
 
 # Internal process docs — not for public repo
 docs/metadata-lifecycle-audit-brief.md
