@@ -114,7 +114,10 @@ async fn test_wcc_anchors_req_028_ac_028_merge_missing_anchors_adds_gr_without_o
 }
 
 /// REQ-IDs: REQ-018, REQ-020, AC-015, AC-034, AC-035
-/// Directive: detect_conflicting_anchors reports federated same-type anchor conflicts.
+/// Directive: detect_conflicting_anchors reports federated same-type anchor conflicts
+/// for machine-set anchors (AutoSearch/AutoIsbn/etc.), but respects User-set anchors
+/// — a User pick is the top of the confidence hierarchy and must not be overridden by
+/// a machine result.
 #[tokio::test]
 
 async fn test_wcc_anchors_req_018_req_020_ac_015_ac_034_ac_035_detect_conflicting_ol_anchor() {
@@ -129,6 +132,9 @@ async fn test_wcc_anchors_req_018_req_020_ac_015_ac_034_ac_035_detect_conflictin
     )
     .await
     .expect("ISBN bridge anchor should be confirmed");
+
+    // User-set anchor: a differing incoming OL key must NOT generate a conflict.
+    // The user already made the identity call; a machine result cannot override it.
     db.confirm_anchor(
         work_id,
         AnchorType::new(AnchorType::OL_WORK),
@@ -138,7 +144,7 @@ async fn test_wcc_anchors_req_018_req_020_ac_015_ac_034_ac_035_detect_conflictin
     .await
     .expect("existing OL anchor should be confirmed");
 
-    let conflicts = db
+    let conflicts_user_set = db
         .detect_conflicting_anchors(
             work_id,
             &incoming_identity(
@@ -153,14 +159,47 @@ async fn test_wcc_anchors_req_018_req_020_ac_015_ac_034_ac_035_detect_conflictin
         .await
         .expect("conflict detection should succeed");
 
-    assert_eq!(conflicts.len(), 1);
     assert_eq!(
-        conflicts[0].kind,
+        conflicts_user_set.len(),
+        0,
+        "User-set OL anchor must not generate a conflict; got: {conflicts_user_set:?}"
+    );
+
+    // AutoSearch-set anchor: a differing incoming OL key MUST generate a conflict.
+    let work_id2 = create_work(&db, 1, "Detect Conflicting Anchors AutoSearch").await;
+    db.confirm_anchor(
+        work_id2,
+        AnchorType::new(AnchorType::OL_WORK),
+        "OL333W", // different value from work_id's anchor to avoid cross-work user-uniqueness
+        AnchorSetter::AutoSearch,
+    )
+    .await
+    .expect("existing OL anchor should be confirmed");
+
+    let conflicts_auto = db
+        .detect_conflicting_anchors(
+            work_id2,
+            &incoming_identity(
+                Some("OL222W"),
+                Some("12345"),
+                None,
+                Some("9780439139601"),
+                None,
+            ),
+            livrarr_domain::identity::ConflictSource::ManualAdd,
+        )
+        .await
+        .expect("conflict detection should succeed");
+
+    assert_eq!(conflicts_auto.len(), 1);
+    assert_eq!(
+        conflicts_auto[0].kind,
         livrarr_domain::identity::IdentityConflictKind::IncomingDifferentOlKey
     );
-    assert_eq!(conflicts[0].existing_work_id, work_id);
-    assert_eq!(conflicts[0].incoming.ol_key.as_deref(), Some("OL222W"));
-    assert_eq!(conflicts[0].incoming.gr_key.as_deref(), Some("12345"));
+    assert_eq!(conflicts_auto[0].existing_work_id, work_id2);
+    // incoming OL key differs from the existing "OL333W"
+    assert_eq!(conflicts_auto[0].incoming.ol_key.as_deref(), Some("OL222W"));
+    assert_eq!(conflicts_auto[0].incoming.gr_key.as_deref(), Some("12345"));
 }
 
 /// REQ-IDs: REQ-002, AC-003

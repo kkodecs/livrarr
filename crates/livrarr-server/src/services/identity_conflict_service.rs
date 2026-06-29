@@ -90,7 +90,7 @@ impl IdentityConflictService for LiveIdentityConflictService {
         }
 
         self.db
-            .resolve_identity_conflict(id, action, notes.as_deref(), Utc::now())
+            .apply_conflict_resolution(&conflict, action, notes.as_deref(), Utc::now())
             .await
             .map_err(|e| ConflictError::Db(e.to_string()))
     }
@@ -112,7 +112,7 @@ impl IdentityConflictService for LiveIdentityConflictService {
         }
 
         self.db
-            .dismiss_identity_conflict(id, Utc::now())
+            .apply_conflict_dismiss(&conflict, Utc::now())
             .await
             .map_err(|e| ConflictError::Db(e.to_string()))
     }

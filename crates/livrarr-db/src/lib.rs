@@ -59,6 +59,8 @@ mod sqlite_work_identity;
 mod cross_user_isolation_tests;
 #[cfg(test)]
 mod playback_enhancement_tests;
+#[cfg(test)]
+mod sqlite_identity_conflict_tests;
 
 // =============================================================================
 // CRATE: livrarr-db

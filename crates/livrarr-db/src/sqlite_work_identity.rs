@@ -175,6 +175,8 @@ impl WorkIdentityRepository for SqliteDb {
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
+        // Sync ALL five denormalized work columns — same contract as confirm_anchor
+        // (supersede_anchor previously only synced OL/GR, leaving HC/ISBN/ASIN stale).
         match anchor_type.as_str() {
             AnchorType::OL_WORK => {
                 sqlx::query("UPDATE works SET ol_key = ?1 WHERE id = ?2")
@@ -186,6 +188,30 @@ impl WorkIdentityRepository for SqliteDb {
             }
             AnchorType::GR_WORK => {
                 sqlx::query("UPDATE works SET gr_key = ?1 WHERE id = ?2")
+                    .bind(new_value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::HC_WORK => {
+                sqlx::query("UPDATE works SET hc_key = ?1 WHERE id = ?2")
+                    .bind(new_value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::ISBN_13 => {
+                sqlx::query("UPDATE works SET isbn_13 = ?1 WHERE id = ?2")
+                    .bind(new_value)
+                    .bind(work_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            }
+            AnchorType::ASIN => {
+                sqlx::query("UPDATE works SET asin = ?1 WHERE id = ?2")
                     .bind(new_value)
                     .bind(work_id)
                     .execute(&mut *tx)
@@ -263,35 +289,76 @@ impl WorkIdentityRepository for SqliteDb {
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
-        let confirmed: std::collections::HashMap<String, String> = existing
+        // Track value AND setter: a User-set anchor must never generate a conflict
+        // (the user already chose this value; a machine result cannot override it).
+        let confirmed: std::collections::HashMap<String, (String, AnchorSetter)> = existing
             .iter()
             .filter(|a| a.confidence == AnchorConfidence::Confirmed)
-            .map(|a| (a.anchor_type.as_str().to_string(), a.anchor_value.clone()))
+            .map(|a| {
+                (
+                    a.anchor_type.as_str().to_string(),
+                    (a.anchor_value.clone(), a.setter),
+                )
+            })
             .collect();
 
         let mut conflicts = Vec::new();
-        let checks: &[(&str, Option<&str>, IdentityConflictKind)] = &[
+        // (anchor_type_str, incoming_value, conflict_kind, json_path_in_payload)
+        let checks: &[(&str, Option<&str>, IdentityConflictKind, &str)] = &[
             (
                 AnchorType::OL_WORK,
                 incoming.ol_key.as_deref(),
                 IdentityConflictKind::IncomingDifferentOlKey,
+                "$.ol_key",
             ),
             (
                 AnchorType::GR_WORK,
                 incoming.gr_key.as_deref(),
                 IdentityConflictKind::IncomingDifferentGrKey,
+                "$.gr_key",
             ),
             (
                 AnchorType::HC_WORK,
                 incoming.hc_key.as_deref(),
                 IdentityConflictKind::IncomingDifferentHcKey,
+                "$.hc_key",
             ),
         ];
 
-        for &(anchor_type_str, incoming_value, kind) in checks {
+        for &(anchor_type_str, incoming_value, kind, json_field) in checks {
             if let Some(incoming_val) = incoming_value {
-                if let Some(existing_val) = confirmed.get(anchor_type_str) {
+                if let Some((existing_val, existing_setter)) = confirmed.get(anchor_type_str) {
                     if incoming_val != existing_val.as_str() {
+                        // A User-set anchor is the top of the confidence hierarchy —
+                        // the user already made the identity call for this type.
+                        // Drop the differing machine value rather than raising a conflict.
+                        if existing_setter == &AnchorSetter::User {
+                            continue;
+                        }
+
+                        // If this exact contradiction (work × kind × incoming value) was
+                        // already dismissed or resolved, do not re-raise it.
+                        let kind_str = serde_json::to_value(kind)
+                            .ok()
+                            .and_then(|v| v.as_str().map(String::from))
+                            .unwrap_or_default();
+                        let closed_count: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM work_identity_conflicts
+                             WHERE existing_work_id = ?1 AND kind = ?2
+                               AND status IN ('dismissed', 'resolved')
+                               AND json_extract(incoming_payload_json, ?3) = ?4",
+                        )
+                        .bind(existing_work_id)
+                        .bind(&kind_str)
+                        .bind(json_field)
+                        .bind(incoming_val)
+                        .fetch_one(self.pool())
+                        .await
+                        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+                        if closed_count > 0 {
+                            continue;
+                        }
+
                         conflicts.push(NewIdentityConflict {
                             user_id,
                             existing_work_id,
@@ -327,6 +394,22 @@ impl WorkIdentityRepository for SqliteDb {
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
+        let raised_by_str = serde_json::to_value(conflict.raised_by)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "manual_add".to_string());
+        let incoming_json = serde_json::to_string(&conflict.incoming)
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        let raised_at_str = Utc::now().to_rfc3339();
+
+        // All three operations — dedup-SELECT, conflict INSERT, badge UPDATE —
+        // run inside a single transaction so no partial state is ever visible.
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
         // Idempotency (REQ-020): one open conflict per (work, kind). A repeated
         // converge/add pass must not duplicate an already-surfaced conflict.
         let existing: Option<i64> = sqlx::query_scalar(
@@ -336,34 +419,44 @@ impl WorkIdentityRepository for SqliteDb {
         )
         .bind(conflict.existing_work_id)
         .bind(&kind_str)
-        .fetch_optional(self.pool())
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
         let conflict_id = if let Some(id) = existing {
             id
         } else {
-            let incoming_json = serde_json::to_string(&conflict.incoming)
-                .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
-            self.create_identity_conflict(
-                conflict.user_id,
-                conflict.existing_work_id,
-                conflict.kind,
-                &incoming_json,
-                Utc::now(),
-                conflict.raised_by,
-                conflict.raised_source_path.as_deref(),
+            let result = sqlx::query(
+                "INSERT INTO work_identity_conflicts
+                 (user_id, existing_work_id, kind, incoming_payload_json, raised_at, raised_by, raised_source_path, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'open')",
             )
+            .bind(conflict.user_id)
+            .bind(conflict.existing_work_id)
+            .bind(&kind_str)
+            .bind(&incoming_json)
+            .bind(&raised_at_str)
+            .bind(&raised_by_str)
+            .bind(conflict.raised_source_path.as_deref())
+            .execute(&mut *tx)
             .await
-            .map_err(|e| WorkIdentityError::Db(e.to_string()))?
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+            result.last_insert_rowid()
         };
+
         // An open identity contradiction now exists for this work — reflect it in
         // the persisted identity badge (REQ-014/D-013) so reads surface Conflict.
         sqlx::query("UPDATE works SET identity_status = 'conflict' WHERE id = ?1 AND user_id = ?2")
             .bind(conflict.existing_work_id)
             .bind(conflict.user_id)
-            .execute(self.pool())
+            .execute(&mut *tx)
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
         Ok(conflict_id)
     }
 
@@ -530,7 +623,9 @@ impl WorkIdentityRepository for SqliteDb {
                 _ => continue,
             };
             let setter = serde_json::from_value(serde_json::Value::String(setter.clone()))
-                .unwrap_or(AnchorSetter::User);
+                // Least-privilege default: an unreadable setter must never be treated
+                // as user-authoritative — that would suppress legitimate conflict raises.
+                .unwrap_or(AnchorSetter::AutoSearch);
             let set_at = chrono::DateTime::parse_from_rfc3339(&set_at)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
