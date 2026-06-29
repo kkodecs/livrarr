@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use livrarr_domain::identity::*;
+use livrarr_domain::services::WorkIdentityError;
 use livrarr_domain::{IdentityStatus, UserId, WorkId};
 use sqlx::SqliteConnection;
 
@@ -181,6 +182,14 @@ impl SqliteDb {
     ///
     /// Every affirmative resolution is a user decision; the resulting anchor is
     /// stamped `AnchorSetter::User` so future detection passes skip it (fix #1).
+    ///
+    /// **QuorumTie** is fully in scope: `async_resolver::llm_identity_verify` creates
+    /// work-scoped QuorumTie conflicts (`existing_work_id = work.id`), so resolving
+    /// them must recompute the badge just like any other conflict.
+    /// The add-time QuorumTie (`existing_work_id = 0`, from `english_identity_resolver`)
+    /// has no work to act on; routing it through here recomputes a non-existent work
+    /// (harmless no-op). That add-time case is deferred to the Phase 2-3 "pick at add"
+    /// reshape — documented, not claimed fixed here.
     pub async fn apply_conflict_resolution(
         &self,
         conflict: &IdentityConflict,
@@ -188,14 +197,6 @@ impl SqliteDb {
         notes: Option<&str>,
         resolved_at: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
-        if conflict.kind == IdentityConflictKind::QuorumTie {
-            // QuorumTie (existing_work_id = 0) is out-of-scope for this resolution
-            // path; the four standard actions do not cleanly map to it.
-            return self
-                .resolve_identity_conflict(conflict.id, action, notes, resolved_at)
-                .await;
-        }
-
         let work_id = conflict.existing_work_id;
         let now = resolved_at.to_rfc3339();
         let action_str = serde_json::to_value(action)
@@ -205,10 +206,22 @@ impl SqliteDb {
 
         let mut tx = self.pool().begin().await?;
 
+        // All incoming anchors as (anchor_type_str, value) pairs — iterated by Merge
+        // and by ReplaceAnchor/Merge on QuorumTie (which has no single implicated type).
+        let anchors_to_merge: &[(&str, Option<&str>)] = &[
+            (AnchorType::OL_WORK, conflict.incoming.ol_key.as_deref()),
+            (AnchorType::GR_WORK, conflict.incoming.gr_key.as_deref()),
+            (AnchorType::HC_WORK, conflict.incoming.hc_key.as_deref()),
+            (AnchorType::ISBN_13, conflict.incoming.isbn_13.as_deref()),
+            (AnchorType::ASIN, conflict.incoming.asin.as_deref()),
+        ];
+
         match action {
             ConflictResolutionAction::KeepExisting | ConflictResolutionAction::AcceptSeparate => {
                 // Re-stamp the kept anchor as User so future machine passes cannot
                 // raise the same conflict again (part 1 protection).
+                // For QuorumTie, anchor_type_for_kind returns None — no anchor to re-stamp;
+                // the badge recompute in the tail is the only side-effect needed.
                 if let Some(at) = anchor_type_for_kind(conflict.kind) {
                     sqlx::query(
                         "UPDATE work_identity_anchors
@@ -224,12 +237,14 @@ impl SqliteDb {
             }
 
             ConflictResolutionAction::ReplaceAnchor => {
-                // Supersede the existing anchor with the incoming value, stamped User.
                 if let Some(at) = anchor_type_for_kind(conflict.kind) {
+                    // Standard anchor replacement: supersede the existing anchor and
+                    // confirm the incoming value (User-stamped).
+                    // Canonical validation runs inside confirm_anchor_in_tx.
+                    // Primary-type validation failure → fail the whole resolution.
                     if let Some(incoming_val) =
                         incoming_value_for_kind(conflict.kind, &conflict.incoming)
                     {
-                        // Mark the old confirmed anchor as superseded
                         sqlx::query(
                             "UPDATE work_identity_anchors
                              SET confidence = 'superseded', superseded_by = ?1
@@ -241,47 +256,77 @@ impl SqliteDb {
                         .execute(&mut *tx)
                         .await?;
 
-                        // Insert the new confirmed anchor (User-stamped)
-                        sqlx::query(
-                            "INSERT INTO work_identity_anchors
-                             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
-                             VALUES (?1, ?2, ?3, 'confirmed', 'user', ?4,
-                                     (SELECT user_id FROM works WHERE id = ?1))
-                             ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
-                                 confidence = 'confirmed', setter = 'user', set_at = ?4,
-                                 superseded_by = NULL,
-                                 user_id = (SELECT user_id FROM works WHERE id = ?1)",
+                        crate::sqlite_work_identity::confirm_anchor_in_tx(
+                            &mut tx,
+                            work_id,
+                            AnchorType::new(at),
+                            incoming_val,
+                            AnchorSetter::User,
+                        )
+                        .await
+                        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+                    }
+                } else {
+                    // QuorumTie has no single implicated anchor type.
+                    // ReplaceAnchor on QuorumTie is treated as Merge: adopt the incoming
+                    // candidate's anchors as secondary gap-fills (existing anchors are
+                    // preserved; no supersede). Badge recompute runs in the tail below.
+                    for &(at, val) in anchors_to_merge {
+                        let val = match val.filter(|v| !v.is_empty()) {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        let has_confirmed: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM work_identity_anchors
+                             WHERE work_id = ?1 AND anchor_type = ?2 AND confidence = 'confirmed'",
                         )
                         .bind(work_id)
                         .bind(at)
-                        .bind(incoming_val)
-                        .bind(&now)
-                        .execute(&mut *tx)
+                        .fetch_one(&mut *tx)
                         .await?;
-
-                        // Sync the denormalized works column
-                        update_works_column_in_tx(&mut tx, at, incoming_val, work_id).await?;
+                        if has_confirmed > 0 {
+                            continue;
+                        }
+                        match crate::sqlite_work_identity::confirm_anchor_in_tx(
+                            &mut tx,
+                            work_id,
+                            AnchorType::new(at),
+                            val,
+                            AnchorSetter::User,
+                        )
+                        .await
+                        {
+                            Ok(()) => {}
+                            Err(WorkIdentityError::InvalidAnchorValue) => {
+                                tracing::warn!(
+                                    work_id = %work_id,
+                                    anchor_type = at,
+                                    "quorum-tie replace-anchor: incoming anchor has invalid \
+                                     canonical form — skipping gap-fill for this type"
+                                );
+                            }
+                            Err(e) => return Err(sqlx::Error::Protocol(e.to_string())),
+                        }
                     }
                 }
             }
 
             ConflictResolutionAction::Merge => {
-                // Confirm all non-null incoming anchors with User setter.
-                // For each type, supersede any existing confirmed anchor that
-                // differs in value first — the partial unique index
-                // (work_id, anchor_type WHERE confidence='confirmed') only
-                // allows one confirmed row per type.
-                let anchors_to_merge: &[(&str, Option<&str>)] = &[
-                    (AnchorType::OL_WORK, conflict.incoming.ol_key.as_deref()),
-                    (AnchorType::GR_WORK, conflict.incoming.gr_key.as_deref()),
-                    (AnchorType::HC_WORK, conflict.incoming.hc_key.as_deref()),
-                    (AnchorType::ISBN_13, conflict.incoming.isbn_13.as_deref()),
-                    (AnchorType::ASIN, conflict.incoming.asin.as_deref()),
-                ];
+                // The primary type is the anchor implicated by the conflict kind.
+                // For QuorumTie, anchor_type_for_kind returns None → all types are secondary
+                // (gap-fill only; no supersede of existing confirmed anchors).
+                let primary_type: Option<&str> = anchor_type_for_kind(conflict.kind);
+
                 for &(at, val) in anchors_to_merge {
-                    if let Some(val) = val.filter(|v| !v.is_empty()) {
-                        // Clear the slot for any same-type confirmed anchor that
-                        // has a different value (do not touch same-value rows).
+                    let val = match val.filter(|v| !v.is_empty()) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+
+                    if primary_type == Some(at) {
+                        // Primary (the conflict's own type): supersede any different existing
+                        // confirmed anchor, then validate + confirm the incoming value.
+                        // Primary-type canonical validation failure → fail the whole resolution.
                         sqlx::query(
                             "UPDATE work_identity_anchors
                              SET confidence = 'superseded', superseded_by = ?1
@@ -294,24 +339,56 @@ impl SqliteDb {
                         .execute(&mut *tx)
                         .await?;
 
-                        sqlx::query(
-                            "INSERT INTO work_identity_anchors
-                             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
-                             VALUES (?1, ?2, ?3, 'confirmed', 'user', ?4,
-                                     (SELECT user_id FROM works WHERE id = ?1))
-                             ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
-                                 confidence = 'confirmed', setter = 'user', set_at = ?4,
-                                 superseded_by = NULL,
-                                 user_id = (SELECT user_id FROM works WHERE id = ?1)",
+                        crate::sqlite_work_identity::confirm_anchor_in_tx(
+                            &mut tx,
+                            work_id,
+                            AnchorType::new(at),
+                            val,
+                            AnchorSetter::User,
+                        )
+                        .await
+                        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+                    } else {
+                        // Secondary (gap-fill): add the incoming anchor ONLY if the work has
+                        // no confirmed anchor of this type at all — never overwrite an existing
+                        // User- or machine-set confirmed anchor (Fix 2 / R-001).
+                        let has_confirmed: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM work_identity_anchors
+                             WHERE work_id = ?1 AND anchor_type = ?2 AND confidence = 'confirmed'",
                         )
                         .bind(work_id)
                         .bind(at)
-                        .bind(val)
-                        .bind(&now)
-                        .execute(&mut *tx)
+                        .fetch_one(&mut *tx)
                         .await?;
 
-                        update_works_column_in_tx(&mut tx, at, val, work_id).await?;
+                        if has_confirmed > 0 {
+                            // An existing confirmed anchor (User- or machine-set) takes
+                            // precedence; do not overwrite it with a secondary gap-fill.
+                            continue;
+                        }
+
+                        // Secondary-type canonical validation failure → skip + warn; do not
+                        // block the primary resolution (malformed gap-fill data is non-fatal).
+                        match crate::sqlite_work_identity::confirm_anchor_in_tx(
+                            &mut tx,
+                            work_id,
+                            AnchorType::new(at),
+                            val,
+                            AnchorSetter::User,
+                        )
+                        .await
+                        {
+                            Ok(()) => {}
+                            Err(WorkIdentityError::InvalidAnchorValue) => {
+                                tracing::warn!(
+                                    work_id = %work_id,
+                                    anchor_type = at,
+                                    "merge: secondary anchor has invalid canonical form — \
+                                     skipping gap-fill for this type"
+                                );
+                            }
+                            Err(e) => return Err(sqlx::Error::Protocol(e.to_string())),
+                        }
                     }
                 }
             }
@@ -331,7 +408,8 @@ impl SqliteDb {
         .execute(&mut *tx)
         .await?;
 
-        // Recompute the badge now that this conflict row is resolved
+        // Recompute the badge now that this conflict row is resolved.
+        // Works for all conflict kinds including QuorumTie.
         let new_status = derive_badge_in_tx(&mut tx, work_id).await?;
         let status_str = identity_status_str(new_status);
         sqlx::query("UPDATE works SET identity_status = ?1 WHERE id = ?2")
@@ -388,7 +466,12 @@ impl SqliteDb {
 // ---------------------------------------------------------------------------
 
 /// Return the anchor-table type string for a given conflict kind, or `None`
-/// for `QuorumTie` (which is handled separately / out of scope).
+/// for `QuorumTie` (which has no single implicated anchor type).
+///
+/// All four resolution actions handle `QuorumTie` via the anchor-agnostic branch
+/// in `apply_conflict_resolution`: `KeepExisting`/`AcceptSeparate` make no anchor
+/// change (the existing identity stands); `Merge` and `ReplaceAnchor` adopt the
+/// incoming candidate's anchors as secondary gap-fills and recompute the badge.
 fn anchor_type_for_kind(kind: IdentityConflictKind) -> Option<&'static str> {
     match kind {
         IdentityConflictKind::IncomingDifferentOlKey
@@ -411,27 +494,6 @@ fn incoming_value_for_kind(
         IdentityConflictKind::IncomingDifferentHcKey => incoming.hc_key.as_deref(),
         IdentityConflictKind::QuorumTie => None,
     }
-}
-
-/// Update the denormalized `works` column corresponding to `anchor_type`.
-async fn update_works_column_in_tx(
-    tx: &mut SqliteConnection,
-    anchor_type: &str,
-    value: &str,
-    work_id: WorkId,
-) -> Result<(), sqlx::Error> {
-    let sql: Option<&str> = match anchor_type {
-        AnchorType::OL_WORK => Some("UPDATE works SET ol_key = ?1 WHERE id = ?2"),
-        AnchorType::GR_WORK => Some("UPDATE works SET gr_key = ?1 WHERE id = ?2"),
-        AnchorType::HC_WORK => Some("UPDATE works SET hc_key = ?1 WHERE id = ?2"),
-        AnchorType::ISBN_13 => Some("UPDATE works SET isbn_13 = ?1 WHERE id = ?2"),
-        AnchorType::ASIN => Some("UPDATE works SET asin = ?1 WHERE id = ?2"),
-        _ => None,
-    };
-    if let Some(s) = sql {
-        sqlx::query(s).bind(value).bind(work_id).execute(tx).await?;
-    }
-    Ok(())
 }
 
 /// Derive the correct `IdentityStatus` badge from the work's remaining confirmed
