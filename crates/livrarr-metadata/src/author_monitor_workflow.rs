@@ -472,7 +472,9 @@ where
                     }
                     let raw_title = entry.title.as_deref().unwrap_or("Unknown").to_string();
                     let work_title = crate::title_cleanup::clean_title(&raw_title);
-                    let cover_url = entry.covers.as_deref()
+                    let cover_url = entry
+                        .covers
+                        .as_deref()
                         .and_then(|cs| cs.iter().find(|&&id| id > 0))
                         .map(|id| format!("https://covers.openlibrary.org/b/id/{id}-L.jpg"));
                     Some((stripped_ol_key, year, work_title, cover_url))
@@ -488,113 +490,119 @@ where
             }
 
             let outcomes: Vec<EntryOutcome> = stream::iter(eligible.into_iter())
-                .map(|(stripped_ol_key, year, work_title, cover_url)| async move {
-                    tracing::info!(
-                        author_id = author_ref.id,
-                        year = year,
-                        "author monitor: new work detected"
-                    );
+                .map(
+                    |(stripped_ol_key, year, work_title, cover_url)| async move {
+                        tracing::info!(
+                            author_id = author_ref.id,
+                            year = year,
+                            "author monitor: new work detected"
+                        );
 
-                    if author_ref.monitor_new_items {
-                        use livrarr_domain::identity::{IdentityMethod, IdentityState};
-                        use livrarr_domain::seed::{seed_author_monitor, SeedInput, SeedLanguage};
-                        let candidate = seed_author_monitor(
-                            SeedInput {
-                                title: work_title.clone(),
-                                author_name: cleaned_author_ref.clone(),
-                                language: SeedLanguage::resolve(
-                                    author_ref.monitor_language.as_deref(),
-                                ),
-                                author_ol_key: Some(ol_key_ref.clone()),
-                                year: Some(year),
-                                cover_url,
-                                detail_url: None,
-                                description: None,
-                                series_name: None,
-                                series_position: None,
-                            },
-                            IdentityState::Confirmed {
-                                anchors: livrarr_domain::identity::CapturedIdentity {
-                                    ol_key: Some(stripped_ol_key.clone()),
-                                    gr_key: None,
-                                    hc_key: None,
-                                    isbn_13: None,
-                                    asin: None,
+                        if author_ref.monitor_new_items {
+                            use livrarr_domain::identity::{IdentityMethod, IdentityState};
+                            use livrarr_domain::seed::{
+                                seed_author_monitor, SeedInput, SeedLanguage,
+                            };
+                            let candidate = seed_author_monitor(
+                                SeedInput {
                                     title: work_title.clone(),
                                     author_name: cleaned_author_ref.clone(),
-                                    language: None,
+                                    language: SeedLanguage::resolve(
+                                        author_ref.monitor_language.as_deref(),
+                                    ),
+                                    author_ol_key: Some(ol_key_ref.clone()),
+                                    year: Some(year),
+                                    cover_url,
+                                    detail_url: None,
+                                    description: None,
+                                    series_name: None,
+                                    series_position: None,
                                 },
-                                method: IdentityMethod::TitleAuthorSearch,
-                                score: None,
-                            },
-                        );
-                        match self.work_service.add(author_ref.user_id, candidate).await {
-                            Ok(_work) => {
-                                let notif_ok = self
-                                    .db
-                                    .create_notification(CreateNotificationDbRequest {
-                                        user_id: author_ref.user_id,
-                                        notification_type: NotificationType::WorkAutoAdded,
-                                        ref_key: Some(stripped_ol_key.clone()),
-                                        message: format!(
-                                            "New work '{}' by {} auto-added to your library",
-                                            work_title, author_ref.name
-                                        ),
-                                        data: serde_json::json!({
-                                            "title": work_title,
-                                            "author": author_ref.name,
-                                            "year": year,
-                                            "ol_key": stripped_ol_key,
-                                        }),
-                                    })
-                                    .await
-                                    .map_err(|e| tracing::warn!("create_notification failed: {e}"))
-                                    .is_ok();
-                                EntryOutcome {
-                                    works_added: true,
-                                    notifications_created: notif_ok,
+                                IdentityState::Confirmed {
+                                    anchors: livrarr_domain::identity::CapturedIdentity {
+                                        ol_key: Some(stripped_ol_key.clone()),
+                                        gr_key: None,
+                                        hc_key: None,
+                                        isbn_13: None,
+                                        asin: None,
+                                        title: work_title.clone(),
+                                        author_name: cleaned_author_ref.clone(),
+                                        language: None,
+                                    },
+                                    method: IdentityMethod::TitleAuthorSearch,
+                                    score: None,
+                                },
+                            );
+                            match self.work_service.add(author_ref.user_id, candidate).await {
+                                Ok(_work) => {
+                                    let notif_ok = self
+                                        .db
+                                        .create_notification(CreateNotificationDbRequest {
+                                            user_id: author_ref.user_id,
+                                            notification_type: NotificationType::WorkAutoAdded,
+                                            ref_key: Some(stripped_ol_key.clone()),
+                                            message: format!(
+                                                "New work '{}' by {} auto-added to your library",
+                                                work_title, author_ref.name
+                                            ),
+                                            data: serde_json::json!({
+                                                "title": work_title,
+                                                "author": author_ref.name,
+                                                "year": year,
+                                                "ol_key": stripped_ol_key,
+                                            }),
+                                        })
+                                        .await
+                                        .map_err(|e| {
+                                            tracing::warn!("create_notification failed: {e}")
+                                        })
+                                        .is_ok();
+                                    EntryOutcome {
+                                        works_added: true,
+                                        notifications_created: notif_ok,
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        author_id = author_ref.id,
+                                        ol_key = %stripped_ol_key,
+                                        error = %e,
+                                        "author monitor: failed to auto-add work"
+                                    );
+                                    EntryOutcome {
+                                        works_added: false,
+                                        notifications_created: false,
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    author_id = author_ref.id,
-                                    ol_key = %stripped_ol_key,
-                                    error = %e,
-                                    "author monitor: failed to auto-add work"
-                                );
-                                EntryOutcome {
-                                    works_added: false,
-                                    notifications_created: false,
-                                }
+                        } else {
+                            let notif_ok = self
+                                .db
+                                .create_notification(CreateNotificationDbRequest {
+                                    user_id: author_ref.user_id,
+                                    notification_type: NotificationType::NewWorkDetected,
+                                    ref_key: Some(stripped_ol_key.clone()),
+                                    message: format!(
+                                        "New work '{}' by {} detected",
+                                        work_title, author_ref.name
+                                    ),
+                                    data: serde_json::json!({
+                                        "title": work_title,
+                                        "author": author_ref.name,
+                                        "year": year,
+                                        "ol_key": stripped_ol_key,
+                                    }),
+                                })
+                                .await
+                                .map_err(|e| tracing::warn!("create_notification failed: {e}"))
+                                .is_ok();
+                            EntryOutcome {
+                                works_added: false,
+                                notifications_created: notif_ok,
                             }
                         }
-                    } else {
-                        let notif_ok = self
-                            .db
-                            .create_notification(CreateNotificationDbRequest {
-                                user_id: author_ref.user_id,
-                                notification_type: NotificationType::NewWorkDetected,
-                                ref_key: Some(stripped_ol_key.clone()),
-                                message: format!(
-                                    "New work '{}' by {} detected",
-                                    work_title, author_ref.name
-                                ),
-                                data: serde_json::json!({
-                                    "title": work_title,
-                                    "author": author_ref.name,
-                                    "year": year,
-                                    "ol_key": stripped_ol_key,
-                                }),
-                            })
-                            .await
-                            .map_err(|e| tracing::warn!("create_notification failed: {e}"))
-                            .is_ok();
-                        EntryOutcome {
-                            works_added: false,
-                            notifications_created: notif_ok,
-                        }
-                    }
-                })
+                    },
+                )
                 .buffer_unordered(5)
                 .collect()
                 .await;

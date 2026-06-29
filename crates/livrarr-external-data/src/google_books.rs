@@ -477,7 +477,11 @@ pub fn map_volume_to_detail(vi: &GbVolumeInfo) -> NormalizedWorkDetail {
     let (series_name, series_position) = vi
         .title
         .as_deref()
-        .and_then(|t| RE_GB_SERIES.captures(t).map(|c| (Some(c[1].to_string()), c[2].parse::<f64>().ok())))
+        .and_then(|t| {
+            RE_GB_SERIES
+                .captures(t)
+                .map(|c| (Some(c[1].to_string()), c[2].parse::<f64>().ok()))
+        })
         .unwrap_or((None, None));
 
     NormalizedWorkDetail {

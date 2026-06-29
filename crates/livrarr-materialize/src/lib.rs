@@ -66,33 +66,32 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
     // Decode, validate, extract dims, and write — all in one spawn_blocking so
     // the CPU-heavy JPEG decode never blocks the async executor (insight 10).
     let result = tokio::task::spawn_blocking(move || {
-            // Single decode: grayscale check + dims. Pass through if the bytes
-            // aren't a recognisable image format (non-fatal per existing policy).
-            let dims = match image::load_from_memory(&raw_bytes) {
-                Ok(img) => {
-                    if matches!(
-                        img.color(),
-                        image::ColorType::L8
-                            | image::ColorType::L16
-                            | image::ColorType::La8
-                            | image::ColorType::La16
-                    ) {
-                        return Err("grayscale cover rejected (likely placeholder)".into());
-                    }
-                    Some((img.width() as i32, img.height() as i32))
+        // Single decode: grayscale check + dims. Pass through if the bytes
+        // aren't a recognisable image format (non-fatal per existing policy).
+        let dims = match image::load_from_memory(&raw_bytes) {
+            Ok(img) => {
+                if matches!(
+                    img.color(),
+                    image::ColorType::L8
+                        | image::ColorType::L16
+                        | image::ColorType::La8
+                        | image::ColorType::La16
+                ) {
+                    return Err("grayscale cover rejected (likely placeholder)".into());
                 }
-                Err(_) => None,
-            };
+                Some((img.width() as i32, img.height() as i32))
+            }
+            Err(_) => None,
+        };
 
-            use std::io::Write;
-            let mut f = std::fs::File::create(&tmp_clone)?;
-            f.write_all(&raw_bytes)?;
-            f.sync_all()?;
-            drop(f);
-            std::fs::rename(&tmp_clone, &target)?;
-            Ok((raw_bytes, dims))
-        },
-    )
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_clone)?;
+        f.write_all(&raw_bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_clone, &target)?;
+        Ok((raw_bytes, dims))
+    })
     .await;
 
     match result {

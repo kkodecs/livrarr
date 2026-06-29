@@ -226,9 +226,23 @@ impl WorkIdentityRepository for SqliteDb {
             if let Some(value) = maybe_value {
                 if !confirmed_types.contains(anchor_type_str) {
                     let anchor_type = AnchorType::new(anchor_type_str);
-                    self.confirm_anchor(work_id, anchor_type.clone(), value, AnchorSetter::Import)
-                        .await?;
-                    merged.push(anchor_type);
+                    match self
+                        .confirm_anchor(work_id, anchor_type.clone(), value, AnchorSetter::Import)
+                        .await
+                    {
+                        Ok(()) => {
+                            merged.push(anchor_type);
+                        }
+                        Err(WorkIdentityError::InvalidAnchorValue) => {
+                            tracing::warn!(
+                                work_id,
+                                anchor_type = anchor_type_str,
+                                value,
+                                "skipping invalid anchor value"
+                            );
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         }

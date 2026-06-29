@@ -673,6 +673,7 @@ impl SystemApi for SecondaryApiImpl {
             log_init_error: None,
             startup_time: Utc::now(),
             log_level: "info".into(),
+            rss_bytes: None,
         })
     }
 }

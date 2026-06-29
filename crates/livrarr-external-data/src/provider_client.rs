@@ -57,7 +57,7 @@ impl ProviderClient {
 
     /// Anchor-only enrichment fetch (REQ-006). Each provider accepts exactly
     /// the spec's anchor mapping — GoogleBooks: Isbn13; Goodreads: GrKey ONLY
-    /// (the GR ISBN→LLM tier is an identity-surface capability, never an
+    /// (the GR ISBN/title-search tier is an identity-surface capability, never an
     /// enrichment fetch); Hardcover: HcKey or Isbn13; OpenLibrary: OlKey or
     /// Isbn13; Audnexus/Audible: Asin. No branch falls back to text search —
     /// those paths live only behind the lookup/identity entry points. A
@@ -159,7 +159,7 @@ impl ProviderClient {
 }
 
 /// REQ-006 anchor mapping: which anchor kinds each provider's enrichment
-/// surface accepts. GR is GrKey ONLY (its ISBN→LLM tier is an identity-surface
+/// surface accepts. GR is GrKey ONLY (its ISBN/title-search tier is an identity-surface
 /// capability); HC/OL accept their own key or ISBN; Audnexus/Audible are
 /// ASIN-keyed; GB is ISBN-keyed. Llm/Readarr are never scatter providers.
 fn anchor_kind_accepted(provider: MetadataProvider, query: &AnchorQuery) -> bool {
@@ -889,6 +889,22 @@ impl OpenLibraryClient {
 struct GrCandidateText {
     title: String,
     author: Option<String>,
+    /// Cover from the autocomplete/search hit. Kept so a GR payload still
+    /// carries a cover when the detail page won't fetch (anti-bot): GR outranks
+    /// OpenLibrary in the cover priority, so this wins over the OL/ISBN fallback
+    /// that otherwise produces the weaker import covers.
+    cover_url: Option<String>,
+}
+
+impl GrCandidateText {
+    /// The hit's cover, validated + upscaled, ready to use as a payload cover
+    /// (same treatment `normalize` gives the detail-page cover).
+    fn cover(&self) -> Option<String> {
+        self.cover_url
+            .clone()
+            .filter(|u| goodreads::validate_cover_url(u))
+            .map(|u| crate::provider_util::upscale_cover_url(&u))
+    }
 }
 
 /// A resolved GR detail target plus the candidate text that chose it
@@ -1097,6 +1113,12 @@ impl GoodreadsClient {
 
         if let Some(detail) = goodreads::parse_detail_html(&html) {
             let mut payload = self.normalize(&detail_url, detail);
+            // Detail page parsed but carried no cover — fall back to the cover
+            // that came with the search hit (GR outranks OL, so this beats the
+            // ISBN-resolved OL cover the merge would otherwise use).
+            if payload.cover_url.is_none() {
+                payload.cover_url = resolved.candidate.as_ref().and_then(|c| c.cover());
+            }
             if let Some(ref isbn) = via_isbn {
                 payload.isbn_13 = Some(isbn.clone());
             }
@@ -1166,6 +1188,7 @@ impl GoodreadsClient {
             None => self.confirm_key_via_search(work, key).await,
         };
 
+        let cover_url = confirmed.as_ref().and_then(|c| c.cover());
         let (title, author_name) = match confirmed {
             Some(c) => (Some(c.title), c.author),
             None => (None, None),
@@ -1174,6 +1197,7 @@ impl GoodreadsClient {
             title,
             author_name,
             gr_key: Some(key.clone()),
+            cover_url,
             ..Default::default()
         })
     }
@@ -1190,6 +1214,7 @@ impl GoodreadsClient {
             .map(|h| GrCandidateText {
                 title: h.title.clone(),
                 author: h.author.clone(),
+                cover_url: h.cover_url.clone(),
             })
     }
 
@@ -1213,39 +1238,22 @@ impl GoodreadsClient {
             let query = format!("isbn:{normalized}");
             match goodreads::search_goodreads_by_query(&self.http, &self.base_url, &query).await {
                 Ok(hits) if !hits.is_empty() => {
-                    if let Some(live) = &self.live_config {
-                        let cfg = live.snapshot();
-                        match gr_llm_disambiguate(
-                            &self.http,
-                            cfg.as_ref(),
-                            &work.title,
-                            &work.author_name,
-                            &hits,
-                        )
-                        .await
-                        {
-                            Ok(Some(idx)) => {
-                                tracing::info!(isbn = %normalized, chosen_idx = idx, "LLM selected GR ISBN result");
-                                return Ok(Some(ResolvedGrDetail {
-                                    url: goodreads::resolve_detail_url(
-                                        &self.base_url,
-                                        &hits[idx].detail_url,
-                                    ),
-                                    candidate: Some(GrCandidateText {
-                                        title: hits[idx].title.clone(),
-                                        author: hits[idx].author.clone(),
-                                    }),
-                                    via_isbn: Some(normalized.clone()),
-                                }));
-                            }
-                            Ok(None) => {
-                                tracing::debug!(isbn = %normalized, "LLM declined all GR ISBN candidates");
-                            }
-                            Err(e) => {
-                                tracing::debug!(isbn = %normalized, error = %e, "GR ISBN LLM disambiguation failed");
-                            }
-                        }
+                    if let Some(idx) = gr_best_match(&work.title, &work.author_name, &hits) {
+                        tracing::debug!(isbn = %normalized, chosen_idx = idx, "GR ISBN result selected (deterministic)");
+                        return Ok(Some(ResolvedGrDetail {
+                            url: goodreads::resolve_detail_url(
+                                &self.base_url,
+                                &hits[idx].detail_url,
+                            ),
+                            candidate: Some(GrCandidateText {
+                                title: hits[idx].title.clone(),
+                                author: hits[idx].author.clone(),
+                                cover_url: hits[idx].cover_url.clone(),
+                            }),
+                            via_isbn: Some(normalized.clone()),
+                        }));
                     }
+                    tracing::debug!(isbn = %normalized, "no confident GR ISBN match");
                 }
                 Ok(_) => {
                     tracing::debug!(isbn = %isbn, "GR ISBN search: no results");
@@ -1259,74 +1267,68 @@ impl GoodreadsClient {
         let title = &work.title;
         let author = &work.author_name;
 
-        // 3. Search GR by title+author (autocomplete — GR's own data) + LLM
-        // disambiguation among the REAL hits. Runs before any LLM-recalled
-        // key: a key chosen from live hits cannot be a hallucination, and it
-        // arrives with candidate text that can vouch for it (#148; PO
-        // decision 2026-06-11 after a live LLM-direct key proved wrong).
-        let mut hits =
-            goodreads::search_goodreads(&self.http, &self.base_url, title, author).await?;
+        // 3. Search GR by title+author via the WAF-free autocomplete endpoint,
+        // then a deterministic best-match pick (no LLM). A fetch error here is
+        // most often GR rate-limiting / anti-bot during a bulk burst — log it
+        // (previously a silent `?`, which hid these failures) and still
+        // propagate so map_fetch_err can schedule a retry.
+        let mut hits = match goodreads::search_goodreads(&self.http, &self.base_url, title, author)
+            .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(title = %title, error = ?e, "GR autocomplete failed (likely rate-limit/anti-bot)");
+                return Err(e);
+            }
+        };
 
         if hits.is_empty() && !title.is_ascii() {
             let ascii_title: String = title.chars().filter(|c| c.is_ascii()).collect();
             if !ascii_title.trim().is_empty() {
-                hits =
-                    goodreads::search_goodreads(&self.http, &self.base_url, &ascii_title, author)
-                        .await?;
-            }
-        }
-
-        if !hits.is_empty() {
-            if let Some(live) = &self.live_config {
-                let cfg = live.snapshot();
-                match gr_llm_disambiguate(&self.http, cfg.as_ref(), title, author, &hits).await {
-                    Ok(Some(idx)) => {
-                        tracing::info!(title = %title, chosen_idx = idx, "LLM selected GR search result");
-                        return Ok(Some(ResolvedGrDetail {
-                            url: goodreads::resolve_detail_url(
-                                &self.base_url,
-                                &hits[idx].detail_url,
-                            ),
-                            candidate: Some(GrCandidateText {
-                                title: hits[idx].title.clone(),
-                                author: hits[idx].author.clone(),
-                            }),
-                            via_isbn: None,
-                        }));
-                    }
-                    Ok(None) => {
-                        tracing::debug!(title = %title, "LLM declined all GR candidates");
-                    }
+                hits = match goodreads::search_goodreads(
+                    &self.http,
+                    &self.base_url,
+                    &ascii_title,
+                    author,
+                )
+                .await
+                {
+                    Ok(h) => h,
                     Err(e) => {
-                        tracing::debug!(title = %title, error = %e, "GR LLM disambiguation unavailable");
+                        tracing::warn!(title = %title, error = ?e, "GR autocomplete (ascii retry) failed (likely rate-limit/anti-bot)");
+                        return Err(e);
                     }
-                }
+                };
             }
         }
 
-        // 4. Last resort: ask the LLM to recall the GR key from its own
-        // knowledge — hallucination-prone, so the downstream quarantine
-        // (confirm-or-drop, REQ-024) is what makes this safe to keep.
-        if let Some(live) = &self.live_config {
-            let cfg = live.snapshot();
-            match gr_llm_key_lookup(&self.http, cfg.as_ref(), title, author).await {
-                Ok(Some(key)) => {
-                    tracing::info!(title = %title, gr_key = %key, "LLM resolved GR key directly (unconfirmed)");
-                    return Ok(Some(ResolvedGrDetail {
-                        url: goodreads::detail_url_for_gr_key(&self.base_url, &key),
-                        candidate: None,
-                        via_isbn: None,
-                    }));
-                }
-                Ok(None) => {
-                    tracing::debug!(title = %title, "LLM returned no GR key");
-                }
-                Err(e) => {
-                    tracing::debug!(title = %title, error = %e, "LLM GR key lookup unavailable");
-                }
-            }
+        if let Some(idx) = gr_best_match(title, author, &hits) {
+            tracing::debug!(title = %title, chosen_idx = idx, "GR search result selected (deterministic)");
+            return Ok(Some(ResolvedGrDetail {
+                url: goodreads::resolve_detail_url(&self.base_url, &hits[idx].detail_url),
+                candidate: Some(GrCandidateText {
+                    title: hits[idx].title.clone(),
+                    author: hits[idx].author.clone(),
+                    cover_url: hits[idx].cover_url.clone(),
+                }),
+                via_isbn: None,
+            }));
         }
 
+        // No confident GR match. Identity must degrade without an LLM (spec:
+        // work-creation-consistency) — we do NOT ask an LLM to recall a key
+        // from memory: a fabricated key is worse than no key. The other
+        // providers carry identity; GR simply abstains. Log so abstains are
+        // visible (empty results vs hits-present-but-no-confident-match).
+        if hits.is_empty() {
+            tracing::debug!(title = %title, "GR autocomplete: no results");
+        } else {
+            tracing::debug!(
+                title = %title,
+                hit_count = hits.len(),
+                "GR abstained: no confident title/author match"
+            );
+        }
         Ok(None)
     }
 
@@ -1408,197 +1410,46 @@ impl GoodreadsClient {
     }
 }
 
+/// Junk Goodreads editions that share a title with the real book (study
+/// guides, summaries). Filtered before the deterministic match — the job the
+/// removed LLM disambiguation prompt did ("reject SparkNotes/CliffsNotes...").
+fn is_gr_junk_edition(title: &str) -> bool {
+    const JUNK: [&str; 6] = [
+        "sparknotes",
+        "cliffsnotes",
+        "bookrags",
+        "study guide",
+        "summary of",
+        "summary and analysis",
+    ];
+    let lower = title.to_lowercase();
+    JUNK.iter().any(|needle| lower.contains(needle))
+}
+
+/// Deterministic Goodreads search-hit selection — no LLM. Mirrors the
+/// OpenLibrary tier: drop junk editions, then pick the best title+author match
+/// (`score_provider_candidates`, author overlap required). Returns the index
+/// into `hits`, or None when nothing clears the bar — a wrong GR key is worse
+/// than none, so GR abstains.
+fn gr_best_match(
+    title: &str,
+    author: &str,
+    hits: &[goodreads::GoodreadsSearchResult],
+) -> Option<usize> {
+    let kept: Vec<(usize, (String, String))> = hits
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| !is_gr_junk_edition(&h.title))
+        .map(|(i, h)| (i, (h.title.clone(), h.author.clone().unwrap_or_default())))
+        .collect();
+    let scored: Vec<(String, String)> = kept.iter().map(|(_, c)| c.clone()).collect();
+    let pick = crate::audible::score_provider_candidates(title, author, &scored, 0.75, 1)?;
+    Some(kept[pick].0)
+}
+
 /// Construct a `GoodreadsClient` against the production Goodreads URL.
 impl GoodreadsClient {
     pub fn production(http: HttpClient) -> Self {
         Self::new(http, GOODREADS_BASE_URL)
-    }
-}
-
-/// LLM disambiguation for GR search results — same pattern as HC's llm_disambiguate.
-async fn gr_llm_disambiguate(
-    http: &HttpClient,
-    cfg: &livrarr_domain::settings::MetadataConfig,
-    title: &str,
-    author: &str,
-    hits: &[goodreads::GoodreadsSearchResult],
-) -> Result<Option<usize>, String> {
-    if !cfg.llm_enabled {
-        return Err("LLM disabled".into());
-    }
-    let endpoint = cfg
-        .llm_endpoint
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM not configured")?;
-    let api_key = cfg
-        .llm_api_key
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM API key not configured")?;
-    let model = cfg
-        .llm_model
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM model not configured")?;
-
-    let mut candidates = String::new();
-    for (i, hit) in hits.iter().enumerate() {
-        let a = hit.author.as_deref().unwrap_or("?");
-        let y = hit
-            .year
-            .map(|y| y.to_string())
-            .unwrap_or_else(|| "?".into());
-        candidates.push_str(&format!("{i}: \"{}\" by {a} ({y})\n", hit.title));
-    }
-
-    let prompt = format!(
-        "I'm looking for the book \"{title}\" by {author}.\n\n\
-         These are search results from Goodreads:\n{candidates}\n\
-         Which result (by number) is the correct match? \
-         Reject study guides, summaries, SparkNotes, BookRags, and CliffsNotes — those are NOT the real book.\n\
-         Reply with ONLY the number. If none match, reply \"none\"."
-    );
-
-    let url = format!(
-        "{}chat/completions",
-        endpoint.trim_end_matches('/').to_owned() + "/"
-    );
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
-        "temperature": 0.0,
-    });
-
-    let resp = http
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("LLM request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM HTTP {status}: {text}"));
-    }
-
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("LLM parse error: {e}"))?;
-
-    let answer = data
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-
-    tracing::debug!(
-        candidates_count = hits.len(),
-        raw_answer = %answer,
-        "GR LLM disambiguation"
-    );
-
-    if answer == "none" || answer.is_empty() {
-        return Ok(None);
-    }
-
-    match answer.parse::<usize>() {
-        Ok(idx) if idx < hits.len() => Ok(Some(idx)),
-        _ => {
-            tracing::warn!(answer = %answer, "GR LLM returned unparseable disambiguation result");
-            Ok(None)
-        }
-    }
-}
-
-async fn gr_llm_key_lookup(
-    http: &HttpClient,
-    cfg: &livrarr_domain::settings::MetadataConfig,
-    title: &str,
-    author: &str,
-) -> Result<Option<String>, String> {
-    if !cfg.llm_enabled {
-        return Err("LLM disabled".into());
-    }
-    let endpoint = cfg
-        .llm_endpoint
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM not configured")?;
-    let api_key = cfg
-        .llm_api_key
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM API key not configured")?;
-    let model = cfg
-        .llm_model
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM model not configured")?;
-
-    let prompt = format!(
-        "What is the Goodreads numeric book ID for \"{title}\" by {author}? \
-         Return ONLY a JSON object: {{\"gr_id\": \"<numeric_id>\"}}. \
-         IMPORTANT: If you are not confident you have the correct ID, \
-         return {{\"gr_id\": null}}. Do NOT guess or fabricate an ID. \
-         A wrong ID is worse than no ID. No explanation."
-    );
-
-    let url = format!(
-        "{}chat/completions",
-        endpoint.trim_end_matches('/').to_owned() + "/"
-    );
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 30,
-        "temperature": 0.0,
-    });
-
-    let resp = http
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("LLM request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM HTTP {status}: {text}"));
-    }
-
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("LLM parse error: {e}"))?;
-
-    let answer = data
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-
-    let parsed: Result<serde_json::Value, _> = serde_json::from_str(answer);
-    let gr_id = parsed
-        .ok()
-        .and_then(|v| v.get("gr_id")?.as_str().map(String::from));
-
-    match gr_id {
-        Some(id) if !id.is_empty() && id != "null" => {
-            tracing::debug!(title = %title, gr_key = %id, "LLM provided GR key");
-            Ok(Some(id))
-        }
-        _ => Ok(None),
     }
 }
