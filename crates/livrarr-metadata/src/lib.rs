@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub mod author_service;
+pub mod convergence_service;
 pub mod cover;
 pub mod cover_alternatives;
 pub mod enrichment_workflow_service;

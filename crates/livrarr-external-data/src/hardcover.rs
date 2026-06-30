@@ -22,6 +22,59 @@ impl std::fmt::Display for HardcoverError {
     }
 }
 
+impl std::error::Error for HardcoverError {}
+
+/// Format the GraphQL `SearchBooks` query string with the given `per_page` limit.
+fn hc_search_graphql(per_page: u32) -> String {
+    format!(
+        r#"query SearchBooks($query: String!) {{
+        search(query: $query, query_type: "books", per_page: {per_page}) {{
+            results
+        }}
+    }}"#
+    )
+}
+
+/// Build the JSON body for a Hardcover `SearchBooks` request.
+///
+/// `term` is used verbatim — callers must pre-format it (e.g. `"\"title\""` for
+/// exact-match, bare value for ISBN/broad lookup).
+pub fn hc_search_body(per_page: u32, term: &str) -> Value {
+    serde_json::json!({
+        "query": hc_search_graphql(per_page),
+        "variables": {"query": term}
+    })
+}
+
+/// POST a pre-built body to the Hardcover GraphQL endpoint and return the parsed
+/// JSON response. Handles auth header, Content-Type, and HTTP status check.
+pub async fn hc_post(http: &HttpClient, body: Value, token: &str) -> Result<Value, HardcoverError> {
+    let resp = http
+        .post(HARDCOVER_API_URL)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| HardcoverError::Http(format!("request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(HardcoverError::Http(format!("HTTP {}", resp.status())));
+    }
+
+    resp.json()
+        .await
+        .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))
+}
+
+/// Extract the `hits` array from a Hardcover search response value.
+pub fn hc_extract_hits(data: &Value) -> Vec<Value> {
+    data.pointer("/data/search/results/hits")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Hardcover GraphQL API endpoint.
 pub const HARDCOVER_API_URL: &str = "https://api.hardcover.app/v1/graphql";
 
@@ -70,12 +123,6 @@ pub async fn query_hardcover(
     metadata_cfg: &MetadataConfig,
 ) -> Result<HardcoverResult, HardcoverError> {
     // Search by title only — gets the best results for short/common titles.
-    let query = r#"query SearchBooks($query: String!) {
-        search(query: $query, query_type: "books", per_page: 25) {
-            results
-        }
-    }"#;
-
     // Strip trailing parenthetical before searching — OL titles often include
     // series info like "(The Wheel of Time Book 2)" which breaks Hardcover's
     // exact-match search. The enrichment result will supply the canonical title.
@@ -87,34 +134,9 @@ pub async fn query_hardcover(
     // Quote the title for exact matching — without quotes, Hardcover
     // returns partial matches (e.g., comic adaptations) that flood results.
     let search_term = format!("\"{clean_title}\"");
-    let body = serde_json::json!({
-        "query": query,
-        "variables": {"query": search_term}
-    });
-
-    let resp = http
-        .post(HARDCOVER_API_URL)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| HardcoverError::Http(format!("request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        return Err(HardcoverError::Http(format!("HTTP {}", resp.status())));
-    }
-
-    let data: Value = resp
-        .json()
-        .await
-        .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))?;
-
-    let hits = data
-        .pointer("/data/search/results/hits")
-        .and_then(|r| r.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let body = hc_search_body(25, &search_term);
+    let data = hc_post(http, body, token).await?;
+    let hits = hc_extract_hits(&data);
 
     if hits.is_empty() {
         return Err(HardcoverError::NoResults);
@@ -474,40 +496,9 @@ pub async fn query_hardcover_by_isbn(
     token: &str,
     _metadata_cfg: &livrarr_domain::settings::MetadataConfig,
 ) -> Result<Option<HardcoverResult>, HardcoverError> {
-    let query = r#"query SearchBooks($query: String!) {
-        search(query: $query, query_type: "books", per_page: 10) {
-            results
-        }
-    }"#;
-
-    let body = serde_json::json!({
-        "query": query,
-        "variables": {"query": isbn}
-    });
-
-    let resp = http
-        .post(HARDCOVER_API_URL)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| HardcoverError::Http(format!("request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        return Err(HardcoverError::Http(format!("HTTP {}", resp.status())));
-    }
-
-    let data: Value = resp
-        .json()
-        .await
-        .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))?;
-
-    let hits = data
-        .pointer("/data/search/results/hits")
-        .and_then(|r| r.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let body = hc_search_body(10, isbn);
+    let data = hc_post(http, body, token).await?;
+    let hits = hc_extract_hits(&data);
 
     for hit in &hits {
         let doc = match hit.get("document") {

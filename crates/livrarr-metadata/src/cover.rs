@@ -314,40 +314,16 @@ async fn fast_hc_cover_search(
     author: &str,
     token: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    use livrarr_external_data::hardcover::HARDCOVER_API_URL;
-
-    let query = r#"query SearchBooks($query: String!) {
-        search(query: $query, query_type: "books", per_page: 10) { results }
-    }"#;
+    use livrarr_external_data::hardcover::{hc_extract_hits, hc_post, hc_search_body};
 
     let clean_title = title
         .rfind('(')
         .filter(|_| title.ends_with(')'))
         .map(|i| title[..i].trim())
         .unwrap_or(title);
-    let body = serde_json::json!({
-        "query": query,
-        "variables": {"query": format!("\"{clean_title}\"")}
-    });
-
-    let resp = http
-        .post(HARDCOVER_API_URL)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        return Err(format!("HC HTTP {}", resp.status()).into());
-    }
-
-    let data: serde_json::Value = resp.json().await?;
-    let hits = data
-        .pointer("/data/search/results/hits")
-        .and_then(|r| r.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let body = hc_search_body(10, &format!("\"{clean_title}\""));
+    let data = hc_post(http, body, token).await?;
+    let hits = hc_extract_hits(&data);
 
     let title_lower = clean_title.trim().to_lowercase();
     let author_lower = author.trim().to_lowercase();

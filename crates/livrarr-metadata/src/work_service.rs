@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use livrarr_domain::seed::{iso639_1_to_3, lookup_term_to_seed, seed_carries_identifier};
+use livrarr_domain::seed::{lookup_term_to_seed, seed_carries_identifier};
 
 pub struct StubNoLlm;
 
@@ -37,7 +37,7 @@ pub struct WorkServiceImpl<
     M = crate::DefaultMergeEngine,
     T = StubTagService,
 > {
-    db: D,
+    pub(crate) db: D,
     enrichment: E,
     http: H,
     http_client: livrarr_http::HttpClient,
@@ -57,7 +57,7 @@ pub struct WorkServiceImpl<
     /// routes discovery through the federated fan-out (the #97 path) instead of
     /// the legacy sequential lookup chain. `None` keeps the legacy chain
     /// (back-compat until the resolver is composed in the server).
-    resolver: Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
+    pub(crate) resolver: Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
 }
 
 impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm, crate::DefaultMergeEngine, StubTagService> {
@@ -230,14 +230,14 @@ impl livrarr_domain::services::TagService for StubTagService {
 /// chased (REQ-009, PO-locked at 3). The background convergence job reads its
 /// threshold from `[convergence]` config; the synchronous refresh gate uses
 /// this default directly.
-const DEAD_END_THRESHOLD: u32 = 3;
+pub(crate) const DEAD_END_THRESHOLD: u32 = 3;
 
 /// The hard-anchor types still worth chasing on a work: a `works.*` column that
 /// is NULL, holds no pending (fuzzy-guessed) ledger row, and has not reached the
 /// dead-end attempt `threshold`. Shared by the refresh gate (Insertion B) and the
 /// background convergence loop so both agree on what "still obtainable" means
 /// (REQ-006, RE-007).
-fn chaseable_anchor_types(
+pub(crate) fn chaseable_anchor_types(
     work: &Work,
     anchors: &[livrarr_domain::identity::WorkIdentityAnchor],
     dead_ends: &[livrarr_domain::identity::AnchorDeadEnd],
@@ -1451,73 +1451,7 @@ where
         &self,
         user_id: UserId,
     ) -> Result<livrarr_domain::services::RetrySummary, WorkServiceError> {
-        // Single pass over every "incomplete" work — Failed, Unenriched, or
-        // identity-Pending — filtered in memory (like refresh_all). This REPLACES
-        // the deleted background retry job: user-triggered, one pass, no recurring
-        // loop (REQ-011 / PO §7).
-        let works = self
-            .db
-            .list_works(user_id)
-            .await
-            .map_err(WorkServiceError::Db)?;
-        let incomplete: Vec<Work> = works
-            .into_iter()
-            .filter(|w| {
-                matches!(
-                    w.enrichment_status,
-                    EnrichmentStatus::Failed | EnrichmentStatus::Unenriched
-                ) || w.identity_status == IdentityStatus::Pending
-            })
-            .collect();
-
-        let total = incomplete.len();
-        let mut recovered = 0usize;
-
-        for work in &incomplete {
-            // A Pending work re-resolves identity first via the one identity road
-            // (settle_identity) — Background mode so Audnexus stays eligible
-            // (REQ-001). The promoted anchor survives the refresh below
-            // (reset_enrichment_for_refresh touches only enrichment).
-            if work.identity_status == IdentityStatus::Pending {
-                if let Some(resolver) = self.resolver.as_ref() {
-                    if let Err(e) = crate::async_resolver::settle_identity(
-                        resolver.as_ref(),
-                        &self.db,
-                        user_id,
-                        work,
-                        livrarr_domain::identity::IdentityMode::Background,
-                        livrarr_domain::identity::ConflictSource::ManualRetry,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            work_id = work.id,
-                            "retry-incomplete identity settle failed: {e}"
-                        );
-                    }
-                }
-            }
-
-            // Re-enrich through the one road (refresh -> run_unified ->
-            // materialize). A refresh error never blocks the rest of the sweep.
-            if self.refresh(user_id, work.id).await.is_ok() {
-                if let Ok(after) = self.db.get_work(user_id, work.id).await {
-                    let still_incomplete = matches!(
-                        after.enrichment_status,
-                        EnrichmentStatus::Failed | EnrichmentStatus::Unenriched
-                    ) || after.identity_status == IdentityStatus::Pending;
-                    if !still_incomplete {
-                        recovered += 1;
-                    }
-                }
-            }
-        }
-
-        Ok(RetrySummary {
-            total,
-            recovered,
-            still_incomplete: total - recovered,
-        })
+        crate::convergence_service::retry_all_incomplete(self, user_id).await
     }
 
     // Dead: bulk refresh is implemented at the handler layer
@@ -2055,145 +1989,7 @@ where
         work_id: WorkId,
         threshold: u32,
     ) -> Result<ConvergeOutcome, WorkServiceError> {
-        use livrarr_domain::identity::{
-            AnchorConfidence, AnchorType, ConflictSource, IdentityMode,
-        };
-        use livrarr_domain::IdentityStatus;
-
-        // Fresh row (R-10): the job hands us an id; re-read so we settle on truth.
-        let work = self.get(user_id, work_id).await?;
-        let was_pending = work.identity_status == IdentityStatus::Pending;
-
-        // The anchor slots that are currently NULL on works.*.
-        let missing_of = |w: &Work| -> Vec<String> {
-            [
-                (AnchorType::OL_WORK, w.ol_key.is_none()),
-                (AnchorType::GR_WORK, w.gr_key.is_none()),
-                (AnchorType::HC_WORK, w.hc_key.is_none()),
-                (AnchorType::ISBN_13, w.isbn_13.is_none()),
-                (AnchorType::ASIN, w.asin.is_none()),
-            ]
-            .into_iter()
-            .filter(|(_, missing)| *missing)
-            .map(|(t, _)| t.to_string())
-            .collect()
-        };
-        let before_missing = missing_of(&work);
-        let holds_anchor = before_missing.len() < 5;
-
-        let anchors = self.db.list_anchors(work_id).await.unwrap_or_default();
-        let dead_ends = self
-            .db
-            .list_anchor_dead_ends(work_id)
-            .await
-            .unwrap_or_default();
-        let chaseable = chaseable_anchor_types(&work, &anchors, &dead_ends, threshold);
-
-        // Step 0 — Pending dead-end (M9 / the convergence trap). settle_identity treats
-        // a NoCandidates Unresolved as TRANSIENT (ST-002) and keeps the work Pending, so
-        // re-settling a hopeless Pending work would fan out to providers every cadence
-        // forever. Terminalize to NeedsReview when a Pending work has no identity path:
-        // it holds NO hard anchor to resolve from (an anchorless, title-only work is not
-        // chased in the background), OR every still-missing anchor is already
-        // pending-guessed / at the dead-end threshold (chaseable empty).
-        //
-        // DIVERGENCE from ir-v2 convergence-orchestration step 0: the IR's
-        // `chaseable.is_empty()` (missing-based) does NOT catch an anchorless Pending
-        // work (all 5 missing -> chaseable non-empty). The behavioral contract
-        // (test_id_completeness converge_work_terminal, "Converge Pending No Chase")
-        // requires it to terminalize on the first pass — hence the `!holds_anchor`
-        // clause. [Flagged for cross-family review; Codex authored that test.]
-        if was_pending && (!holds_anchor || chaseable.is_empty()) {
-            self.db.set_needs_review(work_id).await.map_err(|e| {
-                WorkServiceError::Validation(format!("convergence set_needs_review failed: {e}"))
-            })?;
-            return Ok(ConvergeOutcome::Terminal);
-        }
-
-        // Step 1 — identity / ID-chasing leg via the one identity road. Settle ONLY when
-        // a chaseable missing anchor remains (R-5): a fully-anchored or fully-dead-ended
-        // Confirmed work is never fanned out; a Pending work that reached here still
-        // holds a chaseable bridge. Background keeps Audnexus eligible; Convergence
-        // attributes any raised conflict.
-        let mut work = work;
-        if !chaseable.is_empty() {
-            if let Some(resolver) = self.resolver.as_ref() {
-                if let Err(e) = crate::async_resolver::settle_identity(
-                    resolver.as_ref(),
-                    &self.db,
-                    user_id,
-                    &work,
-                    IdentityMode::Background,
-                    ConflictSource::Convergence,
-                )
-                .await
-                {
-                    tracing::warn!(work_id, "convergence identity settle failed: {e}");
-                }
-                work = self.get(user_id, work_id).await?;
-            }
-        }
-
-        // Step 2 — enrichment leg (Background path — NEVER refresh, RE-005). Runs when
-        // identity permits (settled) and enrichment is still incomplete.
-        let identity_permits = !matches!(
-            work.identity_status,
-            IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
-        );
-        let enrichment_incomplete = matches!(
-            work.enrichment_status,
-            EnrichmentStatus::Unenriched | EnrichmentStatus::Failed
-        );
-        if identity_permits && enrichment_incomplete {
-            let _ = self
-                .run_unified_enrichment(user_id, &work, None, EnrichmentMode::Background, None)
-                .await;
-            work = self.get(user_id, work_id).await?;
-        }
-
-        // Step 3 — dead-end accounting (R-1/R-2). A harvested anchor clears its counter;
-        // a chaseable anchor still missing and unguessed gets +1 (an at-threshold anchor
-        // is already excluded from `chaseable`, so it is never re-bumped).
-        let still_missing = missing_of(&work);
-        let anchors_after = self.db.list_anchors(work_id).await.unwrap_or_default();
-        let pending_after: Vec<String> = anchors_after
-            .iter()
-            .filter(|a| a.confidence == AnchorConfidence::Pending)
-            .map(|a| a.anchor_type.as_str().to_string())
-            .collect();
-        for t in &before_missing {
-            if !still_missing.contains(t) {
-                let _ = self
-                    .db
-                    .clear_anchor_dead_end(work_id, AnchorType::new(t))
-                    .await;
-            }
-        }
-        for at in &chaseable {
-            let key = at.as_str().to_string();
-            if still_missing.contains(&key) && !pending_after.contains(&key) {
-                let _ = self.db.bump_anchor_attempt(work_id, at.clone()).await;
-            }
-        }
-
-        // Step 4 — outcome for the job's pacing.
-        let outcome = if matches!(
-            work.identity_status,
-            IdentityStatus::NeedsReview | IdentityStatus::Conflict | IdentityStatus::NotFound
-        ) {
-            ConvergeOutcome::Terminal
-        } else if matches!(
-            work.identity_status,
-            IdentityStatus::Confirmed | IdentityStatus::Provisional
-        ) && matches!(
-            work.enrichment_status,
-            EnrichmentStatus::Enriched | EnrichmentStatus::Thin
-        ) {
-            ConvergeOutcome::Completed
-        } else {
-            ConvergeOutcome::StillIncomplete
-        };
-        Ok(outcome)
+        crate::convergence_service::converge_work(self, user_id, work_id, threshold).await
     }
 }
 
@@ -2374,111 +2170,9 @@ where
         term: &str,
         lang: &str,
     ) -> Result<Vec<LookupResult>, WorkServiceError> {
-        let lang_param = if lang != "en" {
-            let ol_lang = iso639_1_to_3(lang);
-            format!("&language={}", urlencoding::encode(ol_lang))
-        } else {
-            String::new()
-        };
-        let url = format!(
-            "https://openlibrary.org/search.json?q={}&limit=50&fields=key,title,author_name,author_key,first_publish_year,cover_i{lang_param}",
-            urlencoding::encode(term)
-        );
-
-        let fetch_req = FetchRequest {
-            url,
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: None,
-            timeout: std::time::Duration::from_secs(10),
-            rate_bucket: RateBucket::OpenLibrary,
-            max_body_bytes: 2 * 1024 * 1024,
-            anti_bot_check: false,
-            user_agent: UserAgentProfile::Server,
-        };
-
-        let resp = match self.http.fetch(fetch_req).await {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(WorkServiceError::Enrichment(format!(
-                    "OpenLibrary request failed: {e}"
-                )));
-            }
-        };
-
-        if resp.status >= 400 {
-            return Err(WorkServiceError::Enrichment(format!(
-                "OpenLibrary returned {}",
-                resp.status
-            )));
-        }
-
-        let data: serde_json::Value = serde_json::from_slice(&resp.body)
-            .map_err(|e| WorkServiceError::Enrichment(format!("OpenLibrary parse error: {e}")))?;
-
-        let docs = data
-            .get("docs")
-            .and_then(|d| d.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let results = docs
-            .iter()
-            .filter_map(|doc| {
-                let key = doc.get("key")?.as_str()?;
-                let title = doc.get("title")?.as_str()?;
-                let ol_key = key.trim_start_matches("/works/").to_string();
-
-                let author_name = doc
-                    .get("author_name")
-                    .and_then(|a| a.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("Unknown")
-                    .to_string();
-
-                let author_ol_key = doc
-                    .get("author_key")
-                    .and_then(|a| a.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|a| a.as_str())
-                    .map(|k| k.trim_start_matches("/authors/").to_string());
-
-                let year = doc
-                    .get("first_publish_year")
-                    .and_then(|y| y.as_i64())
-                    .map(|y| y as i32);
-
-                let cover_url = doc
-                    .get("cover_i")
-                    .and_then(|c| c.as_i64())
-                    .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
-
-                Some(LookupResult {
-                    ol_key: Some(ol_key),
-                    title: title.to_string(),
-                    author_name,
-                    author_ol_key,
-                    year,
-                    cover_url,
-                    description: None,
-                    series_name: None,
-                    series_position: None,
-                    source: Some("openlibrary".to_string()),
-                    source_type: Some("openlibrary".to_string()),
-                    language: Some(lang.to_string()),
-                    detail_url: None,
-                    rating: None,
-                    isbn_13: None,
-                    candidate_id: None,
-                    hc_key: None,
-                    gr_key: None,
-                    asin: None,
-                })
-            })
-            .collect();
-
-        Ok(results)
+        livrarr_external_data::openlibrary::search_openlibrary(&self.http, term, lang)
+            .await
+            .map_err(WorkServiceError::Enrichment)
     }
 
     async fn lookup_google_books(
@@ -2596,17 +2290,7 @@ where
             None => return Ok(vec![]),
         };
 
-        let query = r#"query SearchBooks($query: String!) {
-            search(query: $query, query_type: "books", per_page: 15) {
-                results
-            }
-        }"#;
-
-        let body = serde_json::json!({
-            "query": query,
-            "variables": {"query": term}
-        });
-
+        let body = livrarr_external_data::hardcover::hc_search_body(15, term);
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| WorkServiceError::Enrichment(format!("HC serialize: {e}")))?;
 
@@ -2639,11 +2323,7 @@ where
         let data: serde_json::Value = serde_json::from_slice(&resp.body)
             .map_err(|e| WorkServiceError::Enrichment(format!("HC parse: {e}")))?;
 
-        let hits = data
-            .pointer("/data/search/results/hits")
-            .and_then(|r| r.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let hits = livrarr_external_data::hardcover::hc_extract_hits(&data);
 
         let results: Vec<LookupResult> = hits
             .iter()
@@ -3092,7 +2772,7 @@ where
     /// Returns `(enrichment_status, identity_not_found)`. Never returns `Err` — all
     /// failures are absorbed, producing `Failed` status when enrichment itself fails
     /// and otherwise continuing past materialize errors (non-fatal, warned).
-    async fn run_unified_enrichment(
+    pub(crate) async fn run_unified_enrichment(
         &self,
         user_id: UserId,
         work: &Work,
