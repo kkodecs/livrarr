@@ -390,8 +390,6 @@ async fn test_wcc_add_reqs_014_015_add_reuses_cached_payloads_in_process_without
         Arc::new(db.clone()),
         Arc::new(queue),
         Arc::new(DefaultMergeEngine::new(PriorityModel::english())),
-        Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-        livrarr_metadata::work_service::StubNoLlm,
         false,
     )
     .with_transport_cache(cache.clone());

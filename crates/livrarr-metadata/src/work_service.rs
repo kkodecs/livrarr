@@ -3245,9 +3245,7 @@ where
         };
         match mat_outcome {
             Ok(outcome) => {
-                // REQ-017: persist freshly decoded ebook-cover dimensions via
-                // the existing writer. (The audiobook slot has no dims writer
-                // today — its SavedCover is computed but not yet persisted.)
+                // REQ-017: persist freshly decoded ebook-cover dimensions.
                 if let Some(saved) = outcome.saved_cover.as_ref() {
                     if let Err(e) = self
                         .db
@@ -3282,6 +3280,58 @@ where
                                 .await
                             {
                                 tracing::warn!(work_id, "cover dimension backfill failed: {e}");
+                            }
+                        }
+                    }
+                }
+                // REQ-017: persist freshly decoded audiobook-cover dimensions
+                // (M-007 fix — mirrors the ebook path above).
+                if let Some(saved) = outcome.saved_audiobook_cover.as_ref() {
+                    if let Err(e) = self
+                        .db
+                        .update_audiobook_cover_dimensions(
+                            user_id,
+                            work_id,
+                            saved.width,
+                            saved.height,
+                        )
+                        .await
+                    {
+                        tracing::warn!(work_id, "audiobook cover dimension persist failed: {e}");
+                    }
+                } else if post_enrich_work.audiobook_cover_width == 0
+                    && post_enrich_work.audiobook_cover_url.is_some()
+                {
+                    // REQ-017 trust-independent backfill (mirrors the ebook
+                    // branch): nothing was saved this pass (incl. user-locked
+                    // covers) but the stored audiobook file exists and the work
+                    // has no dims — decode the stored image once. The
+                    // "_audiobook" suffix matches livrarr-materialize's slot
+                    // naming (cover_file_path).
+                    let path = self
+                        .data_dir
+                        .join("covers")
+                        .join(user_id.to_string())
+                        .join(format!("{work_id}_audiobook.jpg"));
+                    if let Ok(bytes) = tokio::fs::read(&path).await {
+                        let dims = tokio::task::spawn_blocking(move || {
+                            image::load_from_memory(&bytes)
+                                .map(|img| (img.width() as i32, img.height() as i32))
+                                .ok()
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some((w, h)) = dims {
+                            if let Err(e) = self
+                                .db
+                                .update_audiobook_cover_dimensions(user_id, work_id, w, h)
+                                .await
+                            {
+                                tracing::warn!(
+                                    work_id,
+                                    "audiobook cover dimension backfill failed: {e}"
+                                );
                             }
                         }
                     }

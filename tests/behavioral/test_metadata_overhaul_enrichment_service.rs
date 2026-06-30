@@ -553,6 +553,18 @@ impl WorkDb for SequencedApplyDb {
             .update_cover_dimensions(user_id, work_id, width, height)
             .await
     }
+
+    async fn update_audiobook_cover_dimensions(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DbError> {
+        self.inner
+            .update_audiobook_cover_dimensions(user_id, work_id, width, height)
+            .await
+    }
 }
 
 impl ProvenanceDb for SequencedApplyDb {
@@ -893,14 +905,7 @@ where
         + Sync
         + 'static,
 {
-    livrarr_metadata::EnrichmentServiceImpl::new(
-        db,
-        Arc::new(queue),
-        Arc::new(merge_engine),
-        Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-        livrarr_metadata::work_service::StubNoLlm,
-        false,
-    )
+    livrarr_metadata::EnrichmentServiceImpl::new(db, Arc::new(queue), Arc::new(merge_engine), false)
 }
 
 fn persist_scatter_result_hook<DB>(
@@ -1480,8 +1485,6 @@ macro_rules! enrichment_service_tests {
                 Arc::new(seq_db),
                 Arc::new(queue),
                 Arc::new(merge_engine),
-                Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-                livrarr_metadata::work_service::StubNoLlm,
                 false,
             );
 
@@ -1542,8 +1545,6 @@ macro_rules! enrichment_service_tests {
                 Arc::new(seq_db),
                 Arc::new(queue),
                 Arc::new(merge_engine),
-                Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-                livrarr_metadata::work_service::StubNoLlm,
                 false,
             );
 
@@ -2154,8 +2155,6 @@ macro_rules! enrichment_service_tests {
                 db.clone(),
                 Arc::new(queue),
                 Arc::new(merge_engine),
-                Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-                livrarr_metadata::work_service::StubNoLlm,
                 false,
             );
 

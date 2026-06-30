@@ -672,6 +672,26 @@ impl WorkDb for SqliteDb {
         Ok(())
     }
 
+    async fn update_audiobook_cover_dimensions(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE works SET audiobook_cover_width = ?, audiobook_cover_height = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(width)
+        .bind(height)
+        .bind(work_id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(())
+    }
+
     async fn delete_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError> {
         let work = self.get_work(user_id, id).await?;
         sqlx::query("DELETE FROM works WHERE id = ? AND user_id = ?")

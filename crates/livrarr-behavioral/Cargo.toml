@@ -163,10 +163,6 @@ name = "test_ewl_resolver"
 path = "../../tests/behavioral/test_ewl_resolver.rs"
 
 [[test]]
-name = "test_ewl_bulk_resolver"
-path = "../../tests/behavioral/test_ewl_bulk_resolver.rs"
-
-[[test]]
 name = "test_ewl_cover_gate"
 path = "../../tests/behavioral/test_ewl_cover_gate.rs"
 
@@ -353,10 +349,6 @@ path = "../../tests/behavioral/test_metadata_refactor_merge.rs"
 [[test]]
 name = "test_metadata_refactor_pipeline"
 path = "../../tests/behavioral/test_metadata_refactor_pipeline.rs"
-
-[[test]]
-name = "test_metadata_refactor_cache"
-path = "../../tests/behavioral/test_metadata_refactor_cache.rs"
 
 [[test]]
 name = "test_idu_bulk_import_identity"

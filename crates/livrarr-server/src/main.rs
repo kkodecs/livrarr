@@ -367,31 +367,11 @@ async fn main() {
             ))
         };
 
-        // LLM validator — single LiveLlmValidator that reads credentials
-        // from live config per-call. When `llm_enabled=false` or
-        // `llm_api_key` is empty, behaves as a pass-through (no-op).
-        // Per Principle 11, LLM is value-add and never gatekeeps enrichment.
-        let validator = m::llm_validator::LiveLlmValidator::new(
-            http_client.clone(),
-            live_metadata_config.clone(),
-        );
-
-        let llm_caller = livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
-            live_metadata_config.clone(),
-            http_client.clone(),
-        );
         let llm_configured = live_metadata_config.snapshot().llm_enabled;
         let service = Arc::new(
-            m::EnrichmentServiceImpl::new(
-                db_arc,
-                queue.clone(),
-                merge_engine,
-                Arc::new(validator),
-                llm_caller,
-                llm_configured,
-            )
-            .with_transport_cache(transport_cache.clone())
-            .with_call_sink(call_sink.clone()),
+            m::EnrichmentServiceImpl::new(db_arc, queue.clone(), merge_engine, llm_configured)
+                .with_transport_cache(transport_cache.clone())
+                .with_call_sink(call_sink.clone()),
         );
         (queue, service)
     };
@@ -610,7 +590,6 @@ async fn main() {
         startup_time: chrono::Utc::now(),
         job_runner: Some(job_runner.clone()),
         cover_proxy_cache: cover_proxy_cache.clone(),
-        goodreads_rate_limiter: Arc::new(livrarr_server::state::GoodreadsRateLimiter::new()),
         live_metadata_config: live_metadata_config.clone(),
         log_buffer: log_buffer.clone(),
         log_level_handle: log_level_handle.clone(),

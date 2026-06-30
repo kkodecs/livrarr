@@ -250,10 +250,6 @@ where
         self.running.store(false, Ordering::Release);
         result
     }
-
-    fn trigger_monitor(&self) {
-        // Stub — server wires this up to spawn(author_monitor_tick).
-    }
 }
 
 impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H>

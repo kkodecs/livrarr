@@ -39,7 +39,6 @@ mod sqlite_indexer;
 mod sqlite_kash_link;
 mod sqlite_library_item;
 mod sqlite_list_import;
-mod sqlite_metadata_cache;
 mod sqlite_notification;
 mod sqlite_playback_progress;
 mod sqlite_provenance;
@@ -291,6 +290,14 @@ pub trait WorkDb: Send + Sync {
     ) -> Result<(), DbError>;
 
     async fn update_cover_dimensions(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DbError>;
+
+    async fn update_audiobook_cover_dimensions(
         &self,
         user_id: UserId,
         work_id: WorkId,
@@ -1616,39 +1623,6 @@ pub trait SeriesRosterDb: Send + Sync {
         series_id: i64,
         entries: &[SeriesRosterEntry],
     ) -> Result<SeriesRoster, DbError>;
-}
-
-/// One row of the persistent (work, provider) metadata cache (REQ-009). The
-/// payload is stored as opaque JSON so livrarr-db never names external-data's
-/// `NormalizedWorkDetail` (keeps db -> domain only, GC-2); the enrichment cache
-/// adapter (de)serializes it.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MetadataCacheRow {
-    pub payload_json: String,
-    pub fetched_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Persistent (work, provider) metadata cache (REQ-009). The enrichment
-/// provider-gateway wraps this behind a cache abstraction; a refresh bypasses it.
-/// TTL is enforced here via `max_age`.
-#[trait_variant::make(Send)]
-pub trait MetadataCacheDb: Send + Sync {
-    /// The cached payload JSON if present and younger than `max_age`, else None.
-    async fn metadata_cache_get(
-        &self,
-        work_id: livrarr_domain::WorkId,
-        provider: livrarr_domain::MetadataProvider,
-        max_age: std::time::Duration,
-    ) -> Result<Option<MetadataCacheRow>, DbError>;
-
-    /// Upsert a provider payload for (work, provider). INSERT ... ON CONFLICT
-    /// DO UPDATE SET (never INSERT OR REPLACE, insight 20).
-    async fn metadata_cache_put(
-        &self,
-        work_id: livrarr_domain::WorkId,
-        provider: livrarr_domain::MetadataProvider,
-        payload_json: &str,
-    ) -> Result<(), DbError>;
 }
 
 /// Loads the provider-policy table into the in-memory snapshot (REQ-003). The

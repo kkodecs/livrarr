@@ -105,8 +105,6 @@ pub enum HttpClientError {
 // v2.1 — HTTP Client Contracts
 // ---------------------------------------------------------------------------
 
-pub mod rate_limit;
-
 /// Max response body size for downloads and covers.
 ///
 /// Satisfies: IMPL-META-006, IMPL-DLC-003

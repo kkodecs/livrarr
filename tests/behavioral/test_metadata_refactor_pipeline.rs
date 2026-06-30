@@ -228,8 +228,6 @@ fn service(
         Arc::new(db),
         Arc::new(queue),
         Arc::new(DefaultMergeEngine::new(PriorityModel::english())),
-        Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-        livrarr_metadata::work_service::StubNoLlm,
         false,
     )
     .with_transport_cache(Arc::new(cache.clone()))

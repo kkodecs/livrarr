@@ -19,7 +19,6 @@ use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 
 pub mod cover_gate;
 pub mod cover_resolution;
-pub mod llm_ewl;
 pub mod llm_validator;
 pub mod pacing_queue;
 pub mod provider_queue;
@@ -1207,20 +1206,11 @@ async fn persist_dissents<DB: livrarr_db::FieldDissentDb>(
 }
 
 /// Enrichment service implementation.
-/// Generic over DB, Q (ProviderQueue), ME (MergeEngine), V (LlmValidator),
-/// and L (LlmCaller for cover gate disambiguation).
-pub struct EnrichmentServiceImpl<DB, Q, ME, V, L = crate::StubNoLlm> {
+/// Generic over DB, Q (ProviderQueue), and ME (MergeEngine).
+pub struct EnrichmentServiceImpl<DB, Q, ME> {
     db: Arc<DB>,
     queue: Arc<Q>,
     merge_engine: Arc<ME>,
-    /// Cross-provider semantic validator. Kept for API compatibility; Step 8.5
-    /// (LLM identity-validation) is removed per REQ-005 (zero LLM in pipeline).
-    #[allow(dead_code)]
-    validator: Arc<V>,
-    /// LLM caller. Kept for API compatibility; no longer called in the pipeline
-    /// (REQ-005). The cover-gate AskLlm path is replaced with conservative strip.
-    #[allow(dead_code)]
-    llm: L,
     llm_configured: bool,
     /// Per-work lock map [I-12]: serializes concurrent enrichment calls for the same (user_id, work_id).
     locks: Arc<PerWorkLocks>,
@@ -1240,7 +1230,7 @@ pub struct EnrichmentServiceImpl<DB, Q, ME, V, L = crate::StubNoLlm> {
     call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 
-impl<DB, Q, ME, V, L> EnrichmentServiceImpl<DB, Q, ME, V, L>
+impl<DB, Q, ME> EnrichmentServiceImpl<DB, Q, ME>
 where
     DB: livrarr_db::WorkDb
         + livrarr_db::ProvenanceDb
@@ -1252,23 +1242,12 @@ where
         + 'static,
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
-    V: crate::llm_validator::LlmValidator + Send + Sync + 'static,
-    L: livrarr_domain::services::LlmCaller + Send + Sync + 'static,
 {
-    pub fn new(
-        db: Arc<DB>,
-        queue: Arc<Q>,
-        merge_engine: Arc<ME>,
-        validator: Arc<V>,
-        llm: L,
-        llm_configured: bool,
-    ) -> Self {
+    pub fn new(db: Arc<DB>, queue: Arc<Q>, merge_engine: Arc<ME>, llm_configured: bool) -> Self {
         Self {
             db,
             queue,
             merge_engine,
-            validator,
-            llm,
             llm_configured,
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             source_data_store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -1311,7 +1290,7 @@ where
     }
 }
 
-impl<DB, Q, ME, V, L> EnrichmentService for EnrichmentServiceImpl<DB, Q, ME, V, L>
+impl<DB, Q, ME> EnrichmentService for EnrichmentServiceImpl<DB, Q, ME>
 where
     DB: livrarr_db::WorkDb
         + livrarr_db::ProvenanceDb
@@ -1323,8 +1302,6 @@ where
         + 'static,
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
-    V: crate::llm_validator::LlmValidator + Send + Sync + 'static,
-    L: livrarr_domain::services::LlmCaller + Send + Sync + 'static,
 {
     async fn enrich_work(
         &self,

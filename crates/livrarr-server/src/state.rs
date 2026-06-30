@@ -20,20 +20,12 @@ use crate::config::AppConfig;
 /// that scatter-gathers HC / OL / Audnexus / GR for live enrichment dispatch.
 pub type LiveProviderQueue = livrarr_metadata::DefaultProviderQueue<SqliteDb>;
 
-/// Type alias for the production LLM validator — single struct that reads
-/// credentials from the live metadata config per-call. Behaves as a no-op
-/// when LLM is not configured; calls Gemini when llm_enabled + key are set.
-pub type LiveLlmValidator = livrarr_metadata::llm_validator::LiveLlmValidator;
-
 /// Type alias for the production `EnrichmentServiceImpl` instance — the IR-defined
-/// enrichment service backed by the live `DefaultProviderQueue` + `DefaultMergeEngine`
-/// + LLM validator (no-op or Gemini per `MetadataConfig.llm_*`).
+/// enrichment service backed by the live `DefaultProviderQueue` + `DefaultMergeEngine`.
 pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
     SqliteDb,
     LiveProviderQueue,
     livrarr_metadata::DefaultMergeEngine,
-    LiveLlmValidator,
-    livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
 
 // =============================================================================
@@ -125,12 +117,11 @@ pub struct AppState {
     pub startup_time: chrono::DateTime<chrono::Utc>,
     pub job_runner: Option<crate::jobs::JobRunner>,
     pub cover_proxy_cache: Arc<crate::infra::cover_cache::CoverProxyCache>,
-    pub goodreads_rate_limiter: Arc<GoodreadsRateLimiter>,
     /// Shared, mutable snapshot of `MetadataConfig`. The
     /// `update_metadata_config` handlers call `.replace()` after persisting
     /// to the DB so the new credentials are live on the next enrichment
     /// without a restart. All credential-dependent components
-    /// (LiveLlmValidator, HardcoverClient, GoodreadsClient LLM fallback)
+    /// (HardcoverClient, GoodreadsClient LLM fallback)
     /// hold a clone and read fresh per call.
     pub live_metadata_config: livrarr_external_data::live_config::LiveMetadataConfig,
     pub log_buffer: Arc<LogBuffer>,

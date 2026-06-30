@@ -22,7 +22,6 @@ const TITLE_MATCH_JACCARD: f64 = 0.75;
 
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
-    pub confirm_title_jaccard: f64,
     pub confirm_runner_up_delta: f64,
     /// Per-provider call budget; a provider exceeding it abstains (REQ-025).
     pub call_timeout: Duration,
@@ -35,7 +34,6 @@ pub struct ResolverConfig {
 impl Default for ResolverConfig {
     fn default() -> Self {
         Self {
-            confirm_title_jaccard: 0.75,
             confirm_runner_up_delta: 0.10,
             call_timeout: Duration::from_secs(10),
             gb_key_present: false,

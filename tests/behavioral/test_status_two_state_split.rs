@@ -326,21 +326,13 @@ fn real_textless_workflow(
     db: livrarr_db::sqlite::SqliteDb,
     user_id: UserId,
 ) -> EnrichmentWorkflowImpl<
-    EnrichmentServiceImpl<
-        livrarr_db::sqlite::SqliteDb,
-        TextlessProviderQueue,
-        DefaultMergeEngine,
-        livrarr_metadata::llm_validator::NoOpLlmValidator,
-        livrarr_metadata::work_service::StubNoLlm,
-    >,
+    EnrichmentServiceImpl<livrarr_db::sqlite::SqliteDb, TextlessProviderQueue, DefaultMergeEngine>,
     livrarr_db::sqlite::SqliteDb,
 > {
     let enrichment = EnrichmentServiceImpl::new(
         Arc::new(db.clone()),
         Arc::new(TextlessProviderQueue::new(db.clone(), user_id)),
         Arc::new(DefaultMergeEngine::new(PriorityModel::english())),
-        Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-        livrarr_metadata::work_service::StubNoLlm,
         false,
     );
 

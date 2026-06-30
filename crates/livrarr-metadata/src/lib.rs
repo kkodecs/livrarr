@@ -24,9 +24,7 @@ pub mod series_service;
 pub mod work_service;
 
 // Re-export of the identity-resolution modules (now in livrarr-identity).
-pub use livrarr_identity::{
-    async_resolver, bulk_resolver, english_identity_resolver, title_cleanup,
-};
+pub use livrarr_identity::{async_resolver, english_identity_resolver, title_cleanup};
 
 pub mod author_monitor_workflow;
 pub mod provenance;
@@ -39,7 +37,7 @@ pub use livrarr_enrichment::provider_queue::{
     ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
 };
 pub use livrarr_enrichment::{
-    cover_gate, cover_resolution, llm_ewl, llm_validator, provider_queue, CircuitBreakerConfig,
+    cover_gate, cover_resolution, llm_validator, provider_queue, CircuitBreakerConfig,
     CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentError, EnrichmentMode,
     EnrichmentResult, EnrichmentService, EnrichmentServiceImpl, LivePacingQueue, MergeEngine,
     MergeError, MergeInput, MergeOutput, PacingQueue, PriorityModel, ProviderQueue,

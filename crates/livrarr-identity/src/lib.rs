@@ -4,6 +4,5 @@
 //! one-way identity/enrichment sibling boundary).
 
 pub mod async_resolver;
-pub mod bulk_resolver;
 pub mod english_identity_resolver;
 pub mod title_cleanup;
