@@ -114,6 +114,7 @@ where
                 max_body_bytes: 5 * 1024 * 1024,
                 anti_bot_check: false,
                 user_agent: UserAgentProfile::Server,
+                priority: RequestPriority::Normal,
             };
 
             match self.http.fetch(req).await {

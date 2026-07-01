@@ -3,83 +3,12 @@
 //! Provides rate-limited HTTP fetching with SSRF protection, anti-bot detection,
 //! and streaming body-size enforcement.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use livrarr_domain::services::{
-    FetchError, FetchRequest, FetchResponse, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    FetchError, FetchRequest, FetchResponse, HttpFetcher, HttpMethod, UserAgentProfile,
 };
-use tokio::time::Instant;
 
+use crate::outbound_queue;
 use crate::ssrf;
-
-// ---------------------------------------------------------------------------
-// Rate limiter
-// ---------------------------------------------------------------------------
-
-struct BucketLimiter {
-    min_interval: Duration,
-    last_request: Instant,
-}
-
-/// Simple per-bucket rate limiter. Blocks (sleeps) until the minimum interval
-/// since the last request in the same bucket has elapsed.
-#[derive(Clone)]
-struct RateLimiterMap {
-    buckets: Arc<Mutex<HashMap<RateBucket, BucketLimiter>>>,
-}
-
-impl RateLimiterMap {
-    fn new() -> Self {
-        Self {
-            buckets: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    async fn acquire(&self, bucket: &RateBucket) {
-        let interval = Self::interval_for(bucket);
-        if interval.is_zero() {
-            return;
-        }
-
-        let sleep_until = {
-            let mut map = self.buckets.lock().unwrap();
-            let now = Instant::now();
-            let entry = map.entry(bucket.clone()).or_insert_with(|| BucketLimiter {
-                min_interval: interval,
-                last_request: now - interval, // allow first request immediately
-            });
-            entry.min_interval = interval;
-
-            let earliest = entry.last_request + entry.min_interval;
-            if earliest > now {
-                entry.last_request = earliest;
-                Some(earliest)
-            } else {
-                entry.last_request = now;
-                None
-            }
-        };
-
-        if let Some(deadline) = sleep_until {
-            tokio::time::sleep_until(deadline).await;
-        }
-    }
-
-    fn interval_for(bucket: &RateBucket) -> Duration {
-        match bucket {
-            RateBucket::OpenLibrary => Duration::from_secs(1),
-            RateBucket::Goodreads => Duration::from_secs(1),
-            RateBucket::Hardcover => Duration::from_secs(1),
-            RateBucket::Audnexus => Duration::from_secs(2),
-            RateBucket::Audible => Duration::from_millis(150),
-            RateBucket::GoogleBooks => Duration::from_secs(1),
-            RateBucket::Indexer(_) => Duration::from_millis(500),
-            RateBucket::None => Duration::ZERO,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Anti-bot detection
@@ -131,7 +60,6 @@ fn user_agent_string(profile: &UserAgentProfile) -> String {
 pub struct HttpFetcherImpl {
     client: reqwest::Client,
     ssrf_client: reqwest::Client,
-    rate_limiters: RateLimiterMap,
 }
 
 impl HttpFetcherImpl {
@@ -151,7 +79,6 @@ impl HttpFetcherImpl {
         Ok(Self {
             client,
             ssrf_client,
-            rate_limiters: RateLimiterMap::new(),
         })
     }
 
@@ -161,8 +88,12 @@ impl HttpFetcherImpl {
         client: &reqwest::Client,
         req: FetchRequest,
     ) -> Result<FetchResponse, FetchError> {
-        // Rate limit
-        self.rate_limiters.acquire(&req.rate_bucket).await;
+        // Wait our turn in the process-global outbound queue: paced per bucket, with a
+        // bounded number of in-flight sends. Hold the permit across the send and body
+        // read — it releases the in-flight slot on drop.
+        let _permit = outbound_queue::shared()
+            .acquire(req.rate_bucket.clone(), req.priority)
+            .await;
 
         // Build request
         let method = match req.method {
@@ -338,6 +269,7 @@ impl HttpFetcher for HttpFetcherImpl {
                 max_body_bytes: req.max_body_bytes,
                 anti_bot_check: req.anti_bot_check,
                 user_agent: req.user_agent.clone(),
+                priority: req.priority,
             };
 
             let result = self.do_fetch(&self.ssrf_client, follow_req).await?;

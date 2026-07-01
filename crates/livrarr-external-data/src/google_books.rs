@@ -4,6 +4,7 @@ use livrarr_domain::services::{
     FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::text_norm;
+use livrarr_domain::RequestPriority;
 use livrarr_http::HttpClient;
 use serde::Deserialize;
 
@@ -104,6 +105,7 @@ pub async fn fetch_gb_volumes<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
     };
 
     let resp = fetcher

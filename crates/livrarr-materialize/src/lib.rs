@@ -11,6 +11,7 @@ use livrarr_domain::services::{
     MaterializeRequest, MaterializeService, MaterializeTags, RateBucket, SavedCover,
     UserAgentProfile,
 };
+use livrarr_domain::RequestPriority;
 use livrarr_tagwrite::{write_tags_batch, TagMetadata};
 
 /// The on-disk path for a work's cover in a slot (`suffix` distinguishes slots:
@@ -47,6 +48,7 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
         max_body_bytes: 10 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
     };
 
     let resp = http

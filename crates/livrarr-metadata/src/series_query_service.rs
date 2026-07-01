@@ -1091,6 +1091,7 @@ async fn fetch_gr_html<F: HttpFetcher>(
         max_body_bytes: 5 * 1024 * 1024,
         anti_bot_check: true,
         user_agent: UserAgentProfile::Browser,
+        priority: RequestPriority::Normal,
     };
     let resp = fetcher
         .fetch(req)
@@ -1299,6 +1300,7 @@ async fn resolve_gr_candidates_json<F: HttpFetcher>(
         max_body_bytes: 512 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Browser,
+        priority: RequestPriority::Normal,
     };
 
     let resp = match fetcher.fetch(req).await {

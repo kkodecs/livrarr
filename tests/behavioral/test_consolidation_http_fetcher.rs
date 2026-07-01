@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::Router;
 use livrarr_domain::services::*;
+use livrarr_domain::RequestPriority;
 use livrarr_http::fetcher::HttpFetcherImpl;
 use tokio::net::TcpListener;
 
@@ -35,6 +36,7 @@ fn default_req(url: &str) -> FetchRequest {
         max_body_bytes: 1024 * 1024, // 1MB default
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
     }
 }
 

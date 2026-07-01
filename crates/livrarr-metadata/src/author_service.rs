@@ -193,6 +193,7 @@ where
             max_body_bytes: 512 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         };
         let resp = self
             .fetcher
@@ -250,6 +251,7 @@ where
             max_body_bytes: 512 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         };
         let _resp = self
             .fetcher
@@ -455,6 +457,7 @@ where
             max_body_bytes: 1024 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         };
 
         let resp = self

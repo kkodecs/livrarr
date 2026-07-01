@@ -6,6 +6,7 @@ use livrarr_domain::seed::iso639_1_to_3;
 use livrarr_domain::services::{
     FetchRequest, HttpFetcher, HttpMethod, LookupResult, RateBucket, UserAgentProfile,
 };
+use livrarr_domain::RequestPriority;
 use livrarr_http::HttpClient;
 
 /// Parsed subset of an OpenLibrary work detail + first edition with ISBN.
@@ -121,6 +122,7 @@ pub async fn search_openlibrary<H: HttpFetcher + Send + Sync>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
     };
 
     let resp = http

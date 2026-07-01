@@ -147,10 +147,8 @@ impl Drop for DispatcherGuard {
     }
 }
 
-/// Minimum interval between dispatches for a bucket.
-///
-/// Duplicates `fetcher.rs`'s `interval_for` on purpose for now — removed once
-/// `do_fetch` adopts this queue.
+/// Minimum interval between dispatches for a bucket — the single source of
+/// per-provider pacing now that `do_fetch` routes through this queue.
 fn interval_for(bucket: &RateBucket) -> Duration {
     match bucket {
         RateBucket::OpenLibrary

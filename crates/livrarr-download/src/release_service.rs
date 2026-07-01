@@ -132,6 +132,7 @@ where
                     max_body_bytes: 10 * 1024 * 1024,
                     anti_bot_check: false,
                     user_agent: UserAgentProfile::Server,
+                    priority: RequestPriority::Normal,
                 };
 
                 match http.fetch(fetch_req).await {
@@ -427,6 +428,7 @@ async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
             max_body_bytes: 4 * 1024 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         })
         .await
     {
@@ -538,6 +540,7 @@ async fn dispatch_torrent<H: HttpFetcher>(
             max_body_bytes: 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         })
         .await
         .map_err(|e| format!("qBit auth failed: {e}"))?;
@@ -613,6 +616,7 @@ async fn dispatch_torrent<H: HttpFetcher>(
             max_body_bytes: 4096,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         })
         .await
         .map_err(|e| format!("qBit add torrent failed: {e}"))?;
@@ -673,6 +677,7 @@ async fn dispatch_transmission<H: HttpFetcher>(
                     max_body_bytes: 10 * 1024 * 1024,
                     anti_bot_check: false,
                     user_agent: UserAgentProfile::Server,
+                    priority: RequestPriority::Normal,
                 })
                 .await
                 .map_err(|e| format!("failed to download .torrent: {e}"))?;
@@ -719,6 +724,7 @@ async fn dispatch_transmission<H: HttpFetcher>(
                 max_body_bytes: 64 * 1024,
                 anti_bot_check: false,
                 user_agent: UserAgentProfile::Server,
+                priority: RequestPriority::Normal,
             })
             .await
             .map_err(|e| format!("Transmission RPC failed: {e}"))?;
@@ -783,6 +789,7 @@ async fn dispatch_usenet<H: HttpFetcher>(
             max_body_bytes: 16 * 1024 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         })
         .await
         .map_err(|e| format!("failed to download NZB from indexer: {e}"))?;
@@ -833,6 +840,7 @@ async fn dispatch_usenet<H: HttpFetcher>(
             max_body_bytes: 4096,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         })
         .await
         .map_err(|e| format!("SABnzbd unreachable: {e}"))?;

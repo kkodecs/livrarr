@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::RequestPriority;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
     Get,
@@ -38,6 +40,7 @@ pub struct FetchRequest {
     pub max_body_bytes: usize,
     pub anti_bot_check: bool,
     pub user_agent: UserAgentProfile,
+    pub priority: RequestPriority,
 }
 
 #[derive(Debug)]

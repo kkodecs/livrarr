@@ -2091,6 +2091,7 @@ where
             max_body_bytes: 2 * 1024 * 1024,
             anti_bot_check: true,
             user_agent: UserAgentProfile::Browser,
+            priority: RequestPriority::Normal,
         };
 
         let resp = match self.http.fetch(fetch_req).await {
@@ -2309,6 +2310,7 @@ where
                 max_body_bytes: 2 * 1024 * 1024,
                 anti_bot_check: false,
                 user_agent: livrarr_domain::services::UserAgentProfile::Server,
+                priority: livrarr_domain::RequestPriority::Normal,
             })
             .await
             .map_err(|e| WorkServiceError::Enrichment(format!("HC search: {e}")))?;

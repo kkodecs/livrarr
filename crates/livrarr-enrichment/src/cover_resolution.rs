@@ -6,7 +6,8 @@ use livrarr_domain::services::{
     FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::{
-    CoverMediaType, CoverResolution, CoverTrust, MetadataProvider, OutcomeClass, Work,
+    CoverMediaType, CoverResolution, CoverTrust, MetadataProvider, OutcomeClass, RequestPriority,
+    Work,
 };
 
 use crate::{NormalizedWorkDetail, ReconstructedOutcome};
@@ -279,6 +280,7 @@ pub async fn maybe_upgrade_cover<H: HttpFetcher>(
         max_body_bytes: COVER_MAX_BODY_BYTES,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
     };
 
     let resp = http
