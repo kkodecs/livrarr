@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 pub mod fetcher;
+pub mod outbound_queue;
 pub mod ssrf;
 
 /// Composable HTTP client.
