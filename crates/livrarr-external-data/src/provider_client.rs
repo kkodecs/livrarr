@@ -422,6 +422,9 @@ fn audnexus_payload(audnexus: AudnexusResult) -> NormalizedWorkDetail {
 /// HC owns its own LLM call.
 #[derive(Clone)]
 pub struct HardcoverClient {
+    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+    /// Kept solely for the `llm_disambiguate` pass-through — the LLM caller is
+    /// out of scope for the outbound queue.
     http: HttpClient,
     /// Reads `hardcover_enabled` + `hardcover_api_token` per fetch — config
     /// changes via UI take effect on the next enrichment without restart.
@@ -433,8 +436,13 @@ pub struct HardcoverClient {
 }
 
 impl HardcoverClient {
-    pub fn new(http: HttpClient, live_config: crate::live_config::LiveMetadataConfig) -> Self {
+    pub fn new(
+        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+        http: HttpClient,
+        live_config: crate::live_config::LiveMetadataConfig,
+    ) -> Self {
         Self {
+            fetcher,
             http,
             live_config,
             retry_backoff_secs: 5 * 60,
@@ -482,7 +490,7 @@ impl HardcoverClient {
             AnchorQuery::Isbn13(isbn) => {
                 let normalized = livrarr_domain::normalize_isbn(isbn);
                 match crate::hardcover::query_hardcover_by_isbn(
-                    &self.http,
+                    &self.fetcher,
                     &normalized,
                     &token,
                     cfg.as_ref(),
@@ -533,7 +541,7 @@ impl HardcoverClient {
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
             let normalized = livrarr_domain::normalize_isbn(isbn);
             match crate::hardcover::query_hardcover_by_isbn(
-                &self.http,
+                &self.fetcher,
                 &normalized,
                 &token,
                 cfg.as_ref(),
@@ -566,6 +574,7 @@ impl HardcoverClient {
 
         // Title+author search (existing behavior)
         let result = query_hardcover(
+            &self.fetcher,
             &self.http,
             &work.title,
             &work.author_name,
@@ -601,7 +610,7 @@ impl HardcoverClient {
         let mut isbn_13 = hc.isbn_13.clone();
         if let Some(ref hc_id) = hc.hc_key {
             if let Ok(Some(better_isbn)) =
-                crate::hardcover::fetch_hardcover_editions(&self.http, hc_id, token, "en").await
+                crate::hardcover::fetch_hardcover_editions(&self.fetcher, hc_id, token, "en").await
             {
                 isbn_13 = Some(better_isbn);
             }

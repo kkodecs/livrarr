@@ -214,6 +214,13 @@ pub trait HasHttpClient: Clone + Send + Sync + 'static {
     fn http_client_safe(&self) -> &HttpClient;
 }
 
+/// The queue-routed `HttpFetcher` — outbound requests through this accessor
+/// are paced and capped by the process-global outbound queue.
+pub trait HasHttpFetcher: Clone + Send + Sync + 'static {
+    type Fetcher: livrarr_domain::services::HttpFetcher + Send + Sync + 'static;
+    fn http_fetcher(&self) -> &Self::Fetcher;
+}
+
 pub trait HasDataDir: Clone + Send + Sync + 'static {
     fn data_dir(&self) -> &std::path::Path;
 }

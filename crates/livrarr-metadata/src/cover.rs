@@ -169,7 +169,6 @@ fn classify_cover_url(url: &str) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch_phase1_cover<H: HttpFetcher>(
     http_fetcher: &H,
-    hc_http: &HttpClient,
     title: &str,
     author: &str,
     request_cover_url: Option<&str>,
@@ -258,7 +257,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
             let hc_timeout = remaining.min(Duration::from_secs(2));
             match tokio::time::timeout(
                 hc_timeout,
-                fast_hc_cover_search(hc_http, title, author, token),
+                fast_hc_cover_search(http_fetcher, title, author, token),
             )
             .await
             {
@@ -308,8 +307,8 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
     None
 }
 
-async fn fast_hc_cover_search(
-    http: &HttpClient,
+async fn fast_hc_cover_search<F: HttpFetcher>(
+    fetcher: &F,
     title: &str,
     author: &str,
     token: &str,
@@ -322,7 +321,7 @@ async fn fast_hc_cover_search(
         .map(|i| title[..i].trim())
         .unwrap_or(title);
     let body = hc_search_body(10, &format!("\"{clean_title}\""));
-    let data = hc_post(http, body, token).await?;
+    let data = hc_post(fetcher, body, token).await?;
     let hits = hc_extract_hits(&data);
 
     let title_lower = clean_title.trim().to_lowercase();

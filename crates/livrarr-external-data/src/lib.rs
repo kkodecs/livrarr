@@ -20,6 +20,9 @@ pub mod provider_client;
 pub mod provider_util;
 pub mod transport_cache;
 
+#[cfg(test)]
+mod test_support;
+
 pub use types::{NormalizedWorkDetail, ProviderOutcome};
 
 pub use google_books::GoogleBooksClient;

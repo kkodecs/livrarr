@@ -112,6 +112,9 @@ pub struct AppState {
     /// SSRF-safe HTTP client — uses DNS resolver that rejects private IPs.
     /// Use for all user-supplied URLs (grab, fetch_and_extract_hash).
     pub http_client_safe: HttpClient,
+    /// Shared `HttpFetcher` implementation — routes admin-triggered outbound
+    /// requests through the process-global rate-limit queue.
+    pub http_fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     pub config: Arc<AppConfig>,
     pub data_dir: Arc<std::path::PathBuf>,
     pub startup_time: chrono::DateTime<chrono::Utc>,
@@ -344,13 +347,14 @@ use livrarr_handlers::context::{
     HasBookmarkService, HasChapterService, HasCoverCache, HasCoverService, HasDataDir,
     HasDownloadClientCredentialService, HasDownloadClientSettingsService, HasEmailService,
     HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService, HasHmacKey,
-    HasHttpClient, HasIdentityConflictService, HasIdentityResolver, HasImportIoService,
-    HasImportService, HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService,
-    HasListService, HasLiveConfig, HasLogSurface, HasManualImportScan, HasManualImportService,
-    HasMatchingService, HasNotificationService, HasPreaddCoverService, HasProviderStats,
-    HasQueueService, HasReadarrImportWorkflow, HasReleaseService, HasRemotePathMappingService,
-    HasRootFolderService, HasRssSync, HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService,
-    HasStartupTime, HasSystem, HasTagService, HasTrustedOrigins, HasWorkService,
+    HasHttpClient, HasHttpFetcher, HasIdentityConflictService, HasIdentityResolver,
+    HasImportIoService, HasImportService, HasImportWorkflow, HasIndexerCredentialService,
+    HasIndexerSettingsService, HasListService, HasLiveConfig, HasLogSurface, HasManualImportScan,
+    HasManualImportService, HasMatchingService, HasNotificationService, HasPreaddCoverService,
+    HasProviderStats, HasQueueService, HasReadarrImportWorkflow, HasReleaseService,
+    HasRemotePathMappingService, HasRootFolderService, HasRssSync, HasRssSyncWorkflow,
+    HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem, HasTagService,
+    HasTrustedOrigins, HasWorkService,
 };
 
 impl HasWorkService for AppState {
@@ -612,6 +616,13 @@ impl HasHttpClient for AppState {
     }
     fn http_client_safe(&self) -> &livrarr_http::HttpClient {
         &self.http_client_safe
+    }
+}
+
+impl HasHttpFetcher for AppState {
+    type Fetcher = livrarr_http::fetcher::HttpFetcherImpl;
+    fn http_fetcher(&self) -> &Self::Fetcher {
+        &self.http_fetcher
     }
 }
 

@@ -283,6 +283,7 @@ async fn main() {
             P::Hardcover,
             livrarr_external_data::ProviderClient::Hardcover(
                 livrarr_external_data::HardcoverClient::new(
+                    http_fetcher.clone(),
                     http_client.clone(),
                     live_metadata_config.clone(),
                 ),
@@ -463,6 +464,7 @@ async fn main() {
             P::Hardcover,
             livrarr_external_data::ProviderClient::Hardcover(
                 livrarr_external_data::HardcoverClient::new(
+                    http_fetcher.clone(),
                     http_client.clone(),
                     live_metadata_config.clone(),
                 ),
@@ -585,6 +587,7 @@ async fn main() {
         auth_service,
         http_client: http_client.clone(),
         http_client_safe,
+        http_fetcher: http_fetcher.clone(),
         config: Arc::new(config.clone()),
         data_dir: data_dir_arc.clone(),
         startup_time: chrono::Utc::now(),
@@ -844,6 +847,7 @@ async fn main() {
                 P::Hardcover,
                 livrarr_external_data::ProviderClient::Hardcover(
                     livrarr_external_data::HardcoverClient::new(
+                        http_fetcher.clone(),
                         http_client.clone(),
                         live_metadata_config.clone(),
                     ),

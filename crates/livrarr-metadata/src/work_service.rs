@@ -40,6 +40,10 @@ pub struct WorkServiceImpl<
     pub(crate) db: D,
     enrichment: E,
     http: H,
+    // Unread: the phase1 cover recovery path's Hardcover calls go through
+    // `http` (HttpFetcher), not this raw client. Retained for construction
+    // compatibility across the service's call sites.
+    #[allow(dead_code)]
     http_client: livrarr_http::HttpClient,
     llm: L,
     data_dir: PathBuf,
@@ -2650,7 +2654,6 @@ where
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
         let phase1_mtime = crate::cover::fetch_phase1_cover(
             &self.http,
-            &self.http_client,
             &work.title,
             &work.author_name,
             work.cover_url.as_deref(),

@@ -1,7 +1,13 @@
 //! Hardcover GraphQL client, consumed via `ProviderClient::Hardcover` (queue
 //! dispatch and the identity-resolution fan-out).
 
+use std::time::Duration;
+
+use livrarr_domain::services::{
+    FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+};
 use livrarr_domain::settings::MetadataConfig;
+use livrarr_domain::RequestPriority;
 use livrarr_http::HttpClient;
 use serde_json::Value;
 
@@ -48,22 +54,40 @@ pub fn hc_search_body(per_page: u32, term: &str) -> Value {
 
 /// POST a pre-built body to the Hardcover GraphQL endpoint and return the parsed
 /// JSON response. Handles auth header, Content-Type, and HTTP status check.
-pub async fn hc_post(http: &HttpClient, body: Value, token: &str) -> Result<Value, HardcoverError> {
-    let resp = http
-        .post(HARDCOVER_API_URL)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| HardcoverError::Http(format!("request failed: {e}")))?;
+pub async fn hc_post<F: HttpFetcher>(
+    fetcher: &F,
+    body: Value,
+    token: &str,
+) -> Result<Value, HardcoverError> {
+    let req = FetchRequest {
+        url: HARDCOVER_API_URL.to_string(),
+        method: HttpMethod::Post,
+        headers: vec![
+            ("Authorization".into(), format!("Bearer {token}")),
+            ("Content-Type".into(), "application/json".into()),
+        ],
+        body: Some(
+            serde_json::to_vec(&body)
+                .map_err(|e| HardcoverError::Http(format!("body encode error: {e}")))?,
+        ),
+        timeout: Duration::from_secs(10),
+        rate_bucket: RateBucket::Hardcover,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
+    };
 
-    if !resp.status().is_success() {
-        return Err(HardcoverError::Http(format!("HTTP {}", resp.status())));
+    let resp = fetcher
+        .fetch(req)
+        .await
+        .map_err(|e| HardcoverError::Http(e.to_string()))?;
+
+    if !(200..300).contains(&resp.status) {
+        return Err(HardcoverError::Http(format!("HTTP {}", resp.status)));
     }
 
-    resp.json()
-        .await
+    serde_json::from_slice(&resp.body)
         .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))
 }
 
@@ -115,7 +139,8 @@ fn doc_author_name(doc: &Value) -> Option<String> {
 /// Search Hardcover for a book matching `title` + `author`. Tier 1 = exact
 /// case-insensitive title + author match (highest `users_read_count` wins).
 /// Tier 2 = LLM disambiguation when no exact match.
-pub async fn query_hardcover(
+pub async fn query_hardcover<F: HttpFetcher>(
+    fetcher: &F,
     http: &HttpClient,
     title: &str,
     author: &str,
@@ -135,7 +160,7 @@ pub async fn query_hardcover(
     // returns partial matches (e.g., comic adaptations) that flood results.
     let search_term = format!("\"{clean_title}\"");
     let body = hc_search_body(25, &search_term);
-    let data = hc_post(http, body, token).await?;
+    let data = hc_post(fetcher, body, token).await?;
     let hits = hc_extract_hits(&data);
 
     if hits.is_empty() {
@@ -292,8 +317,8 @@ pub async fn query_hardcover(
 
 /// Fetch edition data from Hardcover with language filtering (F7: SEARCH-010).
 /// Returns the best ISBN from editions matching the preferred language.
-pub async fn fetch_hardcover_editions(
-    http: &HttpClient,
+pub async fn fetch_hardcover_editions<F: HttpFetcher>(
+    fetcher: &F,
     book_id: &str,
     token: &str,
     preferred_language: &str,
@@ -314,23 +339,35 @@ pub async fn fetch_hardcover_editions(
         "variables": {"bookId": book_id_int}
     });
 
-    let resp = http
-        .post(HARDCOVER_API_URL)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
+    let req = FetchRequest {
+        url: HARDCOVER_API_URL.to_string(),
+        method: HttpMethod::Post,
+        headers: vec![
+            ("Authorization".into(), format!("Bearer {token}")),
+            ("Content-Type".into(), "application/json".into()),
+        ],
+        body: Some(
+            serde_json::to_vec(&body).map_err(|e| format!("edition body encode error: {e}"))?,
+        ),
+        timeout: Duration::from_secs(10),
+        rate_bucket: RateBucket::Hardcover,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
+    };
+
+    let resp = fetcher
+        .fetch(req)
         .await
         .map_err(|e| format!("edition request failed: {e}"))?;
 
-    if !resp.status().is_success() {
-        return Err(format!("edition HTTP {}", resp.status()));
+    if !(200..300).contains(&resp.status) {
+        return Err(format!("edition HTTP {}", resp.status));
     }
 
-    let data: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("edition parse: {e}"))?;
+    let data: Value =
+        serde_json::from_slice(&resp.body).map_err(|e| format!("edition parse: {e}"))?;
 
     let editions = data
         .pointer("/data/editions")
@@ -490,14 +527,14 @@ async fn llm_disambiguate(
     }
 }
 
-pub async fn query_hardcover_by_isbn(
-    http: &HttpClient,
+pub async fn query_hardcover_by_isbn<F: HttpFetcher>(
+    fetcher: &F,
     isbn: &str,
     token: &str,
     _metadata_cfg: &livrarr_domain::settings::MetadataConfig,
 ) -> Result<Option<HardcoverResult>, HardcoverError> {
     let body = hc_search_body(10, isbn);
-    let data = hc_post(http, body, token).await?;
+    let data = hc_post(fetcher, body, token).await?;
     let hits = hc_extract_hits(&data);
 
     for hit in &hits {
@@ -617,5 +654,152 @@ mod tests {
             doc_author_name(&serde_json::json!({"author_names": ["  "]})),
             None
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Door-routing: hc_post / fetch_hardcover_editions go through the
+    // HttpFetcher trait with the Hardcover rate bucket, POST, Bearer auth,
+    // and a JSON body.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn hc_post_sends_hardcover_bucket_post_bearer_auth_and_json_body() {
+        let canned = serde_json::json!({"data": {"search": {"results": {"hits": []}}}});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+        let body = hc_search_body(25, "\"Test Title\"");
+
+        hc_post(&fetcher, body.clone(), "test-token").await.unwrap();
+
+        assert_eq!(fetcher.call_count(), 1);
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert_eq!(req.url, HARDCOVER_API_URL);
+        assert_eq!(req.rate_bucket, RateBucket::Hardcover);
+        assert_eq!(req.method, HttpMethod::Post);
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer test-token"));
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Content-Type" && v == "application/json"));
+        let sent_body: Value = serde_json::from_slice(req.body.as_ref().unwrap()).unwrap();
+        assert_eq!(sent_body, body);
+        assert_transport_params(req);
+    }
+
+    /// The fixed transport parameters every Hardcover API request carries.
+    fn assert_transport_params(req: &FetchRequest) {
+        assert_eq!(req.timeout, Duration::from_secs(10));
+        assert_eq!(req.max_body_bytes, 2 * 1024 * 1024);
+        assert!(!req.anti_bot_check);
+        assert!(matches!(req.user_agent, UserAgentProfile::Server));
+        assert!(matches!(req.priority, RequestPriority::Normal));
+    }
+
+    #[tokio::test]
+    async fn fetch_hardcover_editions_sends_hardcover_bucket_post_bearer_auth_and_json_body() {
+        let canned = serde_json::json!({"data": {"editions": []}});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        fetch_hardcover_editions(&fetcher, "123", "test-token", "en")
+            .await
+            .unwrap();
+
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert_eq!(req.url, HARDCOVER_API_URL);
+        assert_eq!(req.rate_bucket, RateBucket::Hardcover);
+        assert_eq!(req.method, HttpMethod::Post);
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer test-token"));
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Content-Type" && v == "application/json"));
+        assert!(req.body.is_some());
+        assert_transport_params(req);
+    }
+
+    #[tokio::test]
+    async fn hc_post_parses_canned_success_response_into_value() {
+        let canned = serde_json::json!({
+            "data": {"search": {"results": {"hits": [{"document": {"id": 42}}]}}}
+        });
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+        let body = hc_search_body(25, "\"Test Title\"");
+
+        let result = hc_post(&fetcher, body, "tok").await.unwrap();
+
+        assert_eq!(result, canned);
+    }
+
+    #[tokio::test]
+    async fn fetch_hardcover_editions_returns_isbn_for_preferred_language() {
+        let canned = serde_json::json!({
+            "data": {
+                "editions": [
+                    {"isbn_13": "9780000000002", "language": {"language": "french"}},
+                    {"isbn_13": "9780000000001", "language": {"language": "english"}}
+                ]
+            }
+        });
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        let result = fetch_hardcover_editions(&fetcher, "42", "tok", "en")
+            .await
+            .unwrap();
+
+        assert_eq!(result, Some("9780000000001".to_string()));
+    }
+
+    // -------------------------------------------------------------------
+    // Error mapping: HttpFetcher failures map onto the HardcoverError
+    // shapes callers match on (provider_client.rs WillRetry{ServerError}).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn hc_post_maps_http_500_to_hardcover_error_http() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
+        let body = hc_search_body(25, "\"x\"");
+
+        let err = hc_post(&fetcher, body, "tok").await.unwrap_err();
+
+        match err {
+            HardcoverError::Http(msg) => assert_eq!(msg, "HTTP 500"),
+            other => panic!("expected Http variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hc_post_maps_fetch_timeout_to_hardcover_error_http() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::Timeout(std::time::Duration::from_secs(10)),
+        );
+        let body = hc_search_body(25, "\"x\"");
+
+        let err = hc_post(&fetcher, body, "tok").await.unwrap_err();
+
+        match err {
+            HardcoverError::Http(msg) => assert!(msg.contains("timeout")),
+            other => panic!("expected Http variant, got {other:?}"),
+        }
     }
 }

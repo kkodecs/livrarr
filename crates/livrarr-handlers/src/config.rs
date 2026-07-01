@@ -3,8 +3,8 @@ use axum::Json;
 
 use crate::accessors::{LiveMetadataConfigAccessor, RssSyncAccessor};
 use crate::context::{
-    HasAppConfigService, HasEmailService, HasHttpClient, HasIndexerSettingsService, HasLiveConfig,
-    HasProviderStats, HasRssSync, HasRssSyncWorkflow,
+    HasAppConfigService, HasEmailService, HasHttpClient, HasHttpFetcher, HasIndexerSettingsService,
+    HasLiveConfig, HasProviderStats, HasRssSync, HasRssSyncWorkflow,
 };
 
 use crate::middleware::RequireAdmin;
@@ -263,32 +263,46 @@ pub async fn update_metadata<S: HasAppConfigService + HasProviderStats + HasLive
     Ok(Json(metadata_to_response(cfg, provider_status)))
 }
 
-pub async fn test_hardcover<S: HasAppConfigService + HasHttpClient>(
+pub async fn test_hardcover<S: HasAppConfigService + HasHttpFetcher>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<(), ApiError> {
+    use livrarr_domain::services::{
+        FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    };
+
     let cfg = state.app_config_service().get_metadata_config().await?;
     let token = cfg
         .hardcover_api_token
         .ok_or_else(|| ApiError::BadRequest("Hardcover API token not configured".into()))?;
 
     let clean = clean_token(&token);
-    let resp = state
-        .http_client()
-        .post("https://api.hardcover.app/v1/graphql")
-        .header("Authorization", format!("Bearer {clean}"))
-        .header("Content-Type", "application/json")
-        .body(r#"{"query":"{ me { id } }"}"#)
-        .send()
-        .await
-        .map_err(|e| {
-            ApiError::BadGateway(format!("Hardcover connection failed: {}", e.without_url()))
-        })?;
+    let req = FetchRequest {
+        url: "https://api.hardcover.app/v1/graphql".to_string(),
+        method: HttpMethod::Post,
+        headers: vec![
+            ("Authorization".into(), format!("Bearer {clean}")),
+            ("Content-Type".into(), "application/json".into()),
+        ],
+        body: Some(br#"{"query":"{ me { id } }"}"#.to_vec()),
+        timeout: std::time::Duration::from_secs(10),
+        rate_bucket: RateBucket::Hardcover,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority: livrarr_domain::RequestPriority::Normal,
+    };
 
-    if !resp.status().is_success() {
+    let resp = state
+        .http_fetcher()
+        .fetch(req)
+        .await
+        .map_err(|e| ApiError::BadGateway(format!("Hardcover connection failed: {e}")))?;
+
+    if !(200..300).contains(&resp.status) {
         return Err(ApiError::BadGateway(format!(
             "Hardcover returned {} — check API token",
-            resp.status()
+            resp.status
         )));
     }
     Ok(())
