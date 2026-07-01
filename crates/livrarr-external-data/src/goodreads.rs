@@ -581,18 +581,6 @@ pub async fn search_goodreads(
     Ok(parse_autocomplete_json(&body))
 }
 
-pub async fn search_goodreads_by_query(
-    http: &HttpClient,
-    base_url: &str,
-    query: &str,
-) -> Result<Vec<GoodreadsSearchResult>, GoodreadsFetchError> {
-    let base = base_url.trim_end_matches('/');
-    let encoded = urlencoding::encode(query);
-    let url = format!("{base}/search?q={encoded}");
-    let html = fetch_goodreads_html(http, &url).await?;
-    Ok(parse_search_html(&html))
-}
-
 /// Fetch and parse a Goodreads detail page. Returns `Err(Parse)` if the page
 /// loads but yields no useful fields.
 pub async fn fetch_goodreads_detail(

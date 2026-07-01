@@ -151,10 +151,12 @@ impl Drop for DispatcherGuard {
 /// per-provider pacing now that `do_fetch` routes through this queue.
 fn interval_for(bucket: &RateBucket) -> Duration {
     match bucket {
-        RateBucket::OpenLibrary
-        | RateBucket::Goodreads
-        | RateBucket::Hardcover
-        | RateBucket::GoogleBooks => Duration::from_secs(1),
+        RateBucket::OpenLibrary | RateBucket::Hardcover | RateBucket::GoogleBooks => {
+            Duration::from_secs(1)
+        }
+        // Goodreads is an anti-bot-hostile scrape target — paced slower than
+        // the API-backed providers.
+        RateBucket::Goodreads => Duration::from_millis(1500),
         RateBucket::Audnexus => Duration::from_secs(2),
         RateBucket::Audible => Duration::from_millis(150),
         RateBucket::Indexer(_) => Duration::from_millis(500),
@@ -528,7 +530,7 @@ mod tests {
             Err(mpsc::error::TryRecvError::Empty)
         ));
 
-        advance(Duration::from_secs(1)).await;
+        advance(Duration::from_millis(1500)).await;
         settle().await;
         assert_eq!(granted_rx.try_recv().ok(), Some(1));
         assert!(matches!(
@@ -536,7 +538,9 @@ mod tests {
             Err(mpsc::error::TryRecvError::Empty)
         ));
 
-        advance(Duration::from_secs(1)).await;
+        // Advance past the pacing interval: the third grant is still blocked,
+        // proving the in-flight cap (not pacing) is what holds it.
+        advance(Duration::from_millis(1500)).await;
         settle().await;
         assert!(matches!(
             granted_rx.try_recv(),

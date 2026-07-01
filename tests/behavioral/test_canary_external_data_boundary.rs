@@ -21,7 +21,7 @@ fn test_ac004_external_data_contract_types_and_entry_points_are_public() {
     assert_eq!(outcome.class(), OutcomeClass::Success);
     assert!(outcome.can_merge());
 
-    let _discovery_search_entry_point = goodreads::search_goodreads_by_query;
+    let _discovery_search_entry_point = goodreads::search_goodreads;
     let _enrichment_fetch_entry_point = ProviderClient::fetch;
 }
 

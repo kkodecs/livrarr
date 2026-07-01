@@ -912,7 +912,6 @@ impl GrCandidateText {
 struct ResolvedGrDetail {
     url: String,
     candidate: Option<GrCandidateText>,
-    via_isbn: Option<String>,
 }
 
 /// Real-network Goodreads adapter. Wraps the lifted
@@ -1078,7 +1077,6 @@ impl GoodreadsClient {
             Ok(None) => return ProviderOutcome::NotFound,
             Err(err) => return self.map_fetch_err(err),
         };
-        let via_isbn = resolved.via_isbn;
         let detail_url = resolved.url;
 
         // Extract gr_key from the resolved URL so the key survives a page
@@ -1092,7 +1090,7 @@ impl GoodreadsClient {
             Ok(h) => h,
             Err(err) => {
                 if !had_gr_key {
-                    if let Some(mut payload) = self
+                    if let Some(payload) = self
                         .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
                         .await
                     {
@@ -1101,9 +1099,6 @@ impl GoodreadsClient {
                             verified = payload.title.is_some(),
                             "GR page fetch failed; returning key payload"
                         );
-                        if let Some(ref isbn) = via_isbn {
-                            payload.isbn_13 = Some(isbn.clone());
-                        }
                         return ProviderOutcome::Success(Box::new(payload));
                     }
                 }
@@ -1119,9 +1114,6 @@ impl GoodreadsClient {
             if payload.cover_url.is_none() {
                 payload.cover_url = resolved.candidate.as_ref().and_then(|c| c.cover());
             }
-            if let Some(ref isbn) = via_isbn {
-                payload.isbn_13 = Some(isbn.clone());
-            }
             return ProviderOutcome::Success(Box::new(payload));
         }
 
@@ -1136,9 +1128,6 @@ impl GoodreadsClient {
                     if payload.gr_key.is_none() {
                         payload.gr_key = resolved_gr_key;
                     }
-                    if let Some(ref isbn) = via_isbn {
-                        payload.isbn_13 = Some(isbn.clone());
-                    }
                     return ProviderOutcome::Success(Box::new(payload));
                 }
                 Err(err) => return self.map_fetch_err(err),
@@ -1148,7 +1137,7 @@ impl GoodreadsClient {
         // All parse paths failed; fall back to a key payload carrying
         // whatever GR-sourced candidate text can vouch for the key.
         if !had_gr_key {
-            if let Some(mut payload) = self
+            if let Some(payload) = self
                 .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
                 .await
             {
@@ -1157,9 +1146,6 @@ impl GoodreadsClient {
                     verified = payload.title.is_some(),
                     "GR parse failed; returning key payload"
                 );
-                if let Some(ref isbn) = via_isbn {
-                    payload.isbn_13 = Some(isbn.clone());
-                }
                 return ProviderOutcome::Success(Box::new(payload));
             }
         }
@@ -1228,46 +1214,13 @@ impl GoodreadsClient {
             return Ok(Some(ResolvedGrDetail {
                 url: goodreads::detail_url_for_gr_key(&self.base_url, key),
                 candidate: None,
-                via_isbn: None,
             }));
-        }
-
-        // 2. ISBN search — exact match via isbn: prefix query.
-        if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
-            let normalized = livrarr_domain::normalize_isbn(isbn);
-            let query = format!("isbn:{normalized}");
-            match goodreads::search_goodreads_by_query(&self.http, &self.base_url, &query).await {
-                Ok(hits) if !hits.is_empty() => {
-                    if let Some(idx) = gr_best_match(&work.title, &work.author_name, &hits) {
-                        tracing::debug!(isbn = %normalized, chosen_idx = idx, "GR ISBN result selected (deterministic)");
-                        return Ok(Some(ResolvedGrDetail {
-                            url: goodreads::resolve_detail_url(
-                                &self.base_url,
-                                &hits[idx].detail_url,
-                            ),
-                            candidate: Some(GrCandidateText {
-                                title: hits[idx].title.clone(),
-                                author: hits[idx].author.clone(),
-                                cover_url: hits[idx].cover_url.clone(),
-                            }),
-                            via_isbn: Some(normalized.clone()),
-                        }));
-                    }
-                    tracing::debug!(isbn = %normalized, "no confident GR ISBN match");
-                }
-                Ok(_) => {
-                    tracing::debug!(isbn = %isbn, "GR ISBN search: no results");
-                }
-                Err(e) => {
-                    tracing::debug!(isbn = %isbn, error = ?e, "GR ISBN search failed");
-                }
-            }
         }
 
         let title = &work.title;
         let author = &work.author_name;
 
-        // 3. Search GR by title+author via the WAF-free autocomplete endpoint,
+        // 2. Search GR by title+author via the WAF-free autocomplete endpoint,
         // then a deterministic best-match pick (no LLM). A fetch error here is
         // most often GR rate-limiting / anti-bot during a bulk burst — log it
         // (previously a silent `?`, which hid these failures) and still
@@ -1311,7 +1264,6 @@ impl GoodreadsClient {
                     author: hits[idx].author.clone(),
                     cover_url: hits[idx].cover_url.clone(),
                 }),
-                via_isbn: None,
             }));
         }
 
