@@ -3,9 +3,14 @@
 //! Replaces LLM-based scraping with direct HTML parsing for foreign language works.
 //! LLM is kept as fallback only (see fallback chain in design doc).
 
+use livrarr_domain::services::{
+    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+};
+use livrarr_domain::RequestPriority;
 use livrarr_http::HttpClient;
 use regex::Regex;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 // =============================================================================
 // Types
@@ -521,32 +526,50 @@ pub fn extract_gr_key(detail_url: &str) -> Option<String> {
     }
 }
 
-/// Fetch a Goodreads HTML page. Adds the Chrome UA header, treats
-/// non-success status and anti-bot challenge pages as errors.
+/// Map an `HttpFetcher` transport failure onto `GoodreadsFetchError`. The
+/// fetcher intercepts HTTP 429 at the transport level (`FetchError::RateLimited`)
+/// rather than surfacing it as a normal response status, so it is translated
+/// back to `HttpStatus(429)` here — preserving the existing 429-vs-other-error
+/// discrimination (`map_fetch_err` treats `HttpStatus(429)` as `RateLimit`, any
+/// other `Network` failure as `ServerError`).
+fn map_transport_err(context: &str, err: FetchError) -> GoodreadsFetchError {
+    match err {
+        FetchError::RateLimited => GoodreadsFetchError::HttpStatus(429),
+        other => GoodreadsFetchError::Network(format!("{context}: {other}")),
+    }
+}
+
+/// Fetch a Goodreads HTML page. Adds the Chrome UA and treats non-success
+/// status and anti-bot challenge pages as errors.
 ///
-/// Used by the queue path (`GoodreadsClient` in `provider_client`) and the
-/// identity/series surfaces. Pacing is the caller's responsibility — queue
-/// dispatch goes through the per-provider `TokenBucket`; other surfaces
-/// apply their own Goodreads rate limiting before invoking this.
-pub async fn fetch_goodreads_html(
-    http: &HttpClient,
+/// Used by the queue path (`GoodreadsClient` in `provider_client`). Pacing is
+/// the outbound queue's responsibility, per the per-provider `RateBucket`.
+pub async fn fetch_goodreads_html<F: HttpFetcher>(
+    fetcher: &F,
     url: &str,
 ) -> Result<String, GoodreadsFetchError> {
-    let resp = http
-        .get(url)
-        .header("User-Agent", GOODREADS_USER_AGENT)
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
+    let req = FetchRequest {
+        url: url.to_string(),
+        method: HttpMethod::Get,
+        headers: vec![("Accept-Language".to_string(), "en-US,en;q=0.9".to_string())],
+        body: None,
+        timeout: Duration::from_secs(30),
+        rate_bucket: RateBucket::Goodreads,
+        max_body_bytes: 5 * 1024 * 1024,
+        // The fetcher's marker scan is a different, Cloudflare-flavored check —
+        // the GR-specific `is_anti_bot_page` body check below owns this instead.
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Custom(GOODREADS_USER_AGENT.to_string()),
+        priority: RequestPriority::Normal,
+    };
+    let resp = fetcher
+        .fetch(req)
         .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR request: {e}")))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(GoodreadsFetchError::HttpStatus(status.as_u16()));
+        .map_err(|e| map_transport_err("GR request", e))?;
+    if !(200..300).contains(&resp.status) {
+        return Err(GoodreadsFetchError::HttpStatus(resp.status));
     }
-    let html = resp
-        .text()
-        .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR body: {e}")))?;
+    let html = String::from_utf8_lossy(&resp.body).into_owned();
     if crate::provider_util::is_anti_bot_page(&html) {
         return Err(GoodreadsFetchError::AntiBot);
     }
@@ -554,8 +577,8 @@ pub async fn fetch_goodreads_html(
 }
 
 /// Search Goodreads by `title author` via the WAF-free autocomplete JSON endpoint.
-pub async fn search_goodreads(
-    http: &HttpClient,
+pub async fn search_goodreads<F: HttpFetcher>(
+    fetcher: &F,
     base_url: &str,
     title: &str,
     author: &str,
@@ -564,30 +587,36 @@ pub async fn search_goodreads(
     let raw_query = format!("{title} {author}");
     let query = urlencoding::encode(&raw_query);
     let url = format!("{base}/book/auto_complete?format=json&q={query}");
-    let resp = http
-        .get(&url)
-        .header("User-Agent", GOODREADS_USER_AGENT)
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
+    let req = FetchRequest {
+        url,
+        method: HttpMethod::Get,
+        headers: vec![("Accept-Language".to_string(), "en-US,en;q=0.9".to_string())],
+        body: None,
+        timeout: Duration::from_secs(30),
+        rate_bucket: RateBucket::Goodreads,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Custom(GOODREADS_USER_AGENT.to_string()),
+        priority: RequestPriority::Normal,
+    };
+    let resp = fetcher
+        .fetch(req)
         .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(GoodreadsFetchError::HttpStatus(resp.status().as_u16()));
+        .map_err(|e| map_transport_err("GR autocomplete", e))?;
+    if !(200..300).contains(&resp.status) {
+        return Err(GoodreadsFetchError::HttpStatus(resp.status));
     }
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete body: {e}")))?;
+    let body = String::from_utf8_lossy(&resp.body).into_owned();
     Ok(parse_autocomplete_json(&body))
 }
 
 /// Fetch and parse a Goodreads detail page. Returns `Err(Parse)` if the page
 /// loads but yields no useful fields.
-pub async fn fetch_goodreads_detail(
-    http: &HttpClient,
+pub async fn fetch_goodreads_detail<F: HttpFetcher>(
+    fetcher: &F,
     detail_url: &str,
 ) -> Result<GoodreadsDetailResult, GoodreadsFetchError> {
-    let html = fetch_goodreads_html(http, detail_url).await?;
+    let html = fetch_goodreads_html(fetcher, detail_url).await?;
     parse_detail_html(&html).ok_or(GoodreadsFetchError::Parse)
 }
 
@@ -1069,6 +1098,143 @@ pub fn parse_series_detail_html(html: &str) -> (Vec<GoodreadsSeriesBook>, bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------
+    // Door-routing: fetch_goodreads_html / search_goodreads go through the
+    // HttpFetcher trait with the Goodreads rate bucket, GET, the exact
+    // Chrome UA string via UserAgentProfile::Custom (not a header — the
+    // fetcher sets UA from `user_agent`), and the Accept-Language header.
+    // anti_bot_check stays false: the app-level `is_anti_bot_page` body scan
+    // owns anti-bot detection for Goodreads, not the fetcher's generic scan.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_sends_goodreads_bucket_get_custom_ua_and_accept_language() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            b"<html><body>ok</body></html>".to_vec(),
+        );
+
+        let html = fetch_goodreads_html(&fetcher, "https://www.goodreads.com/book/show/1")
+            .await
+            .unwrap();
+
+        assert_eq!(html, "<html><body>ok</body></html>");
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert_eq!(req.url, "https://www.goodreads.com/book/show/1");
+        assert_eq!(req.rate_bucket, RateBucket::Goodreads);
+        assert_eq!(req.method, HttpMethod::Get);
+        match &req.user_agent {
+            UserAgentProfile::Custom(ua) => assert_eq!(ua.as_str(), GOODREADS_USER_AGENT),
+            other => panic!("expected UserAgentProfile::Custom, got {other:?}"),
+        }
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Accept-Language" && v == "en-US,en;q=0.9"));
+        assert!(!req.headers.iter().any(|(k, _)| k == "User-Agent"));
+        assert!(!req.anti_bot_check);
+        assert_eq!(req.timeout, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_maps_anti_bot_body_to_antibot_error() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            br#"<html><div class="cf-browser-verification">Checking...</div></html>"#.to_vec(),
+        );
+
+        let err = fetch_goodreads_html(&fetcher, "https://www.goodreads.com/book/show/1")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, GoodreadsFetchError::AntiBot));
+    }
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_maps_fetcher_rate_limited_to_http_status_429() {
+        // The fetcher intercepts HTTP 429 as `FetchError::RateLimited` rather
+        // than a normal response — this must still surface as
+        // `HttpStatus(429)` so `map_fetch_err` (provider_client.rs) keeps
+        // classifying it as `WillRetry { RateLimit }`, not `ServerError`.
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+
+        let err = fetch_goodreads_html(&fetcher, "https://www.goodreads.com/book/show/1")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, GoodreadsFetchError::HttpStatus(429)));
+    }
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_maps_http_500_to_http_status() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
+
+        let err = fetch_goodreads_html(&fetcher, "https://www.goodreads.com/book/show/1")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, GoodreadsFetchError::HttpStatus(500)));
+    }
+
+    #[tokio::test]
+    async fn search_goodreads_sends_goodreads_bucket_get_autocomplete_url() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"[]".to_vec());
+
+        let hits = search_goodreads(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Dune",
+            "Frank Herbert",
+        )
+        .await
+        .unwrap();
+
+        assert!(hits.is_empty());
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert!(req
+            .url
+            .starts_with("https://www.goodreads.com/book/auto_complete?format=json&q="));
+        assert_eq!(req.rate_bucket, RateBucket::Goodreads);
+        assert_eq!(req.method, HttpMethod::Get);
+        match &req.user_agent {
+            UserAgentProfile::Custom(ua) => assert_eq!(ua.as_str(), GOODREADS_USER_AGENT),
+            other => panic!("expected UserAgentProfile::Custom, got {other:?}"),
+        }
+        assert!(!req.anti_bot_check);
+        assert_eq!(req.timeout, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn search_goodreads_parses_canned_autocomplete_response() {
+        let body = r#"[{"title":"The Hobbit","bookUrl":"/book/show/5907","author":{"name":"J.R.R. Tolkien"}}]"#;
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
+
+        let hits = search_goodreads(&fetcher, "https://www.goodreads.com", "Hobbit", "Tolkien")
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "The Hobbit");
+    }
+
+    #[tokio::test]
+    async fn search_goodreads_maps_fetcher_rate_limited_to_http_status_429() {
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+
+        let err = search_goodreads(&fetcher, "https://www.goodreads.com", "x", "y")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, GoodreadsFetchError::HttpStatus(429)));
+    }
 
     // =========================================================================
     // Live-fetch helper (requires network — tests are #[ignore])

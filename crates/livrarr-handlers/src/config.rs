@@ -308,24 +308,43 @@ pub async fn test_hardcover<S: HasAppConfigService + HasHttpFetcher>(
     Ok(())
 }
 
-pub async fn test_audnexus<S: HasAppConfigService + HasHttpClient>(
+pub async fn test_audnexus<S: HasAppConfigService + HasHttpFetcher>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<(), ApiError> {
+    use livrarr_domain::services::{
+        FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    };
+
     let cfg = state.app_config_service().get_metadata_config().await?;
     let url = format!(
         "{}/authors/B000AQ0842",
         cfg.audnexus_url.trim_end_matches('/')
     );
 
-    let resp = state.http_client().get(&url).send().await.map_err(|e| {
-        ApiError::BadGateway(format!("Audnexus connection failed: {}", e.without_url()))
-    })?;
+    let req = FetchRequest {
+        url,
+        method: HttpMethod::Get,
+        headers: vec![],
+        body: None,
+        timeout: std::time::Duration::from_secs(30),
+        rate_bucket: RateBucket::Audnexus,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority: livrarr_domain::RequestPriority::Normal,
+    };
 
-    if !resp.status().is_success() {
+    let resp = state
+        .http_fetcher()
+        .fetch(req)
+        .await
+        .map_err(|e| ApiError::BadGateway(format!("Audnexus connection failed: {e}")))?;
+
+    if !(200..300).contains(&resp.status) {
         return Err(ApiError::BadGateway(format!(
             "Audnexus returned {}",
-            resp.status()
+            resp.status
         )));
     }
     Ok(())

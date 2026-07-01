@@ -17,10 +17,12 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use livrarr_domain::services::{
-    CallOperation, CallOutcomeClass, ProviderCallRecord, ProviderCallSink,
+    CallOperation, CallOutcomeClass, FetchRequest, HttpFetcher, HttpMethod, ProviderCallRecord,
+    ProviderCallSink, RateBucket, UserAgentProfile,
 };
-use livrarr_domain::{AnchorQuery, MetadataProvider, WillRetryReason, Work};
+use livrarr_domain::{AnchorQuery, MetadataProvider, RequestPriority, WillRetryReason, Work};
 use livrarr_http::HttpClient;
+use std::time::Duration;
 
 use crate::audnexus::{query_audnexus, query_audnexus_by_asin, AudnexusCache, AudnexusResult};
 use crate::goodreads::{self, GoodreadsDetailResult, GoodreadsFetchError, GOODREADS_BASE_URL};
@@ -299,7 +301,7 @@ impl StubProviderClient {
 ///     each provider's failure taxonomy gets pulled into typed errors.
 #[derive(Clone)]
 pub struct AudnexusClient {
-    http: HttpClient,
+    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     base_url: String,
     retry_backoff_secs: i64,
     cache: AudnexusCache,
@@ -308,9 +310,12 @@ pub struct AudnexusClient {
 }
 
 impl AudnexusClient {
-    pub fn new(http: HttpClient, base_url: impl Into<String>) -> Self {
+    pub fn new(
+        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
-            http,
+            fetcher,
             base_url: base_url.into(),
             retry_backoff_secs: 5 * 60,
             cache: crate::audnexus::AudnexusCache::new(),
@@ -331,7 +336,7 @@ impl AudnexusClient {
 
     async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
         let result = query_audnexus(
-            &self.http,
+            &self.fetcher,
             &self.base_url,
             work.asin.as_deref(),
             &work.title,
@@ -352,7 +357,7 @@ impl AudnexusClient {
 
     /// Anchor-only fetch (REQ-006): ASIN lookup with no title/author fallback.
     async fn fetch_by_asin(&self, asin: &str) -> ProviderOutcome<NormalizedWorkDetail> {
-        match query_audnexus_by_asin(&self.http, &self.base_url, asin, &self.cache).await {
+        match query_audnexus_by_asin(&self.fetcher, &self.base_url, asin, &self.cache).await {
             Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
             Ok(None) => ProviderOutcome::NotFound,
             Err(_) => ProviderOutcome::WillRetry {
@@ -655,16 +660,16 @@ impl HardcoverClient {
 /// hitting the network.
 #[derive(Clone)]
 pub struct OpenLibraryClient {
-    http: HttpClient,
+    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     retry_backoff_secs: i64,
     #[allow(dead_code)] // read at green: REQ-001 record emission
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
 impl OpenLibraryClient {
-    pub fn new(http: HttpClient) -> Self {
+    pub fn new(fetcher: livrarr_http::fetcher::HttpFetcherImpl) -> Self {
         Self {
-            http,
+            fetcher,
             retry_backoff_secs: 5 * 60,
             call_sink: None,
         }
@@ -710,7 +715,7 @@ impl OpenLibraryClient {
     /// NotFound — mirroring the seeded fetch's tier behavior, never a text
     /// search.
     async fn detail_by_key(&self, ol_key: &str) -> ProviderOutcome<NormalizedWorkDetail> {
-        match query_ol_detail(&self.http, ol_key).await {
+        match query_ol_detail(&self.fetcher, ol_key).await {
             Ok(detail) => ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail))),
             Err(e) => {
                 tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail miss");
@@ -724,7 +729,7 @@ impl OpenLibraryClient {
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
             let normalized = livrarr_domain::normalize_isbn(isbn);
             match self.isbn_lookup(&normalized).await {
-                Ok(Some(ol_work_key)) => match query_ol_detail(&self.http, &ol_work_key).await {
+                Ok(Some(ol_work_key)) => match query_ol_detail(&self.fetcher, &ol_work_key).await {
                     Ok(detail) => {
                         let mut payload = self.build_payload(&ol_work_key, detail);
                         payload.isbn_13 = Some(normalized.clone());
@@ -745,7 +750,7 @@ impl OpenLibraryClient {
 
         // Tier 2: ol_key direct lookup (existing behavior)
         if let Some(ol_key) = work.ol_key.as_deref().filter(|s| !s.is_empty()) {
-            match query_ol_detail(&self.http, ol_key).await {
+            match query_ol_detail(&self.fetcher, ol_key).await {
                 Ok(detail) => {
                     return ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail)));
                 }
@@ -785,32 +790,7 @@ impl OpenLibraryClient {
     }
 
     async fn isbn_lookup(&self, isbn: &str) -> Result<Option<String>, String> {
-        let url = format!("https://openlibrary.org/isbn/{isbn}.json");
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("OL ISBN fetch failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            return Ok(None);
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("OL ISBN parse error: {e}"))?;
-
-        let ol_work_key = data
-            .get("works")
-            .and_then(|w| w.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|w| w.get("key"))
-            .and_then(|k| k.as_str())
-            .map(|k| k.strip_prefix("/works/").unwrap_or(k).to_string());
-
-        Ok(ol_work_key)
+        crate::openlibrary::isbn_lookup(&self.fetcher, isbn).await
     }
 
     async fn title_author_search(
@@ -823,20 +803,29 @@ impl OpenLibraryClient {
             urlencoding::encode(&query)
         );
 
+        let req = FetchRequest {
+            url,
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(30),
+            rate_bucket: RateBucket::OpenLibrary,
+            max_body_bytes: 2 * 1024 * 1024,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
+        };
         let resp = self
-            .http
-            .get(&url)
-            .send()
+            .fetcher
+            .fetch(req)
             .await
             .map_err(|e| format!("OL search failed: {e}"))?;
 
-        if !resp.status().is_success() {
-            return Err(format!("OL search returned {}", resp.status()));
+        if !(200..300).contains(&resp.status) {
+            return Err(format!("OL search returned {}", resp.status));
         }
 
-        let data: serde_json::Value = resp
-            .json()
-            .await
+        let data: serde_json::Value = serde_json::from_slice(&resp.body)
             .map_err(|e| format!("OL search parse error: {e}"))?;
 
         let docs = data
@@ -883,7 +872,7 @@ impl OpenLibraryClient {
             None => return Ok(None),
         };
 
-        match query_ol_detail(&self.http, &ol_key).await {
+        match query_ol_detail(&self.fetcher, &ol_key).await {
             Ok(detail) => Ok(Some(self.build_payload(&ol_key, detail))),
             Err(_) => Ok(None),
         }
@@ -953,6 +942,9 @@ struct ResolvedGrDetail {
 ///   - Detail page returned 200 OK but unparseable → `NotFound`.
 #[derive(Clone)]
 pub struct GoodreadsClient {
+    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+    /// Kept solely for the `llm_extract_payload` pass-through — the LLM
+    /// caller is out of scope for the outbound queue.
     http: HttpClient,
     base_url: String,
     retry_backoff_secs: i64,
@@ -966,8 +958,13 @@ pub struct GoodreadsClient {
 }
 
 impl GoodreadsClient {
-    pub fn new(http: HttpClient, base_url: impl Into<String>) -> Self {
+    pub fn new(
+        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+        http: HttpClient,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
+            fetcher,
             http,
             base_url: base_url.into(),
             retry_backoff_secs: 5 * 60,
@@ -1006,7 +1003,7 @@ impl GoodreadsClient {
         language: Option<&str>,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let detail_url = goodreads::detail_url_for_gr_key(&self.base_url, gr_key);
-        let html = match goodreads::fetch_goodreads_html(&self.http, &detail_url).await {
+        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url).await {
             Ok(h) => h,
             Err(err) => return self.map_fetch_err(err),
         };
@@ -1095,7 +1092,7 @@ impl GoodreadsClient {
         // Direct parse path. On Parse failure, optionally fall through to
         // LLM extraction if configured (typical for foreign-language pages
         // where JSON-LD / regex don't match the locale-specific HTML).
-        let html = match goodreads::fetch_goodreads_html(&self.http, &detail_url).await {
+        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url).await {
             Ok(h) => h,
             Err(err) => {
                 if !had_gr_key {
@@ -1200,10 +1197,14 @@ impl GoodreadsClient {
     /// One search round-trip to vouch for an LLM-direct key: returns the
     /// matching hit's text only when the hit's own gr_key equals the key.
     async fn confirm_key_via_search(&self, work: &Work, key: &str) -> Option<GrCandidateText> {
-        let hits =
-            goodreads::search_goodreads(&self.http, &self.base_url, &work.title, &work.author_name)
-                .await
-                .ok()?;
+        let hits = goodreads::search_goodreads(
+            &self.fetcher,
+            &self.base_url,
+            &work.title,
+            &work.author_name,
+        )
+        .await
+        .ok()?;
         hits.iter()
             .find(|h| goodreads::extract_gr_key(&h.detail_url).as_deref() == Some(key))
             .map(|h| GrCandidateText {
@@ -1234,8 +1235,13 @@ impl GoodreadsClient {
         // most often GR rate-limiting / anti-bot during a bulk burst — log it
         // (previously a silent `?`, which hid these failures) and still
         // propagate so map_fetch_err can schedule a retry.
-        let mut hits = match goodreads::search_goodreads(&self.http, &self.base_url, title, author)
-            .await
+        let mut hits = match goodreads::search_goodreads(
+            &self.fetcher,
+            &self.base_url,
+            title,
+            author,
+        )
+        .await
         {
             Ok(h) => h,
             Err(e) => {
@@ -1248,7 +1254,7 @@ impl GoodreadsClient {
             let ascii_title: String = title.chars().filter(|c| c.is_ascii()).collect();
             if !ascii_title.trim().is_empty() {
                 hits = match goodreads::search_goodreads(
-                    &self.http,
+                    &self.fetcher,
                     &self.base_url,
                     &ascii_title,
                     author,
@@ -1410,7 +1416,7 @@ fn gr_best_match(
 
 /// Construct a `GoodreadsClient` against the production Goodreads URL.
 impl GoodreadsClient {
-    pub fn production(http: HttpClient) -> Self {
-        Self::new(http, GOODREADS_BASE_URL)
+    pub fn production(fetcher: livrarr_http::fetcher::HttpFetcherImpl, http: HttpClient) -> Self {
+        Self::new(fetcher, http, GOODREADS_BASE_URL)
     }
 }

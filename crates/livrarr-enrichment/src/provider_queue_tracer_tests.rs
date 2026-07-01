@@ -20,7 +20,6 @@ mod audnexus_tracer_tests {
     use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole};
     use livrarr_external_data::{AudnexusClient, ProviderClient, ProviderOutcome};
-    use livrarr_http::HttpClient;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -104,8 +103,8 @@ mod audnexus_tracer_tests {
         let url = spawn_canned_audnexus_server(body).await;
 
         let (db, work) = seed_db_and_work().await;
-        let http = HttpClient::builder().build().unwrap();
-        let client = AudnexusClient::new(http, url);
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().unwrap();
+        let client = AudnexusClient::new(fetcher, url);
 
         let queue = DefaultProviderQueueBuilder::new()
             .add_provider(
@@ -150,11 +149,8 @@ mod audnexus_tracer_tests {
         drop(listener);
 
         let (db, work) = seed_db_and_work().await;
-        let http = HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(2))
-            .build()
-            .unwrap();
-        let client = AudnexusClient::new(http, url);
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().unwrap();
+        let client = AudnexusClient::new(fetcher, url);
 
         let queue = DefaultProviderQueueBuilder::new()
             .add_provider(
@@ -290,7 +286,8 @@ mod goodreads_tracer_tests {
 
         let (db, work) = seed_db_and_work_with_gr_key(Some("12345.Tracer_Book")).await;
         let http = HttpClient::builder().build().unwrap();
-        let client = GoodreadsClient::new(http, url);
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().unwrap();
+        let client = GoodreadsClient::new(fetcher, http, url);
 
         let queue = DefaultProviderQueueBuilder::new()
             .add_provider(
@@ -350,7 +347,8 @@ mod goodreads_tracer_tests {
 
         let (db, work) = seed_db_and_work_with_gr_key(Some("99999.Blocked")).await;
         let http = HttpClient::builder().build().unwrap();
-        let client = GoodreadsClient::new(http, url);
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().unwrap();
+        let client = GoodreadsClient::new(fetcher, http, url);
 
         let queue = DefaultProviderQueueBuilder::new()
             .add_provider(

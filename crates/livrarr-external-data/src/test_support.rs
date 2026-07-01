@@ -43,8 +43,26 @@ impl RecordingHttpFetcher {
         }))
     }
 
+    /// Like [`Self::with_ok`] but with response headers — e.g. Audnexus's
+    /// `Last-Modified` 304-cache revalidation.
+    pub fn with_ok_headers(status: u16, headers: Vec<(String, String)>, body: Vec<u8>) -> Self {
+        Self::with_response(Ok(FetchResponse {
+            status,
+            headers,
+            body,
+        }))
+    }
+
     pub fn with_error(err: FetchError) -> Self {
         Self::with_response(Err(err))
+    }
+
+    /// Queue an additional response, consumed in FIFO order after any
+    /// already queued — for scenarios where successive calls must see
+    /// different responses (e.g. a 200 that populates a cache, then a 304
+    /// that must be served from it).
+    pub fn push_response(&self, response: Result<FetchResponse, FetchError>) {
+        self.responses.lock().unwrap().push(response);
     }
 
     /// Captured requests, in call order.

@@ -5,7 +5,6 @@ use livrarr_domain::services::{
 };
 use livrarr_domain::text_norm;
 use livrarr_domain::RequestPriority;
-use livrarr_http::HttpClient;
 use serde::Deserialize;
 
 use crate::live_config::LiveMetadataConfig;
@@ -127,13 +126,66 @@ pub async fn fetch_gb_volumes<F: HttpFetcher>(
     Ok(search.items.unwrap_or_default())
 }
 
+/// Fetch + parse a Google Books search response for `GoogleBooksClient::fetch`
+/// / `fetch_by_isbn`, applying `map_http_error`'s exact status classification.
+///
+/// The fetcher intercepts HTTP 429 at the transport level
+/// (`FetchError::RateLimited`) rather than surfacing it as a normal response
+/// status — translated back to `map_http_error(429)` here so the existing
+/// 6-hour+jitter quota-exhaustion backoff (vs. the 300s generic backoff) is
+/// preserved exactly. Any other transport failure (network, timeout, body)
+/// maps to the same generic `WillRetry { ServerError }` the pre-fetcher code
+/// used for both `.send()` failures and the manual `tokio::time::timeout`.
+async fn fetch_gb_search<F: HttpFetcher>(
+    fetcher: &F,
+    api_key: &str,
+    url: String,
+) -> Result<GbSearchResponse, ProviderOutcome<NormalizedWorkDetail>> {
+    let req = FetchRequest {
+        url,
+        method: HttpMethod::Get,
+        headers: vec![("X-Goog-Api-Key".to_string(), api_key.to_string())],
+        body: None,
+        timeout: Duration::from_secs(10),
+        rate_bucket: RateBucket::GoogleBooks,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
+    };
+    let resp = match fetcher.fetch(req).await {
+        Ok(r) => r,
+        Err(livrarr_domain::services::FetchError::RateLimited) => {
+            tracing::warn!("GoogleBooks: request failed: rate limited");
+            return Err(map_http_error(429));
+        }
+        Err(e) => {
+            tracing::warn!("GoogleBooks: request failed: {e}");
+            return Err(ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+            });
+        }
+    };
+
+    if resp.status != 200 {
+        tracing::warn!(status = resp.status, "GoogleBooks: HTTP error");
+        return Err(map_http_error(resp.status));
+    }
+
+    serde_json::from_slice(&resp.body).map_err(|_| ProviderOutcome::WillRetry {
+        reason: livrarr_domain::WillRetryReason::ServerError,
+        next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct GoogleBooksClient {
-    http: HttpClient,
+    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     live_config: LiveMetadataConfig,
     base_url: String,
     #[allow(dead_code)] // read at green: REQ-001 record emission
@@ -141,9 +193,12 @@ pub struct GoogleBooksClient {
 }
 
 impl GoogleBooksClient {
-    pub fn new(http: HttpClient, live_config: LiveMetadataConfig) -> Self {
+    pub fn new(
+        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+        live_config: LiveMetadataConfig,
+    ) -> Self {
         Self {
-            http,
+            fetcher,
             live_config,
             base_url: DEFAULT_BASE_URL.to_string(),
             call_sink: None,
@@ -151,12 +206,12 @@ impl GoogleBooksClient {
     }
 
     pub fn with_base_url(
-        http: HttpClient,
+        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
         live_config: LiveMetadataConfig,
         base_url: String,
     ) -> Self {
         Self {
-            http,
+            fetcher,
             live_config,
             base_url,
             call_sink: None,
@@ -200,56 +255,9 @@ impl GoogleBooksClient {
             urlencoding::encode(isbn),
         );
 
-        let resp = match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.http
-                .get(&url)
-                .header("X-Goog-Api-Key", &api_key)
-                .send(),
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                tracing::warn!(isbn = isbn, "GoogleBooks: request failed: {e}");
-                return ProviderOutcome::WillRetry {
-                    reason: livrarr_domain::WillRetryReason::ServerError,
-                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-                };
-            }
-            Err(_) => {
-                tracing::warn!(isbn = isbn, "GoogleBooks: request timed out");
-                return ProviderOutcome::WillRetry {
-                    reason: livrarr_domain::WillRetryReason::ServerError,
-                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-                };
-            }
-        };
-
-        let status = resp.status().as_u16();
-        if status != 200 {
-            tracing::warn!(isbn = isbn, status = status, "GoogleBooks: HTTP error");
-            return map_http_error(status);
-        }
-
-        let body = match resp.text().await {
-            Ok(t) => t,
-            Err(_) => {
-                return ProviderOutcome::WillRetry {
-                    reason: livrarr_domain::WillRetryReason::ServerError,
-                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-                }
-            }
-        };
-
-        let search: GbSearchResponse = match serde_json::from_str(&body) {
+        let search = match fetch_gb_search(&self.fetcher, &api_key, url).await {
             Ok(s) => s,
-            Err(_) => {
-                return ProviderOutcome::WillRetry {
-                    reason: livrarr_domain::WillRetryReason::ServerError,
-                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-                }
-            }
+            Err(outcome) => return outcome,
         };
 
         let Some(items) = search.items.as_ref().filter(|v| !v.is_empty()) else {
@@ -311,60 +319,9 @@ impl GoogleBooksClient {
             )
         };
 
-        let resp = match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.http
-                .get(&url)
-                .header("X-Goog-Api-Key", &api_key)
-                .send(),
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                tracing::warn!(work_id = work.id, "GoogleBooks: request failed: {e}");
-                return ProviderOutcome::WillRetry {
-                    reason: livrarr_domain::WillRetryReason::ServerError,
-                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-                };
-            }
-            Err(_) => {
-                tracing::warn!(work_id = work.id, "GoogleBooks: request timed out");
-                return ProviderOutcome::WillRetry {
-                    reason: livrarr_domain::WillRetryReason::ServerError,
-                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-                };
-            }
-        };
-
-        let status = resp.status().as_u16();
-        if status != 200 {
-            tracing::warn!(
-                work_id = work.id,
-                status = status,
-                "GoogleBooks: HTTP error"
-            );
-            return map_http_error(status);
-        }
-
-        let body = match resp.text().await {
-            Ok(t) => t,
-            Err(_) => {
-                return ProviderOutcome::WillRetry {
-                    reason: livrarr_domain::WillRetryReason::ServerError,
-                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-                }
-            }
-        };
-
-        let search: GbSearchResponse = match serde_json::from_str(&body) {
+        let search = match fetch_gb_search(&self.fetcher, &api_key, url).await {
             Ok(s) => s,
-            Err(_) => {
-                return ProviderOutcome::WillRetry {
-                    reason: livrarr_domain::WillRetryReason::ServerError,
-                    next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-                }
-            }
+            Err(outcome) => return outcome,
         };
 
         let total = search.total_items.unwrap_or(0);
@@ -672,8 +629,8 @@ mod tests {
         }
     }
 
-    fn test_http_client() -> HttpClient {
-        HttpClient::builder().build().unwrap()
+    fn test_fetcher() -> livrarr_http::fetcher::HttpFetcherImpl {
+        livrarr_http::fetcher::HttpFetcherImpl::new().unwrap()
     }
 
     fn test_live_config() -> LiveMetadataConfig {
@@ -694,7 +651,7 @@ mod tests {
     /// REQ-001: GoogleBooksClient::new initializes the default Google Books API base URL.
     #[test]
     fn google_books_client_new_uses_default_base_url() {
-        let client = GoogleBooksClient::new(test_http_client(), test_live_config());
+        let client = GoogleBooksClient::new(test_fetcher(), test_live_config());
 
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
         assert_eq!(
@@ -711,7 +668,7 @@ mod tests {
     #[test]
     fn google_books_client_with_base_url_uses_custom_base_url() {
         let client = GoogleBooksClient::with_base_url(
-            test_http_client(),
+            test_fetcher(),
             test_live_config(),
             "http://127.0.0.1:9999/books/v1".to_string(),
         );
@@ -1213,12 +1170,100 @@ mod tests {
             languages: vec![],
             google_books_api_key: None,
         });
-        let client = GoogleBooksClient::new(test_http_client(), no_key_config);
+        let client = GoogleBooksClient::new(test_fetcher(), no_key_config);
         let work = livrarr_domain::Work::default();
         let result = client.fetch(&work).await;
         assert!(
             matches!(result, ProviderOutcome::NotConfigured),
             "expected NotConfigured, got {result:?}"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // fetch_gb_search door-routing / error-mapping: the shared transport
+    // helper behind GoogleBooksClient::fetch / fetch_by_isbn.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_gb_search_sends_googlebooks_bucket_get_and_api_key_header() {
+        let canned = serde_json::json!({"totalItems": 0});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        let search = fetch_gb_search(&fetcher, "test-key", "https://example.com/volumes".into())
+            .await
+            .unwrap();
+
+        assert_eq!(search.total_items, Some(0));
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert_eq!(req.url, "https://example.com/volumes");
+        assert_eq!(req.rate_bucket, RateBucket::GoogleBooks);
+        assert_eq!(req.method, HttpMethod::Get);
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "X-Goog-Api-Key" && v == "test-key"));
+        assert!(matches!(req.user_agent, UserAgentProfile::Server));
+        assert!(!req.anti_bot_check);
+        assert_eq!(req.timeout, Duration::from_secs(10));
+        assert_eq!(req.max_body_bytes, 2 * 1024 * 1024);
+    }
+
+    /// REQ-016 preservation: the fetcher intercepts HTTP 429 as a transport
+    /// error (`FetchError::RateLimited`) rather than a normal response — this
+    /// must still resolve through `map_http_error(429)`'s 6-hour+jitter
+    /// quota-exhaustion backoff, not the generic 300s `ServerError` backoff a
+    /// plain transport failure gets.
+    #[tokio::test]
+    async fn fetch_gb_search_maps_fetcher_rate_limited_to_map_http_error_429() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::RateLimited,
+        );
+
+        let outcome = fetch_gb_search(&fetcher, "test-key", "https://example.com/volumes".into())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            outcome,
+            ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::RateLimit,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_gb_search_maps_http_403_to_not_configured() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(403, vec![]);
+
+        let outcome = fetch_gb_search(&fetcher, "test-key", "https://example.com/volumes".into())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(outcome, ProviderOutcome::NotConfigured));
+    }
+
+    #[tokio::test]
+    async fn fetch_gb_search_maps_network_error_to_server_error_retry() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::Timeout(Duration::from_secs(10)),
+        );
+
+        let outcome = fetch_gb_search(&fetcher, "test-key", "https://example.com/volumes".into())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            outcome,
+            ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                ..
+            }
+        ));
     }
 }

@@ -1,9 +1,13 @@
 //! Audnexus REST client, consumed via `ProviderClient::Audnexus` (queue
 //! dispatch and the identity-resolution fan-out).
 
-use livrarr_http::HttpClient;
+use livrarr_domain::services::{
+    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+};
+use livrarr_domain::RequestPriority;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 const CACHE_CAP: usize = 512;
@@ -47,8 +51,8 @@ pub struct AudnexusResult {
 /// transport or parse errors. The error string is opaque — callers that need
 /// failure-class discrimination (timeout vs 5xx vs DNS) should inspect the
 /// underlying `reqwest::Error` themselves.
-pub async fn query_audnexus(
-    http: &HttpClient,
+pub async fn query_audnexus<F: HttpFetcher>(
+    fetcher: &F,
     base_url: &str,
     asin: Option<&str>,
     title: &str,
@@ -59,7 +63,7 @@ pub async fn query_audnexus(
 
     // Try by ASIN first.
     if let Some(asin) = asin {
-        if let Some(result) = query_audnexus_by_asin(http, base_url, asin, cache).await? {
+        if let Some(result) = query_audnexus_by_asin(fetcher, base_url, asin, cache).await? {
             return Ok(Some(result));
         }
     }
@@ -70,7 +74,7 @@ pub async fn query_audnexus(
         urlencoding(title),
         urlencoding(author),
     );
-    if let Some(result) = cached_fetch(http, &url, cache).await? {
+    if let Some(result) = cached_fetch(fetcher, &url, cache).await? {
         let book = if result.is_array() {
             result.as_array().and_then(|a| a.first()).cloned()
         } else {
@@ -88,22 +92,29 @@ pub async fn query_audnexus(
 /// ASIN-only Audnexus lookup — the anchor tier of [`query_audnexus`], exposed
 /// separately for the anchor-grounded enrichment surface (REQ-006): no
 /// title/author fallback exists on this path.
-pub async fn query_audnexus_by_asin(
-    http: &HttpClient,
+pub async fn query_audnexus_by_asin<F: HttpFetcher>(
+    fetcher: &F,
     base_url: &str,
     asin: &str,
     cache: &AudnexusCache,
 ) -> Result<Option<AudnexusResult>, String> {
     let base = base_url.trim_end_matches('/');
     let url = format!("{base}/books/{asin}");
-    match cached_fetch(http, &url, cache).await? {
+    match cached_fetch(fetcher, &url, cache).await? {
         Some(result) => Ok(Some(parse_audnexus(&result, Some(asin)))),
         None => Ok(None),
     }
 }
 
-async fn cached_fetch(
-    http: &HttpClient,
+/// Fetch `url` with `If-Modified-Since` conditional-request caching (R-13):
+/// a prior response's `Last-Modified` header is replayed on the next request
+/// for the same URL; a `304` response is served from the cache without
+/// re-parsing the (empty) body. Any non-success status — including a
+/// fetcher-intercepted HTTP 429 (`FetchError::RateLimited`) — is a soft
+/// `Ok(None)` miss, matching the pre-fetcher code (it only ever checked
+/// `resp.status().is_success()`, never treated any status as retry-worthy).
+async fn cached_fetch<F: HttpFetcher>(
+    fetcher: &F,
     url: &str,
     cache: &AudnexusCache,
 ) -> Result<Option<serde_json::Value>, String> {
@@ -112,18 +123,31 @@ async fn cached_fetch(
         guard.get(url).map(|c| c.last_modified.clone())
     };
 
-    let mut req = http.get(url);
+    let mut headers = Vec::new();
     if let Some(ref lm) = cached_last_modified {
-        req = req.header("If-Modified-Since", lm);
+        headers.push(("If-Modified-Since".to_string(), lm.clone()));
     }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-    let status = resp.status();
+    let req = FetchRequest {
+        url: url.to_string(),
+        method: HttpMethod::Get,
+        headers,
+        body: None,
+        timeout: Duration::from_secs(30),
+        rate_bucket: RateBucket::Audnexus,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
+    };
 
-    if status.as_u16() == 304 {
+    let resp = match fetcher.fetch(req).await {
+        Ok(r) => r,
+        Err(FetchError::RateLimited) => return Ok(None),
+        Err(e) => return Err(format!("request failed: {e}")),
+    };
+
+    if resp.status == 304 {
         let mut guard = cache.0.lock().await;
         if let Some(cached) = guard.get(url) {
             tracing::debug!(%url, "audnexus 304 — reusing cached response");
@@ -131,17 +155,21 @@ async fn cached_fetch(
         }
     }
 
-    if !status.is_success() {
+    if !(200..300).contains(&resp.status) {
         return Ok(None);
     }
 
+    // HTTP header names are case-insensitive; the fetcher preserves whatever
+    // casing the server sent, so match case-insensitively (reqwest's
+    // `HeaderMap::get` — used by the pre-fetcher code — does the same).
     let last_modified = resp
-        .headers()
-        .get("Last-Modified")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("last-modified"))
+        .map(|(_, v)| v.clone());
 
-    let data: serde_json::Value = resp.json().await.map_err(|e| format!("parse: {e}"))?;
+    let data: serde_json::Value =
+        serde_json::from_slice(&resp.body).map_err(|e| format!("parse: {e}"))?;
 
     if let Some(lm) = last_modified {
         let mut guard = cache.0.lock().await;
@@ -238,5 +266,124 @@ mod tests {
         assert_eq!(result.asin.as_deref(), Some("B07HINT123"));
         assert_eq!(result.duration_seconds, Some(1800));
         assert!(result.narrators_empty);
+    }
+
+    // -------------------------------------------------------------------
+    // Door-routing / 304-cache / error-mapping: query_audnexus_by_asin goes
+    // through the HttpFetcher trait with the Audnexus rate bucket and GET,
+    // no auth. A `Last-Modified` response header seeds the cache; the next
+    // request for the same URL replays it as `If-Modified-Since`, and a 304
+    // response is served from the cache without re-parse.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_sends_audnexus_bucket_get_no_conditional_header_on_first_call()
+    {
+        let canned = serde_json::json!({"asin": "B07ABCDEFG", "narrators": []});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok_headers(
+            200,
+            vec![("Last-Modified".to_string(), "Tue, 01 Jan 2030".to_string())],
+            canned.to_string().into_bytes(),
+        );
+        let cache = AudnexusCache::new();
+
+        let result =
+            query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B07ABCDEFG", &cache)
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(result.asin.as_deref(), Some("B07ABCDEFG"));
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert_eq!(req.url, "https://api.audnex.us/books/B07ABCDEFG");
+        assert_eq!(req.rate_bucket, RateBucket::Audnexus);
+        assert_eq!(req.method, HttpMethod::Get);
+        assert!(matches!(req.user_agent, UserAgentProfile::Server));
+        assert!(!req.anti_bot_check);
+        assert!(!req.headers.iter().any(|(k, _)| k == "If-Modified-Since"));
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_replays_last_modified_and_serves_304_from_cache() {
+        let canned = serde_json::json!({"asin": "B07ABCDEFG", "narrators": [{"name": "N"}]});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok_headers(
+            200,
+            vec![("Last-Modified".to_string(), "Tue, 01 Jan 2030".to_string())],
+            canned.to_string().into_bytes(),
+        );
+        // Second call gets a 304 with no body — must be served from cache.
+        fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+            status: 304,
+            headers: vec![],
+            body: vec![],
+        }));
+        let cache = AudnexusCache::new();
+
+        let first = query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B07ABCDEFG", &cache)
+            .await
+            .unwrap()
+            .unwrap();
+        let second =
+            query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B07ABCDEFG", &cache)
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(first.narrators, second.narrators);
+        assert_eq!(second.narrators, vec!["N".to_string()]);
+
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 2);
+        // The second request replays the cached Last-Modified value.
+        assert!(reqs[1]
+            .headers
+            .iter()
+            .any(|(k, v)| k == "If-Modified-Since" && v == "Tue, 01 Jan 2030"));
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_maps_http_404_to_ok_none() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
+        let cache = AudnexusCache::new();
+
+        let result = query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B0MISSING", &cache)
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_maps_fetcher_rate_limited_to_ok_none_not_error() {
+        // The pre-fetcher code only checked `resp.status().is_success()` — a
+        // 429 fell into the same "no result" bucket as any other
+        // non-success status, never a hard error. The fetcher now
+        // intercepts 429 as a transport-level `FetchError::RateLimited`
+        // before a status is ever seen; this must still land on `Ok(None)`.
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let cache = AudnexusCache::new();
+
+        let result = query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B0RATE", &cache)
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_maps_network_error_to_err() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            FetchError::Connection("refused".to_string()),
+        );
+        let cache = AudnexusCache::new();
+
+        let err = query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B0NET", &cache)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("request failed"));
     }
 }

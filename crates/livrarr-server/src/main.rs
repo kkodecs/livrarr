@@ -257,7 +257,7 @@ async fn main() {
             P::Audnexus,
             livrarr_external_data::ProviderClient::Audnexus(
                 livrarr_external_data::AudnexusClient::new(
-                    http_client.clone(),
+                    http_fetcher.clone(),
                     cfg_snapshot.audnexus_url.clone(),
                 ),
             )
@@ -269,7 +269,7 @@ async fn main() {
         builder = builder.add_provider(
             P::OpenLibrary,
             livrarr_external_data::ProviderClient::OpenLibrary(
-                livrarr_external_data::OpenLibraryClient::new(http_client.clone()),
+                livrarr_external_data::OpenLibraryClient::new(http_fetcher.clone()),
             )
             .with_call_sink(call_sink.clone()),
             queue_cfg(P::OpenLibrary),
@@ -294,8 +294,11 @@ async fn main() {
 
         // Goodreads — always registered. The LLM extraction fallback for
         // foreign-language pages reads live config per-fetch.
-        let gr_client = livrarr_external_data::GoodreadsClient::production(http_client.clone())
-            .with_live_config(live_metadata_config.clone());
+        let gr_client = livrarr_external_data::GoodreadsClient::production(
+            http_fetcher.clone(),
+            http_client.clone(),
+        )
+        .with_live_config(live_metadata_config.clone());
         builder = builder.add_provider(
             P::Goodreads,
             livrarr_external_data::ProviderClient::Goodreads(gr_client)
@@ -308,7 +311,7 @@ async fn main() {
             P::GoogleBooks,
             livrarr_external_data::ProviderClient::GoogleBooks(
                 livrarr_external_data::GoogleBooksClient::new(
-                    http_client.clone(),
+                    http_fetcher.clone(),
                     live_metadata_config.clone(),
                 ),
             )
@@ -321,7 +324,7 @@ async fn main() {
             P::Audible,
             livrarr_external_data::ProviderClient::Audible(
                 livrarr_external_data::audible::AudibleCatalogClient::new(
-                    http_client.clone(),
+                    http_fetcher.clone(),
                     5 * 60,
                 ),
             )
@@ -449,7 +452,7 @@ async fn main() {
             P::Audnexus,
             livrarr_external_data::ProviderClient::Audnexus(
                 livrarr_external_data::AudnexusClient::new(
-                    http_client.clone(),
+                    http_fetcher.clone(),
                     live_metadata_config.snapshot().audnexus_url.clone(),
                 ),
             ),
@@ -457,7 +460,7 @@ async fn main() {
         clients.insert(
             P::OpenLibrary,
             livrarr_external_data::ProviderClient::OpenLibrary(
-                livrarr_external_data::OpenLibraryClient::new(http_client.clone()),
+                livrarr_external_data::OpenLibraryClient::new(http_fetcher.clone()),
             ),
         );
         clients.insert(
@@ -473,15 +476,18 @@ async fn main() {
         clients.insert(
             P::Goodreads,
             livrarr_external_data::ProviderClient::Goodreads(
-                livrarr_external_data::GoodreadsClient::production(http_client.clone())
-                    .with_live_config(live_metadata_config.clone()),
+                livrarr_external_data::GoodreadsClient::production(
+                    http_fetcher.clone(),
+                    http_client.clone(),
+                )
+                .with_live_config(live_metadata_config.clone()),
             ),
         );
         clients.insert(
             P::GoogleBooks,
             livrarr_external_data::ProviderClient::GoogleBooks(
                 livrarr_external_data::GoogleBooksClient::new(
-                    http_client.clone(),
+                    http_fetcher.clone(),
                     live_metadata_config.clone(),
                 ),
             ),
@@ -490,7 +496,7 @@ async fn main() {
             P::Audible,
             livrarr_external_data::ProviderClient::Audible(
                 livrarr_external_data::audible::AudibleCatalogClient::new(
-                    http_client.clone(),
+                    http_fetcher.clone(),
                     5 * 60,
                 ),
             ),
@@ -856,21 +862,24 @@ async fn main() {
             preadd_clients.insert(
                 P::OpenLibrary,
                 livrarr_external_data::ProviderClient::OpenLibrary(
-                    livrarr_external_data::OpenLibraryClient::new(http_client.clone()),
+                    livrarr_external_data::OpenLibraryClient::new(http_fetcher.clone()),
                 ),
             );
             preadd_clients.insert(
                 P::Goodreads,
                 livrarr_external_data::ProviderClient::Goodreads(
-                    livrarr_external_data::GoodreadsClient::production(http_client.clone())
-                        .with_live_config(live_metadata_config.clone()),
+                    livrarr_external_data::GoodreadsClient::production(
+                        http_fetcher.clone(),
+                        http_client.clone(),
+                    )
+                    .with_live_config(live_metadata_config.clone()),
                 ),
             );
             preadd_clients.insert(
                 P::Audnexus,
                 livrarr_external_data::ProviderClient::Audnexus(
                     livrarr_external_data::AudnexusClient::new(
-                        http_client.clone(),
+                        http_fetcher.clone(),
                         live_metadata_config.snapshot().audnexus_url.clone(),
                     ),
                 ),
@@ -879,7 +888,7 @@ async fn main() {
                 P::Audible,
                 livrarr_external_data::ProviderClient::Audible(
                     livrarr_external_data::audible::AudibleCatalogClient::new(
-                        http_client.clone(),
+                        http_fetcher.clone(),
                         5 * 60,
                     ),
                 ),
