@@ -160,28 +160,12 @@ pub struct EnrichmentContext {
     pub mode: EnrichmentMode,
 }
 
-/// Circuit breaker state for a provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CircuitState {
-    Closed,
-    Open,
-    HalfOpen,
-}
-
-/// Per-provider circuit breaker configuration.
-///
-/// R-22
-#[derive(Debug, Clone)]
-pub struct CircuitBreakerConfig {
-    /// Number of consecutive failures within `evaluation_window_secs` that trips Closed → Open.
-    pub failure_threshold: u32,
-    /// Rolling window over which failures are counted.
-    pub evaluation_window_secs: u64,
-    /// How long the breaker stays Open before transitioning to HalfOpen.
-    pub open_duration_secs: u64,
-    /// In HalfOpen, allow this many probe attempts before deciding Open vs Closed.
-    pub half_open_probe_count: u32,
-}
+// Circuit breaker types moved to `livrarr-http` (B2): the outbound queue now
+// owns per-bucket breaker state, so the queue crate is the canonical home.
+// Re-exported here (D-014-style transitional shim) so `ProviderQueueConfig`,
+// the enrichment queue's own (untouched, stage-C-removed) breaker, and
+// existing dependents keep compiling unchanged.
+pub use livrarr_http::breaker::{CircuitBreakerConfig, CircuitState};
 
 /// Per-provider queue configuration.
 ///

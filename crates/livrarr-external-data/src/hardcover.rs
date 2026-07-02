@@ -4,10 +4,12 @@
 use std::time::Duration;
 
 use livrarr_domain::services::{
-    FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::settings::MetadataConfig;
 use livrarr_domain::RequestPriority;
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
 use livrarr_http::HttpClient;
 use serde_json::Value;
 
@@ -16,6 +18,10 @@ pub enum HardcoverError {
     NoResults,
     NoMatch(String),
     Http(String),
+    /// The outbound queue's breaker was Open for the Hardcover bucket — no
+    /// HTTP was attempted. Carries the retry-after duration (R-11: the
+    /// enrichment-surface caller must map this to `WillRetryReason::CircuitOpen`).
+    CircuitOpen(Duration),
 }
 
 impl std::fmt::Display for HardcoverError {
@@ -24,6 +30,7 @@ impl std::fmt::Display for HardcoverError {
             Self::NoResults => write!(f, "no results"),
             Self::NoMatch(detail) => write!(f, "no match: {detail}"),
             Self::Http(msg) => write!(f, "{msg}"),
+            Self::CircuitOpen(d) => write!(f, "circuit open, retry after {d:?}"),
         }
     }
 }
@@ -78,17 +85,25 @@ pub async fn hc_post<F: HttpFetcher>(
         priority: RequestPriority::Normal,
     };
 
-    let resp = fetcher
-        .fetch(req)
-        .await
-        .map_err(|e| HardcoverError::Http(e.to_string()))?;
+    let resp = match fetcher.fetch(req).await {
+        Ok(r) => r,
+        Err(FetchError::CircuitOpen { retry_after }) => {
+            return Err(HardcoverError::CircuitOpen(retry_after));
+        }
+        Err(e) => return Err(HardcoverError::Http(e.to_string())),
+    };
 
     if !(200..300).contains(&resp.status) {
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
+        }
         return Err(HardcoverError::Http(format!("HTTP {}", resp.status)));
     }
 
-    serde_json::from_slice(&resp.body)
-        .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))
+    let parsed = serde_json::from_slice(&resp.body)
+        .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))?;
+    outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Success);
+    Ok(parsed)
 }
 
 /// Extract the `hits` array from a Hardcover search response value.
@@ -317,6 +332,13 @@ pub async fn query_hardcover<F: HttpFetcher>(
 
 /// Fetch edition data from Hardcover with language filtering (F7: SEARCH-010).
 /// Returns the best ISBN from editions matching the preferred language.
+///
+/// Best-effort: the sole caller (`HardcoverClient::build_success`) swallows
+/// every `Err` behind `if let Ok(Some(..))` while already holding a Success
+/// payload — no error from here (including a breaker-open pause) can reach
+/// outcome mapping or retry-budget accounting. The opaque `String` error is
+/// therefore deliberate; a caller that ever propagates these errors must
+/// first switch this to a typed error preserving `FetchError::CircuitOpen`.
 pub async fn fetch_hardcover_editions<F: HttpFetcher>(
     fetcher: &F,
     book_id: &str,
@@ -363,11 +385,15 @@ pub async fn fetch_hardcover_editions<F: HttpFetcher>(
         .map_err(|e| format!("edition request failed: {e}"))?;
 
     if !(200..300).contains(&resp.status) {
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
+        }
         return Err(format!("edition HTTP {}", resp.status));
     }
 
     let data: Value =
         serde_json::from_slice(&resp.body).map_err(|e| format!("edition parse: {e}"))?;
+    outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Success);
 
     let editions = data
         .pointer("/data/editions")

@@ -1,11 +1,14 @@
 use livrarr_domain::services::{
-    FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::text_norm;
 use livrarr_domain::RequestPriority;
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
 use serde::Deserialize;
 use std::time::Duration;
 
+use crate::types::ProviderFetchError;
 use crate::NormalizedWorkDetail;
 
 const BASE_URL: &str = "https://api.audible.com/1.0/catalog/products";
@@ -110,6 +113,7 @@ impl AudibleCatalogClient {
                 crate::ProviderOutcome::Success(Box::new(map_audible_to_detail(&product)))
             }
             Ok(None) => crate::ProviderOutcome::NotFound,
+            Err(ProviderFetchError::CircuitOpen(retry_after)) => circuit_open_outcome(retry_after),
             Err(_) => crate::ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: chrono::Utc::now()
@@ -156,6 +160,9 @@ impl AudibleCatalogClient {
                 Ok(None) => {
                     tracing::debug!(asin = %asin, "Audible ASIN lookup: not found");
                 }
+                Err(ProviderFetchError::CircuitOpen(retry_after)) => {
+                    return circuit_open_outcome(retry_after);
+                }
                 Err(_) => {
                     return crate::ProviderOutcome::WillRetry {
                         reason: livrarr_domain::WillRetryReason::ServerError,
@@ -200,12 +207,26 @@ impl AudibleCatalogClient {
 
                 crate::ProviderOutcome::NotFound
             }
+            Err(ProviderFetchError::CircuitOpen(retry_after)) => circuit_open_outcome(retry_after),
             Err(_) => crate::ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: chrono::Utc::now()
                     + chrono::Duration::seconds(self.retry_backoff_secs),
             },
         }
+    }
+}
+
+/// Common `WillRetry { CircuitOpen }` mapping (R-11), local to this module —
+/// mirrors `provider_client::circuit_open_outcome` for the one client
+/// (`AudibleCatalogClient`) whose enrichment-surface methods live outside
+/// `provider_client.rs`.
+fn circuit_open_outcome(retry_after: Duration) -> crate::ProviderOutcome<NormalizedWorkDetail> {
+    crate::ProviderOutcome::WillRetry {
+        reason: livrarr_domain::WillRetryReason::CircuitOpen,
+        next_attempt_at: chrono::Utc::now()
+            + chrono::Duration::from_std(retry_after)
+                .unwrap_or_else(|_| chrono::Duration::seconds(60)),
     }
 }
 
@@ -237,7 +258,7 @@ pub async fn search_audible<F: HttpFetcher>(
     title: &str,
     author: &str,
     max_results: u32,
-) -> Result<Vec<AudibleProduct>, String> {
+) -> Result<Vec<AudibleProduct>, ProviderFetchError> {
     let url = format!(
         "{}?title={}&author={}&num_results={}&products_sort_by=Relevance&response_groups={}",
         BASE_URL,
@@ -247,17 +268,31 @@ pub async fn search_audible<F: HttpFetcher>(
         urlencoding::encode(RESPONSE_GROUPS),
     );
 
-    let resp = fetcher
-        .fetch(audible_request(url))
-        .await
-        .map_err(|e| format!("Audible search failed: {e}"))?;
+    let resp = match fetcher.fetch(audible_request(url)).await {
+        Ok(r) => r,
+        Err(FetchError::CircuitOpen { retry_after }) => {
+            return Err(ProviderFetchError::CircuitOpen(retry_after));
+        }
+        Err(e) => {
+            return Err(ProviderFetchError::Other(format!(
+                "Audible search failed: {e}"
+            )))
+        }
+    };
 
     if !(200..300).contains(&resp.status) {
-        return Err(format!("Audible returned {}", resp.status));
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
+        }
+        return Err(ProviderFetchError::Other(format!(
+            "Audible returned {}",
+            resp.status
+        )));
     }
 
-    let data: AudibleSearchResponse =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("Audible parse error: {e}"))?;
+    let data: AudibleSearchResponse = serde_json::from_slice(&resp.body)
+        .map_err(|e| ProviderFetchError::Other(format!("Audible parse error: {e}")))?;
+    outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Success);
 
     Ok(data.products)
 }
@@ -265,7 +300,7 @@ pub async fn search_audible<F: HttpFetcher>(
 pub async fn lookup_audible_by_asin<F: HttpFetcher>(
     fetcher: &F,
     asin: &str,
-) -> Result<Option<AudibleProduct>, String> {
+) -> Result<Option<AudibleProduct>, ProviderFetchError> {
     let url = format!(
         "{}/{}?response_groups={}",
         BASE_URL,
@@ -273,17 +308,31 @@ pub async fn lookup_audible_by_asin<F: HttpFetcher>(
         urlencoding::encode(RESPONSE_GROUPS),
     );
 
-    let resp = fetcher
-        .fetch(audible_request(url))
-        .await
-        .map_err(|e| format!("Audible ASIN lookup failed: {e}"))?;
+    let resp = match fetcher.fetch(audible_request(url)).await {
+        Ok(r) => r,
+        Err(FetchError::CircuitOpen { retry_after }) => {
+            return Err(ProviderFetchError::CircuitOpen(retry_after));
+        }
+        Err(e) => {
+            return Err(ProviderFetchError::Other(format!(
+                "Audible ASIN lookup failed: {e}"
+            )))
+        }
+    };
 
     if !(200..300).contains(&resp.status) {
-        return Err(format!("Audible returned {}", resp.status));
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
+        }
+        return Err(ProviderFetchError::Other(format!(
+            "Audible returned {}",
+            resp.status
+        )));
     }
 
-    let data: AudibleSearchResponse =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("Audible parse error: {e}"))?;
+    let data: AudibleSearchResponse = serde_json::from_slice(&resp.body)
+        .map_err(|e| ProviderFetchError::Other(format!("Audible parse error: {e}")))?;
+    outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Success);
 
     Ok(data.products.into_iter().next())
 }
@@ -509,7 +558,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err, "Audible returned 500");
+        assert_eq!(err.to_string(), "Audible returned 500");
     }
 
     #[tokio::test]
@@ -522,7 +571,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.contains("Audible search failed"));
+        assert!(err.to_string().contains("Audible search failed"));
     }
 
     #[tokio::test]
@@ -535,6 +584,6 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.contains("Audible ASIN lookup failed"));
+        assert!(err.to_string().contains("Audible ASIN lookup failed"));
     }
 }

@@ -21,6 +21,8 @@ use livrarr_domain::services::{
     ProviderCallSink, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::{AnchorQuery, MetadataProvider, RequestPriority, WillRetryReason, Work};
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
 use livrarr_http::HttpClient;
 use std::time::Duration;
 
@@ -184,6 +186,20 @@ fn anchor_kind_accepted(provider: MetadataProvider, query: &AnchorQuery) -> bool
     )
 }
 
+/// Common `WillRetry { CircuitOpen }` mapping (R-11 / Step 4): every provider
+/// client that detects `ProviderFetchError::CircuitOpen` /
+/// `FetchError::CircuitOpen` maps it through this one helper, never to
+/// `RateLimit` (corrupts retry accounting) and never to `Suppressed` (burns
+/// suppression budget).
+fn circuit_open_outcome(retry_after: Duration) -> ProviderOutcome<NormalizedWorkDetail> {
+    ProviderOutcome::WillRetry {
+        reason: WillRetryReason::CircuitOpen,
+        next_attempt_at: Utc::now()
+            + chrono::Duration::from_std(retry_after)
+                .unwrap_or_else(|_| chrono::Duration::seconds(60)),
+    }
+}
+
 /// REQ-001 outcome mapping: ProviderOutcome (the control-flow vocabulary) →
 /// CallOutcomeClass (the reporting vocabulary), explicit per variant.
 /// Conflict/Suppressed never originate from a client fetch; they map to Error
@@ -208,6 +224,13 @@ fn outcome_record_class(
             WillRetryReason::ServerError => {
                 (CallOutcomeClass::Error, Some("server_error".to_string()))
             }
+            // Observability only — mirrors the queue's existing
+            // `record_queue_skip` precedent of tagging a pacing/breaker skip
+            // as RateLimited with a `detail` string.
+            WillRetryReason::CircuitOpen => (
+                CallOutcomeClass::RateLimited,
+                Some("circuit_open".to_string()),
+            ),
         },
         ProviderOutcome::PermanentFailure { reason } => {
             (CallOutcomeClass::Error, Some(format!("{reason:?}")))
@@ -348,6 +371,9 @@ impl AudnexusClient {
         match result {
             Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
             Ok(None) => ProviderOutcome::NotFound,
+            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(_) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
@@ -360,6 +386,9 @@ impl AudnexusClient {
         match query_audnexus_by_asin(&self.fetcher, &self.base_url, asin, &self.cache).await {
             Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
             Ok(None) => ProviderOutcome::NotFound,
+            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(_) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
@@ -504,6 +533,9 @@ impl HardcoverClient {
                 {
                     Ok(Some(hc)) => self.build_success(hc, &token).await,
                     Ok(None) => ProviderOutcome::NotFound,
+                    Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
+                        circuit_open_outcome(retry_after)
+                    }
                     Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
                         reason: livrarr_domain::WillRetryReason::ServerError,
                         next_attempt_at: Utc::now()
@@ -563,6 +595,9 @@ impl HardcoverClient {
                 Ok(None) => {
                     tracing::debug!(isbn = %normalized, "HC ISBN search: no verified match");
                 }
+                Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
+                    return circuit_open_outcome(retry_after);
+                }
                 Err(crate::hardcover::HardcoverError::Http(e)) => {
                     tracing::debug!(isbn = %normalized, error = %e, "HC ISBN search failed");
                     return ProviderOutcome::WillRetry {
@@ -594,6 +629,9 @@ impl HardcoverClient {
                 crate::hardcover::HardcoverError::NoResults
                 | crate::hardcover::HardcoverError::NoMatch(_),
             ) => ProviderOutcome::NotFound,
+            Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
@@ -699,6 +737,9 @@ impl OpenLibraryClient {
                 match self.isbn_lookup(&normalized).await {
                     Ok(Some(ol_work_key)) => self.detail_by_key(&ol_work_key).await,
                     Ok(None) => ProviderOutcome::NotFound,
+                    Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                        circuit_open_outcome(retry_after)
+                    }
                     Err(_) => ProviderOutcome::WillRetry {
                         reason: livrarr_domain::WillRetryReason::ServerError,
                         next_attempt_at: Utc::now()
@@ -710,13 +751,18 @@ impl OpenLibraryClient {
         }
     }
 
-    /// OL detail fetch by work key. `query_ol_detail`'s error is an opaque
-    /// string (parse and transport are indistinguishable), so a miss maps to
-    /// NotFound — mirroring the seeded fetch's tier behavior, never a text
-    /// search.
+    /// OL detail fetch by work key. `query_ol_detail`'s error is mostly opaque
+    /// (parse and 4xx/5xx are indistinguishable), so a miss maps to NotFound —
+    /// mirroring the seeded fetch's tier behavior, never a text search. A
+    /// breaker-open pause is the one error kind that must NOT collapse into
+    /// NotFound (R-11: NotFound is phase-2 terminal — persisting it would turn
+    /// a temporary pause into a permanent miss).
     async fn detail_by_key(&self, ol_key: &str) -> ProviderOutcome<NormalizedWorkDetail> {
         match query_ol_detail(&self.fetcher, ol_key).await {
             Ok(detail) => ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail))),
+            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(e) => {
                 tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail miss");
                 ProviderOutcome::NotFound
@@ -764,6 +810,9 @@ impl OpenLibraryClient {
         match self.title_author_search(work).await {
             Ok(Some(payload)) => ProviderOutcome::Success(Box::new(payload)),
             Ok(None) => ProviderOutcome::NotFound,
+            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(_) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
@@ -789,14 +838,17 @@ impl OpenLibraryClient {
         }
     }
 
-    async fn isbn_lookup(&self, isbn: &str) -> Result<Option<String>, String> {
+    async fn isbn_lookup(
+        &self,
+        isbn: &str,
+    ) -> Result<Option<String>, crate::types::ProviderFetchError> {
         crate::openlibrary::isbn_lookup(&self.fetcher, isbn).await
     }
 
     async fn title_author_search(
         &self,
         work: &Work,
-    ) -> Result<Option<NormalizedWorkDetail>, String> {
+    ) -> Result<Option<NormalizedWorkDetail>, crate::types::ProviderFetchError> {
         let query = format!("{} {}", work.title, work.author_name);
         let url = format!(
             "https://openlibrary.org/search.json?q={}&fields=key,title,author_name&limit=10",
@@ -815,18 +867,33 @@ impl OpenLibraryClient {
             user_agent: UserAgentProfile::Server,
             priority: RequestPriority::Normal,
         };
-        let resp = self
-            .fetcher
-            .fetch(req)
-            .await
-            .map_err(|e| format!("OL search failed: {e}"))?;
+        let resp = match self.fetcher.fetch(req).await {
+            Ok(r) => r,
+            Err(livrarr_domain::services::FetchError::CircuitOpen { retry_after }) => {
+                return Err(crate::types::ProviderFetchError::CircuitOpen(retry_after));
+            }
+            Err(e) => {
+                return Err(crate::types::ProviderFetchError::Other(format!(
+                    "OL search failed: {e}"
+                )))
+            }
+        };
 
         if !(200..300).contains(&resp.status) {
-            return Err(format!("OL search returned {}", resp.status));
+            if (500..600).contains(&resp.status) {
+                outbound_queue::shared()
+                    .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+            }
+            return Err(crate::types::ProviderFetchError::Other(format!(
+                "OL search returned {}",
+                resp.status
+            )));
         }
 
-        let data: serde_json::Value = serde_json::from_slice(&resp.body)
-            .map_err(|e| format!("OL search parse error: {e}"))?;
+        let data: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| {
+            crate::types::ProviderFetchError::Other(format!("OL search parse error: {e}"))
+        })?;
+        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
 
         let docs = data
             .get("docs")
@@ -1302,6 +1369,7 @@ impl GoodreadsClient {
     fn map_fetch_err(&self, err: GoodreadsFetchError) -> ProviderOutcome<NormalizedWorkDetail> {
         let backoff = chrono::Duration::seconds(self.retry_backoff_secs);
         match err {
+            GoodreadsFetchError::CircuitOpen(retry_after) => circuit_open_outcome(retry_after),
             GoodreadsFetchError::AntiBot => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::AntiBotBlock,
                 next_attempt_at: Utc::now() + backoff,

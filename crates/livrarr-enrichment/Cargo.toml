@@ -20,4 +20,5 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 [dev-dependencies]
 livrarr-db = { workspace = true, features = ["test-helpers"] }
+livrarr-http = { workspace = true, features = ["test-helpers"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

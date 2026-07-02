@@ -7,6 +7,10 @@ use livrarr_domain::services::{
     FetchError, FetchRequest, HttpFetcher, HttpMethod, LookupResult, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::RequestPriority;
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
+
+use crate::types::ProviderFetchError;
 
 /// Parsed subset of an OpenLibrary work detail + first edition with ISBN.
 #[derive(Debug, Clone)]
@@ -27,7 +31,7 @@ pub struct OlDetailResult {
 pub async fn query_ol_detail<F: HttpFetcher>(
     fetcher: &F,
     ol_key: &str,
-) -> Result<OlDetailResult, String> {
+) -> Result<OlDetailResult, ProviderFetchError> {
     let key = ol_key.trim_start_matches("/works/").trim_start_matches('/');
 
     let url = format!("https://openlibrary.org/works/{key}.json");
@@ -43,17 +47,25 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         user_agent: UserAgentProfile::Server,
         priority: RequestPriority::Normal,
     };
-    let resp = fetcher
-        .fetch(req)
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
+    let resp = match fetcher.fetch(req).await {
+        Ok(r) => r,
+        Err(FetchError::CircuitOpen { retry_after }) => {
+            return Err(ProviderFetchError::CircuitOpen(retry_after));
+        }
+        Err(e) => return Err(ProviderFetchError::Other(format!("request failed: {e}"))),
+    };
 
     if !(200..300).contains(&resp.status) {
-        return Err(format!("HTTP {}", resp.status));
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared()
+                .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        }
+        return Err(ProviderFetchError::Other(format!("HTTP {}", resp.status)));
     }
 
-    let data: serde_json::Value =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("parse: {e}"))?;
+    let data: serde_json::Value = serde_json::from_slice(&resp.body)
+        .map_err(|e| ProviderFetchError::Other(format!("parse: {e}")))?;
+    outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
 
     let title = data
         .get("title")
@@ -124,7 +136,7 @@ pub async fn query_ol_detail<F: HttpFetcher>(
 pub async fn isbn_lookup<F: HttpFetcher>(
     fetcher: &F,
     isbn: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, ProviderFetchError> {
     let url = format!("https://openlibrary.org/isbn/{isbn}.json");
     let req = FetchRequest {
         url,
@@ -141,15 +153,27 @@ pub async fn isbn_lookup<F: HttpFetcher>(
     let resp = match fetcher.fetch(req).await {
         Ok(r) => r,
         Err(FetchError::RateLimited) => return Ok(None),
-        Err(e) => return Err(format!("OL ISBN fetch failed: {e}")),
+        Err(FetchError::CircuitOpen { retry_after }) => {
+            return Err(ProviderFetchError::CircuitOpen(retry_after));
+        }
+        Err(e) => {
+            return Err(ProviderFetchError::Other(format!(
+                "OL ISBN fetch failed: {e}"
+            )))
+        }
     };
 
     if !(200..300).contains(&resp.status) {
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared()
+                .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        }
         return Ok(None);
     }
 
-    let data: serde_json::Value =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("OL ISBN parse error: {e}"))?;
+    let data: serde_json::Value = serde_json::from_slice(&resp.body)
+        .map_err(|e| ProviderFetchError::Other(format!("OL ISBN parse error: {e}")))?;
+    outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
 
     let ol_work_key = data
         .get("works")
@@ -358,7 +382,7 @@ mod tests {
 
         let err = query_ol_detail(&fetcher, "OL999W").await.unwrap_err();
 
-        assert_eq!(err, "HTTP 404");
+        assert_eq!(err.to_string(), "HTTP 404");
     }
 
     #[tokio::test]
@@ -369,7 +393,7 @@ mod tests {
 
         let err = query_ol_detail(&fetcher, "OL999W").await.unwrap_err();
 
-        assert!(err.contains("request failed"));
+        assert!(err.to_string().contains("request failed"));
     }
 
     // -------------------------------------------------------------------
@@ -431,6 +455,6 @@ mod tests {
 
         let err = isbn_lookup(&fetcher, "9781234567890").await.unwrap_err();
 
-        assert!(err.contains("OL ISBN fetch failed"));
+        assert!(err.to_string().contains("OL ISBN fetch failed"));
     }
 }

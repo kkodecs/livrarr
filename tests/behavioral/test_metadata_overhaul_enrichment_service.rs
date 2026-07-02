@@ -644,6 +644,18 @@ impl ProviderRetryStateDb for SequencedApplyDb {
             .await
     }
 
+    async fn record_will_retry_paused(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        provider: MetadataProvider,
+        next_attempt_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<livrarr_db::ProviderRetryState, DbError> {
+        self.inner
+            .record_will_retry_paused(user_id, work_id, provider, next_attempt_at)
+            .await
+    }
+
     async fn record_suppressed(
         &self,
         user_id: UserId,

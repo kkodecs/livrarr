@@ -123,6 +123,9 @@ impl StubHttpFetcher {
                         classification: classification.clone(),
                     },
                     FetchError::RateLimited => FetchError::RateLimited,
+                    FetchError::CircuitOpen { retry_after } => FetchError::CircuitOpen {
+                        retry_after: *retry_after,
+                    },
                 }),
             }
         } else {

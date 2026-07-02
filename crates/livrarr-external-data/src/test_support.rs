@@ -118,6 +118,9 @@ fn clone_fetch_error(e: &FetchError) -> FetchError {
             classification: classification.clone(),
         },
         FetchError::RateLimited => FetchError::RateLimited,
+        FetchError::CircuitOpen { retry_after } => FetchError::CircuitOpen {
+            retry_after: *retry_after,
+        },
     }
 }
 

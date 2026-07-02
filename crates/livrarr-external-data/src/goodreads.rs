@@ -7,6 +7,8 @@ use livrarr_domain::services::{
     FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::RequestPriority;
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
 use livrarr_http::HttpClient;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -485,6 +487,10 @@ pub enum GoodreadsFetchError {
     Network(String),
     /// Detail page returned 200 OK but no JSON-LD or regex fields parsed out.
     Parse,
+    /// The outbound queue's breaker was Open for the Goodreads bucket — no
+    /// HTTP was attempted (R-11: the caller must map this to
+    /// `WillRetryReason::CircuitOpen`, never burn retry budget on it).
+    CircuitOpen(Duration),
 }
 
 /// Build the canonical detail URL for a `gr_key` against the configured base.
@@ -535,6 +541,7 @@ pub fn extract_gr_key(detail_url: &str) -> Option<String> {
 fn map_transport_err(context: &str, err: FetchError) -> GoodreadsFetchError {
     match err {
         FetchError::RateLimited => GoodreadsFetchError::HttpStatus(429),
+        FetchError::CircuitOpen { retry_after } => GoodreadsFetchError::CircuitOpen(retry_after),
         other => GoodreadsFetchError::Network(format!("{context}: {other}")),
     }
 }
@@ -567,12 +574,22 @@ pub async fn fetch_goodreads_html<F: HttpFetcher>(
         .await
         .map_err(|e| map_transport_err("GR request", e))?;
     if !(200..300).contains(&resp.status) {
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Failure);
+        }
         return Err(GoodreadsFetchError::HttpStatus(resp.status));
     }
     let html = String::from_utf8_lossy(&resp.body).into_owned();
     if crate::provider_util::is_anti_bot_page(&html) {
+        // A 200-but-soft-blocked interstitial is a hard block on the
+        // breaker, not a threshold-counted failure (R-8).
+        outbound_queue::shared().report_outcome(
+            RateBucket::Goodreads,
+            BreakerSignal::TripImmediately { open_for: None },
+        );
         return Err(GoodreadsFetchError::AntiBot);
     }
+    outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Success);
     Ok(html)
 }
 

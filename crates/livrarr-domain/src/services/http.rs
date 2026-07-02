@@ -66,6 +66,11 @@ pub enum FetchError {
     HttpError { status: u16, classification: String },
     #[error("rate limited")]
     RateLimited,
+    /// The outbound queue's per-bucket circuit breaker is Open for this
+    /// request's `RateBucket` — no HTTP was attempted (R-3). `retry_after` is
+    /// the time remaining until the breaker's open window elapses.
+    #[error("circuit open, retry after {retry_after:?}")]
+    CircuitOpen { retry_after: Duration },
 }
 
 #[trait_variant::make(Send)]

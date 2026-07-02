@@ -1733,6 +1733,7 @@ dependencies = [
 name = "livrarr-http"
 version = "0.1.0-alpha5"
 dependencies = [
+ "chrono",
  "livrarr-domain",
  "reqwest",
  "thiserror 2.0.18",

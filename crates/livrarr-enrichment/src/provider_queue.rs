@@ -688,6 +688,16 @@ where
                 reason,
                 next_attempt_at,
             } => {
+                // R-11: a breaker-open pass is a PAUSE (the provider is
+                // temporarily down), never a step toward a retry-budget
+                // dead-end — it must consume neither the attempt nor the
+                // suppression budget. Return it unchanged.
+                if reason == WillRetryReason::CircuitOpen {
+                    return Ok(ProviderOutcome::WillRetry {
+                        reason,
+                        next_attempt_at,
+                    });
+                }
                 let prior = self
                     .retry_db
                     .get_retry_state(work.user_id, work.id, provider)
@@ -801,11 +811,21 @@ where
                     .await?;
             }
             ProviderOutcome::WillRetry {
-                next_attempt_at, ..
+                reason,
+                next_attempt_at,
             } => {
-                self.retry_db
-                    .record_will_retry(work.user_id, work.id, provider, *next_attempt_at)
-                    .await?;
+                // R-11: a breaker-open pass persists via `record_will_retry_paused`
+                // (same row shape, `attempts` NOT incremented) — a paused provider
+                // must not spend retry budget while its breaker is open.
+                if *reason == WillRetryReason::CircuitOpen {
+                    self.retry_db
+                        .record_will_retry_paused(work.user_id, work.id, provider, *next_attempt_at)
+                        .await?;
+                } else {
+                    self.retry_db
+                        .record_will_retry(work.user_id, work.id, provider, *next_attempt_at)
+                        .await?;
+                }
             }
             ProviderOutcome::Suppressed { until } => {
                 self.retry_db
@@ -814,5 +834,142 @@ where
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod circuit_open_budget_tests {
+    //! R-11: a breaker-open `WillRetry { CircuitOpen }` must never convert to
+    //! `PermanentFailure` at the retry-attempt-budget boundary, and its
+    //! persistence must never bump `attempts` (see the `record_will_retry_paused`
+    //! db-level tests in `livrarr-db`). This is the one spot budget conversion
+    //! happens (`apply_budget_rules`), driven end-to-end through
+    //! `dispatch_enrichment` with a scripted `StubProviderClient`.
+
+    use std::sync::Arc;
+
+    use livrarr_db::{
+        CreateUserDbRequest, CreateWorkDbRequest, ProviderRetryStateDb, UserDb, WorkDbCreate,
+    };
+    use livrarr_domain::{MetadataProvider, RequestPriority, UserRole, WillRetryReason};
+    use livrarr_external_data::{ProviderClient, ProviderOutcome, StubProviderClient};
+
+    use crate::provider_queue::DefaultProviderQueueBuilder;
+    use crate::{
+        CircuitBreakerConfig, EnrichmentContext, EnrichmentMode, ProviderQueue, ProviderQueueConfig,
+    };
+
+    fn config(max_attempts: u32) -> ProviderQueueConfig {
+        ProviderQueueConfig {
+            provider: MetadataProvider::OpenLibrary,
+            concurrency: 1,
+            requests_per_second: 0.0,
+            circuit_breaker: CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+            max_attempts,
+            max_suppressed_passes: 3,
+            max_suppression_window_secs: 3600,
+        }
+    }
+
+    async fn seed_db_and_work() -> (livrarr_db::sqlite::SqliteDb, livrarr_domain::Work) {
+        let db = livrarr_db::create_test_db().await;
+        let user_id = db
+            .create_user(CreateUserDbRequest {
+                username: "circuit_open_budget_user".to_string(),
+                password_hash: "hash".to_string(),
+                role: UserRole::Admin,
+                api_key_hash: "apikey".to_string(),
+            })
+            .await
+            .unwrap()
+            .id;
+        let (work, _) = db
+            .create_work(CreateWorkDbRequest {
+                user_id,
+                title: "Budget Book".to_string(),
+                author_name: "Budget Author".to_string(),
+                // OpenLibrary's REQ-006 anchor gate requires ol_key or isbn_13
+                // before the queue will dispatch to the client at all.
+                ol_key: Some("OL1W".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        (db, work)
+    }
+
+    /// Prior REAL retries (non-CircuitOpen) parked one short of the
+    /// `max_attempts` boundary — the next WillRetry{ServerError} pass would
+    /// normally convert to PermanentFailure{RetryBudgetExhausted}. A
+    /// WillRetry{CircuitOpen} pass at the exact same boundary must NOT.
+    #[tokio::test]
+    async fn will_retry_circuit_open_survives_the_max_attempts_boundary() {
+        let (db, work) = seed_db_and_work().await;
+        let max_attempts = 3;
+        for _ in 0..(max_attempts - 1) {
+            db.record_will_retry(
+                work.user_id,
+                work.id,
+                MetadataProvider::OpenLibrary,
+                chrono::Utc::now() + chrono::Duration::seconds(60),
+            )
+            .await
+            .unwrap();
+        }
+        let prior = db
+            .get_retry_state(work.user_id, work.id, MetadataProvider::OpenLibrary)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prior.attempts, max_attempts - 1);
+
+        let client = ProviderClient::Stub(StubProviderClient::new(
+            MetadataProvider::OpenLibrary,
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::CircuitOpen,
+                next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+            },
+        ));
+        let db = Arc::new(db);
+        let queue = DefaultProviderQueueBuilder::new()
+            .add_provider(MetadataProvider::OpenLibrary, client, config(max_attempts))
+            .build(db.clone());
+
+        let ctx = EnrichmentContext {
+            priority: RequestPriority::Normal,
+            mode: EnrichmentMode::Background,
+        };
+        let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
+        let outcome = result.outcomes.get(&MetadataProvider::OpenLibrary).unwrap();
+
+        assert!(
+            matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::CircuitOpen,
+                    ..
+                }
+            ),
+            "a breaker-open pass at the max_attempts boundary must stay WillRetry{{CircuitOpen}}, \
+             not convert to PermanentFailure — got {outcome:?}"
+        );
+
+        // record_will_retry_paused must have been used, not record_will_retry:
+        // the prior attempts count is untouched by the CircuitOpen pass.
+        let after = db
+            .get_retry_state(work.user_id, work.id, MetadataProvider::OpenLibrary)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.attempts,
+            max_attempts - 1,
+            "a breaker-open pass must not increment attempts"
+        );
     }
 }

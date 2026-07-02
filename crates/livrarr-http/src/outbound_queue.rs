@@ -28,6 +28,8 @@ use livrarr_domain::RequestPriority;
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
+use crate::breaker::{self, BreakerSignal, BreakerState, CircuitState};
+
 /// Maximum concurrent in-flight sends per bucket.
 ///
 /// Separate control from pacing: pacing spaces the *start* of each send; this caps
@@ -41,9 +43,15 @@ pub const OUTBOUND_IN_FLIGHT_CAP: usize = 2;
 /// cancellation — frees the in-flight slot. Opaque: hold it across the HTTP send and
 /// body read, then let it drop. There is nothing to call on it. A bypass call
 /// (`RateBucket::None`) holds no permit (`None`).
+#[derive(Debug)]
 pub struct QueuePermit {
     _permit: Option<OwnedSemaphorePermit>,
 }
+
+/// What the dispatcher hands a queued caller: a granted turn (the in-flight
+/// permit), or a breaker-open rejection carrying the time remaining until the
+/// open window elapses (R-3: no HTTP happens on this path).
+type TurnResult = Result<OwnedSemaphorePermit, Duration>;
 
 /// Process-monotonic sequence number. Assigned once per `acquire` call so same-
 /// priority items dispatch in arrival order.
@@ -59,7 +67,7 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 struct QueuedItem {
     priority: RequestPriority,
     seq: u64,
-    turn: oneshot::Sender<OwnedSemaphorePermit>,
+    turn: oneshot::Sender<TurnResult>,
 }
 
 impl PartialEq for QueuedItem {
@@ -92,16 +100,20 @@ struct BucketState {
     last_dispatch: Instant,
 }
 
-/// Shared handle to one bucket's queue state and its in-flight permit pool. Cheap to
-/// clone — both fields are `Arc`s.
+/// Shared handle to one bucket's queue state, its in-flight permit pool, and
+/// (for breaker-tracked buckets) its circuit breaker. Cheap to clone — every
+/// field is an `Arc` (or, for `breaker`, an `Option<Arc<_>>`).
 #[derive(Clone)]
 struct BucketHandle {
     state: Arc<Mutex<BucketState>>,
     semaphore: Arc<Semaphore>,
+    /// `None` for `RateBucket::None` / `Indexer(_)` (R-5/R-6: exempt, never
+    /// trip). `Some` for the six breaker-tracked provider buckets.
+    breaker: Option<Arc<Mutex<BreakerState>>>,
 }
 
 impl BucketHandle {
-    fn new(interval: Duration) -> Self {
+    fn new(bucket: &RateBucket, interval: Duration) -> Self {
         Self {
             state: Arc::new(Mutex::new(BucketState {
                 heap: BinaryHeap::new(),
@@ -111,6 +123,8 @@ impl BucketHandle {
                 last_dispatch: Instant::now() - interval,
             })),
             semaphore: Arc::new(Semaphore::new(OUTBOUND_IN_FLIGHT_CAP)),
+            breaker: breaker::breaker_tracked(bucket)
+                .then(|| Arc::new(Mutex::new(BreakerState::new(breaker::config_for(bucket))))),
         }
     }
 }
@@ -189,6 +203,30 @@ async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
             state.last_dispatch + interval
         };
 
+        // Breaker gate (R-3), checked BEFORE pacing/semaphore: an Open breaker
+        // rejects the top queued item immediately — no HTTP, no pacing slot
+        // consumed, no in-flight permit touched. `handle.breaker` is `None`
+        // for exempt buckets (`None`/`Indexer(_)`), which always fall through
+        // to a normal grant below.
+        if let Some(breaker) = &handle.breaker {
+            let retry_after = {
+                let mut b = breaker.lock().unwrap();
+                match b.current() {
+                    CircuitState::Open => Some(b.retry_after()),
+                    CircuitState::Closed | CircuitState::HalfOpen => None,
+                }
+            };
+            if let Some(retry_after) = retry_after {
+                let mut state = handle.state.lock().unwrap();
+                let item = state.heap.pop().expect(
+                    "dispatcher is the sole consumer; heap was non-empty at the last check",
+                );
+                drop(state);
+                let _ = item.turn.send(Err(retry_after));
+                continue;
+            }
+        }
+
         if next_allowed > Instant::now() {
             tokio::time::sleep_until(next_allowed).await;
         }
@@ -210,7 +248,7 @@ async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
         // successful hand-off. If the caller cancelled, its receiver is gone and `send`
         // returns the permit in `Err` — it drops here, freeing the in-flight slot, and no
         // pacing is consumed. A cancelled wait must never burn a slot or an interval.
-        if item.turn.send(permit).is_ok() {
+        if item.turn.send(Ok(permit)).is_ok() {
             state.last_dispatch = Instant::now();
         }
         drop(state);
@@ -241,25 +279,33 @@ impl OutboundQueue {
         let mut registry = self.registry.lock().unwrap();
         registry
             .entry(bucket.clone())
-            .or_insert_with(|| BucketHandle::new(interval_for(bucket)))
+            .or_insert_with(|| BucketHandle::new(bucket, interval_for(bucket)))
             .clone()
     }
 
     /// Enqueue an outbound call for `bucket` at `priority` and await your turn.
     ///
-    /// Resolves to a [`QueuePermit`] when it is this caller's turn: the dispatcher has
+    /// Resolves to `Ok(QueuePermit)` when it is this caller's turn: the dispatcher has
     /// paced the bucket (interval since the last ACTUAL dispatch) and acquired an
     /// in-flight permit. Ordering is `(priority DESC, enqueue_sequence ASC)` — highest
     /// priority first, FIFO within a priority via a process-monotonic enqueue
     /// sequence. The wait is UNBOUNDED; nothing is ever dropped. `RateBucket::None`
     /// bypasses pacing and the in-flight cap (immediate turn).
     ///
+    /// Resolves to `Err(retry_after)` when the bucket's breaker is Open at the
+    /// moment a turn would have been granted (R-3): no permit, no HTTP. `retry_after`
+    /// is the time remaining until the breaker's open window elapses.
+    ///
     /// Cancel-safe by construction: a caller dropped while still queued is skipped and
     /// does NOT consume a pacing slot; a caller dropped after dispatch releases its
     /// permit on drop. The pacing clock advances only on an actual dispatch.
-    pub async fn acquire(&self, bucket: RateBucket, priority: RequestPriority) -> QueuePermit {
+    pub async fn acquire(
+        &self,
+        bucket: RateBucket,
+        priority: RequestPriority,
+    ) -> Result<QueuePermit, Duration> {
         if bucket == RateBucket::None {
-            return QueuePermit { _permit: None };
+            return Ok(QueuePermit { _permit: None });
         }
 
         let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
@@ -279,11 +325,53 @@ impl OutboundQueue {
             }
         }
 
-        let permit = turn_rx
+        let result = turn_rx
             .await
             .expect("dispatcher dropped a queued item without granting its turn");
-        QueuePermit {
+        result.map(|permit| QueuePermit {
             _permit: Some(permit),
+        })
+    }
+
+    /// Report a dispatched call's outcome to `bucket`'s breaker (R-8/R-12/R-14).
+    /// `None`/`Indexer(_)` buckets carry no breaker state — this is a no-op for
+    /// them. O(1), a brief lock, never held across an `.await`.
+    pub fn report_outcome(&self, bucket: RateBucket, outcome: BreakerSignal) {
+        let handle = self.bucket_handle(&bucket);
+        if let Some(breaker) = &handle.breaker {
+            breaker.lock().unwrap().apply(outcome);
+        }
+    }
+
+    /// Test-only: reset `bucket`'s breaker to a fresh Closed state.
+    ///
+    /// [`shared`] is a process-global singleton (M-009) — every test in a
+    /// binary that drives a real `HttpFetcherImpl` against a real bucket
+    /// shares the SAME breaker state. A test that deliberately trips a
+    /// breaker (anti-bot, a 5xx run) must reset it afterward so sibling
+    /// tests in the same process don't inherit an Open breaker.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn reset_breaker_for_tests(&self, bucket: RateBucket) {
+        let handle = self.bucket_handle(&bucket);
+        if let Some(breaker) = &handle.breaker {
+            *breaker.lock().unwrap() = BreakerState::new(breaker::config_for(&bucket));
+        }
+    }
+
+    /// Test-only: replace `bucket`'s breaker with one built from a caller-supplied
+    /// config (e.g. a short `open_duration_secs` so an Open→HalfOpen transition
+    /// doesn't require a real wall-clock wait). Mirrors the enrichment queue's
+    /// own `with_initial_circuit_state` test seam. A no-op for exempt buckets
+    /// (`None`/`Indexer(_)`) — they carry no breaker to replace.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_breaker_config_for_tests(
+        &self,
+        bucket: RateBucket,
+        config: breaker::CircuitBreakerConfig,
+    ) {
+        let handle = self.bucket_handle(&bucket);
+        if let Some(breaker) = &handle.breaker {
+            *breaker.lock().unwrap() = BreakerState::new(config);
         }
     }
 }
@@ -326,7 +414,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_first
                 .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_first.send(0usize).unwrap();
         });
 
@@ -338,7 +427,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_second
                 .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_second.send(1usize).unwrap();
         });
 
@@ -353,7 +443,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_third
                 .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_third.send(2usize).unwrap();
         });
 
@@ -382,7 +473,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_first
                 .acquire(RateBucket::GoogleBooks, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_first.send(0usize).unwrap();
         });
 
@@ -394,7 +486,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_second
                 .acquire(RateBucket::GoogleBooks, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_second.send(1usize).unwrap();
         });
 
@@ -426,7 +519,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_open_library
                 .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_open_library.send(0usize).unwrap();
         });
 
@@ -435,7 +529,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_audnexus
                 .acquire(RateBucket::Audnexus, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_audnexus.send(1usize).unwrap();
         });
 
@@ -460,7 +555,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_first
                 .acquire(RateBucket::Hardcover, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_first.send("first").unwrap();
         });
 
@@ -472,7 +568,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_low
                 .acquire(RateBucket::Hardcover, RequestPriority::Low)
-                .await;
+                .await
+                .unwrap();
             tx_low.send("low").unwrap();
         });
 
@@ -487,7 +584,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_interactive
                 .acquire(RateBucket::Hardcover, RequestPriority::Interactive)
-                .await;
+                .await
+                .unwrap();
             tx_interactive.send("interactive").unwrap();
         });
 
@@ -516,7 +614,8 @@ mod tests {
             tokio::spawn(async move {
                 let permit = queue_holder
                     .acquire(RateBucket::Goodreads, RequestPriority::Normal)
-                    .await;
+                    .await
+                    .unwrap();
                 granted_tx_holder.send(id).unwrap();
                 let _ = release_rx.await;
                 drop(permit);
@@ -579,7 +678,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_first
                 .acquire(RateBucket::Audible, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_first.send("first").unwrap();
         });
 
@@ -608,7 +708,8 @@ mod tests {
         tokio::spawn(async move {
             let _permit = queue_followup
                 .acquire(RateBucket::Audible, RequestPriority::Normal)
-                .await;
+                .await
+                .unwrap();
             tx_followup.send("followup").unwrap();
         });
 
@@ -669,7 +770,8 @@ mod tests {
             tokio::spawn(async move {
                 let permit = queue_holder
                     .acquire(RateBucket::None, RequestPriority::Normal)
-                    .await;
+                    .await
+                    .unwrap();
                 tx_holder.send(id).unwrap();
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 drop(permit);
@@ -687,5 +789,216 @@ mod tests {
             vec![0, 1, 2, 3, 4],
             "all None-bucket bypass requests must be granted immediately"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // B2: per-bucket circuit breaker.
+    // -------------------------------------------------------------------
+
+    /// Below the default failure_threshold (5), the breaker stays Closed and
+    /// every reported failure counts exactly once — 4 reports must not trip
+    /// it; the 5th must (the double-count rule: N reports of Failure produce
+    /// exactly N counted failures, never more).
+    #[tokio::test]
+    async fn breaker_stays_closed_below_threshold_and_opens_exactly_at_the_fifth_failure() {
+        let queue = OutboundQueue::new();
+        let bucket = RateBucket::OpenLibrary;
+
+        for _ in 0..4 {
+            queue.report_outcome(bucket.clone(), BreakerSignal::Failure);
+        }
+        queue
+            .acquire(bucket.clone(), RequestPriority::Normal)
+            .await
+            .expect("4 failures must not trip a 5-failure threshold");
+
+        queue.report_outcome(bucket.clone(), BreakerSignal::Failure);
+        let retry_after = queue
+            .acquire(bucket, RequestPriority::Normal)
+            .await
+            .expect_err("the 5th failure must trip Closed -> Open");
+        assert!(
+            retry_after > Duration::ZERO && retry_after <= Duration::from_secs(60),
+            "retry_after should be within the default 60s open window, got {retry_after:?}"
+        );
+    }
+
+    /// `TripImmediately` opens the breaker on a single report, bypassing the
+    /// failure-threshold count entirely (used for a hard block like an
+    /// anti-bot interstitial or a GB quota 403 — R-8/R-9).
+    #[tokio::test]
+    async fn trip_immediately_opens_on_a_single_report_bypassing_the_threshold() {
+        let queue = OutboundQueue::new();
+        let bucket = RateBucket::Hardcover;
+
+        queue.report_outcome(
+            bucket.clone(),
+            BreakerSignal::TripImmediately { open_for: None },
+        );
+
+        queue
+            .acquire(bucket, RequestPriority::Normal)
+            .await
+            .expect_err("a single TripImmediately report must open the breaker");
+    }
+
+    /// `TripImmediately { open_for: Some(d) }` overrides the bucket's
+    /// configured open duration — the queue itself computes nothing
+    /// provider-specific; the caller (e.g. GB's Pacific-midnight reset)
+    /// supplies the window.
+    #[tokio::test]
+    async fn trip_immediately_open_for_override_is_respected() {
+        let queue = OutboundQueue::new();
+        let bucket = RateBucket::GoogleBooks;
+
+        queue.report_outcome(
+            bucket.clone(),
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_secs(42)),
+            },
+        );
+
+        let retry_after = queue
+            .acquire(bucket, RequestPriority::Normal)
+            .await
+            .expect_err("an Open breaker must reject the acquire");
+        assert!(
+            retry_after > Duration::from_secs(40) && retry_after <= Duration::from_secs(42),
+            "retry_after should reflect the 42s override, not the bucket's default, got {retry_after:?}"
+        );
+    }
+
+    /// Goodreads is an anti-bot-hostile scrape target — its default open
+    /// duration is 3600s (R-1/R-9), not the 60s every other breaker-tracked
+    /// bucket uses.
+    #[tokio::test]
+    async fn goodreads_bucket_default_open_duration_is_3600_seconds() {
+        let queue = OutboundQueue::new();
+        let bucket = RateBucket::Goodreads;
+
+        queue.report_outcome(
+            bucket.clone(),
+            BreakerSignal::TripImmediately { open_for: None },
+        );
+
+        let retry_after = queue
+            .acquire(bucket, RequestPriority::Normal)
+            .await
+            .expect_err("an Open breaker must reject the acquire");
+        assert!(
+            retry_after > Duration::from_secs(3599) && retry_after <= Duration::from_secs(3600),
+            "Goodreads' default open window is 3600s, got {retry_after:?}"
+        );
+    }
+
+    /// `None` and `Indexer(_)` are exempt from breaker tracking (R-5/R-6):
+    /// no amount of reported failure ever trips them.
+    #[tokio::test]
+    async fn none_and_indexer_buckets_never_trip_regardless_of_reported_failures() {
+        let queue = OutboundQueue::new();
+        let indexer = RateBucket::Indexer("test-indexer".to_string());
+
+        for _ in 0..20 {
+            queue.report_outcome(RateBucket::None, BreakerSignal::Failure);
+            queue.report_outcome(indexer.clone(), BreakerSignal::Failure);
+        }
+        queue.report_outcome(
+            RateBucket::None,
+            BreakerSignal::TripImmediately { open_for: None },
+        );
+        queue.report_outcome(
+            indexer.clone(),
+            BreakerSignal::TripImmediately { open_for: None },
+        );
+
+        queue
+            .acquire(RateBucket::None, RequestPriority::Normal)
+            .await
+            .expect("RateBucket::None must never trip");
+        queue
+            .acquire(indexer, RequestPriority::Normal)
+            .await
+            .expect("RateBucket::Indexer(_) must never trip");
+    }
+
+    /// Open → HalfOpen → Closed: once the open window elapses, the next
+    /// acquire is granted as a probe; a reported Success on that probe closes
+    /// the breaker (`half_open_probe_count: 1`), and the following acquire is
+    /// granted normally — no waiting out another open window.
+    #[tokio::test]
+    async fn breaker_recovers_via_a_successful_half_open_probe() {
+        let queue = OutboundQueue::new();
+        let bucket = RateBucket::Audible;
+        queue.set_breaker_config_for_tests(
+            bucket.clone(),
+            breaker::CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        // A tiny explicit open_for gets to HalfOpen without a 60s real wait —
+        // TripImmediately's override, not the queue computing anything
+        // provider-specific.
+        queue.report_outcome(
+            bucket.clone(),
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_millis(5)),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let probe = queue
+            .acquire(bucket.clone(), RequestPriority::Normal)
+            .await
+            .expect("HalfOpen must grant a probe turn once the open window elapses");
+        queue.report_outcome(bucket.clone(), BreakerSignal::Success);
+        drop(probe);
+
+        queue
+            .acquire(bucket, RequestPriority::Normal)
+            .await
+            .expect("breaker must be Closed again after the probe succeeded");
+    }
+
+    /// A reported Failure on a HalfOpen probe reopens the breaker (fresh
+    /// `open_duration_secs` window) rather than closing it.
+    #[tokio::test]
+    async fn half_open_probe_failure_reopens_the_breaker() {
+        let queue = OutboundQueue::new();
+        let bucket = RateBucket::Audible;
+        queue.set_breaker_config_for_tests(
+            bucket.clone(),
+            breaker::CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        queue.report_outcome(
+            bucket.clone(),
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_millis(5)),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let probe = queue
+            .acquire(bucket.clone(), RequestPriority::Normal)
+            .await
+            .expect("HalfOpen must grant a probe turn once the open window elapses");
+        queue.report_outcome(bucket.clone(), BreakerSignal::Failure);
+        drop(probe);
+
+        // Reopened with the configured 60s window (not another 5ms override):
+        // the very next acquire, made with no further wait, must see Open.
+        queue
+            .acquire(bucket, RequestPriority::Normal)
+            .await
+            .expect_err("a HalfOpen probe failure must reopen the breaker");
     }
 }

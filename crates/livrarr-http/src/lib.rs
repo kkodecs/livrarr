@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+pub mod breaker;
 pub mod fetcher;
 pub mod outbound_queue;
 pub mod ssrf;

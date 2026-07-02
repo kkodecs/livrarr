@@ -2154,6 +2154,19 @@ pub trait ProviderRetryStateDb: Send + Sync {
         next_attempt_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ProviderRetryState, DbError>;
 
+    /// Same row shape as [`Self::record_will_retry`] but for a breaker-open
+    /// pause (`WillRetryReason::CircuitOpen`, R-11): sets `next_attempt_at` /
+    /// `last_attempt_at` / `last_outcome = 'will_retry'` WITHOUT incrementing
+    /// `attempts` — a paused provider must not spend retry budget while its
+    /// breaker is open.
+    async fn record_will_retry_paused(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        provider: MetadataProvider,
+        next_attempt_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ProviderRetryState, DbError>;
+
     async fn record_suppressed(
         &self,
         user_id: UserId,

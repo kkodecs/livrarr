@@ -371,5 +371,12 @@ mod goodreads_tracer_tests {
             }
             other => panic!("expected WillRetry {{ AntiBotBlock }}, got {other:?}"),
         }
+
+        // The anti-bot challenge trips the SHARED outbound queue's Goodreads
+        // breaker (`BreakerSignal::TripImmediately`, open for 3600s) — reset
+        // it so this deliberate trip doesn't leak into sibling tests sharing
+        // this process (B2's process-global breaker, M-009).
+        livrarr_http::outbound_queue::shared()
+            .reset_breaker_for_tests(livrarr_domain::services::RateBucket::Goodreads);
     }
 }

@@ -5,6 +5,8 @@ use livrarr_domain::services::{
 };
 use livrarr_domain::text_norm;
 use livrarr_domain::RequestPriority;
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
 use serde::Deserialize;
 
 use crate::live_config::LiveMetadataConfig;
@@ -159,6 +161,14 @@ async fn fetch_gb_search<F: HttpFetcher>(
             tracing::warn!("GoogleBooks: request failed: rate limited");
             return Err(map_http_error(429));
         }
+        Err(livrarr_domain::services::FetchError::CircuitOpen { retry_after }) => {
+            return Err(ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::CircuitOpen,
+                next_attempt_at: chrono::Utc::now()
+                    + chrono::Duration::from_std(retry_after)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(60)),
+            });
+        }
         Err(e) => {
             tracing::warn!("GoogleBooks: request failed: {e}");
             return Err(ProviderOutcome::WillRetry {
@@ -168,15 +178,78 @@ async fn fetch_gb_search<F: HttpFetcher>(
         }
     };
 
+    // R-9: a 403 body's error reason discriminates quota exhaustion (breaker
+    // TripImmediately, open until the next Pacific-midnight quota reset) from
+    // a bad API key (breaker Failure, threshold-counted like any other
+    // response-derived failure). The `ProviderOutcome` returned is unchanged
+    // either way (`NotConfigured`, via `map_http_error(403)`) — only the
+    // breaker signal differs.
+    if resp.status == 403 {
+        match gb_403_quota_reason(&resp.body) {
+            Some(()) => {
+                outbound_queue::shared().report_outcome(
+                    RateBucket::GoogleBooks,
+                    BreakerSignal::TripImmediately {
+                        open_for: Some(duration_until_pacific_midnight()),
+                    },
+                );
+            }
+            None => {
+                outbound_queue::shared()
+                    .report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
+            }
+        }
+        return Err(map_http_error(403));
+    }
+
     if resp.status != 200 {
         tracing::warn!(status = resp.status, "GoogleBooks: HTTP error");
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared()
+                .report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
+        }
         return Err(map_http_error(resp.status));
     }
 
-    serde_json::from_slice(&resp.body).map_err(|_| ProviderOutcome::WillRetry {
-        reason: livrarr_domain::WillRetryReason::ServerError,
-        next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-    })
+    let parsed: GbSearchResponse =
+        serde_json::from_slice(&resp.body).map_err(|_| ProviderOutcome::WillRetry {
+            reason: livrarr_domain::WillRetryReason::ServerError,
+            next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+        })?;
+    outbound_queue::shared().report_outcome(RateBucket::GoogleBooks, BreakerSignal::Success);
+    Ok(parsed)
+}
+
+/// R-9: does a GB 403 response body indicate daily-quota / rate-limit
+/// exhaustion (`quotaExceeded` / `rateLimitExceeded`) rather than a bad API
+/// key? `Some(())` = quota reason found; `None` = any other 403 (or an
+/// unparseable body — treated as a bad key, the conservative default).
+fn gb_403_quota_reason(body: &[u8]) -> Option<()> {
+    let json: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let reason = json
+        .pointer("/error/errors/0/reason")
+        .and_then(|v| v.as_str())?;
+    matches!(reason, "quotaExceeded" | "rateLimitExceeded").then_some(())
+}
+
+/// Duration until the next America/Los_Angeles midnight (Google Books' daily
+/// quota reset). Uses a fixed UTC-8 (PST) offset — this workspace has no
+/// chrono-tz dependency, so Pacific Daylight Time (UTC-7, roughly Mar-Nov)
+/// reads up to one hour early. Acceptable for a quota-backoff heuristic
+/// (the breaker still opens; a probe just becomes eligible up to an hour
+/// sooner than the provider's actual reset), not a scheduling guarantee.
+fn duration_until_pacific_midnight() -> Duration {
+    let now = chrono::Utc::now();
+    let pacific = chrono::FixedOffset::west_opt(8 * 3600).expect("valid fixed offset");
+    let now_pacific = now.with_timezone(&pacific);
+    let next_midnight_pacific = (now_pacific.date_naive() + chrono::Duration::days(1))
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is always a valid time")
+        .and_local_timezone(pacific)
+        .single()
+        .expect("a fixed offset has no DST ambiguity");
+    let next_midnight_utc = next_midnight_pacific.with_timezone(&chrono::Utc);
+    (next_midnight_utc - now).to_std().unwrap_or(Duration::ZERO)
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ use livrarr_domain::services::{
     FetchError, FetchRequest, FetchResponse, HttpFetcher, HttpMethod, UserAgentProfile,
 };
 
+use crate::breaker::BreakerSignal;
 use crate::outbound_queue;
 use crate::ssrf;
 
@@ -90,10 +91,16 @@ impl HttpFetcherImpl {
     ) -> Result<FetchResponse, FetchError> {
         // Wait our turn in the process-global outbound queue: paced per bucket, with a
         // bounded number of in-flight sends. Hold the permit across the send and body
-        // read — it releases the in-flight slot on drop.
-        let _permit = outbound_queue::shared()
+        // read — it releases the in-flight slot on drop. An Open breaker resolves to
+        // an error instead of a permit (R-3): no HTTP happens, and this call does not
+        // report a breaker outcome — no attempt was made to report on.
+        let _permit = match outbound_queue::shared()
             .acquire(req.rate_bucket.clone(), req.priority)
-            .await;
+            .await
+        {
+            Ok(permit) => permit,
+            Err(retry_after) => return Err(FetchError::CircuitOpen { retry_after }),
+        };
 
         // Build request
         let method = match req.method {
@@ -118,19 +125,31 @@ impl HttpFetcherImpl {
             builder = builder.body(body);
         }
 
-        // Send
-        let response = builder.send().await.map_err(|e| {
-            if e.is_timeout() {
-                FetchError::Timeout(req.timeout)
-            } else {
-                FetchError::Connection(e.to_string())
+        // Send. do_fetch is the single choke point for every FetchError it
+        // generates/intercepts itself (Timeout, Connection, RateLimited,
+        // BodyTooLarge) — each reports exactly one breaker Failure so a
+        // transport failure is never double-counted against the caller's own
+        // response-derived reporting.
+        let response = match builder.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = if e.is_timeout() {
+                    FetchError::Timeout(req.timeout)
+                } else {
+                    FetchError::Connection(e.to_string())
+                };
+                outbound_queue::shared()
+                    .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
+                return Err(err);
             }
-        })?;
+        };
 
         let status = response.status().as_u16();
 
         // 429 → RateLimited
         if status == 429 {
+            outbound_queue::shared()
+                .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
             return Err(FetchError::RateLimited);
         }
 
@@ -155,17 +174,25 @@ impl HttpFetcherImpl {
         let mut stream = response;
 
         loop {
-            let chunk = stream.chunk().await.map_err(|e| {
-                if e.is_timeout() {
-                    FetchError::Timeout(req.timeout)
-                } else {
-                    FetchError::Connection(e.to_string())
+            let chunk = match stream.chunk().await {
+                Ok(c) => c,
+                Err(e) => {
+                    let err = if e.is_timeout() {
+                        FetchError::Timeout(req.timeout)
+                    } else {
+                        FetchError::Connection(e.to_string())
+                    };
+                    outbound_queue::shared()
+                        .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
+                    return Err(err);
                 }
-            })?;
+            };
 
             match chunk {
                 Some(bytes) => {
                     if body.len() + bytes.len() > max_bytes {
+                        outbound_queue::shared()
+                            .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
                         return Err(FetchError::BodyTooLarge { max_bytes });
                     }
                     body.extend_from_slice(&bytes);
@@ -174,9 +201,14 @@ impl HttpFetcherImpl {
             }
         }
 
-        // Anti-bot check (only on HTML content types)
+        // Anti-bot check (only on HTML content types): an interstitial is a hard
+        // block on any breaker bucket, not a threshold-counted failure.
         if req.anti_bot_check && is_anti_bot_content_type(&content_type) && scan_for_anti_bot(&body)
         {
+            outbound_queue::shared().report_outcome(
+                req.rate_bucket.clone(),
+                BreakerSignal::TripImmediately { open_for: None },
+            );
             return Err(FetchError::AntiBotDetected);
         }
 

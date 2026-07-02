@@ -1385,6 +1385,10 @@ pub enum WillRetryReason {
     RateLimit,
     ServerError,
     AntiBotBlock,
+    /// The outbound queue's breaker was Open for this provider's bucket
+    /// (R-11): a pause, not a step toward a retry-budget dead-end — must
+    /// never consume the attempt or suppression budget.
+    CircuitOpen,
 }
 
 /// Reason a provider permanently failed for this work.

@@ -5,10 +5,14 @@ use livrarr_domain::services::{
     FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::RequestPriority;
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+use crate::types::ProviderFetchError;
 
 const CACHE_CAP: usize = 512;
 
@@ -58,7 +62,7 @@ pub async fn query_audnexus<F: HttpFetcher>(
     title: &str,
     author: &str,
     cache: &AudnexusCache,
-) -> Result<Option<AudnexusResult>, String> {
+) -> Result<Option<AudnexusResult>, ProviderFetchError> {
     let base = base_url.trim_end_matches('/');
 
     // Try by ASIN first.
@@ -97,7 +101,7 @@ pub async fn query_audnexus_by_asin<F: HttpFetcher>(
     base_url: &str,
     asin: &str,
     cache: &AudnexusCache,
-) -> Result<Option<AudnexusResult>, String> {
+) -> Result<Option<AudnexusResult>, ProviderFetchError> {
     let base = base_url.trim_end_matches('/');
     let url = format!("{base}/books/{asin}");
     match cached_fetch(fetcher, &url, cache).await? {
@@ -117,7 +121,7 @@ async fn cached_fetch<F: HttpFetcher>(
     fetcher: &F,
     url: &str,
     cache: &AudnexusCache,
-) -> Result<Option<serde_json::Value>, String> {
+) -> Result<Option<serde_json::Value>, ProviderFetchError> {
     let cached_last_modified = {
         let mut guard = cache.0.lock().await;
         guard.get(url).map(|c| c.last_modified.clone())
@@ -144,18 +148,25 @@ async fn cached_fetch<F: HttpFetcher>(
     let resp = match fetcher.fetch(req).await {
         Ok(r) => r,
         Err(FetchError::RateLimited) => return Ok(None),
-        Err(e) => return Err(format!("request failed: {e}")),
+        Err(FetchError::CircuitOpen { retry_after }) => {
+            return Err(ProviderFetchError::CircuitOpen(retry_after));
+        }
+        Err(e) => return Err(ProviderFetchError::Other(format!("request failed: {e}"))),
     };
 
     if resp.status == 304 {
         let mut guard = cache.0.lock().await;
         if let Some(cached) = guard.get(url) {
             tracing::debug!(%url, "audnexus 304 — reusing cached response");
+            outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Success);
             return Ok(Some(cached.body.clone()));
         }
     }
 
     if !(200..300).contains(&resp.status) {
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Failure);
+        }
         return Ok(None);
     }
 
@@ -168,8 +179,8 @@ async fn cached_fetch<F: HttpFetcher>(
         .find(|(k, _)| k.eq_ignore_ascii_case("last-modified"))
         .map(|(_, v)| v.clone());
 
-    let data: serde_json::Value =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("parse: {e}"))?;
+    let data: serde_json::Value = serde_json::from_slice(&resp.body)
+        .map_err(|e| ProviderFetchError::Other(format!("parse: {e}")))?;
 
     if let Some(lm) = last_modified {
         let mut guard = cache.0.lock().await;
@@ -182,6 +193,7 @@ async fn cached_fetch<F: HttpFetcher>(
         );
     }
 
+    outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Success);
     Ok(Some(data))
 }
 
@@ -384,6 +396,6 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.contains("request failed"));
+        assert!(err.to_string().contains("request failed"));
     }
 }
