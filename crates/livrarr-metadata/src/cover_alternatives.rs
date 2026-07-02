@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use livrarr_domain::services::HttpFetcher;
 use livrarr_domain::{
     CoverCandidateSource, CoverMediaType, InternalCoverCandidate, MetadataProvider, Work,
 };
@@ -58,10 +59,10 @@ fn media_type_for_provider(provider: MetadataProvider) -> CoverMediaType {
     }
 }
 
-pub async fn fetch_internal_alternatives(
+pub async fn fetch_internal_alternatives<F: HttpFetcher>(
     work: &Work,
     clients: &HashMap<MetadataProvider, ProviderClient>,
-    http: &livrarr_http::HttpClient,
+    http: &F,
 ) -> Vec<InternalCoverCandidate> {
     let eligible = eligible_providers_for_work(work);
     let mut candidates = Vec::new();

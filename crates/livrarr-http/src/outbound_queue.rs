@@ -173,6 +173,9 @@ fn interval_for(bucket: &RateBucket) -> Duration {
         RateBucket::Goodreads => Duration::from_millis(1500),
         RateBucket::Audnexus => Duration::from_secs(2),
         RateBucket::Audible => Duration::from_millis(150),
+        // OL's ISBN-cover endpoint limit is ~100 requests/IP/5min ≈ 1 per 3s.
+        // Pace-only (R-6) — never added to `breaker::breaker_tracked`.
+        RateBucket::OpenLibraryCovers => Duration::from_secs(3),
         RateBucket::Indexer(_) => Duration::from_millis(500),
         RateBucket::None => Duration::ZERO,
     }
@@ -498,6 +501,54 @@ mod tests {
         ));
 
         advance(Duration::from_millis(999)).await;
+        settle().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        advance(Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(rx.try_recv().ok(), Some(1));
+    }
+
+    /// B3: `OpenLibraryCovers` paces at 3s — OL's ISBN-cover limit (~100/IP/5min
+    /// ≈ 1 per 3s), a different interval from the 1s book-metadata buckets.
+    #[tokio::test(start_paused = true)]
+    async fn openlibrary_covers_bucket_is_paced_at_3_seconds() {
+        let queue = Arc::new(OutboundQueue::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let queue_first = Arc::clone(&queue);
+        let tx_first = tx.clone();
+        tokio::spawn(async move {
+            let _permit = queue_first
+                .acquire(RateBucket::OpenLibraryCovers, RequestPriority::Normal)
+                .await
+                .unwrap();
+            tx_first.send(0usize).unwrap();
+        });
+
+        settle().await;
+        assert_eq!(rx.try_recv().ok(), Some(0));
+
+        let queue_second = Arc::clone(&queue);
+        let tx_second = tx.clone();
+        tokio::spawn(async move {
+            let _permit = queue_second
+                .acquire(RateBucket::OpenLibraryCovers, RequestPriority::Normal)
+                .await
+                .unwrap();
+            tx_second.send(1usize).unwrap();
+        });
+
+        settle().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        advance(Duration::from_millis(2999)).await;
         settle().await;
         assert!(matches!(
             rx.try_recv(),
@@ -891,16 +942,20 @@ mod tests {
         );
     }
 
-    /// `None` and `Indexer(_)` are exempt from breaker tracking (R-5/R-6):
-    /// no amount of reported failure ever trips them.
+    /// `None`, `Indexer(_)`, and (B3) `OpenLibraryCovers` are exempt from
+    /// breaker tracking (R-5/R-6): no amount of reported failure ever trips
+    /// them. `OpenLibraryCovers` is pace-only — it must NOT be in
+    /// `breaker::breaker_tracked`'s six-bucket allowlist.
     #[tokio::test]
-    async fn none_and_indexer_buckets_never_trip_regardless_of_reported_failures() {
+    async fn none_indexer_and_ol_covers_buckets_never_trip_regardless_of_reported_failures() {
         let queue = OutboundQueue::new();
         let indexer = RateBucket::Indexer("test-indexer".to_string());
+        let ol_covers = RateBucket::OpenLibraryCovers;
 
         for _ in 0..20 {
             queue.report_outcome(RateBucket::None, BreakerSignal::Failure);
             queue.report_outcome(indexer.clone(), BreakerSignal::Failure);
+            queue.report_outcome(ol_covers.clone(), BreakerSignal::Failure);
         }
         queue.report_outcome(
             RateBucket::None,
@@ -908,6 +963,10 @@ mod tests {
         );
         queue.report_outcome(
             indexer.clone(),
+            BreakerSignal::TripImmediately { open_for: None },
+        );
+        queue.report_outcome(
+            ol_covers.clone(),
             BreakerSignal::TripImmediately { open_for: None },
         );
 
@@ -919,6 +978,10 @@ mod tests {
             .acquire(indexer, RequestPriority::Normal)
             .await
             .expect("RateBucket::Indexer(_) must never trip");
+        queue
+            .acquire(ol_covers, RequestPriority::Normal)
+            .await
+            .expect("RateBucket::OpenLibraryCovers must never trip (pace-only, R-6)");
     }
 
     /// Open → HalfOpen → Closed: once the open window elapses, the next

@@ -62,7 +62,16 @@ pub async fn run_cover_backfill(db: SqliteDb, covers_dir: PathBuf) {
             continue;
         }
 
-        match download_cover_to_disk(&http, cover_url, &covers_dir, *work_id, "").await {
+        match download_cover_to_disk(
+            &http,
+            cover_url,
+            &covers_dir,
+            *work_id,
+            "",
+            livrarr_domain::RequestPriority::Normal,
+        )
+        .await
+        {
             Ok(_) => {
                 downloaded += 1;
                 tracing::debug!(work_id, "cover backfill: downloaded");

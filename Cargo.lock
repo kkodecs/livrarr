@@ -1807,9 +1807,11 @@ dependencies = [
  "livrarr-domain",
  "livrarr-http",
  "livrarr-tagwrite",
+ "tempfile",
  "tokio",
  "tracing",
  "trait-variant",
+ "url",
 ]
 
 [[package]]

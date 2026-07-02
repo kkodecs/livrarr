@@ -1,4 +1,7 @@
-use livrarr_http::HttpClient;
+use livrarr_domain::services::{
+    FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+};
+use livrarr_domain::RequestPriority;
 
 use livrarr_external_data::provider_util::upscale_cover_url;
 
@@ -14,21 +17,67 @@ fn is_valid_isbn(isbn: &str) -> bool {
         && (last[0].is_ascii_digit() || last[0] == b'X' || last[0] == b'x')
 }
 
+/// GET `url` on `bucket` via the queue-routed, SSRF-safe fetcher. `None` on
+/// any transport error or a non-2xx status — the silent-None style the
+/// direct-`HttpClient` callers this replaces already used.
+async fn get_ok<F: HttpFetcher>(
+    fetcher: &F,
+    url: &str,
+    bucket: RateBucket,
+) -> Option<livrarr_domain::services::FetchResponse> {
+    let req = FetchRequest {
+        url: url.to_string(),
+        method: HttpMethod::Get,
+        headers: vec![],
+        body: None,
+        timeout: std::time::Duration::from_secs(30),
+        rate_bucket: bucket,
+        max_body_bytes: 10 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
+    };
+    let resp = fetcher.fetch_ssrf_safe(req).await.ok()?;
+    (200..300).contains(&resp.status).then_some(resp)
+}
+
+/// Case-insensitive `Content-Length` lookup.
+fn declared_content_length(headers: &[(String, String)]) -> Option<usize> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.parse::<usize>().ok())
+}
+
+/// Amazon/CdL return a tiny placeholder image for a missing cover — filter it
+/// out. Prefer the declared `Content-Length`; if the header is absent, fall
+/// back to the actual downloaded body length (available now that the
+/// queue-routed fetcher always reads the full body, unlike the lazy
+/// `reqwest::Response` this replaces). Either way: tiny = placeholder = filtered.
+fn passes_placeholder_filter(resp: &livrarr_domain::services::FetchResponse) -> bool {
+    let len = declared_content_length(&resp.headers).unwrap_or(resp.body.len());
+    len > 1000
+}
+
 /// Attempt to resolve a cover image URL from an ISBN using OpenLibrary.
 /// Used for English works only.
-pub async fn resolve_cover_by_isbn_ol(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
+pub async fn resolve_cover_by_isbn_ol<F: HttpFetcher>(
+    fetcher: &F,
+    isbn: Option<&str>,
+) -> Option<String> {
     let isbn = isbn?;
     if !is_valid_isbn(isbn) {
         return None;
     }
 
     let ol_url = format!("https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?default=false");
-    if let Ok(resp) = http.get(&ol_url).send().await {
-        if resp.status().is_success() {
-            return Some(format!(
-                "https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg",
-            ));
-        }
+    if get_ok(fetcher, &ol_url, RateBucket::OpenLibraryCovers)
+        .await
+        .is_some()
+    {
+        return Some(format!(
+            "https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg",
+        ));
     }
 
     None
@@ -38,7 +87,10 @@ pub async fn resolve_cover_by_isbn_ol(http: &HttpClient, isbn: Option<&str>) -> 
 /// No API key, no scraping — just URL construction from ISBN-10.
 /// Returns the URL directly (Amazon returns 200 for valid ISBNs with covers,
 /// or a 1x1 pixel for missing ones — we check Content-Length to filter).
-pub async fn resolve_cover_by_isbn_amazon(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
+pub async fn resolve_cover_by_isbn_amazon<F: HttpFetcher>(
+    fetcher: &F,
+    isbn: Option<&str>,
+) -> Option<String> {
     let isbn = isbn?;
     if !is_valid_isbn(isbn) {
         return None;
@@ -56,18 +108,9 @@ pub async fn resolve_cover_by_isbn_amazon(http: &HttpClient, isbn: Option<&str>)
     let url =
         format!("https://images-na.ssl-images-amazon.com/images/P/{isbn10}.01._SCLZZZZZZZ_.jpg");
 
-    if let Ok(resp) = http.get(&url).send().await {
-        if resp.status().is_success() {
-            // Amazon returns a tiny 1x1 GIF for missing covers — filter by Content-Length.
-            // Real covers are >1KB.
-            if let Some(len) = resp.content_length() {
-                if len > 1000 {
-                    return Some(url);
-                }
-            } else {
-                // No Content-Length header — accept it (could be chunked)
-                return Some(url);
-            }
+    if let Some(resp) = get_ok(fetcher, &url, RateBucket::None).await {
+        if passes_placeholder_filter(&resp) {
+            return Some(url);
         }
     }
 
@@ -96,8 +139,8 @@ fn isbn13_to_isbn10(isbn13: &str) -> Option<String> {
 
 /// Resolve a cover using Casa del Libro's predictable ISBN-to-URL pattern.
 /// Works for Spanish ISBNs (978-84-...) with very high hit rate.
-pub async fn resolve_cover_by_isbn_casadellibro(
-    http: &HttpClient,
+pub async fn resolve_cover_by_isbn_casadellibro<F: HttpFetcher>(
+    fetcher: &F,
     isbn: Option<&str>,
 ) -> Option<String> {
     let isbn = isbn?;
@@ -111,15 +154,9 @@ pub async fn resolve_cover_by_isbn_casadellibro(
     let last2 = &clean[11..13];
     let n = (clean.as_bytes()[12] - b'0') % 10; // last digit mod 10
     let url = format!("https://imagessl{n}.casadellibro.com/a/l/s5/{last2}/{clean}.webp");
-    if let Ok(resp) = http.get(&url).send().await {
-        if resp.status().is_success() {
-            if let Some(len) = resp.content_length() {
-                if len > 1000 {
-                    return Some(url);
-                }
-            } else {
-                return Some(url);
-            }
+    if let Some(resp) = get_ok(fetcher, &url, RateBucket::None).await {
+        if passes_placeholder_filter(&resp) {
+            return Some(url);
         }
     }
     None
@@ -128,20 +165,26 @@ pub async fn resolve_cover_by_isbn_casadellibro(
 /// Resolve cover for foreign (non-English) works.
 /// Chain: Casa del Libro ISBN → Amazon ISBN → nothing.
 /// CdL covers are proxied through /api/v1/coverproxy to bypass their CDN browser-blocking.
-pub async fn resolve_cover_foreign(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
-    if let Some(url) = resolve_cover_by_isbn_casadellibro(http, isbn).await {
+pub async fn resolve_cover_foreign<F: HttpFetcher>(
+    fetcher: &F,
+    isbn: Option<&str>,
+) -> Option<String> {
+    if let Some(url) = resolve_cover_by_isbn_casadellibro(fetcher, isbn).await {
         return Some(url);
     }
-    resolve_cover_by_isbn_amazon(http, isbn).await
+    resolve_cover_by_isbn_amazon(fetcher, isbn).await
 }
 
 /// Resolve cover for English works (existing behavior).
 /// Chain: OL ISBN → Amazon ISBN.
-pub async fn resolve_cover_english(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
-    if let Some(url) = resolve_cover_by_isbn_ol(http, isbn).await {
+pub async fn resolve_cover_english<F: HttpFetcher>(
+    fetcher: &F,
+    isbn: Option<&str>,
+) -> Option<String> {
+    if let Some(url) = resolve_cover_by_isbn_ol(fetcher, isbn).await {
         return Some(url);
     }
-    resolve_cover_by_isbn_amazon(http, isbn).await
+    resolve_cover_by_isbn_amazon(fetcher, isbn).await
 }
 
 // =============================================================================
@@ -149,8 +192,6 @@ pub async fn resolve_cover_english(http: &HttpClient, isbn: Option<&str>) -> Opt
 // =============================================================================
 
 use std::time::Duration;
-
-use livrarr_domain::services::HttpFetcher;
 
 fn classify_cover_url(url: &str) -> &'static str {
     if url.contains("hardcover.app") || url.contains("assets.hardcover") {
@@ -200,6 +241,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                     covers_dir,
                     work_id,
                     "",
+                    RequestPriority::Normal,
                 ),
             )
             .await;
@@ -226,6 +268,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                         covers_dir,
                         work_id,
                         "",
+                        RequestPriority::Normal,
                     ),
                 )
                 .await;
@@ -273,6 +316,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                                     covers_dir,
                                     work_id,
                                     "",
+                                    RequestPriority::Normal,
                                 ),
                             )
                             .await,

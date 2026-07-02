@@ -21,6 +21,19 @@ fn cover_file_path(covers_dir: &Path, work_id: i64, suffix: &str) -> PathBuf {
     covers_dir.join(format!("{work_id}{suffix}.jpg"))
 }
 
+/// The pacing bucket for a cover download URL: `OpenLibraryCovers` for
+/// `covers.openlibrary.org` (case-insensitive), `None` for every other host —
+/// including a URL that fails to parse (unpaced, matching prior behavior).
+fn cover_bucket_for_url(url: &str) -> RateBucket {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(livrarr_domain::services::cover_bucket_for_host)
+        })
+        .unwrap_or(RateBucket::None)
+}
+
 /// Download a cover to disk via the SSRF-safe fetcher (runtime URL, insight 37),
 /// writing atomically (tmp + rename) and returning the image bytes so the caller
 /// can embed them in the file tags (R-002). Relocated from livrarr-metadata to
@@ -35,6 +48,7 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
     covers_dir: &Path,
     work_id: i64,
     suffix: &str,
+    priority: RequestPriority,
 ) -> Result<(Vec<u8>, Option<(i32, i32)>), Box<dyn std::error::Error + Send + Sync>> {
     tokio::fs::create_dir_all(covers_dir).await?;
 
@@ -44,11 +58,11 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
         headers: vec![],
         body: None,
         timeout: std::time::Duration::from_secs(30),
-        rate_bucket: RateBucket::None,
+        rate_bucket: cover_bucket_for_url(url),
         max_body_bytes: 10 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
 
     let resp = http
@@ -173,6 +187,7 @@ where
                         &request.covers_dir,
                         request.work_id,
                         "",
+                        RequestPriority::Normal,
                     )
                     .await
                     .map_err(|e| MaterializeError::CoverDownload(e.to_string()))?;
@@ -200,6 +215,7 @@ where
                         &request.covers_dir,
                         request.work_id,
                         "_audiobook",
+                        RequestPriority::Normal,
                     )
                     .await
                     .map_err(|e| MaterializeError::CoverDownload(e.to_string()))?;
@@ -232,5 +248,96 @@ where
         }
 
         Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use livrarr_domain::services::{FetchError, FetchResponse};
+    use std::sync::Mutex;
+
+    /// Records the `RateBucket` and `RequestPriority` of the last request it
+    /// was handed and returns a canned 200 response. `download_cover_to_disk`
+    /// tolerates a body that doesn't decode as an image (dims come back
+    /// `None`, non-fatal per existing policy) — this fake never needs a real
+    /// JPEG.
+    struct RecordingFetcher {
+        last_bucket: Mutex<Option<RateBucket>>,
+        last_priority: Mutex<Option<RequestPriority>>,
+    }
+
+    impl RecordingFetcher {
+        fn new() -> Self {
+            Self {
+                last_bucket: Mutex::new(None),
+                last_priority: Mutex::new(None),
+            }
+        }
+    }
+
+    impl HttpFetcher for RecordingFetcher {
+        async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+            self.fetch_ssrf_safe(req).await
+        }
+
+        async fn fetch_ssrf_safe(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+            *self.last_bucket.lock().unwrap() = Some(req.rate_bucket.clone());
+            *self.last_priority.lock().unwrap() = Some(req.priority);
+            Ok(FetchResponse {
+                status: 200,
+                headers: vec![],
+                body: b"not-a-real-image".to_vec(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn download_cover_to_disk_routes_ol_covers_host_and_passes_priority_through() {
+        let fetcher = RecordingFetcher::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        download_cover_to_disk(
+            &fetcher,
+            "https://covers.openlibrary.org/b/isbn/9780306406157-L.jpg",
+            dir.path(),
+            1,
+            "",
+            RequestPriority::Interactive,
+        )
+        .await
+        .expect("download should succeed against the canned 200 response");
+
+        assert_eq!(
+            *fetcher.last_bucket.lock().unwrap(),
+            Some(RateBucket::OpenLibraryCovers)
+        );
+        assert_eq!(
+            *fetcher.last_priority.lock().unwrap(),
+            Some(RequestPriority::Interactive)
+        );
+    }
+
+    #[tokio::test]
+    async fn download_cover_to_disk_non_ol_host_uses_none_bucket() {
+        let fetcher = RecordingFetcher::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        download_cover_to_disk(
+            &fetcher,
+            "https://i.gr-assets.com/books/12345/cover.jpg",
+            dir.path(),
+            2,
+            "",
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("download should succeed against the canned 200 response");
+
+        assert_eq!(*fetcher.last_bucket.lock().unwrap(), Some(RateBucket::None));
+        assert_eq!(
+            *fetcher.last_priority.lock().unwrap(),
+            Some(RequestPriority::Normal)
+        );
     }
 }

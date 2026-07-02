@@ -580,7 +580,6 @@ async fn main() {
         let clients = provider_clients.clone();
         Arc::new(livrarr_server::cover_service::LiveCoverService::new(
             db.clone(),
-            http_client.clone(),
             http_fetcher.clone(),
             clients,
             hmac_key.clone(),

@@ -14,14 +14,12 @@ use livrarr_domain::{
 };
 use livrarr_external_data::provider_client::ProviderClient;
 use livrarr_http::fetcher::HttpFetcherImpl;
-use livrarr_http::HttpClient;
 use livrarr_metadata::cover_resolution::measure_dimensions;
 
 type HmacSha256 = Hmac<Sha256>;
 
 pub struct LiveCoverService {
     db: SqliteDb,
-    http: HttpClient,
     http_fetcher: HttpFetcherImpl,
     clients: HashMap<MetadataProvider, ProviderClient>,
     hmac_key: Vec<u8>,
@@ -31,7 +29,6 @@ pub struct LiveCoverService {
 impl LiveCoverService {
     pub fn new(
         db: SqliteDb,
-        http: HttpClient,
         http_fetcher: HttpFetcherImpl,
         clients: HashMap<MetadataProvider, ProviderClient>,
         hmac_key: Vec<u8>,
@@ -39,7 +36,6 @@ impl LiveCoverService {
     ) -> Self {
         Self {
             db,
-            http,
             http_fetcher,
             clients,
             hmac_key,
@@ -154,7 +150,7 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
         let internals = livrarr_metadata::cover_alternatives::fetch_internal_alternatives(
             &work,
             &self.clients,
-            &self.http,
+            &self.http_fetcher,
         )
         .await;
 
@@ -198,16 +194,18 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
                 .ok_or_else(|| {
                     CoverServiceError::Internal("provider returned no cover URL".into())
                 })?,
-            CoverCandidateSource::IsbnOl => {
-                livrarr_metadata::cover::resolve_cover_english(&self.http, work.isbn_13.as_deref())
-                    .await
-                    .ok_or_else(|| CoverServiceError::Internal("ISBN cover not found".into()))?
-            }
-            CoverCandidateSource::IsbnAmazon => {
-                livrarr_metadata::cover::resolve_cover_foreign(&self.http, work.isbn_13.as_deref())
-                    .await
-                    .ok_or_else(|| CoverServiceError::Internal("ISBN cover not found".into()))?
-            }
+            CoverCandidateSource::IsbnOl => livrarr_metadata::cover::resolve_cover_english(
+                &self.http_fetcher,
+                work.isbn_13.as_deref(),
+            )
+            .await
+            .ok_or_else(|| CoverServiceError::Internal("ISBN cover not found".into()))?,
+            CoverCandidateSource::IsbnAmazon => livrarr_metadata::cover::resolve_cover_foreign(
+                &self.http_fetcher,
+                work.isbn_13.as_deref(),
+            )
+            .await
+            .ok_or_else(|| CoverServiceError::Internal("ISBN cover not found".into()))?,
             CoverCandidateSource::Epub => {
                 // EPUB extraction — TODO: wire CoverIoService when available
                 return Err(CoverServiceError::Internal(
@@ -223,6 +221,7 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
             &covers_dir,
             work_id,
             suffix,
+            livrarr_domain::RequestPriority::Normal,
         )
         .await
         .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
