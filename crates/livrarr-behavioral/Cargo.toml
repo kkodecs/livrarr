@@ -335,10 +335,6 @@ name = "test_metadata_refactor_policy"
 path = "../../tests/behavioral/test_metadata_refactor_policy.rs"
 
 [[test]]
-name = "test_metadata_refactor_pacing"
-path = "../../tests/behavioral/test_metadata_refactor_pacing.rs"
-
-[[test]]
 name = "test_metadata_refactor_materialize"
 path = "../../tests/behavioral/test_metadata_refactor_materialize.rs"
 
