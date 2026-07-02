@@ -15,7 +15,7 @@ use livrarr_external_data::{
     transport_cache::TransportCache, NormalizedWorkDetail, ProviderOutcome,
 };
 use livrarr_metadata::{
-    CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentService,
+    DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentService,
     EnrichmentServiceImpl, PacingQueue, PriorityModel, ProviderQueue, ProviderQueueError,
     ScatterGatherResult,
 };
@@ -62,10 +62,6 @@ impl ProviderQueue for StubProviderQueue {
             persist_scatter_result(db, *user_id, &result).await?;
         }
         Ok(result)
-    }
-
-    fn circuit_state(&self, _provider: MetadataProvider) -> CircuitState {
-        CircuitState::Closed
     }
 }
 

@@ -29,8 +29,8 @@ use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, R
 use livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl;
 use livrarr_metadata::work_service::WorkServiceImpl;
 use livrarr_metadata::{
-    CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentServiceImpl, PriorityModel,
-    ProviderQueue, ProviderQueueError, ScatterGatherResult,
+    DefaultMergeEngine, EnrichmentContext, EnrichmentServiceImpl, PriorityModel, ProviderQueue,
+    ProviderQueueError, ScatterGatherResult,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -178,10 +178,6 @@ impl ProviderQueue for NoProviderDispatchQueue {
             merge_eligible: false,
             deferred: false,
         })
-    }
-
-    fn circuit_state(&self, _provider: MetadataProvider) -> CircuitState {
-        CircuitState::Closed
     }
 }
 

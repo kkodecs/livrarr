@@ -27,9 +27,7 @@ pub mod provider_queue;
 mod provider_queue_tracer_tests;
 
 pub use pacing_queue::{LivePacingQueue, PacingQueue};
-pub use provider_queue::{
-    ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
-};
+pub use provider_queue::{ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder};
 
 /// No-op `LlmCaller` used as the default `L` type parameter for
 /// `EnrichmentServiceImpl` when no LLM is configured. Relocated here from
@@ -163,26 +161,12 @@ pub struct EnrichmentContext {
     pub mode: EnrichmentMode,
 }
 
-// Circuit breaker types moved to `livrarr-http` (B2): the outbound queue now
-// owns per-bucket breaker state, so the queue crate is the canonical home.
-// Re-exported here (D-014-style transitional shim) so `ProviderQueueConfig`,
-// the enrichment queue's own (untouched, stage-C-removed) breaker, and
-// existing dependents keep compiling unchanged.
-pub use livrarr_http::breaker::{CircuitBreakerConfig, CircuitState};
-
 /// Per-provider queue configuration.
 ///
 /// R-22
 #[derive(Debug, Clone)]
 pub struct ProviderQueueConfig {
     pub provider: livrarr_domain::MetadataProvider,
-    /// Max in-flight requests against this provider. Reserved 1 slot for Background
-    /// when concurrency >= 2 (priority class semantics — not exercised by tests yet).
-    pub concurrency: u32,
-    /// Pacing limit. Not enforced by the queue runtime in this phase — see deferred
-    /// notes in the plan. Field kept on the contract so adapters can query it.
-    pub requests_per_second: f64,
-    pub circuit_breaker: CircuitBreakerConfig,
     pub max_attempts: u32,
     pub max_suppressed_passes: u32,
     pub max_suppression_window_secs: u64,
@@ -198,8 +182,8 @@ pub enum ProviderQueueError {
     Db(#[from] DbError),
 }
 
-/// Shared per-provider request queue. Scatter-gather dispatch with per-provider
-/// circuit breakers and durable phase-1 outcome persistence.
+/// Shared per-provider request queue. Scatter-gather dispatch with durable
+/// phase-1 outcome persistence.
 ///
 /// R-22
 #[trait_variant::make(Send)]
@@ -209,8 +193,6 @@ pub trait ProviderQueue: Send + Sync {
         work: &Work,
         context: EnrichmentContext,
     ) -> Result<ScatterGatherResult, ProviderQueueError>;
-
-    fn circuit_state(&self, provider: livrarr_domain::MetadataProvider) -> CircuitState;
 }
 
 /// TEMP(pk-tdd): reconstructed per-provider outcome for merge input.

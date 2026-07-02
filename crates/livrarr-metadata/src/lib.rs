@@ -35,14 +35,14 @@ pub mod rss_sync_workflow;
 // (4a). Re-exported here so existing dependents compile unchanged; AC-021 will
 // switch consumers to direct livrarr_enrichment:: imports and delete this shim.
 pub use livrarr_enrichment::provider_queue::{
-    ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
+    ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder,
 };
 pub use livrarr_enrichment::{
-    cover_gate, cover_resolution, llm_validator, provider_queue, CircuitBreakerConfig,
-    CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentError, EnrichmentMode,
-    EnrichmentResult, EnrichmentService, EnrichmentServiceImpl, LivePacingQueue, MergeEngine,
-    MergeError, MergeInput, MergeOutput, PacingQueue, PriorityModel, ProviderQueue,
-    ProviderQueueConfig, ProviderQueueError, ReconstructedOutcome, ScatterGatherResult,
+    cover_gate, cover_resolution, llm_validator, provider_queue, DefaultMergeEngine,
+    EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentResult, EnrichmentService,
+    EnrichmentServiceImpl, LivePacingQueue, MergeEngine, MergeError, MergeInput, MergeOutput,
+    PacingQueue, PriorityModel, ProviderQueue, ProviderQueueConfig, ProviderQueueError,
+    ReconstructedOutcome, ScatterGatherResult,
 };
 
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};

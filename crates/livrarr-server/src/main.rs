@@ -235,14 +235,6 @@ async fn main() {
 
         let queue_cfg = |provider| m::ProviderQueueConfig {
             provider,
-            concurrency: 2,
-            requests_per_second: 1.0,
-            circuit_breaker: m::CircuitBreakerConfig {
-                failure_threshold: 5,
-                evaluation_window_secs: 60,
-                open_duration_secs: 60,
-                half_open_probe_count: 1,
-            },
             max_attempts: 5,
             max_suppressed_passes: 3,
             max_suppression_window_secs: 3600,

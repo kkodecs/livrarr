@@ -16,7 +16,7 @@ mod audnexus_tracer_tests {
 
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::EnrichmentContext;
-    use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
+    use crate::{EnrichmentMode, ProviderQueue, ProviderQueueConfig};
     use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole};
     use livrarr_external_data::{AudnexusClient, ProviderClient, ProviderOutcome};
@@ -47,14 +47,6 @@ mod audnexus_tracer_tests {
     fn audnexus_config() -> ProviderQueueConfig {
         ProviderQueueConfig {
             provider: MetadataProvider::Audnexus,
-            concurrency: 1,
-            requests_per_second: 1.0,
-            circuit_breaker: CircuitBreakerConfig {
-                failure_threshold: 3,
-                evaluation_window_secs: 60,
-                open_duration_secs: 60,
-                half_open_probe_count: 1,
-            },
             max_attempts: 3,
             max_suppressed_passes: 3,
             max_suppression_window_secs: 3600,
@@ -184,7 +176,7 @@ mod goodreads_tracer_tests {
 
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::EnrichmentContext;
-    use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
+    use crate::{EnrichmentMode, ProviderQueue, ProviderQueueConfig};
     use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole, WillRetryReason};
     use livrarr_external_data::{GoodreadsClient, ProviderClient, ProviderOutcome};
@@ -216,14 +208,6 @@ mod goodreads_tracer_tests {
     fn goodreads_config() -> ProviderQueueConfig {
         ProviderQueueConfig {
             provider: MetadataProvider::Goodreads,
-            concurrency: 1,
-            requests_per_second: 1.0,
-            circuit_breaker: CircuitBreakerConfig {
-                failure_threshold: 3,
-                evaluation_window_secs: 60,
-                open_duration_secs: 60,
-                half_open_probe_count: 1,
-            },
             max_attempts: 3,
             max_suppressed_passes: 3,
             max_suppression_window_secs: 3600,

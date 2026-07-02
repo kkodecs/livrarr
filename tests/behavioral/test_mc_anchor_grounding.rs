@@ -11,8 +11,8 @@ use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
 use livrarr_metadata::{
-    CircuitBreakerConfig, DefaultProviderQueueBuilder, EnrichmentContext, EnrichmentMode,
-    ProviderQueue, ProviderQueueConfig,
+    DefaultProviderQueueBuilder, EnrichmentContext, EnrichmentMode, ProviderQueue,
+    ProviderQueueConfig,
 };
 
 #[derive(Default)]
@@ -35,14 +35,6 @@ impl ProviderCallSink for RecordingSink {
 fn default_config(provider: MetadataProvider) -> ProviderQueueConfig {
     ProviderQueueConfig {
         provider,
-        concurrency: 2,
-        requests_per_second: 1000.0,
-        circuit_breaker: CircuitBreakerConfig {
-            failure_threshold: 3,
-            evaluation_window_secs: 60,
-            open_duration_secs: 60,
-            half_open_probe_count: 1,
-        },
         max_attempts: 3,
         max_suppressed_passes: 3,
         max_suppression_window_secs: 3600,

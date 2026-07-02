@@ -25,8 +25,8 @@ use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 use livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl;
 use livrarr_metadata::work_service::WorkServiceImpl;
 use livrarr_metadata::{
-    CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentServiceImpl,
-    MergeEngine, MergeInput, MergeOutput, PriorityModel, ProviderQueue, ProviderQueueError,
+    DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentServiceImpl, MergeEngine,
+    MergeInput, MergeOutput, PriorityModel, ProviderQueue, ProviderQueueError,
     ReconstructedOutcome, ScatterGatherResult,
 };
 
@@ -316,10 +316,6 @@ impl ProviderQueue for TextlessProviderQueue {
             merge_eligible: true,
             deferred: false,
         })
-    }
-
-    fn circuit_state(&self, _provider: MetadataProvider) -> CircuitState {
-        CircuitState::Closed
     }
 }
 

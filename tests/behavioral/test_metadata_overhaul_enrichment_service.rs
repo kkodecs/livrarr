@@ -32,9 +32,8 @@ use livrarr_domain::{
 };
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 use livrarr_metadata::{
-    CircuitState, EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentService,
-    MergeEngine, MergeError, MergeInput, MergeOutput, ProviderQueue, ProviderQueueError,
-    ScatterGatherResult,
+    EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentService, MergeEngine, MergeError,
+    MergeInput, MergeOutput, ProviderQueue, ProviderQueueError, ScatterGatherResult,
 };
 use tokio::sync::{Mutex, Notify};
 
@@ -162,10 +161,6 @@ impl ProviderQueue for StubProviderQueue {
         }
 
         Ok(plan.result)
-    }
-
-    fn circuit_state(&self, _provider: MetadataProvider) -> CircuitState {
-        CircuitState::Closed
     }
 }
 

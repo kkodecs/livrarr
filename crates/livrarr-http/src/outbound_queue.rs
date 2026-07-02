@@ -33,8 +33,8 @@ use crate::breaker::{self, BreakerSignal, BreakerState, CircuitState};
 /// Maximum concurrent in-flight sends per bucket.
 ///
 /// Separate control from pacing: pacing spaces the *start* of each send; this caps
-/// how many may be *in flight* at once when a response outlives the interval. Carries
-/// over the enrichment layer's concurrency of 2 — confirm at review.
+/// how many may be *in flight* at once when a response outlives the interval. This
+/// is the sole authority on in-flight concurrency per bucket, for every caller.
 pub const OUTBOUND_IN_FLIGHT_CAP: usize = 2;
 
 /// RAII "your turn to send" signal handed to a caller when the dispatcher releases it.

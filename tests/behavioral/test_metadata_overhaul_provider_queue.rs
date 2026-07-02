@@ -1,6 +1,6 @@
 //! Behavioral contract tests for ProviderQueue (R-22), covering scatter-gather dispatch,
 //! durable phase-1 persistence into provider_retry_state [I-11], panic isolation,
-//! circuit state reporting, restart safety, and manual-mode coercion semantics.
+//! restart safety, and manual-mode coercion semantics.
 
 #![allow(dead_code)]
 
@@ -19,9 +19,8 @@ use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
 use livrarr_metadata::{
-    CircuitBreakerConfig, CircuitState, DefaultProviderQueue, DefaultProviderQueueBuilder,
-    EnrichmentContext, EnrichmentMode, InitialCircuitState, ProviderQueue, ProviderQueueConfig,
-    ScatterGatherResult,
+    DefaultProviderQueue, DefaultProviderQueueBuilder, EnrichmentContext, EnrichmentMode,
+    ProviderQueue, ProviderQueueConfig, ScatterGatherResult,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,11 +32,9 @@ pub enum ProviderQueueScenario {
     AllCanMergeBackground,
     ConflictBlocksMerge,
     ProviderPanicIsolation,
-    CircuitStateSnapshot,
     RestartSkipsTerminal,
     ManualCoercesWillRetry,
     ManualCoercesSuppressed,
-    CircuitOpenSuppressedSkip,
     RetryBudgetExhausted,
     SuppressionExhausted,
     SuppressionPreservesFirstTimestamp,
@@ -379,61 +376,6 @@ macro_rules! provider_queue_contract_tests {
 
         #[tokio::test]
 
-        async fn test_provider_queue_circuit_state_returns_snapshot_per_provider() {
-            // REQ-ID: R-22 | Contract: ProviderQueue::circuit_state | Behavior: circuit_state reports Closed, Open, and HalfOpen per provider
-            let h = <$harness as ProviderQueueTestHarness>::setup(
-                ProviderQueueScenario::CircuitStateSnapshot,
-            )
-            .await;
-
-            assert_eq!(
-                h.queue().circuit_state(MetadataProvider::Hardcover),
-                CircuitState::Closed
-            );
-            assert_eq!(
-                h.queue().circuit_state(MetadataProvider::OpenLibrary),
-                CircuitState::Open
-            );
-            assert_eq!(
-                h.queue().circuit_state(MetadataProvider::Goodreads),
-                CircuitState::HalfOpen
-            );
-        }
-
-        #[tokio::test]
-
-        async fn test_provider_queue_dispatch_skips_open_circuit_provider_and_records_suppressed() {
-            // REQ-ID: R-22 | Contract: ProviderQueue::dispatch_enrichment | Behavior: an Open circuit skips specific provider Hardcover and records Suppressed rather than dispatching
-            let h = <$harness as ProviderQueueTestHarness>::setup(
-                ProviderQueueScenario::CircuitOpenSuppressedSkip,
-            )
-            .await;
-
-            assert_eq!(
-                h.queue().circuit_state(MetadataProvider::Hardcover),
-                CircuitState::Open
-            );
-
-            let result = h
-                .queue()
-                .dispatch_enrichment(h.work(), background_context())
-                .await
-                .unwrap();
-
-            assert!(matches!(
-                result.outcomes.get(&MetadataProvider::Hardcover),
-                Some(ProviderOutcome::Suppressed { .. })
-            ));
-            assert_eq!(h.call_count(MetadataProvider::Hardcover), 0);
-
-            let state = retry_state_for(h.retry_db(), h.work(), MetadataProvider::Hardcover).await;
-            assert_eq!(state.last_outcome, Some(OutcomeClass::Suppressed));
-            assert_eq!(state.attempts, 0);
-            assert_eq!(state.suppressed_passes, 1);
-        }
-
-        #[tokio::test]
-
         async fn test_provider_queue_dispatch_skips_terminal_providers_on_restart() {
             // REQ-ID: R-22 | Contract: ProviderQueue::dispatch_enrichment | Behavior: providers with existing phase-2 terminal retry state are skipped on restart
             let h = <$harness as ProviderQueueTestHarness>::setup(
@@ -493,40 +435,6 @@ macro_rules! provider_queue_contract_tests {
                 .unwrap();
 
             assert!(has_outcome_class(&result, OutcomeClass::Suppressed));
-            assert!(result.merge_eligible);
-            assert!(!result.deferred);
-        }
-
-        #[tokio::test]
-
-        async fn test_provider_queue_dispatch_manual_with_open_circuit_returns_degraded_immediately() {
-            // REQ-ID: R-22 | Contract: ProviderQueue::dispatch_enrichment | Behavior: in Manual mode, an Open circuit yields immediate degraded completion: skipped provider is Suppressed, not called, merge_eligible=true, deferred=false, while other applicable providers still complete normally
-            let h = <$harness as ProviderQueueTestHarness>::setup(
-                ProviderQueueScenario::CircuitOpenSuppressedSkip,
-            )
-            .await;
-
-            assert_eq!(
-                h.queue().circuit_state(MetadataProvider::Hardcover),
-                CircuitState::Open
-            );
-
-            let result = h
-                .queue()
-                .dispatch_enrichment(h.work(), manual_context())
-                .await
-                .unwrap();
-
-            assert_eq!(h.call_count(MetadataProvider::Hardcover), 0);
-            assert!(matches!(
-                result.outcomes.get(&MetadataProvider::Hardcover),
-                Some(ProviderOutcome::Suppressed { .. })
-            ));
-            assert!(h.call_count(MetadataProvider::OpenLibrary) > 0);
-            assert!(matches!(
-                result.outcomes.get(&MetadataProvider::OpenLibrary),
-                Some(ProviderOutcome::Success(_))
-            ));
             assert!(result.merge_eligible);
             assert!(!result.deferred);
         }
@@ -810,14 +718,6 @@ macro_rules! provider_queue_contract_tests {
 fn default_config(provider: MetadataProvider) -> ProviderQueueConfig {
     ProviderQueueConfig {
         provider,
-        concurrency: 2,
-        requests_per_second: 1.0,
-        circuit_breaker: CircuitBreakerConfig {
-            failure_threshold: 3,
-            evaluation_window_secs: 60,
-            open_duration_secs: 60,
-            half_open_probe_count: 1,
-        },
         max_attempts: 3,
         max_suppressed_passes: 3,
         max_suppression_window_secs: 3600,
@@ -1065,37 +965,6 @@ impl ProviderQueueTestHarness for StubProviderQueueHarness {
                     ProviderOutcome::Success(Box::new(payload_for(MetadataProvider::OpenLibrary))),
                 );
             }
-            ProviderQueueScenario::CircuitStateSnapshot => {
-                builder = Self::add_stub(
-                    builder,
-                    &mut configs,
-                    &mut clients,
-                    MetadataProvider::Hardcover,
-                    ProviderOutcome::Success(Box::new(payload_for(MetadataProvider::Hardcover))),
-                );
-                builder = Self::add_stub(
-                    builder,
-                    &mut configs,
-                    &mut clients,
-                    MetadataProvider::OpenLibrary,
-                    ProviderOutcome::Success(Box::new(payload_for(MetadataProvider::OpenLibrary))),
-                );
-                builder = Self::add_stub(
-                    builder,
-                    &mut configs,
-                    &mut clients,
-                    MetadataProvider::Goodreads,
-                    ProviderOutcome::Success(Box::new(payload_for(MetadataProvider::Goodreads))),
-                );
-                builder = builder.with_initial_circuit_state(
-                    MetadataProvider::OpenLibrary,
-                    InitialCircuitState::Open,
-                );
-                builder = builder.with_initial_circuit_state(
-                    MetadataProvider::Goodreads,
-                    InitialCircuitState::HalfOpen,
-                );
-            }
             ProviderQueueScenario::RestartSkipsTerminal => {
                 builder = Self::add_stub(
                     builder,
@@ -1144,30 +1013,6 @@ impl ProviderQueueTestHarness for StubProviderQueueHarness {
                     ProviderOutcome::Suppressed {
                         until: future_ts(600),
                     },
-                );
-            }
-            ProviderQueueScenario::CircuitOpenSuppressedSkip => {
-                // HC is configured with an Open circuit — the queue must skip
-                // dispatch and record Suppressed without invoking the client.
-                // Even though we register a Success outcome on the client, it
-                // must never run.
-                builder = Self::add_stub(
-                    builder,
-                    &mut configs,
-                    &mut clients,
-                    MetadataProvider::Hardcover,
-                    ProviderOutcome::Success(Box::new(payload_for(MetadataProvider::Hardcover))),
-                );
-                builder = Self::add_stub(
-                    builder,
-                    &mut configs,
-                    &mut clients,
-                    MetadataProvider::OpenLibrary,
-                    ProviderOutcome::Success(Box::new(payload_for(MetadataProvider::OpenLibrary))),
-                );
-                builder = builder.with_initial_circuit_state(
-                    MetadataProvider::Hardcover,
-                    InitialCircuitState::Open,
                 );
             }
             ProviderQueueScenario::RetryBudgetExhausted => {
