@@ -95,6 +95,7 @@ pub async fn fetch_gb_volumes<F: HttpFetcher>(
     fetcher: &F,
     api_key: &str,
     url: String,
+    priority: RequestPriority,
 ) -> Result<Vec<GbVolume>, String> {
     let req = FetchRequest {
         url,
@@ -106,7 +107,7 @@ pub async fn fetch_gb_volumes<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
 
     let resp = fetcher
@@ -142,6 +143,7 @@ async fn fetch_gb_search<F: HttpFetcher>(
     fetcher: &F,
     api_key: &str,
     url: String,
+    priority: RequestPriority,
 ) -> Result<GbSearchResponse, ProviderOutcome<NormalizedWorkDetail>> {
     let req = FetchRequest {
         url,
@@ -153,7 +155,7 @@ async fn fetch_gb_search<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
     let resp = match fetcher.fetch(req).await {
         Ok(r) => r,
@@ -309,7 +311,11 @@ impl GoogleBooksClient {
     /// Anchor-only fetch (REQ-006): ISBN volumes query with the same key gate,
     /// transport handling, and ISBN verification as the seeded fetch — and no
     /// intitle/inauthor fallback.
-    pub async fn fetch_by_isbn(&self, isbn: &str) -> ProviderOutcome<NormalizedWorkDetail> {
+    pub async fn fetch_by_isbn(
+        &self,
+        isbn: &str,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         let cfg = self.live_config.snapshot();
         let api_key = match cfg
             .google_books_api_key
@@ -328,7 +334,7 @@ impl GoogleBooksClient {
             urlencoding::encode(isbn),
         );
 
-        let search = match fetch_gb_search(&self.fetcher, &api_key, url).await {
+        let search = match fetch_gb_search(&self.fetcher, &api_key, url, priority).await {
             Ok(s) => s,
             Err(outcome) => return outcome,
         };
@@ -352,6 +358,7 @@ impl GoogleBooksClient {
     pub async fn fetch(
         &self,
         work: &livrarr_domain::Work,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let cfg = self.live_config.snapshot();
         let api_key = match cfg
@@ -392,7 +399,7 @@ impl GoogleBooksClient {
             )
         };
 
-        let search = match fetch_gb_search(&self.fetcher, &api_key, url).await {
+        let search = match fetch_gb_search(&self.fetcher, &api_key, url, priority).await {
             Ok(s) => s,
             Err(outcome) => return outcome,
         };
@@ -1245,7 +1252,7 @@ mod tests {
         });
         let client = GoogleBooksClient::new(test_fetcher(), no_key_config);
         let work = livrarr_domain::Work::default();
-        let result = client.fetch(&work).await;
+        let result = client.fetch(&work, RequestPriority::Normal).await;
         assert!(
             matches!(result, ProviderOutcome::NotConfigured),
             "expected NotConfigured, got {result:?}"
@@ -1265,9 +1272,14 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        let search = fetch_gb_search(&fetcher, "test-key", "https://example.com/volumes".into())
-            .await
-            .unwrap();
+        let search = fetch_gb_search(
+            &fetcher,
+            "test-key",
+            "https://example.com/volumes".into(),
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(search.total_items, Some(0));
         let reqs = fetcher.requests();
@@ -1297,9 +1309,14 @@ mod tests {
             livrarr_domain::services::FetchError::RateLimited,
         );
 
-        let outcome = fetch_gb_search(&fetcher, "test-key", "https://example.com/volumes".into())
-            .await
-            .unwrap_err();
+        let outcome = fetch_gb_search(
+            &fetcher,
+            "test-key",
+            "https://example.com/volumes".into(),
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(
             outcome,
@@ -1314,9 +1331,14 @@ mod tests {
     async fn fetch_gb_search_maps_http_403_to_not_configured() {
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(403, vec![]);
 
-        let outcome = fetch_gb_search(&fetcher, "test-key", "https://example.com/volumes".into())
-            .await
-            .unwrap_err();
+        let outcome = fetch_gb_search(
+            &fetcher,
+            "test-key",
+            "https://example.com/volumes".into(),
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(outcome, ProviderOutcome::NotConfigured));
     }
@@ -1327,9 +1349,14 @@ mod tests {
             livrarr_domain::services::FetchError::Timeout(Duration::from_secs(10)),
         );
 
-        let outcome = fetch_gb_search(&fetcher, "test-key", "https://example.com/volumes".into())
-            .await
-            .unwrap_err();
+        let outcome = fetch_gb_search(
+            &fetcher,
+            "test-key",
+            "https://example.com/volumes".into(),
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(
             outcome,

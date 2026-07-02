@@ -197,12 +197,14 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
             CoverCandidateSource::IsbnOl => livrarr_metadata::cover::resolve_cover_english(
                 &self.http_fetcher,
                 work.isbn_13.as_deref(),
+                livrarr_domain::RequestPriority::Normal,
             )
             .await
             .ok_or_else(|| CoverServiceError::Internal("ISBN cover not found".into()))?,
             CoverCandidateSource::IsbnAmazon => livrarr_metadata::cover::resolve_cover_foreign(
                 &self.http_fetcher,
                 work.isbn_13.as_deref(),
+                livrarr_domain::RequestPriority::Normal,
             )
             .await
             .ok_or_else(|| CoverServiceError::Internal("ISBN cover not found".into()))?,
@@ -413,9 +415,12 @@ impl LiveCoverService {
             CoverServiceError::Internal(format!("no client for provider {provider:?}"))
         })?;
 
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), client.fetch(work))
-            .await
-            .map_err(|_| CoverServiceError::Internal("provider timeout".into()))?;
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.fetch(work, livrarr_domain::RequestPriority::Normal),
+        )
+        .await
+        .map_err(|_| CoverServiceError::Internal("provider timeout".into()))?;
 
         match outcome {
             livrarr_external_data::ProviderOutcome::Success(detail) => Ok(detail.cover_url.clone()),

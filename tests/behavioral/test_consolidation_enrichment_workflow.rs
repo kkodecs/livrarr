@@ -32,6 +32,7 @@ impl EnrichmentService for SuccessEnrichment {
         _: livrarr_domain::WorkId,
         _: MetaEnrichmentMode,
         _: Option<livrarr_domain::identity::CandidateId>,
+        _: livrarr_domain::RequestPriority,
     ) -> Result<livrarr_metadata::EnrichmentResult, EnrichmentError> {
         Ok(livrarr_metadata::EnrichmentResult {
             enrichment_status: EnrichmentStatus::Enriched,
@@ -74,6 +75,7 @@ impl EnrichmentService for DeferredEnrichment {
         _: livrarr_domain::WorkId,
         _: MetaEnrichmentMode,
         _: Option<livrarr_domain::identity::CandidateId>,
+        _: livrarr_domain::RequestPriority,
     ) -> Result<livrarr_metadata::EnrichmentResult, EnrichmentError> {
         Ok(livrarr_metadata::EnrichmentResult {
             enrichment_status: EnrichmentStatus::Unenriched,
@@ -113,6 +115,7 @@ impl EnrichmentService for FailedEnrichment {
         _: livrarr_domain::WorkId,
         _: MetaEnrichmentMode,
         _: Option<livrarr_domain::identity::CandidateId>,
+        _: livrarr_domain::RequestPriority,
     ) -> Result<livrarr_metadata::EnrichmentResult, EnrichmentError> {
         Ok(livrarr_metadata::EnrichmentResult {
             enrichment_status: EnrichmentStatus::Failed,
@@ -152,6 +155,7 @@ impl EnrichmentService for NotFoundEnrichment {
         _: livrarr_domain::WorkId,
         _: MetaEnrichmentMode,
         _: Option<livrarr_domain::identity::CandidateId>,
+        _: livrarr_domain::RequestPriority,
     ) -> Result<livrarr_metadata::EnrichmentResult, EnrichmentError> {
         Err(EnrichmentError::WorkNotFound)
     }
@@ -179,6 +183,7 @@ impl EnrichmentService for MergeSupersededEnrichment {
         _: livrarr_domain::WorkId,
         _: MetaEnrichmentMode,
         _: Option<livrarr_domain::identity::CandidateId>,
+        _: livrarr_domain::RequestPriority,
     ) -> Result<livrarr_metadata::EnrichmentResult, EnrichmentError> {
         Err(EnrichmentError::MergeSuperseded)
     }
@@ -206,6 +211,7 @@ impl EnrichmentService for CorruptPayloadEnrichment {
         _: livrarr_domain::WorkId,
         _: MetaEnrichmentMode,
         _: Option<livrarr_domain::identity::CandidateId>,
+        _: livrarr_domain::RequestPriority,
     ) -> Result<livrarr_metadata::EnrichmentResult, EnrichmentError> {
         Err(EnrichmentError::CorruptRetryPayload {
             work_id: 1,
@@ -262,7 +268,13 @@ async fn test_enrich_happy_path_merges_provider_data() {
 
     let workflow = EnrichmentWorkflowImpl::new(Arc::new(SuccessEnrichment), db);
     let r = workflow
-        .enrich_work(user_id, work_id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work_id,
+            EnrichmentMode::Manual,
+            None,
+            livrarr_domain::RequestPriority::Normal,
+        )
         .await
         .unwrap();
 
@@ -280,7 +292,13 @@ async fn test_enrich_background_defers_merge_when_not_terminal() {
 
     let workflow = EnrichmentWorkflowImpl::new(Arc::new(DeferredEnrichment), db);
     let r = workflow
-        .enrich_work(user_id, work_id, EnrichmentMode::Background, None)
+        .enrich_work(
+            user_id,
+            work_id,
+            EnrichmentMode::Background,
+            None,
+            livrarr_domain::RequestPriority::Low,
+        )
         .await
         .unwrap();
 
@@ -299,7 +317,13 @@ async fn test_enrich_llm_rejects_all_sets_conflict() {
 
     let workflow = EnrichmentWorkflowImpl::new(Arc::new(FailedEnrichment), db);
     let r = workflow
-        .enrich_work(user_id, work_id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work_id,
+            EnrichmentMode::Manual,
+            None,
+            livrarr_domain::RequestPriority::Normal,
+        )
         .await
         .unwrap();
 
@@ -314,7 +338,13 @@ async fn test_enrich_llm_failure_passes_through() {
 
     let workflow = EnrichmentWorkflowImpl::new(Arc::new(SuccessEnrichment), db);
     let r = workflow
-        .enrich_work(user_id, work_id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work_id,
+            EnrichmentMode::Manual,
+            None,
+            livrarr_domain::RequestPriority::Normal,
+        )
         .await
         .unwrap();
 
@@ -329,7 +359,13 @@ async fn test_enrich_cas_exhausted_returns_error() {
 
     let workflow = EnrichmentWorkflowImpl::new(Arc::new(MergeSupersededEnrichment), db);
     let result = workflow
-        .enrich_work(user_id, work_id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work_id,
+            EnrichmentMode::Manual,
+            None,
+            livrarr_domain::RequestPriority::Normal,
+        )
         .await;
 
     assert!(
@@ -346,7 +382,13 @@ async fn test_enrich_corrupt_retry_payload_returns_error() {
 
     let workflow = EnrichmentWorkflowImpl::new(Arc::new(CorruptPayloadEnrichment), db);
     let result = workflow
-        .enrich_work(user_id, work_id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work_id,
+            EnrichmentMode::Manual,
+            None,
+            livrarr_domain::RequestPriority::Normal,
+        )
         .await;
 
     match result {
@@ -369,7 +411,13 @@ async fn test_enrich_user_provenance_never_overwritten() {
 
     let workflow = EnrichmentWorkflowImpl::new(Arc::new(SuccessEnrichment), db);
     let r = workflow
-        .enrich_work(user_id, work_id, EnrichmentMode::HardRefresh, None)
+        .enrich_work(
+            user_id,
+            work_id,
+            EnrichmentMode::HardRefresh,
+            None,
+            livrarr_domain::RequestPriority::Normal,
+        )
         .await
         .unwrap();
 

@@ -65,6 +65,7 @@ pub async fn hc_post<F: HttpFetcher>(
     fetcher: &F,
     body: Value,
     token: &str,
+    priority: RequestPriority,
 ) -> Result<Value, HardcoverError> {
     let req = FetchRequest {
         url: HARDCOVER_API_URL.to_string(),
@@ -82,7 +83,7 @@ pub async fn hc_post<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
 
     let resp = match fetcher.fetch(req).await {
@@ -161,6 +162,7 @@ pub async fn query_hardcover<F: HttpFetcher>(
     author: &str,
     token: &str,
     metadata_cfg: &MetadataConfig,
+    priority: RequestPriority,
 ) -> Result<HardcoverResult, HardcoverError> {
     // Search by title only — gets the best results for short/common titles.
     // Strip trailing parenthetical before searching — OL titles often include
@@ -175,7 +177,7 @@ pub async fn query_hardcover<F: HttpFetcher>(
     // returns partial matches (e.g., comic adaptations) that flood results.
     let search_term = format!("\"{clean_title}\"");
     let body = hc_search_body(25, &search_term);
-    let data = hc_post(fetcher, body, token).await?;
+    let data = hc_post(fetcher, body, token, priority).await?;
     let hits = hc_extract_hits(&data);
 
     if hits.is_empty() {
@@ -344,6 +346,7 @@ pub async fn fetch_hardcover_editions<F: HttpFetcher>(
     book_id: &str,
     token: &str,
     preferred_language: &str,
+    priority: RequestPriority,
 ) -> Result<Option<String>, String> {
     let book_id_int: i64 = book_id.parse().map_err(|_| "invalid book ID".to_string())?;
 
@@ -376,7 +379,7 @@ pub async fn fetch_hardcover_editions<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
 
     let resp = fetcher
@@ -558,9 +561,10 @@ pub async fn query_hardcover_by_isbn<F: HttpFetcher>(
     isbn: &str,
     token: &str,
     _metadata_cfg: &livrarr_domain::settings::MetadataConfig,
+    priority: RequestPriority,
 ) -> Result<Option<HardcoverResult>, HardcoverError> {
     let body = hc_search_body(10, isbn);
-    let data = hc_post(fetcher, body, token).await?;
+    let data = hc_post(fetcher, body, token, priority).await?;
     let hits = hc_extract_hits(&data);
 
     for hit in &hits {
@@ -697,7 +701,9 @@ mod tests {
         );
         let body = hc_search_body(25, "\"Test Title\"");
 
-        hc_post(&fetcher, body.clone(), "test-token").await.unwrap();
+        hc_post(&fetcher, body.clone(), "test-token", RequestPriority::High)
+            .await
+            .unwrap();
 
         assert_eq!(fetcher.call_count(), 1);
         let reqs = fetcher.requests();
@@ -716,16 +722,19 @@ mod tests {
             .any(|(k, v)| k == "Content-Type" && v == "application/json"));
         let sent_body: Value = serde_json::from_slice(req.body.as_ref().unwrap()).unwrap();
         assert_eq!(sent_body, body);
-        assert_transport_params(req);
+        assert_transport_params(req, RequestPriority::High);
     }
 
     /// The fixed transport parameters every Hardcover API request carries.
-    fn assert_transport_params(req: &FetchRequest) {
+    /// `expected_priority` asserts the caller-supplied `RequestPriority` was
+    /// threaded through to the request unchanged (B4) rather than the prior
+    /// hardcoded `Normal`.
+    fn assert_transport_params(req: &FetchRequest, expected_priority: RequestPriority) {
         assert_eq!(req.timeout, Duration::from_secs(10));
         assert_eq!(req.max_body_bytes, 2 * 1024 * 1024);
         assert!(!req.anti_bot_check);
         assert!(matches!(req.user_agent, UserAgentProfile::Server));
-        assert!(matches!(req.priority, RequestPriority::Normal));
+        assert_eq!(req.priority, expected_priority);
     }
 
     #[tokio::test]
@@ -736,7 +745,7 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        fetch_hardcover_editions(&fetcher, "123", "test-token", "en")
+        fetch_hardcover_editions(&fetcher, "123", "test-token", "en", RequestPriority::Low)
             .await
             .unwrap();
 
@@ -755,7 +764,7 @@ mod tests {
             .iter()
             .any(|(k, v)| k == "Content-Type" && v == "application/json"));
         assert!(req.body.is_some());
-        assert_transport_params(req);
+        assert_transport_params(req, RequestPriority::Low);
     }
 
     #[tokio::test]
@@ -769,7 +778,9 @@ mod tests {
         );
         let body = hc_search_body(25, "\"Test Title\"");
 
-        let result = hc_post(&fetcher, body, "tok").await.unwrap();
+        let result = hc_post(&fetcher, body, "tok", RequestPriority::Normal)
+            .await
+            .unwrap();
 
         assert_eq!(result, canned);
     }
@@ -789,7 +800,7 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        let result = fetch_hardcover_editions(&fetcher, "42", "tok", "en")
+        let result = fetch_hardcover_editions(&fetcher, "42", "tok", "en", RequestPriority::Normal)
             .await
             .unwrap();
 
@@ -806,7 +817,9 @@ mod tests {
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
         let body = hc_search_body(25, "\"x\"");
 
-        let err = hc_post(&fetcher, body, "tok").await.unwrap_err();
+        let err = hc_post(&fetcher, body, "tok", RequestPriority::Normal)
+            .await
+            .unwrap_err();
 
         match err {
             HardcoverError::Http(msg) => assert_eq!(msg, "HTTP 500"),
@@ -821,7 +834,9 @@ mod tests {
         );
         let body = hc_search_body(25, "\"x\"");
 
-        let err = hc_post(&fetcher, body, "tok").await.unwrap_err();
+        let err = hc_post(&fetcher, body, "tok", RequestPriority::Normal)
+            .await
+            .unwrap_err();
 
         match err {
             HardcoverError::Http(msg) => assert!(msg.contains("timeout")),

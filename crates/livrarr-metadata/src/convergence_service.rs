@@ -131,8 +131,16 @@ where
         EnrichmentStatus::Unenriched | EnrichmentStatus::Failed
     );
     if identity_permits && enrichment_incomplete {
+        // Low: background convergence (B4 table).
         let _ = svc
-            .run_unified_enrichment(user_id, &work, None, EnrichmentMode::Background, None)
+            .run_unified_enrichment(
+                user_id,
+                &work,
+                None,
+                EnrichmentMode::Background,
+                None,
+                livrarr_domain::RequestPriority::Low,
+            )
             .await;
         work = svc.get(user_id, work_id).await?;
     }

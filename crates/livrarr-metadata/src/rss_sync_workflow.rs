@@ -114,6 +114,13 @@ where
                 max_body_bytes: 5 * 1024 * 1024,
                 anti_bot_check: false,
                 user_agent: UserAgentProfile::Server,
+                // Normal (B4 table, mixed callers — verified against the packet's
+                // assumption): `run_sync` is shared by the scheduled background
+                // job (`jobs/rss_sync.rs`) AND the user-facing "sync now" handler
+                // (`handlers/config.rs::trigger_rss_sync`, any authenticated user).
+                // One priority per call, like the parked `fetch_gr_html` case —
+                // stays Normal rather than picking a value that's wrong for one
+                // of the two callers.
                 priority: RequestPriority::Normal,
             };
 

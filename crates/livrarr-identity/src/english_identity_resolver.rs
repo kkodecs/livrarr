@@ -86,6 +86,15 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
         let providers = self.select_providers(seed, tier);
         let work = build_transient_work_from_seed(seed, user_id);
 
+        // Tier→priority (B4 table): Interactive (Add/manual-import) is High,
+        // Bulk (list/Readarr import) and Background (monitors/convergence)
+        // are both Low — neither should queue ahead of an interactive add or
+        // a foreground refresh.
+        let priority = match tier {
+            LatencyTier::Interactive => livrarr_domain::RequestPriority::High,
+            LatencyTier::Bulk | LatencyTier::Background => livrarr_domain::RequestPriority::Low,
+        };
+
         // Fan out to the eligible providers in parallel, each under the per-call
         // timeout. A timeout or any non-Success outcome is an abstention — it
         // neither errors the resolve nor counts as quorum disagreement (REQ-025).
@@ -96,7 +105,7 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
                 let work = work.clone();
                 let timeout = self.config.call_timeout;
                 futures.push(async move {
-                    match tokio::time::timeout(timeout, client.fetch(&work)).await {
+                    match tokio::time::timeout(timeout, client.fetch(&work, priority)).await {
                         Ok(ProviderOutcome::Success(detail)) => Some((provider, *detail)),
                         _ => None,
                     }

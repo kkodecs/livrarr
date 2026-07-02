@@ -554,6 +554,7 @@ fn map_transport_err(context: &str, err: FetchError) -> GoodreadsFetchError {
 pub async fn fetch_goodreads_html<F: HttpFetcher>(
     fetcher: &F,
     url: &str,
+    priority: RequestPriority,
 ) -> Result<String, GoodreadsFetchError> {
     let req = FetchRequest {
         url: url.to_string(),
@@ -567,7 +568,7 @@ pub async fn fetch_goodreads_html<F: HttpFetcher>(
         // the GR-specific `is_anti_bot_page` body check below owns this instead.
         anti_bot_check: false,
         user_agent: UserAgentProfile::Custom(GOODREADS_USER_AGENT.to_string()),
-        priority: RequestPriority::Normal,
+        priority,
     };
     let resp = fetcher
         .fetch(req)
@@ -599,6 +600,7 @@ pub async fn search_goodreads<F: HttpFetcher>(
     base_url: &str,
     title: &str,
     author: &str,
+    priority: RequestPriority,
 ) -> Result<Vec<GoodreadsSearchResult>, GoodreadsFetchError> {
     let base = base_url.trim_end_matches('/');
     let raw_query = format!("{title} {author}");
@@ -614,7 +616,7 @@ pub async fn search_goodreads<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Custom(GOODREADS_USER_AGENT.to_string()),
-        priority: RequestPriority::Normal,
+        priority,
     };
     let resp = fetcher
         .fetch(req)
@@ -632,8 +634,9 @@ pub async fn search_goodreads<F: HttpFetcher>(
 pub async fn fetch_goodreads_detail<F: HttpFetcher>(
     fetcher: &F,
     detail_url: &str,
+    priority: RequestPriority,
 ) -> Result<GoodreadsDetailResult, GoodreadsFetchError> {
-    let html = fetch_goodreads_html(fetcher, detail_url).await?;
+    let html = fetch_goodreads_html(fetcher, detail_url, priority).await?;
     parse_detail_html(&html).ok_or(GoodreadsFetchError::Parse)
 }
 
@@ -1132,9 +1135,13 @@ mod tests {
             b"<html><body>ok</body></html>".to_vec(),
         );
 
-        let html = fetch_goodreads_html(&fetcher, "https://www.goodreads.com/book/show/1")
-            .await
-            .unwrap();
+        let html = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(html, "<html><body>ok</body></html>");
         let reqs = fetcher.requests();
@@ -1163,9 +1170,13 @@ mod tests {
             br#"<html><div class="cf-browser-verification">Checking...</div></html>"#.to_vec(),
         );
 
-        let err = fetch_goodreads_html(&fetcher, "https://www.goodreads.com/book/show/1")
-            .await
-            .unwrap_err();
+        let err = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, GoodreadsFetchError::AntiBot));
     }
@@ -1179,9 +1190,13 @@ mod tests {
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
 
-        let err = fetch_goodreads_html(&fetcher, "https://www.goodreads.com/book/show/1")
-            .await
-            .unwrap_err();
+        let err = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, GoodreadsFetchError::HttpStatus(429)));
     }
@@ -1190,9 +1205,13 @@ mod tests {
     async fn fetch_goodreads_html_maps_http_500_to_http_status() {
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
 
-        let err = fetch_goodreads_html(&fetcher, "https://www.goodreads.com/book/show/1")
-            .await
-            .unwrap_err();
+        let err = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, GoodreadsFetchError::HttpStatus(500)));
     }
@@ -1206,6 +1225,7 @@ mod tests {
             "https://www.goodreads.com",
             "Dune",
             "Frank Herbert",
+            RequestPriority::Normal,
         )
         .await
         .unwrap();
@@ -1233,9 +1253,15 @@ mod tests {
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
 
-        let hits = search_goodreads(&fetcher, "https://www.goodreads.com", "Hobbit", "Tolkien")
-            .await
-            .unwrap();
+        let hits = search_goodreads(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Hobbit",
+            "Tolkien",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "The Hobbit");
@@ -1246,9 +1272,15 @@ mod tests {
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
 
-        let err = search_goodreads(&fetcher, "https://www.goodreads.com", "x", "y")
-            .await
-            .unwrap_err();
+        let err = search_goodreads(
+            &fetcher,
+            "https://www.goodreads.com",
+            "x",
+            "y",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, GoodreadsFetchError::HttpStatus(429)));
     }

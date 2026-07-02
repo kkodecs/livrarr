@@ -24,6 +24,7 @@ async fn get_ok<F: HttpFetcher>(
     fetcher: &F,
     url: &str,
     bucket: RateBucket,
+    priority: RequestPriority,
 ) -> Option<livrarr_domain::services::FetchResponse> {
     let req = FetchRequest {
         url: url.to_string(),
@@ -35,7 +36,7 @@ async fn get_ok<F: HttpFetcher>(
         max_body_bytes: 10 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
     let resp = fetcher.fetch_ssrf_safe(req).await.ok()?;
     (200..300).contains(&resp.status).then_some(resp)
@@ -64,6 +65,7 @@ fn passes_placeholder_filter(resp: &livrarr_domain::services::FetchResponse) -> 
 pub async fn resolve_cover_by_isbn_ol<F: HttpFetcher>(
     fetcher: &F,
     isbn: Option<&str>,
+    priority: RequestPriority,
 ) -> Option<String> {
     let isbn = isbn?;
     if !is_valid_isbn(isbn) {
@@ -71,7 +73,7 @@ pub async fn resolve_cover_by_isbn_ol<F: HttpFetcher>(
     }
 
     let ol_url = format!("https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?default=false");
-    if get_ok(fetcher, &ol_url, RateBucket::OpenLibraryCovers)
+    if get_ok(fetcher, &ol_url, RateBucket::OpenLibraryCovers, priority)
         .await
         .is_some()
     {
@@ -90,6 +92,7 @@ pub async fn resolve_cover_by_isbn_ol<F: HttpFetcher>(
 pub async fn resolve_cover_by_isbn_amazon<F: HttpFetcher>(
     fetcher: &F,
     isbn: Option<&str>,
+    priority: RequestPriority,
 ) -> Option<String> {
     let isbn = isbn?;
     if !is_valid_isbn(isbn) {
@@ -108,7 +111,7 @@ pub async fn resolve_cover_by_isbn_amazon<F: HttpFetcher>(
     let url =
         format!("https://images-na.ssl-images-amazon.com/images/P/{isbn10}.01._SCLZZZZZZZ_.jpg");
 
-    if let Some(resp) = get_ok(fetcher, &url, RateBucket::None).await {
+    if let Some(resp) = get_ok(fetcher, &url, RateBucket::None, priority).await {
         if passes_placeholder_filter(&resp) {
             return Some(url);
         }
@@ -142,6 +145,7 @@ fn isbn13_to_isbn10(isbn13: &str) -> Option<String> {
 pub async fn resolve_cover_by_isbn_casadellibro<F: HttpFetcher>(
     fetcher: &F,
     isbn: Option<&str>,
+    priority: RequestPriority,
 ) -> Option<String> {
     let isbn = isbn?;
     if !is_valid_isbn(isbn) {
@@ -154,7 +158,7 @@ pub async fn resolve_cover_by_isbn_casadellibro<F: HttpFetcher>(
     let last2 = &clean[11..13];
     let n = (clean.as_bytes()[12] - b'0') % 10; // last digit mod 10
     let url = format!("https://imagessl{n}.casadellibro.com/a/l/s5/{last2}/{clean}.webp");
-    if let Some(resp) = get_ok(fetcher, &url, RateBucket::None).await {
+    if let Some(resp) = get_ok(fetcher, &url, RateBucket::None, priority).await {
         if passes_placeholder_filter(&resp) {
             return Some(url);
         }
@@ -168,11 +172,12 @@ pub async fn resolve_cover_by_isbn_casadellibro<F: HttpFetcher>(
 pub async fn resolve_cover_foreign<F: HttpFetcher>(
     fetcher: &F,
     isbn: Option<&str>,
+    priority: RequestPriority,
 ) -> Option<String> {
-    if let Some(url) = resolve_cover_by_isbn_casadellibro(fetcher, isbn).await {
+    if let Some(url) = resolve_cover_by_isbn_casadellibro(fetcher, isbn, priority).await {
         return Some(url);
     }
-    resolve_cover_by_isbn_amazon(fetcher, isbn).await
+    resolve_cover_by_isbn_amazon(fetcher, isbn, priority).await
 }
 
 /// Resolve cover for English works (existing behavior).
@@ -180,11 +185,12 @@ pub async fn resolve_cover_foreign<F: HttpFetcher>(
 pub async fn resolve_cover_english<F: HttpFetcher>(
     fetcher: &F,
     isbn: Option<&str>,
+    priority: RequestPriority,
 ) -> Option<String> {
-    if let Some(url) = resolve_cover_by_isbn_ol(fetcher, isbn).await {
+    if let Some(url) = resolve_cover_by_isbn_ol(fetcher, isbn, priority).await {
         return Some(url);
     }
-    resolve_cover_by_isbn_amazon(fetcher, isbn).await
+    resolve_cover_by_isbn_amazon(fetcher, isbn, priority).await
 }
 
 // =============================================================================
@@ -241,7 +247,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                     covers_dir,
                     work_id,
                     "",
-                    RequestPriority::Normal,
+                    RequestPriority::High,
                 ),
             )
             .await;
@@ -268,7 +274,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                         covers_dir,
                         work_id,
                         "",
-                        RequestPriority::Normal,
+                        RequestPriority::High,
                     ),
                 )
                 .await;
@@ -300,7 +306,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
             let hc_timeout = remaining.min(Duration::from_secs(2));
             match tokio::time::timeout(
                 hc_timeout,
-                fast_hc_cover_search(http_fetcher, title, author, token),
+                fast_hc_cover_search(http_fetcher, title, author, token, RequestPriority::High),
             )
             .await
             {
@@ -316,7 +322,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                                     covers_dir,
                                     work_id,
                                     "",
-                                    RequestPriority::Normal,
+                                    RequestPriority::High,
                                 ),
                             )
                             .await,
@@ -356,6 +362,7 @@ async fn fast_hc_cover_search<F: HttpFetcher>(
     title: &str,
     author: &str,
     token: &str,
+    priority: RequestPriority,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
     use livrarr_external_data::hardcover::{hc_extract_hits, hc_post, hc_search_body};
 
@@ -365,7 +372,7 @@ async fn fast_hc_cover_search<F: HttpFetcher>(
         .map(|i| title[..i].trim())
         .unwrap_or(title);
     let body = hc_search_body(10, &format!("\"{clean_title}\""));
-    let data = hc_post(fetcher, body, token).await?;
+    let data = hc_post(fetcher, body, token, priority).await?;
     let hits = hc_extract_hits(&data);
 
     let title_lower = clean_title.trim().to_lowercase();

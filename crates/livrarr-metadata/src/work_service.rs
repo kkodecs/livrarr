@@ -185,6 +185,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
         _work_id: WorkId,
         _mode: EnrichmentMode,
         _candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        _priority: RequestPriority,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         Ok(EnrichmentResult {
             identity_not_found: false,
@@ -1435,7 +1436,14 @@ where
         // discard the data other providers returned — best-effort merge. (#117)
         // No candidate_id for a manual refresh — always re-fetches from network.
         let _enrichment_status = self
-            .run_unified_enrichment(user_id, &work, None, EnrichmentMode::Manual, None)
+            .run_unified_enrichment(
+                user_id,
+                &work,
+                None,
+                EnrichmentMode::Manual,
+                None,
+                RequestPriority::Normal,
+            )
             .await;
 
         let refreshed_work = match self.db.get_work(user_id, work_id).await {
@@ -2209,10 +2217,14 @@ where
             urlencoding::encode(&lang_norm),
         );
 
-        let volumes =
-            livrarr_external_data::google_books::fetch_gb_volumes(&self.http, &api_key, url)
-                .await
-                .map_err(WorkServiceError::Enrichment)?;
+        let volumes = livrarr_external_data::google_books::fetch_gb_volumes(
+            &self.http,
+            &api_key,
+            url,
+            RequestPriority::Interactive,
+        )
+        .await
+        .map_err(WorkServiceError::Enrichment)?;
 
         let results = volumes
             .iter()
@@ -2421,6 +2433,11 @@ where
         if let Some(work) = existing.into_iter().next() {
             let (work, enrichment_status) = if source_provider_data.is_some() {
                 // No candidate_id: dedup path re-enriches existing work from network.
+                // High: reached only from `add()`'s Pending-identity arm — the
+                // same interactive Add/manual-import door as
+                // `ensure_identity_and_enrichment`, not a background call
+                // (unlisted call site — B4 table's "add door" bucket applied
+                // by extension; flagged in the B4 report).
                 let (status, _) = self
                     .run_unified_enrichment(
                         user_id,
@@ -2428,6 +2445,7 @@ where
                         source_provider_data.clone(),
                         EnrichmentMode::Background,
                         None,
+                        RequestPriority::High,
                     )
                     .await;
                 let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -2565,12 +2583,16 @@ where
             return (work.enrichment_status, false);
         }
 
+        // High: the interactive Add/manual-import flow's provider work (B4
+        // table) — mode stays Background (suppression/budget semantics
+        // untouched), priority is the door's own queue-ordering hint.
         self.run_unified_enrichment(
             user_id,
             &work,
             source_provider_data,
             EnrichmentMode::Background,
             candidate_id,
+            RequestPriority::High,
         )
         .await
     }
@@ -2777,6 +2799,10 @@ where
     /// Returns `(enrichment_status, identity_not_found)`. Never returns `Err` — all
     /// failures are absorbed, producing `Failed` status when enrichment itself fails
     /// and otherwise continuing past materialize errors (non-fatal, warned).
+    /// `priority` (B4) is the queue-ordering hint threaded to the scatter —
+    /// independent of `mode`, so a door can request Background mode
+    /// (suppression/budget semantics) while still queuing ahead of a
+    /// background scan.
     pub(crate) async fn run_unified_enrichment(
         &self,
         user_id: UserId,
@@ -2784,6 +2810,7 @@ where
         source_provider_data: Option<livrarr_domain::services::SourceProviderData>,
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        priority: RequestPriority,
     ) -> (EnrichmentStatus, bool) {
         let work_id = work.id;
 
@@ -2831,7 +2858,7 @@ where
         // candidate during discovery (AC-001).
         let enrich_result = match self
             .enrichment
-            .enrich_work(user_id, work_id, mode, candidate_id)
+            .enrich_work(user_id, work_id, mode, candidate_id, priority)
             .await
         {
             Ok(r) => r,

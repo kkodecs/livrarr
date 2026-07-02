@@ -340,4 +340,29 @@ mod tests {
             Some(RequestPriority::Normal)
         );
     }
+
+    /// B4: the cover backfill job (`livrarr-server/src/jobs/cover_backfill.rs`)
+    /// passes `RequestPriority::Low` — a background one-shot pass over every
+    /// work's cover, never ahead of a foreground door.
+    #[tokio::test]
+    async fn download_cover_to_disk_passes_backfill_low_priority_through() {
+        let fetcher = RecordingFetcher::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        download_cover_to_disk(
+            &fetcher,
+            "https://i.gr-assets.com/books/12345/cover.jpg",
+            dir.path(),
+            3,
+            "",
+            RequestPriority::Low,
+        )
+        .await
+        .expect("download should succeed against the canned 200 response");
+
+        assert_eq!(
+            *fetcher.last_priority.lock().unwrap(),
+            Some(RequestPriority::Low)
+        );
+    }
 }

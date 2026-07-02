@@ -290,7 +290,8 @@ pub async fn test_hardcover<S: HasAppConfigService + HasHttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: livrarr_domain::RequestPriority::Normal,
+        // Interactive: an admin's "Test Connection" click, B4 table.
+        priority: livrarr_domain::RequestPriority::Interactive,
     };
 
     let resp = state
@@ -332,7 +333,8 @@ pub async fn test_audnexus<S: HasAppConfigService + HasHttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: livrarr_domain::RequestPriority::Normal,
+        // Interactive: an admin's "Test Connection" click, B4 table.
+        priority: livrarr_domain::RequestPriority::Interactive,
     };
 
     let resp = state

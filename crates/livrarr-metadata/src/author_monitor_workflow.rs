@@ -313,7 +313,8 @@ where
                 max_body_bytes: 2 * 1024 * 1024,
                 anti_bot_check: false,
                 user_agent: UserAgentProfile::Server,
-                priority: RequestPriority::Normal,
+                // Low: background author monitor scan (B4 table).
+                priority: RequestPriority::Low,
             };
 
             let fetch_result = self.http.fetch(req).await;

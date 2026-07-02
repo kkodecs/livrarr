@@ -107,8 +107,12 @@ impl AudibleCatalogClient {
     /// is canonical identity, so no title rescoring applies here — the scoring
     /// in the seeded fetch guards wrong-ASIN adoption on the text path, which
     /// does not exist on this surface.
-    pub async fn fetch_by_asin(&self, asin: &str) -> crate::ProviderOutcome<NormalizedWorkDetail> {
-        match lookup_audible_by_asin(&self.fetcher, asin).await {
+    pub async fn fetch_by_asin(
+        &self,
+        asin: &str,
+        priority: RequestPriority,
+    ) -> crate::ProviderOutcome<NormalizedWorkDetail> {
+        match lookup_audible_by_asin(&self.fetcher, asin, priority).await {
             Ok(Some(product)) => {
                 crate::ProviderOutcome::Success(Box::new(map_audible_to_detail(&product)))
             }
@@ -125,10 +129,11 @@ impl AudibleCatalogClient {
     pub async fn fetch(
         &self,
         work: &livrarr_domain::Work,
+        priority: RequestPriority,
     ) -> crate::ProviderOutcome<NormalizedWorkDetail> {
         // ASIN direct lookup
         if let Some(asin) = work.asin.as_deref().filter(|s| !s.is_empty()) {
-            match lookup_audible_by_asin(&self.fetcher, asin).await {
+            match lookup_audible_by_asin(&self.fetcher, asin, priority).await {
                 Ok(Some(product)) => {
                     let author = product
                         .authors
@@ -174,7 +179,7 @@ impl AudibleCatalogClient {
         }
 
         // Title+author search
-        match search_audible(&self.fetcher, &work.title, &work.author_name, 10).await {
+        match search_audible(&self.fetcher, &work.title, &work.author_name, 10, priority).await {
             Ok(products) if products.is_empty() => crate::ProviderOutcome::NotFound,
             Ok(products) => {
                 // Feed multiple title variants per product (raw, series-stripped,
@@ -238,7 +243,7 @@ fn circuit_open_outcome(retry_after: Duration) -> crate::ProviderOutcome<Normali
 /// the same generic `Err(String)` the pre-fetcher code already produced for
 /// ANY non-success status, so no special `FetchError` translation is needed
 /// here (unlike Goodreads/OpenLibrary/GoogleBooks/Audnexus).
-fn audible_request(url: String) -> FetchRequest {
+fn audible_request(url: String, priority: RequestPriority) -> FetchRequest {
     FetchRequest {
         url,
         method: HttpMethod::Get,
@@ -249,7 +254,7 @@ fn audible_request(url: String) -> FetchRequest {
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     }
 }
 
@@ -258,6 +263,7 @@ pub async fn search_audible<F: HttpFetcher>(
     title: &str,
     author: &str,
     max_results: u32,
+    priority: RequestPriority,
 ) -> Result<Vec<AudibleProduct>, ProviderFetchError> {
     let url = format!(
         "{}?title={}&author={}&num_results={}&products_sort_by=Relevance&response_groups={}",
@@ -268,7 +274,7 @@ pub async fn search_audible<F: HttpFetcher>(
         urlencoding::encode(RESPONSE_GROUPS),
     );
 
-    let resp = match fetcher.fetch(audible_request(url)).await {
+    let resp = match fetcher.fetch(audible_request(url, priority)).await {
         Ok(r) => r,
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(ProviderFetchError::CircuitOpen(retry_after));
@@ -300,6 +306,7 @@ pub async fn search_audible<F: HttpFetcher>(
 pub async fn lookup_audible_by_asin<F: HttpFetcher>(
     fetcher: &F,
     asin: &str,
+    priority: RequestPriority,
 ) -> Result<Option<AudibleProduct>, ProviderFetchError> {
     let url = format!(
         "{}/{}?response_groups={}",
@@ -308,7 +315,7 @@ pub async fn lookup_audible_by_asin<F: HttpFetcher>(
         urlencoding::encode(RESPONSE_GROUPS),
     );
 
-    let resp = match fetcher.fetch(audible_request(url)).await {
+    let resp = match fetcher.fetch(audible_request(url, priority)).await {
         Ok(r) => r,
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(ProviderFetchError::CircuitOpen(retry_after));
@@ -492,9 +499,15 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        let products = search_audible(&fetcher, "Dune", "Frank Herbert", 10)
-            .await
-            .unwrap();
+        let products = search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
 
         assert!(products.is_empty());
         let reqs = fetcher.requests();
@@ -519,7 +532,7 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        let product = lookup_audible_by_asin(&fetcher, "B000FC0PBC")
+        let product = lookup_audible_by_asin(&fetcher, "B000FC0PBC", RequestPriority::Normal)
             .await
             .unwrap()
             .unwrap();
@@ -539,7 +552,9 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        let product = lookup_audible_by_asin(&fetcher, "B0MISSING").await.unwrap();
+        let product = lookup_audible_by_asin(&fetcher, "B0MISSING", RequestPriority::Normal)
+            .await
+            .unwrap();
 
         assert!(product.is_none());
     }
@@ -554,9 +569,15 @@ mod tests {
     async fn search_audible_maps_http_500_to_err() {
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
 
-        let err = search_audible(&fetcher, "Dune", "Frank Herbert", 10)
-            .await
-            .unwrap_err();
+        let err = search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err.to_string(), "Audible returned 500");
     }
@@ -567,9 +588,15 @@ mod tests {
             livrarr_domain::services::FetchError::RateLimited,
         );
 
-        let err = search_audible(&fetcher, "Dune", "Frank Herbert", 10)
-            .await
-            .unwrap_err();
+        let err = search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert!(err.to_string().contains("Audible search failed"));
     }
@@ -580,7 +607,7 @@ mod tests {
             livrarr_domain::services::FetchError::Connection("refused".to_string()),
         );
 
-        let err = lookup_audible_by_asin(&fetcher, "B000FC0PBC")
+        let err = lookup_audible_by_asin(&fetcher, "B000FC0PBC", RequestPriority::Normal)
             .await
             .unwrap_err();
 

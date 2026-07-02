@@ -193,7 +193,11 @@ async fn test_mc_anchor_query_variant_set_has_no_title_author_and_fetch_by_ancho
         ProviderOutcome::NotFound,
     ));
     let _ = client
-        .fetch_by_anchor(AnchorQuery::GrKey("12345".to_string()), Some("en"))
+        .fetch_by_anchor(
+            AnchorQuery::GrKey("12345".to_string()),
+            Some("en"),
+            RequestPriority::Normal,
+        )
         .await;
 }
 
@@ -206,7 +210,11 @@ async fn test_mc_provider_client_fetch_by_anchor_mapping_rejects_wrong_anchor_ki
     ));
 
     let outcome = client
-        .fetch_by_anchor(AnchorQuery::Isbn13("9780140447934".to_string()), Some("en"))
+        .fetch_by_anchor(
+            AnchorQuery::Isbn13("9780140447934".to_string()),
+            Some("en"),
+            RequestPriority::Normal,
+        )
         .await;
 
     assert!(matches!(outcome, ProviderOutcome::NotFound));

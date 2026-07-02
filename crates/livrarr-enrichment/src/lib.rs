@@ -52,12 +52,15 @@ pub trait EnrichmentService: Send + Sync {
     /// when `Some`, the pipeline consumes that picked candidate's cached discovery
     /// payloads (zero network) before gateway-fetching the rest; `None` = enrich
     /// from the network.
+    /// `priority` (B4) drives the `EnrichmentContext` handed to
+    /// `ProviderQueue::dispatch_enrichment` — independent of `mode`.
     async fn enrich_work(
         &self,
         user_id: UserId,
         work_id: WorkId,
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        priority: RequestPriority,
     ) -> Result<EnrichmentResult, EnrichmentError>;
 
     /// TEMP(pk-tdd): compile-only scaffold — reset work for manual refresh.
@@ -1293,6 +1296,7 @@ where
         work_id: WorkId,
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        priority: RequestPriority,
     ) -> Result<EnrichmentResult, EnrichmentError> {
         let _enrich_span = livrarr_domain::perf::StageTimer::start("enrich", work_id);
         // Step 1: Acquire per-work lock [I-12]
@@ -1420,11 +1424,9 @@ where
         // Step 3: Read merge_generation before dispatch (for CAS baseline)
         let mut generation = self.db.get_merge_generation(user_id, work_id).await?;
 
-        // Step 4: Dispatch to provider queue
-        let context = EnrichmentContext {
-            priority: RequestPriority::Normal,
-            mode,
-        };
+        // Step 4: Dispatch to provider queue. `priority` is the caller's
+        // explicit queue-ordering hint (B4) — it no longer hardcodes Normal.
+        let context = EnrichmentContext { priority, mode };
         let mut scatter_result = self.queue.dispatch_enrichment(&work, context).await?;
 
         // Step 4.5: Append source provider data (Readarr import) if pre-injected.

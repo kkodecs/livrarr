@@ -524,6 +524,7 @@ where
         let mut set: JoinSet<(MetadataProvider, DispatchedOutcome)> = JoinSet::new();
         let language = work.language.clone();
         let dispatch_work_id = work.id;
+        let priority = context.priority;
         for d in &to_dispatch {
             let provider = d.provider;
             let client = d.client.clone();
@@ -554,7 +555,9 @@ where
                         }),
                     );
                 }
-                let outcome = client.fetch_by_anchor(anchor, language.as_deref()).await;
+                let outcome = client
+                    .fetch_by_anchor(anchor, language.as_deref(), priority)
+                    .await;
                 (provider, DispatchedOutcome::Returned(outcome))
             });
         }

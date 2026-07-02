@@ -62,12 +62,15 @@ pub async fn query_audnexus<F: HttpFetcher>(
     title: &str,
     author: &str,
     cache: &AudnexusCache,
+    priority: RequestPriority,
 ) -> Result<Option<AudnexusResult>, ProviderFetchError> {
     let base = base_url.trim_end_matches('/');
 
     // Try by ASIN first.
     if let Some(asin) = asin {
-        if let Some(result) = query_audnexus_by_asin(fetcher, base_url, asin, cache).await? {
+        if let Some(result) =
+            query_audnexus_by_asin(fetcher, base_url, asin, cache, priority).await?
+        {
             return Ok(Some(result));
         }
     }
@@ -78,7 +81,7 @@ pub async fn query_audnexus<F: HttpFetcher>(
         urlencoding(title),
         urlencoding(author),
     );
-    if let Some(result) = cached_fetch(fetcher, &url, cache).await? {
+    if let Some(result) = cached_fetch(fetcher, &url, cache, priority).await? {
         let book = if result.is_array() {
             result.as_array().and_then(|a| a.first()).cloned()
         } else {
@@ -101,10 +104,11 @@ pub async fn query_audnexus_by_asin<F: HttpFetcher>(
     base_url: &str,
     asin: &str,
     cache: &AudnexusCache,
+    priority: RequestPriority,
 ) -> Result<Option<AudnexusResult>, ProviderFetchError> {
     let base = base_url.trim_end_matches('/');
     let url = format!("{base}/books/{asin}");
-    match cached_fetch(fetcher, &url, cache).await? {
+    match cached_fetch(fetcher, &url, cache, priority).await? {
         Some(result) => Ok(Some(parse_audnexus(&result, Some(asin)))),
         None => Ok(None),
     }
@@ -121,6 +125,7 @@ async fn cached_fetch<F: HttpFetcher>(
     fetcher: &F,
     url: &str,
     cache: &AudnexusCache,
+    priority: RequestPriority,
 ) -> Result<Option<serde_json::Value>, ProviderFetchError> {
     let cached_last_modified = {
         let mut guard = cache.0.lock().await;
@@ -142,7 +147,7 @@ async fn cached_fetch<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
 
     let resp = match fetcher.fetch(req).await {
@@ -299,11 +304,16 @@ mod tests {
         );
         let cache = AudnexusCache::new();
 
-        let result =
-            query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B07ABCDEFG", &cache)
-                .await
-                .unwrap()
-                .unwrap();
+        let result = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B07ABCDEFG",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         assert_eq!(result.asin.as_deref(), Some("B07ABCDEFG"));
         let reqs = fetcher.requests();
@@ -333,15 +343,26 @@ mod tests {
         }));
         let cache = AudnexusCache::new();
 
-        let first = query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B07ABCDEFG", &cache)
-            .await
-            .unwrap()
-            .unwrap();
-        let second =
-            query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B07ABCDEFG", &cache)
-                .await
-                .unwrap()
-                .unwrap();
+        let first = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B07ABCDEFG",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let second = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B07ABCDEFG",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         assert_eq!(first.narrators, second.narrators);
         assert_eq!(second.narrators, vec!["N".to_string()]);
@@ -360,9 +381,15 @@ mod tests {
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
         let cache = AudnexusCache::new();
 
-        let result = query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B0MISSING", &cache)
-            .await
-            .unwrap();
+        let result = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0MISSING",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
 
         assert!(result.is_none());
     }
@@ -378,9 +405,15 @@ mod tests {
             crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
         let cache = AudnexusCache::new();
 
-        let result = query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B0RATE", &cache)
-            .await
-            .unwrap();
+        let result = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0RATE",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
 
         assert!(result.is_none());
     }
@@ -392,9 +425,15 @@ mod tests {
         );
         let cache = AudnexusCache::new();
 
-        let err = query_audnexus_by_asin(&fetcher, "https://api.audnex.us", "B0NET", &cache)
-            .await
-            .unwrap_err();
+        let err = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0NET",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
 
         assert!(err.to_string().contains("request failed"));
     }

@@ -1091,6 +1091,9 @@ async fn fetch_gr_html<F: HttpFetcher>(
         max_body_bytes: 5 * 1024 * 1024,
         anti_bot_check: true,
         user_agent: UserAgentProfile::Browser,
+        // Parked (B4 table): this one fn serves BOTH the background series
+        // monitor AND the interactive roster-expand door — stays Normal
+        // rather than picking a value that's wrong for one of the two.
         priority: RequestPriority::Normal,
     };
     let resp = fetcher

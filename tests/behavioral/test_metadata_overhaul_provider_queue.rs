@@ -65,6 +65,10 @@ pub trait ProviderQueueTestHarness: Send + Sync {
     fn call_count(&self, provider: MetadataProvider) -> usize;
 
     fn provider_config(&self, provider: MetadataProvider) -> ProviderQueueConfig;
+
+    /// The `RequestPriority` the stub for `provider` last received via
+    /// `fetch_by_anchor` (B4) — `None` if the provider was never dispatched.
+    fn last_priority(&self, provider: MetadataProvider) -> Option<RequestPriority>;
 }
 
 fn background_context() -> EnrichmentContext {
@@ -1325,6 +1329,55 @@ impl ProviderQueueTestHarness for StubProviderQueueHarness {
             .cloned()
             .unwrap_or_else(|| default_config(provider))
     }
+
+    fn last_priority(&self, provider: MetadataProvider) -> Option<RequestPriority> {
+        self.clients.get(&provider).and_then(|c| c.last_priority())
+    }
 }
 
 provider_queue_contract_tests!(StubProviderQueueHarness);
+
+// =============================================================================
+// B4: dispatch_enrichment threads context.priority to the provider client
+// (packet-b4-priorities.md item 5 — "enrichment dispatch sends context.priority").
+// =============================================================================
+
+#[tokio::test]
+async fn test_provider_queue_dispatch_sends_manual_context_priority_to_client() {
+    let h = <StubProviderQueueHarness as ProviderQueueTestHarness>::setup(
+        ProviderQueueScenario::NominalPopulatedOutcomes,
+    )
+    .await;
+
+    let _ = h
+        .queue()
+        .dispatch_enrichment(h.work(), manual_context())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        h.last_priority(MetadataProvider::Hardcover),
+        Some(RequestPriority::High),
+        "manual_context's High priority must reach the dispatched provider client"
+    );
+}
+
+#[tokio::test]
+async fn test_provider_queue_dispatch_sends_background_context_priority_to_client() {
+    let h = <StubProviderQueueHarness as ProviderQueueTestHarness>::setup(
+        ProviderQueueScenario::NominalPopulatedOutcomes,
+    )
+    .await;
+
+    let _ = h
+        .queue()
+        .dispatch_enrichment(h.work(), background_context())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        h.last_priority(MetadataProvider::Hardcover),
+        Some(RequestPriority::Low),
+        "background_context's Low priority must reach the dispatched provider client"
+    );
+}

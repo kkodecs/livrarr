@@ -262,6 +262,7 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
         work_id: WorkId,
         _mode: EnrichmentMode,
         _candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        _priority: livrarr_domain::RequestPriority,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         self.work_ids.lock().unwrap().push(work_id);

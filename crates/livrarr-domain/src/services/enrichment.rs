@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CoverResolution, DbError, EnrichmentStatus, MetadataProvider, OutcomeClass, Work, WorkId,
+    CoverResolution, DbError, EnrichmentStatus, MetadataProvider, OutcomeClass, RequestPriority,
+    Work, WorkId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -65,12 +66,18 @@ pub enum EnrichmentWorkflowError {
 
 #[trait_variant::make(Send)]
 pub trait EnrichmentWorkflow: Send + Sync {
+    /// `priority` is the queue-ordering hint (B4) for this call's provider
+    /// dispatch — independent of `mode`: a door can request Background mode
+    /// (suppression/budget semantics) while still wanting its scatter to
+    /// queue ahead of a background scan (e.g. the add door: Background mode,
+    /// High priority).
     async fn enrich_work(
         &self,
         user_id: crate::UserId,
         work_id: WorkId,
         mode: EnrichmentMode,
         candidate_id: Option<crate::identity::CandidateId>,
+        priority: RequestPriority,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError>;
     async fn reset_for_manual_refresh(
         &self,

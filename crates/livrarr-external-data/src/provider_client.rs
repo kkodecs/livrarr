@@ -47,15 +47,27 @@ pub enum ProviderClient {
 }
 
 impl ProviderClient {
-    pub async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    /// `priority` is the caller's queue-ordering hint (B4): the identity
+    /// fan-out and other lookup/discovery callers pass their own
+    /// `RequestPriority` through to whatever transport request this ends up
+    /// making. Providers with no live request on this surface (e.g. a
+    /// key-direct path) simply ignore it.
+    pub async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         match self {
-            Self::Stub(s) => s.fetch(work).await,
-            Self::Audnexus(a) => a.fetch(work).await,
-            Self::Hardcover(h) => h.fetch(work).await,
-            Self::OpenLibrary(o) => o.fetch(work).await,
-            Self::Goodreads(g) => g.fetch(work).await,
-            Self::GoogleBooks(g) => g.fetch(work).await,
-            Self::Audible(a) => a.fetch(work).await,
+            Self::Stub(s) => {
+                *s.last_priority.lock().unwrap() = Some(priority);
+                s.fetch(work).await
+            }
+            Self::Audnexus(a) => a.fetch(work, priority).await,
+            Self::Hardcover(h) => h.fetch(work, priority).await,
+            Self::OpenLibrary(o) => o.fetch(work, priority).await,
+            Self::Goodreads(g) => g.fetch(work, priority).await,
+            Self::GoogleBooks(g) => g.fetch(work, priority).await,
+            Self::Audible(a) => a.fetch(work, priority).await,
         }
     }
 
@@ -71,6 +83,7 @@ impl ProviderClient {
         &self,
         query: AnchorQuery,
         language: Option<&str>,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let provider = self.provider();
         if !anchor_kind_accepted(provider, &query) {
@@ -84,15 +97,20 @@ impl ProviderClient {
         let started_at = Utc::now();
         let t0 = std::time::Instant::now();
         let outcome = match (self, &query) {
-            (Self::Stub(s), _) => s.fire().await,
-            (Self::Audnexus(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin).await,
-            (Self::Hardcover(h), q) => h.fetch_by_anchor_query(q).await,
-            (Self::OpenLibrary(o), q) => o.fetch_by_anchor_query(q).await,
-            (Self::Goodreads(g), AnchorQuery::GrKey(key)) => {
-                g.fetch_detail_by_key(key, language).await
+            (Self::Stub(s), _) => {
+                *s.last_priority.lock().unwrap() = Some(priority);
+                s.fire().await
             }
-            (Self::GoogleBooks(g), AnchorQuery::Isbn13(isbn)) => g.fetch_by_isbn(isbn).await,
-            (Self::Audible(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin).await,
+            (Self::Audnexus(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin, priority).await,
+            (Self::Hardcover(h), q) => h.fetch_by_anchor_query(q, priority).await,
+            (Self::OpenLibrary(o), q) => o.fetch_by_anchor_query(q, priority).await,
+            (Self::Goodreads(g), AnchorQuery::GrKey(key)) => {
+                g.fetch_detail_by_key(key, language, priority).await
+            }
+            (Self::GoogleBooks(g), AnchorQuery::Isbn13(isbn)) => {
+                g.fetch_by_isbn(isbn, priority).await
+            }
+            (Self::Audible(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin, priority).await,
             // Unreachable: the acceptance gate above filtered every other pairing.
             _ => return ProviderOutcome::NotFound,
         };
@@ -253,6 +271,10 @@ pub struct StubProviderClient {
     call_count: Arc<AtomicUsize>,
     /// Optional fetch delay so tests can drive the resolver's per-call timeout.
     delay: Option<std::time::Duration>,
+    /// Last `RequestPriority` this stub received via either `fetch` (the
+    /// identity fan-out) or `fetch_by_anchor` (the enrichment queue) — B4.
+    /// `None` until a call happens.
+    last_priority: Arc<Mutex<Option<RequestPriority>>>,
 }
 
 impl StubProviderClient {
@@ -263,6 +285,7 @@ impl StubProviderClient {
             panic_on_call: false,
             call_count: Arc::new(AtomicUsize::new(0)),
             delay: None,
+            last_priority: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -274,6 +297,7 @@ impl StubProviderClient {
             panic_on_call: true,
             call_count: Arc::new(AtomicUsize::new(0)),
             delay: None,
+            last_priority: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -286,6 +310,13 @@ impl StubProviderClient {
 
     pub fn call_count(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
+    }
+
+    /// The `RequestPriority` the most recent `fetch`/`fetch_by_anchor` call
+    /// carried (B4) — lets a test assert a caller's priority actually
+    /// reached the provider client, not just that a call happened.
+    pub fn last_priority(&self) -> Option<RequestPriority> {
+        *self.last_priority.lock().unwrap()
     }
 
     /// Shared scripted-call body for both fetch surfaces: counts the call,
@@ -357,7 +388,11 @@ impl AudnexusClient {
         self
     }
 
-    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         let result = query_audnexus(
             &self.fetcher,
             &self.base_url,
@@ -365,6 +400,7 @@ impl AudnexusClient {
             &work.title,
             &work.author_name,
             &self.cache,
+            priority,
         )
         .await;
 
@@ -382,8 +418,14 @@ impl AudnexusClient {
     }
 
     /// Anchor-only fetch (REQ-006): ASIN lookup with no title/author fallback.
-    async fn fetch_by_asin(&self, asin: &str) -> ProviderOutcome<NormalizedWorkDetail> {
-        match query_audnexus_by_asin(&self.fetcher, &self.base_url, asin, &self.cache).await {
+    async fn fetch_by_asin(
+        &self,
+        asin: &str,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        match query_audnexus_by_asin(&self.fetcher, &self.base_url, asin, &self.cache, priority)
+            .await
+        {
             Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
             Ok(None) => ProviderOutcome::NotFound,
             Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
@@ -502,6 +544,7 @@ impl HardcoverClient {
     async fn fetch_by_anchor_query(
         &self,
         query: &AnchorQuery,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let cfg = self.live_config.snapshot();
         if !cfg.hardcover_enabled {
@@ -528,10 +571,11 @@ impl HardcoverClient {
                     &normalized,
                     &token,
                     cfg.as_ref(),
+                    priority,
                 )
                 .await
                 {
-                    Ok(Some(hc)) => self.build_success(hc, &token).await,
+                    Ok(Some(hc)) => self.build_success(hc, &token, priority).await,
                     Ok(None) => ProviderOutcome::NotFound,
                     Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
                         circuit_open_outcome(retry_after)
@@ -555,7 +599,11 @@ impl HardcoverClient {
         }
     }
 
-    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         let cfg = self.live_config.snapshot();
         if !cfg.hardcover_enabled {
             return ProviderOutcome::NotConfigured;
@@ -582,11 +630,14 @@ impl HardcoverClient {
                 &normalized,
                 &token,
                 cfg.as_ref(),
+                priority,
             )
             .await
             {
                 Ok(Some(hc)) => {
-                    if let ProviderOutcome::Success(mut p) = self.build_success(hc, &token).await {
+                    if let ProviderOutcome::Success(mut p) =
+                        self.build_success(hc, &token, priority).await
+                    {
                         p.isbn_13 = Some(normalized.clone());
                         return ProviderOutcome::Success(p);
                     }
@@ -620,11 +671,12 @@ impl HardcoverClient {
             &work.author_name,
             &token,
             cfg.as_ref(),
+            priority,
         )
         .await;
 
         match result {
-            Ok(hc) => self.build_success(hc, &token).await,
+            Ok(hc) => self.build_success(hc, &token, priority).await,
             Err(
                 crate::hardcover::HardcoverError::NoResults
                 | crate::hardcover::HardcoverError::NoMatch(_),
@@ -643,6 +695,7 @@ impl HardcoverClient {
         &self,
         hc: crate::hardcover::HardcoverResult,
         token: &str,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let year = hc
             .publish_date
@@ -652,8 +705,14 @@ impl HardcoverClient {
 
         let mut isbn_13 = hc.isbn_13.clone();
         if let Some(ref hc_id) = hc.hc_key {
-            if let Ok(Some(better_isbn)) =
-                crate::hardcover::fetch_hardcover_editions(&self.fetcher, hc_id, token, "en").await
+            if let Ok(Some(better_isbn)) = crate::hardcover::fetch_hardcover_editions(
+                &self.fetcher,
+                hc_id,
+                token,
+                "en",
+                priority,
+            )
+            .await
             {
                 isbn_13 = Some(better_isbn);
             }
@@ -729,13 +788,14 @@ impl OpenLibraryClient {
     async fn fetch_by_anchor_query(
         &self,
         query: &AnchorQuery,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         match query {
-            AnchorQuery::OlKey(key) => self.detail_by_key(key).await,
+            AnchorQuery::OlKey(key) => self.detail_by_key(key, priority).await,
             AnchorQuery::Isbn13(isbn) => {
                 let normalized = livrarr_domain::normalize_isbn(isbn);
-                match self.isbn_lookup(&normalized).await {
-                    Ok(Some(ol_work_key)) => self.detail_by_key(&ol_work_key).await,
+                match self.isbn_lookup(&normalized, priority).await {
+                    Ok(Some(ol_work_key)) => self.detail_by_key(&ol_work_key, priority).await,
                     Ok(None) => ProviderOutcome::NotFound,
                     Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
                         circuit_open_outcome(retry_after)
@@ -757,8 +817,12 @@ impl OpenLibraryClient {
     /// breaker-open pause is the one error kind that must NOT collapse into
     /// NotFound (R-11: NotFound is phase-2 terminal — persisting it would turn
     /// a temporary pause into a permanent miss).
-    async fn detail_by_key(&self, ol_key: &str) -> ProviderOutcome<NormalizedWorkDetail> {
-        match query_ol_detail(&self.fetcher, ol_key).await {
+    async fn detail_by_key(
+        &self,
+        ol_key: &str,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        match query_ol_detail(&self.fetcher, ol_key, priority).await {
             Ok(detail) => ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail))),
             Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
                 circuit_open_outcome(retry_after)
@@ -770,21 +834,27 @@ impl OpenLibraryClient {
         }
     }
 
-    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         // Tier 1: ISBN lookup
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
             let normalized = livrarr_domain::normalize_isbn(isbn);
-            match self.isbn_lookup(&normalized).await {
-                Ok(Some(ol_work_key)) => match query_ol_detail(&self.fetcher, &ol_work_key).await {
-                    Ok(detail) => {
-                        let mut payload = self.build_payload(&ol_work_key, detail);
-                        payload.isbn_13 = Some(normalized.clone());
-                        return ProviderOutcome::Success(Box::new(payload));
+            match self.isbn_lookup(&normalized, priority).await {
+                Ok(Some(ol_work_key)) => {
+                    match query_ol_detail(&self.fetcher, &ol_work_key, priority).await {
+                        Ok(detail) => {
+                            let mut payload = self.build_payload(&ol_work_key, detail);
+                            payload.isbn_13 = Some(normalized.clone());
+                            return ProviderOutcome::Success(Box::new(payload));
+                        }
+                        Err(e) => {
+                            tracing::debug!(isbn = %normalized, error = %e, "OL ISBN detail miss");
+                        }
                     }
-                    Err(e) => {
-                        tracing::debug!(isbn = %normalized, error = %e, "OL ISBN detail miss");
-                    }
-                },
+                }
                 Ok(None) => {
                     tracing::debug!(isbn = %normalized, "OL ISBN lookup: no work found");
                 }
@@ -796,7 +866,7 @@ impl OpenLibraryClient {
 
         // Tier 2: ol_key direct lookup (existing behavior)
         if let Some(ol_key) = work.ol_key.as_deref().filter(|s| !s.is_empty()) {
-            match query_ol_detail(&self.fetcher, ol_key).await {
+            match query_ol_detail(&self.fetcher, ol_key, priority).await {
                 Ok(detail) => {
                     return ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail)));
                 }
@@ -807,7 +877,7 @@ impl OpenLibraryClient {
         }
 
         // Tier 3: title+author search fallback
-        match self.title_author_search(work).await {
+        match self.title_author_search(work, priority).await {
             Ok(Some(payload)) => ProviderOutcome::Success(Box::new(payload)),
             Ok(None) => ProviderOutcome::NotFound,
             Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
@@ -841,13 +911,15 @@ impl OpenLibraryClient {
     async fn isbn_lookup(
         &self,
         isbn: &str,
+        priority: RequestPriority,
     ) -> Result<Option<String>, crate::types::ProviderFetchError> {
-        crate::openlibrary::isbn_lookup(&self.fetcher, isbn).await
+        crate::openlibrary::isbn_lookup(&self.fetcher, isbn, priority).await
     }
 
     async fn title_author_search(
         &self,
         work: &Work,
+        priority: RequestPriority,
     ) -> Result<Option<NormalizedWorkDetail>, crate::types::ProviderFetchError> {
         let query = format!("{} {}", work.title, work.author_name);
         let url = format!(
@@ -865,7 +937,7 @@ impl OpenLibraryClient {
             max_body_bytes: 2 * 1024 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
-            priority: RequestPriority::Normal,
+            priority,
         };
         let resp = match self.fetcher.fetch(req).await {
             Ok(r) => r,
@@ -939,7 +1011,7 @@ impl OpenLibraryClient {
             None => return Ok(None),
         };
 
-        match query_ol_detail(&self.fetcher, &ol_key).await {
+        match query_ol_detail(&self.fetcher, &ol_key, priority).await {
             Ok(detail) => Ok(Some(self.build_payload(&ol_key, detail))),
             Err(_) => Ok(None),
         }
@@ -1068,9 +1140,11 @@ impl GoodreadsClient {
         &self,
         gr_key: &str,
         language: Option<&str>,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let detail_url = goodreads::detail_url_for_gr_key(&self.base_url, gr_key);
-        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url).await {
+        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url, priority).await
+        {
             Ok(h) => h,
             Err(err) => return self.map_fetch_err(err),
         };
@@ -1143,9 +1217,13 @@ impl GoodreadsClient {
         }
     }
 
-    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         let had_gr_key = work.gr_key.as_deref().is_some_and(|k| !k.is_empty());
-        let resolved = match self.resolve_detail_url(work).await {
+        let resolved = match self.resolve_detail_url(work, priority).await {
             Ok(Some(resolved)) => resolved,
             Ok(None) => return ProviderOutcome::NotFound,
             Err(err) => return self.map_fetch_err(err),
@@ -1159,12 +1237,13 @@ impl GoodreadsClient {
         // Direct parse path. On Parse failure, optionally fall through to
         // LLM extraction if configured (typical for foreign-language pages
         // where JSON-LD / regex don't match the locale-specific HTML).
-        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url).await {
+        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url, priority).await
+        {
             Ok(h) => h,
             Err(err) => {
                 if !had_gr_key {
                     if let Some(payload) = self
-                        .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
+                        .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate, priority)
                         .await
                     {
                         tracing::info!(
@@ -1211,7 +1290,7 @@ impl GoodreadsClient {
         // whatever GR-sourced candidate text can vouch for the key.
         if !had_gr_key {
             if let Some(payload) = self
-                .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
+                .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate, priority)
                 .await
             {
                 tracing::info!(
@@ -1239,12 +1318,13 @@ impl GoodreadsClient {
         work: &Work,
         resolved_gr_key: &Option<String>,
         candidate: &Option<GrCandidateText>,
+        priority: RequestPriority,
     ) -> Option<NormalizedWorkDetail> {
         let key = resolved_gr_key.as_ref()?;
 
         let confirmed = match candidate {
             Some(c) => Some(c.clone()),
-            None => self.confirm_key_via_search(work, key).await,
+            None => self.confirm_key_via_search(work, key, priority).await,
         };
 
         let cover_url = confirmed.as_ref().and_then(|c| c.cover());
@@ -1263,12 +1343,18 @@ impl GoodreadsClient {
 
     /// One search round-trip to vouch for an LLM-direct key: returns the
     /// matching hit's text only when the hit's own gr_key equals the key.
-    async fn confirm_key_via_search(&self, work: &Work, key: &str) -> Option<GrCandidateText> {
+    async fn confirm_key_via_search(
+        &self,
+        work: &Work,
+        key: &str,
+        priority: RequestPriority,
+    ) -> Option<GrCandidateText> {
         let hits = goodreads::search_goodreads(
             &self.fetcher,
             &self.base_url,
             &work.title,
             &work.author_name,
+            priority,
         )
         .await
         .ok()?;
@@ -1284,6 +1370,7 @@ impl GoodreadsClient {
     async fn resolve_detail_url(
         &self,
         work: &Work,
+        priority: RequestPriority,
     ) -> Result<Option<ResolvedGrDetail>, GoodreadsFetchError> {
         // 1. work.gr_key — canonical GR identity. No candidate text: the key
         // is already established, nothing needs vouching.
@@ -1307,6 +1394,7 @@ impl GoodreadsClient {
             &self.base_url,
             title,
             author,
+            priority,
         )
         .await
         {
@@ -1325,6 +1413,7 @@ impl GoodreadsClient {
                     &self.base_url,
                     &ascii_title,
                     author,
+                    priority,
                 )
                 .await
                 {

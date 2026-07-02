@@ -463,3 +463,69 @@ fn test_wcc_resolver_ac_024_build_transient_work_from_seed_carries_identifiers_w
     assert_eq!(transient.gr_key.as_deref(), Some("234225"));
     assert_eq!(transient.hc_key.as_deref(), Some("HC-DUNE"));
 }
+
+// =============================================================================
+// B4: the resolver's tier→priority mapping (packet-b4-priorities.md item 3 —
+// Interactive->High, Background->Low, Bulk->Low), observed via the stub
+// client's recorded `RequestPriority` (item 5 — "resolver maps Interactive->High").
+// =============================================================================
+
+#[tokio::test]
+async fn test_wcc_resolver_interactive_tier_maps_to_high_priority() {
+    let hc = StubProviderClient::new(
+        MetadataProvider::Hardcover,
+        success(detail("Dune", "Frank Herbert")),
+    );
+    let resolver = make_resolver(vec![hc.clone()], full_config());
+
+    resolver
+        .resolve(USER_ID, &isbn_seed(), LatencyTier::Interactive)
+        .await
+        .expect("resolve should succeed");
+
+    assert_eq!(
+        hc.last_priority(),
+        Some(livrarr_domain::RequestPriority::High),
+        "LatencyTier::Interactive must map to RequestPriority::High"
+    );
+}
+
+#[tokio::test]
+async fn test_wcc_resolver_background_tier_maps_to_low_priority() {
+    let hc = StubProviderClient::new(
+        MetadataProvider::Hardcover,
+        success(detail("Dune", "Frank Herbert")),
+    );
+    let resolver = make_resolver(vec![hc.clone()], full_config());
+
+    resolver
+        .resolve(USER_ID, &isbn_seed(), LatencyTier::Background)
+        .await
+        .expect("resolve should succeed");
+
+    assert_eq!(
+        hc.last_priority(),
+        Some(livrarr_domain::RequestPriority::Low),
+        "LatencyTier::Background must map to RequestPriority::Low"
+    );
+}
+
+#[tokio::test]
+async fn test_wcc_resolver_bulk_tier_maps_to_low_priority() {
+    let hc = StubProviderClient::new(
+        MetadataProvider::Hardcover,
+        success(detail("Dune", "Frank Herbert")),
+    );
+    let resolver = make_resolver(vec![hc.clone()], full_config());
+
+    resolver
+        .resolve(USER_ID, &isbn_seed(), LatencyTier::Bulk)
+        .await
+        .expect("resolve should succeed");
+
+    assert_eq!(
+        hc.last_priority(),
+        Some(livrarr_domain::RequestPriority::Low),
+        "LatencyTier::Bulk must map to RequestPriority::Low"
+    );
+}

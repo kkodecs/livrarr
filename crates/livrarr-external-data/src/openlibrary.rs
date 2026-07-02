@@ -31,6 +31,7 @@ pub struct OlDetailResult {
 pub async fn query_ol_detail<F: HttpFetcher>(
     fetcher: &F,
     ol_key: &str,
+    priority: RequestPriority,
 ) -> Result<OlDetailResult, ProviderFetchError> {
     let key = ol_key.trim_start_matches("/works/").trim_start_matches('/');
 
@@ -45,7 +46,7 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
     let resp = match fetcher.fetch(req).await {
         Ok(r) => r,
@@ -100,7 +101,7 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
     if let Ok(ed_resp) = fetcher.fetch(editions_req).await {
         if let Ok(ed_data) = serde_json::from_slice::<serde_json::Value>(&ed_resp.body) {
@@ -136,6 +137,7 @@ pub async fn query_ol_detail<F: HttpFetcher>(
 pub async fn isbn_lookup<F: HttpFetcher>(
     fetcher: &F,
     isbn: &str,
+    priority: RequestPriority,
 ) -> Result<Option<String>, ProviderFetchError> {
     let url = format!("https://openlibrary.org/isbn/{isbn}.json");
     let req = FetchRequest {
@@ -148,7 +150,7 @@ pub async fn isbn_lookup<F: HttpFetcher>(
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
     let resp = match fetcher.fetch(req).await {
         Ok(r) => r,
@@ -327,7 +329,9 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        let result = query_ol_detail(&fetcher, "OL123W").await.unwrap();
+        let result = query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal)
+            .await
+            .unwrap();
 
         assert_eq!(result.title.as_deref(), Some("Test Work"));
         assert_eq!(result.description.as_deref(), Some("A description"));
@@ -363,7 +367,9 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        query_ol_detail(&fetcher, "/works/OL42W").await.unwrap();
+        query_ol_detail(&fetcher, "/works/OL42W", RequestPriority::Normal)
+            .await
+            .unwrap();
 
         let reqs = fetcher.requests();
         assert_eq!(reqs[0].url, "https://openlibrary.org/works/OL42W.json");
@@ -380,7 +386,9 @@ mod tests {
     async fn query_ol_detail_maps_http_404_to_error() {
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
 
-        let err = query_ol_detail(&fetcher, "OL999W").await.unwrap_err();
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal)
+            .await
+            .unwrap_err();
 
         assert_eq!(err.to_string(), "HTTP 404");
     }
@@ -391,7 +399,9 @@ mod tests {
             livrarr_domain::services::FetchError::Timeout(std::time::Duration::from_secs(30)),
         );
 
-        let err = query_ol_detail(&fetcher, "OL999W").await.unwrap_err();
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal)
+            .await
+            .unwrap_err();
 
         assert!(err.to_string().contains("request failed"));
     }
@@ -408,7 +418,9 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        let key = isbn_lookup(&fetcher, "9781234567890").await.unwrap();
+        let key = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap();
 
         assert_eq!(key.as_deref(), Some("OL42W"));
         let reqs = fetcher.requests();
@@ -425,7 +437,9 @@ mod tests {
     async fn isbn_lookup_maps_http_404_to_ok_none() {
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
 
-        let key = isbn_lookup(&fetcher, "9781234567890").await.unwrap();
+        let key = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap();
 
         assert_eq!(key, None);
     }
@@ -442,7 +456,9 @@ mod tests {
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
 
-        let key = isbn_lookup(&fetcher, "9781234567890").await.unwrap();
+        let key = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap();
 
         assert_eq!(key, None);
     }
@@ -453,7 +469,9 @@ mod tests {
             FetchError::Connection("refused".to_string()),
         );
 
-        let err = isbn_lookup(&fetcher, "9781234567890").await.unwrap_err();
+        let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap_err();
 
         assert!(err.to_string().contains("OL ISBN fetch failed"));
     }

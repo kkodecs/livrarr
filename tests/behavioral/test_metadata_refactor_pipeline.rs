@@ -9,7 +9,7 @@ use livrarr_db::{
 };
 use livrarr_domain::{
     identity::CandidateId, normalize_for_matching, EnrichmentStatus, MetadataProvider,
-    OutcomeClass, UserId, UserRole, Work, WorkId,
+    OutcomeClass, RequestPriority, UserId, UserRole, Work, WorkId,
 };
 use livrarr_external_data::{
     transport_cache::TransportCache, NormalizedWorkDetail, ProviderOutcome,
@@ -270,7 +270,13 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
     let service = service(db.clone(), queue, cache.clone());
 
     service
-        .enrich_work(user_id, add_box_work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            add_box_work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("network path should enrich");
 
@@ -290,6 +296,7 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
             author_page_work.id,
             EnrichmentMode::Manual,
             Some(CandidateId("cached-candidate-with-cover".to_string())),
+            RequestPriority::Normal,
         )
         .await
         .expect("candidate reuse path should enrich without a second network dispatch");
@@ -330,7 +337,13 @@ async fn failed_enrichment_sets_failed_and_queue_membership_is_transient() {
     );
 
     let result = service
-        .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("failed provider run should not block the add");
 
@@ -373,7 +386,13 @@ async fn unconfigured_provider_is_skipped_remaining_providers_save_the_work() {
     );
 
     let result = service
-        .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("unconfigured provider must not block the add");
 
@@ -410,7 +429,13 @@ async fn all_providers_no_usable_data_saves_seed_and_lands_thin_or_failed() {
     );
 
     let result = service
-        .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("empty provider results must not block the add");
 
@@ -444,7 +469,13 @@ async fn one_empty_success_and_rest_errors_lands_thin_not_failed() {
     );
 
     let result = service
-        .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("mixed empty-success plus errors should complete");
 
