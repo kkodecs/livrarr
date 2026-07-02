@@ -926,8 +926,11 @@ impl WorkDb for SqliteDb {
             // REQ-007: no anchor columns (hc_key/gr_key/ol_key/isbn_13/asin)
             // in this UPDATE — anchors move exclusively via the identity
             // track. REQ-009: None/empty cover_url and language never clobber
-            // populated values (COALESCE + empty-filtered binds).
-            sqlx::query(
+            // populated values (COALESCE + empty-filtered binds). The WHERE
+            // clause also requires merge_generation to still match the value
+            // read above; a concurrent writer that already committed makes
+            // this UPDATE affect zero rows.
+            let result = sqlx::query(
                 "UPDATE works SET \
                  title = COALESCE(?, title), subtitle = ?, original_title = ?, \
                  author_name = COALESCE(?, author_name), \
@@ -941,7 +944,7 @@ impl WorkDb for SqliteDb {
                  cover_url = COALESCE(?, cover_url), \
                  enrichment_source = ?, enrichment_status = ?, enriched_at = ?, \
                  merge_generation = merge_generation + 1 \
-                 WHERE id = ? AND user_id = ?",
+                 WHERE id = ? AND user_id = ? AND merge_generation = ?",
             )
             .bind(u.title.as_deref())
             .bind(u.subtitle.as_deref())
@@ -972,22 +975,32 @@ impl WorkDb for SqliteDb {
             .bind(&now)
             .bind(req.work_id)
             .bind(req.user_id)
+            .bind(req.expected_merge_generation)
             .execute(&mut *tx)
             .await
             .map_err(map_db_err)?;
+
+            if result.rows_affected() == 0 {
+                return Ok(ApplyMergeOutcome::Superseded);
+            }
         } else {
             // Status-only path (e.g. Conflict).
-            sqlx::query(
+            let result = sqlx::query(
                 "UPDATE works SET enrichment_status = ?, \
                  merge_generation = merge_generation + 1 \
-                 WHERE id = ? AND user_id = ?",
+                 WHERE id = ? AND user_id = ? AND merge_generation = ?",
             )
             .bind(status_str)
             .bind(req.work_id)
             .bind(req.user_id)
+            .bind(req.expected_merge_generation)
             .execute(&mut *tx)
             .await
             .map_err(map_db_err)?;
+
+            if result.rows_affected() == 0 {
+                return Ok(ApplyMergeOutcome::Superseded);
+            }
         }
 
         // Write provenance upserts.
