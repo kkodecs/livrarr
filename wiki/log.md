@@ -236,3 +236,27 @@ Processed all 17 specs chronologically (v2 through consolidation), 4 policies, c
 - Ingested domain knowledge from high-level build artifact review
 - 2026-06-10: insight 49 added — speed baseline + serial-scatter finding, a6 release gate (B + parallelization), F1 live-confirmation + revert. Sprint A closed in ROADMAP.
 - 2026-06-10: insight 16 corrected (metadata_source is a dead column; works.language drives foreign routing) + insight 50 added (Sprint B evidence round: F1 root cause = wrong-book adoption, anchors triple-stored, file logging alive / stale livrarr.txt pointer, no 24h cache). Source: spec-metadata-correctness.md §0b.
+
+## 2026-07-02 — Phase 3 foundation build complete (overnight session)
+Rewrote insight 30: the "rate limiter must reject" rule described the enrichment
+TokenBucket, deleted in Phase 3 stage C. Replaced with the outbound-queue transport
+architecture (pacing/cap/breaker/priority at livrarr-http, R-11 pause semantics,
+reporter split). Insight 49's description of TokenBucket+Semaphore in
+dispatch_enrichment is now historical — the scatter still uses JoinSet but transport
+control lives at the outbound queue. Stages B0..C at commits 19af4d5, 7e76dec,
+556e327, f03b537, 1657d26, f557e07, 97963cf; every stage dual-family reviewed (PASS).
+
+## 2026-07-02 — Phase 4 (data completeness + convergence) built + dual-family reviewed
+All five units built on 97963cf, orchestrator-gate-verified (1094 tests, 10 new),
+Gemini+Codex PASS across 3 review batches, 0 findings; work UNCOMMITTED pending PO go.
+Units: dead `pacing_queue` module deleted (submit was `todo!()`, zero production
+callers); M-013 empty-list guard at extract time (`non_empty_vec` — HC/GB/Readarr all
+emitted `Some(vec![])`, which won the priority walk and ERASED stored genres via the
+un-COALESCEd `genres = ?` bind); M-012 GR cover gate moved into `merge()` (was
+network-path-only; the cached-reuse path also stamped every payload Success→Validated
+trust, amplifying the miss); M-014 `merge_generation` predicate + rows_affected check
+on both `apply_enrichment_merge` UPDATEs; M-017 `converge_outcome` pure fn (Completed
+now requires zero chaseable anchors) + job error-arm backoff. Insights 56-58 added
+(merge chokepoint policies; Completed contract; GR-breaker test flake).
+`livrarr-domain/services/pacing.rs` (PacingLane/ProviderCallOutcome) deliberately left
+— PO decision pending. Packet + unit ledger: `build/plans/packet-phase4.md`.
