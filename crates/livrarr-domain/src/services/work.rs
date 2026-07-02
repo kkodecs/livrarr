@@ -265,6 +265,16 @@ pub enum ConvergeOutcome {
     Terminal,
 }
 
+/// Surface that triggered a [`WorkService::refresh`] call. `Interactive` — a
+/// person is watching (existing behavior). `Bulk` — an unattended sweep;
+/// provider work rides the outbound queue at Low priority with background
+/// identity semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshSurface {
+    Interactive,
+    Bulk,
+}
+
 #[trait_variant::make(Send)]
 pub trait WorkService: Send + Sync {
     async fn add(
@@ -318,6 +328,7 @@ pub trait WorkService: Send + Sync {
         &self,
         user_id: UserId,
         work_id: WorkId,
+        surface: RefreshSurface,
     ) -> Result<RefreshWorkResult, WorkServiceError>;
     /// User-triggered bulk recovery (REQ-011 / PO §7): sweep every "incomplete"
     /// work for the user — Failed, Unenriched, or identity-Pending — and re-run

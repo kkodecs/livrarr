@@ -168,6 +168,7 @@ impl WorkService for StubWorkService {
         &self,
         _user_id: UserId,
         _work_id: WorkId,
+        _surface: RefreshSurface,
     ) -> Result<RefreshWorkResult, WorkServiceError> {
         Ok(RefreshWorkResult {
             work: Work::default(),

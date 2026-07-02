@@ -1364,6 +1364,7 @@ where
         &self,
         user_id: UserId,
         work_id: WorkId,
+        surface: RefreshSurface,
     ) -> Result<RefreshWorkResult, WorkServiceError> {
         let work = self.get(user_id, work_id).await?;
         let _refresh_span = livrarr_domain::perf::StageTimer::start("refresh_total", work_id);
@@ -1410,7 +1411,12 @@ where
                     &self.db,
                     user_id,
                     &work,
-                    livrarr_domain::identity::IdentityMode::Interactive,
+                    match surface {
+                        RefreshSurface::Interactive => {
+                            livrarr_domain::identity::IdentityMode::Interactive
+                        }
+                        RefreshSurface::Bulk => livrarr_domain::identity::IdentityMode::Background,
+                    },
                     livrarr_domain::identity::ConflictSource::Refresh,
                 )
                 .await
@@ -1442,7 +1448,10 @@ where
                 None,
                 EnrichmentMode::Manual,
                 None,
-                RequestPriority::Normal,
+                match surface {
+                    RefreshSurface::Interactive => RequestPriority::Normal,
+                    RefreshSurface::Bulk => RequestPriority::Low,
+                },
             )
             .await;
 

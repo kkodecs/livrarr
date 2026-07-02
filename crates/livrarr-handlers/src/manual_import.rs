@@ -42,7 +42,7 @@ use crate::middleware::RequireAdmin;
 use crate::ApiError;
 use livrarr_domain::services::{
     AppConfigService, AuthorService, ImportFileResult, ImportService, ImportSingleFileRequest,
-    ManualImportService, MatchingService, WorkService,
+    ManualImportService, MatchingService, RefreshSurface, WorkService,
 };
 use livrarr_domain::{classify_file, MediaType};
 
@@ -871,7 +871,10 @@ pub async fn import<S: ManualImportHandlerContext>(
         let s = state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let _ = s.work_service().refresh(user_id, work_id).await;
+            let _ = s
+                .work_service()
+                .refresh(user_id, work_id, RefreshSurface::Interactive)
+                .await;
         });
     }
 

@@ -20,7 +20,7 @@ use crate::{
 use livrarr_domain::identity::{AnchorConfidence, AnchorSetter, AnchorType};
 use livrarr_domain::services::{
     AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
-    SeriesQueryService, WorkIdentityRepository, WorkService, WorkServiceError,
+    RefreshSurface, SeriesQueryService, WorkIdentityRepository, WorkService, WorkServiceError,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -261,7 +261,10 @@ pub async fn add<
         let wid = result.work.id;
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let _ = s.work_service().refresh(uid, wid).await;
+            let _ = s
+                .work_service()
+                .refresh(uid, wid, RefreshSurface::Interactive)
+                .await;
         });
     }
 
@@ -581,7 +584,10 @@ pub async fn refresh<S: HasWorkService>(
 ) -> Result<Json<RefreshWorkResponse>, ApiError> {
     // WorkService::refresh() runs the unified enrichment pipeline:
     // provider dispatch, merge, cover download, and tag sync are all handled inside.
-    let result = state.work_service().refresh(ctx.user.id, id).await?;
+    let result = state
+        .work_service()
+        .refresh(ctx.user.id, id, RefreshSurface::Interactive)
+        .await?;
 
     Ok(Json(RefreshWorkResponse {
         work: work_to_detail(&result.work),
@@ -645,7 +651,12 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
         for work in &works {
             // refresh() funnels through run_unified, which materializes covers and
             // tags itself — the handler does not re-download or re-tag (REQ-001).
-            match s.work_service().refresh(user_id, work.id).await {
+            // Low: unattended refresh-all sweep (B4 table).
+            match s
+                .work_service()
+                .refresh(user_id, work.id, RefreshSurface::Bulk)
+                .await
+            {
                 Ok(_) => {
                     enriched += 1;
                 }
@@ -953,7 +964,11 @@ pub async fn affirm_pending_anchor<S: HasWorkIdentityRepository + HasWorkService
     // Fire-and-forget the enrichment the newly-confirmed anchor unlocks.
     let s = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = s.work_service().refresh(user_id, work_id).await {
+        if let Err(e) = s
+            .work_service()
+            .refresh(user_id, work_id, RefreshSurface::Interactive)
+            .await
+        {
             tracing::debug!(work_id, "post-affirm background enrichment skipped: {e}");
         }
     });

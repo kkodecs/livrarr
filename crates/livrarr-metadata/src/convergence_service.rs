@@ -9,8 +9,8 @@ use livrarr_db::{
 };
 use livrarr_domain::identity::{AnchorConfidence, AnchorType, ConflictSource, IdentityMode};
 use livrarr_domain::services::{
-    ConvergeOutcome, EnrichmentMode, EnrichmentWorkflow, HttpFetcher, LlmCaller, RetrySummary,
-    WorkService, WorkServiceError,
+    ConvergeOutcome, EnrichmentMode, EnrichmentWorkflow, HttpFetcher, LlmCaller, RefreshSurface,
+    RetrySummary, WorkService, WorkServiceError,
 };
 use livrarr_domain::{EnrichmentStatus, IdentityStatus, UserId, Work, WorkId};
 
@@ -170,24 +170,57 @@ where
         }
     }
 
-    // Step 4 — outcome for the job's pacing.
-    let outcome = if matches!(
+    // Step 4 — outcome for the job's pacing. has_chaseable is recomputed AFTER
+    // Step 3's dead-end bumps so an anchor that just hit the threshold no
+    // longer holds the work open.
+    let dead_ends_after = svc
+        .db
+        .list_anchor_dead_ends(work_id)
+        .await
+        .unwrap_or_default();
+    let chaseable_after =
+        chaseable_anchor_types(&work, &anchors_after, &dead_ends_after, threshold);
+    let outcome = converge_outcome(
         work.identity_status,
+        work.enrichment_status,
+        !chaseable_after.is_empty(),
+    );
+    Ok(outcome)
+}
+
+/// Step-4 outcome mapping for one [`converge_work`] pass.
+///
+/// `Completed` means no selection branch will re-pick the work: identity has
+/// settled (`Confirmed`/`Provisional`), enrichment has settled
+/// (`Enriched`/`Thin`), and no anchor remains chaseable. A terminal identity
+/// (`NeedsReview`/`Conflict`/`NotFound`) always maps to `Terminal`, regardless
+/// of enrichment or chaseable state — that check runs first. Everything else,
+/// including a settled identity/enrichment pair that still has a chaseable
+/// anchor, is `StillIncomplete`: the work remains selectable via
+/// `list_convergence_due`'s chaseable-anchor branch, so the outcome says so
+/// and lets the job back it off one cadence instead of clearing the clock.
+fn converge_outcome(
+    identity: IdentityStatus,
+    enrichment: EnrichmentStatus,
+    has_chaseable: bool,
+) -> ConvergeOutcome {
+    if matches!(
+        identity,
         IdentityStatus::NeedsReview | IdentityStatus::Conflict | IdentityStatus::NotFound
     ) {
         ConvergeOutcome::Terminal
     } else if matches!(
-        work.identity_status,
+        identity,
         IdentityStatus::Confirmed | IdentityStatus::Provisional
     ) && matches!(
-        work.enrichment_status,
+        enrichment,
         EnrichmentStatus::Enriched | EnrichmentStatus::Thin
-    ) {
+    ) && !has_chaseable
+    {
         ConvergeOutcome::Completed
     } else {
         ConvergeOutcome::StillIncomplete
-    };
-    Ok(outcome)
+    }
 }
 
 /// Single-pass sweep over every incomplete work for the user.
@@ -271,7 +304,12 @@ where
 
         // Re-enrich through the one road (refresh -> run_unified ->
         // materialize). A refresh error never blocks the rest of the sweep.
-        if svc.refresh(user_id, work.id).await.is_ok() {
+        // Low: unattended retry-all-incomplete sweep (B4 table).
+        if svc
+            .refresh(user_id, work.id, RefreshSurface::Bulk)
+            .await
+            .is_ok()
+        {
             if let Ok(after) = svc.db.get_work(user_id, work.id).await {
                 let still_incomplete = matches!(
                     after.enrichment_status,
@@ -289,4 +327,93 @@ where
         recovered,
         still_incomplete: total - recovered,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TERMINAL_IDENTITIES: [IdentityStatus; 3] = [
+        IdentityStatus::NeedsReview,
+        IdentityStatus::Conflict,
+        IdentityStatus::NotFound,
+    ];
+    const SETTLED_IDENTITIES: [IdentityStatus; 2] =
+        [IdentityStatus::Confirmed, IdentityStatus::Provisional];
+    const SETTLED_ENRICHMENTS: [EnrichmentStatus; 2] =
+        [EnrichmentStatus::Enriched, EnrichmentStatus::Thin];
+    const ALL_ENRICHMENTS: [EnrichmentStatus; 4] = [
+        EnrichmentStatus::Unenriched,
+        EnrichmentStatus::Enriched,
+        EnrichmentStatus::Thin,
+        EnrichmentStatus::Failed,
+    ];
+
+    #[test]
+    fn terminal_identities_always_map_to_terminal() {
+        for identity in TERMINAL_IDENTITIES {
+            for enrichment in ALL_ENRICHMENTS {
+                for has_chaseable in [false, true] {
+                    assert_eq!(
+                        converge_outcome(identity, enrichment, has_chaseable),
+                        ConvergeOutcome::Terminal,
+                        "identity={identity:?} enrichment={enrichment:?} \
+                         has_chaseable={has_chaseable}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn settled_identity_and_enrichment_with_no_chaseable_anchor_completes() {
+        for identity in SETTLED_IDENTITIES {
+            for enrichment in SETTLED_ENRICHMENTS {
+                assert_eq!(
+                    converge_outcome(identity, enrichment, false),
+                    ConvergeOutcome::Completed,
+                    "identity={identity:?} enrichment={enrichment:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settled_identity_and_enrichment_with_chaseable_anchor_stays_incomplete() {
+        for identity in SETTLED_IDENTITIES {
+            for enrichment in SETTLED_ENRICHMENTS {
+                assert_eq!(
+                    converge_outcome(identity, enrichment, true),
+                    ConvergeOutcome::StillIncomplete,
+                    "identity={identity:?} enrichment={enrichment:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_identity_never_completes_or_terminalizes() {
+        for enrichment in ALL_ENRICHMENTS {
+            for has_chaseable in [false, true] {
+                assert_eq!(
+                    converge_outcome(IdentityStatus::Pending, enrichment, has_chaseable),
+                    ConvergeOutcome::StillIncomplete,
+                    "enrichment={enrichment:?} has_chaseable={has_chaseable}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn confirmed_identity_with_unsettled_enrichment_stays_incomplete() {
+        for enrichment in [EnrichmentStatus::Unenriched, EnrichmentStatus::Failed] {
+            for has_chaseable in [false, true] {
+                assert_eq!(
+                    converge_outcome(IdentityStatus::Confirmed, enrichment, has_chaseable),
+                    ConvergeOutcome::StillIncomplete,
+                    "enrichment={enrichment:?} has_chaseable={has_chaseable}"
+                );
+            }
+        }
+    }
 }

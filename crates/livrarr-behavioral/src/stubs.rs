@@ -213,6 +213,9 @@ pub struct StubEnrichmentWorkflow {
     should_fail: bool,
     call_count: Arc<AtomicUsize>,
     work_ids: Arc<Mutex<Vec<WorkId>>>,
+    /// (mode, priority) of every enrich_work call, in order — lets tests assert
+    /// the dispatch settings a caller threaded through the pipeline.
+    enrich_contexts: Arc<Mutex<Vec<(EnrichmentMode, livrarr_domain::RequestPriority)>>>,
     reset_call_count: Arc<AtomicUsize>,
     reset_work_ids: Arc<Mutex<Vec<WorkId>>>,
 }
@@ -223,6 +226,7 @@ impl StubEnrichmentWorkflow {
             should_fail: false,
             call_count: Arc::new(AtomicUsize::new(0)),
             work_ids: Arc::new(Mutex::new(Vec::new())),
+            enrich_contexts: Arc::new(Mutex::new(Vec::new())),
             reset_call_count: Arc::new(AtomicUsize::new(0)),
             reset_work_ids: Arc::new(Mutex::new(Vec::new())),
         }
@@ -233,9 +237,14 @@ impl StubEnrichmentWorkflow {
             should_fail: true,
             call_count: Arc::new(AtomicUsize::new(0)),
             work_ids: Arc::new(Mutex::new(Vec::new())),
+            enrich_contexts: Arc::new(Mutex::new(Vec::new())),
             reset_call_count: Arc::new(AtomicUsize::new(0)),
             reset_work_ids: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub fn enrich_contexts(&self) -> Vec<(EnrichmentMode, livrarr_domain::RequestPriority)> {
+        self.enrich_contexts.lock().unwrap().clone()
     }
 
     pub fn call_count(&self) -> usize {
@@ -260,12 +269,13 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
         &self,
         _user_id: UserId,
         work_id: WorkId,
-        _mode: EnrichmentMode,
+        mode: EnrichmentMode,
         _candidate_id: Option<livrarr_domain::identity::CandidateId>,
-        _priority: livrarr_domain::RequestPriority,
+        priority: livrarr_domain::RequestPriority,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         self.work_ids.lock().unwrap().push(work_id);
+        self.enrich_contexts.lock().unwrap().push((mode, priority));
 
         if self.should_fail {
             return Err(EnrichmentWorkflowError::Queue("stub failure".into()));

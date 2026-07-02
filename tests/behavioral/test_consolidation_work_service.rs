@@ -725,7 +725,10 @@ async fn test_work_refresh_returns_updated_metadata() {
         .await
         .unwrap();
 
-    let refreshed = svc.refresh(user_id, added.work.id).await.unwrap();
+    let refreshed = svc
+        .refresh(user_id, added.work.id, RefreshSurface::Interactive)
+        .await
+        .unwrap();
     assert_eq!(refreshed.work.id, added.work.id);
     assert_eq!(refreshed.work.user_id, user_id);
 }
@@ -752,9 +755,10 @@ async fn test_work_refresh_concurrent_waits_not_rejects() {
     let svc2 = svc.clone();
     let id = added.work.id;
 
-    let (r1, r2) = tokio::join!(async move { svc1.refresh(user_id, id).await }, async move {
-        svc2.refresh(user_id, id).await
-    });
+    let (r1, r2) = tokio::join!(
+        async move { svc1.refresh(user_id, id, RefreshSurface::Interactive).await },
+        async move { svc2.refresh(user_id, id, RefreshSurface::Interactive).await }
+    );
 
     assert!(r1.is_ok(), "first refresh should succeed");
     assert!(
@@ -781,7 +785,9 @@ async fn test_work_refresh_enrichment_failure_returns_error() {
         .await
         .unwrap();
 
-    let result = svc.refresh(user_id, added.work.id).await;
+    let result = svc
+        .refresh(user_id, added.work.id, RefreshSurface::Interactive)
+        .await;
     assert!(
         result.is_ok(),
         "refresh should return Ok even on enrichment failure (enrichment failure is non-fatal)"

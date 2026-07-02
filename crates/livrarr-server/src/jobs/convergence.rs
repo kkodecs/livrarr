@@ -77,12 +77,30 @@ pub async fn convergence_tick(state: AppState, cancel: CancellationToken) -> Res
                         user_id = user.id,
                         work_id, "convergence: converge_work failed: {e}"
                     );
+                    // Best-effort backoff so a persistently-failing work waits
+                    // one cadence instead of re-selecting every tick.
+                    if let Err(e) = state
+                        .db
+                        .set_next_convergence_at(
+                            user.id,
+                            work_id,
+                            Some(chrono::Utc::now() + cadence),
+                        )
+                        .await
+                    {
+                        warn!(
+                            user_id = user.id,
+                            work_id, "convergence: set_next_convergence_at failed: {e}"
+                        );
+                    }
                     continue;
                 }
             };
 
-            // Completed/Terminal works stop being selected (clear the clock); a
-            // still-incomplete work backs off one cadence before re-selection.
+            // Completed/Terminal works stop being selected (clear the clock) —
+            // Completed means no chaseable anchors remain, so no selection
+            // branch re-picks the work; a still-incomplete work backs off one
+            // cadence before re-selection.
             let next = match outcome {
                 ConvergeOutcome::Completed | ConvergeOutcome::Terminal => None,
                 ConvergeOutcome::StillIncomplete => Some(chrono::Utc::now() + cadence),
