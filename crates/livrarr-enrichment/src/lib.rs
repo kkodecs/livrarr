@@ -20,13 +20,11 @@ use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 pub mod cover_gate;
 pub mod cover_resolution;
 pub mod llm_validator;
-pub mod pacing_queue;
 pub mod provider_queue;
 
 #[cfg(test)]
 mod provider_queue_tracer_tests;
 
-pub use pacing_queue::{LivePacingQueue, PacingQueue};
 pub use provider_queue::{ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder};
 
 /// No-op `LlmCaller` used as the default `L` type parameter for
@@ -395,11 +393,14 @@ impl MergeEngine for DefaultMergeEngine {
         // caller is configured. Language routing (REQ-014/#133) is enforced here at
         // the single chokepoint both the cached and network entry paths funnel through,
         // so a foreign work can never take English OpenLibrary/Hardcover metadata.
-        // `had_providers` is captured BEFORE the policy drop: providers that were
+        // The Goodreads cover gate (REQ-017) is the second chokepoint policy enforced
+        // here, so a mismatched-title GR cover can never win on either entry path.
+        // `had_providers` is captured BEFORE the policy drops: providers that were
         // attempted but all excluded yield a status-only output (REQ-014), while an
         // empty dispatch re-materializes current state as before.
         let had_providers = !inputs.provider_results.is_empty();
         let inputs = drop_language_incompatible_providers(inputs);
+        let inputs = apply_gr_cover_gate(inputs);
         merge_impl(inputs, had_providers)
     }
 
@@ -459,6 +460,60 @@ fn drop_language_incompatible_providers(mut inputs: MergeInput) -> MergeInput {
         inputs
             .provider_results
             .retain(|provider, _| !matches!(provider, P::OpenLibrary | P::Hardcover));
+    }
+    inputs
+}
+
+/// Enforce the Goodreads cover gate (REQ-017): for an English work with an OL
+/// key, a Goodreads payload's cover_url only survives if its title clears the
+/// deterministic Jaccard threshold against the work title. Called once at the
+/// `MergeEngine::merge` chokepoint so the cached-reuse path and the network
+/// path share one cover-gating policy — the same centralization
+/// `drop_language_incompatible_providers` applies to the language-routing
+/// policy (#133).
+fn apply_gr_cover_gate(mut inputs: MergeInput) -> MergeInput {
+    if inputs.current_work.language.as_deref() == Some("en") && inputs.current_work.ol_key.is_some()
+    {
+        if let Some(gr_outcome) = inputs
+            .provider_results
+            .get_mut(&livrarr_domain::MetadataProvider::Goodreads)
+        {
+            if let Some(ref mut payload) = gr_outcome.payload {
+                if payload.cover_url.is_some() {
+                    let anchor = crate::cover_gate::OlAnchor {
+                        title: &inputs.current_work.title,
+                        author_name: &inputs.current_work.author_name,
+                        year: inputs.current_work.year,
+                        isbn: inputs.current_work.isbn_13.as_deref(),
+                        ol_key: inputs.current_work.ol_key.as_deref().unwrap_or(""),
+                    };
+                    let candidate = crate::cover_gate::GrCandidate {
+                        title: payload.title.as_deref().unwrap_or(""),
+                        author_name: payload.author_name.as_deref().unwrap_or(""),
+                        year: payload.year,
+                        isbn: None,
+                        gr_key: payload.gr_key.as_deref().unwrap_or(""),
+                    };
+                    // REQ-005 (zero LLM): the merge is deterministic and LLM-free, so
+                    // a borderline title is a strip either way — the LLM branch here
+                    // is unreachable, hence hardcoded `false`.
+                    let outcome =
+                        crate::cover_gate::evaluate_gr_cover_gate(&anchor, &candidate, false);
+                    match outcome {
+                        crate::cover_gate::CoverGateOutcome::Apply { .. } => {}
+                        other => {
+                            tracing::info!(
+                                work_id = inputs.current_work.id,
+                                ?other,
+                                "cover gate: stripping GR cover_url"
+                            );
+                            payload.cover_url = None;
+                            payload.gr_key = None;
+                        }
+                    }
+                }
+            }
+        }
     }
     inputs
 }
@@ -533,7 +588,7 @@ fn extract_provider_field(field: WorkField, detail: &NormalizedWorkDetail) -> Fi
         WorkField::Year => FieldValue::Int(detail.year),
         WorkField::SeriesName => FieldValue::Str(non_blank(&detail.series_name)),
         WorkField::SeriesPosition => FieldValue::Float(detail.series_position),
-        WorkField::Genres => FieldValue::Strings(detail.genres.clone()),
+        WorkField::Genres => FieldValue::Strings(non_empty_vec(&detail.genres)),
         WorkField::Language => FieldValue::Str(non_blank(&detail.language)),
         WorkField::PageCount => FieldValue::Int(detail.page_count),
         WorkField::DurationSeconds => FieldValue::Int(detail.duration_seconds),
@@ -544,7 +599,7 @@ fn extract_provider_field(field: WorkField, detail: &NormalizedWorkDetail) -> Fi
         WorkField::GrKey => FieldValue::Str(non_blank(&detail.gr_key)),
         WorkField::Isbn13 => FieldValue::Str(non_blank(&detail.isbn_13)),
         WorkField::Asin => FieldValue::Str(non_blank(&detail.asin)),
-        WorkField::Narrator => FieldValue::Strings(detail.narrator.clone()),
+        WorkField::Narrator => FieldValue::Strings(non_empty_vec(&detail.narrator)),
         WorkField::NarrationType => FieldValue::NarrationType(detail.narration_type),
         WorkField::Abridged => FieldValue::Bool(detail.abridged),
         WorkField::Rating => FieldValue::Float(detail.rating),
@@ -588,6 +643,11 @@ fn extract_current_field(field: WorkField, work: &Work) -> FieldValue {
 /// Returns None if the string is None or whitespace-only after trimming.
 fn non_blank(s: &Option<String>) -> Option<String> {
     s.as_ref().filter(|v| !v.trim().is_empty()).cloned()
+}
+
+/// Returns None if the list is None or empty — an empty offer is no offer.
+fn non_empty_vec(v: &Option<Vec<String>>) -> Option<Vec<String>> {
+    v.as_ref().filter(|list| !list.is_empty()).cloned()
 }
 
 /// Returns None if the owned string is empty or whitespace-only.
@@ -1180,7 +1240,6 @@ pub struct EnrichmentServiceImpl<DB, Q, ME> {
     db: Arc<DB>,
     queue: Arc<Q>,
     merge_engine: Arc<ME>,
-    llm_configured: bool,
     /// Per-work lock map [I-12]: serializes concurrent enrichment calls for the same (user_id, work_id).
     locks: Arc<PerWorkLocks>,
     /// Pre-injected source provider data (e.g., from Readarr import).
@@ -1212,12 +1271,13 @@ where
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
 {
-    pub fn new(db: Arc<DB>, queue: Arc<Q>, merge_engine: Arc<ME>, llm_configured: bool) -> Self {
+    /// `_llm_configured` is retained for call-site compatibility — the merge is
+    /// purely deterministic (REQ-005), so the flag has no effect on behavior.
+    pub fn new(db: Arc<DB>, queue: Arc<Q>, merge_engine: Arc<ME>, _llm_configured: bool) -> Self {
         Self {
             db,
             queue,
             merge_engine,
-            llm_configured,
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             source_data_store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             transport_cache: None,
@@ -1568,59 +1628,6 @@ where
         // the pipeline. Per-provider Conflict outcomes are dissent-isolated by
         // the merge (REQ-014); identity_not_found keeps its identity-track
         // sources only.
-
-        // Cover gate: for English works with an OL key, filter GR cover_urls
-        // through the deterministic Jaccard gate before merge (REQ-017).
-        let reconstructed = if current_work.language.as_deref() == Some("en")
-            && current_work.ol_key.is_some()
-        {
-            let mut filtered = reconstructed;
-            if let Some(gr_outcome) = filtered.get_mut(&livrarr_domain::MetadataProvider::Goodreads)
-            {
-                if let Some(ref mut payload) = gr_outcome.payload {
-                    if payload.cover_url.is_some() {
-                        let anchor = crate::cover_gate::OlAnchor {
-                            title: &current_work.title,
-                            author_name: &current_work.author_name,
-                            year: current_work.year,
-                            isbn: current_work.isbn_13.as_deref(),
-                            ol_key: current_work.ol_key.as_deref().unwrap_or(""),
-                        };
-                        let candidate = crate::cover_gate::GrCandidate {
-                            title: payload.title.as_deref().unwrap_or(""),
-                            author_name: payload.author_name.as_deref().unwrap_or(""),
-                            year: payload.year,
-                            isbn: None,
-                            gr_key: payload.gr_key.as_deref().unwrap_or(""),
-                        };
-                        let outcome = crate::cover_gate::evaluate_gr_cover_gate(
-                            &anchor,
-                            &candidate,
-                            self.llm_configured,
-                        );
-                        // REQ-005 (zero LLM): AskLlm borderline cases are treated
-                        // conservatively as a strip — the GR cover is rejected.
-                        // The deterministic Jaccard gate's Apply / non-Apply outcomes
-                        // are unchanged.
-                        match outcome {
-                            crate::cover_gate::CoverGateOutcome::Apply { .. } => {}
-                            other => {
-                                tracing::info!(
-                                    work_id,
-                                    ?other,
-                                    "cover gate: stripping GR cover_url"
-                                );
-                                payload.cover_url = None;
-                                payload.gr_key = None;
-                            }
-                        }
-                    }
-                }
-            }
-            filtered
-        } else {
-            reconstructed
-        };
 
         // Determine priority model based on work language
         let priority_model = PriorityModel::for_language(current_work.language.as_deref());

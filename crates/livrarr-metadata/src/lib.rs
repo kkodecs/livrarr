@@ -40,9 +40,9 @@ pub use livrarr_enrichment::provider_queue::{
 pub use livrarr_enrichment::{
     cover_gate, cover_resolution, llm_validator, provider_queue, DefaultMergeEngine,
     EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentResult, EnrichmentService,
-    EnrichmentServiceImpl, LivePacingQueue, MergeEngine, MergeError, MergeInput, MergeOutput,
-    PacingQueue, PriorityModel, ProviderQueue, ProviderQueueConfig, ProviderQueueError,
-    ReconstructedOutcome, ScatterGatherResult,
+    EnrichmentServiceImpl, MergeEngine, MergeError, MergeInput, MergeOutput, PriorityModel,
+    ProviderQueue, ProviderQueueConfig, ProviderQueueError, ReconstructedOutcome,
+    ScatterGatherResult,
 };
 
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};

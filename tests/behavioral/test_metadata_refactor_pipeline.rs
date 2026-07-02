@@ -16,8 +16,7 @@ use livrarr_external_data::{
 };
 use livrarr_metadata::{
     DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentService,
-    EnrichmentServiceImpl, PacingQueue, PriorityModel, ProviderQueue, ProviderQueueError,
-    ScatterGatherResult,
+    EnrichmentServiceImpl, PriorityModel, ProviderQueue, ProviderQueueError, ScatterGatherResult,
 };
 use tokio::sync::Mutex;
 
@@ -314,7 +313,7 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
 }
 
 #[tokio::test]
-async fn failed_enrichment_sets_failed_and_queue_membership_is_transient() {
+async fn failed_enrichment_sets_failed() {
     // AC-009
     let db = create_test_db().await;
     let (user_id, work) = seed_user_and_work(&db, "failed", "Failed Title").await;
@@ -350,12 +349,6 @@ async fn failed_enrichment_sets_failed_and_queue_membership_is_transient() {
             .unwrap()
             .enrichment_status,
         EnrichmentStatus::Failed
-    );
-
-    let pacing = livrarr_metadata::LivePacingQueue::new(Arc::new(db));
-    assert!(
-        !pacing.has_pending_or_running(work.id),
-        "in-progress is derived from live queue membership, not persisted status"
     );
 }
 
