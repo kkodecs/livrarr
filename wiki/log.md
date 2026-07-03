@@ -282,3 +282,21 @@ DeterministicSkipNoLlm rename, orphaned tests/behavioral/test_metadata.rs, two
 stale "askllm" stub docstrings, normalize_for_matching removal once fixtures
 migrate. Spec REQ-013 (per-install) and REQ-015 (c)/(d) amendments applied.
 P11's parenthetical Hardcover example still needs the PO's one-line edit.
+
+## 2026-07-03 — N1: GR series-page parser rewrite (React layout)
+
+GR redesigned /series/<id> to React (books in data-react-props JSON; no
+position labels; old h3/JSON-LD layout gone) → parser silent-empty →
+series-add created 0 works. Rewrote parse_series_detail_html (per-entry
+tolerant parse, loud drift warns, pagination counter blob), roster = header's
+"N primary works" cutoff (live probe 43318 disproved blob-membership==primary:
+27 listed for 3 primaries), positions only from same-series decorations.
+Emptiness never persisted: stored-empty heals on open, monitor never writes an
+empty/partial fetch, every roster save pairs with work_count. Review: r1 2
+findings (collision-branch heal bypass P1, mount-order test gap P2), r2 codex
+partial-pagination P1, r3 PASS×2. 1239 tests green. Fixtures:
+crates/livrarr-external-data/fixtures/. Updated goodreads.md (stale
+"GR requires LLM" + series-page section), series-matching.md, series.md
+(roster amendments), insight 62 added. Gemini note for retro: r1 retry
+findings were verbatim codex copies (verdict-file bleed suspected); 0 unique
+gemini P1s again.

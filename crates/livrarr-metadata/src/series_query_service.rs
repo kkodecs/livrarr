@@ -192,16 +192,28 @@ where
             .into_iter()
             .find(|s| s.id != series.id && s.gr_key == gr_key);
         if let Some(other) = existing {
+            // A stored-empty roster (pre-N1 break window) reads as absent —
+            // the same emptiness-is-never-truth rule series_books applies.
             if let Ok(Some(roster)) = self.db.get_series_roster(other.id).await {
-                return Some(roster.entries);
+                if !roster.entries.is_empty() {
+                    return Some(roster.entries);
+                }
             }
             let books = fetch_series_roster_pages(&self.fetcher, &gr_key)
                 .await
                 .ok()?;
             let entries = to_roster_entries(&books);
-            if !entries.is_empty() {
-                let _ = self.db.save_series_roster(other.id, &entries).await;
+            if entries.is_empty() {
+                tracing::debug!(series = %series.name, gr_key = %gr_key,
+                    "silent resolution: collided row roster fetch parsed empty — degrading");
+                return None;
             }
+            let _ = self.db.save_series_roster(other.id, &entries).await;
+            // Same pairing rule as every roster save: the count follows.
+            let _ = self
+                .db
+                .update_series_work_count(user_id, other.id, entries.len() as i32)
+                .await;
             return Some(entries);
         }
 
@@ -710,8 +722,14 @@ where
 
         // Roster write-through (REQ-010): persist the fetch this run already
         // paid for, so expansions never re-hit GR. Before the cancellation
-        // check on purpose — a cancelled run still yields a roster.
-        if let Err(e) = self
+        // check on purpose — a cancelled run still yields a roster. An EMPTY
+        // fetch is drift, never truth: it must not erase stored data (N1).
+        if all_books.is_empty() {
+            tracing::warn!(
+                series = %series_name,
+                "series roster fetch parsed empty — leaving stored roster and work_count untouched"
+            );
+        } else if let Err(e) = self
             .db
             .save_series_roster(series_id, &to_roster_entries(&all_books))
             .await
@@ -732,10 +750,14 @@ where
             return Ok(());
         }
 
-        let _ = self
-            .db
-            .update_series_work_count(user_id, series_id, all_books.len() as i32)
-            .await;
+        // Same drift guard: an empty fetch must not zero the work count
+        // (`work_count = 0` would also win ST-007's most-specific arbitration).
+        if !all_books.is_empty() {
+            let _ = self
+                .db
+                .update_series_work_count(user_id, series_id, all_books.len() as i32)
+                .await;
+        }
 
         let existing_works = self
             .db
@@ -1062,22 +1084,50 @@ where
             }
         }
 
-        // Persisted roster; fetch + store exactly once when absent (AC-022) —
-        // an empty parse result is stored too, so it never refetches.
-        let entries = match self
+        // Persisted roster: a stored NON-EMPTY roster serves without a
+        // refetch (AC-022). Emptiness is never persisted (N1): an empty
+        // parse means drift or an unreadable page, so the view degrades to
+        // linked works and the next expansion retries — the store heals as
+        // soon as GR yields books again. (Pre-N1 rows that stored an empty
+        // roster during the 2026-07 layout break heal through the same
+        // road: empty-stored reads as absent and triggers the refetch.)
+        let stored = self
             .db
             .get_series_roster(series_id)
             .await
             .map_err(SeriesServiceError::Db)?
-        {
-            Some(roster) => roster.entries,
+            .map(|roster| roster.entries)
+            .filter(|entries| !entries.is_empty());
+        let entries = match stored {
+            Some(entries) => entries,
             None => {
                 let books = fetch_series_roster_pages(&self.fetcher, &series.gr_key).await?;
                 let entries = to_roster_entries(&books);
+                if entries.is_empty() {
+                    let rows = linked
+                        .into_iter()
+                        .map(|sw| SeriesBookRow::InLibrary {
+                            position: sw.work.series_position,
+                            entry: Box::new(sw),
+                        })
+                        .collect();
+                    return Ok(SeriesBooksView {
+                        roster_available: false,
+                        rows,
+                    });
+                }
                 self.db
                     .save_series_roster(series_id, &entries)
                     .await
                     .map_err(SeriesServiceError::Db)?;
+                // work_count IS the GR roster size (ST-007): every roster
+                // save pairs with a count update, or a healed roster would
+                // sit beside a stale count (the broken-window rows carry 0,
+                // which wins most-specific arbitration).
+                let _ = self
+                    .db
+                    .update_series_work_count(user_id, series_id, entries.len() as i32)
+                    .await;
                 entries
             }
         };
@@ -1123,14 +1173,19 @@ async fn fetch_gr_html<F: HttpFetcher>(
 }
 
 /// Fetch + parse a GR series' detail pages (ST-008 road: paged, ≤10 pages,
-/// 1s pacing), filtered to primary works (integer positions) — the same set
-/// `work_count` counts. Shared by the monitor worker and the first-expand
-/// roster fetch (REQ-010).
+/// 1s pacing) and keep the PRIMARY-works roster — the same set `work_count`
+/// counts. On the 2026-07 React layout the page lists primaries FIRST and
+/// the header states their count; omnibuses, split editions, and
+/// translations follow (measured on series 108562 and 43318). No primary
+/// count means the header drifted: return an empty roster (loud, never a
+/// guess) rather than adopt GR's full 27-entry edition soup. Shared by the
+/// monitor worker and the first-expand roster fetch (REQ-010).
 async fn fetch_series_roster_pages<F: HttpFetcher>(
     fetcher: &F,
     series_gr_key: &str,
 ) -> Result<Vec<livrarr_external_data::goodreads::GoodreadsSeriesBook>, SeriesServiceError> {
-    let mut all_books = Vec::new();
+    let mut collected = Vec::new();
+    let mut primary_count: Option<usize> = None;
     let mut page = 1;
 
     loop {
@@ -1144,15 +1199,18 @@ async fn fetch_series_roster_pages<F: HttpFetcher>(
         };
 
         let html = fetch_gr_html(fetcher, &url).await?;
-        let (books, has_next) = livrarr_external_data::goodreads::parse_series_detail_html(&html);
+        let parsed = livrarr_external_data::goodreads::parse_series_detail_html(&html);
 
-        if books.is_empty() {
+        if page == 1 {
+            primary_count = parsed.primary_count;
+        }
+        if parsed.books.is_empty() {
             break;
         }
+        collected.extend(parsed.books);
 
-        all_books.extend(books);
-
-        if !has_next || page >= 10 {
+        let Some(needed) = primary_count else { break };
+        if collected.len() >= needed || !parsed.has_next || page >= 10 {
             break;
         }
 
@@ -1160,15 +1218,40 @@ async fn fetch_series_roster_pages<F: HttpFetcher>(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    // Filter to primary works: integer positions (1.0, 2.0, ...).
-    Ok(all_books
-        .into_iter()
-        .filter(|b| {
-            b.position
-                .map(|p| p > 0.0 && p.fract() == 0.0)
-                .unwrap_or(false)
-        })
-        .collect())
+    let Some(needed) = primary_count else {
+        if !collected.is_empty() {
+            tracing::warn!(
+                series_gr_key,
+                books = collected.len(),
+                "GR series page parsed books but carries no primary count — refusing to guess the roster"
+            );
+        }
+        return Ok(Vec::new());
+    };
+    // Fewer books than the header declared means a later page was unreadable
+    // (or the pagination walk stopped short): a PARTIAL roster is drift, not
+    // truth — returning empty routes it into the same no-write guards, so a
+    // stored full roster is never replaced by a partial one (review R-3).
+    if collected.len() < needed {
+        tracing::warn!(
+            series_gr_key,
+            collected = collected.len(),
+            declared = needed,
+            "GR roster: fewer books than the declared primary count — refusing a partial roster"
+        );
+        return Ok(Vec::new());
+    }
+    collected.truncate(needed);
+    let before = collected.len();
+    collected.retain(|b| !livrarr_external_data::goodreads::is_collection_title(&b.title));
+    if collected.len() < before {
+        tracing::warn!(
+            series_gr_key,
+            screened = before - collected.len(),
+            "GR roster: screened collection-shaped titles inside the primary window"
+        );
+    }
+    Ok(collected)
 }
 
 fn to_roster_entries(

@@ -1000,13 +1000,17 @@ pub fn classify_file(path: &std::path::Path) -> Option<MediaType> {
 }
 
 pub fn decode_xml_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
+    // `&amp;` must decode LAST: decoding it first turns a literal `&amp;quot;`
+    // into `&quot;`, which the later pass then wrongly decodes again —
+    // corrupting any payload (e.g. attribute-encoded JSON) that carries
+    // entity text inside strings.
+    s.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
         .replace("&#39;", "'")
         .replace("&#x27;", "'")
+        .replace("&amp;", "&")
 }
 
 /// Proxy an external cover URL through the internal cover proxy endpoint.
