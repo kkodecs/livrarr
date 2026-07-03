@@ -2,6 +2,7 @@ use livrarr_db::{
     ConfigDb, CreateNotificationDbRequest, DownloadClientDb, GrabDb, IndexerDb, LibraryItemDb,
     NotificationDb, WorkDb,
 };
+use livrarr_domain::identity_matching::LanguageVerdict;
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use livrarr_matching::MatchCandidate as M4Candidate;
@@ -64,6 +65,12 @@ where
         let media_mgmt = self
             .db
             .get_media_management_config()
+            .await
+            .map_err(RssSyncError::Db)?;
+
+        let default_language = self
+            .db
+            .get_default_language()
             .await
             .map_err(RssSyncError::Db)?;
 
@@ -259,6 +266,8 @@ where
 
         let threshold = config.rss_match_threshold;
         let mut n_matched: usize = 0;
+        let mut n_lang_veto: usize = 0;
+        let mut n_lang_grey: usize = 0;
 
         // Phase 1: Per-release, find best work per (user, media_type).
         struct ReleaseMatch {
@@ -351,6 +360,27 @@ where
                             if *pub_dt < work.added_at {
                                 continue;
                             }
+                        }
+
+                        // D7 recognition corollary (REQ-011): a release
+                        // declaring a language different from the work is a
+                        // hard veto; a language-silent release only matches
+                        // works whose language is the install default —
+                        // background sync never silently grabs the rest.
+                        match livrarr_matching::release_language_verdict(
+                            parsed.language.as_deref(),
+                            work.language.as_deref(),
+                            &default_language,
+                        ) {
+                            LanguageVerdict::Veto => {
+                                n_lang_veto += 1;
+                                continue;
+                            }
+                            LanguageVerdict::Grey => {
+                                n_lang_grey += 1;
+                                continue;
+                            }
+                            LanguageVerdict::Neutral => {}
                         }
 
                         let best_score = livrarr_matching::best_match_score(&parsed, cand);
@@ -572,9 +602,18 @@ where
 
         report.releases_matched = n_matched;
 
+        if n_lang_grey > 0 {
+            report.warnings.push(format!(
+                "{n_lang_grey} release-work pairing(s) skipped: release declares no language \
+                 and the work's language isn't the install default — needs manual confirmation \
+                 via interactive search"
+            ));
+        }
+
         info!(
             "RSS sync: {n_fetched} releases, {n_parsed} parsed, {n_unparsed} unparseable, \
-             {n_matched} matched, {n_grabbed} grabbed, {n_skipped} filtered"
+             {n_matched} matched, {n_grabbed} grabbed, {n_skipped} filtered, \
+             {n_lang_veto} language-veto, {n_lang_grey} language-grey"
         );
 
         Ok(report)

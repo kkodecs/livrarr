@@ -1581,6 +1581,7 @@ dependencies = [
  "livrarr-materialize",
  "livrarr-metadata",
  "livrarr-tagwrite",
+ "rapidfuzz",
  "serde",
  "serde_json",
  "sha2",
@@ -1590,6 +1591,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "trait-variant",
+ "unicode-normalization",
  "urlencoding",
 ]
 
