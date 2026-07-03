@@ -477,8 +477,10 @@ where
             ));
         }
         let cleaned_author = crate::title_cleanup::clean_author(&candidate.fields.author_name);
-        let normalized_title = livrarr_domain::normalize_for_matching(&cleaned_title);
-        let normalized_author = livrarr_domain::normalize_for_matching(&cleaned_author);
+        // REQ-014: the stored identity key and every add-time lookup that
+        // compares against it derive from the same identity_key recipe.
+        let (normalized_title, normalized_author) =
+            livrarr_domain::identity_matching::identity_key(&cleaned_title, &cleaned_author);
 
         // The persisted identity badge derived from the candidate's anchors
         // (REQ-014/016, D-013) — written at create and used to gate enrichment.
@@ -569,12 +571,19 @@ where
 
                 // Step 3: REQ-005 adopt path — existing ol-key-less work with
                 // same normalized identity absorbs the incoming confirmed key.
+                // REQ-014/ST-04: both sides of the lookup derive from the SAME
+                // identity_key recipe on the SAME cleaned inputs — the query
+                // values below ARE the stored-key values this candidate would
+                // write (identity_key over the clean_title/clean_author
+                // output, computed once above). The old code passed the RAW
+                // candidate fields through a weak trim+lowercase, so a
+                // junk-tailed or accented incoming title could never adopt.
                 if let Some(existing) = self
                     .db
                     .find_normalized_match_no_anchor_for_user(
                         user_id,
-                        &candidate.fields.title,
-                        &candidate.fields.author_name,
+                        &normalized_title,
+                        &normalized_author,
                     )
                     .await
                     .map_err(WorkServiceError::Db)?
@@ -1219,12 +1228,27 @@ where
         let cleaned_author = req
             .author_name
             .map(|a| crate::title_cleanup::clean_author(&a));
-        let normalized_title = cleaned_title
-            .as_deref()
-            .map(livrarr_domain::normalize_for_matching);
-        let normalized_author = cleaned_author
-            .as_deref()
-            .map(livrarr_domain::normalize_for_matching);
+        // REQ-014: route through identity_key like every other stored-key
+        // write site. Title and author are independently optional here (a
+        // user may rename just one); identity_key's two components are
+        // independent per-string computations, so pairing whichever side(s)
+        // changed with an empty counterpart for a lone-side update is safe.
+        let (normalized_title, normalized_author) =
+            match (cleaned_title.as_deref(), cleaned_author.as_deref()) {
+                (Some(t), Some(a)) => {
+                    let (nt, na) = livrarr_domain::identity_matching::identity_key(t, a);
+                    (Some(nt), Some(na))
+                }
+                (Some(t), None) => (
+                    Some(livrarr_domain::identity_matching::identity_key(t, "").0),
+                    None,
+                ),
+                (None, Some(a)) => (
+                    None,
+                    Some(livrarr_domain::identity_matching::identity_key("", a).1),
+                ),
+                (None, None) => (None, None),
+            };
         let db_req = UpdateWorkUserFieldsDbRequest {
             title: cleaned_title,
             author_name: cleaned_author,
@@ -3631,5 +3655,59 @@ mod discovery_tests {
             ),
         ];
         assert_eq!(best_same_work_cover(&selected, &corpus, Some("de")), None);
+    }
+
+    // ---- Phase 5 Unit E: anchor-graft/cover-borrow seat pinned under the
+    // identity authority (REQ-014, site 7 — normalize_title_for_match and
+    // authors_match now route through identity_matching) -------------------
+
+    #[test]
+    fn cover_upgrade_recognizes_same_work_across_a_subtitle() {
+        // The bare title (no subtitle) and a subtitled variant of the same
+        // book must still be treated as the same work for cover-borrowing —
+        // normalize_title_for_match now derives from parse_title's main
+        // title (site 7), which drops any tail exactly as the old colon-cut
+        // did for this shape, so this pins that the routing didn't regress
+        // the seat's basic case.
+        let selected = lr_cover(
+            "The Hobbit",
+            "Tolkien",
+            None,
+            Some("https://covers.openlibrary.org/b/id/123-M.jpg"),
+        );
+        let corpus = vec![
+            selected.clone(),
+            lr_cover(
+                "The Hobbit: There and Back Again",
+                "Tolkien",
+                None,
+                Some("https://books.google.com/books/content?id=hobbit"),
+            ),
+        ];
+        let better = best_same_work_cover(&selected, &corpus, None);
+        assert_eq!(
+            better.as_deref(),
+            Some("https://books.google.com/books/content?id=hobbit"),
+            "a subtitled same-work candidate must still be recognized for the cover upgrade"
+        );
+    }
+
+    #[test]
+    fn finalize_eager_pick_grafts_anchor_from_subtitled_same_work_candidate() {
+        // Mirrors the cover-upgrade case for the anchor-graft half of
+        // finalize_eager_pick: an anchorless pick (e.g. an ISBN-only Google
+        // Books hit) borrows a work anchor from a same-work candidate whose
+        // title carries a subtitle the pick's title doesn't.
+        let anchorless = LookupResult {
+            ol_key: None,
+            ..lr("The Hobbit", "Tolkien", Some("9780000000001"))
+        };
+        let anchored = LookupResult {
+            ol_key: Some("/works/OL1W".to_string()),
+            ..lr("The Hobbit: There and Back Again", "Tolkien", None)
+        };
+        let corpus = vec![anchorless.clone(), anchored];
+        let result = finalize_eager_pick(0, &corpus, None);
+        assert_eq!(result.ol_key.as_deref(), Some("/works/OL1W"));
     }
 }

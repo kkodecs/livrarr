@@ -15,7 +15,8 @@
 //!   series and GR-backed rows are never auto-deleted here.
 
 use livrarr_db::{CreateSeriesDbRequest, DbError, SeriesDb, UserId, WorkDb};
-use livrarr_domain::{normalize_for_matching, split_series_suffix, Work};
+use livrarr_domain::identity_matching::identity_key;
+use livrarr_domain::{split_series_suffix, Work};
 
 // Single authority for stub-key semantics lives in livrarr-domain (handlers
 // mask these at the API boundary).
@@ -25,7 +26,9 @@ pub use livrarr_domain::{
 };
 
 pub fn stub_key_for(clean_name: &str) -> String {
-    format!("{STUB_KEY_PREFIX}{}", normalize_for_matching(clean_name))
+    // REQ-014: series names are title-like (no author component); the
+    // author half is unused here, so it's passed empty and discarded.
+    format!("{STUB_KEY_PREFIX}{}", identity_key(clean_name, "").0)
 }
 
 /// Who initiated the series_name value being reconciled.
@@ -86,7 +89,7 @@ where
         db.normalize_work_series_fields(user_id, work.id, &clean_name, extracted_pos)
             .await?;
     }
-    let normalized = normalize_for_matching(&clean_name);
+    let normalized = identity_key(&clean_name, "").0;
     if normalized.is_empty() {
         return Ok(None);
     }
@@ -96,7 +99,7 @@ where
     let author_series = db.list_series_for_author(user_id, author_id).await?;
     let mut target = None;
     for s in &author_series {
-        if normalize_for_matching(&s.name) == normalized {
+        if identity_key(&s.name, "").0 == normalized {
             if !is_stub_key(&s.gr_key) {
                 target = Some(s.clone());
                 break;
@@ -226,7 +229,7 @@ mod tests {
                 user_id,
                 title: title.to_string(),
                 author_name: "Jim Butcher".to_string(),
-                normalized_title: normalize_for_matching(title),
+                normalized_title: livrarr_domain::normalize_for_matching(title),
                 normalized_author: "jim butcher".to_string(),
                 author_id,
                 ol_key: None,

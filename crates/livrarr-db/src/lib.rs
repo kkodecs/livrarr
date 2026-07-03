@@ -186,7 +186,8 @@ pub trait WorkDbCreate: Send + Sync {
     /// an existing row; the returned `work` is the existing one.
     ///
     /// Precondition: `normalized_title` and `normalized_author` were computed
-    ///               via `livrarr_domain::normalize_for_matching()`.
+    ///               via `livrarr_domain::identity_matching::identity_key()`
+    ///               (REQ-014; supersedes the retired `normalize_for_matching`).
     async fn create_work(&self, req: CreateWorkDbRequest) -> Result<(Work, bool), DbError>;
 
     async fn create_work_with_anchor(

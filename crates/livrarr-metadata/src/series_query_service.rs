@@ -165,11 +165,15 @@ where
                     return None;
                 }
             };
-        let normalized = normalize_for_matching(&series.name);
+        // REQ-014: series names are title-like (no author component); the
+        // author half of identity_key is unused here.
+        let normalized = identity_matching::identity_key(&series.name, "").0;
         let matches: Vec<&AuthorSeriesItemView> = view
             .series
             .iter()
-            .filter(|e| !e.gr_key.is_empty() && normalize_for_matching(&e.name) == normalized)
+            .filter(|e| {
+                !e.gr_key.is_empty() && identity_matching::identity_key(&e.name, "").0 == normalized
+            })
             .collect();
         let [single] = matches.as_slice() else {
             tracing::debug!(series = %series.name, candidates = matches.len(),
@@ -937,12 +941,13 @@ where
             None => {
                 // Exact normalized-name match among the author's GR series.
                 let view = self.list_author_series(user_id, author_id, false).await?;
-                let normalized_stub = normalize_for_matching(&series.name);
+                let normalized_stub = identity_matching::identity_key(&series.name, "").0;
                 let matches: Vec<&AuthorSeriesItemView> = view
                     .series
                     .iter()
                     .filter(|e| {
-                        !e.gr_key.is_empty() && normalize_for_matching(&e.name) == normalized_stub
+                        !e.gr_key.is_empty()
+                            && identity_matching::identity_key(&e.name, "").0 == normalized_stub
                     })
                     .collect();
                 match matches.as_slice() {

@@ -11,8 +11,8 @@ use std::mem::discriminant;
 use livrarr_domain::services::{CoverService, CoverServiceError};
 use livrarr_domain::{
     CoverCandidate, CoverMediaType, CoverTrust, ExternalIdType, MergeResolved, MetadataProvider,
-    NormalizationClass, OutcomeClass, PermanentFailureReason, ProvenanceSetter, UserId,
-    WillRetryReason, WorkField, WorkId,
+    OutcomeClass, PermanentFailureReason, ProvenanceSetter, UserId, WillRetryReason, WorkField,
+    WorkId,
 };
 use livrarr_external_data::ProviderOutcome;
 use livrarr_metadata::EnrichmentMode;
@@ -437,104 +437,6 @@ fn test_domain_permanent_failure_reason_serializes_each_variant_in_snake_case() 
     for (reason, expected_json) in cases {
         assert_serializes_to_json(reason, expected_json);
     }
-}
-
-#[test]
-fn test_domain_work_field_normalization_class_matches_contract_for_each_ir_specified_mapping() {
-    // REQ-ID: R-18/R-22 | Contract: WorkField::normalization_class | Behavior: only IR-specified WorkField mappings are asserted, and each maps to the documented normalization class
-    let cases = [
-        (WorkField::Description, NormalizationClass::RichText),
-        (WorkField::Title, NormalizationClass::DisplayText),
-        (WorkField::Subtitle, NormalizationClass::DisplayText),
-        (WorkField::OriginalTitle, NormalizationClass::DisplayText),
-        (WorkField::SortTitle, NormalizationClass::DisplayText),
-        (WorkField::AuthorName, NormalizationClass::DisplayText),
-        (WorkField::SeriesName, NormalizationClass::DisplayText),
-        (WorkField::Publisher, NormalizationClass::DisplayText),
-        (WorkField::Narrator, NormalizationClass::DisplayText),
-        (WorkField::NarrationType, NormalizationClass::DisplayText),
-        (WorkField::Isbn13, NormalizationClass::Identifier),
-        (WorkField::Asin, NormalizationClass::Identifier),
-        (WorkField::OlKey, NormalizationClass::Identifier),
-        (WorkField::GrKey, NormalizationClass::Identifier),
-    ];
-
-    for (field, expected_class) in cases {
-        assert_eq!(
-            field.normalization_class(),
-            expected_class,
-            "unexpected normalization class for {:?}",
-            field
-        );
-    }
-
-    // These fields do not have a NormalizationClass specified in the IR contract.
-    // Uncomment when the contract is extended.
-    //
-    // let unspecified_cases = [
-    //     WorkField::Year,
-    //     WorkField::PageCount,
-    //     WorkField::DurationSeconds,
-    //     WorkField::SeriesPosition,
-    //     WorkField::RatingCount,
-    //     WorkField::Rating,
-    //     WorkField::Abridged,
-    // ];
-
-    // not contract-specified:
-    // WorkField::Genres
-    // WorkField::Language
-    // WorkField::PublishDate
-    // WorkField::HcKey
-    // WorkField::CoverUrl
-}
-
-#[test]
-fn test_domain_work_field_normalization_class_returns_only_documented_ir_variants_for_ir_specified_fields(
-) {
-    // REQ-ID: R-18/R-22 | Contract: WorkField::normalization_class | Behavior: IR-specified fields map only to documented normalization-class variants
-    let fields = [
-        WorkField::Description,
-        WorkField::Title,
-        WorkField::Subtitle,
-        WorkField::OriginalTitle,
-        WorkField::SortTitle,
-        WorkField::AuthorName,
-        WorkField::SeriesName,
-        WorkField::Publisher,
-        WorkField::Narrator,
-        WorkField::NarrationType,
-        WorkField::Isbn13,
-        WorkField::Asin,
-        WorkField::OlKey,
-        WorkField::GrKey,
-    ];
-
-    for field in fields {
-        assert!(
-            matches!(
-                field.normalization_class(),
-                NormalizationClass::RichText
-                    | NormalizationClass::DisplayText
-                    | NormalizationClass::Identifier
-            ),
-            "work field {:?} must map to a valid IR-documented NormalizationClass",
-            field
-        );
-    }
-
-    // These fields do not have a NormalizationClass specified in the IR contract.
-    // Uncomment when the contract is extended.
-    //
-    // let unspecified_fields = [
-    //     WorkField::Year,
-    //     WorkField::PageCount,
-    //     WorkField::DurationSeconds,
-    //     WorkField::SeriesPosition,
-    //     WorkField::RatingCount,
-    //     WorkField::Rating,
-    //     WorkField::Abridged,
-    // ];
 }
 
 #[test]

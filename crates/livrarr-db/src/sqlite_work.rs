@@ -1000,14 +1000,27 @@ impl WorkDb for SqliteDb {
                 .map(|n| serde_json::to_string(n).map_err(|e| DbError::Io(Box::new(e))))
                 .transpose()?;
             let narration_type_val = u.narration_type.as_ref().map(narration_type_str);
-            let norm_title = u
-                .title
-                .as_deref()
-                .map(livrarr_domain::normalize_for_matching);
-            let norm_author = u
-                .author_name
-                .as_deref()
-                .map(livrarr_domain::normalize_for_matching);
+            // REQ-014: both sides of a stored identity key come from the
+            // same identity_key call when both title and author change
+            // together; when only one changes, the other's component is
+            // computed with an empty counterpart (identity_key's two halves
+            // are independent per-string computations, so this is safe —
+            // see identity_matching::identity_key's doc comment).
+            let (norm_title, norm_author) = match (u.title.as_deref(), u.author_name.as_deref()) {
+                (Some(t), Some(a)) => {
+                    let (nt, na) = livrarr_domain::identity_matching::identity_key(t, a);
+                    (Some(nt), Some(na))
+                }
+                (Some(t), None) => (
+                    Some(livrarr_domain::identity_matching::identity_key(t, "").0),
+                    None,
+                ),
+                (None, Some(a)) => (
+                    None,
+                    Some(livrarr_domain::identity_matching::identity_key("", a).1),
+                ),
+                (None, None) => (None, None),
+            };
 
             // REQ-007: no anchor columns (hc_key/gr_key/ol_key/isbn_13/asin)
             // in this UPDATE — anchors move exclusively via the identity

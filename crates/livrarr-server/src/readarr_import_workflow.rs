@@ -10,13 +10,12 @@ use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::{
     ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest,
 };
+use livrarr_domain::identity_matching::identity_key;
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::{
     ReadarrImportWorkflow, ServiceError, SourceProviderData, WorkService,
 };
-use livrarr_domain::{
-    derive_sort_name, normalize_for_matching, sanitize_path_component, Import, MediaType,
-};
+use livrarr_domain::{derive_sort_name, sanitize_path_component, Import, MediaType};
 
 use livrarr_http::HttpClient;
 
@@ -645,7 +644,9 @@ impl<'a> ImportPlanner<'a> {
 
         let mut author_names_seen: HashMap<String, bool> = HashMap::new();
         for a in existing_authors {
-            author_names_seen.insert(normalize_for_matching(&a.name), true);
+            // REQ-014: author-only normalization — the title half of
+            // identity_key is unused here.
+            author_names_seen.insert(identity_key("", &a.name).1, true);
         }
 
         for book in self.books {
@@ -669,7 +670,7 @@ impl<'a> ImportPlanner<'a> {
                 continue;
             }
 
-            let norm_author = normalize_for_matching(author_name);
+            let norm_author = identity_key("", author_name).1;
             if !author_names_seen.contains_key(&norm_author) {
                 author_names_seen.insert(norm_author.clone(), false);
                 authors_to_create += 1;
@@ -700,7 +701,7 @@ impl<'a> ImportPlanner<'a> {
             .values()
             .filter(|a| {
                 let name = a.author_name.as_deref().unwrap_or("");
-                let norm = normalize_for_matching(name);
+                let norm = identity_key("", name).1;
                 author_names_seen.get(&norm) == Some(&true)
             })
             .count() as i64;
@@ -732,7 +733,11 @@ impl<'a> ImportPlanner<'a> {
             .and_then(|e| e.asin.as_deref())
             .filter(|s| !s.is_empty());
         let year = book.release_date.as_deref().and_then(extract_year);
-        let norm_title = normalize_for_matching(title);
+        // REQ-014: `norm_author` (the parameter) is already an identity_key
+        // author component (computed by the caller); pair it with the
+        // title-only component here rather than re-deriving both — the
+        // caller's precomputed `norm_author` stays authoritative.
+        let norm_title = identity_key(title, "").0;
 
         if let Some(isbn_val) = isbn {
             existing_works
@@ -744,9 +749,8 @@ impl<'a> ImportPlanner<'a> {
                 .any(|w| w.asin.as_deref() == Some(asin_val))
         } else {
             existing_works.iter().any(|w| {
-                normalize_for_matching(&w.author_name) == norm_author
-                    && normalize_for_matching(&w.title) == norm_title
-                    && w.year == year
+                let (w_norm_title, w_norm_author) = identity_key(&w.title, &w.author_name);
+                w_norm_author == norm_author && w_norm_title == norm_title && w.year == year
             })
         }
     }
@@ -1049,10 +1053,10 @@ impl ImportRunner {
                 }
             }
 
-            let norm = normalize_for_matching(name);
+            let norm = identity_key("", name).1;
             let matches: Vec<_> = existing_authors
                 .iter()
-                .filter(|a| normalize_for_matching(&a.name) == norm)
+                .filter(|a| identity_key("", &a.name).1 == norm)
                 .collect();
 
             let livrarr_author_id = if matches.len() == 1 {
@@ -1300,9 +1304,9 @@ impl ImportRunner {
         let mut by_identity: HashMap<(String, String), (Prep, Vec<i64>)> =
             HashMap::with_capacity(preps.len());
         for prep in preps {
-            let key = (
-                normalize_for_matching(&prep.candidate.fields.title),
-                normalize_for_matching(&prep.candidate.fields.author_name),
+            let key = identity_key(
+                &prep.candidate.fields.title,
+                &prep.candidate.fields.author_name,
             );
             by_identity
                 .entry(key)

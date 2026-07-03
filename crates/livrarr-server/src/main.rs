@@ -140,6 +140,16 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Step 9c: Recompute works.normalized_title/normalized_author via the
+    // identity_matching authority's identity_key recipe (REQ-014),
+    // superseding the retired normalize_for_matching. Idempotent — migration
+    // 069 seeds the generation marker this checks.
+    if let Err(e) = livrarr_db::pool::backfill_identity_key_recompute(&pool).await {
+        error!("identity-key recompute failed: {e}");
+        livrarr_db::pool::release_pid_lock(&data_dir);
+        std::process::exit(1);
+    }
+
     // Step 10: Clean up old backups (keep 3).
     {
         let data_dir_clone = data_dir.clone();

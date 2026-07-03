@@ -881,6 +881,13 @@ pub fn derive_sort_name(display_name: &str) -> String {
 /// dots and underscores with spaces so that Livrarr-imported filenames
 /// (which use underscores for illegal chars) match back to their DB titles.
 ///
+/// Superseded in production by [`identity_matching::identity_key`] (REQ-014):
+/// this recipe keeps stopwords and accents (no leading-article drop, no
+/// accent strip), which is exactly the mismatch ST-04 named. No production
+/// call site uses this function anymore; it is retained because existing
+/// test fixtures across the suite construct `normalized_title`/
+/// `normalized_author` values with it.
+///
 /// Satisfies: SCAN-002, SCAN-003
 pub fn normalize_for_matching(s: &str) -> String {
     const ILLEGAL: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
@@ -1196,28 +1203,6 @@ pub enum WorkField {
     Rating,
     RatingCount,
     CoverUrl,
-}
-
-impl WorkField {
-    /// TEMP(pk-tdd): compile-only scaffold — returns the normalization class for this field.
-    pub fn normalization_class(self) -> NormalizationClass {
-        match self {
-            WorkField::Description => NormalizationClass::RichText,
-            WorkField::Title
-            | WorkField::SortTitle
-            | WorkField::Subtitle
-            | WorkField::OriginalTitle
-            | WorkField::AuthorName
-            | WorkField::SeriesName
-            | WorkField::Publisher
-            | WorkField::Narrator
-            | WorkField::NarrationType => NormalizationClass::DisplayText,
-            WorkField::Isbn13 | WorkField::Asin | WorkField::OlKey | WorkField::GrKey => {
-                NormalizationClass::Identifier
-            }
-            _ => NormalizationClass::DisplayText,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -608,6 +608,72 @@ async fn test_author_bibliography_already_in_library_flag() {
     );
 }
 
+// Phase 5 Unit E: pins the already-in-library seat under the identity
+// authority (REQ-014, site 7 — author_service.rs's enrich_bibliography now
+// routes normalize_title_for_match through identity_matching::parse_title).
+#[tokio::test]
+async fn test_author_bibliography_already_in_library_flag_across_a_subtitle() {
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let db2 = db.clone();
+    let svc = make_svc(db);
+
+    let author = svc
+        .add(
+            user_id,
+            AddAuthorRequest {
+                name: "Test Author".into(),
+                ol_key: None,
+                monitored: false,
+                sort_name: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The library holds the bare title; the bibliography entry carries a
+    // subtitle. Both must still resolve to the same main title.
+    let _ = db2
+        .create_work(CreateWorkDbRequest {
+            user_id,
+            title: "Storm Front".into(),
+            author_name: "Test Author".into(),
+            author_id: Some(author.author().id),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    use livrarr_db::AuthorBibliographyDb;
+    db2.save_bibliography(
+        author.author().id,
+        &[livrarr_db::BibliographyEntry {
+            ol_key: Some("/works/OL30W".to_string()),
+            title: "Storm Front: The Dresden Files, Book 1".into(),
+            year: Some(2000),
+            series_name: None,
+            series_position: None,
+        }],
+        None,
+    )
+    .await
+    .unwrap();
+
+    let result = svc
+        .bibliography(user_id, author.author().id, false)
+        .await
+        .unwrap();
+    let entry = result
+        .entries
+        .iter()
+        .find(|e| e.title == "Storm Front: The Dresden Files, Book 1")
+        .unwrap();
+    assert!(
+        entry.already_in_library,
+        "a subtitled bibliography entry must still match the bare-title library work"
+    );
+}
+
 // =============================================================================
 // refresh_bibliography
 // =============================================================================
