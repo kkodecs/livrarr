@@ -494,11 +494,10 @@ fn apply_gr_cover_gate(mut inputs: MergeInput) -> MergeInput {
                         isbn: None,
                         gr_key: payload.gr_key.as_deref().unwrap_or(""),
                     };
-                    // REQ-005 (zero LLM): the merge is deterministic and LLM-free, so
-                    // a borderline title is a strip either way — the LLM branch here
-                    // is unreachable, hence hardcoded `false`.
-                    let outcome =
-                        crate::cover_gate::evaluate_gr_cover_gate(&anchor, &candidate, false);
+                    // REQ-005/REQ-016 (zero LLM): the merge is deterministic and
+                    // LLM-free, so a borderline title is a strip either way — the
+                    // gate itself has no LLM tier to select (D10).
+                    let outcome = crate::cover_gate::evaluate_gr_cover_gate(&anchor, &candidate);
                     match outcome {
                         crate::cover_gate::CoverGateOutcome::Apply { .. } => {}
                         other => {

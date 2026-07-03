@@ -100,33 +100,6 @@ pub enum MatchProvider {
     Goodreads,
 }
 
-/// Final result of the matching pipeline for one input item.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MatchResult {
-    /// The reconciled extraction used for matching.
-    pub extraction: Extraction,
-    /// All extractions from individual methods (for UI display if methods disagreed).
-    pub all_extractions: Vec<Extraction>,
-    /// Ranked candidates from OL/Goodreads.
-    pub candidates: Vec<MatchCandidate>,
-    /// Whether the top candidate was auto-confirmed.
-    pub auto_confirmed: bool,
-    /// Existing work ID if duplicate detected.
-    pub existing_work_id: Option<i64>,
-    /// Duplicate class if detected.
-    pub duplicate_class: Option<DuplicateClass>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DuplicateClass {
-    ExactFile,
-    SameWorkSameFormat,
-    SameWorkDifferentFormat,
-    PossibleDuplicate,
-}
-
 /// Input to the matching engine.
 #[derive(Debug, Clone)]
 pub struct MatchInput {

@@ -22,8 +22,7 @@ pub mod work_dedup;
 use std::path::Path;
 
 pub use types::{
-    Confidence, DuplicateClass, Extraction, ExtractionSource, MatchCandidate, MatchInput,
-    MatchProvider, MatchResult,
+    Confidence, Extraction, ExtractionSource, MatchCandidate, MatchInput, MatchProvider,
 };
 
 /// Variant-title comparison key for Tier-A auto-match, built from the

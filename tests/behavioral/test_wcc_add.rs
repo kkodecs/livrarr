@@ -64,7 +64,6 @@ fn stub_isbn_resolver() -> LiveEnglishIdentityResolver {
         cache: Arc::new(TransportCache::new(Duration::from_secs(30))),
         config: ResolverConfig {
             gb_key_present: false,
-            llm_configured: false,
             ..ResolverConfig::default()
         },
     }

@@ -276,7 +276,6 @@ async fn main() {
             livrarr_external_data::ProviderClient::Hardcover(
                 livrarr_external_data::HardcoverClient::new(
                     http_fetcher.clone(),
-                    http_client.clone(),
                     live_metadata_config.clone(),
                 ),
             )
@@ -460,7 +459,6 @@ async fn main() {
             livrarr_external_data::ProviderClient::Hardcover(
                 livrarr_external_data::HardcoverClient::new(
                     http_fetcher.clone(),
-                    http_client.clone(),
                     live_metadata_config.clone(),
                 ),
             ),
@@ -509,9 +507,6 @@ async fn main() {
             cache: transport_cache.clone(),
             config: {
                 let cfg = live_metadata_config.snapshot();
-                let llm_configured = cfg.llm_enabled
-                    && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
-                    && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
                 let gb_key_present = cfg
                     .google_books_api_key
                     .as_deref()
@@ -528,7 +523,6 @@ async fn main() {
                 };
                 livrarr_metadata::english_identity_resolver::ResolverConfig {
                     gb_key_present,
-                    llm_configured,
                     default_language_source,
                     ..Default::default()
                 }
@@ -857,7 +851,6 @@ async fn main() {
                 livrarr_external_data::ProviderClient::Hardcover(
                     livrarr_external_data::HardcoverClient::new(
                         http_fetcher.clone(),
-                        http_client.clone(),
                         live_metadata_config.clone(),
                     ),
                 ),

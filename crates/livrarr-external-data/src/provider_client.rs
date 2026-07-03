@@ -491,20 +491,18 @@ fn audnexus_payload(audnexus: AudnexusResult) -> NormalizedWorkDetail {
 /// Real-network Hardcover adapter. Wraps `crate::hardcover::query_hardcover`
 /// and maps its return value onto `ProviderOutcome<NormalizedWorkDetail>`.
 ///
-/// Holds a clone of `MetadataConfig` because the inner query consults
-/// `llm_enabled` / `llm_endpoint` / `llm_api_key` / `llm_model` for the Tier 2
-/// disambiguation fallback. The orchestration cutover may rework that path so
-/// the LLM fan-out happens through `MetadataProvider::Llm` instead — until then,
-/// HC owns its own LLM call.
+/// Holds the shared `HttpFetcherImpl` (all HC HTTP rides the outbound queue)
+/// and a `LiveMetadataConfig` handle read per fetch for `hardcover_enabled` +
+/// `hardcover_api_token`, so config changes take effect without restart. The
+/// title+author query is deterministic and two-tier (REQ-016/D10): exact
+/// title + author-in-list match first, then the shared 0.75 title+author
+/// picker; nothing clearing the bar means HC abstains (`NoMatch`) rather
+/// than adopting a fuzzy hit.
 #[derive(Clone)]
 pub struct HardcoverClient {
     fetcher: livrarr_http::fetcher::HttpFetcherImpl,
-    /// Kept solely for the `llm_disambiguate` pass-through — the LLM caller is
-    /// out of scope for the outbound queue.
-    http: HttpClient,
     /// Reads `hardcover_enabled` + `hardcover_api_token` per fetch — config
     /// changes via UI take effect on the next enrichment without restart.
-    /// Also exposes `llm_*` fields for the inner llm_disambiguate fallback.
     live_config: crate::live_config::LiveMetadataConfig,
     retry_backoff_secs: i64,
     #[allow(dead_code)] // read at green: REQ-001 record emission
@@ -514,12 +512,10 @@ pub struct HardcoverClient {
 impl HardcoverClient {
     pub fn new(
         fetcher: livrarr_http::fetcher::HttpFetcherImpl,
-        http: HttpClient,
         live_config: crate::live_config::LiveMetadataConfig,
     ) -> Self {
         Self {
             fetcher,
-            http,
             live_config,
             retry_backoff_secs: 5 * 60,
             call_sink: None,
@@ -666,11 +662,9 @@ impl HardcoverClient {
         // Title+author search (existing behavior)
         let result = query_hardcover(
             &self.fetcher,
-            &self.http,
             &work.title,
             &work.author_name,
             &token,
-            cfg.as_ref(),
             priority,
         )
         .await;
@@ -1058,14 +1052,13 @@ struct ResolvedGrDetail {
 /// Resolution order:
 ///   1. If `work.gr_key` is populated, fetch the detail page directly
 ///      (skips a search round-trip — see R-21 canonical-identity policy).
-///   2. Otherwise, search by `title author` and use the LLM to disambiguate
-///      among hits. GR is a hostile scraping target (anti-bot, HTML drift,
-///      noisy results full of study guides and alternate editions) — naive
-///      first-hit matching is unreliable, and LLM judgment is required.
-///      Without an LLM configured, this path returns `NotFound`. Use
-///      Hardcover + OpenLibrary for LLM-free English enrichment; GR
-///      contributes cover quality + supplemental fields when LLM is
-///      available.
+///   2. Otherwise, search by `title author` and pick deterministically among
+///      hits (`gr_best_match`: junk-edition filter + the shared title+author
+///      picker, REQ-012/D6/ST-07) — no LLM is involved in the pick. GR is a
+///      hostile scraping target (anti-bot, HTML drift, noisy results full of
+///      study guides and alternate editions), so a wrong pick is worse than
+///      none: nothing clearing the bar means GR abstains rather than
+///      adopting a fuzzy match.
 ///   3. Resolve the chosen hit's (often relative) `detail_url` against
 ///      `base_url` and fetch the detail page.
 ///
@@ -1169,6 +1162,13 @@ impl GoodreadsClient {
     /// HTML where JSON-LD/regex parsing misses). Returns None when the LLM is
     /// not configured or its extraction also parses nothing — callers fall
     /// through; Some(Err) carries fetch-class errors.
+    ///
+    /// Contract (REQ-012/confer b): this is repair, not selection — a payload
+    /// built here carries zero extra trust. It returns the same
+    /// `NormalizedWorkDetail` shape as a direct parse, with no provenance or
+    /// confidence marker distinguishing it, so it rides through the same
+    /// deterministic matching, vetoes, and bars as any other payload; repair
+    /// can never raise confidence.
     async fn llm_extract_payload(
         &self,
         html: &str,
