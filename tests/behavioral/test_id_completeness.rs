@@ -16,8 +16,9 @@ use livrarr_db::{
     CreateWorkDbRequest, UpdateWorkEnrichmentDbRequest, UserDb, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::identity::{
-    AnchorConfidence, AnchorProvenance, AnchorSetter, AnchorType, CandidateId, CapturedIdentity,
-    ConflictSource, IdentityMethod, IdentityMode, MatchBasis, Resolution,
+    AnchorConfidence, AnchorProvenance, AnchorSetter, AnchorType, Candidate, CandidateId,
+    CapturedIdentity, ConflictSource, IdentityMethod, IdentityMode, MatchBasis, Resolution,
+    ResolutionScore,
 };
 use livrarr_domain::services::{
     ConvergeOutcome, RefreshSurface, WorkIdentityError, WorkIdentityRepository, WorkService,
@@ -750,6 +751,156 @@ async fn test_id_completeness_needs_review_work_never_dispatches_enrichment_ac01
         after.description, None,
         "AC-012: no description written from an uncertain candidate"
     );
+}
+
+/// `refresh()` lacked the `identity_permits` gate the convergence path (the
+/// test above) and the add door both apply — a parked work would still
+/// enrich on a manual or bulk refresh. Same fixture shape as the test above,
+/// driven through `refresh()` instead of `converge_work`, proving the gate
+/// now makes the two paths consistent.
+#[tokio::test]
+async fn test_id_completeness_needs_review_work_never_enriches_on_refresh() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let parked = seed_work(
+        &db,
+        user_id,
+        "Parked Refresh Guard",
+        IdentityStatus::NeedsReview,
+        EnrichmentStatus::Unenriched,
+        SeedAnchors::default(),
+    )
+    .await;
+
+    let workflow = StubEnrichmentWorkflow::succeeding();
+    let svc = service(db.clone(), workflow.clone(), None);
+
+    svc.refresh(user_id, parked.id, RefreshSurface::Interactive)
+        .await
+        .expect("refresh a needs-review work");
+
+    assert_eq!(
+        workflow.call_count(),
+        0,
+        "refresh must never dispatch enrichment for a grey/needs-review work"
+    );
+    assert!(
+        !workflow.work_ids().contains(&parked.id),
+        "the parked work's id must never reach the enrichment workflow via refresh"
+    );
+
+    let after = db
+        .get_work(user_id, parked.id)
+        .await
+        .expect("read parked work");
+    assert_eq!(
+        after.identity_status,
+        IdentityStatus::NeedsReview,
+        "a NeedsReview badge is not silently changed by refresh"
+    );
+}
+
+/// The ranked candidates behind a `NeedsReview` park are now persisted
+/// (queryable per work) instead of discarded, and carry their real computed
+/// scores rather than a placeholder.
+#[tokio::test]
+async fn test_id_completeness_review_candidates_persist_and_round_trip() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let work = seed_work(
+        &db,
+        user_id,
+        "Candidate Round Trip",
+        IdentityStatus::Pending,
+        EnrichmentStatus::Unenriched,
+        SeedAnchors::default(),
+    )
+    .await;
+
+    assert_eq!(
+        db.get_review_candidates(work.id)
+            .await
+            .expect("read before any park"),
+        None,
+        "a work with no recorded park has no candidates to read"
+    );
+
+    let candidates = vec![Candidate {
+        candidate_id: CandidateId("cand-1".to_string()),
+        anchors: CapturedIdentity {
+            ol_key: Some("OL-CAND-1".to_string()),
+            gr_key: None,
+            hc_key: None,
+            isbn_13: None,
+            asin: None,
+            title: "Candidate Round Trip".to_string(),
+            author_name: "Test Author".to_string(),
+            language: Some("en".to_string()),
+        },
+        cover_url: None,
+        sources: vec![MetadataProvider::OpenLibrary],
+        score: ResolutionScore {
+            title_jaccard: 0.83,
+            author_overlap: 0,
+            runner_up_delta: 0.0,
+        },
+        existing_work_id: None,
+    }];
+    db.record_review_candidates(work.id, &candidates)
+        .await
+        .expect("record candidates");
+
+    let round_tripped = db
+        .get_review_candidates(work.id)
+        .await
+        .expect("read after record")
+        .expect("candidates present after recording");
+    assert_eq!(round_tripped.len(), 1);
+    assert_eq!(
+        round_tripped[0].anchors.ol_key.as_deref(),
+        Some("OL-CAND-1")
+    );
+    assert!(
+        (round_tripped[0].score.title_jaccard - 0.83).abs() < 1e-9,
+        "the real computed score survives the round trip, not a hardcoded value"
+    );
+
+    // A later park replaces the set wholesale rather than appending to it.
+    let candidates_v2 = vec![Candidate {
+        candidate_id: CandidateId("cand-2".to_string()),
+        anchors: CapturedIdentity {
+            ol_key: Some("OL-CAND-2".to_string()),
+            gr_key: None,
+            hc_key: None,
+            isbn_13: None,
+            asin: None,
+            title: "Candidate Round Trip".to_string(),
+            author_name: "Test Author".to_string(),
+            language: Some("en".to_string()),
+        },
+        cover_url: None,
+        sources: vec![MetadataProvider::Hardcover],
+        score: ResolutionScore {
+            title_jaccard: 0.91,
+            author_overlap: 0,
+            runner_up_delta: 0.0,
+        },
+        existing_work_id: None,
+    }];
+    db.record_review_candidates(work.id, &candidates_v2)
+        .await
+        .expect("record replacement candidates");
+    let replaced = db
+        .get_review_candidates(work.id)
+        .await
+        .expect("read after replace")
+        .expect("candidates present after replace");
+    assert_eq!(
+        replaced.len(),
+        1,
+        "a fresh park replaces the prior candidate set, never appends"
+    );
+    assert_eq!(replaced[0].anchors.ol_key.as_deref(), Some("OL-CAND-2"));
 }
 
 #[tokio::test]

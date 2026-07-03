@@ -516,9 +516,20 @@ async fn main() {
                     .google_books_api_key
                     .as_deref()
                     .is_some_and(|s| !s.is_empty());
+                // Read once at startup, like every other credential/flag above
+                // (REQ-007/REQ-013) — a settings change here takes effect on
+                // the next restart, consistent with this whole block.
+                let default_language_source = {
+                    use livrarr_db::ConfigDb;
+                    db.get_default_language().await.unwrap_or_else(|e| {
+                        warn!("Failed to read default language at startup ({e}); using \"en\"");
+                        "en".to_string()
+                    })
+                };
                 livrarr_metadata::english_identity_resolver::ResolverConfig {
                     gb_key_present,
                     llm_configured,
+                    default_language_source,
                     ..Default::default()
                 }
             },

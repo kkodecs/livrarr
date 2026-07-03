@@ -1437,24 +1437,36 @@ where
             }
         }
 
-        // Unified enrichment: provider dispatch, merge, cover download, tag sync.
-        // Manual mode (not Background) so a transiently-unavailable provider
-        // (e.g. Google Books quota 429) does not defer the entire merge and
-        // discard the data other providers returned — best-effort merge. (#117)
-        // No candidate_id for a manual refresh — always re-fetches from network.
-        let _enrichment_status = self
-            .run_unified_enrichment(
-                user_id,
-                &work,
-                None,
-                EnrichmentMode::Manual,
-                None,
-                match surface {
-                    RefreshSurface::Interactive => RequestPriority::Normal,
-                    RefreshSurface::Bulk => RequestPriority::Low,
-                },
-            )
-            .await;
+        // Identity gate (REQ-008/AC-012): the same identity_permits check
+        // convergence (convergence_service.rs) and the add door
+        // (ensure_identity_and_enrichment) already apply — a held identity does
+        // not enrich here either. Re-reads the post-settle status above, so a
+        // work the settle step just confirmed still enriches this same call;
+        // only a work still Pending/Conflict/NeedsReview after settling skips.
+        let identity_permits = !matches!(
+            work.identity_status,
+            IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
+        );
+        if identity_permits {
+            // Unified enrichment: provider dispatch, merge, cover download, tag sync.
+            // Manual mode (not Background) so a transiently-unavailable provider
+            // (e.g. Google Books quota 429) does not defer the entire merge and
+            // discard the data other providers returned — best-effort merge. (#117)
+            // No candidate_id for a manual refresh — always re-fetches from network.
+            let _enrichment_status = self
+                .run_unified_enrichment(
+                    user_id,
+                    &work,
+                    None,
+                    EnrichmentMode::Manual,
+                    None,
+                    match surface {
+                        RefreshSurface::Interactive => RequestPriority::Normal,
+                        RefreshSurface::Bulk => RequestPriority::Low,
+                    },
+                )
+                .await;
+        }
 
         let refreshed_work = match self.db.get_work(user_id, work_id).await {
             Ok(w) => w,
