@@ -164,6 +164,16 @@ impl From<livrarr_domain::services::WorkServiceError> for ApiError {
             WorkServiceError::Enrichment(msg) => ApiError::Internal(msg),
             WorkServiceError::Cover(msg) => ApiError::Internal(msg),
             WorkServiceError::Db(db_err) => ApiError::Db(db_err),
+            WorkServiceError::MergeChoiceRequired(fields) => ApiError::Conflict {
+                reason: format!(
+                    "merge requires an explicit choice for: {}",
+                    fields
+                        .iter()
+                        .map(|f| format!("{f:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
         }
     }
 }

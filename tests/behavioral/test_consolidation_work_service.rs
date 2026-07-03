@@ -13,14 +13,18 @@ use livrarr_behavioral::stubs::StubHttpFetcher;
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
-    AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, CreateWorkDbRequest, ProvenanceDb,
-    UserDb, WorkDb,
+    AuthorDb, CreateAuthorDbRequest, CreateDownloadClientDbRequest, CreateGrabDbRequest,
+    CreateLibraryItemDbRequest, CreateUserDbRequest, CreateWorkDbRequest, DownloadClientDb, GrabDb,
+    LibraryItemDb, ProvenanceDb, RootFolderDb, UserDb, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::identity::{
     IdentityMethod, IdentityState, PendingReason, WorkCandidate, WorkSeedFields,
 };
 use livrarr_domain::services::*;
-use livrarr_domain::{ProvenanceSetter, UserRole, WorkField};
+use livrarr_domain::{
+    DbError, DownloadClientImplementation, GrabStatus, MediaType, ProvenanceSetter, UserRole,
+    WorkField,
+};
 use livrarr_metadata::work_service::WorkServiceImpl;
 use std::sync::Arc;
 
@@ -920,4 +924,444 @@ async fn test_work_lookup_openlibrary_empty_with_llm_fallback_returns_llm_result
 #[ignore = "pk-implement: WorkService::lookup() not yet added to domain trait"]
 async fn test_work_lookup_degraded_provider_returns_empty_not_error() {
     todo!("Stub provider failure/degraded HTTP path. Assert lookup returns Ok(empty vec) rather than error, per graceful degradation contract.")
+}
+
+// =============================================================================
+// merge_works / preview_merge_works (REQ-015)
+// =============================================================================
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_work_full(
+    db: &SqliteDb,
+    user_id: i64,
+    title: &str,
+    author: &str,
+    series_name: Option<&str>,
+    series_position: Option<f64>,
+    monitor_ebook: bool,
+    monitor_audiobook: bool,
+) -> i64 {
+    // normalized_title/author must be distinct per work — the DB layer's
+    // ON CONFLICT dedup backstop collapses two creates that share the same
+    // (user_id, normalized_title, normalized_author) key, which the
+    // all-empty-string default would trigger for every seeded work.
+    db.create_work(CreateWorkDbRequest {
+        user_id,
+        title: title.into(),
+        author_name: author.into(),
+        normalized_title: livrarr_domain::normalize_for_matching(title),
+        normalized_author: livrarr_domain::normalize_for_matching(author),
+        series_name: series_name.map(String::from),
+        series_position,
+        monitor_ebook,
+        monitor_audiobook,
+        ..Default::default()
+    })
+    .await
+    .unwrap()
+    .0
+    .id
+}
+
+async fn seed_download_client(db: &SqliteDb) -> i64 {
+    db.create_download_client(CreateDownloadClientDbRequest {
+        name: "test-qbit".into(),
+        implementation: DownloadClientImplementation::QBittorrent,
+        host: "localhost".into(),
+        port: 8080,
+        use_ssl: false,
+        skip_ssl_validation: false,
+        url_base: None,
+        username: None,
+        password: None,
+        category: "livrarr".into(),
+        download_dir: None,
+        enabled: true,
+        api_key: None,
+    })
+    .await
+    .unwrap()
+    .id
+}
+
+async fn seed_library_item(
+    db: &SqliteDb,
+    user_id: i64,
+    work_id: i64,
+    root_id: i64,
+    path: &str,
+) -> i64 {
+    db.create_library_item(CreateLibraryItemDbRequest {
+        user_id,
+        work_id,
+        root_folder_id: root_id,
+        path: path.into(),
+        media_type: MediaType::Ebook,
+        file_size: 10,
+        import_id: None,
+        tag_status: livrarr_db::TagStatus::Pending,
+        tagged_at_generation: 0,
+    })
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn test_merge_preview_counts_and_conflicts() {
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
+
+    let survivor_id = seed_work_full(
+        &db,
+        user_id,
+        "Survivor",
+        "Author",
+        Some("Foo"),
+        Some(1.0),
+        true,
+        false,
+    )
+    .await;
+    let loser_id = seed_work_full(
+        &db,
+        user_id,
+        "Loser",
+        "Author",
+        Some("Bar"),
+        Some(1.0),
+        false,
+        true,
+    )
+    .await;
+
+    let root = db
+        .create_root_folder("/data/books", MediaType::Ebook)
+        .await
+        .unwrap();
+    seed_library_item(&db, user_id, loser_id, root.id, "a.epub").await;
+    seed_library_item(&db, user_id, loser_id, root.id, "b.epub").await;
+
+    let client_id = seed_download_client(&db).await;
+    db.upsert_grab(CreateGrabDbRequest {
+        user_id,
+        work_id: loser_id,
+        download_client_id: client_id,
+        title: "grab".into(),
+        indexer: "idx".into(),
+        guid: "guid-1".into(),
+        size: None,
+        download_url: "http://x".into(),
+        download_id: None,
+        status: GrabStatus::Sent,
+        media_type: None,
+    })
+    .await
+    .unwrap();
+
+    let preview = svc
+        .preview_merge_works(user_id, survivor_id, loser_id)
+        .await
+        .unwrap();
+
+    // Only SeriesName conflicts — both sides share the same series_position.
+    assert_eq!(preview.library_items_moving, 2);
+    assert_eq!(preview.grabs_moving, 1);
+    assert!(preview.monitor_ebook_result);
+    assert!(preview.monitor_audiobook_result);
+    assert_eq!(preview.conflicts.len(), 1);
+    assert_eq!(preview.conflicts[0].field, MergeableField::SeriesName);
+    assert_eq!(preview.conflicts[0].survivor_value, "Foo");
+    assert_eq!(preview.conflicts[0].loser_value, "Bar");
+}
+
+#[tokio::test]
+async fn test_merge_refuses_without_choice_for_conflict() {
+    // AC-025: a conflicting user-set field with no explicit choice must
+    // refuse, not silently default.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
+
+    let survivor_id = seed_work_full(
+        &db,
+        user_id,
+        "Survivor",
+        "Author",
+        Some("Foo"),
+        None,
+        false,
+        false,
+    )
+    .await;
+    let loser_id = seed_work_full(
+        &db,
+        user_id,
+        "Loser",
+        "Author",
+        Some("Bar"),
+        None,
+        false,
+        false,
+    )
+    .await;
+
+    let result = svc
+        .merge_works(user_id, survivor_id, loser_id, vec![])
+        .await;
+    match result {
+        Err(WorkServiceError::MergeChoiceRequired(fields)) => {
+            assert_eq!(fields, vec![MergeableField::SeriesName]);
+        }
+        other => panic!("expected MergeChoiceRequired, got {other:?}"),
+    }
+
+    // The refusal must not have applied anything — the loser still exists.
+    assert!(db.get_work(user_id, loser_id).await.is_ok());
+}
+
+#[tokio::test]
+async fn test_merge_applies_explicit_choice() {
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
+
+    let survivor_id = seed_work_full(
+        &db,
+        user_id,
+        "Survivor",
+        "Author",
+        Some("Foo"),
+        None,
+        false,
+        false,
+    )
+    .await;
+    let loser_id = seed_work_full(
+        &db,
+        user_id,
+        "Loser",
+        "Author",
+        Some("Bar"),
+        None,
+        false,
+        false,
+    )
+    .await;
+
+    let result = svc
+        .merge_works(
+            user_id,
+            survivor_id,
+            loser_id,
+            vec![MergeFieldChoiceEntry {
+                field: MergeableField::SeriesName,
+                choice: MergeFieldChoice::TakeLoser,
+            }],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.survivor.series_name.as_deref(), Some("Bar"));
+    // Loser is gone only now that the choice let the merge complete.
+    assert!(db.get_work(user_id, loser_id).await.is_err());
+}
+
+#[tokio::test]
+async fn test_merge_additive_fields_need_no_choice() {
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
+
+    // Only the loser has series info — additive, never a conflict.
+    let survivor_id =
+        seed_work_full(&db, user_id, "Survivor", "Author", None, None, true, false).await;
+    let loser_id = seed_work_full(
+        &db,
+        user_id,
+        "Loser",
+        "Author",
+        Some("OnlyLoser"),
+        Some(3.0),
+        false,
+        true,
+    )
+    .await;
+
+    let result = svc
+        .merge_works(user_id, survivor_id, loser_id, vec![])
+        .await
+        .unwrap();
+
+    assert_eq!(result.survivor.series_name.as_deref(), Some("OnlyLoser"));
+    assert_eq!(result.survivor.series_position, Some(3.0));
+    assert!(result.survivor.monitor_ebook); // survivor's own true, OR'd
+    assert!(result.survivor.monitor_audiobook); // loser's true, OR'd
+}
+
+#[tokio::test]
+async fn test_merge_reassigns_items_and_grabs_same_row_ids_and_deletes_loser() {
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
+
+    let survivor_id =
+        seed_work_full(&db, user_id, "Survivor", "Author", None, None, false, false).await;
+    let loser_id = seed_work_full(&db, user_id, "Loser", "Author", None, None, false, false).await;
+
+    let root = db
+        .create_root_folder("/data/books", MediaType::Ebook)
+        .await
+        .unwrap();
+    let item_id = seed_library_item(&db, user_id, loser_id, root.id, "a.epub").await;
+
+    let client_id = seed_download_client(&db).await;
+    let grab = db
+        .upsert_grab(CreateGrabDbRequest {
+            user_id,
+            work_id: loser_id,
+            download_client_id: client_id,
+            title: "grab".into(),
+            indexer: "idx".into(),
+            guid: "guid-1".into(),
+            size: None,
+            download_url: "http://x".into(),
+            download_id: None,
+            status: GrabStatus::Sent,
+            media_type: None,
+        })
+        .await
+        .unwrap();
+
+    let result = svc
+        .merge_works(user_id, survivor_id, loser_id, vec![])
+        .await
+        .unwrap();
+    assert_eq!(result.library_items_moved, 1);
+    assert_eq!(result.grabs_moved, 1);
+
+    assert!(
+        db.get_work(user_id, loser_id).await.is_err(),
+        "loser row must be gone"
+    );
+
+    // Reassignment updates work_id on the SAME row — never delete+recreate —
+    // so anything FK'd to the item/grab id (bookmarks, playback, kash links)
+    // rides along untouched (REQ-015 d).
+    let moved_item = db.get_library_item(user_id, item_id).await.unwrap();
+    assert_eq!(moved_item.work_id, survivor_id);
+    let moved_grab = db.get_grab(user_id, grab.id).await.unwrap();
+    assert_eq!(moved_grab.work_id, survivor_id);
+}
+
+#[tokio::test]
+async fn test_merge_rejects_self_merge() {
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
+
+    let work_id = seed_work_full(&db, user_id, "Solo", "Author", None, None, false, false).await;
+
+    let merge_result = svc.merge_works(user_id, work_id, work_id, vec![]).await;
+    assert!(matches!(merge_result, Err(WorkServiceError::Validation(_))));
+
+    let preview_result = svc.preview_merge_works(user_id, work_id, work_id).await;
+    assert!(matches!(
+        preview_result,
+        Err(WorkServiceError::Validation(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_merge_cross_user_is_impossible() {
+    // AC-024: a merge never crosses users. Cross-user attempts must fail
+    // exactly like the id didn't exist — never leaking which case it was.
+    let db = create_test_db().await;
+    let user_a = setup_user(&db).await;
+    let user_b = setup_second_user(&db).await;
+    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
+
+    let survivor_id = seed_work_full(&db, user_a, "Mine", "Author", None, None, false, false).await;
+    let other_users_work = seed_work_full(
+        &db,
+        user_b,
+        "TheirsNotMine",
+        "Author",
+        None,
+        None,
+        false,
+        false,
+    )
+    .await;
+
+    let preview = svc
+        .preview_merge_works(user_a, survivor_id, other_users_work)
+        .await;
+    assert!(matches!(preview, Err(WorkServiceError::NotFound)));
+
+    let merge = svc
+        .merge_works(user_a, survivor_id, other_users_work, vec![])
+        .await;
+    assert!(matches!(merge, Err(WorkServiceError::NotFound)));
+
+    // The other user's work is completely untouched.
+    let still_theirs = db.get_work(user_b, other_users_work).await.unwrap();
+    assert_eq!(still_theirs.title, "TheirsNotMine");
+
+    // Also reject the reverse direction (loser belongs to the caller, but
+    // the "survivor" they named does not).
+    let reverse = svc
+        .merge_works(user_a, other_users_work, survivor_id, vec![])
+        .await;
+    assert!(matches!(reverse, Err(WorkServiceError::NotFound)));
+}
+
+#[tokio::test]
+async fn test_merge_works_db_aborts_whole_transaction_leaving_nothing_half_moved() {
+    // Exercises `WorkDb::merge_works`'s OWN internal ownership re-check
+    // directly (bypassing the service layer, which would already refuse
+    // this pair before ever calling the DB — this proves the DB-layer
+    // guard is independently load-bearing, defense in depth). The
+    // survivor's ownership check passes first; the loser's fails second —
+    // so this is a genuine "some validation already happened, then it
+    // aborts" case, not a same-request no-op. Nothing about the loser
+    // (its row, or the items it owns) may be touched when the call fails:
+    // one transaction, all-or-nothing (REQ-015 e).
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let other_user = setup_second_user(&db).await;
+
+    let survivor_id =
+        seed_work_full(&db, user_id, "Survivor", "Author", None, None, false, false).await;
+    // Actually owned by `other_user`, not `user_id` — the request below
+    // claims it as if it were the caller's.
+    let loser_id = seed_work_full(
+        &db, other_user, "NotMine", "Author", None, None, false, false,
+    )
+    .await;
+
+    let root = db
+        .create_root_folder("/data/books", MediaType::Ebook)
+        .await
+        .unwrap();
+    let item_id = seed_library_item(&db, other_user, loser_id, root.id, "a.epub").await;
+
+    let result = db
+        .merge_works(livrarr_db::MergeWorksDbRequest {
+            user_id,
+            survivor_id,
+            loser_id,
+            monitor_ebook: false,
+            monitor_audiobook: false,
+            series_name: None,
+            series_position: None,
+        })
+        .await;
+    assert!(matches!(result, Err(DbError::NotFound { .. })));
+
+    // The real owner's work and item are completely untouched.
+    assert!(db.get_work(other_user, loser_id).await.is_ok());
+    let item_after = db.get_library_item(other_user, item_id).await.unwrap();
+    assert_eq!(item_after.work_id, loser_id);
 }

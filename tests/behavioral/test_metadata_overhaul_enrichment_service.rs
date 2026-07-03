@@ -353,6 +353,10 @@ impl WorkDb for SequencedApplyDb {
         self.inner.delete_work(user_id, id).await
     }
 
+    async fn merge_works(&self, req: livrarr_db::MergeWorksDbRequest) -> Result<Work, DbError> {
+        self.inner.merge_works(req).await
+    }
+
     async fn set_work_series_id(
         &self,
         user_id: UserId,

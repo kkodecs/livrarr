@@ -307,6 +307,43 @@ export interface DeleteWorkResponse {
   warnings: string[];
 }
 
+// Merge duplicates
+export type MergeableField = "series_name" | "series_position";
+export type MergeFieldChoice = "keep_survivor" | "take_loser";
+
+export interface MergeConflict {
+  field: MergeableField;
+  survivorValue: string;
+  loserValue: string;
+}
+
+export interface MergePreviewResponse {
+  survivorId: number;
+  loserId: number;
+  libraryItemsMoving: number;
+  grabsMoving: number;
+  monitorEbookResult: boolean;
+  monitorAudiobookResult: boolean;
+  /** Fields needing an explicit choice before the merge can execute. */
+  conflicts: MergeConflict[];
+}
+
+export interface MergeChoiceEntry {
+  field: MergeableField;
+  choice: MergeFieldChoice;
+}
+
+export interface MergeWorksRequest {
+  choices: MergeChoiceEntry[];
+}
+
+export interface MergeWorksResponse {
+  survivor: WorkDetailResponse;
+  libraryItemsMoved: number;
+  grabsMoved: number;
+  warnings: string[];
+}
+
 // Authors
 export interface AuthorSearchResult {
   olKey: string;

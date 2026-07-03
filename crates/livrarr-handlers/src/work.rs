@@ -7,22 +7,23 @@ use axum::response::{IntoResponse, Response};
 
 use crate::context::{
     HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
-    HasEmailService, HasEnrichmentWorkflow, HasFileService, HasIdentityResolver,
+    HasEmailService, HasEnrichmentWorkflow, HasFileService, HasIdentityResolver, HasImportService,
     HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkIdentityRepository,
     HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
-use crate::types::work::work_to_detail;
+use crate::types::work::{merge_preview_to_response, work_to_detail};
 use crate::{
     AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse, LookupApiResponse,
-    RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
+    MergePreviewResponse, MergeWorksRequest, MergeWorksResponse, RefreshWorkResponse,
+    UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
 use livrarr_domain::identity::{AnchorConfidence, AnchorSetter, AnchorType};
 use livrarr_domain::services::{
     AppConfigService, AuthorService, CreateNotificationRequest, EmailService, FileService,
-    NotificationService, RefreshSurface, SeriesQueryService, WorkIdentityRepository, WorkService,
-    WorkServiceError,
+    ImportService, MergeFieldChoiceEntry, NotificationService, RefreshSurface, SeriesQueryService,
+    WorkIdentityRepository, WorkService, WorkServiceError,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -579,6 +580,64 @@ pub async fn delete<S: HasWorkService>(
 ) -> Result<Json<DeleteWorkResponse>, ApiError> {
     state.work_service().delete(ctx.user.id, id).await?;
     Ok(Json(DeleteWorkResponse { warnings: vec![] }))
+}
+
+/// Preview combining `loser_id` into `id` (the survivor) without applying
+/// anything (REQ-015 b). Both works must belong to the caller — enforced by
+/// `WorkService::preview_merge_works` itself, not just here (REQ-015 a).
+pub async fn preview_merge<S: HasWorkService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path((id, loser_id)): Path<(i64, i64)>,
+) -> Result<Json<MergePreviewResponse>, ApiError> {
+    let preview = state
+        .work_service()
+        .preview_merge_works(ctx.user.id, id, loser_id)
+        .await?;
+    Ok(Json(merge_preview_to_response(preview)))
+}
+
+/// Combine `loser_id` into `id` (the survivor): reassigns library items and
+/// grabs, resolves user-sovereign fields, then removes the loser row — all
+/// in one transaction (REQ-015 c/e). Physical file reorganization under the
+/// survivor's canonical path is a separate, best-effort follow-up: it never
+/// blocks or reverses the transaction above, which is the guarantee the
+/// user actually needs (items/grabs moved, loser gone, zero deletions).
+pub async fn merge<S: HasWorkService + HasImportService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path((id, loser_id)): Path<(i64, i64)>,
+    Json(req): Json<MergeWorksRequest>,
+) -> Result<Json<MergeWorksResponse>, ApiError> {
+    let choices = req
+        .choices
+        .into_iter()
+        .map(|c| MergeFieldChoiceEntry {
+            field: c.field,
+            choice: c.choice,
+        })
+        .collect();
+
+    let result = state
+        .work_service()
+        .merge_works(ctx.user.id, id, loser_id, choices)
+        .await?;
+
+    let reorg_warnings = state
+        .import_service()
+        .reorganize_work_files(ctx.user.id, id)
+        .await
+        .unwrap_or_else(|e| vec![format!("file reorganization skipped: {e}")]);
+
+    let mut warnings = result.warnings;
+    warnings.extend(reorg_warnings);
+
+    Ok(Json(MergeWorksResponse {
+        survivor: work_to_detail(&result.survivor),
+        library_items_moved: result.library_items_moved,
+        grabs_moved: result.grabs_moved,
+        warnings,
+    }))
 }
 
 pub async fn refresh<S: HasWorkService>(

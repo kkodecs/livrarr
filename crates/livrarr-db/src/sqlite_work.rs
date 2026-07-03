@@ -5,8 +5,8 @@ use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{absolute_http_cover_url, map_db_err, parse_dt};
 use crate::{
     ApplyEnrichmentMergeRequest, ApplyMergeOutcome, AuthorId, CreateWorkDbRequest, DbError,
-    EnrichmentStatus, MediaType, NarrationType, ProvenanceSetter, UpdateWorkEnrichmentDbRequest,
-    UpdateWorkUserFieldsDbRequest, UserId, Work, WorkDb, WorkId,
+    EnrichmentStatus, MediaType, MergeWorksDbRequest, NarrationType, ProvenanceSetter,
+    UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, UserId, Work, WorkDb, WorkId,
 };
 
 fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
@@ -701,6 +701,92 @@ impl WorkDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
         Ok(work)
+    }
+
+    async fn merge_works(&self, req: MergeWorksDbRequest) -> Result<Work, DbError> {
+        if req.survivor_id == req.loser_id {
+            return Err(DbError::Constraint {
+                message: "cannot merge a work into itself".to_string(),
+            });
+        }
+
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+
+        // Re-verify ownership of both ids inside the transaction (defense in
+        // depth — the service layer already checked). NotFound either way,
+        // never distinguishing "doesn't exist" from "not yours" (AC-024).
+        for id in [req.survivor_id, req.loser_id] {
+            let exists: Option<(i64,)> =
+                sqlx::query_as("SELECT id FROM works WHERE id = ? AND user_id = ?")
+                    .bind(id)
+                    .bind(req.user_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(map_db_err)?;
+            if exists.is_none() {
+                return Err(DbError::NotFound { entity: "work" });
+            }
+        }
+
+        // Reassign the loser's library items and grabs to the survivor
+        // BEFORE deleting the loser row — `works` children are
+        // `ON DELETE CASCADE`, so anything still pointing at the loser when
+        // it's deleted would be destroyed, not moved (REQ-015 e).
+        sqlx::query("UPDATE library_items SET work_id = ? WHERE user_id = ? AND work_id = ?")
+            .bind(req.survivor_id)
+            .bind(req.user_id)
+            .bind(req.loser_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
+        sqlx::query("UPDATE grabs SET work_id = ? WHERE user_id = ? AND work_id = ?")
+            .bind(req.survivor_id)
+            .bind(req.user_id)
+            .bind(req.loser_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
+        // Write the caller-resolved user-sovereign field values onto the
+        // survivor (REQ-015 d — the service layer already applied the
+        // OR/conflict-choice logic; this is a plain write).
+        sqlx::query(
+            "UPDATE works SET monitor_ebook = ?, monitor_audiobook = ?, \
+             series_name = ?, series_position = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(req.monitor_ebook)
+        .bind(req.monitor_audiobook)
+        .bind(&req.series_name)
+        .bind(req.series_position)
+        .bind(req.survivor_id)
+        .bind(req.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        // The loser is removed only now that the survivor owns its items
+        // and grabs (REQ-015 e). Everything else FK'd to the loser
+        // (identity anchors, provenance, dissents, history, ...) cascades
+        // away with it — that metadata is system/provider-derived, not
+        // per-user consumption data, so its loss is the intended outcome.
+        sqlx::query("DELETE FROM works WHERE id = ? AND user_id = ?")
+            .bind(req.loser_id)
+            .bind(req.user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
+        let row = sqlx::query("SELECT * FROM works WHERE id = ? AND user_id = ?")
+            .bind(req.survivor_id)
+            .bind(req.user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+        let survivor = row_to_work(row)?;
+
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(survivor)
     }
 
     async fn work_exists_by_ol_key(&self, user_id: UserId, ol_key: &str) -> Result<bool, DbError> {
