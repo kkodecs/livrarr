@@ -683,6 +683,75 @@ async fn test_id_completeness_converge_work_terminal_settle_enrich_clear_and_no_
     );
 }
 
+/// Directive (Phase 5 REQ-008/AC-012): a work parked as `NeedsReview` — the
+/// resolver could not confidently pick a candidate, so identity is grey — must
+/// never have provider data written onto it by a background pass. Seeds a work
+/// already at `NeedsReview` (the state a `Resolution::NeedsConfirmation`
+/// verdict leaves it in) and drives it through the same background convergence
+/// path a scheduled tick uses, with no resolver wired: the Step-0 dead-end exit
+/// only applies to a `Pending` prior, so this exercises the Step-2 enrichment
+/// gate (`identity_permits`) directly.
+#[tokio::test]
+async fn test_id_completeness_needs_review_work_never_dispatches_enrichment_ac012() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let parked = seed_work(
+        &db,
+        user_id,
+        "AC-012 Parked Grey Candidate",
+        IdentityStatus::NeedsReview,
+        EnrichmentStatus::Unenriched,
+        SeedAnchors::default(),
+    )
+    .await;
+
+    let workflow = StubEnrichmentWorkflow::succeeding();
+    let svc = service(db.clone(), workflow.clone(), None);
+
+    let outcome = svc
+        .converge_work(user_id, parked.id, 3)
+        .await
+        .expect("converge a needs-review work");
+
+    assert_eq!(
+        outcome,
+        ConvergeOutcome::Terminal,
+        "a NeedsReview identity is terminal regardless of enrichment/chaseable state"
+    );
+    assert_eq!(
+        workflow.call_count(),
+        0,
+        "AC-012: background convergence must never dispatch enrichment for a grey/needs-review work"
+    );
+    assert!(
+        !workflow.work_ids().contains(&parked.id),
+        "AC-012: the parked work's id must never reach the enrichment workflow"
+    );
+
+    let after = db
+        .get_work(user_id, parked.id)
+        .await
+        .expect("read parked work");
+    assert_eq!(
+        after.identity_status,
+        IdentityStatus::NeedsReview,
+        "a NeedsReview badge is not silently changed by convergence"
+    );
+    assert_eq!(
+        after.enrichment_status,
+        EnrichmentStatus::Unenriched,
+        "AC-012: no provider data merged onto a grey-identity work"
+    );
+    assert_eq!(
+        after.cover_url, None,
+        "AC-012: no cover written from an uncertain candidate"
+    );
+    assert_eq!(
+        after.description, None,
+        "AC-012: no description written from an uncertain candidate"
+    );
+}
+
 #[tokio::test]
 async fn test_id_completeness_pending_anchor_handlers_affirm_list_and_cross_user_404() {
     let db = create_test_db().await;
