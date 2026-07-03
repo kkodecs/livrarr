@@ -100,6 +100,28 @@ pub enum FetchError {
 pub trait HttpFetcher: Send + Sync {
     async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, FetchError>;
     async fn fetch_ssrf_safe(&self, req: FetchRequest) -> Result<FetchResponse, FetchError>;
+
+    /// Same as `fetch_ssrf_safe`, but the TCP-connect phase is bounded far
+    /// tighter than `req.timeout` — for a caller that wants to fail fast
+    /// against an unreachable host without shrinking the budget a slow-but-
+    /// live host needs to finish downloading. The connect budget is an
+    /// implementation constant owned by the fetcher, not caller-supplied —
+    /// `req.timeout` still governs the rest of the request exactly as with
+    /// `fetch_ssrf_safe`.
+    ///
+    /// Defaulted so every existing implementor keeps today's behavior
+    /// unchanged unless it opts in by overriding this method; `HttpFetcherImpl`
+    /// is the only override. The body is written pre-desugared (`fn` +
+    /// `impl Future`, not `async fn`) because `trait_variant::make` rewrites
+    /// an `async fn`'s signature but not its body — a default body written as
+    /// `async fn` containing `.await` would no longer compile once its
+    /// `asyncness` is stripped.
+    fn fetch_ssrf_safe_fast_connect(
+        &self,
+        req: FetchRequest,
+    ) -> impl core::future::Future<Output = Result<FetchResponse, FetchError>> {
+        async move { self.fetch_ssrf_safe(req).await }
+    }
 }
 
 #[cfg(test)]

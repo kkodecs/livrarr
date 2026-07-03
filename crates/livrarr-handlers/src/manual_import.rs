@@ -850,24 +850,34 @@ pub async fn import<S: ManualImportHandlerContext>(
     // file and picked candidate both carry no language seed this value.
     let default_language = state.app_config_service().get_default_language().await?;
 
-    let mut results = Vec::new();
     let mut author_ol_cache: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
 
-    for item in &req.items {
-        let result = import_single_item(
-            &state,
-            user_id,
-            item,
-            &existing_works,
-            &root_folders,
-            &media_mgmt,
-            &mut author_ol_cache,
-            &default_language,
-        )
-        .await;
-        results.push(result);
-    }
+    // One negative cover-host cache for the whole batch (dead-URL phase1
+    // fast-fail): once a book's embedded cover URL fails to connect, later
+    // books in this SAME request skip the doomed connect for that host. The
+    // scope ends when the block below returns, so nothing survives past this
+    // request — the next import (or a concurrent one on another task) starts
+    // with an empty cache.
+    let results = livrarr_domain::services::with_cover_host_cache(async {
+        let mut results = Vec::new();
+        for item in &req.items {
+            let result = import_single_item(
+                &state,
+                user_id,
+                item,
+                &existing_works,
+                &root_folders,
+                &media_mgmt,
+                &mut author_ol_cache,
+                &default_language,
+            )
+            .await;
+            results.push(result);
+        }
+        results
+    })
+    .await;
 
     // Background refresh for each imported work: fills in anchors (GR/HC/ASIN)
     // that initial enrichment misses because they require the identity road.

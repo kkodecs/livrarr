@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use livrarr_domain::services::{
-    FetchRequest, HttpFetcher, HttpMethod, MaterializeError, MaterializeOutcome,
+    FetchError, FetchRequest, HttpFetcher, HttpMethod, MaterializeError, MaterializeOutcome,
     MaterializeRequest, MaterializeService, MaterializeTags, RateBucket, SavedCover,
     UserAgentProfile,
 };
@@ -19,6 +19,40 @@ use livrarr_tagwrite::{write_tags_batch, TagMetadata};
 /// outcome so the reported path always matches the file written.
 fn cover_file_path(covers_dir: &Path, work_id: i64, suffix: &str) -> PathBuf {
     covers_dir.join(format!("{work_id}{suffix}.jpg"))
+}
+
+/// `download_cover_to_disk`'s error, kept as a small typed enum (rather than
+/// a boxed `dyn Error`) so a caller that cares — phase1 cover fetch, for its
+/// negative host cache — can tell a transport-level connect/timeout failure
+/// apart from a live host that simply had nothing at that URL. Every variant's
+/// `Display` matches the message this type replaces, so callers that only
+/// call `.to_string()` on it (all of them, today) see no change.
+#[derive(Debug, thiserror::Error)]
+pub enum DownloadCoverError {
+    #[error("fetch: {0}")]
+    Fetch(#[from] FetchError),
+    #[error("cover download returned {0}")]
+    HttpStatus(u16),
+    #[error("grayscale cover rejected (likely placeholder)")]
+    GrayscalePlaceholder,
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+    #[error("spawn error: {0}")]
+    Spawn(String),
+}
+
+impl DownloadCoverError {
+    /// True for a transport-level failure during the connect/send phase —
+    /// the class `fetch_ssrf_safe_fast_connect` bounds tightly, and the only
+    /// class phase1's negative host cache should act on. A 4xx/5xx status,
+    /// a decode/grayscale rejection, or a local IO error means the host
+    /// answered just fine — never grounds for marking it dead.
+    pub fn is_connect_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Fetch(FetchError::Connection(_)) | Self::Fetch(FetchError::Timeout(_))
+        )
+    }
 }
 
 /// The pacing bucket for a cover download URL: `OpenLibraryCovers` for
@@ -42,6 +76,14 @@ fn cover_bucket_for_url(url: &str) -> RateBucket {
 /// Decodes the image exactly ONCE (in spawn_blocking per insight 10): checks for
 /// grayscale placeholders and extracts dimensions in the same pass. Returns
 /// `(bytes, dims)` so callers never need a second decode.
+///
+/// `fast_connect` selects `HttpFetcher::fetch_ssrf_safe_fast_connect` instead
+/// of `fetch_ssrf_safe` — a tight connect-phase budget for a caller that wants
+/// to fail fast against an unreachable host (phase1 cover fetch) without
+/// shrinking `priority`/the request's own timeout for everyone else (the
+/// materialize save path, the cover backfill job, and manual cover selection
+/// all pass `false` and are unaffected).
+#[allow(clippy::too_many_arguments)]
 pub async fn download_cover_to_disk<H: HttpFetcher>(
     http: &H,
     url: &str,
@@ -49,7 +91,8 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
     work_id: i64,
     suffix: &str,
     priority: RequestPriority,
-) -> Result<(Vec<u8>, Option<(i32, i32)>), Box<dyn std::error::Error + Send + Sync>> {
+    fast_connect: bool,
+) -> Result<(Vec<u8>, Option<(i32, i32)>), DownloadCoverError> {
     tokio::fs::create_dir_all(covers_dir).await?;
 
     let req = FetchRequest {
@@ -65,12 +108,14 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
         priority,
     };
 
-    let resp = http
-        .fetch_ssrf_safe(req)
-        .await
-        .map_err(|e| format!("fetch: {e}"))?;
+    let resp = if fast_connect {
+        http.fetch_ssrf_safe_fast_connect(req).await
+    } else {
+        http.fetch_ssrf_safe(req).await
+    }
+    .map_err(DownloadCoverError::Fetch)?;
     if resp.status >= 400 {
-        return Err(format!("cover download returned {}", resp.status).into());
+        return Err(DownloadCoverError::HttpStatus(resp.status));
     }
 
     let cover_path = cover_file_path(covers_dir, work_id, suffix);
@@ -93,7 +138,7 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
                         | image::ColorType::La8
                         | image::ColorType::La16
                 ) {
-                    return Err("grayscale cover rejected (likely placeholder)".into());
+                    return Err(DownloadCoverError::GrayscalePlaceholder);
                 }
                 Some((img.width() as i32, img.height() as i32))
             }
@@ -118,7 +163,7 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            Err(format!("spawn error: {e}").into())
+            Err(DownloadCoverError::Spawn(e.to_string()))
         }
     }
 }
@@ -201,6 +246,7 @@ where
                         request.work_id,
                         "",
                         RequestPriority::Normal,
+                        false,
                     )
                     .await
                     .map_err(|e| MaterializeError::CoverDownload(e.to_string()))?;
@@ -236,6 +282,7 @@ where
                         request.work_id,
                         "_audiobook",
                         RequestPriority::Normal,
+                        false,
                     )
                     .await
                     .map_err(|e| MaterializeError::CoverDownload(e.to_string()))?;
@@ -278,13 +325,15 @@ mod tests {
     use std::sync::Mutex;
 
     /// Records the `RateBucket` and `RequestPriority` of the last request it
-    /// was handed and returns a canned 200 response. `download_cover_to_disk`
-    /// tolerates a body that doesn't decode as an image (dims come back
-    /// `None`, non-fatal per existing policy) — this fake never needs a real
-    /// JPEG.
+    /// was handed, and which `HttpFetcher` method carried it, then returns a
+    /// canned 200 response. `download_cover_to_disk` tolerates a body that
+    /// doesn't decode as an image (dims come back `None`, non-fatal per
+    /// existing policy) — this fake never needs a real JPEG.
     struct RecordingFetcher {
         last_bucket: Mutex<Option<RateBucket>>,
         last_priority: Mutex<Option<RequestPriority>>,
+        used_fast_connect: Mutex<bool>,
+        status: u16,
     }
 
     impl RecordingFetcher {
@@ -292,6 +341,15 @@ mod tests {
             Self {
                 last_bucket: Mutex::new(None),
                 last_priority: Mutex::new(None),
+                used_fast_connect: Mutex::new(false),
+                status: 200,
+            }
+        }
+
+        fn with_status(status: u16) -> Self {
+            Self {
+                status,
+                ..Self::new()
             }
         }
     }
@@ -305,10 +363,18 @@ mod tests {
             *self.last_bucket.lock().unwrap() = Some(req.rate_bucket.clone());
             *self.last_priority.lock().unwrap() = Some(req.priority);
             Ok(FetchResponse {
-                status: 200,
+                status: self.status,
                 headers: vec![],
                 body: b"not-a-real-image".to_vec(),
             })
+        }
+
+        async fn fetch_ssrf_safe_fast_connect(
+            &self,
+            req: FetchRequest,
+        ) -> Result<FetchResponse, FetchError> {
+            *self.used_fast_connect.lock().unwrap() = true;
+            self.fetch_ssrf_safe(req).await
         }
     }
 
@@ -324,6 +390,7 @@ mod tests {
             1,
             "",
             RequestPriority::Interactive,
+            false,
         )
         .await
         .expect("download should succeed against the canned 200 response");
@@ -350,6 +417,7 @@ mod tests {
             2,
             "",
             RequestPriority::Normal,
+            false,
         )
         .await
         .expect("download should succeed against the canned 200 response");
@@ -376,6 +444,7 @@ mod tests {
             3,
             "",
             RequestPriority::Low,
+            false,
         )
         .await
         .expect("download should succeed against the canned 200 response");
@@ -383,6 +452,94 @@ mod tests {
         assert_eq!(
             *fetcher.last_priority.lock().unwrap(),
             Some(RequestPriority::Low)
+        );
+    }
+
+    /// The `fast_connect` flag must actually select
+    /// `fetch_ssrf_safe_fast_connect` on the fetcher, not just get accepted
+    /// and ignored (cf. door->road wiring lesson: threading a value into a
+    /// call is not the same as the call using it).
+    #[tokio::test]
+    async fn download_cover_to_disk_fast_connect_true_uses_fast_connect_method() {
+        let fetcher = RecordingFetcher::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        download_cover_to_disk(
+            &fetcher,
+            "https://dead-or-alive.example.com/cover.jpg",
+            dir.path(),
+            4,
+            "",
+            RequestPriority::High,
+            true,
+        )
+        .await
+        .expect("download should succeed against the canned 200 response");
+
+        assert!(*fetcher.used_fast_connect.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn download_cover_to_disk_fast_connect_false_uses_normal_method() {
+        let fetcher = RecordingFetcher::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        download_cover_to_disk(
+            &fetcher,
+            "https://dead-or-alive.example.com/cover.jpg",
+            dir.path(),
+            5,
+            "",
+            RequestPriority::Normal,
+            false,
+        )
+        .await
+        .expect("download should succeed against the canned 200 response");
+
+        assert!(!*fetcher.used_fast_connect.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn download_cover_to_disk_4xx_status_is_not_a_connect_failure() {
+        let fetcher = RecordingFetcher::with_status(404);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let err = download_cover_to_disk(
+            &fetcher,
+            "https://flaky.example.com/missing.jpg",
+            dir.path(),
+            6,
+            "",
+            RequestPriority::High,
+            true,
+        )
+        .await
+        .expect_err("404 must surface as an error");
+
+        assert_eq!(err.to_string(), "cover download returned 404");
+        assert!(
+            !err.is_connect_failure(),
+            "a live host's 404 must never be classified as a connect failure \
+             (that would poison the negative host cache for a host that works fine)"
+        );
+    }
+
+    #[test]
+    fn is_connect_failure_true_only_for_connection_and_timeout_fetch_errors() {
+        assert!(
+            DownloadCoverError::Fetch(FetchError::Connection("refused".into()))
+                .is_connect_failure()
+        );
+        assert!(
+            DownloadCoverError::Fetch(FetchError::Timeout(std::time::Duration::from_millis(600)))
+                .is_connect_failure()
+        );
+
+        assert!(!DownloadCoverError::HttpStatus(404).is_connect_failure());
+        assert!(!DownloadCoverError::GrayscalePlaceholder.is_connect_failure());
+        assert!(!DownloadCoverError::Fetch(FetchError::RateLimited).is_connect_failure());
+        assert!(
+            !DownloadCoverError::Fetch(FetchError::Ssrf("blocked".into())).is_connect_failure()
         );
     }
 }
