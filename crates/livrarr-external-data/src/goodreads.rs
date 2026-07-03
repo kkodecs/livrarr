@@ -281,6 +281,16 @@ pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
         .filter_map(|e| {
             let title = e.title.filter(|t| !t.trim().is_empty())?;
             let detail_url = e.book_url.filter(|u| !u.trim().is_empty())?;
+            // The search-card decoration "(Series, #N)" is provider data: the
+            // same series/volume evidence the HTML road extracts. It must ride
+            // the result so downstream volume vetoes can see it.
+            let (series_name, series_position) = match RE_TITLE_SERIES.captures(&title) {
+                Some(caps) => (
+                    Some(caps[1].trim().to_string()),
+                    caps[2].parse::<f64>().ok(),
+                ),
+                None => (None, None),
+            };
             Some(GoodreadsSearchResult {
                 title,
                 title_bare: e.book_title_bare.filter(|t| !t.trim().is_empty()),
@@ -301,8 +311,8 @@ pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
                     .avg_rating
                     .map(StringOrNumber::into_rating_string)
                     .filter(|r| !r.trim().is_empty() && r != "0.00"),
-                series_name: None,
-                series_position: None,
+                series_name,
+                series_position,
             })
         })
         .collect()
@@ -1783,6 +1793,22 @@ mod tests {
         let results = parse_autocomplete_json(body);
         assert_eq!(results.len(), 1, "the broken entry drops alone");
         assert_eq!(results[0].title, "Survivor");
+    }
+
+    #[test]
+    fn autocomplete_decoration_populates_series_fields() {
+        // The search-card decoration is provider data — the volume evidence
+        // must ride the result fields (the HTML road already extracts it).
+        let body = r#"[
+            {"bookId":"47212","bookUrl":"/book/show/47212","title":"Storm Front (The Dresden Files, #1)","bookTitleBare":"Storm Front","author":{"name":"Jim Butcher"}},
+            {"bookId":"11084145","bookUrl":"/book/show/11084145","title":"Steve Jobs","bookTitleBare":"Steve Jobs","author":{"name":"Walter Isaacson"}}
+        ]"#;
+        let results = parse_autocomplete_json(body);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].series_name.as_deref(), Some("The Dresden Files"));
+        assert_eq!(results[0].series_position, Some(1.0));
+        assert_eq!(results[1].series_name, None);
+        assert_eq!(results[1].series_position, None);
     }
 
     #[test]

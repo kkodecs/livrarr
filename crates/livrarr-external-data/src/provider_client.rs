@@ -1031,6 +1031,12 @@ struct GrCandidateText {
     /// OpenLibrary in the cover priority, so this wins over the OL/ISBN fallback
     /// that otherwise produces the weaker import covers.
     cover_url: Option<String>,
+    /// Series evidence from the hit's search-card decoration. Travels into
+    /// the payload so the identity quorum's volume veto can see the volume
+    /// the picker saw — a picked later-volume record must never read as a
+    /// bare-title twin downstream.
+    series_name: Option<String>,
+    series_position: Option<f64>,
 }
 
 impl GrCandidateText {
@@ -1272,7 +1278,7 @@ impl GoodreadsClient {
             if payload.cover_url.is_none() {
                 payload.cover_url = resolved.candidate.as_ref().and_then(|c| c.cover());
             }
-            apply_bare_title(&mut payload, &resolved.candidate);
+            apply_candidate_text(&mut payload, &resolved.candidate);
             return ProviderOutcome::Success(Box::new(payload));
         }
 
@@ -1287,7 +1293,7 @@ impl GoodreadsClient {
                     if payload.gr_key.is_none() {
                         payload.gr_key = resolved_gr_key;
                     }
-                    apply_bare_title(&mut payload, &resolved.candidate);
+                    apply_candidate_text(&mut payload, &resolved.candidate);
                     return ProviderOutcome::Success(Box::new(payload));
                 }
                 Err(err) => return self.map_fetch_err(err),
@@ -1336,14 +1342,23 @@ impl GoodreadsClient {
         };
 
         let cover_url = confirmed.as_ref().and_then(|c| c.cover());
-        let (title, author_name) = match confirmed {
-            // Same bare-over-decorated preference as the detail path.
-            Some(c) => (Some(c.title_bare.unwrap_or(c.title)), c.author),
-            None => (None, None),
+        let (title, author_name, series_name, series_position) = match confirmed {
+            // Same bare-over-decorated preference as the detail path. The
+            // decoration's series evidence rides along: the volume the picker
+            // saw must stay visible to the identity quorum's veto.
+            Some(c) => (
+                Some(c.title_bare.unwrap_or(c.title)),
+                c.author,
+                c.series_name,
+                c.series_position,
+            ),
+            None => (None, None, None, None),
         };
         Some(NormalizedWorkDetail {
             title,
             author_name,
+            series_name,
+            series_position,
             gr_key: Some(key.clone()),
             cover_url,
             ..Default::default()
@@ -1369,6 +1384,8 @@ impl GoodreadsClient {
                 title_bare: h.title_bare.clone(),
                 author: h.author.clone(),
                 cover_url: h.cover_url.clone(),
+                series_name: h.series_name.clone(),
+                series_position: h.series_position,
             })
     }
 
@@ -1438,6 +1455,8 @@ impl GoodreadsClient {
                     title_bare: hits[idx].title_bare.clone(),
                     author: hits[idx].author.clone(),
                     cover_url: hits[idx].cover_url.clone(),
+                    series_name: hits[idx].series_name.clone(),
+                    series_position: hits[idx].series_position,
                 }),
             }));
         }
@@ -1543,15 +1562,20 @@ impl GoodreadsClient {
 /// "(Series, #N)" search-card decoration that reads as a one-sided series
 /// marker to the identity authority — the decorated form keeps an otherwise
 /// correct GR answer out of the quorum cluster. Series name/position ride
-/// their own payload fields, so nothing is lost. Provider data selection,
-/// not a cleaning step: the bare form comes from GR itself.
-fn apply_bare_title(payload: &mut NormalizedWorkDetail, candidate: &Option<GrCandidateText>) {
-    if let Some(bare) = candidate
-        .as_ref()
-        .and_then(|c| c.title_bare.as_deref())
-        .filter(|t| !t.trim().is_empty())
-    {
+/// their own payload fields, so nothing is lost: when the detail parse left
+/// them empty, the candidate's decoration evidence fills them, keeping the
+/// volume the picker saw visible to the quorum's veto. Provider data
+/// selection, not a cleaning step: every value comes from GR itself.
+fn apply_candidate_text(payload: &mut NormalizedWorkDetail, candidate: &Option<GrCandidateText>) {
+    let Some(c) = candidate.as_ref() else { return };
+    if let Some(bare) = c.title_bare.as_deref().filter(|t| !t.trim().is_empty()) {
         payload.title = Some(bare.to_string());
+    }
+    if payload.series_name.is_none() {
+        payload.series_name = c.series_name.clone();
+    }
+    if payload.series_position.is_none() {
+        payload.series_position = c.series_position;
     }
 }
 
@@ -1571,30 +1595,172 @@ fn is_gr_junk_edition(title: &str) -> bool {
     JUNK.iter().any(|needle| lower.contains(needle))
 }
 
-/// Deterministic Goodreads search-hit selection — no LLM. Mirrors the
-/// OpenLibrary tier: drop junk editions, then pick the best title+author match
-/// (`score_provider_candidates`, author overlap required). Returns the index
-/// into `hits`, or None when nothing clears the bar — a wrong GR key is worse
-/// than none, so GR abstains.
+/// Deterministic Goodreads search-hit selection — no LLM. Drop junk
+/// editions, require author-token overlap (unchanged guard), then judge the
+/// title through the one matching authority: `Same` or `Grey` (the authority
+/// floors grey at 0.75 of the MAIN title) picks; `Different` and
+/// `VetoVolume` never do. The hit's DECORATED title is parsed — decoration
+/// "(Series, #N)" reads structurally as a series marker and its volume
+/// evidence participates in the veto, while a subtitled record still matches
+/// a bare seed on main-title equality (the 2026-07-03 refresh-residue
+/// shape). Ranking: Same beats Grey, higher grey score beats lower, then
+/// author overlap; earliest hit wins ties (GR relevance order). Returns
+/// None when nothing qualifies — a wrong GR key is worse than none, so GR
+/// abstains.
 fn gr_best_match(
     title: &str,
     author: &str,
     hits: &[goodreads::GoodreadsSearchResult],
 ) -> Option<usize> {
-    let kept: Vec<(usize, (String, String))> = hits
-        .iter()
-        .enumerate()
-        .filter(|(_, h)| !is_gr_junk_edition(&h.title))
-        .map(|(i, h)| (i, (h.title.clone(), h.author.clone().unwrap_or_default())))
-        .collect();
-    let scored: Vec<(String, String)> = kept.iter().map(|(_, c)| c.clone()).collect();
-    let pick = crate::audible::score_provider_candidates(title, author, &scored, 0.75, 1)?;
-    Some(kept[pick].0)
+    use livrarr_domain::identity_matching::{parse_title, title_verdict, TitleVerdict};
+    use livrarr_domain::text_norm;
+
+    let seed = parse_title(title);
+    let seed_author_tokens = text_norm::author_tokens(author);
+
+    // (index, tier: Same=2 / Grey=1, grey score, author overlap)
+    let mut best: Option<(usize, u8, f64, u32)> = None;
+    for (idx, h) in hits.iter().enumerate() {
+        if is_gr_junk_edition(&h.title) {
+            continue;
+        }
+        let author_overlap = seed_author_tokens
+            .intersection(&text_norm::author_tokens(
+                h.author.as_deref().unwrap_or_default(),
+            ))
+            .count() as u32;
+        if author_overlap < 1 {
+            continue;
+        }
+        let (tier, score) = match title_verdict(&seed, &parse_title(&h.title)) {
+            TitleVerdict::Same => (2u8, 1.0),
+            TitleVerdict::Grey { score } => (1u8, score),
+            TitleVerdict::Different | TitleVerdict::VetoVolume => continue,
+        };
+        let beats_best = match best {
+            None => true,
+            Some((_, best_tier, best_score, best_overlap)) => {
+                tier > best_tier
+                    || (tier == best_tier
+                        && (score > best_score
+                            || (score == best_score && author_overlap > best_overlap)))
+            }
+        };
+        if beats_best {
+            best = Some((idx, tier, score, author_overlap));
+        }
+    }
+    best.map(|(idx, ..)| idx)
 }
 
 /// Construct a `GoodreadsClient` against the production Goodreads URL.
 impl GoodreadsClient {
     pub fn production(fetcher: livrarr_http::fetcher::HttpFetcherImpl, http: HttpClient) -> Self {
         Self::new(fetcher, http, GOODREADS_BASE_URL)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::goodreads::GoodreadsSearchResult;
+
+    fn hit(title: &str, title_bare: Option<&str>, author: &str) -> GoodreadsSearchResult {
+        GoodreadsSearchResult {
+            title: title.to_string(),
+            title_bare: title_bare.map(str::to_string),
+            author: Some(author.to_string()),
+            detail_url: "/book/show/1".to_string(),
+            cover_url: None,
+            year: None,
+            rating: None,
+            series_name: None,
+            series_position: None,
+        }
+    }
+
+    #[test]
+    fn picker_matches_subtitled_record_from_bare_seed() {
+        // The 2026-07-03 bulk-refresh residue shape: the seed title is bare
+        // while GR's record carries the full subtitle — a whole-title token
+        // comparison dilutes below any flat bar, but the authority sees equal
+        // main titles with a one-sided subtitle (grey, floored).
+        let hits = vec![hit(
+            "The Power Broker: Robert Moses and the Fall of New York",
+            Some("The Power Broker: Robert Moses and the Fall of New York"),
+            "Robert A. Caro",
+        )];
+        assert_eq!(
+            gr_best_match("The Power Broker", "Robert A. Caro", &hits),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn picker_takes_decorated_series_hit_for_bare_seed() {
+        // Search-card decoration "(Series, #N)" is structural to the
+        // authority (a series marker), never a similarity penalty.
+        let hits = vec![hit(
+            "Storm Front (The Dresden Files, #1)",
+            Some("Storm Front"),
+            "Jim Butcher",
+        )];
+        assert_eq!(gr_best_match("Storm Front", "Jim Butcher", &hits), Some(0));
+    }
+
+    #[test]
+    fn picker_still_rejects_sequels() {
+        let hits = vec![hit("Dune Messiah", Some("Dune Messiah"), "Frank Herbert")];
+        assert_eq!(gr_best_match("Dune", "Frank Herbert", &hits), None);
+    }
+
+    #[test]
+    fn picker_requires_author_overlap() {
+        let hits = vec![hit(
+            "The Power Broker: Robert Moses and the Fall of New York",
+            None,
+            "Somebody Else",
+        )];
+        assert_eq!(
+            gr_best_match("The Power Broker", "Robert A. Caro", &hits),
+            None
+        );
+    }
+
+    #[test]
+    fn picker_vetoes_conflicting_volumes() {
+        // Equal mains but contradicting volume evidence must never auto-pick —
+        // the decoration carries the hit's volume, the seed carries its own.
+        let hits = vec![hit("Alpha (Saga, #3)", Some("Alpha"), "Ann Author")];
+        assert_eq!(gr_best_match("Alpha, Vol. 2", "Ann Author", &hits), None);
+    }
+
+    #[test]
+    fn picker_prefers_exact_match_over_subtitled_grey() {
+        let hits = vec![
+            hit(
+                "The Power Broker: Robert Moses and the Fall of New York",
+                None,
+                "Robert A. Caro",
+            ),
+            hit("The Power Broker", None, "Robert A. Caro"),
+        ];
+        assert_eq!(
+            gr_best_match("The Power Broker", "Robert A. Caro", &hits),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn picker_junk_filter_still_applies() {
+        let hits = vec![hit(
+            "Summary of The Power Broker by Robert A. Caro",
+            None,
+            "Robert A. Caro",
+        )];
+        assert_eq!(
+            gr_best_match("The Power Broker", "Robert A. Caro", &hits),
+            None
+        );
     }
 }

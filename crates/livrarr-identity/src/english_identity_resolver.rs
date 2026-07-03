@@ -563,6 +563,23 @@ fn agree(a: &NormalizedWorkDetail, b: &NormalizedWorkDetail) -> bool {
     let pb = identity_matching::parse_title(b.title.as_deref().unwrap_or(""));
     let tv = identity_matching::title_verdict(&pa, &pb);
 
+    // Payload series positions participate in the volume VETO only: a bare
+    // "Alpha" payload must never corroborate an "Alpha" that carries a
+    // conflicting volume (e.g. a GR pick whose search-card decoration said
+    // #3 while its title was stripped to the bare form). One-sided position
+    // evidence deliberately does NOT demote an equal-main pair — most
+    // providers omit positions, and demotion would strip corroboration from
+    // correct clusters wholesale.
+    if identity_matching::title_verdict_with_positions(
+        &pa,
+        a.series_position,
+        &pb,
+        b.series_position,
+    ) == identity_matching::TitleVerdict::VetoVolume
+    {
+        return false;
+    }
+
     let author_a = a.author_name.as_deref().unwrap_or("");
     let author_b = b.author_name.as_deref().unwrap_or("");
     let av = identity_matching::author_verdict(&[author_a.to_string()], &[author_b.to_string()]);
@@ -902,6 +919,44 @@ mod tests {
         let hc = detail("Summer Knight", None, None, Some("341498"));
         let ol = detail("Summer Knight", Some("Jim Butcher"), Some("OL123W"), None);
         assert!(agree(&hc, &ol));
+    }
+
+    // Payload positions feed the volume veto: a bare-titled payload whose
+    // series_position contradicts the other side's must never corroborate —
+    // the GR-picker shape where a later volume's stripped title reads as a
+    // twin while the volume evidence rides the position field.
+    #[test]
+    fn conflicting_payload_positions_veto_agreement() {
+        let mut gr = detail("Alpha", Some("Ann Author"), None, None);
+        gr.series_position = Some(3.0);
+        let mut ol = detail("Alpha", Some("Ann Author"), Some("OL1W"), None);
+        ol.series_position = Some(1.0);
+        assert!(!agree(&gr, &ol));
+    }
+
+    // One-sided position evidence must NOT demote an equal-main pair — most
+    // providers omit positions; demotion would strip corroboration from
+    // correct clusters wholesale.
+    #[test]
+    fn one_sided_payload_position_still_agrees() {
+        let mut gr = detail("Storm Front", Some("Jim Butcher"), None, None);
+        gr.series_position = Some(1.0);
+        let ol = detail("Storm Front", Some("Jim Butcher"), Some("OL2W"), None);
+        assert!(agree(&gr, &ol));
+    }
+
+    // A conflicting position also blocks the edition-bridge rescue: shared
+    // ISBN plus contradicting volumes is the collision shape (AC-020), never
+    // a silent merge.
+    #[test]
+    fn edition_bridge_does_not_rescue_conflicting_positions() {
+        let mut a = detail("Alpha", Some("Ann Author"), None, None);
+        a.isbn_13 = Some("9780000000010".to_string());
+        a.series_position = Some(2.0);
+        let mut b = detail("Alpha", Some("Ann Author"), None, None);
+        b.isbn_13 = Some("9780000000010".to_string());
+        b.series_position = Some(3.0);
+        assert!(!agree(&a, &b));
     }
 
     // The abstention path holds the STRICTER bar: a non-colon title variant

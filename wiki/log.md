@@ -300,3 +300,16 @@ crates/livrarr-external-data/fixtures/. Updated goodreads.md (stale
 (roster amendments), insight 62 added. Gemini note for retro: r1 retry
 findings were verbatim codex copies (verdict-file bleed suspected); 0 unique
 gemini P1s again.
+
+## 2026-07-03 — N4: GR picker through the matching authority
+
+The 2026-07-03 refresh residue (8-9 GR misses, all bare-seed vs subtitled
+GR record) traced to gr_best_match's whole-title jaccard. The picker now
+routes through parse_title/title_verdict (Same or Grey picks, decorated hit
+title parsed, junk filter + author-token guard unchanged, Same>Grey ranking,
+earliest-on-ties). Review r1 codex P1: a picked one-sided-volume Grey could
+self-corroborate downstream because apply_bare_title stripped the decoration
+and agree() ignored series_position — fixed by making the evidence travel
+(autocomplete parses decoration into series fields; candidate/payload carry
+them; agree folds positions into the volume VETO only, incl. blocking the
+edition-bridge rescue). r2 PASS×2. 1250 tests green. Insight 59 amended.
