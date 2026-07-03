@@ -260,3 +260,25 @@ now requires zero chaseable anchors) + job error-arm backoff. Insights 56-58 add
 (merge chokepoint policies; Completed contract; GR-breaker test flake).
 `livrarr-domain/services/pacing.rs` (PacingLane/ProviderCallOutcome) deliberately left
 — PO decision pending. Packet + unit ledger: `build/plans/packet-phase4.md`.
+
+## 2026-07-03 — Phase 5 (one matching authority) COMPLETE: built, reviewed, merged, deployed
+All Phase-5 units landed on metadata-remediation (overnight autonomous run, PO
+gates pre-approved): H default-language setting (2a12960), A authority module +
+46 trap tests (3454b7a), C decision-diff harness (7ffc697) whose v2 report the
+PO approved as the cutover basis, J AC-012 pin (99c7bd7), I merge-two-works
+(5908fd5), D identity-engine rewire + candidate persistence + refresh gate
+(5801200), F recognition fixes + harness old-side freeze (49648c1), G GR unlock
++ HC Tier-2 delete + dead scaffolding (0ef07d1), E identity key + adopt/dedup +
+recompute (6fa00e9), J2 review surface + conflicts wiring + RSS language-skip
+notifications (a06ba33). Every unit dual-family reviewed to PASS+PASS (codex
+caught 6 real P1s across the night: harness live-call old sides, backfill
+catch-all error masking, resolve/dismiss missing parked-state guards ×2 + the
+orchestrator caught the sibling-key-collision P1 and the scan-flatten
+regression pre-review). Final gate 1221/0 (129 suites); startup recompute
+backfilled all 133 works' stored keys zero-collision (identity_key_generation=1);
+3 works carry segmented keys. Insights 13 (rewritten — GR needs no LLM), 59-61
+added. Hygiene backlog recorded in the phase report: GateReason::
+DeterministicSkipNoLlm rename, orphaned tests/behavioral/test_metadata.rs, two
+stale "askllm" stub docstrings, normalize_for_matching removal once fixtures
+migrate. Spec REQ-013 (per-install) and REQ-015 (c)/(d) amendments applied.
+P11's parenthetical Hardcover example still needs the PO's one-line edit.
