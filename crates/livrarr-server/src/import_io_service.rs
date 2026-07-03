@@ -120,6 +120,18 @@ where
             .map_err(map_db_err)
     }
 
+    async fn update_library_item_path(
+        &self,
+        user_id: UserId,
+        item_id: LibraryItemId,
+        new_path: &str,
+    ) -> Result<(), ImportIoServiceError> {
+        self.db
+            .update_library_item_path(user_id, item_id, new_path)
+            .await
+            .map_err(map_db_err)
+    }
+
     async fn create_library_item(
         &self,
         req: livrarr_domain::services::CreateLibraryItemRequest,

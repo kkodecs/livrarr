@@ -18,6 +18,9 @@ import type {
   UpdateWorkRequest,
   RefreshWorkResponse,
   DeleteWorkResponse,
+  MergePreviewResponse,
+  MergeWorksRequest,
+  MergeWorksResponse,
   AuthorSearchResult,
   AddAuthorRequest,
   AuthorResponse,
@@ -205,6 +208,17 @@ export const affirmPendingAnchor = (workId: number, anchorType: string) =>
     `/work/${workId}/pending-anchors/${encodeURIComponent(anchorType)}/affirm`,
     { method: "POST" },
   );
+export const previewMergeWorks = (survivorId: number, loserId: number) =>
+  apiFetch<MergePreviewResponse>(`/work/${survivorId}/merge/${loserId}/preview`);
+export const mergeWorks = (
+  survivorId: number,
+  loserId: number,
+  req: MergeWorksRequest,
+) =>
+  apiFetch<MergeWorksResponse>(`/work/${survivorId}/merge/${loserId}`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
 
 // Authors
 export const lookupAuthors = (term: string) =>

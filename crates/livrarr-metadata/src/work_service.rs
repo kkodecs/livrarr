@@ -1,8 +1,8 @@
 use futures::stream::{self, StreamExt};
 use livrarr_db::{
-    AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, EnrichmentRetryDb,
-    LibraryItemDb, ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
-    WorkDbCreate,
+    AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, EnrichmentRetryDb, GrabDb,
+    LibraryItemDb, MergeWorksDbRequest, ProvenanceDb, SetFieldProvenanceRequest,
+    UpdateWorkUserFieldsDbRequest, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::*;
@@ -448,6 +448,7 @@ where
         + WorkDbCreate
         + AuthorDb
         + LibraryItemDb
+        + GrabDb
         + ProvenanceDb
         + EnrichmentRetryDb
         + livrarr_db::ProviderRetryStateDb
@@ -2012,6 +2013,173 @@ where
     ) -> Result<ConvergeOutcome, WorkServiceError> {
         crate::convergence_service::converge_work(self, user_id, work_id, threshold).await
     }
+
+    async fn preview_merge_works(
+        &self,
+        user_id: UserId,
+        survivor_id: WorkId,
+        loser_id: WorkId,
+    ) -> Result<MergePreview, WorkServiceError> {
+        if survivor_id == loser_id {
+            return Err(WorkServiceError::Validation(
+                "cannot merge a work into itself".into(),
+            ));
+        }
+
+        let survivor = self.get(user_id, survivor_id).await?;
+        let loser = self.get(user_id, loser_id).await?;
+
+        let items = self
+            .db
+            .list_library_items_by_work(user_id, loser_id)
+            .await
+            .map_err(WorkServiceError::Db)?;
+        let grabs = self
+            .db
+            .list_grabs_by_work(user_id, loser_id)
+            .await
+            .map_err(WorkServiceError::Db)?;
+
+        Ok(MergePreview {
+            survivor_id,
+            loser_id,
+            library_items_moving: items.len(),
+            grabs_moving: grabs.len(),
+            monitor_ebook_result: survivor.monitor_ebook || loser.monitor_ebook,
+            monitor_audiobook_result: survivor.monitor_audiobook || loser.monitor_audiobook,
+            conflicts: merge_field_conflicts(&survivor, &loser),
+        })
+    }
+
+    async fn merge_works(
+        &self,
+        user_id: UserId,
+        survivor_id: WorkId,
+        loser_id: WorkId,
+        choices: Vec<MergeFieldChoiceEntry>,
+    ) -> Result<MergeWorksResult, WorkServiceError> {
+        if survivor_id == loser_id {
+            return Err(WorkServiceError::Validation(
+                "cannot merge a work into itself".into(),
+            ));
+        }
+
+        let survivor = self.get(user_id, survivor_id).await?;
+        let loser = self.get(user_id, loser_id).await?;
+
+        // Recompute conflicts fresh rather than trusting the caller's
+        // (possibly stale) preview — every conflict needs a matching entry
+        // in `choices` or the whole call refuses (AC-025).
+        let conflicts = merge_field_conflicts(&survivor, &loser);
+        let missing: Vec<MergeableField> = conflicts
+            .iter()
+            .map(|c| c.field)
+            .filter(|field| !choices.iter().any(|entry| entry.field == *field))
+            .collect();
+        if !missing.is_empty() {
+            return Err(WorkServiceError::MergeChoiceRequired(missing));
+        }
+
+        let choice_for = |field: MergeableField| {
+            choices
+                .iter()
+                .find(|entry| entry.field == field)
+                .map(|entry| entry.choice)
+        };
+
+        // A field with no conflict is additive: whichever side actually has
+        // a value wins, so no data is lost when only one side was ever set
+        // (REQ-015 d). A field WITH a conflict follows the caller's choice.
+        let series_name = match choice_for(MergeableField::SeriesName) {
+            Some(MergeFieldChoice::KeepSurvivor) => survivor.series_name.clone(),
+            Some(MergeFieldChoice::TakeLoser) => loser.series_name.clone(),
+            None => survivor.series_name.clone().or(loser.series_name.clone()),
+        };
+        let series_position = match choice_for(MergeableField::SeriesPosition) {
+            Some(MergeFieldChoice::KeepSurvivor) => survivor.series_position,
+            Some(MergeFieldChoice::TakeLoser) => loser.series_position,
+            None => survivor.series_position.or(loser.series_position),
+        };
+        let monitor_ebook = survivor.monitor_ebook || loser.monitor_ebook;
+        let monitor_audiobook = survivor.monitor_audiobook || loser.monitor_audiobook;
+
+        // Snapshot counts before the DB call folds the loser's rows into
+        // the survivor — afterward there is no way to tell "moved" from
+        // "was already the survivor's."
+        let library_items_moved = self
+            .db
+            .list_library_items_by_work(user_id, loser_id)
+            .await
+            .map_err(WorkServiceError::Db)?
+            .len();
+        let grabs_moved = self
+            .db
+            .list_grabs_by_work(user_id, loser_id)
+            .await
+            .map_err(WorkServiceError::Db)?
+            .len();
+
+        let updated_survivor = self
+            .db
+            .merge_works(MergeWorksDbRequest {
+                user_id,
+                survivor_id,
+                loser_id,
+                monitor_ebook,
+                monitor_audiobook,
+                series_name,
+                series_position,
+            })
+            .await
+            .map_err(|e| match e {
+                DbError::NotFound { .. } => WorkServiceError::NotFound,
+                other => WorkServiceError::Db(other),
+            })?;
+
+        // Physical file reorganization (REQ-015 c) is a separate, best-effort
+        // step the caller runs via `ImportService::reorganize_work_files` —
+        // this service has no filesystem access (compile-wall seam,
+        // livrarr-metadata may not depend on livrarr-library). `warnings`
+        // starts empty; the handler appends the reorg step's warnings.
+        Ok(MergeWorksResult {
+            survivor: updated_survivor,
+            library_items_moved,
+            grabs_moved,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+/// Fields where both works carry a differing non-empty user value (REQ-015
+/// d). Title/author are deliberately excluded — the survivor's identity
+/// fields are not renegotiated by a merge.
+fn merge_field_conflicts(survivor: &Work, loser: &Work) -> Vec<MergeFieldConflict> {
+    let mut conflicts = Vec::new();
+
+    if let (Some(s), Some(l)) = (
+        survivor.series_name.as_deref().map(str::trim),
+        loser.series_name.as_deref().map(str::trim),
+    ) {
+        if !s.is_empty() && !l.is_empty() && s != l {
+            conflicts.push(MergeFieldConflict {
+                field: MergeableField::SeriesName,
+                survivor_value: s.to_string(),
+                loser_value: l.to_string(),
+            });
+        }
+    }
+
+    if let (Some(s), Some(l)) = (survivor.series_position, loser.series_position) {
+        if s != l {
+            conflicts.push(MergeFieldConflict {
+                field: MergeableField::SeriesPosition,
+                survivor_value: s.to_string(),
+                loser_value: l.to_string(),
+            });
+        }
+    }
+
+    conflicts
 }
 
 impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>

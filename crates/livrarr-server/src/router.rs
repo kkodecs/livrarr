@@ -278,6 +278,14 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/work/{id}/pending-anchors/{anchor_type}/affirm",
             post(livrarr_handlers::work::affirm_pending_anchor::<AppState>),
         )
+        .route(
+            "/work/{id}/merge/{loser_id}/preview",
+            get(livrarr_handlers::work::preview_merge::<AppState>),
+        )
+        .route(
+            "/work/{id}/merge/{loser_id}",
+            post(livrarr_handlers::work::merge::<AppState>),
+        )
         // Authors
         .route(
             "/author/lookup",

@@ -21,6 +21,15 @@ pub enum ImportIoServiceError {
     Db(#[from] DbError),
 }
 
+impl From<ImportIoServiceError> for super::common::ServiceError {
+    fn from(e: ImportIoServiceError) -> Self {
+        match e {
+            ImportIoServiceError::NotFound => super::common::ServiceError::NotFound,
+            ImportIoServiceError::Db(db_err) => db_err.into(),
+        }
+    }
+}
+
 #[trait_variant::make(Send)]
 pub trait ImportIoService: Send + Sync {
     async fn get_grab(
@@ -69,6 +78,15 @@ pub trait ImportIoService: Send + Sync {
         user_id: UserId,
         item_id: LibraryItemId,
         new_size: i64,
+    ) -> Result<(), ImportIoServiceError>;
+
+    /// Persist a library item's new relative path after it has been
+    /// physically relocated on disk (merge reorganize step, REQ-015 c).
+    async fn update_library_item_path(
+        &self,
+        user_id: UserId,
+        item_id: LibraryItemId,
+        new_path: &str,
     ) -> Result<(), ImportIoServiceError>;
 
     async fn create_library_item(

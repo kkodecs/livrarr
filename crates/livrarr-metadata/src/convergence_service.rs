@@ -5,7 +5,8 @@
 //! wrappers so the public contract is unchanged.
 
 use livrarr_db::{
-    AuthorDb, ConfigDb, EnrichmentRetryDb, LibraryItemDb, ProvenanceDb, WorkDb, WorkDbCreate,
+    AuthorDb, ConfigDb, EnrichmentRetryDb, GrabDb, LibraryItemDb, ProvenanceDb, WorkDb,
+    WorkDbCreate,
 };
 use livrarr_domain::identity::{AnchorConfidence, AnchorType, ConflictSource, IdentityMode};
 use livrarr_domain::services::{
@@ -32,6 +33,7 @@ where
         + WorkDbCreate
         + AuthorDb
         + LibraryItemDb
+        + GrabDb
         + ProvenanceDb
         + EnrichmentRetryDb
         + livrarr_db::ProviderRetryStateDb
@@ -241,6 +243,7 @@ where
         + WorkDbCreate
         + AuthorDb
         + LibraryItemDb
+        + GrabDb
         + ProvenanceDb
         + EnrichmentRetryDb
         + livrarr_db::ProviderRetryStateDb

@@ -105,6 +105,20 @@ impl GrabDb for SqliteDb {
         row_to_grab(row)
     }
 
+    async fn list_grabs_by_work(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<Grab>, DbError> {
+        let rows = sqlx::query("SELECT * FROM grabs WHERE user_id = ? AND work_id = ? ORDER BY id")
+            .bind(user_id)
+            .bind(work_id)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_grab).collect()
+    }
+
     async fn list_grabs_paginated(
         &self,
         user_id: UserId,
