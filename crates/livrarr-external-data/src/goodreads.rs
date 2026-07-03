@@ -22,6 +22,12 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct GoodreadsSearchResult {
     pub title: String,
+    /// GR's own undecorated title (`bookTitleBare`): "Pandora's Star" where
+    /// `title` is "Pandora's Star (Commonwealth Saga, #1)". Provider data,
+    /// not a cleaning step — preferred as the payload title so GR's answer
+    /// compares like every other provider's instead of carrying search-card
+    /// series decoration into matching and merge.
+    pub title_bare: Option<String>,
     pub author: Option<String>,
     pub detail_url: String,
     pub cover_url: Option<String>,
@@ -178,7 +184,9 @@ pub fn parse_search_html(html: &str) -> Vec<GoodreadsSearchResult> {
             };
 
         results.push(GoodreadsSearchResult {
+            // Already stripped of its "(Series, #N)" decoration above.
             title: clean_title,
+            title_bare: None,
             author,
             detail_url,
             cover_url,
@@ -204,6 +212,8 @@ pub fn parse_search_html(html: &str) -> Vec<GoodreadsSearchResult> {
 struct AutocompleteEntry {
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    book_title_bare: Option<String>,
     #[serde(default)]
     book_url: Option<String>,
     #[serde(default)]
@@ -273,6 +283,7 @@ pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
             let detail_url = e.book_url.filter(|u| !u.trim().is_empty())?;
             Some(GoodreadsSearchResult {
                 title,
+                title_bare: e.book_title_bare.filter(|t| !t.trim().is_empty()),
                 author: e
                     .author
                     .and_then(|a| a.name)
@@ -1570,6 +1581,11 @@ mod tests {
             "one numeric-avgRating entry must never erase the batch"
         );
         assert_eq!(results[0].title, "Pandora's Star (Commonwealth Saga, #1)");
+        assert_eq!(
+            results[0].title_bare.as_deref(),
+            Some("Pandora's Star"),
+            "bookTitleBare rides along so matching sees GR's own undecorated title"
+        );
         assert_eq!(results[0].rating.as_deref(), Some("4.22"));
         assert_eq!(
             results[1].rating, None,

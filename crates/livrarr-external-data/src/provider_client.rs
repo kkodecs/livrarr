@@ -1019,6 +1019,12 @@ impl OpenLibraryClient {
 #[derive(Debug, Clone)]
 struct GrCandidateText {
     title: String,
+    /// GR's own undecorated form of `title` (`bookTitleBare`), when the
+    /// autocomplete hit carried one. Preferred as the payload title: the
+    /// decorated form ("Pandora's Star (Commonwealth Saga, #1)") reads as a
+    /// one-sided series marker to the identity authority and keeps GR's
+    /// answer out of the quorum cluster it belongs to.
+    title_bare: Option<String>,
     author: Option<String>,
     /// Cover from the autocomplete/search hit. Kept so a GR payload still
     /// carries a cover when the detail page won't fetch (anti-bot): GR outranks
@@ -1266,6 +1272,7 @@ impl GoodreadsClient {
             if payload.cover_url.is_none() {
                 payload.cover_url = resolved.candidate.as_ref().and_then(|c| c.cover());
             }
+            apply_bare_title(&mut payload, &resolved.candidate);
             return ProviderOutcome::Success(Box::new(payload));
         }
 
@@ -1280,6 +1287,7 @@ impl GoodreadsClient {
                     if payload.gr_key.is_none() {
                         payload.gr_key = resolved_gr_key;
                     }
+                    apply_bare_title(&mut payload, &resolved.candidate);
                     return ProviderOutcome::Success(Box::new(payload));
                 }
                 Err(err) => return self.map_fetch_err(err),
@@ -1329,7 +1337,8 @@ impl GoodreadsClient {
 
         let cover_url = confirmed.as_ref().and_then(|c| c.cover());
         let (title, author_name) = match confirmed {
-            Some(c) => (Some(c.title), c.author),
+            // Same bare-over-decorated preference as the detail path.
+            Some(c) => (Some(c.title_bare.unwrap_or(c.title)), c.author),
             None => (None, None),
         };
         Some(NormalizedWorkDetail {
@@ -1362,6 +1371,7 @@ impl GoodreadsClient {
             .find(|h| goodreads::extract_gr_key(&h.detail_url).as_deref() == Some(key))
             .map(|h| GrCandidateText {
                 title: h.title.clone(),
+                title_bare: h.title_bare.clone(),
                 author: h.author.clone(),
                 cover_url: h.cover_url.clone(),
             })
@@ -1432,6 +1442,7 @@ impl GoodreadsClient {
                 url: goodreads::resolve_detail_url(&self.base_url, &hits[idx].detail_url),
                 candidate: Some(GrCandidateText {
                     title: hits[idx].title.clone(),
+                    title_bare: hits[idx].title_bare.clone(),
                     author: hits[idx].author.clone(),
                     cover_url: hits[idx].cover_url.clone(),
                 }),
@@ -1531,6 +1542,23 @@ impl GoodreadsClient {
             additional_isbns: Vec::new(),
             additional_asins: Vec::new(),
         }
+    }
+}
+
+/// Prefer GR's own undecorated title (`bookTitleBare`) over whatever the
+/// detail page or LLM extraction produced. GR's display titles carry
+/// "(Series, #N)" search-card decoration that reads as a one-sided series
+/// marker to the identity authority — the decorated form keeps an otherwise
+/// correct GR answer out of the quorum cluster. Series name/position ride
+/// their own payload fields, so nothing is lost. Provider data selection,
+/// not a cleaning step: the bare form comes from GR itself.
+fn apply_bare_title(payload: &mut NormalizedWorkDetail, candidate: &Option<GrCandidateText>) {
+    if let Some(bare) = candidate
+        .as_ref()
+        .and_then(|c| c.title_bare.as_deref())
+        .filter(|t| !t.trim().is_empty())
+    {
+        payload.title = Some(bare.to_string());
     }
 }
 
