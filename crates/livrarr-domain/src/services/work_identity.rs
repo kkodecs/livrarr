@@ -1,5 +1,5 @@
 use crate::identity::*;
-use crate::WorkId;
+use crate::{Work, WorkId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkIdentityError {
@@ -9,6 +9,8 @@ pub enum WorkIdentityError {
     AnchorNotFound,
     #[error("seed carried no usable identity signal")]
     EmptySeed,
+    #[error("work is not parked for review")]
+    NotParked,
     #[error("database error: {0}")]
     Db(String),
 }
@@ -82,6 +84,46 @@ pub trait WorkIdentityRepository: Send + Sync {
         &self,
         work_id: WorkId,
     ) -> Result<Option<Vec<Candidate>>, WorkIdentityError>;
+
+    /// List every work parked `NeedsReview` for a user (AC-013 review surface).
+    /// Ordered by id; a work with no recorded candidate set (should not occur
+    /// in practice) is still listed — the caller pairs each with
+    /// [`Self::get_review_candidates`].
+    async fn list_needs_review_works(
+        &self,
+        user_id: crate::UserId,
+    ) -> Result<Vec<Work>, WorkIdentityError>;
+
+    /// Apply a user-picked candidate from a `NeedsReview` park (AC-013): confirm
+    /// every anchor the candidate carries (setter attributes who chose it),
+    /// atomically recompute and write the resulting `identity_status` badge from
+    /// the updated anchor set, and clear the park's recorded candidate row.
+    /// Mirrors [`Self::confirm_anchor_and_recompute_badge`]'s one-transaction
+    /// contract, generalized to a candidate's full anchor set rather than one
+    /// (type, value) pair.
+    ///
+    /// Guarded: the transaction's first statement atomically verifies the work
+    /// is currently `NeedsReview` and claims it. A settled work — even one
+    /// holding a stale candidates row — returns [`WorkIdentityError::NotParked`]
+    /// with zero writes; a concurrent resolve/dismiss loses the claim the same
+    /// way, so the read-candidates-then-apply window cannot double-apply.
+    async fn apply_review_candidate(
+        &self,
+        work_id: WorkId,
+        candidate: &Candidate,
+        setter: AnchorSetter,
+    ) -> Result<(), WorkIdentityError>;
+
+    /// Dismiss a `NeedsReview` park without adopting any candidate: the work
+    /// reverts to `Pending` (no merge, no anchor writes) and its recorded
+    /// candidate row is cleared. A duplicate one click away from the
+    /// merge-two-works action, per AC-013's dismiss semantics.
+    ///
+    /// Guarded like [`Self::apply_review_candidate`]: only a work currently
+    /// `NeedsReview` can be dismissed — a settled work (Confirmed/Provisional/
+    /// Conflict) is never downgraded to Pending by this call; it returns
+    /// [`WorkIdentityError::NotParked`] untouched.
+    async fn dismiss_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError>;
 
     /// Raise the badge to `Confirmed` (REQ-003/008) — a work anchor (OL/GR/HC)
     /// fixed the identity. Writes only the `identity_status` column for the one

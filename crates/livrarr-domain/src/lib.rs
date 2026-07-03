@@ -190,6 +190,10 @@ pub enum NotificationType {
     RssGrabbed,
     /// RSS sync grab failed (download client unreachable or rejected).
     RssGrabFailed,
+    /// RSS sync skipped one or more releases that declared no language against
+    /// a work outside the user's default language (REQ-011/AC-022) — surfaces
+    /// the silent, background-only skip so it never sits in unnoticed limbo.
+    RssLanguageSkipped,
 }
 
 /// Narration type for audiobook metadata.

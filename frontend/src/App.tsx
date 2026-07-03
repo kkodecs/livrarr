@@ -29,6 +29,7 @@ const QueuePage = lazy(() => import("@/pages/activity/queue/QueuePage"));
 const HistoryPage = lazy(() => import("@/pages/activity/history/HistoryPage"));
 const ProfilePage = lazy(() => import("@/pages/profile/ProfilePage"));
 const UnmappedPage = lazy(() => import("@/pages/unmapped/UnmappedPage"));
+const ReviewPage = lazy(() => import("@/pages/review/ReviewPage"));
 const ManualImportPage = lazy(
   () => import("@/pages/manual-import/ManualImportPage"),
 );
@@ -244,6 +245,14 @@ export function App() {
                 element={
                   <LazyPage>
                     <UnmappedPage />
+                  </LazyPage>
+                }
+              />
+              <Route
+                path="review"
+                element={
+                  <LazyPage>
+                    <ReviewPage />
                   </LazyPage>
                 }
               />

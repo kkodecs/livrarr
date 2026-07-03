@@ -722,7 +722,7 @@ async fn test_rss_sync_silent_release_skips_nondefault_language_work() {
 
     db.update_default_language("en").await.unwrap();
     // The work is German; the install default is English.
-    let _work = seed_monitored_work_with_language(
+    let work = seed_monitored_work_with_language(
         &db,
         user_id,
         "The Way of Kings",
@@ -754,6 +754,22 @@ async fn test_rss_sync_silent_release_skips_nondefault_language_work() {
         report.warnings.iter().any(|w| w.contains("language")),
         "a skipped language-silent/non-default pairing must surface for confirmation, got: {:?}",
         report.warnings
+    );
+
+    // AC-022: the log-only warning above is not enough — the user must also
+    // see this as a notification, naming the affected work.
+    let notifs = db_arc.list_notifications(user_id, false).await.unwrap();
+    assert!(
+        notifs.iter().any(
+            |n| n.notification_type == NotificationType::RssLanguageSkipped
+                && n.message.contains(&work.title)
+                && n.message.to_lowercase().contains("language")
+        ),
+        "a language-grey skip must surface as a notification naming the work, got: {:?}",
+        notifs
+            .iter()
+            .map(|n| (&n.notification_type, &n.message))
+            .collect::<Vec<_>>()
     );
 }
 

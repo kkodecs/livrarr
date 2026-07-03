@@ -2,10 +2,11 @@ use chrono::Utc;
 use livrarr_domain::identity::*;
 use livrarr_domain::normalization::{normalize_asin, normalize_gr_key, normalize_isbn13, AsinNorm};
 use livrarr_domain::services::{WorkIdentityError, WorkIdentityRepository};
-use livrarr_domain::WorkId;
+use livrarr_domain::{UserId, Work, WorkId};
 use sqlx::SqliteConnection;
 
 use crate::sqlite::SqliteDb;
+use crate::sqlite_work::row_to_work;
 
 /// Core in-transaction anchor write: canonical validation + anchor upsert + denormalized column sync.
 ///
@@ -562,6 +563,158 @@ impl WorkIdentityRepository for SqliteDb {
             }
             None => Ok(None),
         }
+    }
+
+    async fn list_needs_review_works(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<Work>, WorkIdentityError> {
+        let rows = sqlx::query(
+            "SELECT * FROM works WHERE user_id = ?1 AND identity_status = 'needs_review' \
+             ORDER BY id",
+        )
+        .bind(user_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row_to_work(row) {
+                Ok(w) => results.push(w),
+                Err(e) => {
+                    tracing::warn!("needs-review works: skipping corrupt row: {e}");
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    async fn apply_review_candidate(
+        &self,
+        work_id: WorkId,
+        candidate: &Candidate,
+        setter: AnchorSetter,
+    ) -> Result<(), WorkIdentityError> {
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        // ── TOCTOU claim (mirrors apply_conflict_resolution's status='open'
+        // guard) ─────────────────────────────────────────────────────────────
+        // First statement of the transaction: atomically verify the work is
+        // parked NeedsReview and claim it. Being a WRITE, this acquires the
+        // write lock immediately, so a concurrent resolve/dismiss either
+        // committed first (rows_affected = 0 → clean abort, no writes) or
+        // queues behind this transaction — the handler's read-candidates-then-
+        // apply window cannot double-apply. A stale candidates row on a
+        // settled work is inert: the guard is on the badge, not the row.
+        // The interim 'pending' is invisible outside the transaction and is
+        // overwritten by the derived badge below before commit.
+        let guard = sqlx::query(
+            "UPDATE works SET identity_status = 'pending' \
+             WHERE id = ?1 AND identity_status = 'needs_review'",
+        )
+        .bind(work_id)
+        .execute(&mut *tx as &mut SqliteConnection)
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        if guard.rows_affected() == 0 {
+            return Err(WorkIdentityError::NotParked);
+        }
+
+        // Confirm every anchor the chosen candidate carries. Fails closed (the
+        // transaction never commits) if any value fails canonical validation —
+        // a partially-applied pick would be worse than an unapplied one.
+        let anchors: &[(&str, Option<&str>)] = &[
+            (AnchorType::OL_WORK, candidate.anchors.ol_key.as_deref()),
+            (AnchorType::GR_WORK, candidate.anchors.gr_key.as_deref()),
+            (AnchorType::HC_WORK, candidate.anchors.hc_key.as_deref()),
+            (AnchorType::ISBN_13, candidate.anchors.isbn_13.as_deref()),
+            (AnchorType::ASIN, candidate.anchors.asin.as_deref()),
+        ];
+        for &(anchor_type_str, maybe_value) in anchors {
+            if let Some(value) = maybe_value {
+                confirm_anchor_in_tx(
+                    &mut tx,
+                    work_id,
+                    AnchorType::new(anchor_type_str),
+                    value,
+                    setter,
+                )
+                .await?;
+            }
+        }
+
+        // Atomically derive and write the badge from the anchors just written —
+        // same derivation `confirm_anchor_and_recompute_badge` and conflict
+        // resolution use, so a picked candidate un-parks to whatever its anchors
+        // actually earn (Confirmed/Provisional/Pending), never a new status.
+        let badge = crate::sqlite_identity_conflict::derive_badge_in_tx(
+            &mut *tx as &mut SqliteConnection,
+            work_id,
+        )
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        sqlx::query("UPDATE works SET identity_status = ?1 WHERE id = ?2")
+            .bind(crate::sqlite_identity_conflict::identity_status_str(badge))
+            .bind(work_id)
+            .execute(&mut *tx as &mut SqliteConnection)
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        // The park is resolved — clear the recorded candidate set (REQ-010).
+        sqlx::query("DELETE FROM work_identity_review_candidates WHERE work_id = ?1")
+            .bind(work_id)
+            .execute(&mut *tx as &mut SqliteConnection)
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn dismiss_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        // ── TOCTOU claim (same shape as apply_review_candidate) ─────────────
+        // No anchor writes, no merge — the work simply stops needing review and
+        // stands alone as Pending (AC-013 dismiss semantics). Conditional on the
+        // work actually being parked: a settled work (Confirmed/Provisional/
+        // Conflict) must never be downgraded to Pending by a direct dismiss
+        // POST. rows_affected = 0 → not parked → abort with zero writes; the
+        // candidates-row clear below only ever runs under a won claim.
+        let guard = sqlx::query(
+            "UPDATE works SET identity_status = 'pending' \
+             WHERE id = ?1 AND identity_status = 'needs_review'",
+        )
+        .bind(work_id)
+        .execute(&mut *tx as &mut SqliteConnection)
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        if guard.rows_affected() == 0 {
+            return Err(WorkIdentityError::NotParked);
+        }
+
+        sqlx::query("DELETE FROM work_identity_review_candidates WHERE work_id = ?1")
+            .bind(work_id)
+            .execute(&mut *tx as &mut SqliteConnection)
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
     }
 
     async fn set_identity_confirmed(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {

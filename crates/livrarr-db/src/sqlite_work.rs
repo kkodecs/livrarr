@@ -9,7 +9,7 @@ use crate::{
     UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, UserId, Work, WorkDb, WorkId,
 };
 
-fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
+pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
     let genres_str: Option<String> = row
         .try_get("genres")
         .map_err(|e| DbError::Io(Box::new(e)))?;

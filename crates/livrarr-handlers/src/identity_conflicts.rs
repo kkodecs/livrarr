@@ -9,6 +9,7 @@ use livrarr_domain::identity::*;
 use livrarr_domain::services::{ConflictError, IdentityConflictService};
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IdentityConflictDto {
     pub id: i64,
     pub existing_work_id: i64,
@@ -22,6 +23,7 @@ pub struct IdentityConflictDto {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IdentityConflictDetailDto {
     pub id: i64,
     pub existing_work_id: i64,
@@ -37,12 +39,14 @@ pub struct IdentityConflictDetailDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolveRequest {
     pub action: ConflictResolutionAction,
     pub notes: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolveResponse {
     pub status: String,
     pub action: ConflictResolutionAction,
