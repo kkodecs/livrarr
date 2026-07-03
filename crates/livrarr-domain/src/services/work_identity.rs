@@ -67,6 +67,22 @@ pub trait WorkIdentityRepository: Send + Sync {
     /// match as needs-review — never an indefinite background-retry loop (REQ-026).
     async fn set_needs_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError>;
 
+    /// Persist the ranked candidates behind a `NeedsReview` park (REQ-010),
+    /// replacing any prior set for the same work. Queryable per work by the
+    /// review surface; never touches the identity badge itself.
+    async fn record_review_candidates(
+        &self,
+        work_id: WorkId,
+        candidates: &[Candidate],
+    ) -> Result<(), WorkIdentityError>;
+
+    /// The candidates recorded behind a work's current park, if any.
+    /// `None` when the work was never parked with a candidate set to show.
+    async fn get_review_candidates(
+        &self,
+        work_id: WorkId,
+    ) -> Result<Option<Vec<Candidate>>, WorkIdentityError>;
+
     /// Raise the badge to `Confirmed` (REQ-003/008) — a work anchor (OL/GR/HC)
     /// fixed the identity. Writes only the `identity_status` column for the one
     /// work; the engine calls it solely on a monotonic raise.

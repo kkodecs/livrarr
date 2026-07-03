@@ -14,7 +14,7 @@ use livrarr_domain::services::{
     EnrichmentMode, RefreshSurface, WorkIdentityRepository, WorkService,
 };
 use livrarr_domain::{
-    normalize_for_matching, MetadataProvider, OutcomeClass, RequestPriority, Work,
+    normalize_for_matching, IdentityStatus, MetadataProvider, OutcomeClass, RequestPriority, Work,
 };
 use livrarr_external_data::transport_cache::TransportCache;
 use livrarr_external_data::{
@@ -184,6 +184,11 @@ async fn dead_ended_completion_suppression_survives_plain_refresh() {
         .await
         .expect("seed work missing only gr_key");
     assert!(created);
+    // The refresh enrichment gate requires a settled identity; this fixture's
+    // point is the chaseable gate, so the anchor-rich work is marked Confirmed.
+    db.set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
+        .await
+        .expect("mark work confirmed");
     db.confirm_anchor(
         work.id,
         AnchorType::new(AnchorType::HC_WORK),

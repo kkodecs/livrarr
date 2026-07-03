@@ -518,6 +518,52 @@ impl WorkIdentityRepository for SqliteDb {
         Ok(())
     }
 
+    async fn record_review_candidates(
+        &self,
+        work_id: WorkId,
+        candidates: &[Candidate],
+    ) -> Result<(), WorkIdentityError> {
+        let json =
+            serde_json::to_string(candidates).map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO work_identity_review_candidates (work_id, user_id, candidates_json, recorded_at)
+             VALUES (?1, (SELECT user_id FROM works WHERE id = ?1), ?2, ?3)
+             ON CONFLICT (work_id) DO UPDATE SET
+                 candidates_json = ?2,
+                 recorded_at = ?3",
+        )
+        .bind(work_id)
+        .bind(&json)
+        .bind(&now)
+        .execute(self.pool())
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_review_candidates(
+        &self,
+        work_id: WorkId,
+    ) -> Result<Option<Vec<Candidate>>, WorkIdentityError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT candidates_json FROM work_identity_review_candidates WHERE work_id = ?1",
+        )
+        .bind(work_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+
+        match row {
+            Some((json,)) => {
+                let candidates: Vec<Candidate> = serde_json::from_str(&json)
+                    .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
+                Ok(Some(candidates))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn set_identity_confirmed(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
         sqlx::query("UPDATE works SET identity_status = 'confirmed' WHERE id = ?1")
             .bind(work_id)
