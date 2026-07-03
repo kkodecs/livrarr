@@ -331,6 +331,132 @@ pub fn id_verdict(a: &IdEvidence, b: &IdEvidence) -> IdVerdict {
     IdVerdict::NoEvidence
 }
 
+/// Deterministic identity key for storage and exact-equality lookups: the
+/// title component encodes the FULL parse triple — cleaned main title, true
+/// subtitle, and sorted volume-marker numbers — joined by `\u{1}` (a
+/// character the cleaned segments can never contain: `canonical_phrase`
+/// folds all non-alphanumerics to token boundaries); the author component
+/// is the canonical author string (the same name canonicalization
+/// `author_verdict` uses under the hood). Built entirely from the
+/// authority's own internals. Feeds `works.normalized_title`/
+/// `normalized_author` (REQ-014) and any other site that needs a single
+/// deterministic string pair rather than a full [`TitleVerdict`]/
+/// [`AuthorVerdict`] comparison.
+///
+/// Why the triple and not the bare main title: the stored key backs a
+/// UNIQUE index and an `ON CONFLICT DO NOTHING` create backstop, so two
+/// DIFFERENT books must never share a key. Series siblings ("Mistborn: The
+/// Final Empire" vs "Mistborn: The Well of Ascension") share a main title
+/// and differ only in subtitle/volume — the triple keeps them distinct, so
+/// both persist. Junk tails ("A Novel", "(Unabridged)") are stripped by the
+/// parse and never enter the key, so a junk-tail or accented variant of a
+/// stored title computes the SAME key and can adopt (ST-04). A one-sided
+/// true-subtitle/volume pair computes DIFFERENT keys — it correctly misses
+/// at this exact-equality seat and falls to the dedup cascade, which lands
+/// grey → a visible duplicate, never a silent absorb (REQ-008; the
+/// merge-two-works action is the resolution path).
+///
+/// Trailing empty segments are dropped, so a plain title's key is just its
+/// cleaned main ("Dune" → "dune") — unambiguous, since `\u{1}` cannot
+/// appear in cleaned text.
+///
+/// Deliberately blunter than `title_verdict`/`author_verdict`: a plain
+/// string pair can only express exact equality, never grey, and an
+/// initials-vs-full-name author variant that `author_verdict` would call
+/// [`AuthorVerdict::Agree`] (e.g. "J.K. Rowling" vs "Joanne Kathleen
+/// Rowling") can still produce different strings here. The richer verdict
+/// functions remain the primary decision seats; this is the storable
+/// backstop their unique-index guard needs.
+///
+/// Either side may be passed empty when only the other half is needed (e.g.
+/// normalizing a bare series or title-only string has no author) — the
+/// unused side's component is still returned deterministically as an empty
+/// string.
+pub fn identity_key(title: &str, author: &str) -> (String, String) {
+    let parsed = parse_title(title);
+    let volume_segment = rendered_volume_numbers(&parsed).join(",");
+
+    let mut segments = vec![
+        parsed.main,
+        parsed.subtitle.unwrap_or_default(),
+        volume_segment,
+    ];
+    while segments.len() > 1 && segments.last().is_some_and(|s| s.is_empty()) {
+        segments.pop();
+    }
+    let title_key = segments.join("\u{1}");
+
+    (title_key, canonical_author_key(author))
+}
+
+/// The scan/filename comparison form of the SAME recipe (never stored):
+/// the [`identity_key`] parse triple flattened into one space-joined,
+/// whitespace-collapsed token string — volume numbers rendered as bare
+/// digits — with the canonical article vocabulary (a/an/the) dropped at
+/// EVERY token position. The author component is identical to
+/// [`identity_key`]'s.
+///
+/// Why this form exists: filesystem sanitization erases the `:` separator
+/// (`sanitize_path_component` writes `:` as `_`), so a rescanned file stem
+/// ("Mistborn_ The Final Empire") parses FLAT while the stored work title
+/// ("Mistborn: The Final Empire") parses segmented. Comparing two
+/// flattened renders of the one parse reconciles the two shapes — the
+/// scan matcher compares `identity_key_flat(stem)` against
+/// `identity_key_flat(work.title)`, never the segmented stored key.
+///
+/// Why articles drop at every position here (vs segment-leading only in
+/// the segmented form): position-sensitive article dropping is defined by
+/// segment boundaries, and flattening is precisely the erasure of those
+/// boundaries — the stem side never had them, so its buried "the" would
+/// otherwise never reconcile with the work side's dropped subtitle
+/// article. Both sides coarsen identically, so sibling distinctness
+/// survives: differing subtitles still differ token-wise, a bare-titled
+/// stem still misses a subtitled work (grey territory — the existing
+/// fuzzy/manual import path), and junk-tail/accent folding hold exactly
+/// as in the segmented form. Never used for storage, adopt, or dedup —
+/// those keep the segmented [`identity_key`].
+pub fn identity_key_flat(title: &str, author: &str) -> (String, String) {
+    let parsed = parse_title(title);
+    let volumes = rendered_volume_numbers(&parsed);
+    let joined = format!(
+        "{} {} {}",
+        parsed.main,
+        parsed.subtitle.unwrap_or_default(),
+        volumes.join(" ")
+    );
+    let flat_title = joined
+        .split_whitespace()
+        .filter(|t| !matches!(*t, "a" | "an" | "the"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (flat_title, canonical_author_key(author))
+}
+
+/// Sorted, deduplicated volume numbers of a parsed title, rendered as bare
+/// digit strings ("1", "3.5") — the shared volume normalization behind
+/// both [`identity_key`] (comma-joined segment) and [`identity_key_flat`]
+/// (space-joined tokens).
+fn rendered_volume_numbers(parsed: &ParsedTitle) -> Vec<String> {
+    let mut volumes = parsed.volume_numbers();
+    volumes.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    volumes.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
+    volumes.iter().map(|n| n.to_string()).collect()
+}
+
+/// The canonical author string shared by [`identity_key`] and
+/// [`identity_key_flat`]: order-normalized, accent-stripped,
+/// suffix-dropped tokens (the same name canonicalization `author_verdict`
+/// uses under the hood), or empty when no usable author name is present.
+fn canonical_author_key(author: &str) -> String {
+    canonical_author_name(author)
+        .map(|name| {
+            let mut tokens = name.given;
+            tokens.push(name.surname);
+            tokens.join(" ")
+        })
+        .unwrap_or_default()
+}
+
 // --- title parsing internals ---
 
 /// Volume-marker phrase: optional "Series Name, " prefix, a volume token,
@@ -1123,5 +1249,162 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(id_verdict(&a, &b), IdVerdict::NoEvidence);
+    }
+
+    // --- identity_key ---
+
+    #[test]
+    fn identity_key_is_deterministic() {
+        let a = identity_key("The Hobbit", "J.R.R. Tolkien");
+        let b = identity_key("The Hobbit", "J.R.R. Tolkien");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn identity_key_title_drops_leading_article_and_accents() {
+        let (main, _) = identity_key("The Hobbit", "Author");
+        assert_eq!(main, "hobbit");
+
+        let (main, _) = identity_key("Café", "Author");
+        assert_eq!(main, "cafe");
+    }
+
+    #[test]
+    fn identity_key_junk_tail_folds_to_bare_title() {
+        // A junk tail ("A Novel") is stripped by the parse and never enters
+        // the key — the ST-04 acceptance shape: a junk-tail variant of a
+        // stored title computes the SAME key and can adopt.
+        let (key_a, _) = identity_key("Dune: A Novel", "Author");
+        let (key_b, _) = identity_key("Dune", "Author");
+        assert_eq!(key_a, key_b);
+    }
+
+    #[test]
+    fn identity_key_one_sided_volume_marker_keeps_distinct() {
+        // A volume marker on one side enters the key triple: the pair
+        // misses at the exact-equality seat (falls to the dedup cascade,
+        // which lands grey — a visible duplicate, never a silent absorb).
+        let (key_a, _) = identity_key("Storm Front: The Dresden Files, Book 1", "Author");
+        let (key_b, _) = identity_key("Storm Front", "Author");
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn identity_key_true_subtitle_siblings_stay_distinct() {
+        // Series siblings share a main title but differ in subtitle — the
+        // triple keeps their keys distinct so BOTH persist under the UNIQUE
+        // index + ON CONFLICT DO NOTHING backstop.
+        let (key_a, _) = identity_key("Mistborn: The Final Empire", "Brandon Sanderson");
+        let (key_b, _) = identity_key("Mistborn: The Well of Ascension", "Brandon Sanderson");
+        let (key_bare, _) = identity_key("Mistborn", "Brandon Sanderson");
+        assert_ne!(key_a, key_b);
+        assert_ne!(key_a, key_bare);
+        assert_ne!(key_b, key_bare);
+    }
+
+    #[test]
+    fn identity_key_volume_siblings_stay_distinct() {
+        let (key_a, _) = identity_key("History of Rome: Volume 1", "Author");
+        let (key_b, _) = identity_key("History of Rome: Volume 2", "Author");
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn identity_key_matching_volume_variants_fold() {
+        // Different spellings of the SAME volume ("Volume 1" tail vs
+        // ", Vol. 1" comma marker) extract the same number and compute the
+        // same key — variant forms of one book still fold.
+        let (key_a, _) = identity_key("History of Rome: Volume 1", "Author");
+        let (key_b, _) = identity_key("History of Rome, Vol. 1", "Author");
+        assert_eq!(key_a, key_b);
+
+        let (key_c, _) = identity_key("Foo: Book Three", "Author");
+        let (key_d, _) = identity_key("Foo, Vol. 3", "Author");
+        assert_eq!(key_c, key_d);
+    }
+
+    #[test]
+    fn identity_key_plain_title_key_is_bare_main() {
+        // Trailing empty segments are dropped: a plain title's key is just
+        // its cleaned main, with no separator characters.
+        let (key, _) = identity_key("Dune", "Author");
+        assert_eq!(key, "dune");
+        assert!(!key.contains('\u{1}'));
+    }
+
+    #[test]
+    fn identity_key_author_reorders_last_first_and_lowercases() {
+        let (_, author_a) = identity_key("Title", "Herbert, Frank");
+        let (_, author_b) = identity_key("Title", "frank herbert");
+        assert_eq!(author_a, author_b);
+        assert_eq!(author_a, "frank herbert");
+    }
+
+    #[test]
+    fn identity_key_empty_side_yields_empty_component() {
+        let (main, author) = identity_key("Dune", "");
+        assert_eq!(main, "dune");
+        assert_eq!(author, "");
+
+        let (main, author) = identity_key("", "Frank Herbert");
+        assert_eq!(main, "");
+        assert_eq!(author, "frank herbert");
+    }
+
+    #[test]
+    fn identity_key_differs_from_old_recipe_on_leading_article() {
+        // The retired normalize_for_matching kept stopwords (no article
+        // drop); identity_key's title component does drop them (REQ-014 —
+        // this IS the behavior change the recompute migration exists for).
+        let (main, _) = identity_key("The Hobbit", "Author");
+        assert_ne!(main, "the hobbit");
+    }
+
+    // --- identity_key_flat (the scan/filename comparison form) ---
+
+    #[test]
+    fn flat_sanitized_colon_stem_matches_subtitled_work() {
+        // The rescan regression case, dead: sanitize_path_component wrote
+        // ":" as "_", so the stem carries no separator — its buried "The"
+        // and the work side's segmented subtitle reconcile only in the
+        // flattened form.
+        let stem = identity_key_flat("Mistborn_ The Final Empire", "Brandon Sanderson");
+        let work = identity_key_flat("Mistborn: The Final Empire", "Brandon Sanderson");
+        assert_eq!(stem, work);
+    }
+
+    #[test]
+    fn flat_sibling_stems_never_cross_match() {
+        let final_empire = identity_key_flat("Mistborn: The Final Empire", "Brandon Sanderson");
+        let well_of_ascension =
+            identity_key_flat("Mistborn: The Well of Ascension", "Brandon Sanderson");
+        assert_ne!(final_empire, well_of_ascension);
+
+        // A sanitized sibling stem matches its OWN work only.
+        let sibling_stem =
+            identity_key_flat("Mistborn_ The Well of Ascension", "Brandon Sanderson");
+        assert_eq!(sibling_stem, well_of_ascension);
+        assert_ne!(sibling_stem, final_empire);
+    }
+
+    #[test]
+    fn flat_bare_stem_does_not_match_subtitled_work() {
+        // A bare-titled file against a subtitled work is grey territory —
+        // it falls to the existing fuzzy/manual import path, never a silent
+        // flat match.
+        let bare = identity_key_flat("Mistborn", "Brandon Sanderson");
+        let subtitled = identity_key_flat("Mistborn: The Final Empire", "Brandon Sanderson");
+        assert_ne!(bare, subtitled);
+    }
+
+    #[test]
+    fn flat_junk_tail_and_accent_folding_hold() {
+        let junk = identity_key_flat("Dune: A Novel", "Frank Herbert");
+        let bare = identity_key_flat("Dune", "Frank Herbert");
+        assert_eq!(junk, bare);
+
+        let accented = identity_key_flat("CAFÉ WORLD", "J. Author");
+        let plain = identity_key_flat("Cafe World", "j. author");
+        assert_eq!(accented, plain);
     }
 }

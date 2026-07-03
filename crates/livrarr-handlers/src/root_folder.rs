@@ -9,8 +9,9 @@ use crate::{
     ApiError, CreateRootFolderRequest, RootFolderResponse, ScanErrorEntry, ScanResult,
     ScanUnmatchedFile,
 };
+use livrarr_domain::identity_matching::identity_key_flat;
 use livrarr_domain::services::{FileService, ImportIoService, RootFolderService, WorkService};
-use livrarr_domain::{classify_file, normalize_for_matching, MediaType};
+use livrarr_domain::{classify_file, MediaType};
 
 fn disk_space(path: &str) -> (Option<i64>, Option<i64>) {
     #[cfg(unix)]
@@ -167,17 +168,12 @@ pub async fn scan<
     let existing_items = state.file_service().list(user_id).await?;
 
     // Pre-compute normalized lookup HashMap to avoid O(files×works).
+    // identity_key_flat, not the segmented identity_key: file stems carry
+    // no ":" (sanitize_path_component wrote it as "_"), so only the
+    // flattened form of the recipe compares equal across the two shapes.
     let work_lookup: std::collections::HashMap<(String, String), &livrarr_domain::Work> = works
         .iter()
-        .map(|w| {
-            (
-                (
-                    normalize_for_matching(&w.title),
-                    normalize_for_matching(&w.author_name),
-                ),
-                w,
-            )
-        })
+        .map(|w| (identity_key_flat(&w.title, &w.author_name), w))
         .collect();
 
     let mut matched: i64 = 0;
@@ -253,10 +249,9 @@ pub async fn scan<
             }
         };
 
-        let norm_title = normalize_for_matching(&parsed_title);
-        let norm_author = normalize_for_matching(&parsed_author);
-
-        let matched_work = work_lookup.get(&(norm_title, norm_author)).copied();
+        let matched_work = work_lookup
+            .get(&identity_key_flat(&parsed_title, &parsed_author))
+            .copied();
 
         match matched_work {
             Some(work) => {
@@ -368,17 +363,10 @@ pub async fn scan_path<S: HasWorkService>(
         .await?;
 
     // Pre-compute normalized lookup HashMap to avoid O(files×works).
+    // identity_key_flat for the same reason as the import scan above.
     let work_lookup2: std::collections::HashMap<(String, String), bool> = works
         .iter()
-        .map(|w| {
-            (
-                (
-                    normalize_for_matching(&w.title),
-                    normalize_for_matching(&w.author_name),
-                ),
-                true,
-            )
-        })
+        .map(|w| (identity_key_flat(&w.title, &w.author_name), true))
         .collect();
 
     let mut matched: i64 = 0;
@@ -418,10 +406,7 @@ pub async fn scan_path<S: HasWorkService>(
 
         match parsed {
             Some((author, title)) => {
-                let norm_title = normalize_for_matching(&title);
-                let norm_author = normalize_for_matching(&author);
-
-                if work_lookup2.contains_key(&(norm_title, norm_author)) {
+                if work_lookup2.contains_key(&identity_key_flat(&title, &author)) {
                     matched += 1;
                 } else {
                     unmatched.push(ScanUnmatchedFile {

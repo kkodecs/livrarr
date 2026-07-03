@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use livrarr_domain::identity_matching::{
-    author_verdict, id_verdict, language_verdict, parse_title, title_verdict,
+    author_verdict, id_verdict, identity_key, language_verdict, parse_title, title_verdict,
     title_verdict_with_positions, AuthorVerdict, IdEvidence, IdVerdict, LanguageVerdict,
     TitleVerdict,
 };
@@ -738,11 +738,16 @@ fn seat1_pair(a: &WorkRow, b: &WorkRow) -> Seat1Row {
 // `old_match` is structurally false for every pair of DISTINCT existing
 // works — reported anyway: that's the honest zero, not a harness artifact.
 //
-// NEW: exact main-title equality (`ParsedTitle.main`, bare — NOT the fuller
-// `title_verdict` state machine, since a DB key can't express "grey") plus
-// author Agree. This is the literal Unit-E `identity_key` recipe
-// (REQ-014: the DB key and the already-in-library key of Seat 3 become ONE
-// function post-cutover, which is why Seats 2 and 3 share this formula).
+// NEW: `identity_matching::identity_key` equality, called directly — the
+// LIVE Unit-E stored-key recipe (REQ-014). The key's title component is the
+// full parse triple (cleaned main + true subtitle + sorted volume markers,
+// \u{1}-joined; junk tails stripped), the author component the canonical
+// author string. Exact string equality of the pair — NOT the fuller
+// `title_verdict` state machine, since a DB key can't express "grey".
+// Series siblings (same main, differing subtitle/volume) therefore keep
+// DISTINCT keys, exactly like the production unique index. The DB key and
+// the create-backstop share this one function post-cutover, which is why
+// Seat 3's NEW side uses the same formula.
 
 struct Seat2Row {
     a: PairRef,
@@ -757,22 +762,14 @@ fn seat2_pair(a: &WorkRow, b: &WorkRow) -> Seat2Row {
     let old_match = old_normalize_for_matching(&a.title) == old_normalize_for_matching(&b.title)
         && old_normalize_for_matching(&a.author_name) == old_normalize_for_matching(&b.author_name);
 
-    let pa = parse_title(&a.title);
-    let pb = parse_title(&b.title);
-    let av = author_verdict(
-        std::slice::from_ref(&a.author_name),
-        std::slice::from_ref(&b.author_name),
-    );
-    let new_match = pa.main == pb.main && av == AuthorVerdict::Agree;
+    let key_a = identity_key(&a.title, &a.author_name);
+    let key_b = identity_key(&b.title, &b.author_name);
+    let new_match = key_a == key_b;
 
     let reason = format!(
-        "old: normalized_title/author {}; new: main-title {} + author={av:?}",
+        "old: normalized_title/author {}; new: identity_key {}",
         if old_match { "equal" } else { "differ" },
-        if pa.main == pb.main {
-            "equal"
-        } else {
-            "differ"
-        },
+        if new_match { "equal" } else { "differ" },
     );
 
     Seat2Row {
@@ -804,8 +801,10 @@ fn seat2_pair(a: &WorkRow, b: &WorkRow) -> Seat2Row {
 // author equality back in here is the correct generalization across a
 // whole library, not a divergence from it.
 //
-// NEW: same recipe as Seat 2 (REQ-014 unification) — main-title equality +
-// author Agree.
+// NEW: same formula as Seat 2 (REQ-014 unification) —
+// `identity_matching::identity_key` equality, called directly (the live
+// Unit-E stored-key recipe: full parse-triple title component + canonical
+// author string).
 
 struct Seat3Row {
     a: PairRef,
@@ -821,22 +820,14 @@ fn seat3_pair(a: &WorkRow, b: &WorkRow) -> Seat3Row {
         == old_normalize_title_for_match(&b.title)
         && old_authors_match(&a.author_name, &b.author_name);
 
-    let pa = parse_title(&a.title);
-    let pb = parse_title(&b.title);
-    let av = author_verdict(
-        std::slice::from_ref(&a.author_name),
-        std::slice::from_ref(&b.author_name),
-    );
-    let new_match = pa.main == pb.main && av == AuthorVerdict::Agree;
+    let key_a = identity_key(&a.title, &a.author_name);
+    let key_b = identity_key(&b.title, &b.author_name);
+    let new_match = key_a == key_b;
 
     let reason = format!(
-        "old: normalize_title_for_match {}; new: main-title {} + author={av:?}",
+        "old: normalize_title_for_match {}; new: identity_key {}",
         if old_match { "equal" } else { "differ" },
-        if pa.main == pb.main {
-            "equal"
-        } else {
-            "differ"
-        },
+        if new_match { "equal" } else { "differ" },
     );
 
     Seat3Row {
@@ -1344,10 +1335,12 @@ fn render_markdown(d: &ReportData) -> String {
     md.push_str(
         "This is the raw uniqueness key the database already enforces today (no two \
          works can share it), so OLD can never show a collision between two distinct \
-         existing works — the interesting number is how many pairs the NEW key (main \
-         title + author) would now treat as the same identity that the OLD key kept \
-         apart. Those are latent near-duplicates already sitting in the library; the \
-         planned identity_key migration (Unit E) will need to reconcile them.\n\n",
+         existing works — the interesting number is how many pairs the NEW key \
+         (identity_key: cleaned main title + true subtitle + volume markers, plus \
+         canonical author; junk tails stripped) would now treat as the same identity \
+         that the OLD key kept apart. Those are latent near-duplicates already sitting \
+         in the library; the identity_key recompute (Unit E, migration 069's startup \
+         backfill) will need to reconcile them.\n\n",
     );
     let s2_xor: Vec<&Seat2Row> = d
         .seat2
