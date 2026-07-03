@@ -33,7 +33,10 @@ pub struct MaterializeTags {
 pub struct CoverSlotState {
     /// The cover URL the merge chose for this slot (`None` = no new cover).
     pub chosen_new_url: Option<String>,
-    /// The cover URL currently on the work (drives the non-destructive/replace decision).
+    /// The URL the slot's existing on-disk file came from — the PRE-merge
+    /// stored value, never the post-merge one (which always equals
+    /// `chosen_new_url` and would mask a changed pick behind a stale file).
+    /// Drives the download-vs-no-op decision together with file presence.
     pub current_url: Option<String>,
     /// The cover file already on disk for this slot, if any.
     pub current_path: Option<String>,

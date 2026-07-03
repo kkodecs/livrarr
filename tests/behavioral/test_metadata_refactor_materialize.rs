@@ -173,6 +173,43 @@ async fn url_equality_with_file_present_skips_redownload() {
     assert_eq!(second.ebook_cover_path, None);
 }
 
+/// A later pass can change the pick (e.g. Goodreads' answer landing after a
+/// first pass already downloaded another provider's image). The stale file
+/// from the old URL must never satisfy the gate: chosen ≠ the URL the file
+/// came from ⇒ re-download, file presence notwithstanding.
+#[tokio::test]
+async fn changed_pick_replaces_stale_file_from_previous_url() {
+    let http = Arc::new(SpyHttp::default());
+    let service = LiveMaterializeService::new(http.clone());
+
+    let covers_dir =
+        std::env::temp_dir().join(format!("livrarr-mz-stale-swap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&covers_dir);
+
+    // Pass 1: first provider's cover downloads.
+    let mut req = request(true);
+    req.covers_dir = covers_dir.clone();
+    req.ebook_cover.current_url = None;
+    req.ebook_cover.chosen_new_url = Some("https://covers.example.test/old-german.jpg".into());
+    req.audiobook_cover.chosen_new_url = None;
+    service.materialize(req.clone()).await.expect("pass 1");
+    assert_eq!(http.safe_fetch_count(), 1);
+    assert!(covers_dir.join("42.jpg").exists());
+
+    // Pass 2: the pick changed; the old file is still on disk. current_url
+    // carries the PRE-merge value (the URL the file came from).
+    req.ebook_cover.current_url = Some("https://covers.example.test/old-german.jpg".into());
+    req.ebook_cover.chosen_new_url = Some("https://covers.example.test/new-english.jpg".into());
+    let outcome = service.materialize(req).await.expect("pass 2");
+
+    assert_eq!(
+        http.safe_fetch_count(),
+        2,
+        "a changed pick must re-download even though a (stale) file exists"
+    );
+    assert!(outcome.ebook_cover_path.is_some());
+}
+
 #[tokio::test]
 async fn unchanged_materialize_request_skips_cover_downloads_and_tag_rewrites() {
     // AC-010

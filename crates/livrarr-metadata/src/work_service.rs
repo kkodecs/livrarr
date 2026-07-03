@@ -3125,12 +3125,19 @@ where
             work_id,
             changed: enrich_result.changed,
             tag_fields_changed: enrich_result.changed,
+            // current_url must be the URL the on-disk file came from — the
+            // PRE-enrich snapshot. The merge has already stamped the chosen
+            // URL onto the row by this point, so the post-enrich value always
+            // equals chosen_new_url and can never signal "the pick changed
+            // this pass": a work whose cover pick moved (e.g. GR's answer
+            // arriving after a first pass downloaded another provider's
+            // image) would keep serving the stale file forever.
             ebook_cover: livrarr_domain::services::CoverSlotState {
                 chosen_new_url: enrich_result
                     .cover_resolution
                     .as_ref()
                     .map(|r| r.url.clone()),
-                current_url: post_enrich_work.cover_url.clone(),
+                current_url: work.cover_url.clone(),
                 current_path: None,
                 user_locked: post_enrich_work.cover_trust == livrarr_domain::CoverTrust::User,
             },
@@ -3139,7 +3146,7 @@ where
                     .audiobook_cover_resolution
                     .as_ref()
                     .map(|r| r.url.clone()),
-                current_url: post_enrich_work.audiobook_cover_url.clone(),
+                current_url: work.audiobook_cover_url.clone(),
                 current_path: None,
                 user_locked: post_enrich_work.audiobook_cover_trust
                     == livrarr_domain::CoverTrust::User,
