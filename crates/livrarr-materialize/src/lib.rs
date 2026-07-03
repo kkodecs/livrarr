@@ -173,14 +173,27 @@ where
         let mut outcome = MaterializeOutcome::default();
         let mut ebook_cover_bytes: Option<Vec<u8>> = None;
 
-        // Ebook cover: download only a NEW url, never over a user lock (REQ-008),
-        // never blanking an existing cover when no new url (REQ-006). The bytes
+        // Ebook cover: download a NEW url, or a chosen url whose local file is
+        // missing — never over a user lock (REQ-008), never blanking an
+        // existing cover when no new url (REQ-006). The file check is what
+        // makes first acquisition work on every door: the merge stamps the
+        // chosen url onto the work BEFORE this request is built, so
+        // chosen == current on the very first pass and url inequality alone
+        // would skip the only download the work ever gets. URL equality with
+        // the bytes already on disk is the true "nothing to do". The bytes
         // feed the tag write. A download failure propagates (the caller — the
         // pipeline — saves the work anyway per REQ-013).
         let ebook = &request.ebook_cover;
         if !ebook.user_locked {
             if let Some(url) = ebook.chosen_new_url.as_deref() {
-                if ebook.current_url.as_deref() != Some(url) {
+                let file_present = tokio::fs::try_exists(cover_file_path(
+                    &request.covers_dir,
+                    request.work_id,
+                    "",
+                ))
+                .await
+                .unwrap_or(false);
+                if ebook.current_url.as_deref() != Some(url) || !file_present {
                     let (bytes, dims) = download_cover_to_disk(
                         &*self.http,
                         url,
@@ -208,7 +221,14 @@ where
         let audiobook = &request.audiobook_cover;
         if !audiobook.user_locked {
             if let Some(url) = audiobook.chosen_new_url.as_deref() {
-                if audiobook.current_url.as_deref() != Some(url) {
+                let file_present = tokio::fs::try_exists(cover_file_path(
+                    &request.covers_dir,
+                    request.work_id,
+                    "_audiobook",
+                ))
+                .await
+                .unwrap_or(false);
+                if audiobook.current_url.as_deref() != Some(url) || !file_present {
                     let (_, dims) = download_cover_to_disk(
                         &*self.http,
                         url,
