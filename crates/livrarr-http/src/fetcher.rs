@@ -3,6 +3,8 @@
 //! Provides rate-limited HTTP fetching with SSRF protection, anti-bot detection,
 //! and streaming body-size enforcement.
 
+use std::time::Duration;
+
 use livrarr_domain::services::{
     FetchError, FetchRequest, FetchResponse, HttpFetcher, HttpMethod, UserAgentProfile,
 };
@@ -10,6 +12,13 @@ use livrarr_domain::services::{
 use crate::breaker::BreakerSignal;
 use crate::outbound_queue;
 use crate::ssrf;
+
+/// TCP-connect budget for `fetch_ssrf_safe_fast_connect`. A dead/unreachable
+/// host fails here in well under a second instead of riding out whatever the
+/// caller's overall `req.timeout` (or an outer deadline wrapping the call,
+/// like phase1 cover download's 3s budget) happens to be. Chosen to comfortably
+/// cover a slow-but-live handshake while cutting off a black-holed host fast.
+const FAST_CONNECT_TIMEOUT: Duration = Duration::from_millis(600);
 
 // ---------------------------------------------------------------------------
 // Anti-bot detection
@@ -61,6 +70,11 @@ fn user_agent_string(profile: &UserAgentProfile) -> String {
 pub struct HttpFetcherImpl {
     client: reqwest::Client,
     ssrf_client: reqwest::Client,
+    /// Same SSRF-safe configuration as `ssrf_client`, plus `FAST_CONNECT_TIMEOUT`.
+    /// A separate, persistent client (not built per-request) so repeated calls
+    /// against the same live host within one process still get connection
+    /// reuse — only `fetch_ssrf_safe_fast_connect` uses it.
+    fast_connect_ssrf_client: reqwest::Client,
 }
 
 impl HttpFetcherImpl {
@@ -77,9 +91,17 @@ impl HttpFetcherImpl {
             .build()
             .map_err(|e| e.to_string())?;
 
+        let fast_connect_ssrf_client = reqwest::Client::builder()
+            .dns_resolver(ssrf::SsrfSafeResolver::new())
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(FAST_CONNECT_TIMEOUT)
+            .build()
+            .map_err(|e| e.to_string())?;
+
         Ok(Self {
             client,
             ssrf_client,
+            fast_connect_ssrf_client,
         })
     }
 
@@ -218,14 +240,16 @@ impl HttpFetcherImpl {
             body,
         })
     }
-}
 
-impl HttpFetcher for HttpFetcherImpl {
-    async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
-        self.do_fetch(&self.client, req).await
-    }
-
-    async fn fetch_ssrf_safe(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+    /// Shared body for `fetch_ssrf_safe` and `fetch_ssrf_safe_fast_connect` —
+    /// identical SSRF preflight and manual redirect loop, differing only in
+    /// which pre-built client (and therefore which connect-phase budget)
+    /// carries the actual sends.
+    async fn fetch_ssrf_safe_impl(
+        &self,
+        req: FetchRequest,
+        client: &reqwest::Client,
+    ) -> Result<FetchResponse, FetchError> {
         // Pre-flight validation
         let parsed =
             url::Url::parse(&req.url).map_err(|e| FetchError::Ssrf(format!("invalid URL: {e}")))?;
@@ -304,7 +328,7 @@ impl HttpFetcher for HttpFetcherImpl {
                 priority: req.priority,
             };
 
-            let result = self.do_fetch(&self.ssrf_client, follow_req).await?;
+            let result = self.do_fetch(client, follow_req).await?;
 
             if !(300..400).contains(&result.status) {
                 return Ok(result);
@@ -394,5 +418,23 @@ impl HttpFetcher for HttpFetcherImpl {
         }
 
         Err(FetchError::Connection("too many redirects".to_string()))
+    }
+}
+
+impl HttpFetcher for HttpFetcherImpl {
+    async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+        self.do_fetch(&self.client, req).await
+    }
+
+    async fn fetch_ssrf_safe(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+        self.fetch_ssrf_safe_impl(req, &self.ssrf_client).await
+    }
+
+    async fn fetch_ssrf_safe_fast_connect(
+        &self,
+        req: FetchRequest,
+    ) -> Result<FetchResponse, FetchError> {
+        self.fetch_ssrf_safe_impl(req, &self.fast_connect_ssrf_client)
+            .await
     }
 }

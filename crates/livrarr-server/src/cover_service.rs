@@ -224,6 +224,7 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
             work_id,
             suffix,
             livrarr_domain::RequestPriority::Normal,
+            false,
         )
         .await
         .map_err(|e| CoverServiceError::Internal(e.to_string()))?;

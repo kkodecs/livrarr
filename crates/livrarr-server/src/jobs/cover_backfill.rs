@@ -70,6 +70,7 @@ pub async fn run_cover_backfill(db: SqliteDb, covers_dir: PathBuf) {
             "",
             // Low: background cover backfill job (B4 table).
             livrarr_domain::RequestPriority::Low,
+            false,
         )
         .await
         {
