@@ -18,6 +18,13 @@ pub trait AppConfigService: Send + Sync {
         &self,
         params: UpdateMetadataParams,
     ) -> Result<crate::settings::MetadataConfig, DbError>;
+    /// The default language for newly added works: applied wherever a
+    /// creation door has no explicit language for the book.
+    async fn get_default_language(&self) -> Result<String, DbError>;
+    async fn update_default_language(&self, language: &str) -> Result<String, DbError>;
+    /// Validate and normalize a default-language code against the supported
+    /// set. Returns the normalized code; `Err` carries the reason.
+    async fn validate_default_language(&self, language: &str) -> Result<String, String>;
     async fn get_email_config(&self) -> Result<crate::settings::EmailConfig, DbError>;
     async fn update_email_config(
         &self,

@@ -99,6 +99,20 @@ export default function MetadataPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const defaultLangQ = useQuery({
+    queryKey: ["defaultLanguage"],
+    queryFn: api.getDefaultLanguage,
+  });
+
+  const updateDefaultLang = useMutation({
+    mutationFn: api.updateDefaultLanguage,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["defaultLanguage"] });
+      setDefaultLangDirty(false);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const {
     register,
     handleSubmit,
@@ -138,6 +152,10 @@ export default function MetadataPage() {
   const [langInput, setLangInput] = useState("");
   const [langDirty, setLangDirty] = useState(false);
 
+  // Default language for new books
+  const [defaultLanguage, setDefaultLanguage] = useState("");
+  const [defaultLangDirty, setDefaultLangDirty] = useState(false);
+
   // Sync languages from query data on first load
   useEffect(() => {
     if (
@@ -148,6 +166,13 @@ export default function MetadataPage() {
       setLanguages(configQ.data.languages);
     }
   }, [configQ.data, langDirty]);
+
+  // Sync the default language from query data on first load
+  useEffect(() => {
+    if (defaultLangQ.data && !defaultLangDirty) {
+      setDefaultLanguage(defaultLangQ.data.defaultLanguage);
+    }
+  }, [defaultLangQ.data, defaultLangDirty]);
 
   if (configQ.isLoading) return <PageLoading />;
   if (configQ.error)
@@ -183,6 +208,10 @@ export default function MetadataPage() {
     if (langDirty) req.languages = languages;
 
     updateConfig.mutate(req);
+
+    if (defaultLangDirty && defaultLanguage) {
+      updateDefaultLang.mutate({ defaultLanguage });
+    }
   };
 
   const handleProviderChange = (newProvider: string) => {
@@ -467,6 +496,51 @@ export default function MetadataPage() {
                 Languages
               </h2>
             </div>
+            <div className="mb-4">
+              <div className="flex items-center gap-2 mb-1">
+                <label className="block text-xs text-muted">
+                  Default language for new books
+                </label>
+                <HelpTip text="Used when a book is added and its language cannot be determined — nothing in the file, the provider record, or your pick says what it is. Books that already declare a language are not affected, and neither are books already in your library." />
+              </div>
+              <select
+                value={
+                  defaultLangQ.data
+                    ? defaultLanguage || defaultLangQ.data.defaultLanguage
+                    : ""
+                }
+                onChange={(e) => {
+                  setDefaultLanguage(e.target.value);
+                  setDefaultLangDirty(true);
+                }}
+                disabled={defaultLangQ.isLoading || !!defaultLangQ.error}
+                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
+              >
+                {defaultLangQ.data ? (
+                  SUPPORTED_LANGUAGES.map((l) => (
+                    <option key={l.code} value={l.code}>
+                      {l.flag} {l.englishName}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">
+                    {defaultLangQ.error ? "Unavailable" : "Loading…"}
+                  </option>
+                )}
+              </select>
+              {!!defaultLangQ.error && (
+                <p className="mt-0.5 text-xs text-red-400">
+                  Failed to load the current default language.{" "}
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={() => defaultLangQ.refetch()}
+                  >
+                    Retry
+                  </button>
+                </p>
+              )}
+            </div>
             <p className="text-xs text-muted mb-4">
               Select languages for book metadata. The first enabled language is
               your primary &mdash; used by default when searching for new books.
@@ -577,10 +651,14 @@ export default function MetadataPage() {
           <div className="pt-2">
             <button
               type="submit"
-              disabled={isSubmitting || updateConfig.isPending}
+              disabled={
+                isSubmitting || updateConfig.isPending || updateDefaultLang.isPending
+              }
               className="rounded bg-brand px-6 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
             >
-              {updateConfig.isPending ? "Saving..." : "Save Changes"}
+              {updateConfig.isPending || updateDefaultLang.isPending
+                ? "Saving..."
+                : "Save Changes"}
             </button>
           </div>
         </form>

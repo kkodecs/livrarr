@@ -808,6 +808,14 @@ export interface UpdateMetadataConfigRequest {
   googleBooksApiKey?: string | null;
 }
 
+export interface DefaultLanguageResponse {
+  defaultLanguage: string;
+}
+
+export interface UpdateDefaultLanguageRequest {
+  defaultLanguage: string;
+}
+
 // System
 export interface HealthCheckResult {
   source: string;

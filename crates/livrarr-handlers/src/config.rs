@@ -9,9 +9,10 @@ use crate::context::{
 
 use crate::middleware::RequireAdmin;
 use crate::{
-    ApiError, AuthContext, EmailConfigResponse, MediaManagementConfigResponse,
-    MetadataConfigResponse, NamingConfigResponse, UpdateEmailApiRequest,
-    UpdateMediaManagementApiRequest, UpdateMetadataApiRequest,
+    ApiError, AuthContext, DefaultLanguageResponse, EmailConfigResponse,
+    MediaManagementConfigResponse, MetadataConfigResponse, NamingConfigResponse,
+    UpdateDefaultLanguageApiRequest, UpdateEmailApiRequest, UpdateMediaManagementApiRequest,
+    UpdateMetadataApiRequest,
 };
 use livrarr_domain::services::{
     AppConfigService, IndexerSettingsService, ProviderStatsService, RssSyncWorkflow,
@@ -261,6 +262,31 @@ pub async fn update_metadata<S: HasAppConfigService + HasProviderStats + HasLive
 
     let provider_status = provider_error_map(&state).await?;
     Ok(Json(metadata_to_response(cfg, provider_status)))
+}
+
+pub async fn get_default_language<S: HasAppConfigService>(
+    State(state): State<S>,
+    _admin: RequireAdmin,
+) -> Result<Json<DefaultLanguageResponse>, ApiError> {
+    let default_language = state.app_config_service().get_default_language().await?;
+    Ok(Json(DefaultLanguageResponse { default_language }))
+}
+
+pub async fn update_default_language<S: HasAppConfigService>(
+    State(state): State<S>,
+    _admin: RequireAdmin,
+    Json(req): Json<UpdateDefaultLanguageApiRequest>,
+) -> Result<Json<DefaultLanguageResponse>, ApiError> {
+    let validated = state
+        .app_config_service()
+        .validate_default_language(&req.default_language)
+        .await
+        .map_err(ApiError::BadRequest)?;
+    let default_language = state
+        .app_config_service()
+        .update_default_language(&validated)
+        .await?;
+    Ok(Json(DefaultLanguageResponse { default_language }))
 }
 
 pub async fn test_hardcover<S: HasAppConfigService + HasHttpFetcher>(

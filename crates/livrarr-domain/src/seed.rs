@@ -3,7 +3,9 @@
 //! Every creation door builds its [`WorkCandidate`] here; no door assembles
 //! [`WorkSeedFields`] directly (the only other legal site is `#[cfg(test)]`
 //! code). The module owns seed-language policy: [`SeedLanguage::resolve`] is
-//! the one place the system default lives, and every constructor stamps the
+//! the one place a language-unknown seed falls back — to the caller-supplied
+//! default (the user's default-language setting), then to
+//! [`DEFAULT_SEED_LANGUAGE`] as the last resort. Every constructor stamps the
 //! resolved language into the identity payload the candidate carries, so the
 //! seed fields and the identity harvest can never disagree.
 
@@ -11,22 +13,32 @@ use crate::identity::{CandidateId, IdentityState, WorkCandidate, WorkSeed, WorkS
 use crate::services::SourceProviderData;
 use crate::ProvenanceSetter;
 
-/// The system-wide last-resort seed language.
+/// The system-wide last-resort seed language: the database default for the
+/// user's default-language setting, and the fallback when a caller has no
+/// usable setting value to supply.
 pub const DEFAULT_SEED_LANGUAGE: &str = "en";
 
 /// A resolved seed language. Constructed only via [`SeedLanguage::resolve`]:
-/// normalized, with missing or empty input resolving to
-/// [`DEFAULT_SEED_LANGUAGE`].
+/// normalized, with missing or empty input resolving to the caller-supplied
+/// default (the user's default-language setting), and a blank default
+/// resolving to [`DEFAULT_SEED_LANGUAGE`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedLanguage(String);
 
 impl SeedLanguage {
-    pub fn resolve(input: Option<&str>) -> Self {
+    pub fn resolve(input: Option<&str>, default: &str) -> Self {
         let lang = input
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(crate::normalize_language)
-            .unwrap_or_else(|| DEFAULT_SEED_LANGUAGE.to_string());
+            .unwrap_or_else(|| {
+                let default = default.trim();
+                if default.is_empty() {
+                    DEFAULT_SEED_LANGUAGE.to_string()
+                } else {
+                    crate::normalize_language(default)
+                }
+            });
         SeedLanguage(lang)
     }
 
@@ -337,9 +349,33 @@ mod tests {
 
     #[test]
     fn resolve_defaults_on_none_and_empty() {
-        assert_eq!(SeedLanguage::resolve(None).as_str(), DEFAULT_SEED_LANGUAGE);
         assert_eq!(
-            SeedLanguage::resolve(Some("  ")).as_str(),
+            SeedLanguage::resolve(None, "en").as_str(),
+            DEFAULT_SEED_LANGUAGE
+        );
+        assert_eq!(
+            SeedLanguage::resolve(Some("  "), "en").as_str(),
+            DEFAULT_SEED_LANGUAGE
+        );
+    }
+
+    #[test]
+    fn resolve_applies_user_default_when_input_unknown() {
+        // A "de"-default user: a language-unknown seed resolves "de", not "en".
+        assert_eq!(SeedLanguage::resolve(None, "de").as_str(), "de");
+        assert_eq!(SeedLanguage::resolve(Some(""), "de").as_str(), "de");
+        assert_eq!(SeedLanguage::resolve(Some("  "), "de").as_str(), "de");
+        // An explicit input still wins over the default.
+        assert_eq!(SeedLanguage::resolve(Some("fr"), "de").as_str(), "fr");
+        // The default is normalized like any other language value.
+        assert_eq!(SeedLanguage::resolve(None, "German").as_str(), "de");
+        // A blank default falls back to the last-resort constant.
+        assert_eq!(
+            SeedLanguage::resolve(None, "").as_str(),
+            DEFAULT_SEED_LANGUAGE
+        );
+        assert_eq!(
+            SeedLanguage::resolve(None, "  ").as_str(),
             DEFAULT_SEED_LANGUAGE
         );
     }
@@ -347,7 +383,7 @@ mod tests {
     #[test]
     fn resolve_normalizes_real_input() {
         assert_eq!(
-            SeedLanguage::resolve(Some("fr")).as_str(),
+            SeedLanguage::resolve(Some("fr"), DEFAULT_SEED_LANGUAGE).as_str(),
             crate::normalize_language("fr")
         );
     }
@@ -368,7 +404,10 @@ mod tests {
             method: IdentityMethod::TitleAuthorSearch,
             score: None,
         };
-        let c = seed_author_monitor(input_with(SeedLanguage::resolve(Some("fr"))), identity);
+        let c = seed_author_monitor(
+            input_with(SeedLanguage::resolve(Some("fr"), DEFAULT_SEED_LANGUAGE)),
+            identity,
+        );
         let IdentityState::Confirmed { anchors, .. } = &c.identity else {
             panic!("variant changed");
         };
@@ -395,7 +434,7 @@ mod tests {
             top_candidates: vec![],
         };
         let c = seed_series_monitor(
-            input_with(SeedLanguage::resolve(None)),
+            input_with(SeedLanguage::resolve(None, DEFAULT_SEED_LANGUAGE)),
             identity,
             7,
             true,

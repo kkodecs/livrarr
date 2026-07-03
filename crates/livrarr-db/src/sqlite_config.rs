@@ -248,6 +248,25 @@ impl ConfigDb for SqliteDb {
         self.get_metadata_config().await
     }
 
+    async fn get_default_language(&self) -> Result<String, DbError> {
+        let row = sqlx::query("SELECT default_language FROM metadata_config WHERE id = 1")
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        row.try_get("default_language")
+            .map_err(|e| DbError::Io(Box::new(e)))
+    }
+
+    async fn update_default_language(&self, language: &str) -> Result<String, DbError> {
+        sqlx::query("UPDATE metadata_config SET default_language = ? WHERE id = 1")
+            .bind(language)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        self.get_default_language().await
+    }
+
     async fn get_email_config(&self) -> Result<EmailConfig, DbError> {
         let row = sqlx::query("SELECT * FROM email_config WHERE id = 1")
             .fetch_one(self.pool())

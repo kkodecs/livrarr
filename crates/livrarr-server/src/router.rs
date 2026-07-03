@@ -209,6 +209,11 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
                 .put(livrarr_handlers::config::update_metadata::<AppState>),
         )
         .route(
+            "/config/default-language",
+            get(livrarr_handlers::config::get_default_language::<AppState>)
+                .put(livrarr_handlers::config::update_default_language::<AppState>),
+        )
+        .route(
             "/config/metadata/test/hardcover",
             post(livrarr_handlers::config::test_hardcover::<AppState>),
         )

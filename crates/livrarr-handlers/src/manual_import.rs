@@ -846,6 +846,9 @@ pub async fn import<S: ManualImportHandlerContext>(
         .app_config_service()
         .get_media_management_config()
         .await?;
+    // The user's default language, read once per import request: items whose
+    // file and picked candidate both carry no language seed this value.
+    let default_language = state.app_config_service().get_default_language().await?;
 
     let mut results = Vec::new();
     let mut author_ol_cache: std::collections::HashMap<String, Option<String>> =
@@ -860,6 +863,7 @@ pub async fn import<S: ManualImportHandlerContext>(
             &root_folders,
             &media_mgmt,
             &mut author_ol_cache,
+            &default_language,
         )
         .await;
         results.push(result);
@@ -885,6 +889,7 @@ pub async fn import<S: ManualImportHandlerContext>(
 // Import helpers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn import_single_item<S: ManualImportHandlerContext>(
     state: &S,
     user_id: i64,
@@ -893,6 +898,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
     root_folders: &[livrarr_domain::RootFolder],
     _media_mgmt: &livrarr_domain::settings::MediaManagementConfig,
     author_ol_cache: &mut std::collections::HashMap<String, Option<String>>,
+    default_language: &str,
 ) -> ImportResult {
     let source = PathBuf::from(&item.path);
 
@@ -920,19 +926,27 @@ async fn import_single_item<S: ManualImportHandlerContext>(
         }
     };
 
-    let work_id =
-        match find_or_create_work(state, user_id, item, existing_works, author_ol_cache).await {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("manual import: work creation failed for {}: {e}", item.path);
-                return ImportResult {
-                    path: item.path.clone(),
-                    status: ImportStatus::Failed,
-                    work_id: None,
-                    error: Some(format!("work creation failed: {e}")),
-                };
-            }
-        };
+    let work_id = match find_or_create_work(
+        state,
+        user_id,
+        item,
+        existing_works,
+        author_ol_cache,
+        default_language,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            warn!("manual import: work creation failed for {}: {e}", item.path);
+            return ImportResult {
+                path: item.path.clone(),
+                status: ImportStatus::Failed,
+                work_id: None,
+                error: Some(format!("work creation failed: {e}")),
+            };
+        }
+    };
 
     let target_path = state.import_service().build_target_path(
         &root_folder.path,
@@ -1023,6 +1037,7 @@ async fn find_or_create_work<
     item: &ImportItem,
     existing_works: &[livrarr_domain::Work],
     author_ol_cache: &mut std::collections::HashMap<String, Option<String>>,
+    default_language: &str,
 ) -> Result<i64, ApiError> {
     if let Some(work) = find_existing_work(existing_works, &item.ol_key, &item.title, &item.author)
     {
@@ -1084,6 +1099,7 @@ async fn find_or_create_work<
     // edition), then the picked candidate's language, then English.
     let language = livrarr_domain::seed::SeedLanguage::resolve(
         file_language.or_else(|| item.language.clone()).as_deref(),
+        default_language,
     );
 
     let resolved = state

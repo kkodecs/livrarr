@@ -6,9 +6,10 @@ use axum::Json;
 use axum::response::{IntoResponse, Response};
 
 use crate::context::{
-    HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasEmailService,
-    HasEnrichmentWorkflow, HasFileService, HasIdentityResolver, HasNotificationService,
-    HasSeriesQueryService, HasTagService, HasWorkIdentityRepository, HasWorkService,
+    HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
+    HasEmailService, HasEnrichmentWorkflow, HasFileService, HasIdentityResolver,
+    HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkIdentityRepository,
+    HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
@@ -19,8 +20,9 @@ use crate::{
 };
 use livrarr_domain::identity::{AnchorConfidence, AnchorSetter, AnchorType};
 use livrarr_domain::services::{
-    AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
-    RefreshSurface, SeriesQueryService, WorkIdentityRepository, WorkService, WorkServiceError,
+    AppConfigService, AuthorService, CreateNotificationRequest, EmailService, FileService,
+    NotificationService, RefreshSurface, SeriesQueryService, WorkIdentityRepository, WorkService,
+    WorkServiceError,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -169,7 +171,8 @@ pub async fn add<
         + HasAuthorService
         + HasSeriesQueryService
         + HasEnrichmentWorkflow
-        + HasIdentityResolver,
+        + HasIdentityResolver
+        + HasAppConfigService,
 >(
     State(state): State<S>,
     ctx: AuthContext,
@@ -179,7 +182,8 @@ pub async fn add<
     use livrarr_domain::identity::{LatencyTier, RawHarvest};
     use livrarr_domain::seed::{seed_add_box, SeedInput, SeedLanguage};
 
-    let language = SeedLanguage::resolve(req.language.as_deref());
+    let default_language = state.app_config_service().get_default_language().await?;
+    let language = SeedLanguage::resolve(req.language.as_deref(), &default_language);
 
     // The UI hands back the picked cover in its proxied display form
     // (`/api/v1/coverproxy?url=<encoded>`); persist the real provider URL so it

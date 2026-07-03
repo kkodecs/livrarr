@@ -1,5 +1,5 @@
 use futures::stream::{self, StreamExt};
-use livrarr_db::{CreateNotificationDbRequest, NotificationDb, WorkDb};
+use livrarr_db::{ConfigDb, CreateNotificationDbRequest, NotificationDb, WorkDb};
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use std::collections::HashMap;
@@ -233,7 +233,7 @@ impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H> {
 
 impl<D, W, H> AuthorMonitorWorkflow for AuthorMonitorWorkflowImpl<D, W, H>
 where
-    D: WorkDb + livrarr_db::AuthorDb + NotificationDb + Send + Sync + 'static,
+    D: WorkDb + livrarr_db::AuthorDb + NotificationDb + ConfigDb + Send + Sync + 'static,
     W: WorkService + Send + Sync + 'static,
     H: HttpFetcher + Send + Sync + 'static,
 {
@@ -254,7 +254,7 @@ where
 
 impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H>
 where
-    D: WorkDb + livrarr_db::AuthorDb + NotificationDb + Send + Sync + 'static,
+    D: WorkDb + livrarr_db::AuthorDb + NotificationDb + ConfigDb + Send + Sync + 'static,
     W: WorkService + Send + Sync + 'static,
     H: HttpFetcher + Send + Sync + 'static,
 {
@@ -266,6 +266,14 @@ where
         let authors = self
             .db
             .list_monitored_authors(user_id)
+            .await
+            .map_err(MonitorError::Db)?;
+
+        // The user's default language, read once per monitor run: new works
+        // whose author has no monitor_language choice seed this value.
+        let default_language = self
+            .db
+            .get_default_language()
             .await
             .map_err(MonitorError::Db)?;
 
@@ -429,6 +437,7 @@ where
             let cleaned_author_ref = &cleaned_author;
             let author_ref = &author;
             let ol_key_ref = &ol_key;
+            let default_language_ref = &default_language;
             let mut entries_screened = 0usize;
             let eligible: Vec<(String, i32, String, Option<String>)> = works_response
                 .entries
@@ -507,6 +516,7 @@ where
                                     author_name: cleaned_author_ref.clone(),
                                     language: SeedLanguage::resolve(
                                         author_ref.monitor_language.as_deref(),
+                                        default_language_ref,
                                     ),
                                     author_ol_key: Some(ol_key_ref.clone()),
                                     year: Some(year),

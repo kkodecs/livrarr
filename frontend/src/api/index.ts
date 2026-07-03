@@ -53,6 +53,8 @@ import type {
   UpdateEmailConfigRequest,
   MetadataConfigResponse,
   UpdateMetadataConfigRequest,
+  DefaultLanguageResponse,
+  UpdateDefaultLanguageRequest,
   IndexerConfigResponse,
   UpdateIndexerConfigRequest,
   HealthCheckResult,
@@ -442,6 +444,13 @@ export const getMetadataConfig = () =>
   apiFetch<MetadataConfigResponse>("/config/metadata");
 export const updateMetadataConfig = (req: UpdateMetadataConfigRequest) =>
   apiFetch<MetadataConfigResponse>("/config/metadata", {
+    method: "PUT",
+    body: JSON.stringify(req),
+  });
+export const getDefaultLanguage = () =>
+  apiFetch<DefaultLanguageResponse>("/config/default-language");
+export const updateDefaultLanguage = (req: UpdateDefaultLanguageRequest) =>
+  apiFetch<DefaultLanguageResponse>("/config/default-language", {
     method: "PUT",
     body: JSON.stringify(req),
   });

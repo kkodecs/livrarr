@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use livrarr_db::{
-    AuthorDb, CreateSeriesDbRequest, LibraryItemDb, LinkWorkToSeriesRequest, SeriesCacheDb,
-    SeriesCacheEntry, SeriesDb, SeriesRosterDb, SeriesRosterEntry, WorkDb,
+    AuthorDb, ConfigDb, CreateSeriesDbRequest, LibraryItemDb, LinkWorkToSeriesRequest,
+    SeriesCacheDb, SeriesCacheEntry, SeriesDb, SeriesRosterDb, SeriesRosterEntry, WorkDb,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
@@ -39,6 +39,7 @@ where
         + LibraryItemDb
         + SeriesCacheDb
         + SeriesRosterDb
+        + ConfigDb
         + Clone
         + Send
         + Sync
@@ -237,6 +238,7 @@ where
         + LibraryItemDb
         + SeriesCacheDb
         + SeriesRosterDb
+        + ConfigDb
         + Clone
         + Send
         + Sync
@@ -737,6 +739,14 @@ where
             .await
             .map_err(SeriesServiceError::Db)?;
 
+        // The user's default language, read once per worker run: roster works
+        // whose series has no monitor_language choice seed this value.
+        let default_language = self
+            .db
+            .get_default_language()
+            .await
+            .map_err(SeriesServiceError::Db)?;
+
         let mut created = 0u32;
         let mut linked = 0u32;
         let max_works = 50;
@@ -803,6 +813,7 @@ where
                             author_name: author.name.clone(),
                             language: SeedLanguage::resolve(
                                 current.as_ref().and_then(|s| s.monitor_language.as_deref()),
+                                &default_language,
                             ),
                             author_ol_key: None,
                             year: book.year,

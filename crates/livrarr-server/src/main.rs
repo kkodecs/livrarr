@@ -833,6 +833,7 @@ async fn main() {
                 readarr_import_progress_arc,
                 data_dir_arc.clone(),
                 work_service_arc.clone(),
+                svc_db.clone(),
             ),
         ),
         cover_service,

@@ -1080,6 +1080,12 @@ pub trait ConfigDb: Send + Sync {
         req: UpdateMetadataConfigRequest,
     ) -> Result<MetadataConfig, DbError>;
 
+    /// Get the default language for newly added works.
+    async fn get_default_language(&self) -> Result<String, DbError>;
+
+    /// Update the default language for newly added works.
+    async fn update_default_language(&self, language: &str) -> Result<String, DbError>;
+
     /// Get email config.
     async fn get_email_config(&self) -> Result<EmailConfig, DbError>;
 

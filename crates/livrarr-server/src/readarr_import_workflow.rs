@@ -6,7 +6,10 @@ use futures::stream::{self, StreamExt};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use livrarr_db::{CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest};
+use livrarr_db::sqlite::SqliteDb;
+use livrarr_db::{
+    ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest,
+};
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::{
     ReadarrImportWorkflow, ServiceError, SourceProviderData, WorkService,
@@ -32,6 +35,7 @@ pub struct LiveReadarrImportWorkflow {
     readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
     data_dir: Arc<std::path::PathBuf>,
     work_service: Arc<LiveWorkService>,
+    db: SqliteDb,
 }
 
 impl LiveReadarrImportWorkflow {
@@ -41,6 +45,7 @@ impl LiveReadarrImportWorkflow {
         readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
         data_dir: Arc<std::path::PathBuf>,
         work_service: Arc<LiveWorkService>,
+        db: SqliteDb,
     ) -> Self {
         Self {
             http_client,
@@ -48,6 +53,7 @@ impl LiveReadarrImportWorkflow {
             readarr_import_progress,
             data_dir,
             work_service,
+            db,
         }
     }
 }
@@ -127,6 +133,15 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         // window without needing finer-grained per-work locks. Other entry
         // paths (list import, author monitor) do not pass
         // `source_provider_data` and are not subject to this race.
+        // The user's default language, read once per import run: books whose
+        // Readarr edition record carries no language seed this value. Fetched
+        // before the running slot is claimed so a failure needs no cleanup.
+        let default_language = self
+            .db
+            .get_default_language()
+            .await
+            .map_err(|e| ServiceError::Internal(format!("read default language: {e}")))?;
+
         let import_id = uuid::Uuid::new_v4().to_string();
         {
             let mut prog = self.readarr_import_progress.lock().await;
@@ -193,6 +208,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
                 user_id,
                 req,
                 work_service,
+                default_language,
             );
             if let Err(e) = runner.run().await {
                 error!(import_id = %id, "Readarr import failed: {e}");
@@ -854,6 +870,7 @@ struct ImportRunner {
     user_id: i64,
     req: ReadarrImportRequest,
     work_service: Arc<LiveWorkService>,
+    default_language: String,
     author_map_rd: HashMap<i64, i64>,
     work_map_rd: HashMap<i64, i64>,
     authors_created: i64,
@@ -872,6 +889,7 @@ impl ImportRunner {
         user_id: i64,
         req: ReadarrImportRequest,
         work_service: Arc<LiveWorkService>,
+        default_language: String,
     ) -> Self {
         Self {
             http_client,
@@ -881,6 +899,7 @@ impl ImportRunner {
             user_id,
             req,
             work_service,
+            default_language,
             author_map_rd: HashMap::new(),
             work_map_rd: HashMap::new(),
             authors_created: 0,
@@ -1236,7 +1255,7 @@ impl ImportRunner {
                 SeedInput {
                     title: title.to_string(),
                     author_name: author_name.to_string(),
-                    language: SeedLanguage::resolve(language.as_deref()),
+                    language: SeedLanguage::resolve(language.as_deref(), &self.default_language),
                     author_ol_key: None,
                     year,
                     cover_url,
