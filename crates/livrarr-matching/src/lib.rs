@@ -9,6 +9,7 @@
 //! - [`best_match_score`] — score parsed extractions against a candidate, return best score
 //! - [`extract_and_reconcile`] — full pipeline for file-based matching (manual import)
 //! - [`should_auto_confirm`] / [`should_try_combinatorial`] — post-scoring decisions
+//! - [`release_language_verdict`] — language gate for a background auto-grab decision
 
 mod m1_embedded;
 mod m2_path;
@@ -25,58 +26,68 @@ pub use types::{
     MatchProvider, MatchResult,
 };
 
-/// Variant-title normalization for Tier-A auto-match (REQ-020), applied to
-/// both candidate and file-derived titles BEFORE m3 string scoring. Folds the
-/// four documented form classes — trailing "(Unabridged)" edition markers,
-/// ": <subtitle>, Book N" tails, translated-subtitle variants (compare base
-/// segments when titles differ only after the first colon), and diacritics
-/// (NFKD, combining marks dropped) — plus lowercase + whitespace collapse.
-/// Acceptance comes from normalization only: the `should_auto_confirm`
-/// threshold and cluster-confidence requirements are untouched (the
-/// false-positive guard).
+/// Variant-title comparison key for Tier-A auto-match, built from the
+/// identity authority's title parse (REQ-002) rather than a blind colon cut.
+/// Two titles carry the same key exactly when they share a main title with
+/// no vetoing or demoting tail evidence between them: edition junk
+/// ("(Unabridged)") and diacritics fold away, but a true subtitle carried on
+/// either side, or a series/volume marker carried on only one side, does
+/// not — those cases keep distinct keys so genuinely different books (or a
+/// sibling volume against a title with no volume information at all) never
+/// collapse together. Degenerate input that parses to an empty main title
+/// falls back to the plain normalization of the whole string.
 pub fn normalize_title_variants(title: &str) -> String {
-    let mut t = title.trim();
+    use livrarr_domain::identity_matching::parse_title;
 
-    // Trailing "(Unabridged)" edition marker, case-insensitive.
-    if let Some(open) = t.rfind('(') {
-        let after = &t[open + 1..];
-        if let Some(close) = after.find(')') {
-            let inner = after[..close].trim();
-            let rest = after[close + 1..].trim();
-            if rest.is_empty() && inner.eq_ignore_ascii_case("unabridged") {
-                t = t[..open].trim_end();
-            }
-        }
+    let parsed = parse_title(title);
+    if parsed.main.is_empty() {
+        return m4_scoring::normalize(title);
     }
 
-    // Translated-subtitle and ": <subtitle>, Book N" classes: the segment
-    // before the first colon is the comparison key (subtitles are the part
-    // that varies across editions and translations).
-    if let Some(idx) = t.find(':') {
-        let base = t[..idx].trim_end();
-        if !base.is_empty() {
-            t = base;
-        }
-    }
+    let mut volumes = parsed.volume_numbers();
+    volumes.sort_by(f64::total_cmp);
+    volumes.dedup();
+    let volume_key = volumes
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
 
-    // ", Book N" tail when no colon precedes it.
-    if let Some(comma) = t.rfind(',') {
-        let tail_lower = t[comma + 1..].trim().to_lowercase();
-        if let Some(num) = tail_lower.strip_prefix("book ") {
-            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
-                t = t[..comma].trim_end();
-            }
-        }
-    }
+    format!(
+        "{}\u{1}{}\u{1}{}",
+        parsed.main,
+        parsed.subtitle.as_deref().unwrap_or(""),
+        volume_key,
+    )
+}
 
-    let key = m4_scoring::normalize(t);
-    if key.is_empty() {
-        // Degenerate inputs (e.g. a bare marker or leading colon): fall back
-        // to the plain normalization of the whole title.
-        m4_scoring::normalize(title)
-    } else {
-        key
-    }
+/// Language compatibility between a parsed release and a candidate work, for
+/// the Recognition matcher's background auto-grab decision (D7 recognition
+/// corollary, REQ-011). Normalizes both sides through the same language
+/// authority used to reconcile provider payloads (a release's declared-
+/// language tag is a bare English word; a work's stored language is an ISO
+/// 639-1 code) before deferring to the identity authority's language
+/// comparison: a declared mismatch is [`LanguageVerdict::Veto`] (never
+/// matches, in the background or interactively); a language-silent release
+/// against a work whose language isn't the install default is
+/// [`LanguageVerdict::Grey`] (never auto-matched in the background); anything
+/// else is [`LanguageVerdict::Neutral`].
+///
+/// [`LanguageVerdict::Veto`]: livrarr_domain::identity_matching::LanguageVerdict::Veto
+/// [`LanguageVerdict::Grey`]: livrarr_domain::identity_matching::LanguageVerdict::Grey
+/// [`LanguageVerdict::Neutral`]: livrarr_domain::identity_matching::LanguageVerdict::Neutral
+pub fn release_language_verdict(
+    release_language: Option<&str>,
+    work_language: Option<&str>,
+    default_language: &str,
+) -> livrarr_domain::identity_matching::LanguageVerdict {
+    let release = livrarr_domain::normalize_language_opt(release_language);
+    let work = livrarr_domain::normalize_language_opt(work_language);
+    livrarr_domain::identity_matching::language_verdict(
+        work.as_deref(),
+        release.as_deref(),
+        default_language,
+    )
 }
 
 /// Parsed output from a release title string (M3 + side-channel metadata).

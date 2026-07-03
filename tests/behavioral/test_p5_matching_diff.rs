@@ -31,10 +31,11 @@ use livrarr_domain::identity_matching::{
     TitleVerdict,
 };
 use livrarr_domain::Work;
-use livrarr_matching::work_dedup::{self, ProviderKeys};
+use rapidfuzz::distance::levenshtein;
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
+use unicode_normalization::UnicodeNormalization;
 
 // ===========================================================================
 // Data loading — the ONLY code in this file that touches the database.
@@ -212,17 +213,359 @@ fn pairs(works: &[&WorkRow]) -> Vec<(usize, usize)> {
 }
 
 // ===========================================================================
+// FROZEN pre-Phase-5 OLD behavior
+// ===========================================================================
+//
+// Every `old_*` item below is a deliberate frozen duplicate of pre-cutover
+// behavior, copied line for line from commit 72953b2 (the pre-rewire
+// baseline), for measurement honesty — the one sanctioned exception to the
+// no-duplication rule. The OLD side of this harness must never call live
+// functions: the Phase-5 rewire units edit those in place, which would
+// silently turn the "old" side into new behavior (or delete it outright)
+// while every diff still read zero. Freezing the copies here means a rewire
+// unit cannot change the old side without touching this file, where the
+// change is visible to review.
+
+/// Frozen duplicate of `normalize` at 72953b2
+/// crates/livrarr-matching/src/m4_scoring.rs:176-205.
+fn old_m4_normalize(s: &str) -> String {
+    let decomposed: String = s.nfkd().collect();
+
+    let stripped: String = decomposed
+        .chars()
+        .filter(|c| !old_unicode_is_combining_mark(*c))
+        .collect();
+
+    let mut result = stripped.to_lowercase();
+
+    result = result.replace('&', " and ");
+
+    for article in &["the ", "a ", "an "] {
+        if result.starts_with(article) {
+            result = result[article.len()..].to_string();
+        }
+    }
+    for article in &[", the", ", a", ", an"] {
+        if result.ends_with(article) {
+            result = result[..result.len() - article.len()].to_string();
+        }
+    }
+
+    result = result
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ')
+        .collect();
+
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Frozen duplicate of `levenshtein_sim` at 72953b2
+/// crates/livrarr-matching/src/m4_scoring.rs:217-224.
+fn old_levenshtein_sim(a: &str, b: &str) -> f64 {
+    let max_len = a.chars().count().max(b.chars().count());
+    if max_len == 0 {
+        return 1.0;
+    }
+    let dist = levenshtein::distance(a.chars(), b.chars());
+    1.0 - (dist as f64 / max_len as f64)
+}
+
+/// Frozen duplicate of `token_set_similarity` at 72953b2
+/// crates/livrarr-matching/src/m4_scoring.rs:226-234.
+fn old_token_set_similarity(a: &str, b: &str) -> f64 {
+    let mut ta: Vec<&str> = a.split_whitespace().collect();
+    let mut tb: Vec<&str> = b.split_whitespace().collect();
+    ta.sort_unstable();
+    tb.sort_unstable();
+    let sa = ta.join(" ");
+    let sb = tb.join(" ");
+    old_levenshtein_sim(&sa, &sb)
+}
+
+/// Frozen duplicate of `unicode_is_combining_mark` at 72953b2
+/// crates/livrarr-matching/src/m4_scoring.rs:236-254.
+fn old_unicode_is_combining_mark(c: char) -> bool {
+    matches!(old_unicode_general_category(c),
+        '\u{0300}'..='\u{036F}'
+        | '\u{0483}'..='\u{0489}'
+        | '\u{0591}'..='\u{05BD}'
+        | '\u{0610}'..='\u{061A}'
+        | '\u{064B}'..='\u{065F}'
+        | '\u{0670}'
+        | '\u{06D6}'..='\u{06DC}'
+        | '\u{0730}'..='\u{074A}'
+        | '\u{0900}'..='\u{0903}'
+        | '\u{093A}'..='\u{094F}'
+        | '\u{0951}'..='\u{0957}'
+        | '\u{0981}'..='\u{0983}'
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FE20}'..='\u{FE2F}'
+        | '\u{20D0}'..='\u{20FF}'
+    )
+}
+
+/// Frozen duplicate of `unicode_general_category` at 72953b2
+/// crates/livrarr-matching/src/m4_scoring.rs:256-258.
+fn old_unicode_general_category(c: char) -> char {
+    c
+}
+
+/// Frozen duplicate of `string_similarity` at 72953b2
+/// crates/livrarr-matching/src/m4_scoring.rs:126-141 — including the
+/// both-empty → 1.0 branch that Phase 5 removes.
+fn old_string_similarity(a: &str, b: &str) -> f64 {
+    let na = old_m4_normalize(a);
+    let nb = old_m4_normalize(b);
+
+    if na.is_empty() && nb.is_empty() {
+        return 1.0;
+    }
+    if na.is_empty() || nb.is_empty() {
+        return 0.0;
+    }
+
+    let lev_sim = old_levenshtein_sim(&na, &nb);
+    let token_sim = old_token_set_similarity(&na, &nb);
+
+    lev_sim.max(token_sim)
+}
+
+/// Frozen duplicate of `normalize_title_variants` at 72953b2
+/// crates/livrarr-matching/src/lib.rs:37-80 — the unabridged strip, the
+/// colon cut, the ", Book N" cut, and the plain-normalize fallback.
+fn old_normalize_title_variants(title: &str) -> String {
+    let mut t = title.trim();
+
+    // Trailing "(Unabridged)" edition marker, case-insensitive.
+    if let Some(open) = t.rfind('(') {
+        let after = &t[open + 1..];
+        if let Some(close) = after.find(')') {
+            let inner = after[..close].trim();
+            let rest = after[close + 1..].trim();
+            if rest.is_empty() && inner.eq_ignore_ascii_case("unabridged") {
+                t = t[..open].trim_end();
+            }
+        }
+    }
+
+    // Translated-subtitle and ": <subtitle>, Book N" classes: the segment
+    // before the first colon is the comparison key (subtitles are the part
+    // that varies across editions and translations).
+    if let Some(idx) = t.find(':') {
+        let base = t[..idx].trim_end();
+        if !base.is_empty() {
+            t = base;
+        }
+    }
+
+    // ", Book N" tail when no colon precedes it.
+    if let Some(comma) = t.rfind(',') {
+        let tail_lower = t[comma + 1..].trim().to_lowercase();
+        if let Some(num) = tail_lower.strip_prefix("book ") {
+            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                t = t[..comma].trim_end();
+            }
+        }
+    }
+
+    let key = old_m4_normalize(t);
+    if key.is_empty() {
+        // Degenerate inputs (e.g. a bare marker or leading colon): fall back
+        // to the plain normalization of the whole title.
+        old_m4_normalize(title)
+    } else {
+        key
+    }
+}
+
+/// Frozen duplicate of `normalize` at 72953b2
+/// crates/livrarr-matching/src/work_dedup.rs:4-9.
+fn old_dedup_normalize(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Frozen duplicate of `base_title` at 72953b2
+/// crates/livrarr-matching/src/work_dedup.rs:12-14.
+fn old_base_title(s: &str) -> &str {
+    s.split_once(':').map(|(base, _)| base.trim()).unwrap_or(s)
+}
+
+/// Frozen duplicate of `has_subtitle` at 72953b2
+/// crates/livrarr-matching/src/work_dedup.rs:16-18.
+fn old_has_subtitle(s: &str) -> bool {
+    s.contains(':')
+}
+
+/// Frozen duplicate of `canonical_author` at 72953b2
+/// crates/livrarr-matching/src/work_dedup.rs:21-35.
+fn old_canonical_author(name: &str) -> String {
+    let trimmed = name.trim();
+    let reordered = if let Some((last, first)) = trimmed.split_once(',') {
+        let first = first.trim();
+        let last = last.trim();
+        if !first.is_empty() && !last.is_empty() {
+            format!("{first} {last}")
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+    old_dedup_normalize(&reordered)
+}
+
+/// Frozen duplicate of `ProviderKeys` at 72953b2
+/// crates/livrarr-matching/src/work_dedup.rs:38-44, so the OLD side has no
+/// live type dependency on the crate being rewired.
+#[derive(Default)]
+struct OldProviderKeys<'a> {
+    ol_key: Option<&'a str>,
+    gr_key: Option<&'a str>,
+    isbn_13: Option<&'a str>,
+    asin: Option<&'a str>,
+}
+
+/// Frozen duplicate of `find_matching_work` at 72953b2
+/// crates/livrarr-matching/src/work_dedup.rs:52-105 — the three-tier
+/// cascade: provider keys, exact normalized title + canonical author,
+/// base-title when exactly one side carries a subtitle.
+fn old_find_matching_work<'a>(
+    existing: &'a [Work],
+    title: &str,
+    author: &str,
+    keys: &OldProviderKeys<'_>,
+) -> Option<&'a Work> {
+    // 1. Provider key match
+    if let Some(key) = keys.ol_key.filter(|k| !k.is_empty()) {
+        if let Some(w) = existing.iter().find(|w| w.ol_key.as_deref() == Some(key)) {
+            return Some(w);
+        }
+    }
+    if let Some(key) = keys.gr_key.filter(|k| !k.is_empty()) {
+        if let Some(w) = existing.iter().find(|w| w.gr_key.as_deref() == Some(key)) {
+            return Some(w);
+        }
+    }
+    if let Some(key) = keys.isbn_13.filter(|k| !k.is_empty()) {
+        if let Some(w) = existing.iter().find(|w| w.isbn_13.as_deref() == Some(key)) {
+            return Some(w);
+        }
+    }
+    if let Some(key) = keys.asin.filter(|k| !k.is_empty()) {
+        if let Some(w) = existing.iter().find(|w| w.asin.as_deref() == Some(key)) {
+            return Some(w);
+        }
+    }
+
+    let norm_title = old_dedup_normalize(title);
+    let norm_author = old_canonical_author(author);
+
+    // 2. Exact normalized title + author
+    if let Some(w) = existing.iter().find(|w| {
+        old_dedup_normalize(&w.title) == norm_title
+            && old_canonical_author(&w.author_name) == norm_author
+    }) {
+        return Some(w);
+    }
+
+    // 3. Base-title match (only when exactly one side has a subtitle)
+    let incoming_has_sub = old_has_subtitle(title);
+    let norm_base = old_dedup_normalize(old_base_title(title));
+
+    existing.iter().find(|w| {
+        let existing_has_sub = old_has_subtitle(&w.title);
+
+        // Only match when one has subtitle and other doesn't
+        if incoming_has_sub == existing_has_sub {
+            return false;
+        }
+
+        let w_norm_base = old_dedup_normalize(old_base_title(&w.title));
+        w_norm_base == norm_base && old_canonical_author(&w.author_name) == norm_author
+    })
+}
+
+/// Frozen duplicate of `authors_match` at 72953b2
+/// crates/livrarr-matching/src/work_dedup.rs:201-203.
+fn old_authors_match(a: &str, b: &str) -> bool {
+    old_canonical_author(a) == old_canonical_author(b)
+}
+
+/// Frozen duplicate of `normalize_title_for_match` at 72953b2
+/// crates/livrarr-matching/src/work_dedup.rs:209-224 — the `:` and " - "
+/// cuts Phase 5 deletes.
+fn old_normalize_title_for_match(title: &str) -> String {
+    let t = title.to_lowercase();
+    let t = t.split(':').next().unwrap_or(&t);
+    let t = t.split(" - ").next().unwrap_or(t);
+    let t = t
+        .strip_prefix("the ")
+        .or_else(|| t.strip_prefix("a "))
+        .or_else(|| t.strip_prefix("an "))
+        .unwrap_or(t);
+    t.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Frozen duplicate of `normalize_for_matching` at 72953b2
+/// crates/livrarr-domain/src/lib.rs:885-917 — the recipe that wrote the
+/// stored `works.normalized_title`/`normalized_author` columns before the
+/// Phase-5 recompute.
+fn old_normalize_for_matching(s: &str) -> String {
+    const ILLEGAL: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+    let normalized: String = s
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| {
+            if ILLEGAL.contains(&c) || c == '.' || c == '_' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    // Collapse multiple spaces and trim
+    let mut result = String::with_capacity(normalized.len());
+    let mut prev_space = true; // trim leading
+    for c in normalized.chars() {
+        if c == ' ' {
+            if !prev_space {
+                result.push(' ');
+            }
+            prev_space = true;
+        } else {
+            result.push(c);
+            prev_space = false;
+        }
+    }
+    // Trim trailing space
+    if result.ends_with(' ') {
+        result.pop();
+    }
+    result.to_lowercase()
+}
+
+// ===========================================================================
 // Seat 1 — library dedup / absorb
 // ===========================================================================
 //
-// OLD: `work_dedup::find_matching_work` (crates/livrarr-matching/src/
-// work_dedup.rs:52-118) — a three-tier cascade: provider key equality
-// (ol_key/gr_key/isbn_13/asin — NOT hc_key, `ProviderKeys` has no hc_key
-// field), then exact normalized title+author, then base-title equality
-// when EXACTLY one side's raw title carries a subtitle (a colon). Called
-// here through the real function against a single-work "existing" slice,
-// so the verdict is exactly what production computes for this pair — no
-// reimplementation of the decision itself.
+// OLD: `old_find_matching_work` — a frozen pre-Phase-5 copy of
+// `work_dedup::find_matching_work` (72953b2 crates/livrarr-matching/src/
+// work_dedup.rs:52-105), deliberately duplicated so rewire units cannot
+// silently change the old side. A three-tier cascade: provider key
+// equality (ol_key/gr_key/isbn_13/asin — NOT hc_key, the frozen
+// `OldProviderKeys` has no hc_key field), then exact normalized
+// title+author, then base-title equality when EXACTLY one side's raw
+// title carries a subtitle (a colon). Applied against a single-work
+// "existing" slice, so the verdict is exactly what pre-cutover production
+// computed for this pair.
 //
 // NEW: identity_matching::title_verdict + author_verdict + id_verdict,
 // D2/REQ-005/REQ-006 semantics:
@@ -300,25 +643,24 @@ struct Seat1Row {
 fn seat1_pair(a: &WorkRow, b: &WorkRow) -> Seat1Row {
     let work_a = to_domain_work(a);
     let existing = std::slice::from_ref(&work_a);
-    let keys_b = ProviderKeys {
+    let keys_b = OldProviderKeys {
         ol_key: b.ol_key.as_deref(),
         gr_key: b.gr_key.as_deref(),
         isbn_13: b.isbn_13.as_deref(),
         asin: b.asin.as_deref(),
     };
-    let full_hit =
-        work_dedup::find_matching_work(existing, &b.title, &b.author_name, &keys_b).is_some();
-    let keyless_hit = work_dedup::find_matching_work(
+    let full_hit = old_find_matching_work(existing, &b.title, &b.author_name, &keys_b).is_some();
+    let keyless_hit = old_find_matching_work(
         existing,
         &b.title,
         &b.author_name,
-        &ProviderKeys::default(),
+        &OldProviderKeys::default(),
     )
     .is_some();
 
     // Tier attribution below is DESCRIPTIVE only (for the reason string) —
-    // the match/no-match verdict itself always comes from the two real
-    // `find_matching_work` calls above, never from this classification.
+    // the match/no-match verdict itself always comes from the two frozen
+    // `old_find_matching_work` calls above, never from this classification.
     let old_reason = if full_hit && !keyless_hit {
         let mut via = Vec::new();
         if key_eq(&a.ol_key, &b.ol_key) {
@@ -382,10 +724,16 @@ fn seat1_pair(a: &WorkRow, b: &WorkRow) -> Seat1Row {
 // Seat 2 — DB identity key
 // ===========================================================================
 //
-// OLD: equality of the STORED `works.normalized_title`/`normalized_author`
-// columns (crates/livrarr-domain/src/lib.rs:885-917, `normalize_for_matching`
-// — illegal-filesystem-char strip + lowercase + whitespace collapse; no
-// colon cut, no article strip). These columns already carry a real
+// OLD: `old_normalize_for_matching` — a frozen pre-Phase-5 copy of
+// `normalize_for_matching` (72953b2 crates/livrarr-domain/src/lib.rs:
+// 885-917 — illegal-filesystem-char strip + lowercase + whitespace
+// collapse; no colon cut, no article strip) — recomputed over
+// (title, author_name). The old side deliberately RECOMPUTES with the
+// frozen old recipe rather than comparing the stored
+// `works.normalized_title`/`normalized_author` columns, because the
+// Phase-5 key rewire BACKFILLS those stored values with the new recipe:
+// after that backfill a stored-column comparison would be comparing
+// new-recipe data and calling it "old". The stored columns carry a real
 // `UNIQUE(user_id, normalized_title, normalized_author)` index, so
 // `old_match` is structurally false for every pair of DISTINCT existing
 // works — reported anyway: that's the honest zero, not a harness artifact.
@@ -406,8 +754,8 @@ struct Seat2Row {
 }
 
 fn seat2_pair(a: &WorkRow, b: &WorkRow) -> Seat2Row {
-    let old_match =
-        a.normalized_title == b.normalized_title && a.normalized_author == b.normalized_author;
+    let old_match = old_normalize_for_matching(&a.title) == old_normalize_for_matching(&b.title)
+        && old_normalize_for_matching(&a.author_name) == old_normalize_for_matching(&b.author_name);
 
     let pa = parse_title(&a.title);
     let pb = parse_title(&b.title);
@@ -441,11 +789,14 @@ fn seat2_pair(a: &WorkRow, b: &WorkRow) -> Seat2Row {
 // Seat 3 — strict already-in-library key
 // ===========================================================================
 //
-// OLD: `work_dedup::normalize_title_for_match` equality
-// (crates/livrarr-matching/src/work_dedup.rs:209-224 — cuts at the first
-// `:` and at " - ", strips a leading article, folds punctuation) combined
-// with the public `authors_match` helper. This mirrors the richer of its
-// two real call sites (anchor-graft / cover-borrow,
+// OLD: `old_normalize_title_for_match` equality — a frozen pre-Phase-5
+// copy of `work_dedup::normalize_title_for_match` (72953b2
+// crates/livrarr-matching/src/work_dedup.rs:209-224 — cuts at the first
+// `:` and at " - ", strips a leading article, folds punctuation; Phase 5
+// deletes the live function outright) combined with the frozen
+// `old_authors_match`, deliberately duplicated so rewire units cannot
+// silently change (or un-compile) the old side. This mirrors the richer
+// of its two real call sites (anchor-graft / cover-borrow,
 // crates/livrarr-metadata/src/work_service.rs:3153-3220); the other call
 // site (bibliography "already in library" flag,
 // crates/livrarr-metadata/src/author_service.rs:616-624) is title-only
@@ -466,9 +817,9 @@ struct Seat3Row {
 }
 
 fn seat3_pair(a: &WorkRow, b: &WorkRow) -> Seat3Row {
-    let old_match = work_dedup::normalize_title_for_match(&a.title)
-        == work_dedup::normalize_title_for_match(&b.title)
-        && work_dedup::authors_match(&a.author_name, &b.author_name);
+    let old_match = old_normalize_title_for_match(&a.title)
+        == old_normalize_title_for_match(&b.title)
+        && old_authors_match(&a.author_name, &b.author_name);
 
     let pa = parse_title(&a.title);
     let pb = parse_title(&b.title);
@@ -502,11 +853,14 @@ fn seat3_pair(a: &WorkRow, b: &WorkRow) -> Seat3Row {
 // Seat 4 — variant-fold (title_similarity_with_variants)
 // ===========================================================================
 //
-// OLD rebuilt from the crate's PUBLIC surface only — never a private-item
-// copy — reproducing crates/livrarr-matching/src/m4_scoring.rs:111-122
-// line for line: full string similarity first; if BOTH sides carry a
-// known, differing series position, return the full score (no fold);
-// otherwise, if the two titles' variant-fold keys (colon-cut,
+// OLD rebuilt from FROZEN pre-Phase-5 copies (`old_string_similarity`,
+// `old_normalize_title_variants`) — deliberately duplicated so rewire
+// units cannot silently change the old side by editing the live public
+// functions (Phase 5 rewrites both). Reproduces 72953b2
+// crates/livrarr-matching/src/m4_scoring.rs:111-122 line for line: full
+// string similarity first; if BOTH sides carry a known, differing series
+// position, return the full score (no fold); otherwise, if the two
+// titles' variant-fold keys (colon-cut, 72953b2
 // crates/livrarr-matching/src/lib.rs:37-80) are equal, force 1.0.
 // `old_forced` flags the risky case: the fold pushed a sub-1.0 full score
 // up to a certain 1.0 "match".
@@ -531,32 +885,31 @@ struct Seat4Row {
     class: &'static str,
 }
 
-/// Rebuilt from `livrarr_matching::string_similarity` +
-/// `livrarr_matching::normalize_title_variants` (both public) — reproduces
-/// the private `m4_scoring::title_similarity_with_variants` exactly, per
-/// the doc comment above.
+/// Rebuilt from the FROZEN `old_string_similarity` +
+/// `old_normalize_title_variants` above (never the live public functions,
+/// which Phase 5 rewrites) — reproduces the pre-cutover private
+/// `m4_scoring::title_similarity_with_variants` (72953b2 :111-122)
+/// exactly, per the doc comment above.
 fn old_title_similarity_with_variants(
     a: &str,
     b: &str,
     pos_a: Option<f64>,
     pos_b: Option<f64>,
 ) -> f64 {
-    let full = livrarr_matching::string_similarity(a, b);
+    let full = old_string_similarity(a, b);
     if let (Some(x), Some(y)) = (pos_a, pos_b) {
         if (x - y).abs() >= 0.01 {
             return full;
         }
     }
-    if livrarr_matching::normalize_title_variants(a)
-        == livrarr_matching::normalize_title_variants(b)
-    {
+    if old_normalize_title_variants(a) == old_normalize_title_variants(b) {
         return 1.0;
     }
     full
 }
 
 fn seat4_pair(a: &WorkRow, b: &WorkRow) -> Seat4Row {
-    let old_full_score = livrarr_matching::string_similarity(&a.title, &b.title);
+    let old_full_score = old_string_similarity(&a.title, &b.title);
     let old_score = old_title_similarity_with_variants(
         &a.title,
         &b.title,

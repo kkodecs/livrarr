@@ -34,9 +34,11 @@ livrarr-materialize = { workspace = true }
 axum = "0.8"
 assert_matches = "1"
 futures = "0.3"
+rapidfuzz = "0.5"
 tempfile = "3"
 tower = "0.5"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+unicode-normalization = "0.1"
 
 [[test]]
 name = "test_metadata_overhaul_domain"
@@ -423,3 +425,7 @@ path = "../../tests/behavioral/test_uip_resolver_tied.rs"
 [[test]]
 name = "test_p5_matching_diff"
 path = "../../tests/behavioral/test_p5_matching_diff.rs"
+
+[[test]]
+name = "test_p5_unit_f_recognition"
+path = "../../tests/behavioral/test_p5_unit_f_recognition.rs"

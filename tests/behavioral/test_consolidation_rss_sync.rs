@@ -607,3 +607,232 @@ async fn test_rss_sync_creates_notifications() {
     assert!(!notifs2.is_empty());
     assert_eq!(notifs2[0].notification_type, NotificationType::RssGrabbed);
 }
+
+// =============================================================================
+// Language gate (D7 recognition corollary, REQ-011)
+// =============================================================================
+
+async fn seed_monitored_work_with_language(
+    db: &livrarr_db::sqlite::SqliteDb,
+    user_id: UserId,
+    title: &str,
+    author: &str,
+    language: Option<&str>,
+) -> Work {
+    db.create_work(CreateWorkDbRequest {
+        user_id,
+        title: title.into(),
+        author_name: author.into(),
+        normalized_title: String::new(),
+        normalized_author: String::new(),
+        author_id: None,
+        ol_key: None,
+        gr_key: None,
+        year: None,
+        cover_url: None,
+        language: language.map(String::from),
+        import_id: None,
+        series_id: None,
+        series_name: None,
+        series_position: None,
+        monitor_ebook: true,
+        monitor_audiobook: false,
+        source_provider_json: None,
+        isbn_13: None,
+        asin: None,
+        description: None,
+        cover_manual: false,
+    })
+    .await
+    .unwrap()
+    .0
+}
+
+async fn seed_download_client(db: &livrarr_db::sqlite::SqliteDb) {
+    db.create_download_client(CreateDownloadClientDbRequest {
+        name: "TestClient".into(),
+        implementation: DownloadClientImplementation::QBittorrent,
+        host: "localhost".into(),
+        port: 8080,
+        use_ssl: false,
+        skip_ssl_validation: false,
+        url_base: None,
+        username: None,
+        password: None,
+        category: "books".into(),
+        download_dir: None,
+        enabled: true,
+        api_key: None,
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rss_sync_declared_language_mismatch_never_grabs() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+
+    let indexer = seed_rss_indexer(&db, "TestIndexer", "http://indexer.test").await;
+    db.upsert_rss_state(indexer.id, Some("2024-12-01"), "old-guid")
+        .await
+        .unwrap();
+
+    db.update_default_language("en").await.unwrap();
+    let _work = seed_monitored_work_with_language(
+        &db,
+        user_id,
+        "The Way of Kings",
+        "Brandon Sanderson",
+        Some("en"),
+    )
+    .await;
+    seed_download_client(&db).await;
+
+    // The release declares French — a hard veto regardless of how well the
+    // rest of the title/author would otherwise score.
+    let feed = rss_xml(&[(
+        "The Way of Kings Brandon Sanderson [French] EPUB",
+        "guid-lang-mismatch",
+        "http://indexer.test/dl/1",
+        1_000_000,
+    )]);
+
+    let http = StubHttpFetcher::with_ok(200, feed);
+    let release_svc = Arc::new(StubReleaseService::succeeding());
+    let db_arc = Arc::new(db);
+
+    let workflow = RssSyncWorkflowImpl::new(db_arc.clone(), Arc::new(http), release_svc.clone());
+    let report = workflow.run_sync().await.unwrap();
+
+    assert_eq!(report.grabs_attempted, 0);
+    assert_eq!(report.grabs_succeeded, 0);
+    assert_eq!(release_svc.grab_call_count().await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rss_sync_silent_release_skips_nondefault_language_work() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+
+    let indexer = seed_rss_indexer(&db, "TestIndexer", "http://indexer.test").await;
+    db.upsert_rss_state(indexer.id, Some("2024-12-01"), "old-guid")
+        .await
+        .unwrap();
+
+    db.update_default_language("en").await.unwrap();
+    // The work is German; the install default is English.
+    let _work = seed_monitored_work_with_language(
+        &db,
+        user_id,
+        "The Way of Kings",
+        "Brandon Sanderson",
+        Some("de"),
+    )
+    .await;
+    seed_download_client(&db).await;
+
+    // The release carries no language tag at all — silent.
+    let feed = rss_xml(&[(
+        "The Way of Kings Brandon Sanderson EPUB",
+        "guid-lang-silent-nondefault",
+        "http://indexer.test/dl/1",
+        1_000_000,
+    )]);
+
+    let http = StubHttpFetcher::with_ok(200, feed);
+    let release_svc = Arc::new(StubReleaseService::succeeding());
+    let db_arc = Arc::new(db);
+
+    let workflow = RssSyncWorkflowImpl::new(db_arc.clone(), Arc::new(http), release_svc.clone());
+    let report = workflow.run_sync().await.unwrap();
+
+    assert_eq!(report.grabs_attempted, 0);
+    assert_eq!(report.grabs_succeeded, 0);
+    assert_eq!(release_svc.grab_call_count().await, 0);
+    assert!(
+        report.warnings.iter().any(|w| w.contains("language")),
+        "a skipped language-silent/non-default pairing must surface for confirmation, got: {:?}",
+        report.warnings
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rss_sync_silent_release_still_grabs_for_default_language_work() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+
+    let indexer = seed_rss_indexer(&db, "TestIndexer", "http://indexer.test").await;
+    db.upsert_rss_state(indexer.id, Some("2024-12-01"), "old-guid")
+        .await
+        .unwrap();
+
+    db.update_default_language("en").await.unwrap();
+    let _work = seed_monitored_work_with_language(
+        &db,
+        user_id,
+        "The Way of Kings",
+        "Brandon Sanderson",
+        Some("en"),
+    )
+    .await;
+    seed_download_client(&db).await;
+
+    let feed = rss_xml(&[(
+        "The Way of Kings Brandon Sanderson EPUB",
+        "guid-lang-silent-default",
+        "http://indexer.test/dl/1",
+        1_000_000,
+    )]);
+
+    let http = StubHttpFetcher::with_ok(200, feed);
+    let release_svc = Arc::new(StubReleaseService::succeeding());
+    let db_arc = Arc::new(db);
+
+    let workflow = RssSyncWorkflowImpl::new(db_arc.clone(), Arc::new(http), release_svc.clone());
+    let report = workflow.run_sync().await.unwrap();
+
+    assert_eq!(report.grabs_attempted, 1);
+    assert_eq!(report.grabs_succeeded, 1);
+    assert_eq!(release_svc.grab_call_count().await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rss_sync_declared_language_match_still_grabs() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+
+    let indexer = seed_rss_indexer(&db, "TestIndexer", "http://indexer.test").await;
+    db.upsert_rss_state(indexer.id, Some("2024-12-01"), "old-guid")
+        .await
+        .unwrap();
+
+    db.update_default_language("en").await.unwrap();
+    let _work = seed_monitored_work_with_language(
+        &db,
+        user_id,
+        "The Way of Kings",
+        "Brandon Sanderson",
+        Some("en"),
+    )
+    .await;
+    seed_download_client(&db).await;
+
+    let feed = rss_xml(&[(
+        "The Way of Kings Brandon Sanderson [English] EPUB",
+        "guid-lang-declared-match",
+        "http://indexer.test/dl/1",
+        1_000_000,
+    )]);
+
+    let http = StubHttpFetcher::with_ok(200, feed);
+    let release_svc = Arc::new(StubReleaseService::succeeding());
+    let db_arc = Arc::new(db);
+
+    let workflow = RssSyncWorkflowImpl::new(db_arc.clone(), Arc::new(http), release_svc.clone());
+    let report = workflow.run_sync().await.unwrap();
+
+    assert_eq!(report.grabs_attempted, 1);
+    assert_eq!(report.grabs_succeeded, 1);
+    assert_eq!(release_svc.grab_call_count().await, 1);
+}
