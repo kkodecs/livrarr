@@ -313,3 +313,15 @@ and agree() ignored series_position — fixed by making the evidence travel
 (autocomplete parses decoration into series fields; candidate/payload carry
 them; agree folds positions into the volume VETO only, incl. blocking the
 edition-bridge rescue). r2 PASS×2. 1250 tests green. Insight 59 amended.
+
+## 2026-07-03 — N3: dead-URL phase1 cover fast-fail
+
+Import profiling showed dead embedded cover URLs burning phase1's full 3s
+budget per book (~40% of machine time), same host repeating across the batch.
+New HttpFetcher::fetch_ssrf_safe_fast_connect (600ms connect budget via a
+third pre-built client sharing the SSRF preflight; default-bodied trait
+method, pre-desugared for trait_variant) + a per-import-run task-local
+negative host cache (manual-import loop only, fail-open everywhere else).
+download_cover_to_disk got a typed error so only connect-class failures mark
+a host dead. Built by a Sonnet agent in a worktree (hybrid with N4);
+PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
