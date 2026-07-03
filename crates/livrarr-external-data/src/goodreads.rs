@@ -642,17 +642,24 @@ pub async fn fetch_goodreads_html<F: HttpFetcher>(
     Ok(html)
 }
 
-/// Search Goodreads by `title author` via the WAF-free autocomplete JSON endpoint.
+/// Search Goodreads by TITLE ONLY via the WAF-free autocomplete JSON endpoint.
+///
+/// The author deliberately stays OUT of the query string: autocomplete
+/// prefix-matches the raw string, so "Ender's Game Orson Scott Card" ranks
+/// study guides whose TITLES contain "by Orson Scott Card" above the real
+/// record — famous books drown in such parasites and the real book drops out
+/// of the hit list entirely (38/135 imports, live 2026-07-03). Author
+/// agreement is the PICKER's job (`gr_best_match` requires author-token
+/// overlap against each hit's own author field), which is both stricter and
+/// immune to that ranking poison.
 pub async fn search_goodreads<F: HttpFetcher>(
     fetcher: &F,
     base_url: &str,
     title: &str,
-    author: &str,
     priority: RequestPriority,
 ) -> Result<Vec<GoodreadsSearchResult>, GoodreadsFetchError> {
     let base = base_url.trim_end_matches('/');
-    let raw_query = format!("{title} {author}");
-    let query = urlencoding::encode(&raw_query);
+    let query = urlencoding::encode(title);
     let url = format!("{base}/book/auto_complete?format=json&q={query}");
     let req = FetchRequest {
         url,
@@ -1272,7 +1279,6 @@ mod tests {
             &fetcher,
             "https://www.goodreads.com",
             "Dune",
-            "Frank Herbert",
             RequestPriority::Normal,
         )
         .await
@@ -1282,9 +1288,12 @@ mod tests {
         let reqs = fetcher.requests();
         assert_eq!(reqs.len(), 1);
         let req = &reqs[0];
-        assert!(req
-            .url
-            .starts_with("https://www.goodreads.com/book/auto_complete?format=json&q="));
+        assert_eq!(
+            req.url, "https://www.goodreads.com/book/auto_complete?format=json&q=Dune",
+            "the query is the TITLE ONLY — an appended author makes autocomplete \
+             rank study-guide titles containing the author's name above the real \
+             record; author agreement belongs to the picker"
+        );
         assert_eq!(req.rate_bucket, RateBucket::Goodreads);
         assert_eq!(req.method, HttpMethod::Get);
         match &req.user_agent {
@@ -1305,7 +1314,6 @@ mod tests {
             &fetcher,
             "https://www.goodreads.com",
             "Hobbit",
-            "Tolkien",
             RequestPriority::Normal,
         )
         .await
@@ -1324,7 +1332,6 @@ mod tests {
             &fetcher,
             "https://www.goodreads.com",
             "x",
-            "y",
             RequestPriority::Normal,
         )
         .await

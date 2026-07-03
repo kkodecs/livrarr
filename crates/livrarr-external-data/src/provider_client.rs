@@ -1358,15 +1358,10 @@ impl GoodreadsClient {
         key: &str,
         priority: RequestPriority,
     ) -> Option<GrCandidateText> {
-        let hits = goodreads::search_goodreads(
-            &self.fetcher,
-            &self.base_url,
-            &work.title,
-            &work.author_name,
-            priority,
-        )
-        .await
-        .ok()?;
+        let hits =
+            goodreads::search_goodreads(&self.fetcher, &self.base_url, &work.title, priority)
+                .await
+                .ok()?;
         hits.iter()
             .find(|h| goodreads::extract_gr_key(&h.detail_url).as_deref() == Some(key))
             .map(|h| GrCandidateText {
@@ -1403,7 +1398,6 @@ impl GoodreadsClient {
             &self.fetcher,
             &self.base_url,
             title,
-            author,
             priority,
         )
         .await
@@ -1422,7 +1416,6 @@ impl GoodreadsClient {
                     &self.fetcher,
                     &self.base_url,
                     &ascii_title,
-                    author,
                     priority,
                 )
                 .await
