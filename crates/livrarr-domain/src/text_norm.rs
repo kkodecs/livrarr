@@ -5,7 +5,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::title_cleanup::clean_title;
 
 const TITLE_STOPWORDS: &[&str] = &["a", "an", "the", "of", "and", "in", "on", "for", "to"];
-const AUTHOR_SUFFIX_STOPWORDS: &[&str] = &["jr", "sr", "iii", "iv"];
+pub(crate) const AUTHOR_SUFFIX_STOPWORDS: &[&str] = &["jr", "sr", "iii", "iv"];
 
 /// Returns true if the character falls in a CJK Unicode block (Unified Ideographs,
 /// Hiragana, Katakana, or Hangul Syllables).
@@ -19,7 +19,7 @@ fn is_cjk_char(c: char) -> bool {
 }
 
 /// Returns true if the string contains at least one CJK character.
-fn has_cjk(s: &str) -> bool {
+pub(crate) fn has_cjk(s: &str) -> bool {
     s.chars().any(is_cjk_char)
 }
 
@@ -107,7 +107,7 @@ pub fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     intersection as f64 / union as f64
 }
 
-fn strip_combining_marks(s: &str) -> String {
+pub(crate) fn strip_combining_marks(s: &str) -> String {
     s.nfkd()
         .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
         .collect()

@@ -1,4 +1,5 @@
 pub mod identity;
+pub mod identity_matching;
 pub mod kash;
 pub mod keyed_mutex;
 pub mod normalization;
