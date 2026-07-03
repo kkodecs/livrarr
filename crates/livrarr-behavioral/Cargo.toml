@@ -417,3 +417,9 @@ path = "../../tests/behavioral/test_id_completeness.rs"
 [[test]]
 name = "test_uip_resolver_tied"
 path = "../../tests/behavioral/test_uip_resolver_tied.rs"
+
+# --- Phase 5 matching-authority remediation ---
+
+[[test]]
+name = "test_p5_matching_diff"
+path = "../../tests/behavioral/test_p5_matching_diff.rs"

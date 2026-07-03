@@ -21,6 +21,12 @@ tmp/
 .env
 .understand-anything/
 
+# Phase 5 Unit C matching-diff harness artifacts — snapshot copy of real
+# library data (plus SQLite -shm/-wal sidecars) and its generated reports;
+# never committed.
+/matching-diff-snapshot.db*
+/reports/
+
 # Internal process docs — not for public repo
 docs/metadata-lifecycle-audit-brief.md
 docs/metadata-lifecycle-audit-scout.md
