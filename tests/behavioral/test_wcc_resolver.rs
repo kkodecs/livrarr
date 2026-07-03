@@ -48,7 +48,6 @@ fn make_resolver(
 fn full_config() -> ResolverConfig {
     ResolverConfig {
         gb_key_present: true,
-        llm_configured: false,
         ..ResolverConfig::default()
     }
 }
@@ -203,6 +202,21 @@ fn test_wcc_resolver_ac_030_select_providers_excludes_prerequisite_lacking_but_k
     assert!(
         selected.len() >= 2,
         "REQ-008: an ISBN seed must not be narrowed to a single hardcoded provider"
+    );
+}
+
+/// REQ-IDs: REQ-012
+/// Directive: Goodreads participates in identity provider selection for every
+/// install (D6) — there is no `llm_configured`-style field on `ResolverConfig`
+/// left to gate it on. An ebook-axis seed selects Goodreads regardless.
+#[test]
+fn test_wcc_resolver_req_012_select_providers_includes_goodreads_without_llm() {
+    let resolver = make_resolver(vec![], full_config());
+    let selected = resolver.select_providers(&isbn_seed(), LatencyTier::Interactive);
+
+    assert!(
+        selected.contains(&MetadataProvider::Goodreads),
+        "REQ-012: Goodreads must be selected for identity regardless of LLM configuration"
     );
 }
 

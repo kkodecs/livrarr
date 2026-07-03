@@ -134,7 +134,6 @@ fn resolver_with_stubs(stubs: Vec<StubProviderClient>) -> LiveEnglishIdentityRes
         cache: Arc::new(TransportCache::new(Duration::from_secs(30))),
         config: ResolverConfig {
             gb_key_present: false,
-            llm_configured: false,
             ..ResolverConfig::default()
         },
     }

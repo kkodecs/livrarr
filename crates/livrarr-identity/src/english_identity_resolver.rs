@@ -23,8 +23,6 @@ pub struct ResolverConfig {
     pub call_timeout: Duration,
     /// A Google Books API key is configured (ST-009) — gates GB selection.
     pub gb_key_present: bool,
-    /// An LLM is configured (ST-001) — gates Goodreads selection.
-    pub llm_configured: bool,
     /// The install's default language (REQ-007/REQ-013), read from
     /// `metadata_config.default_language`. The one named indirection point
     /// this module reads for "what counts as this install's language" —
@@ -39,7 +37,6 @@ impl Default for ResolverConfig {
             confirm_runner_up_delta: 0.10,
             call_timeout: Duration::from_secs(10),
             gb_key_present: false,
-            llm_configured: false,
             default_language_source: "en".to_string(),
         }
     }
@@ -267,15 +264,19 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
 impl LiveEnglishIdentityResolver {
     /// REQ-008 provider matrix scoped by seed + tier + prerequisites; never narrows
     /// a multi-eligible seed to a single provider (the #97 guard). Excludes any
-    /// provider lacking its prerequisite (GB key per ST-009, LLM for GR per ST-001,
-    /// Audnexus on a non-background tier per REQ-021).
+    /// provider lacking its prerequisite (GB key per ST-009, Audnexus on a
+    /// non-background tier per REQ-021). Goodreads carries no prerequisite
+    /// (REQ-012/D6): its matching is deterministic (junk filter + shared 0.75
+    /// picker + explicit abstain), so it participates in identity for every
+    /// install, LLM or not.
     pub fn select_providers(&self, seed: &WorkSeed, tier: LatencyTier) -> Vec<MetadataProvider> {
         let mut out = Vec::new();
 
         // Ebook / print axis: an ISBN, a native ebook key, or title+author reaches
         // OpenLibrary + Hardcover (work anchors), Google Books (edition metadata),
-        // and Goodreads (LLM-verified). Foreign-language metadata is excluded at the
-        // merge layer (REQ-027), not here — anchor capture is language-agnostic.
+        // and Goodreads (deterministic match). Foreign-language metadata is
+        // excluded at the merge layer (REQ-027), not here — anchor capture is
+        // language-agnostic.
         let ebook_axis = seed.isbn_13.is_some()
             || seed.ol_key.is_some()
             || seed.gr_key.is_some()
@@ -287,9 +288,7 @@ impl LiveEnglishIdentityResolver {
             if self.config.gb_key_present {
                 out.push(MetadataProvider::GoogleBooks);
             }
-            if self.config.llm_configured {
-                out.push(MetadataProvider::Goodreads);
-            }
+            out.push(MetadataProvider::Goodreads);
         }
 
         // Audiobook axis: an ASIN reaches Audible interactively; Audnexus is
@@ -1167,7 +1166,6 @@ mod tests {
             cache: Arc::new(TransportCache::new(Duration::from_secs(30))),
             config: ResolverConfig {
                 gb_key_present: false,
-                llm_configured: false,
                 default_language_source: default_language_source.to_string(),
                 ..ResolverConfig::default()
             },

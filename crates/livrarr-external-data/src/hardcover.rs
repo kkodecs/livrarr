@@ -6,11 +6,9 @@ use std::time::Duration;
 use livrarr_domain::services::{
     FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
-use livrarr_domain::settings::MetadataConfig;
 use livrarr_domain::RequestPriority;
 use livrarr_http::breaker::BreakerSignal;
 use livrarr_http::outbound_queue;
-use livrarr_http::HttpClient;
 use serde_json::Value;
 
 #[derive(Debug)]
@@ -154,14 +152,15 @@ fn doc_author_name(doc: &Value) -> Option<String> {
 
 /// Search Hardcover for a book matching `title` + `author`. Tier 1 = exact
 /// case-insensitive title + author match (highest `users_read_count` wins).
-/// Tier 2 = LLM disambiguation when no exact match.
+/// A Tier-1 miss falls through to the same deterministic title+author picker
+/// every other provider uses (REQ-016/D10) — a near-miss that doesn't clear
+/// the bar rides the standard grey-candidate flow at the identity layer, like
+/// any other provider, rather than asking an LLM to choose.
 pub async fn query_hardcover<F: HttpFetcher>(
     fetcher: &F,
-    http: &HttpClient,
     title: &str,
     author: &str,
     token: &str,
-    metadata_cfg: &MetadataConfig,
     priority: RequestPriority,
 ) -> Result<HardcoverResult, HardcoverError> {
     // Search by title only — gets the best results for short/common titles.
@@ -229,23 +228,39 @@ pub async fn query_hardcover<F: HttpFetcher>(
         }
     }
 
-    // Tier 2: LLM disambiguation when exact match fails (SEARCH-007).
-    // The early-return on `hits.is_empty()` above prevents wasted LLM calls
-    // for genuine HC misses; once HC returned candidates we always ask the
-    // LLM to disambiguate (matches alpha2 behavior).
+    // Tier 2: deterministic picker when the exact match fails (REQ-016/D10).
+    // Mirrors the Goodreads/Audible tier (`gr_best_match`): score every hit's
+    // title+author against the query with the shared scorer and take the
+    // best match that clears the bar. Nothing clearing it means Hardcover
+    // abstains, same as any other provider — the near-miss rides the
+    // standard grey-candidate flow at the identity layer instead of an LLM
+    // pick.
     let doc_idx = match best_idx {
         Some(i) => i,
-        None => match llm_disambiguate(http, metadata_cfg, title, author, &hits).await {
-            Ok(Some(idx)) => {
-                tracing::info!(title = %title, chosen_idx = idx, "LLM selected Hardcover result");
-                idx
+        None => {
+            let kept: Vec<(usize, (String, String))> = hits
+                .iter()
+                .enumerate()
+                .filter_map(|(i, hit)| {
+                    let doc = hit.get("document")?;
+                    let t = doc.get("title").and_then(|v| v.as_str())?.trim();
+                    if t.is_empty() {
+                        return None;
+                    }
+                    let a = doc_author_name(doc).unwrap_or_default();
+                    Some((i, (t.to_string(), a)))
+                })
+                .collect();
+            let scored: Vec<(String, String)> = kept.iter().map(|(_, c)| c.clone()).collect();
+            match crate::audible::score_provider_candidates(title, author, &scored, 0.75, 1) {
+                Some(pick) => kept[pick].0,
+                None => {
+                    return Err(HardcoverError::NoMatch(
+                        "no confident deterministic match".into(),
+                    ))
+                }
             }
-            Ok(None) => return Err(HardcoverError::NoMatch("LLM returned no selection".into())),
-            Err(e) => {
-                tracing::warn!(title = %title, error = %e, "LLM disambiguation failed");
-                return Err(HardcoverError::NoMatch(format!("LLM: {e}")));
-            }
-        },
+        }
     };
 
     let doc = hits[doc_idx].get("document").ok_or(HardcoverError::Http(
@@ -436,124 +451,6 @@ pub async fn fetch_hardcover_editions<F: HttpFetcher>(
     }
 
     Ok(None)
-}
-
-/// Ask an LLM to pick the best Hardcover result when exact title match fails.
-/// Returns the index into `hits` of the best match, or None if LLM declines.
-async fn llm_disambiguate(
-    http: &HttpClient,
-    cfg: &MetadataConfig,
-    title: &str,
-    author: &str,
-    hits: &[Value],
-) -> Result<Option<usize>, String> {
-    if !cfg.llm_enabled {
-        return Err("LLM disabled".into());
-    }
-    let endpoint = cfg
-        .llm_endpoint
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM not configured")?;
-    let api_key = cfg
-        .llm_api_key
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM API key not configured")?;
-    let model = cfg
-        .llm_model
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM model not configured")?;
-
-    let mut candidates = String::new();
-    for (i, hit) in hits.iter().enumerate() {
-        let doc = match hit.get("document") {
-            Some(d) => d,
-            None => continue,
-        };
-        let t = doc.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-        let a = doc
-            .pointer("/contributions/0/author/name")
-            .and_then(|v| v.as_str())
-            .or_else(|| doc.get("author").and_then(|v| v.as_str()))
-            .unwrap_or("?");
-        let year = doc
-            .get("release_date")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.get(..4))
-            .unwrap_or("?");
-        let urc = doc
-            .get("users_read_count")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        candidates.push_str(&format!("{i}: \"{t}\" by {a} ({year}, {urc} readers)\n"));
-    }
-
-    let prompt = format!(
-        "I'm looking for the book \"{title}\" by {author}.\n\n\
-         These are the search results from a book database:\n{candidates}\n\
-         Which result (by number) is the correct match? \
-         Reply with ONLY the number. If none match, reply \"none\"."
-    );
-
-    let url = format!(
-        "{}chat/completions",
-        endpoint.trim_end_matches('/').to_owned() + "/"
-    );
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
-        "temperature": 0.0,
-    });
-
-    let resp = http
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| format!("LLM request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM HTTP {status}: {text}"));
-    }
-
-    let data: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("LLM parse error: {e}"))?;
-
-    let answer = data
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-
-    tracing::debug!(
-        candidates_count = candidates.lines().count(),
-        raw_answer = %answer,
-        "LLM disambiguation"
-    );
-
-    if answer == "none" || answer.is_empty() {
-        return Ok(None);
-    }
-
-    match answer.parse::<usize>() {
-        Ok(idx) if idx < hits.len() => Ok(Some(idx)),
-        _ => {
-            tracing::warn!(answer = %answer, "LLM returned unparseable disambiguation result");
-            Ok(None)
-        }
-    }
 }
 
 pub async fn query_hardcover_by_isbn<F: HttpFetcher>(

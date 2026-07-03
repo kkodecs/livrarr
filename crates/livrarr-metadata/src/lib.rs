@@ -101,37 +101,6 @@ pub enum MetadataError {
 }
 
 // =============================================================================
-// Hardcover Matching
-// =============================================================================
-
-#[trait_variant::make(Send)]
-pub trait HardcoverMatcher: Send + Sync {
-    async fn match_deterministic(
-        &self,
-        title: &str,
-        author: &str,
-        candidates: &[HardcoverCandidate],
-    ) -> Option<HardcoverCandidate>;
-
-    async fn match_llm(
-        &self,
-        work_id: WorkId,
-        title: &str,
-        author: &str,
-        candidates: &[HardcoverCandidate],
-    ) -> Result<HardcoverCandidate, MetadataError>;
-}
-
-#[derive(Debug, Clone)]
-pub struct HardcoverCandidate {
-    pub hc_key: String,
-    pub title: String,
-    pub author_name: Option<String>,
-    pub users_read_count: i64,
-    pub detail: ProviderWorkDetail,
-}
-
-// =============================================================================
 // LLM Client
 // =============================================================================
 
@@ -430,82 +399,6 @@ pub mod tests {
     pub fn enrichment_stub_llm_fallback() -> StubEnrichment {
         StubEnrichment {
             mode: StubEnrichmentMode::LlmFallback,
-        }
-    }
-
-    // --- Matcher stubs ---
-
-    pub struct StubMatcher {
-        mode: MatcherMode,
-    }
-
-    enum MatcherMode {
-        Hit,
-        Tiebreaker,
-        Ambiguous,
-        LlmTimeout,
-        LlmSuccess,
-    }
-
-    impl HardcoverMatcher for StubMatcher {
-        async fn match_deterministic(
-            &self,
-            _title: &str,
-            _author: &str,
-            candidates: &[HardcoverCandidate],
-        ) -> Option<HardcoverCandidate> {
-            match self.mode {
-                MatcherMode::Hit => candidates.first().cloned(),
-                MatcherMode::Tiebreaker => candidates
-                    .iter()
-                    .max_by_key(|c| c.users_read_count)
-                    .cloned(),
-                MatcherMode::Ambiguous | MatcherMode::LlmTimeout | MatcherMode::LlmSuccess => {
-                    None // ambiguous — defer to LLM
-                }
-            }
-        }
-
-        async fn match_llm(
-            &self,
-            _work_id: WorkId,
-            _title: &str,
-            _author: &str,
-            candidates: &[HardcoverCandidate],
-        ) -> Result<HardcoverCandidate, MetadataError> {
-            match self.mode {
-                MatcherMode::LlmTimeout => Err(MetadataError::Timeout(Duration::from_secs(30))),
-                MatcherMode::LlmSuccess => {
-                    candidates.first().cloned().ok_or(MetadataError::NoMatch)
-                }
-                _ => Err(MetadataError::NoMatch),
-            }
-        }
-    }
-
-    pub fn matcher_deterministic_hit() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::Hit,
-        }
-    }
-    pub fn matcher_deterministic_tiebreaker() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::Tiebreaker,
-        }
-    }
-    pub fn matcher_deterministic_ambiguous() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::Ambiguous,
-        }
-    }
-    pub fn matcher_llm_timeout() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::LlmTimeout,
-        }
-    }
-    pub fn matcher_llm_success() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::LlmSuccess,
         }
     }
 
