@@ -209,9 +209,29 @@ struct AutocompleteEntry {
     #[serde(default)]
     image_url: Option<String>,
     #[serde(default)]
-    avg_rating: Option<String>,
+    avg_rating: Option<StringOrNumber>,
     #[serde(default)]
     author: Option<AutocompleteAuthor>,
+}
+
+/// `avgRating` arrives as a string on most entries ("4.30") but as a bare JSON
+/// number (0.0) on some unrated editions — one such entry must not fail the
+/// batch. Numbers render to the same two-decimal form the strings use, so the
+/// downstream "0.00" = unrated filter applies uniformly.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StringOrNumber {
+    S(String),
+    N(f64),
+}
+
+impl StringOrNumber {
+    fn into_rating_string(self) -> String {
+        match self {
+            StringOrNumber::S(s) => s,
+            StringOrNumber::N(n) => format!("{n:.2}"),
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -228,13 +248,26 @@ struct AutocompleteAuthor {
 /// endpoint is the live discovery path (measured 2026-06-01). A non-array body
 /// (a WAF interstitial or a format change) yields an empty list rather than an
 /// error — the caller unions providers, so a Goodreads miss is not a failure.
+/// Entries deserialize INDIVIDUALLY: one malformed entry drops alone (logged)
+/// instead of failing the whole batch — a single rogue edition in the hit list
+/// used to silently erase every result for that query.
 pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
-    let entries: Vec<AutocompleteEntry> = match serde_json::from_str(body) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
+    let values: Vec<serde_json::Value> = match serde_json::from_str(body) {
+        Ok(values) => values,
+        Err(e) => {
+            tracing::warn!(error = %e, "GR autocomplete body is not a JSON array (WAF interstitial or format change) — treating as no results");
+            return Vec::new();
+        }
     };
-    entries
+    values
         .into_iter()
+        .filter_map(|v| match serde_json::from_value::<AutocompleteEntry>(v) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::warn!(error = %e, "GR autocomplete entry failed to parse — dropping this entry only");
+                None
+            }
+        })
         .filter_map(|e| {
             let title = e.title.filter(|t| !t.trim().is_empty())?;
             let detail_url = e.book_url.filter(|u| !u.trim().is_empty())?;
@@ -251,8 +284,12 @@ pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
                     .and_then(|u| crate::provider_util::validate_cover_url(&u, GOODREADS_BASE_URL))
                     .map(|u| crate::provider_util::upscale_cover_url(&u)),
                 year: None,
-                // `avgRating` is a string (e.g. "4.30"); "0.00" means unrated.
-                rating: e.avg_rating.filter(|r| !r.trim().is_empty() && r != "0.00"),
+                // `avgRating` normalizes to a two-decimal string (e.g. "4.30");
+                // "0.00" means unrated.
+                rating: e
+                    .avg_rating
+                    .map(StringOrNumber::into_rating_string)
+                    .filter(|r| !r.trim().is_empty() && r != "0.00"),
                 series_name: None,
                 series_position: None,
             })
@@ -1510,6 +1547,48 @@ mod tests {
             !cover.contains("_SY75_"),
             "size token not stripped: {cover}"
         );
+    }
+
+    #[test]
+    fn autocomplete_numeric_avg_rating_entry_does_not_poison_the_batch() {
+        // Live regression shape (Pandora's Star, measured 2026-07-03): GR
+        // returns avgRating as a STRING on most entries but as a bare JSON
+        // NUMBER (0.0) on some unrated editions. The old whole-batch parse
+        // failed on that one entry and silently erased every hit for the
+        // query. All four entries must survive; the numeric-0.0 entry parses
+        // with its rating filtered as unrated.
+        let body = r#"[
+            {"imageUrl":"https://i.gr-assets.com/images/S/x/45252._SX50_.jpg","bookId":"45252","workId":"987015","bookUrl":"/book/show/45252.Pandora_s_Star","from_search":true,"from_srp":true,"qid":"DBVOC7gZj0","rank":1,"title":"Pandora's Star (Commonwealth Saga, #1)","bookTitleBare":"Pandora's Star","numPages":988,"avgRating":"4.22","ratingsCount":88123,"author":{"id":25375,"name":"Peter F. Hamilton"},"kcrPreviewUrl":null,"description":{"html":"x","truncated":true,"fullContentUrl":"https://www.goodreads.com/book/show/45252"}},
+            {"imageUrl":"https://i.gr-assets.com/images/S/x/nophoto.jpg","bookId":"138001619","workId":"1","bookUrl":"/book/show/138001619","from_search":true,"from_srp":true,"qid":"DBVOC7gZj0","rank":2,"title":"Pandora's Star by Hamilton, Peter F. [MassMarket(2005)]","bookTitleBare":"Pandora's Star","numPages":null,"avgRating":0.0,"ratingsCount":0,"author":{"id":2,"name":"Peter F. Hamilton"},"kcrPreviewUrl":null},
+            {"imageUrl":"https://i.gr-assets.com/images/S/x/3.jpg","bookId":"219187841","workId":"3","bookUrl":"/book/show/219187841","rank":3,"title":"Pandora's Star (Commonwealth Saga) by Peter F. Hamilton","avgRating":"5.00","ratingsCount":1,"author":{"id":2,"name":"Peter F. Hamilton"}},
+            {"imageUrl":"https://i.gr-assets.com/images/S/x/4.jpg","bookId":"226763120","workId":"4","bookUrl":"/book/show/226763120","rank":4,"title":"Pandora's Star: Commonwealth Saga 1","avgRating":"4.00","ratingsCount":2,"author":{"id":2,"name":"Peter F. Hamilton"}}
+        ]"#;
+        let results = parse_autocomplete_json(body);
+        assert_eq!(
+            results.len(),
+            4,
+            "one numeric-avgRating entry must never erase the batch"
+        );
+        assert_eq!(results[0].title, "Pandora's Star (Commonwealth Saga, #1)");
+        assert_eq!(results[0].rating.as_deref(), Some("4.22"));
+        assert_eq!(
+            results[1].rating, None,
+            "numeric 0.0 normalizes to \"0.00\" and filters as unrated"
+        );
+        assert_eq!(results[1].author.as_deref(), Some("Peter F. Hamilton"));
+    }
+
+    #[test]
+    fn autocomplete_structurally_broken_entry_drops_alone() {
+        // An entry whose fields are the wrong SHAPE entirely (bookUrl as an
+        // object) drops by itself; its neighbors survive.
+        let body = r#"[
+            {"bookUrl":{"nested":"garbage"},"title":"Broken Entry","avgRating":"4.00"},
+            {"bookId":"5907","bookUrl":"/book/show/5907","title":"Survivor","avgRating":"4.30","author":{"name":"J.R.R. Tolkien"}}
+        ]"#;
+        let results = parse_autocomplete_json(body);
+        assert_eq!(results.len(), 1, "the broken entry drops alone");
+        assert_eq!(results[0].title, "Survivor");
     }
 
     #[test]
