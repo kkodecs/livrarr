@@ -51,6 +51,7 @@ fn parse_notification_type(s: &str) -> Result<NotificationType, DbError> {
         "pathNotFound" => Ok(NotificationType::PathNotFound),
         "rssGrabbed" => Ok(NotificationType::RssGrabbed),
         "rssGrabFailed" => Ok(NotificationType::RssGrabFailed),
+        "rssLanguageSkipped" => Ok(NotificationType::RssLanguageSkipped),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown notification type: {s}"),
         }),
@@ -68,6 +69,7 @@ fn notification_type_str(t: NotificationType) -> &'static str {
         NotificationType::PathNotFound => "pathNotFound",
         NotificationType::RssGrabbed => "rssGrabbed",
         NotificationType::RssGrabFailed => "rssGrabFailed",
+        NotificationType::RssLanguageSkipped => "rssLanguageSkipped",
     }
 }
 

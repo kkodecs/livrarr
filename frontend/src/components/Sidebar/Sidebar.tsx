@@ -29,6 +29,7 @@ import {
   ArrowUpCircle,
   Info,
   X,
+  HelpCircle,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/utils/cn";
@@ -67,6 +68,11 @@ const navGroups: NavGroup[] = [
         label: "Missing",
         path: "/wanted/missing",
         icon: <AlertCircle size={18} />,
+      },
+      {
+        label: "Needs Review",
+        path: "/review",
+        icon: <HelpCircle size={18} />,
       },
       {
         label: "Bookshelf",

@@ -94,6 +94,12 @@ import type {
   ResumePromptDTO,
   AnchorDTO,
   PendingAnchorDTO,
+  IdentityReviewPark,
+  ResolveIdentityReviewRequest,
+  IdentityConflictSummary,
+  IdentityConflictDetail,
+  ResolveIdentityConflictRequest,
+  ConflictResolutionAction,
 } from "@/types/api";
 
 // Setup
@@ -293,6 +299,36 @@ export const dismissNotification = (id: number) =>
   apiFetch<void>(`/notification/${id}`, { method: "DELETE" });
 export const dismissAllNotifications = () =>
   apiFetch<void>("/notification", { method: "DELETE" });
+
+// Identity review (AC-013 grey-park surface)
+export const listIdentityReview = () =>
+  apiFetch<IdentityReviewPark[]>("/identity-review");
+export const resolveIdentityReview = (
+  workId: number,
+  req: ResolveIdentityReviewRequest,
+) =>
+  apiFetch<void>(`/identity-review/${workId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const dismissIdentityReview = (workId: number) =>
+  apiFetch<void>(`/identity-review/${workId}/dismiss`, { method: "POST" });
+
+// Identity conflicts (AC-021 work-key contradictions)
+export const listIdentityConflicts = () =>
+  apiFetch<IdentityConflictSummary[]>("/identity-conflict");
+export const getIdentityConflict = (id: number) =>
+  apiFetch<IdentityConflictDetail>(`/identity-conflict/${id}`);
+export const resolveIdentityConflict = (
+  id: number,
+  req: ResolveIdentityConflictRequest,
+) =>
+  apiFetch<{ status: string; action: ConflictResolutionAction }>(
+    `/identity-conflict/${id}/resolve`,
+    { method: "POST", body: JSON.stringify(req) },
+  );
+export const dismissIdentityConflict = (id: number) =>
+  apiFetch<void>(`/identity-conflict/${id}/dismiss`, { method: "POST" });
 
 // Queue
 export const getQueue = (page = 1) =>

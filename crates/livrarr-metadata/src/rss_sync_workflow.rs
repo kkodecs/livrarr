@@ -268,6 +268,9 @@ where
         let mut n_matched: usize = 0;
         let mut n_lang_veto: usize = 0;
         let mut n_lang_grey: usize = 0;
+        // Per-work tally of language-grey skips this run (AC-022 surfacing):
+        // work_id -> (user_id, title, skipped release count).
+        let mut lang_grey_by_work: HashMap<i64, (i64, String, usize)> = HashMap::new();
 
         // Phase 1: Per-release, find best work per (user, media_type).
         struct ReleaseMatch {
@@ -378,6 +381,10 @@ where
                             }
                             LanguageVerdict::Grey => {
                                 n_lang_grey += 1;
+                                lang_grey_by_work
+                                    .entry(work.id)
+                                    .and_modify(|(_, _, count)| *count += 1)
+                                    .or_insert_with(|| (work.user_id, work.title.clone(), 1));
                                 continue;
                             }
                             LanguageVerdict::Neutral => {}
@@ -608,6 +615,32 @@ where
                  and the work's language isn't the install default — needs manual confirmation \
                  via interactive search"
             ));
+        }
+
+        // AC-022 surfacing: the warnings line above is log-only — give the user
+        // a visible notification per affected work. Deduped per (work, day) so a
+        // persisting gap re-notifies daily instead of once-ever or every 15min
+        // tick (rss_sync_interval_minutes default).
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        for (work_id, (owner_id, title, count)) in &lang_grey_by_work {
+            let plural = if *count == 1 { "" } else { "s" };
+            let _ = self
+                .db
+                .create_notification(CreateNotificationDbRequest {
+                    user_id: *owner_id,
+                    notification_type: NotificationType::RssLanguageSkipped,
+                    ref_key: Some(format!("rss-lang-grey:{work_id}:{today}")),
+                    message: format!(
+                        "{count} release{plural} skipped for {title}: language unconfirmed — \
+                         grab manually via search"
+                    ),
+                    data: serde_json::json!({
+                        "workId": work_id,
+                        "title": title,
+                        "count": count,
+                    }),
+                })
+                .await;
         }
 
         info!(

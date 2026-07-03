@@ -491,6 +491,19 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/identity-conflict/{id}/dismiss",
             post(livrarr_handlers::identity_conflicts::dismiss::<AppState>),
         )
+        // Identity review (AC-013 grey-park surface)
+        .route(
+            "/identity-review",
+            get(livrarr_handlers::identity_review::list::<AppState>),
+        )
+        .route(
+            "/identity-review/{work_id}/resolve",
+            post(livrarr_handlers::identity_review::resolve::<AppState>),
+        )
+        .route(
+            "/identity-review/{work_id}/dismiss",
+            post(livrarr_handlers::identity_review::dismiss::<AppState>),
+        )
         // Library files
         .route(
             "/workfile",
