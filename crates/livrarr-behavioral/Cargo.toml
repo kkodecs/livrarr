@@ -39,6 +39,9 @@ tempfile = "3"
 tower = "0.5"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 unicode-normalization = "0.1"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+livrarr-enrichment = { workspace = true }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[test]]
 name = "test_metadata_overhaul_domain"
@@ -429,3 +432,29 @@ path = "../../tests/behavioral/test_p5_matching_diff.rs"
 [[test]]
 name = "test_p5_unit_f_recognition"
 path = "../../tests/behavioral/test_p5_unit_f_recognition.rs"
+
+# --- N2 cover pipeline consolidation ---
+
+[[test]]
+name = "test_n2_cover_rank"
+path = "../../tests/behavioral/test_n2_cover_rank.rs"
+
+[[test]]
+name = "test_n2_cover_write_gate"
+path = "../../tests/behavioral/test_n2_cover_write_gate.rs"
+
+[[test]]
+name = "test_n2_cover_migrations"
+path = "../../tests/behavioral/test_n2_cover_migrations.rs"
+
+[[test]]
+name = "test_n2_cover_gate_recovery"
+path = "../../tests/behavioral/test_n2_cover_gate_recovery.rs"
+
+[[test]]
+name = "test_n2_cover_pipeline_wiring"
+path = "../../tests/behavioral/test_n2_cover_pipeline_wiring.rs"
+
+[[test]]
+name = "test_n2_review_fixes"
+path = "../../tests/behavioral/test_n2_review_fixes.rs"

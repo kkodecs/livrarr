@@ -245,23 +245,20 @@ pub fn build_tag_metadata(work: &livrarr_domain::Work) -> livrarr_tagwrite::TagM
     }
 }
 
-/// Read cover image bytes for tag embedding.
-/// Checks new tenant-aware path first, falls back to old flat layout.
-/// Returns None if the file doesn't exist (not an error per TAG-V21-003).
+/// Read cover image bytes for tag embedding from the tenant-aware layout,
+/// `covers/{user_id}/{work_id}.jpg` — the only layout a cover can live in
+/// (the startup migration adopts legacy root-level files before any import
+/// runs). A root-level file that still exists is an unowned orphan and must
+/// never be embedded. Returns None if the file doesn't exist (not an error
+/// per TAG-V21-003).
 pub async fn read_cover_bytes(
     data_dir: &std::path::Path,
     user_id: i64,
     work_id: i64,
 ) -> Option<Vec<u8>> {
-    // Try new tenant-aware path: covers/{user_id}/{work_id}.jpg
-    let new_path = data_dir
+    let path = data_dir
         .join("covers")
         .join(user_id.to_string())
         .join(format!("{work_id}.jpg"));
-    if let Ok(bytes) = tokio::fs::read(&new_path).await {
-        return Some(bytes);
-    }
-    // Fallback to old flat layout: covers/{work_id}.jpg
-    let old_path = data_dir.join("covers").join(format!("{work_id}.jpg"));
-    tokio::fs::read(&old_path).await.ok()
+    tokio::fs::read(&path).await.ok()
 }

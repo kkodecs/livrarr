@@ -15,8 +15,9 @@ use livrarr_domain::RequestPriority;
 use livrarr_tagwrite::{write_tags_batch, TagMetadata};
 
 /// The on-disk path for a work's cover in a slot (`suffix` distinguishes slots:
-/// "" = ebook, "_audiobook" = audiobook). Shared by the downloader and the
-/// outcome so the reported path always matches the file written.
+/// "" = ebook, "_audio" = audiobook — `CoverMediaType::suffix()`, the one
+/// suffix every road uses, S1). Shared by the downloader and the outcome so
+/// the reported path always matches the file written.
 fn cover_file_path(covers_dir: &Path, work_id: i64, suffix: &str) -> PathBuf {
     covers_dir.join(format!("{work_id}{suffix}.jpg"))
 }
@@ -68,33 +69,25 @@ fn cover_bucket_for_url(url: &str) -> RateBucket {
         .unwrap_or(RateBucket::None)
 }
 
-/// Download a cover to disk via the SSRF-safe fetcher (runtime URL, insight 37),
-/// writing atomically (tmp + rename) and returning the image bytes so the caller
-/// can embed them in the file tags (R-002). Relocated from livrarr-metadata to
-/// break the cover<->work_service cycle (D-002).
-///
-/// Decodes the image exactly ONCE (in spawn_blocking per insight 10): checks for
-/// grayscale placeholders and extracts dimensions in the same pass. Returns
-/// `(bytes, dims)` so callers never need a second decode.
+/// Fetch `url` via the SSRF-safe fetcher and decode it exactly ONCE (in
+/// spawn_blocking per insight 10): checks for grayscale placeholders and
+/// extracts dimensions in the same pass. Returns the raw bytes (undecoded
+/// format passthrough is non-fatal — a saved cover beats one rejected over a
+/// dims read) and, when decodable, its pixel dimensions. Writes no file —
+/// the pure fetch+decode core shared by `download_cover_to_disk` (commits
+/// straight to the conventional `{id}{suffix}.jpg` path) and the cover-write
+/// gate's candidate step (S2 — commits only after the comparator accepts).
 ///
 /// `fast_connect` selects `HttpFetcher::fetch_ssrf_safe_fast_connect` instead
 /// of `fetch_ssrf_safe` — a tight connect-phase budget for a caller that wants
 /// to fail fast against an unreachable host (phase1 cover fetch) without
-/// shrinking `priority`/the request's own timeout for everyone else (the
-/// materialize save path, the cover backfill job, and manual cover selection
-/// all pass `false` and are unaffected).
-#[allow(clippy::too_many_arguments)]
-pub async fn download_cover_to_disk<H: HttpFetcher>(
+/// shrinking `priority`/the request's own timeout for everyone else.
+pub async fn fetch_and_decode_cover<H: HttpFetcher>(
     http: &H,
     url: &str,
-    covers_dir: &Path,
-    work_id: i64,
-    suffix: &str,
     priority: RequestPriority,
     fast_connect: bool,
 ) -> Result<(Vec<u8>, Option<(i32, i32)>), DownloadCoverError> {
-    tokio::fs::create_dir_all(covers_dir).await?;
-
     let req = FetchRequest {
         url: url.to_string(),
         method: HttpMethod::Get,
@@ -118,15 +111,8 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
         return Err(DownloadCoverError::HttpStatus(resp.status));
     }
 
-    let cover_path = cover_file_path(covers_dir, work_id, suffix);
-    let tmp_path = cover_path.with_extension("jpg.tmp");
-    let tmp_clone = tmp_path.clone();
-    let target = cover_path.clone();
     let raw_bytes = resp.body;
-
-    // Decode, validate, extract dims, and write — all in one spawn_blocking so
-    // the CPU-heavy JPEG decode never blocks the async executor (insight 10).
-    let result = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         // Single decode: grayscale check + dims. Pass through if the bytes
         // aren't a recognisable image format (non-fatal per existing policy).
         let dims = match image::load_from_memory(&raw_bytes) {
@@ -144,22 +130,55 @@ pub async fn download_cover_to_disk<H: HttpFetcher>(
             }
             Err(_) => None,
         };
+        Ok((raw_bytes, dims))
+    })
+    .await
+    .map_err(|e| DownloadCoverError::Spawn(e.to_string()))?
+}
 
+/// Download a cover to disk via the SSRF-safe fetcher (runtime URL, insight 37),
+/// writing atomically (tmp + rename) and returning the image bytes so the caller
+/// can embed them in the file tags (R-002). Relocated from livrarr-metadata to
+/// break the cover<->work_service cycle (D-002).
+///
+/// Commits straight to the conventional `{id}{suffix}.jpg` path — for a save
+/// that must first pass through the comparator gate (S2), use
+/// `fetch_and_decode_cover` directly and commit only on accept.
+#[allow(clippy::too_many_arguments)]
+pub async fn download_cover_to_disk<H: HttpFetcher>(
+    http: &H,
+    url: &str,
+    covers_dir: &Path,
+    work_id: i64,
+    suffix: &str,
+    priority: RequestPriority,
+    fast_connect: bool,
+) -> Result<(Vec<u8>, Option<(i32, i32)>), DownloadCoverError> {
+    tokio::fs::create_dir_all(covers_dir).await?;
+
+    let (raw_bytes, dims) = fetch_and_decode_cover(http, url, priority, fast_connect).await?;
+
+    let cover_path = cover_file_path(covers_dir, work_id, suffix);
+    let tmp_path = cover_path.with_extension("jpg.tmp");
+    let tmp_clone = tmp_path.clone();
+    let target = cover_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp_clone)?;
         f.write_all(&raw_bytes)?;
         f.sync_all()?;
         drop(f);
         std::fs::rename(&tmp_clone, &target)?;
-        Ok((raw_bytes, dims))
+        Ok(raw_bytes)
     })
     .await;
 
     match result {
-        Ok(Ok(result)) => Ok(result),
+        Ok(Ok(bytes)) => Ok((bytes, dims)),
         Ok(Err(e)) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            Err(e)
+            Err(DownloadCoverError::Io(e))
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -261,16 +280,29 @@ where
                     ebook_cover_bytes = Some(bytes);
                 }
             }
+            if ebook_cover_bytes.is_none() {
+                if let Some(bytes) = ebook.prefetched_bytes.as_ref() {
+                    // The cover-write gate already downloaded, decided, and
+                    // committed this slot's file this pass — the request then
+                    // carries the committed bytes instead of a URL to fetch
+                    // (its `chosen_new_url` is None). Feed them into the tag
+                    // embed so an accepted swap's art follows into the book
+                    // file too.
+                    ebook_cover_bytes = Some(bytes.clone());
+                }
+            }
         }
 
-        // Audiobook cover: same rules, separate slot. Identity-independent (REQ-015).
+        // Audiobook cover: same rules, separate slot, one suffix everywhere
+        // (S1 — `_audio`, matching `CoverMediaType::Audiobook::suffix()`, not
+        // the historical `_audiobook`). Identity-independent (REQ-015).
         let audiobook = &request.audiobook_cover;
         if !audiobook.user_locked {
             if let Some(url) = audiobook.chosen_new_url.as_deref() {
                 let file_present = tokio::fs::try_exists(cover_file_path(
                     &request.covers_dir,
                     request.work_id,
-                    "_audiobook",
+                    "_audio",
                 ))
                 .await
                 .unwrap_or(false);
@@ -280,13 +312,13 @@ where
                         url,
                         &request.covers_dir,
                         request.work_id,
-                        "_audiobook",
+                        "_audio",
                         RequestPriority::Normal,
                         false,
                     )
                     .await
                     .map_err(|e| MaterializeError::CoverDownload(e.to_string()))?;
-                    let path = cover_file_path(&request.covers_dir, request.work_id, "_audiobook");
+                    let path = cover_file_path(&request.covers_dir, request.work_id, "_audio");
                     outcome.audiobook_cover_path = Some(path.to_string_lossy().into_owned());
                     outcome.saved_audiobook_cover = dims.map(|(width, height)| SavedCover {
                         path,

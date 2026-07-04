@@ -15,6 +15,11 @@ pub mod author_service;
 pub mod convergence_service;
 pub mod cover;
 pub mod cover_alternatives;
+pub mod cover_layout_migration;
+pub mod cover_provenance_backfill;
+pub mod cover_startup;
+pub mod cover_write_gate;
+pub mod cover_write_gate_recovery;
 pub mod enrichment_workflow_service;
 pub mod http_llm;
 pub mod list_service;
@@ -38,7 +43,7 @@ pub use livrarr_enrichment::provider_queue::{
     ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder,
 };
 pub use livrarr_enrichment::{
-    cover_gate, cover_resolution, llm_validator, provider_queue, DefaultMergeEngine,
+    cover_gate, cover_rank, cover_resolution, llm_validator, provider_queue, DefaultMergeEngine,
     EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentResult, EnrichmentService,
     EnrichmentServiceImpl, MergeEngine, MergeError, MergeInput, MergeOutput, PriorityModel,
     ProviderQueue, ProviderQueueConfig, ProviderQueueError, ReconstructedOutcome,

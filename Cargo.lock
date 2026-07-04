@@ -1570,9 +1570,11 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "image",
  "livrarr-db",
  "livrarr-domain",
  "livrarr-download",
+ "livrarr-enrichment",
  "livrarr-external-data",
  "livrarr-handlers",
  "livrarr-http",
@@ -1593,6 +1595,7 @@ dependencies = [
  "trait-variant",
  "unicode-normalization",
  "urlencoding",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -1720,6 +1723,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

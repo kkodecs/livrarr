@@ -12,8 +12,12 @@ pub async fn get_cover<S: HasDataDir>(
     let data_dir = state.data_dir().to_path_buf();
     let cover_path = tokio::task::spawn_blocking(move || resolve_cover_path(&data_dir, id, ""))
         .await
-        .unwrap_or_else(|_| state.data_dir().join("covers").join(format!("{id}.jpg")));
-    serve_image(&cover_path, id, &req_headers).await
+        .ok()
+        .flatten();
+    match cover_path {
+        Some(path) => serve_image(&path, id, &req_headers).await,
+        None => placeholder_response(),
+    }
 }
 
 pub async fn get_thumb<S: HasDataDir>(
@@ -22,24 +26,21 @@ pub async fn get_thumb<S: HasDataDir>(
     req_headers: HeaderMap,
 ) -> Response {
     let data_dir = state.data_dir().to_path_buf();
-    let (full_path, thumb_path) = tokio::task::spawn_blocking(move || {
-        let full = resolve_cover_path(&data_dir, id, "");
-        let thumb = resolve_cover_path(&data_dir, id, "_thumb");
-        (full, thumb)
-    })
-    .await
-    .unwrap_or_else(|_| {
-        let dir = state.data_dir().join("covers");
-        (
-            dir.join(format!("{id}.jpg")),
-            dir.join(format!("{id}_thumb.jpg")),
-        )
-    });
+    let full_path = tokio::task::spawn_blocking(move || resolve_cover_path(&data_dir, id, ""))
+        .await
+        .ok()
+        .flatten();
+    let Some(full_path) = full_path else {
+        return placeholder_response();
+    };
+
+    // The thumbnail lives next to the cover it renders — same user directory.
+    let thumb_path = full_path
+        .parent()
+        .map(|dir| dir.join(format!("{id}_thumb.jpg")))
+        .unwrap_or_else(|| full_path.with_file_name(format!("{id}_thumb.jpg")));
 
     if !thumb_path.exists() {
-        if !full_path.exists() {
-            return placeholder_response();
-        }
         match tokio::fs::read(&full_path).await {
             Ok(bytes) => {
                 let thumb_path_clone = thumb_path.clone();
@@ -66,32 +67,38 @@ pub async fn get_thumb<S: HasDataDir>(
     serve_image(&thumb_path, id, &req_headers).await
 }
 
-/// Resolve the on-disk path for a cover image. Checks the new tenant-aware
-/// layout `covers/{user_id}/{work_id}{suffix}.jpg` first (scanning user
-/// subdirectories), then falls back to the old flat layout
-/// `covers/{work_id}{suffix}.jpg`.
+/// Resolve the on-disk path for a cover image in the tenant-aware layout,
+/// `covers/{user_id}/{work_id}{suffix}.jpg` — the only layout a cover write
+/// can land in (the startup migration adopts every legacy root-level file
+/// into its owning user's directory before any request reaches this code).
+///
+/// This handler has no user context (the route is deliberately
+/// unauthenticated — images loaded by `<img>` tags directly — see
+/// `router.rs`), so the lookup scans user subdirectories rather than joining
+/// a known user id. `None` when no user directory holds the file. There is
+/// deliberately no flat-root fallback: post-migration, the only file that
+/// can sit at the covers root is an orphan with no matching work row, and an
+/// orphan must never be served.
 pub fn resolve_cover_path(
     data_dir: &std::path::Path,
     work_id: i64,
     suffix: &str,
-) -> std::path::PathBuf {
+) -> Option<std::path::PathBuf> {
     let covers_dir = data_dir.join("covers");
     let filename = format!("{work_id}{suffix}.jpg");
 
-    // Check user subdirectories (new layout: covers/{user_id}/{work_id}.jpg)
     if let Ok(entries) = std::fs::read_dir(&covers_dir) {
         for entry in entries.flatten() {
             if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                 let candidate = entry.path().join(&filename);
                 if candidate.exists() {
-                    return candidate;
+                    return Some(candidate);
                 }
             }
         }
     }
 
-    // Fallback to old flat layout (covers/{work_id}.jpg)
-    covers_dir.join(&filename)
+    None
 }
 
 pub fn generate_thumbnail_jpeg(bytes: &[u8], max_width: u32) -> Result<Vec<u8>, String> {
@@ -162,5 +169,47 @@ pub async fn serve_image(path: &std::path::Path, id: i64, req_headers: &HeaderMa
             (StatusCode::OK, headers, bytes).into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    #[test]
+    fn orphan_root_level_cover_is_never_resolved() {
+        // A root-level covers/{id}.jpg with NO per-user copy is an orphan
+        // (no matching work adopted it at migration) — it must not resolve
+        // to a servable path.
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let covers = data_dir.path().join("covers");
+        std::fs::create_dir_all(&covers).expect("mkdir covers");
+        std::fs::write(covers.join("42.jpg"), b"orphan-bytes").expect("write orphan");
+
+        let resolved = resolve_cover_path(data_dir.path(), 42, "");
+        assert!(
+            resolved.is_none(),
+            "an orphan root-level cover must never resolve to a servable \
+             path — got {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn per_user_cover_resolves() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let user_dir = data_dir.path().join("covers").join("7");
+        std::fs::create_dir_all(&user_dir).expect("mkdir user dir");
+        std::fs::write(user_dir.join("42.jpg"), b"real-bytes").expect("write cover");
+
+        let resolved = resolve_cover_path(data_dir.path(), 42, "").expect("must resolve");
+        assert!(resolved.exists());
+        assert!(resolved.ends_with("7/42.jpg"));
+    }
+
+    #[test]
+    fn missing_cover_resolves_to_none() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(data_dir.path().join("covers")).expect("mkdir covers");
+        assert!(resolve_cover_path(data_dir.path(), 42, "").is_none());
     }
 }

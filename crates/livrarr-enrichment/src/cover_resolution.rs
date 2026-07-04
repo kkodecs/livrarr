@@ -1,15 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
 
-use livrarr_domain::services::{
-    FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
-};
 use livrarr_domain::{
-    CoverMediaType, CoverResolution, CoverTrust, MetadataProvider, OutcomeClass, RequestPriority,
-    Work,
+    CoverMediaType, CoverResolution, CoverTrust, MetadataProvider, OutcomeClass, Work,
 };
 
+use crate::cover_rank::{rank_index, CoverRankModel};
 use crate::{NormalizedWorkDetail, ReconstructedOutcome};
 
 pub fn is_good_enough(width: u32, height: u32) -> bool {
@@ -136,216 +132,62 @@ pub fn resolve_cover(
     })
 }
 
-#[derive(Debug, Clone)]
-pub struct CoverUpgradeResult {
-    pub url: String,
-    pub source: String,
-    pub trust: CoverTrust,
-    pub width: u32,
-    pub height: u32,
-    pub media_type: CoverMediaType,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CoverError {
-    #[error("download failed: {0}")]
-    Download(String),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-const COVER_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10);
-const COVER_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
-
-/// Cover provider priority for same-tier comparison, per media type.
-/// Lower index = higher priority. Audiobook covers must prefer audiobook-native
-/// sources (Audible, Audnexus) over ebook providers, otherwise a refresh can
-/// silently overwrite an existing Audible audiobook cover with a Hardcover
-/// ebook one at the same trust tier.
-const EBOOK_COVER_PRIORITY: &[&str] = &[
-    "goodreads",
-    "hardcover",
-    "openlibrary",
-    "googlebooks",
-    "audnexus",
-    "audible",
-];
-
-const AUDIOBOOK_COVER_PRIORITY: &[&str] = &[
-    "audible",
-    "audnexus",
-    "hardcover",
-    "goodreads",
-    "openlibrary",
-    "googlebooks",
-];
-
-fn provider_priority_index(source: &str, media_type: CoverMediaType) -> usize {
-    let list = match media_type {
-        CoverMediaType::Ebook => EBOOK_COVER_PRIORITY,
-        CoverMediaType::Audiobook => AUDIOBOOK_COVER_PRIORITY,
-    };
-    list.iter().position(|&s| s == source).unwrap_or(list.len())
-}
-
-fn should_upgrade_same_tier(
+/// Same-tier comparison used by the consolidated save gate
+/// (`livrarr_metadata::cover_write_gate`) when a candidate's trust equals the
+/// incumbent's: the 400x600 floor, good-beats-bad, both-good-> unified rank,
+/// both-bad-> larger pixel area, tie-> rank (S2, AS BUILT — unchanged rules).
+/// `rank_model` supplies the ONE rank table (S1): callers derive it from the
+/// work's language + media type via `CoverRankModel::for_media`.
+pub fn should_upgrade_same_tier(
     current_w: u32,
     current_h: u32,
     new_w: u32,
     new_h: u32,
     current_source: Option<&str>,
     new_source: &str,
-    media_type: CoverMediaType,
+    rank_model: CoverRankModel,
 ) -> bool {
     let current_good = is_good_enough(current_w, current_h);
     let new_good = is_good_enough(new_w, new_h);
 
+    let priority_of = |source: &str| -> usize {
+        match provider_from_source_str(source) {
+            Some(p) => rank_index(p, rank_model),
+            None => usize::MAX,
+        }
+    };
+
     match (new_good, current_good) {
         (true, false) => true,
         (false, true) => false,
-        (true, true) => {
-            let new_pri = provider_priority_index(new_source, media_type);
-            let cur_pri = provider_priority_index(current_source.unwrap_or(""), media_type);
-            new_pri < cur_pri
-        }
+        (true, true) => priority_of(new_source) < priority_of(current_source.unwrap_or("")),
         (false, false) => {
             let new_area = (new_w as u64) * (new_h as u64);
             let cur_area = (current_w as u64) * (current_h as u64);
             if new_area != cur_area {
                 new_area > cur_area
             } else {
-                let new_pri = provider_priority_index(new_source, media_type);
-                let cur_pri = provider_priority_index(current_source.unwrap_or(""), media_type);
-                new_pri < cur_pri
+                priority_of(new_source) < priority_of(current_source.unwrap_or(""))
             }
         }
     }
 }
 
-pub async fn maybe_upgrade_cover<H: HttpFetcher>(
-    work: &Work,
-    resolution: Option<CoverResolution>,
-    covers_dir: &Path,
-    http: &H,
-) -> Result<Option<CoverUpgradeResult>, CoverError> {
-    let resolution = match resolution {
-        Some(r) => r,
-        None => return Ok(None),
-    };
-
-    let (current_trust, current_w_db, current_h_db, current_source) = match resolution.media_type {
-        CoverMediaType::Ebook => (
-            work.cover_trust,
-            work.cover_width,
-            work.cover_height,
-            work.cover_source.as_deref(),
-        ),
-        CoverMediaType::Audiobook => (
-            work.audiobook_cover_trust,
-            work.audiobook_cover_width,
-            work.audiobook_cover_height,
-            work.audiobook_cover_source.as_deref(),
-        ),
-    };
-
-    if current_trust == CoverTrust::User {
-        return Ok(None);
-    }
-
-    if !current_trust.allows_replacement_by(resolution.trust) {
-        return Ok(None);
-    }
-
-    let suffix = resolution.media_type.suffix();
-    let cover_path = covers_dir.join(format!("{}{suffix}.jpg", work.id));
-    let candidate_path = covers_dir.join(format!("{}{suffix}.candidate.tmp", work.id));
-
-    // Lazy backfill: measure current if dimensions are 0×0
-    let (current_w, current_h) = if current_w_db == 0 && current_h_db == 0 {
-        measure_dimensions(&cover_path).unwrap_or((0, 0))
-    } else {
-        (current_w_db as u32, current_h_db as u32)
-    };
-
-    // Download candidate to temp path
-    tokio::fs::create_dir_all(covers_dir).await?;
-
-    let req = FetchRequest {
-        url: resolution.url.clone(),
-        method: HttpMethod::Get,
-        headers: vec![],
-        body: None,
-        timeout: COVER_DOWNLOAD_TIMEOUT,
-        rate_bucket: RateBucket::None,
-        max_body_bytes: COVER_MAX_BODY_BYTES,
-        anti_bot_check: false,
-        user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
-    };
-
-    let resp = http
-        .fetch_ssrf_safe(req)
-        .await
-        .map_err(|e| CoverError::Download(e.to_string()))?;
-
-    if resp.status >= 400 {
-        return Err(CoverError::Download(format!("HTTP {}", resp.status)));
-    }
-
-    let cpath = candidate_path.clone();
-    let bytes = resp.body;
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&cpath)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| CoverError::Download(e.to_string()))??;
-
-    // Measure candidate dimensions
-    let (new_w, new_h) = measure_dimensions(&candidate_path).unwrap_or((0, 0));
-
-    // Same-tier comparison
-    let do_upgrade = if resolution.trust != current_trust {
-        true // higher trust always wins (already gated above)
-    } else {
-        should_upgrade_same_tier(
-            current_w,
-            current_h,
-            new_w,
-            new_h,
-            current_source,
-            &resolution.source,
-            resolution.media_type,
-        )
-    };
-
-    if do_upgrade {
-        tokio::fs::rename(&candidate_path, &cover_path).await?;
-
-        // Invalidate thumbnail
-        let thumb_path = covers_dir.join(format!("{}{suffix}_thumb.jpg", work.id));
-        let _ = tokio::fs::remove_file(&thumb_path).await;
-
-        // If ebook upgrade and audiobook has no dedicated cover, invalidate audio thumb too
-        if resolution.media_type == CoverMediaType::Ebook && work.audiobook_cover_url.is_none() {
-            let audio_thumb = covers_dir.join(format!("{}_audio_thumb.jpg", work.id));
-            let _ = tokio::fs::remove_file(&audio_thumb).await;
-        }
-
-        Ok(Some(CoverUpgradeResult {
-            url: resolution.url,
-            source: resolution.source,
-            trust: resolution.trust,
-            width: new_w,
-            height: new_h,
-            media_type: resolution.media_type,
-        }))
-    } else {
-        let _ = tokio::fs::remove_file(&candidate_path).await;
-        Ok(None)
+/// Map a stored `cover_source` string (the lowercased `MetadataProvider`
+/// debug name every write path stamps, e.g. "goodreads", "googlebooks") back
+/// to the provider for a rank lookup. Any other value (a non-provider source
+/// string such as "epub"/"isbn_ol"/"user_upload", or unrecognized) has no
+/// rank position.
+fn provider_from_source_str(source: &str) -> Option<MetadataProvider> {
+    match source {
+        "goodreads" => Some(MetadataProvider::Goodreads),
+        "hardcover" => Some(MetadataProvider::Hardcover),
+        "openlibrary" => Some(MetadataProvider::OpenLibrary),
+        "audnexus" => Some(MetadataProvider::Audnexus),
+        "readarr" => Some(MetadataProvider::Readarr),
+        "googlebooks" => Some(MetadataProvider::GoogleBooks),
+        "audible" => Some(MetadataProvider::Audible),
+        _ => None,
     }
 }
 
@@ -695,7 +537,8 @@ mod tests {
         .is_some());
     }
 
-    // -- should_upgrade_same_tier tests --
+    // -- should_upgrade_same_tier tests (S1: rank model replaces the old
+    // per-media-type-only priority arrays) --
 
     #[test]
     fn same_tier_new_good_current_bad_upgrades() {
@@ -706,7 +549,7 @@ mod tests {
             600,
             Some("goodreads"),
             "hardcover",
-            CoverMediaType::Ebook,
+            CoverRankModel::EbookEnglish,
         ));
     }
 
@@ -719,13 +562,13 @@ mod tests {
             300,
             Some("goodreads"),
             "hardcover",
-            CoverMediaType::Ebook,
+            CoverRankModel::EbookEnglish,
         ));
     }
 
     #[test]
     fn same_tier_both_good_higher_priority_wins() {
-        // ebook: goodreads index 0 < hardcover index 1 → goodreads wins
+        // ebook english: goodreads index 0 < hardcover index 1 → goodreads wins
         assert!(should_upgrade_same_tier(
             400,
             600,
@@ -733,7 +576,7 @@ mod tests {
             700,
             Some("hardcover"),
             "goodreads",
-            CoverMediaType::Ebook,
+            CoverRankModel::EbookEnglish,
         ));
         // reverse: hardcover does not beat goodreads
         assert!(!should_upgrade_same_tier(
@@ -743,7 +586,7 @@ mod tests {
             700,
             Some("goodreads"),
             "hardcover",
-            CoverMediaType::Ebook,
+            CoverRankModel::EbookEnglish,
         ));
     }
 
@@ -757,7 +600,7 @@ mod tests {
             400,
             Some("goodreads"),
             "goodreads",
-            CoverMediaType::Ebook,
+            CoverRankModel::EbookEnglish,
         ));
         // 200×300=60k vs 300×400=120k → keep
         assert!(!should_upgrade_same_tier(
@@ -767,13 +610,13 @@ mod tests {
             300,
             Some("goodreads"),
             "goodreads",
-            CoverMediaType::Ebook,
+            CoverRankModel::EbookEnglish,
         ));
     }
 
     #[test]
     fn same_tier_neither_good_equal_area_priority_wins() {
-        // goodreads (index 0) beats hardcover (index 1) for ebook
+        // goodreads (index 0) beats hardcover (index 1) for ebook english
         assert!(should_upgrade_same_tier(
             200,
             300,
@@ -781,7 +624,7 @@ mod tests {
             300,
             Some("hardcover"),
             "goodreads",
-            CoverMediaType::Ebook,
+            CoverRankModel::EbookEnglish,
         ));
         assert!(!should_upgrade_same_tier(
             200,
@@ -790,7 +633,30 @@ mod tests {
             300,
             Some("goodreads"),
             "hardcover",
-            CoverMediaType::Ebook,
+            CoverRankModel::EbookEnglish,
+        ));
+    }
+
+    #[test]
+    fn same_tier_ebook_foreign_prefers_googlebooks_over_goodreads() {
+        // S1: foreign order is GB -> GR -> HC -> ... — the opposite of English.
+        assert!(should_upgrade_same_tier(
+            400,
+            600,
+            500,
+            700,
+            Some("goodreads"),
+            "googlebooks",
+            CoverRankModel::EbookForeign,
+        ));
+        assert!(!should_upgrade_same_tier(
+            400,
+            600,
+            500,
+            700,
+            Some("googlebooks"),
+            "goodreads",
+            CoverRankModel::EbookForeign,
         ));
     }
 
@@ -806,7 +672,7 @@ mod tests {
             700,
             Some("hardcover"),
             "audible",
-            CoverMediaType::Audiobook,
+            CoverRankModel::Audiobook,
         ));
         // Inverse: HC must NOT replace an existing Audible audiobook cover.
         assert!(!should_upgrade_same_tier(
@@ -816,55 +682,61 @@ mod tests {
             700,
             Some("audible"),
             "hardcover",
-            CoverMediaType::Audiobook,
+            CoverRankModel::Audiobook,
         ));
     }
 
     #[test]
-    fn provider_priority_known_sources_ebook() {
+    fn provider_from_source_str_known_sources() {
         assert_eq!(
-            provider_priority_index("goodreads", CoverMediaType::Ebook),
-            0
+            provider_from_source_str("goodreads"),
+            Some(MetadataProvider::Goodreads)
         );
         assert_eq!(
-            provider_priority_index("hardcover", CoverMediaType::Ebook),
-            1
+            provider_from_source_str("hardcover"),
+            Some(MetadataProvider::Hardcover)
         );
         assert_eq!(
-            provider_priority_index("openlibrary", CoverMediaType::Ebook),
-            2
+            provider_from_source_str("openlibrary"),
+            Some(MetadataProvider::OpenLibrary)
         );
         assert_eq!(
-            provider_priority_index("audnexus", CoverMediaType::Ebook),
-            4
-        );
-    }
-
-    #[test]
-    fn provider_priority_known_sources_audiobook() {
-        assert_eq!(
-            provider_priority_index("audible", CoverMediaType::Audiobook),
-            0
+            provider_from_source_str("googlebooks"),
+            Some(MetadataProvider::GoogleBooks)
         );
         assert_eq!(
-            provider_priority_index("audnexus", CoverMediaType::Audiobook),
-            1
+            provider_from_source_str("audnexus"),
+            Some(MetadataProvider::Audnexus)
         );
         assert_eq!(
-            provider_priority_index("hardcover", CoverMediaType::Audiobook),
-            2
+            provider_from_source_str("audible"),
+            Some(MetadataProvider::Audible)
+        );
+        assert_eq!(
+            provider_from_source_str("readarr"),
+            Some(MetadataProvider::Readarr)
         );
     }
 
     #[test]
-    fn provider_priority_unknown_source_is_last() {
-        assert_eq!(
-            provider_priority_index("unknown", CoverMediaType::Ebook),
-            EBOOK_COVER_PRIORITY.len()
-        );
-        assert_eq!(
-            provider_priority_index("unknown", CoverMediaType::Audiobook),
-            AUDIOBOOK_COVER_PRIORITY.len()
-        );
+    fn provider_from_source_str_unknown_is_none() {
+        assert_eq!(provider_from_source_str("unknown"), None);
+        assert_eq!(provider_from_source_str("epub"), None);
+        assert_eq!(provider_from_source_str("user_upload"), None);
+    }
+
+    #[test]
+    fn same_tier_unknown_current_source_loses_to_any_known_provider() {
+        // An unranked incumbent source (e.g. a legacy "add" stamp) must not
+        // out-rank a real provider at the same trust tier and dimension tier.
+        assert!(should_upgrade_same_tier(
+            200,
+            300,
+            200,
+            300,
+            Some("add"),
+            "openlibrary",
+            CoverRankModel::EbookEnglish,
+        ));
     }
 }

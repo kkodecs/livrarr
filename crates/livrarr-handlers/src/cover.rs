@@ -118,26 +118,23 @@ pub async fn get_audiobook_cover<S: HasDataDir>(
         let dd = data_dir.clone();
         tokio::task::spawn_blocking(move || resolve_cover_path(&dd, id, "_audio"))
             .await
-            .unwrap_or_else(|_| {
-                state
-                    .data_dir()
-                    .join("covers")
-                    .join(format!("{id}_audio.jpg"))
-            })
+            .ok()
+            .flatten()
     };
 
-    if audio_path.exists() {
-        return serve_image(&audio_path, id, &req_headers).await;
+    if let Some(path) = audio_path {
+        return serve_image(&path, id, &req_headers).await;
     }
 
     let ebook_path = tokio::task::spawn_blocking(move || resolve_cover_path(&data_dir, id, ""))
         .await
-        .unwrap_or_else(|_| state.data_dir().join("covers").join(format!("{id}.jpg")));
+        .ok()
+        .flatten();
 
-    if ebook_path.exists() {
-        return serve_image(&ebook_path, id, &req_headers).await;
+    match ebook_path {
+        Some(path) => serve_image(&path, id, &req_headers).await,
+        None => placeholder_response(),
     }
-    placeholder_response()
 }
 
 pub async fn get_audiobook_thumb<S: HasDataDir>(
@@ -150,43 +147,19 @@ pub async fn get_audiobook_thumb<S: HasDataDir>(
         let dd = data_dir.clone();
         tokio::task::spawn_blocking(move || resolve_cover_path(&dd, id, "_audio"))
             .await
-            .unwrap_or_else(|_| {
-                state
-                    .data_dir()
-                    .join("covers")
-                    .join(format!("{id}_audio.jpg"))
-            })
+            .ok()
+            .flatten()
     };
 
-    if !audio_full.exists() {
+    let Some(audio_full) = audio_full else {
         return crate::mediacover::get_thumb(State(state), Path(id), req_headers).await;
-    }
-
-    let audio_thumb = {
-        let dd = data_dir;
-        tokio::task::spawn_blocking(move || {
-            let covers_dir = dd.join("covers");
-            let filename = format!("{id}_audio_thumb.jpg");
-            if let Ok(entries) = std::fs::read_dir(&covers_dir) {
-                for entry in entries.flatten() {
-                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        let candidate = entry.path().join(&filename);
-                        if candidate.exists() {
-                            return candidate;
-                        }
-                    }
-                }
-            }
-            covers_dir.join(filename)
-        })
-        .await
-        .unwrap_or_else(|_| {
-            state
-                .data_dir()
-                .join("covers")
-                .join(format!("{id}_audio_thumb.jpg"))
-        })
     };
+
+    // The thumbnail lives next to the cover it renders — same user directory.
+    let audio_thumb = audio_full
+        .parent()
+        .map(|dir| dir.join(format!("{id}_audio_thumb.jpg")))
+        .unwrap_or_else(|| audio_full.with_file_name(format!("{id}_audio_thumb.jpg")));
 
     if audio_thumb.exists() {
         return serve_image(&audio_thumb, id, &req_headers).await;

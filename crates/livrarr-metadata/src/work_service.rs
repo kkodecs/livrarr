@@ -2913,6 +2913,19 @@ where
                 crate::cover_resolution::phase1_trust(is_user_initiated, is_fallback)
             };
             let source = work.cover_source.as_deref().unwrap_or("add");
+            // REQ-017/S3: measure the bytes phase-1 just wrote instead of
+            // stamping 0x0 — the file only exists when phase1_mtime is Some;
+            // a failed download (cover_url set, no file) keeps 0x0, matching
+            // the "row describes what's on disk" invariant.
+            let (width, height) = if phase1_mtime.is_some() {
+                crate::cover_resolution::measure_dimensions(
+                    &covers_dir.join(format!("{}.jpg", work.id)),
+                )
+                .map(|(w, h)| (w as i32, h as i32))
+                .unwrap_or((0, 0))
+            } else {
+                (0, 0)
+            };
             let _ = self
                 .db
                 .update_cover_metadata(
@@ -2921,8 +2934,8 @@ where
                     work.cover_url.as_deref(),
                     source,
                     trust,
-                    0,
-                    0,
+                    width,
+                    height,
                 )
                 .await;
         }
@@ -2955,18 +2968,14 @@ where
             .get_work(user_id, work.id)
             .await
             .map_err(WorkServiceError::Db)?;
+        // S4: single-path — the startup layout migration adopts every
+        // legacy root-level cover into its owning user's directory before
+        // any request reaches this code, so the flat-root fallback this
+        // used to carry is no longer needed.
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-        let cover_mtime =
-            crate::cover::cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
-                crate::cover::cover_file_mtime(&self.data_dir.join("covers"), updated_work.id)
-            });
+        let cover_mtime = crate::cover::cover_file_mtime(&covers_dir, updated_work.id);
         let audiobook_cover_mtime =
-            crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id).or_else(|| {
-                crate::cover::audiobook_cover_file_mtime(
-                    &self.data_dir.join("covers"),
-                    updated_work.id,
-                )
-            });
+            crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id);
         Ok(AddWorkResult {
             work: updated_work,
             created: true,
@@ -3107,10 +3116,65 @@ where
         let final_status = enrich_result.enrichment_status;
         let identity_not_found = enrich_result.identity_not_found;
 
-        // Step 4: Materialize — change-gated cover download + tag write (REQ-012).
-        // Non-fatal: a materialize error is warned and enrichment still returns
-        // the merged status (REQ-013 / P-G: partial beats wrong beats empty).
+        // Step 4 (S2): the cover write gate — the ONE save chokepoint every
+        // non-User cover resolution routes through, add/refresh/background-
+        // retry alike (all three funnel through this function). Downloads
+        // the candidate, lets the comparator decide, and — on accept —
+        // commits url/source/trust/dims to the DB as one atomic write. The
+        // binding invariant: cover DB fields update ONLY here (or at
+        // phase-1 create), never in the generic field merge above. The gate
+        // reads the incumbent's state itself, under its per-slot lock —
+        // passing a snapshot from here would hand it stale values whenever
+        // another writer commits between our read and the lock acquisition.
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
+
+        let mut ebook_prefetched: Option<Vec<u8>> = None;
+        if let Some(resolution) = enrich_result.cover_resolution.clone() {
+            let outcome = crate::cover_write_gate::run_cover_write_gate(
+                &self.db,
+                &self.http,
+                user_id,
+                crate::cover_write_gate::CoverWriteGateInput {
+                    covers_dir: covers_dir.clone(),
+                    work_id,
+                    media_type: livrarr_domain::CoverMediaType::Ebook,
+                    resolution,
+                },
+            )
+            .await;
+            if let crate::cover_write_gate::GateOutcome::Accepted { bytes, .. } = outcome {
+                ebook_prefetched = Some(bytes);
+            }
+        }
+
+        if let Some(resolution) = enrich_result.audiobook_cover_resolution.clone() {
+            let _ = crate::cover_write_gate::run_cover_write_gate(
+                &self.db,
+                &self.http,
+                user_id,
+                crate::cover_write_gate::CoverWriteGateInput {
+                    covers_dir: covers_dir.clone(),
+                    work_id,
+                    media_type: livrarr_domain::CoverMediaType::Audiobook,
+                    resolution,
+                },
+            )
+            .await;
+        }
+
+        // Re-read: the gate above may have just committed new cover state.
+        let post_enrich_work = self
+            .db
+            .get_work(user_id, work_id)
+            .await
+            .unwrap_or(post_enrich_work);
+
+        // Step 5: Materialize — tag write only for covers now (REQ-012); the
+        // gate owns cover download/decision/DB-commit entirely, so both
+        // chosen_new_url fields stay None (materialize's own download
+        // branches — kept intact for defense-in-depth — never re-fire for
+        // this caller). Accepted ebook bytes ride through so the retag
+        // embeds the new art (V2).
         let items = self
             .db
             .list_taggable_items_by_work(user_id, work_id)
@@ -3125,32 +3189,14 @@ where
             work_id,
             changed: enrich_result.changed,
             tag_fields_changed: enrich_result.changed,
-            // current_url must be the URL the on-disk file came from — the
-            // PRE-enrich snapshot. The merge has already stamped the chosen
-            // URL onto the row by this point, so the post-enrich value always
-            // equals chosen_new_url and can never signal "the pick changed
-            // this pass": a work whose cover pick moved (e.g. GR's answer
-            // arriving after a first pass downloaded another provider's
-            // image) would keep serving the stale file forever.
             ebook_cover: livrarr_domain::services::CoverSlotState {
-                chosen_new_url: enrich_result
-                    .cover_resolution
-                    .as_ref()
-                    .map(|r| r.url.clone()),
-                current_url: work.cover_url.clone(),
+                chosen_new_url: None,
+                current_url: None,
                 current_path: None,
                 user_locked: post_enrich_work.cover_trust == livrarr_domain::CoverTrust::User,
+                prefetched_bytes: ebook_prefetched,
             },
-            audiobook_cover: livrarr_domain::services::CoverSlotState {
-                chosen_new_url: enrich_result
-                    .audiobook_cover_resolution
-                    .as_ref()
-                    .map(|r| r.url.clone()),
-                current_url: work.audiobook_cover_url.clone(),
-                current_path: None,
-                user_locked: post_enrich_work.audiobook_cover_trust
-                    == livrarr_domain::CoverTrust::User,
-            },
+            audiobook_cover: livrarr_domain::services::CoverSlotState::default(),
             file_paths,
             tags: livrarr_domain::services::MaterializeTags {
                 title: post_enrich_work.title.clone(),
@@ -3166,7 +3212,7 @@ where
                 series_name: post_enrich_work.series_name.clone(),
                 series_position: post_enrich_work.series_position,
             },
-            covers_dir,
+            covers_dir: covers_dir.clone(),
         };
 
         let materialize =
@@ -3175,102 +3221,59 @@ where
             let _mat_span = livrarr_domain::perf::StageTimer::start("materialize", work_id);
             livrarr_domain::services::MaterializeService::materialize(&materialize, mat_req).await
         };
-        match mat_outcome {
-            Ok(outcome) => {
-                // REQ-017: persist freshly decoded ebook-cover dimensions.
-                if let Some(saved) = outcome.saved_cover.as_ref() {
+        if let Err(e) = mat_outcome {
+            tracing::warn!(work_id, "run_unified_enrichment: materialize failed: {e}");
+        }
+
+        // REQ-017 belt-and-braces: a stored cover file with no measured dims
+        // (pre-existing data, or a slot the gate above didn't touch this
+        // pass) gets a lazy opportunistic re-measure. This writes ONLY the
+        // dims columns of an already-provenanced row — not a cover write, so
+        // it does not reopen AC-10 (no fourth road).
+        if post_enrich_work.cover_width == 0 && post_enrich_work.cover_url.is_some() {
+            let path = covers_dir.join(format!("{work_id}.jpg"));
+            if let Ok(bytes) = tokio::fs::read(&path).await {
+                let dims = tokio::task::spawn_blocking(move || {
+                    image::load_from_memory(&bytes)
+                        .map(|img| (img.width() as i32, img.height() as i32))
+                        .ok()
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some((w, h)) = dims {
                     if let Err(e) = self
                         .db
-                        .update_cover_dimensions(user_id, work_id, saved.width, saved.height)
+                        .update_cover_dimensions(user_id, work_id, w, h)
                         .await
                     {
-                        tracing::warn!(work_id, "cover dimension persist failed: {e}");
-                    }
-                } else if post_enrich_work.cover_width == 0 && post_enrich_work.cover_url.is_some()
-                {
-                    // REQ-017 trust-independent backfill: nothing was saved this
-                    // pass (incl. user-locked covers) but the stored file exists
-                    // and the work has no dims — decode the stored image once.
-                    let path = self
-                        .data_dir
-                        .join("covers")
-                        .join(user_id.to_string())
-                        .join(format!("{work_id}.jpg"));
-                    if let Ok(bytes) = tokio::fs::read(&path).await {
-                        let dims = tokio::task::spawn_blocking(move || {
-                            image::load_from_memory(&bytes)
-                                .map(|img| (img.width() as i32, img.height() as i32))
-                                .ok()
-                        })
-                        .await
-                        .ok()
-                        .flatten();
-                        if let Some((w, h)) = dims {
-                            if let Err(e) = self
-                                .db
-                                .update_cover_dimensions(user_id, work_id, w, h)
-                                .await
-                            {
-                                tracing::warn!(work_id, "cover dimension backfill failed: {e}");
-                            }
-                        }
-                    }
-                }
-                // REQ-017: persist freshly decoded audiobook-cover dimensions
-                // (M-007 fix — mirrors the ebook path above).
-                if let Some(saved) = outcome.saved_audiobook_cover.as_ref() {
-                    if let Err(e) = self
-                        .db
-                        .update_audiobook_cover_dimensions(
-                            user_id,
-                            work_id,
-                            saved.width,
-                            saved.height,
-                        )
-                        .await
-                    {
-                        tracing::warn!(work_id, "audiobook cover dimension persist failed: {e}");
-                    }
-                } else if post_enrich_work.audiobook_cover_width == 0
-                    && post_enrich_work.audiobook_cover_url.is_some()
-                {
-                    // REQ-017 trust-independent backfill (mirrors the ebook
-                    // branch): nothing was saved this pass (incl. user-locked
-                    // covers) but the stored audiobook file exists and the work
-                    // has no dims — decode the stored image once. The
-                    // "_audiobook" suffix matches livrarr-materialize's slot
-                    // naming (cover_file_path).
-                    let path = self
-                        .data_dir
-                        .join("covers")
-                        .join(user_id.to_string())
-                        .join(format!("{work_id}_audiobook.jpg"));
-                    if let Ok(bytes) = tokio::fs::read(&path).await {
-                        let dims = tokio::task::spawn_blocking(move || {
-                            image::load_from_memory(&bytes)
-                                .map(|img| (img.width() as i32, img.height() as i32))
-                                .ok()
-                        })
-                        .await
-                        .ok()
-                        .flatten();
-                        if let Some((w, h)) = dims {
-                            if let Err(e) = self
-                                .db
-                                .update_audiobook_cover_dimensions(user_id, work_id, w, h)
-                                .await
-                            {
-                                tracing::warn!(
-                                    work_id,
-                                    "audiobook cover dimension backfill failed: {e}"
-                                );
-                            }
-                        }
+                        tracing::warn!(work_id, "cover dimension backfill failed: {e}");
                     }
                 }
             }
-            Err(e) => {
-                tracing::warn!(work_id, "run_unified_enrichment: materialize failed: {e}");
+        }
+        if post_enrich_work.audiobook_cover_width == 0
+            && post_enrich_work.audiobook_cover_url.is_some()
+        {
+            let path = covers_dir.join(format!("{work_id}_audio.jpg"));
+            if let Ok(bytes) = tokio::fs::read(&path).await {
+                let dims = tokio::task::spawn_blocking(move || {
+                    image::load_from_memory(&bytes)
+                        .map(|img| (img.width() as i32, img.height() as i32))
+                        .ok()
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some((w, h)) = dims {
+                    if let Err(e) = self
+                        .db
+                        .update_audiobook_cover_dimensions(user_id, work_id, w, h)
+                        .await
+                    {
+                        tracing::warn!(work_id, "audiobook cover dimension backfill failed: {e}");
+                    }
+                }
             }
         }
 
@@ -3313,31 +3316,25 @@ fn dedupe_lookup_results(results: Vec<LookupResult>) -> Vec<LookupResult> {
     out
 }
 
-/// Rank a cover by the quality of its hosting source, inferred from the URL
-/// host. Higher is better. Google Books, Hardcover, and Amazon serve
-/// full-resolution covers; OpenLibrary's search path serves small images. An
-/// empty/unrecognized URL ranks lowest so a real cover always wins.
-fn cover_source_rank(url: &str) -> u8 {
-    let u = url.to_ascii_lowercase();
-    if u.is_empty() {
+/// Rank a cover by the quality of its hosting source — derived from the SAME
+/// unified rank table the live picker and comparator consume (S1), not an ad
+/// hoc tier scheme. Higher is better. `foreign` selects the ebook-foreign vs
+/// ebook-english order (the seed-cover selection this feeds is always an
+/// ebook concern). A host mapping to a known provider ranks by that
+/// provider's table position; an unrecognized non-empty host ranks above
+/// nothing but below every known provider; empty ranks lowest.
+fn cover_source_rank(url: &str, foreign: bool) -> u8 {
+    if url.is_empty() {
         return 0;
     }
-    if u.contains("books.google")
-        || u.contains("books.googleusercontent")
-        || u.contains("googleusercontent")
-        || u.contains("hardcover.app")
-        || u.contains("assets.hardcover")
-        || u.contains("images-amazon")
-        || u.contains("media-amazon")
-        || u.contains("ssl-images-amazon")
-    {
-        3
-    } else if u.contains("covers.openlibrary.org") {
-        2
-    } else {
-        // A non-empty cover from an unrecognized host still beats OpenLibrary's
-        // small search thumbnails but ranks below the known high-res sources.
-        1
+    match livrarr_enrichment::cover_rank::provider_for_cover_host(url) {
+        Some(provider) => {
+            let model = livrarr_enrichment::cover_rank::CoverRankModel::for_ebook(foreign);
+            let len = livrarr_enrichment::cover_rank::rank_table(model).len();
+            let idx = livrarr_enrichment::cover_rank::rank_index(provider, model);
+            (len - idx + 1) as u8
+        }
+        None => 1,
     }
 }
 
@@ -3414,8 +3411,15 @@ fn best_same_work_cover(
 ) -> Option<String> {
     let norm = livrarr_matching::work_dedup::normalize_title_for_match(&selected.title);
     let want = want_lang.and_then(livrarr_domain::normalization::normalize_language);
+    // S1: one rank table drives this too — the file's own language (when
+    // known) picks ebook-english vs ebook-foreign, the same classifier the
+    // picker and comparator use.
+    let foreign = matches!(
+        livrarr_external_data::language::provider_priority(want_lang),
+        livrarr_external_data::language::ProviderPriority::Foreign
+    );
     let mut best_url: Option<&str> = selected.cover_url.as_deref().filter(|u| !u.is_empty());
-    let mut best_rank = best_url.map(cover_source_rank).unwrap_or(0);
+    let mut best_rank = best_url.map(|u| cover_source_rank(u, foreign)).unwrap_or(0);
 
     for c in corpus {
         let url = match c.cover_url.as_deref().filter(|u| !u.is_empty()) {
@@ -3439,7 +3443,7 @@ fn best_same_work_cover(
                 continue;
             }
         }
-        let rank = cover_source_rank(url);
+        let rank = cover_source_rank(url, foreign);
         if rank > best_rank {
             best_rank = rank;
             best_url = Some(url);
@@ -3599,10 +3603,28 @@ mod discovery_tests {
         let ol = "https://covers.openlibrary.org/b/id/123-L.jpg";
         let amazon = "https://images-amazon.com/images/I/x.jpg";
         let hc = "https://assets.hardcover.app/cover.jpg";
-        assert!(cover_source_rank(gb) > cover_source_rank(ol));
-        assert!(cover_source_rank(amazon) > cover_source_rank(ol));
-        assert!(cover_source_rank(hc) > cover_source_rank(ol));
-        assert!(cover_source_rank(ol) > cover_source_rank(""));
+        assert!(cover_source_rank(gb, false) > cover_source_rank(ol, false));
+        assert!(cover_source_rank(amazon, false) > cover_source_rank(ol, false));
+        assert!(cover_source_rank(hc, false) > cover_source_rank(ol, false));
+        assert!(cover_source_rank(ol, false) > cover_source_rank("", false));
+    }
+
+    #[test]
+    fn cover_rank_unknown_host_ranks_above_empty_below_known_providers() {
+        let unknown = "https://random-cdn.example.com/x.jpg";
+        let ol = "https://covers.openlibrary.org/b/id/123-L.jpg";
+        assert!(cover_source_rank(unknown, false) > cover_source_rank("", false));
+        assert!(cover_source_rank(ol, false) > cover_source_rank(unknown, false));
+    }
+
+    #[test]
+    fn cover_rank_foreign_prefers_googlebooks_over_goodreads_hosted_amazon() {
+        // S1: foreign order is GB -> GR -> ... — the opposite of English,
+        // where GR/amazon-family outranks GB.
+        let gb = "https://books.google.com/books/content?id=abc&img=1";
+        let amazon = "https://images-amazon.com/images/I/x.jpg";
+        assert!(cover_source_rank(gb, true) > cover_source_rank(amazon, true));
+        assert!(cover_source_rank(amazon, false) > cover_source_rank(gb, false));
     }
 
     #[test]

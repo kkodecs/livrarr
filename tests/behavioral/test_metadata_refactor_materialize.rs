@@ -55,12 +55,14 @@ fn request(changed: bool) -> MaterializeRequest {
             current_url: None,
             current_path: None,
             user_locked: false,
+            ..Default::default()
         },
         audiobook_cover: CoverSlotState {
             chosen_new_url: Some("https://covers.example.test/audio.jpg".to_string()),
             current_url: None,
             current_path: None,
             user_locked: false,
+            ..Default::default()
         },
         file_paths: vec![PathBuf::from("/tmp/livrarr-metadata-refactor.epub")],
         tags: MaterializeTags {

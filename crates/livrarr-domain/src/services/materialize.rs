@@ -42,6 +42,11 @@ pub struct CoverSlotState {
     pub current_path: Option<String>,
     /// True if the user locked this cover (provenance Setter=User) — never overwrite (REQ-008).
     pub user_locked: bool,
+    /// Bytes the cover-write gate already downloaded and committed to disk
+    /// this pass (S2). When set, materialize skips its own download for this
+    /// slot (the file is already correct) and embeds these bytes in the tag
+    /// write instead — the accepted-swap retag trigger (V2).
+    pub prefetched_bytes: Option<Vec<u8>>,
 }
 
 /// Everything materialize needs for PURE I/O (REQ-012, R-001). The caller

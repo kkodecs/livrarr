@@ -345,7 +345,13 @@ macro_rules! work_db_merge_tests {
                 got.gr_key, None,
                 "REQ-007: the merge never writes anchor columns"
             );
-            assert_eq!(got.cover_url.as_deref(), Some(MERGED_COVER_URL));
+            assert_eq!(
+                got.cover_url.as_deref(),
+                Some(ORIGINAL_COVER_URL),
+                "S2 binding invariant: cover_url updates only via the cover-write \
+                 gate's commit, never the generic field merge — a resolved-but-\
+                 unaccepted cover_url must never persist on the row"
+            );
             assert_eq!(got.year, None);
         }
 

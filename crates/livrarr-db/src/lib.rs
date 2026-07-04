@@ -397,6 +397,12 @@ pub trait WorkDb: Send + Sync {
     /// Satisfies: RSS-MATCH-001, RSS-FILTER-002
     async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError>;
 
+    /// Every (work id, owning user id) pair, across all users. System startup
+    /// migration only — the S4 cover-layout migration maps a legacy
+    /// root-level cover file's embedded work id to the user directory that
+    /// should own it.
+    async fn list_work_owners_all_users(&self) -> Result<Vec<(WorkId, UserId)>, DbError>;
+
     /// List works stuck in Unenriched state older than threshold (crash recovery).
     async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError>;
 
