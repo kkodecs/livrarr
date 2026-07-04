@@ -163,6 +163,17 @@ fn parse_https_host(url: &str) -> Option<String> {
     parsed.host_str().map(|h| h.to_ascii_lowercase())
 }
 
+/// V5: every unified-rank provider's asset host (S1) must be allowed here so
+/// pre-add/alternatives previews never 403. Verified against live code +
+/// production evidence, not assumed: Goodreads (`i.gr-assets.com`,
+/// amazon-family), Hardcover (`assets.hardcover.app`), Google Books
+/// (`books.google.com`, and `books.googleusercontent.com` — the second host
+/// `work_service::cover_source_rank`'s host classifier has always
+/// recognized as Google Books but which this allowlist was missing),
+/// OpenLibrary (`covers.openlibrary.org`), Audible and Audnexus (both
+/// confirmed live to serve from `m.media-amazon.com` — Audnexus mirrors
+/// Audible's own catalog images). Readarr has no asset host of its own (it
+/// relays whichever provider's URL it imported).
 fn is_allowed_host(host: &str) -> bool {
     const ALLOWED_HOSTS: &[&str] = &[
         "images-na.ssl-images-amazon.com",
@@ -171,6 +182,7 @@ fn is_allowed_host(host: &str) -> bool {
         "s.lubimyczytac.pl",
         "m.media-amazon.com",
         "books.google.com",
+        "books.googleusercontent.com",
         "contents.kyobobook.co.kr",
         "i.gr-assets.com",
         "assets.hardcover.app",
@@ -189,4 +201,34 @@ fn is_allowed_host(host: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_every_unified_rank_provider_asset_host() {
+        // S1/V5: Goodreads, Hardcover, Google Books (both known hosts),
+        // OpenLibrary, Audible + Audnexus (both amazon-hosted, live-verified).
+        for host in [
+            "i.gr-assets.com",
+            "images-na.ssl-images-amazon.com",
+            "m.media-amazon.com",
+            "assets.hardcover.app",
+            "books.google.com",
+            "books.googleusercontent.com",
+            "covers.openlibrary.org",
+        ] {
+            assert!(
+                is_allowed_host(host),
+                "{host} must be an allowed cover host"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unrecognized_host() {
+        assert!(!is_allowed_host("evil.example.com"));
+    }
 }

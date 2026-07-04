@@ -864,7 +864,7 @@ async fn test_merge_engine_hard_refresh_suppressed_preserves_last_known_good_val
 
 #[tokio::test]
 async fn test_merge_engine_english_priority_model_uses_documented_provider_order() {
-    // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: English priority model uses HC→GR→OL for content, HC→OL→GR for description, and HC→GR→OL for cover
+    // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: English priority model uses HC→GR→OL for content, HC→OL→GR for description, and (N2/S1) GR→HC→...→OL for cover
     let engine = make_engine();
 
     let input = MergeInput {
@@ -913,7 +913,9 @@ async fn test_merge_engine_english_priority_model_uses_documented_provider_order
         .cover_resolution
         .as_ref()
         .expect("should resolve a cover");
-    assert_eq!(cover.url, "https://example.test/hc-cover.jpg");
+    // N2/S1: the unified cover rank table puts Goodreads first for English
+    // (GR → HC → GB → Readarr → OL → Audnexus → Audible), not Hardcover.
+    assert_eq!(cover.url, "https://example.test/gr-cover.jpg");
 }
 
 #[tokio::test]

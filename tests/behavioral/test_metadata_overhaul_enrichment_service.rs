@@ -417,6 +417,10 @@ impl WorkDb for SequencedApplyDb {
         self.inner.list_monitored_works_all_users().await
     }
 
+    async fn list_work_owners_all_users(&self) -> Result<Vec<(WorkId, UserId)>, DbError> {
+        self.inner.list_work_owners_all_users().await
+    }
+
     async fn list_stale_unenriched_works(
         &self,
         older_than: chrono::DateTime<chrono::Utc>,
@@ -2398,13 +2402,18 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Audible,
                 ]
             );
+            // N2/S1: pm.cover is derived from the unified rank table, not a
+            // copy of pm.content — English is GR → HC → GB → Readarr → OL →
+            // Audnexus → Audible.
             assert_eq!(
                 pm.cover,
                 vec![
-                    MetadataProvider::Hardcover,
                     MetadataProvider::Goodreads,
+                    MetadataProvider::Hardcover,
+                    MetadataProvider::GoogleBooks,
                     MetadataProvider::Readarr,
                     MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audnexus,
                     MetadataProvider::Audible,
                 ]
             );
@@ -2478,6 +2487,7 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Audible,
                 ]
             );
+            // N2/S1: foreign cover order also carries Audnexus before Audible.
             assert_eq!(
                 pm.cover,
                 vec![
@@ -2486,6 +2496,7 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Hardcover,
                     MetadataProvider::Readarr,
                     MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audnexus,
                     MetadataProvider::Audible,
                 ]
             );

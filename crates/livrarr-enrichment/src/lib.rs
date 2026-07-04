@@ -18,6 +18,7 @@ use livrarr_domain::{
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 
 pub mod cover_gate;
+pub mod cover_rank;
 pub mod cover_resolution;
 pub mod llm_validator;
 pub mod provider_queue;
@@ -210,7 +211,9 @@ pub struct PriorityModel {
 }
 
 impl PriorityModel {
-    /// English: HC → GR → Readarr → OL → Audible, Audio: Audible → Audnexus → HC.
+    /// English content/description order is unchanged by N2 (cover-only
+    /// consolidation); `cover`/`audio` are derived from the single rank table
+    /// (S1) — see `cover_rank::CoverRankModel::EbookEnglish`/`Audiobook`.
     pub fn english() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
@@ -228,18 +231,16 @@ impl PriorityModel {
                 P::OpenLibrary,
                 P::Audible,
             ],
-            cover: vec![
-                P::Hardcover,
-                P::Goodreads,
-                P::Readarr,
-                P::OpenLibrary,
-                P::Audible,
-            ],
-            audio: vec![P::Audible, P::Audnexus, P::Hardcover],
+            cover: crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::EbookEnglish)
+                .to_vec(),
+            audio: crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::Audiobook)
+                .to_vec(),
         }
     }
 
-    /// Foreign: GB → GR → HC → Readarr → OL → Audible, Audio: Audible → Audnexus → HC.
+    /// Foreign content/description order is unchanged by N2; `cover`/`audio`
+    /// are derived from the single rank table (S1) — see
+    /// `cover_rank::CoverRankModel::EbookForeign`/`Audiobook`.
     pub fn foreign() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
@@ -259,15 +260,10 @@ impl PriorityModel {
                 P::OpenLibrary,
                 P::Audible,
             ],
-            cover: vec![
-                P::GoogleBooks,
-                P::Goodreads,
-                P::Hardcover,
-                P::Readarr,
-                P::OpenLibrary,
-                P::Audible,
-            ],
-            audio: vec![P::Audible, P::Audnexus, P::Hardcover],
+            cover: crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::EbookForeign)
+                .to_vec(),
+            audio: crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::Audiobook)
+                .to_vec(),
         }
     }
 

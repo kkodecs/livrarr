@@ -944,10 +944,18 @@ async fn main() {
     };
 
     tokio::spawn(livrarr_server::jobs::chapter_backfill::run_chapter_backfill(svc_db.clone()));
-    tokio::spawn(livrarr_server::jobs::cover_backfill::run_cover_backfill(
-        svc_db.clone(),
-        data_dir.join("covers"),
-    ));
+    // Covers startup sequence — ONE task because the passes inside it are
+    // order-dependent: the layout migration must settle the per-user
+    // directory tree before recovery converges pending cover writes against
+    // it, and the provenance backfill must only stamp rows recovery has
+    // finished healing. The sequencing itself lives in
+    // livrarr_metadata::cover_startup.
+    tokio::spawn(
+        livrarr_server::jobs::cover_startup::run_cover_startup_passes(
+            svc_db.clone(),
+            data_dir.join("covers"),
+        ),
+    );
     tokio::spawn(livrarr_server::jobs::series_backfill::run_series_backfill(
         svc_db.clone(),
     ));

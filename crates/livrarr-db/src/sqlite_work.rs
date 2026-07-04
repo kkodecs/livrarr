@@ -923,6 +923,15 @@ impl WorkDb for SqliteDb {
         rows.into_iter().map(row_to_work).collect()
     }
 
+    async fn list_work_owners_all_users(&self) -> Result<Vec<(WorkId, UserId)>, DbError> {
+        let rows: Vec<(WorkId, UserId)> =
+            sqlx::query_as("SELECT id, user_id FROM works ORDER BY id")
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_db_err)?;
+        Ok(rows)
+    }
+
     async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError> {
         let rows = sqlx::query("SELECT * FROM works WHERE identity_status = 'pending'")
             .fetch_all(self.pool())
@@ -1024,11 +1033,24 @@ impl WorkDb for SqliteDb {
 
             // REQ-007: no anchor columns (hc_key/gr_key/ol_key/isbn_13/asin)
             // in this UPDATE — anchors move exclusively via the identity
-            // track. REQ-009: None/empty cover_url and language never clobber
-            // populated values (COALESCE + empty-filtered binds). The WHERE
-            // clause also requires merge_generation to still match the value
-            // read above; a concurrent writer that already committed makes
-            // this UPDATE affect zero rows.
+            // track. REQ-009: None/empty language never clobbers a populated
+            // value (COALESCE + empty-filtered bind).
+            //
+            // S2 binding invariant: cover_url/cover_source/cover_trust/dims
+            // (and the audiobook twins) are NOT written here — cover DB
+            // fields update only via the cover-write gate's atomic commit
+            // (`update_cover_metadata`/`update_audiobook_cover_metadata`) at
+            // an accepted swap or initial save, or at phase-1 create. Writing
+            // cover_url in the generic merge (as this UPDATE used to) let a
+            // rejected candidate's URL persist on the row before the
+            // comparator could veto it — the DB then pointed at art that
+            // wasn't on disk. u.cover_url is carried by the DTO for
+            // callers/tests that inspect the merge's resolved value; this
+            // statement simply never applies it.
+            //
+            // The WHERE clause also requires merge_generation to still match
+            // the value read above; a concurrent writer that already
+            // committed makes this UPDATE affect zero rows.
             let result = sqlx::query(
                 "UPDATE works SET \
                  title = COALESCE(?, title), subtitle = ?, original_title = ?, \
@@ -1040,7 +1062,6 @@ impl WorkDb for SqliteDb {
                  duration_seconds = ?, publisher = ?, publish_date = ?, \
                  narrator = ?, narration_type = ?, \
                  abridged = ?, rating = ?, rating_count = ?, \
-                 cover_url = COALESCE(?, cover_url), \
                  enrichment_source = ?, enrichment_status = ?, enriched_at = ?, \
                  merge_generation = merge_generation + 1 \
                  WHERE id = ? AND user_id = ? AND merge_generation = ?",
@@ -1066,9 +1087,6 @@ impl WorkDb for SqliteDb {
             .bind(u.abridged)
             .bind(u.rating)
             .bind(u.rating_count)
-            .bind(absolute_http_cover_url(
-                u.cover_url.as_deref().filter(|s| !s.is_empty()),
-            ))
             .bind(u.enrichment_source.as_deref())
             .bind(status_str)
             .bind(&now)

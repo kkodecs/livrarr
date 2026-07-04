@@ -391,9 +391,15 @@ async fn unconfigured_provider_is_skipped_remaining_providers_save_the_work() {
         saved.description,
         Some("A provider description".to_string())
     );
+    // N2/S2: cover fields no longer persist via the generic field merge this
+    // direct enrich_work() call exercises — only the cover-write gate (one
+    // layer up, in run_unified_enrichment) commits cover_url/source/trust/
+    // dims. The merge's resolved pick is still observable on the in-memory
+    // result, which is what this test (about provider skip behavior, not
+    // the cover gate) actually needs to prove.
     assert_eq!(
-        saved.cover_url,
-        Some("https://covers.example.test/ebook.jpg".to_string())
+        result.cover_resolution.as_ref().map(|r| r.url.as_str()),
+        Some("https://covers.example.test/ebook.jpg")
     );
 }
 

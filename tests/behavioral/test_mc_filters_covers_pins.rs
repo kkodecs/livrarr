@@ -141,6 +141,7 @@ async fn materialize_saved_cover_reports_decoded_dimensions() {
                 current_url: None,
                 current_path: None,
                 user_locked: false,
+                ..Default::default()
             },
             audiobook_cover: CoverSlotState::default(),
             file_paths: vec![],

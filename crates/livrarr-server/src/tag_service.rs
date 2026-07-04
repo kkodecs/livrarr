@@ -270,20 +270,19 @@ pub(crate) fn build_tag_metadata(work: &Work) -> livrarr_tagwrite::TagMetadata {
     }
 }
 
+/// Read a work's cover bytes from the tenant-aware layout,
+/// `covers/{user_id}/{work_id}.jpg` — the only layout a cover can live in
+/// (the startup migration adopts legacy root-level files before any tag work
+/// runs). A root-level file that still exists is an unowned orphan and must
+/// never be embedded into a user's book files.
 pub(crate) async fn read_cover_bytes(
     data_dir: &Path,
     user_id: i64,
     work_id: i64,
 ) -> Option<Vec<u8>> {
-    // Try new tenant-aware path: covers/{user_id}/{work_id}.jpg
-    let new_path = data_dir
+    let path = data_dir
         .join("covers")
         .join(user_id.to_string())
         .join(format!("{work_id}.jpg"));
-    if let Ok(bytes) = tokio::fs::read(&new_path).await {
-        return Some(bytes);
-    }
-    // Fallback to old flat layout: covers/{work_id}.jpg
-    let old_path = data_dir.join("covers").join(format!("{work_id}.jpg"));
-    tokio::fs::read(&old_path).await.ok()
+    tokio::fs::read(&path).await.ok()
 }
