@@ -146,15 +146,16 @@ pub enum LogFormat {
 
 /// [convergence] section — the background identity/enrichment completion sweep.
 ///
-/// Ships disabled (`enabled = false`). Activation is an operational decision
-/// gated on the worst-case provider-volume estimate for the target library
-/// (REQ-007). `interval_secs` is both the tick cadence and the back-off applied
+/// Enabled by default; `[convergence] enabled = false` opts out. Provider
+/// calls ride the outbound queue at Low priority behind the circuit breakers,
+/// so the sweep yields to interactive traffic (the REQ-007 volume guard).
+/// `interval_secs` is both the tick cadence and the back-off applied
 /// to a still-incomplete work's next due time; `batch_size` caps how many works
 /// one tick processes per user; `attempt_threshold` is the per-anchor dead-end
 /// limit (a missing anchor is abandoned after this many failed chase attempts).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConvergenceConfig {
-    #[serde(default)]
+    #[serde(default = "default_convergence_enabled")]
     pub enabled: bool,
 
     #[serde(default = "default_convergence_interval_secs")]
@@ -170,12 +171,16 @@ pub struct ConvergenceConfig {
 impl Default for ConvergenceConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_convergence_enabled(),
             interval_secs: default_convergence_interval_secs(),
             batch_size: default_convergence_batch_size(),
             attempt_threshold: default_convergence_attempt_threshold(),
         }
     }
+}
+
+fn default_convergence_enabled() -> bool {
+    true
 }
 
 fn default_convergence_interval_secs() -> u64 {
