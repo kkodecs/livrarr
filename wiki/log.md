@@ -330,3 +330,9 @@ PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
 - insights.md: NEW insight 63 (one cover rank / write gate / layout); amended 52(4) (#153 upgrade half now live) and 51(8) (audiobook dims writer closed).
 - architecture/metadata-pathway.md: corrected the stale "OL emits no cover URL" claim; risk section rewritten — cover writes decoupled from the generic merge (write gate).
 - Source: unit N2, merge 9f1f61e (design confer r1/r2 + code review r1 FAIL+FAIL → fix round → r2 PASS+PASS; record at build/reviews/n2-cover-consolidation/).
+
+## 2026-07-04 — architecture-review prep
+- overview.md: canonical-model path corrected (docs/, not architecture/) + roads.md companion link.
+- crates/server.md: LiveSettingsService trait count corrected (seven, verified against settings_service.rs impls); import_pipeline "no network calls" claim corrected (two fetchers use an explicit HttpClient).
+- roads.md (untracked, provenance pending PO confirm): stale cover_backfill dead-code row marked DONE.
+- NEW docs/architecture-review-briefing.md — review entry point (reading order, doc trust table, intentional-debt register, day-one items).

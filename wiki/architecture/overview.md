@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Livrarr is a 17-crate Rust workspace (14 application crates + `livrarr-jobs`, `livrarr-cli`, `livrarr-behavioral`) with a React/TypeScript frontend. All dependency arrows point toward `livrarr-domain`. `livrarr-server` is the composition root — it depends on everything, nothing depends on it. Authoritative member list: `Cargo.toml` `[workspace].members`. This page documents the **live** graph; the **intended** topology — which code must conform to — is the canonical model at `architecture/canonical-model.yaml`.
+Livrarr is a 17-crate Rust workspace (14 application crates + `livrarr-jobs`, `livrarr-cli`, `livrarr-behavioral`) with a React/TypeScript frontend. All dependency arrows point toward `livrarr-domain`. `livrarr-server` is the composition root — it depends on everything, nothing depends on it. Authoritative member list: `Cargo.toml` `[workspace].members`. This page documents the **live** graph; the **intended** topology — which code must conform to — is the canonical model at `docs/canonical-model.yaml` (flow-side companion: [roads](roads.md)).
 
 ## Crate Dependency Graph
 

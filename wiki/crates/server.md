@@ -97,7 +97,7 @@ All `Live*` type aliases are defined here. Examples:
 ## Service Implementations
 
 ### LiveSettingsService (services/settings_service.rs)
-Implements eight service traits over a single `SqliteDb` generic:
+Implements seven service traits over a single `SqliteDb` generic:
 - `AppConfigService` — app-level naming/media management config
 - `DownloadClientSettingsService` — download client CRUD
 - `DownloadClientCredentialService` — download client credential storage
@@ -190,7 +190,7 @@ High-level import orchestrator. Fields:
 ## Infrastructure (infra/)
 
 ### import_pipeline.rs
-Pure helper functions for the import pipeline (no DB or network calls):
+Free helper functions for the import pipeline — no DB or service-layer access; some DO make network calls (`fetch_qbit_content_path`, `fetch_sabnzbd_storage_path`) via an explicitly-passed `HttpClient`:
 - `build_target_path` — compute the destination path for an imported file given naming config
 - `fetch_qbit_content_path` — resolve the actual content path from qBittorrent save dir + content layout
 - `fetch_sabnzbd_storage_path` — resolve the final storage path from a SABnzbd job
