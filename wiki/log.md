@@ -325,3 +325,8 @@ negative host cache (manual-import loop only, fail-open everywhere else).
 download_cover_to_disk got a typed error so only connect-class failures mark
 a host dead. Built by a Sonnet agent in a worktree (hybrid with N4);
 PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
+
+## 2026-07-04 — N2 cover pipeline consolidation
+- insights.md: NEW insight 63 (one cover rank / write gate / layout); amended 52(4) (#153 upgrade half now live) and 51(8) (audiobook dims writer closed).
+- architecture/metadata-pathway.md: corrected the stale "OL emits no cover URL" claim; risk section rewritten — cover writes decoupled from the generic merge (write gate).
+- Source: unit N2, merge 9f1f61e (design confer r1/r2 + code review r1 FAIL+FAIL → fix round → r2 PASS+PASS; record at build/reviews/n2-cover-consolidation/).
