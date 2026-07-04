@@ -454,22 +454,6 @@ impl ImportWorkflow for StubImportWorkflow {
             warnings: vec![],
         })
     }
-
-    async fn confirm_scan(
-        &self,
-        _user_id: UserId,
-        _scan_id: &str,
-        _selections: Vec<ScanConfirmation>,
-    ) -> Result<ImportResult, ImportWorkflowError> {
-        Ok(ImportResult {
-            grab_id: 0,
-            final_status: GrabStatus::Imported,
-            imported_files: vec![],
-            failed_files: vec![],
-            skipped_files: vec![],
-            warnings: vec![],
-        })
-    }
 }
 
 // =============================================================================

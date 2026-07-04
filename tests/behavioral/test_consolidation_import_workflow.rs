@@ -823,34 +823,6 @@ async fn test_import_grab_copy_failure_no_orphaned_db_record() {
 }
 
 // =============================================================================
-// confirm_scan
-// =============================================================================
-
-#[tokio::test]
-#[ignore = "confirm_scan deferred to ManualImportService"]
-async fn test_confirm_scan_imports_selected_files() {
-    todo!("Deferred: scan_root_folder removed from FileService; confirm_scan moves to ManualImportService")
-}
-
-#[tokio::test]
-#[ignore = "confirm_scan deferred to ManualImportService"]
-async fn test_confirm_scan_rejects_path_not_in_scan() {
-    todo!("Deferred: scan_root_folder removed from FileService; confirm_scan moves to ManualImportService")
-}
-
-#[tokio::test]
-#[ignore = "confirm_scan deferred to ManualImportService"]
-async fn test_confirm_scan_expired_returns_error() {
-    todo!("Deferred: scan_root_folder removed from FileService; confirm_scan moves to ManualImportService")
-}
-
-#[tokio::test]
-#[ignore = "confirm_scan deferred to ManualImportService"]
-async fn test_confirm_scan_per_file_failure_continues() {
-    todo!("Deferred: scan_root_folder removed from FileService; confirm_scan moves to ManualImportService")
-}
-
-// =============================================================================
 // extract_chapters_for_item (manual-import chapter regression)
 // =============================================================================
 //

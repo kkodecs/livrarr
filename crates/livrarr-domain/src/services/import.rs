@@ -1,7 +1,5 @@
 use crate::{DbError, GrabId, GrabStatus, MediaType, UserId};
 
-use super::list::ScanConfirmation;
-
 #[derive(Debug)]
 pub struct ImportResult {
     pub grab_id: GrabId,
@@ -47,10 +45,6 @@ pub enum ImportWorkflowError {
     NoRootFolder { media_type: MediaType },
     #[error("source directory not found or inaccessible")]
     SourceInaccessible,
-    #[error("scan not found or expired")]
-    ScanExpired,
-    #[error("scan belongs to another user")]
-    ScanForbidden,
     #[error("import failed: {0}")]
     ImportFailed(String),
     #[error("tag write failed: {0}")]
@@ -70,12 +64,6 @@ pub trait ImportWorkflow: Send + Sync {
         &self,
         user_id: UserId,
         grab_id: GrabId,
-    ) -> Result<ImportResult, ImportWorkflowError>;
-    async fn confirm_scan(
-        &self,
-        user_id: UserId,
-        scan_id: &str,
-        selections: Vec<ScanConfirmation>,
     ) -> Result<ImportResult, ImportWorkflowError>;
 }
 

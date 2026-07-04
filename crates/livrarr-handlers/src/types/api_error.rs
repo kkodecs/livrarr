@@ -232,8 +232,6 @@ impl From<livrarr_domain::services::ImportWorkflowError> for ApiError {
             ImportWorkflowError::SourceInaccessible => {
                 ApiError::BadGateway("source directory not found or inaccessible".into())
             }
-            ImportWorkflowError::ScanExpired => ApiError::NotFound,
-            ImportWorkflowError::ScanForbidden => ApiError::Forbidden,
             ImportWorkflowError::ImportFailed(msg) => ApiError::Internal(msg),
             ImportWorkflowError::TagWriteFailed(msg) => ApiError::Internal(msg),
             ImportWorkflowError::Db(db_err) => ApiError::Db(db_err),

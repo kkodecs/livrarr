@@ -9,7 +9,7 @@ use livrarr_db::{
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::{
     ChapterExtractionError, ChapterExtractor, FailedFile, ImportResult, ImportWorkflow,
-    ImportWorkflowError, ImportedFile, ScanConfirmation, SkippedFile,
+    ImportWorkflowError, ImportedFile, SkippedFile,
 };
 use livrarr_domain::{
     classify_file, sanitize_path_component, DbError, EventType, GrabId, GrabStatus, MediaType,
@@ -1077,16 +1077,6 @@ where
 
         // Re-run import pipeline — dedup inside import_grab handles already-imported files
         self.import_grab(user_id, grab_id).await
-    }
-
-    async fn confirm_scan(
-        &self,
-        _user_id: UserId,
-        _scan_id: &str,
-        _selections: Vec<ScanConfirmation>,
-    ) -> Result<ImportResult, ImportWorkflowError> {
-        // Scan-based import will move to ManualImportService (deferred).
-        Err(ImportWorkflowError::ScanExpired)
     }
 }
 

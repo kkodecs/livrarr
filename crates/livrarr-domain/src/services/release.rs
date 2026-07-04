@@ -82,7 +82,6 @@ pub struct Release {
 pub enum GrabSource {
     Manual,
     RssSync,
-    AutoAdd,
 }
 
 #[derive(Debug, thiserror::Error)]

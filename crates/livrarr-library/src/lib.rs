@@ -5,8 +5,7 @@ pub mod file_service;
 pub mod import_workflow;
 
 use livrarr_domain::{
-    sanitize_path_component, DbError, Grab, GrabId, GrabStatus, LibraryItemId, MediaType,
-    RootFolderId, UserId, WorkId,
+    DbError, Grab, GrabId, GrabStatus, LibraryItemId, MediaType, RootFolderId, UserId, WorkId,
 };
 // Re-export classify_file from domain.
 pub use livrarr_domain::classify_file;
@@ -154,71 +153,6 @@ pub enum ScanError {
     Io(String),
     #[error("database error: {0}")]
     Db(#[from] DbError),
-}
-
-// ---------------------------------------------------------------------------
-// CWA Integration
-// ---------------------------------------------------------------------------
-
-/// CWA downstream integration (non-fatal).
-pub fn copy_to_cwa(
-    source_path: &str,
-    cwa_ingest_path: &str,
-    user_id: UserId,
-    author: &str,
-    title: &str,
-    extension: &str,
-) -> CwaResult {
-    let author_san = sanitize_path_component(author, "Unknown Author");
-    let title_san = sanitize_path_component(title, "Unknown Title");
-    let dst_dir = std::path::Path::new(cwa_ingest_path)
-        .join(user_id.to_string())
-        .join(&author_san);
-    let dst = dst_dir.join(format!("{}.{}", title_san, extension));
-
-    if dst.exists() {
-        return CwaResult {
-            success: false,
-            warning: Some(format!("destination already exists: {}", dst.display())),
-        };
-    }
-
-    if let Err(e) = std::fs::create_dir_all(&dst_dir) {
-        return CwaResult {
-            success: false,
-            warning: Some(format!("failed to create CWA directory: {e}")),
-        };
-    }
-
-    // Try hardlink first
-    match std::fs::hard_link(source_path, &dst) {
-        Ok(()) => CwaResult {
-            success: true,
-            warning: None,
-        },
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            // EXDEV — cross-filesystem, fallback to copy
-            match std::fs::copy(source_path, &dst) {
-                Ok(_) => CwaResult {
-                    success: true,
-                    warning: None,
-                },
-                Err(e) => CwaResult {
-                    success: false,
-                    warning: Some(format!("CWA copy failed: {e}")),
-                },
-            }
-        }
-        Err(e) => CwaResult {
-            success: false,
-            warning: Some(format!("CWA hardlink failed: {e}")),
-        },
-    }
-}
-
-pub struct CwaResult {
-    pub success: bool,
-    pub warning: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

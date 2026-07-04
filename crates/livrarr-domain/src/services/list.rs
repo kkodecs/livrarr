@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{DbError, MediaType, UserId, WorkId};
+use crate::{DbError, UserId};
 
 /// Kept for backward compatibility with existing behavioral tests.
 /// New code should use the redesigned preview(bytes) API.
@@ -107,13 +107,6 @@ pub enum ListServiceError {
     Conflict(String),
     #[error("database error: {0}")]
     Db(#[from] DbError),
-}
-
-#[derive(Debug)]
-pub struct ScanConfirmation {
-    pub relative_path: String,
-    pub work_id: WorkId,
-    pub media_type: MediaType,
 }
 
 #[trait_variant::make(Send)]
