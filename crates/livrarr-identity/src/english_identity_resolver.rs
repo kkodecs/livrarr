@@ -1,8 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use livrarr_domain::identity::*;
+use livrarr_domain::identity_matching;
+use livrarr_domain::normalization::normalize_language;
 use livrarr_domain::services::WorkIdentityError;
 use livrarr_domain::{MetadataProvider, UserId, Work};
 use uuid::Uuid;
@@ -14,32 +16,28 @@ use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 pub use livrarr_domain::identity::WorkSeed;
 pub use livrarr_domain::services::IdentityResolver as EnglishIdentityResolver;
 
-/// Minimum normalized-title Jaccard for two provider results (or a Goodreads
-/// payload vs the resolved identity) to count as the same work. Edition variants
-/// ("Dune" vs "Dune (Illustrated Edition)") normalize to the same tokens and pass;
-/// a different work ("Dune" vs "Dune Messiah") falls below it.
-const TITLE_MATCH_JACCARD: f64 = 0.75;
-
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
-    pub confirm_title_jaccard: f64,
     pub confirm_runner_up_delta: f64,
     /// Per-provider call budget; a provider exceeding it abstains (REQ-025).
     pub call_timeout: Duration,
     /// A Google Books API key is configured (ST-009) — gates GB selection.
     pub gb_key_present: bool,
-    /// An LLM is configured (ST-001) — gates Goodreads selection.
-    pub llm_configured: bool,
+    /// The install's default language (REQ-007/REQ-013), read from
+    /// `metadata_config.default_language`. The one named indirection point
+    /// this module reads for "what counts as this install's language" —
+    /// every language-silent decision below reads this field, never a
+    /// hardcoded "en".
+    pub default_language_source: String,
 }
 
 impl Default for ResolverConfig {
     fn default() -> Self {
         Self {
-            confirm_title_jaccard: 0.75,
             confirm_runner_up_delta: 0.10,
             call_timeout: Duration::from_secs(10),
             gb_key_present: false,
-            llm_configured: false,
+            default_language_source: "en".to_string(),
         }
     }
 }
@@ -88,6 +86,15 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
         let providers = self.select_providers(seed, tier);
         let work = build_transient_work_from_seed(seed, user_id);
 
+        // Tier→priority (B4 table): Interactive (Add/manual-import) is High,
+        // Bulk (list/Readarr import) and Background (monitors/convergence)
+        // are both Low — neither should queue ahead of an interactive add or
+        // a foreground refresh.
+        let priority = match tier {
+            LatencyTier::Interactive => livrarr_domain::RequestPriority::High,
+            LatencyTier::Bulk | LatencyTier::Background => livrarr_domain::RequestPriority::Low,
+        };
+
         // Fan out to the eligible providers in parallel, each under the per-call
         // timeout. A timeout or any non-Success outcome is an abstention — it
         // neither errors the resolve nor counts as quorum disagreement (REQ-025).
@@ -98,7 +105,7 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
                 let work = work.clone();
                 let timeout = self.config.call_timeout;
                 futures.push(async move {
-                    match tokio::time::timeout(timeout, client.fetch(&work)).await {
+                    match tokio::time::timeout(timeout, client.fetch(&work, priority)).await {
                         Ok(ProviderOutcome::Success(detail)) => Some((provider, *detail)),
                         _ => None,
                     }
@@ -127,6 +134,25 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
                 asin = d.asin.is_some(),
                 "identity fan-out responder"
             );
+        }
+
+        // Language veto (REQ-007): a payload whose declared language flatly
+        // contradicts the work's own established language can never merge or
+        // absorb, regardless of title similarity — treated exactly like a
+        // provider that never responded. A solo responder excluded this way
+        // falls through to the existing no-responder path below; a responder
+        // alongside others simply loses the vote.
+        if let Some(work_lang) = norm_lang(seed.language.as_deref()) {
+            responders.retain(|_, d| {
+                !matches!(
+                    identity_matching::language_verdict(
+                        Some(work_lang.as_str()),
+                        norm_lang(d.language.as_deref()).as_deref(),
+                        &self.config.default_language_source,
+                    ),
+                    identity_matching::LanguageVerdict::Veto
+                )
+            });
         }
 
         // REQ-024: a Goodreads key the seed did NOT carry is trusted only if the
@@ -202,6 +228,34 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
             }
         }
 
+        // Language-silent downgrade (REQ-007/AC-011): every surviving responder
+        // declared no usable language, and the work's own language sits outside
+        // the install default — there is no positive evidence this resolution is
+        // even in the right language, so it is a guess like any other Tier-B
+        // candidate rather than an auto-apply. Independent of anchor strength:
+        // an anchored winner is downgraded here too, unlike the Tier-B check above.
+        // "Silent" has one definition module-wide: nothing usable after
+        // normalization — a declared-but-unparseable value is silent here for
+        // the same reason it cannot veto above.
+        if let Resolution::Resolved { .. } = &resolution {
+            let all_silent = responders
+                .values()
+                .all(|d| norm_lang(d.language.as_deref()).is_none());
+            let off_default_silent = matches!(
+                identity_matching::language_verdict(
+                    norm_lang(seed.language.as_deref()).as_deref(),
+                    None,
+                    &self.config.default_language_source,
+                ),
+                identity_matching::LanguageVerdict::Grey
+            );
+            if all_silent && off_default_silent {
+                resolution = Resolution::NeedsConfirmation {
+                    candidates: candidates_from_responders(&responders, seed, &candidate_id),
+                };
+            }
+        }
+
         attach_candidate_id(&mut resolution, candidate_id, user_id);
         Ok(resolution)
     }
@@ -210,15 +264,19 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
 impl LiveEnglishIdentityResolver {
     /// REQ-008 provider matrix scoped by seed + tier + prerequisites; never narrows
     /// a multi-eligible seed to a single provider (the #97 guard). Excludes any
-    /// provider lacking its prerequisite (GB key per ST-009, LLM for GR per ST-001,
-    /// Audnexus on a non-background tier per REQ-021).
+    /// provider lacking its prerequisite (GB key per ST-009, Audnexus on a
+    /// non-background tier per REQ-021). Goodreads carries no prerequisite
+    /// (REQ-012/D6): its matching is deterministic (junk filter + shared 0.75
+    /// picker + explicit abstain), so it participates in identity for every
+    /// install, LLM or not.
     pub fn select_providers(&self, seed: &WorkSeed, tier: LatencyTier) -> Vec<MetadataProvider> {
         let mut out = Vec::new();
 
         // Ebook / print axis: an ISBN, a native ebook key, or title+author reaches
         // OpenLibrary + Hardcover (work anchors), Google Books (edition metadata),
-        // and Goodreads (LLM-verified). Foreign-language metadata is excluded at the
-        // merge layer (REQ-027), not here — anchor capture is language-agnostic.
+        // and Goodreads (deterministic match). Foreign-language metadata is
+        // excluded at the merge layer (REQ-027), not here — anchor capture is
+        // language-agnostic.
         let ebook_axis = seed.isbn_13.is_some()
             || seed.ol_key.is_some()
             || seed.gr_key.is_some()
@@ -230,9 +288,7 @@ impl LiveEnglishIdentityResolver {
             if self.config.gb_key_present {
                 out.push(MetadataProvider::GoogleBooks);
             }
-            if self.config.llm_configured {
-                out.push(MetadataProvider::Goodreads);
-            }
+            out.push(MetadataProvider::Goodreads);
         }
 
         // Audiobook axis: an ASIN reaches Audible interactively; Audnexus is
@@ -292,8 +348,20 @@ pub fn verify_gr_payload(payload: &NormalizedWorkDetail, captured: &CapturedIden
         return false;
     }
     let payload_author = payload.author_name.as_deref().unwrap_or("");
-    title_matches(payload_title, &captured.title)
-        && author_matches(payload_author, &captured.author_name)
+    let pt = identity_matching::parse_title(payload_title);
+    let ct = identity_matching::parse_title(&captured.title);
+    if identity_matching::title_verdict(&pt, &ct) != identity_matching::TitleVerdict::Same {
+        return false;
+    }
+    // REQ-005c: an authorless side abstains rather than vetoing — agreement
+    // then rests on the exact title equality already established above.
+    matches!(
+        identity_matching::author_verdict(
+            &[payload_author.to_string()],
+            std::slice::from_ref(&captured.author_name),
+        ),
+        identity_matching::AuthorVerdict::Agree | identity_matching::AuthorVerdict::Abstain
+    )
 }
 
 /// Group responders by shared returned anchor or normalized title+author:
@@ -470,53 +538,85 @@ fn anchor_count(d: &NormalizedWorkDetail) -> usize {
 /// shared ISBN carrying flatly disagreeing titles is an ISBN collision —
 /// AC-020 surfaces that as a conflict, never a silent merge.
 fn agree(a: &NormalizedWorkDetail, b: &NormalizedWorkDetail) -> bool {
-    if opt_eq(&a.ol_key, &b.ol_key) || opt_eq(&a.gr_key, &b.gr_key) || opt_eq(&a.hc_key, &b.hc_key)
-    {
+    let idv = identity_matching::id_verdict(&id_evidence(a), &id_evidence(b));
+    if idv == identity_matching::IdVerdict::WorkKeyEqual {
         return true;
     }
     // Provably different identities never merge on a fuzzy title: the SAME anchor
     // type carrying DIFFERENT values means two distinct works. Mirrors the AC-020
     // ISBN-collision guard, extended to work keys.
-    if opt_differs(&a.ol_key, &b.ol_key)
-        || opt_differs(&a.gr_key, &b.gr_key)
-        || opt_differs(&a.hc_key, &b.hc_key)
+    if idv == identity_matching::IdVerdict::WorkKeyContradiction {
+        return false;
+    }
+
+    // REQ-007: two payloads that each declare a language, and it differs
+    // after normalization, can never describe the same work — the
+    // language-dimension analog of the work-key contradiction above. (The
+    // work-vs-established-language veto and the language-silent grey rule
+    // live at the `resolve()` level, where the work's own language is in
+    // scope; this is the narrower payload-vs-payload check available here.)
+    if languages_conflict(a.language.as_deref(), b.language.as_deref()) {
+        return false;
+    }
+
+    let pa = identity_matching::parse_title(a.title.as_deref().unwrap_or(""));
+    let pb = identity_matching::parse_title(b.title.as_deref().unwrap_or(""));
+    let tv = identity_matching::title_verdict(&pa, &pb);
+
+    // Payload series positions participate in the volume VETO only: a bare
+    // "Alpha" payload must never corroborate an "Alpha" that carries a
+    // conflicting volume (e.g. a GR pick whose search-card decoration said
+    // #3 while its title was stripped to the bare form). One-sided position
+    // evidence deliberately does NOT demote an equal-main pair — most
+    // providers omit positions, and demotion would strip corroboration from
+    // correct clusters wholesale.
+    if identity_matching::title_verdict_with_positions(
+        &pa,
+        a.series_position,
+        &pb,
+        b.series_position,
+    ) == identity_matching::TitleVerdict::VetoVolume
     {
         return false;
     }
-    let at = a.title.as_deref().unwrap_or("");
-    let bt = b.title.as_deref().unwrap_or("");
-    let aa = a.author_name.as_deref().unwrap_or("");
-    let ba = b.author_name.as_deref().unwrap_or("");
-    let sa = token_set(&aa.to_lowercase());
-    let sb = token_set(&ba.to_lowercase());
 
-    let text_agrees = if sa.is_empty() || sb.is_empty() {
-        let na = normalize_match_title(at);
-        let nb = normalize_match_title(bt);
-        !na.is_empty() && na == nb
-    } else {
-        title_matches(at, bt) && author_matches(aa, ba)
-    };
+    let author_a = a.author_name.as_deref().unwrap_or("");
+    let author_b = b.author_name.as_deref().unwrap_or("");
+    let av = identity_matching::author_verdict(&[author_a.to_string()], &[author_b.to_string()]);
+
+    // Text agreement (REQ-004/005): exact main-title equality plus author
+    // agreement is the only auto-same path. An authorless side abstains and
+    // falls back to the stricter bar of exact title equality, which `Same`
+    // already satisfies (REQ-005c) — kept in this form since #148 predates
+    // this rewrite: authorless corroboration already required exact titles.
+    let text_agrees = tv == identity_matching::TitleVerdict::Same
+        && matches!(
+            av,
+            identity_matching::AuthorVerdict::Agree | identity_matching::AuthorVerdict::Abstain
+        );
     if text_agrees {
         return true;
     }
 
-    let titles_contradict = {
-        let na = normalize_match_title(at);
-        let nb = normalize_match_title(bt);
-        !na.is_empty() && !nb.is_empty() && !title_matches(at, bt)
-    };
-    (opt_eq(&a.isbn_13, &b.isbn_13) || opt_eq(&a.asin, &b.asin)) && !titles_contradict
+    // Edition bridge fallback (#148/AC-020): a shared ISBN/ASIN still bridges
+    // an ambiguous pair (no title on one side, or mains too dissimilar to
+    // resolve as unrelated-but-not-contradicting) — but a flat contradiction
+    // (both sides titled, and either clearly different or a volume conflict)
+    // is never rescued: that is the ISBN-collision shape, never a silent merge.
+    let a_title_empty = a.title.as_deref().unwrap_or("").trim().is_empty();
+    let b_title_empty = b.title.as_deref().unwrap_or("").trim().is_empty();
+    let titles_contradict = !a_title_empty
+        && !b_title_empty
+        && matches!(
+            tv,
+            identity_matching::TitleVerdict::Different
+                | identity_matching::TitleVerdict::VetoVolume
+        );
+    idv == identity_matching::IdVerdict::EditionBridge && !titles_contradict
 }
 
 fn opt_eq(a: &Option<String>, b: &Option<String>) -> bool {
     matches!((a, b), (Some(x), Some(y)) if x == y)
-}
-
-/// Both present and unequal — a provable conflict (vs `opt_eq`, both present and
-/// equal). Used to veto merging works whose same-type anchor holds different values.
-fn opt_differs(a: &Option<String>, b: &Option<String>) -> bool {
-    matches!((a, b), (Some(x), Some(y)) if x != y)
 }
 
 /// Strip a blank anchor value to `None`. A `Some("")` (or whitespace-only)
@@ -542,13 +642,18 @@ fn captured_from_seed(seed: &WorkSeed) -> CapturedIdentity {
 }
 
 fn captured_from_detail(d: &NormalizedWorkDetail, seed: &WorkSeed) -> CapturedIdentity {
+    use livrarr_domain::normalization::{normalize_asin, normalize_gr_key, AsinNorm};
     CapturedIdentity {
         ol_key: non_blank(d.ol_key.clone()),
-        gr_key: non_blank(d.gr_key.clone())
-            .and_then(|k| livrarr_domain::normalization::normalize_gr_key(&k)),
+        gr_key: non_blank(d.gr_key.clone()).and_then(|k| normalize_gr_key(&k)),
         hc_key: non_blank(d.hc_key.clone()),
         isbn_13: non_blank(d.isbn_13.clone()).or_else(|| non_blank(seed.isbn_13.clone())),
-        asin: non_blank(d.asin.clone()).or_else(|| non_blank(seed.asin.clone())),
+        asin: non_blank(d.asin.clone())
+            .or_else(|| non_blank(seed.asin.clone()))
+            .and_then(|a| match normalize_asin(&a) {
+                AsinNorm::Asin(s) => Some(s),
+                _ => None,
+            }),
         title: d
             .title
             .clone()
@@ -692,19 +797,33 @@ fn candidates_from_responders(
     seed: &WorkSeed,
     candidate_id: &CandidateId,
 ) -> Vec<Candidate> {
+    let seed_title = identity_matching::parse_title(seed.title.as_deref().unwrap_or(""));
     responders
         .iter()
-        .map(|(provider, detail)| Candidate {
-            candidate_id: candidate_id.clone(),
-            anchors: captured_from_detail(detail, seed),
-            cover_url: detail.cover_url.clone(),
-            sources: vec![*provider],
-            score: ResolutionScore {
-                title_jaccard: 1.0,
-                author_overlap: 0,
-                runner_up_delta: 0.0,
-            },
-            existing_work_id: None,
+        .map(|(provider, detail)| {
+            // REQ-010: a genuinely computed similarity against what the seed
+            // was looking for, not the hardcoded 1.0 every candidate used to
+            // carry regardless of how well it actually matched.
+            let detail_title =
+                identity_matching::parse_title(detail.title.as_deref().unwrap_or(""));
+            let title_jaccard = match identity_matching::title_verdict(&seed_title, &detail_title) {
+                identity_matching::TitleVerdict::Same => 1.0,
+                identity_matching::TitleVerdict::Grey { score } => score,
+                identity_matching::TitleVerdict::Different
+                | identity_matching::TitleVerdict::VetoVolume => 0.0,
+            };
+            Candidate {
+                candidate_id: candidate_id.clone(),
+                anchors: captured_from_detail(detail, seed),
+                cover_url: detail.cover_url.clone(),
+                sources: vec![*provider],
+                score: ResolutionScore {
+                    title_jaccard,
+                    author_overlap: 0,
+                    runner_up_delta: 0.0,
+                },
+                existing_work_id: None,
+            }
         })
         .collect()
 }
@@ -728,54 +847,34 @@ fn attach_candidate_id(resolution: &mut Resolution, candidate_id: CandidateId, u
     }
 }
 
-fn normalize_match_title(s: &str) -> String {
-    let lower = s.to_lowercase();
-    let mut out = String::new();
-    let mut depth = 0i32;
-    for ch in lower.chars() {
-        match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = (depth - 1).max(0),
-            ':' => break,
-            _ if depth == 0 => out.push(ch),
-            _ => {}
-        }
+/// Project a provider payload's identifier fields into the authority's
+/// evidence shape for [`identity_matching::id_verdict`].
+fn id_evidence(d: &NormalizedWorkDetail) -> identity_matching::IdEvidence<'_> {
+    identity_matching::IdEvidence {
+        ol_key: d.ol_key.as_deref(),
+        gr_key: d.gr_key.as_deref(),
+        hc_key: d.hc_key.as_deref(),
+        isbn_13: d.isbn_13.as_deref(),
+        asin: d.asin.as_deref(),
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn token_set(s: &str) -> HashSet<String> {
-    s.split_whitespace().map(|t| t.to_string()).collect()
+/// Normalize via the shared reconciler (ST-08) before any language compare —
+/// GB's ISO codes and GR's English names already reconcile through it, and
+/// this guarantees a correct compare even if some upstream write path stored
+/// an unnormalized value in `works.language`.
+fn norm_lang(raw: Option<&str>) -> Option<String> {
+    raw.and_then(normalize_language)
 }
 
-fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 0.0;
+/// Both sides declare a language, and it differs after normalization
+/// (REQ-007) — the language-dimension analog of the work-key contradiction
+/// in [`agree`]. Reuses the shared reconciler; never reimplements it.
+fn languages_conflict(a: Option<&str>, b: Option<&str>) -> bool {
+    match (norm_lang(a), norm_lang(b)) {
+        (Some(x), Some(y)) => x != y,
+        _ => false,
     }
-    let inter = a.intersection(b).count() as f64;
-    let union = a.union(b).count() as f64;
-    inter / union
-}
-
-fn title_matches(a: &str, b: &str) -> bool {
-    let na = normalize_match_title(a);
-    let nb = normalize_match_title(b);
-    if na.is_empty() || nb.is_empty() {
-        return false;
-    }
-    if na == nb {
-        return true;
-    }
-    jaccard(&token_set(&na), &token_set(&nb)) >= TITLE_MATCH_JACCARD
-}
-
-fn author_matches(a: &str, b: &str) -> bool {
-    let sa = token_set(&a.to_lowercase());
-    let sb = token_set(&b.to_lowercase());
-    if sa.is_empty() || sb.is_empty() {
-        return false;
-    }
-    sa.intersection(&sb).next().is_some()
 }
 
 #[cfg(test)]
@@ -820,6 +919,44 @@ mod tests {
         let hc = detail("Summer Knight", None, None, Some("341498"));
         let ol = detail("Summer Knight", Some("Jim Butcher"), Some("OL123W"), None);
         assert!(agree(&hc, &ol));
+    }
+
+    // Payload positions feed the volume veto: a bare-titled payload whose
+    // series_position contradicts the other side's must never corroborate —
+    // the GR-picker shape where a later volume's stripped title reads as a
+    // twin while the volume evidence rides the position field.
+    #[test]
+    fn conflicting_payload_positions_veto_agreement() {
+        let mut gr = detail("Alpha", Some("Ann Author"), None, None);
+        gr.series_position = Some(3.0);
+        let mut ol = detail("Alpha", Some("Ann Author"), Some("OL1W"), None);
+        ol.series_position = Some(1.0);
+        assert!(!agree(&gr, &ol));
+    }
+
+    // One-sided position evidence must NOT demote an equal-main pair — most
+    // providers omit positions; demotion would strip corroboration from
+    // correct clusters wholesale.
+    #[test]
+    fn one_sided_payload_position_still_agrees() {
+        let mut gr = detail("Storm Front", Some("Jim Butcher"), None, None);
+        gr.series_position = Some(1.0);
+        let ol = detail("Storm Front", Some("Jim Butcher"), Some("OL2W"), None);
+        assert!(agree(&gr, &ol));
+    }
+
+    // A conflicting position also blocks the edition-bridge rescue: shared
+    // ISBN plus contradicting volumes is the collision shape (AC-020), never
+    // a silent merge.
+    #[test]
+    fn edition_bridge_does_not_rescue_conflicting_positions() {
+        let mut a = detail("Alpha", Some("Ann Author"), None, None);
+        a.isbn_13 = Some("9780000000010".to_string());
+        a.series_position = Some(2.0);
+        let mut b = detail("Alpha", Some("Ann Author"), None, None);
+        b.isbn_13 = Some("9780000000010".to_string());
+        b.series_position = Some(3.0);
+        assert!(!agree(&a, &b));
     }
 
     // The abstention path holds the STRICTER bar: a non-colon title variant
@@ -911,23 +1048,16 @@ mod tests {
         assert!(!agree(&a, &b));
     }
 
-    // C1: `normalize_match_title` truncates at ':' — two different books in the
-    // same series ("The Dresden Files: Summer Knight" vs "The Dresden Files:
-    // Dead Beat") both normalize to "the dresden files", making `agree()` cluster
-    // them together. This test proves the bug: same-series, different-subtitle
-    // entries MUST NOT cluster when they have no shared anchor.
+    // C1 (historical): the deleted private `normalize_match_title` truncated at
+    // ':' — two different books in the same series ("The Dresden Files: Summer
+    // Knight" vs "The Dresden Files: Dead Beat") both normalized to "the dresden
+    // files", making `agree()` cluster them together. That matcher no longer
+    // exists (REQ-001/AC-002); this is now a plain regression guard: same-series,
+    // different-subtitle entries must never cluster — neither with distinct OL
+    // anchors (work-key contradiction) nor with no anchors at all (the text
+    // path alone).
     #[test]
     fn c1_colon_truncation_causes_same_series_cross_book_clustering() {
-        // Step 1: prove normalize_match_title collapses both to the same prefix.
-        let summer_knight_normalized = normalize_match_title("The Dresden Files: Summer Knight");
-        let dead_beat_normalized = normalize_match_title("The Dresden Files: Dead Beat");
-        assert_eq!(
-            summer_knight_normalized, dead_beat_normalized,
-            "BUG CONFIRMED: both titles collapse to {:?} — subtitle is lost",
-            summer_knight_normalized
-        );
-
-        // Step 2: prove agree() clusters two different books as a result.
         let summer_knight = detail(
             "The Dresden Files: Summer Knight",
             Some("Jim Butcher"),
@@ -940,13 +1070,31 @@ mod tests {
             Some("OL_DEAD_BEAT"),
             None,
         );
-        // These are different books with different OL anchors. agree() must return
-        // false — but due to C1, the colon truncation makes title_matches() return
-        // true, so agree() incorrectly returns true.
+        // Different books with different OL anchors: the work-key contradiction
+        // vetoes outright.
         assert!(
             !agree(&summer_knight, &dead_beat),
-            "BUG CONFIRMED: agree() clustered two different Dresden Files books \
-             because colon truncation collapsed both titles to 'the dresden files'"
+            "agree() must never cluster two different Dresden Files books"
+        );
+
+        // Anchor-less variant: no work keys, no bridges — the text path alone
+        // decides. Equal mains ("dresden files") with disagreeing true
+        // subtitles demote to grey, and grey never clusters.
+        let summer_knight_bare = detail(
+            "The Dresden Files: Summer Knight",
+            Some("Jim Butcher"),
+            None,
+            None,
+        );
+        let dead_beat_bare = detail(
+            "The Dresden Files: Dead Beat",
+            Some("Jim Butcher"),
+            None,
+            None,
+        );
+        assert!(
+            !agree(&summer_knight_bare, &dead_beat_bare),
+            "the text path alone must never cluster same-series different-subtitle books"
         );
     }
 
@@ -982,6 +1130,214 @@ mod tests {
                 assert_eq!(identity.hc_key.as_deref(), Some("341498"));
             }
             other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    // --- AC-021: work-key-vs-edition arbitration (REQ-006) ---
+
+    // ISBN equal + same-provider work keys (both `ol_key`) different: the
+    // work-key contradiction outranks the edition-id agreement outright — a
+    // collision surfaced as Conflict, never an auto-merge.
+    #[test]
+    fn ac021_isbn_equal_but_work_keys_differ_is_conflict_not_merge() {
+        let isbn = "9780000000401";
+        let mut responders = HashMap::new();
+        responders.insert(
+            MetadataProvider::OpenLibrary,
+            NormalizedWorkDetail {
+                title: Some("Arbitration Case".to_string()),
+                author_name: Some("Case Author".to_string()),
+                ol_key: Some("OL-ARB-A".to_string()),
+                isbn_13: Some(isbn.to_string()),
+                ..Default::default()
+            },
+        );
+        responders.insert(
+            MetadataProvider::Hardcover,
+            NormalizedWorkDetail {
+                title: Some("Arbitration Case".to_string()),
+                author_name: Some("Case Author".to_string()),
+                ol_key: Some("OL-ARB-B".to_string()),
+                isbn_13: Some(isbn.to_string()),
+                ..Default::default()
+            },
+        );
+        let resolution = run_quorum(&responders, &seed("Arbitration Case", "Case Author"));
+        assert!(
+            matches!(resolution, Resolution::Conflict { .. }),
+            "AC-021: an ISBN match with contradicting same-provider work keys \
+             must surface as a conflict, got {resolution:?}"
+        );
+    }
+
+    // ASINs differing while all else (title, author, and a shared ol_key)
+    // agrees carries zero penalty: an edition-level id's inequality is no
+    // evidence and never vetoes.
+    #[test]
+    fn ac021_differing_asin_with_agreeing_everything_else_is_no_penalty() {
+        let mut responders = HashMap::new();
+        responders.insert(
+            MetadataProvider::OpenLibrary,
+            NormalizedWorkDetail {
+                title: Some("Arbitration Case".to_string()),
+                author_name: Some("Case Author".to_string()),
+                ol_key: Some("OL-ARB".to_string()),
+                asin: Some("B000ARBA1".to_string()),
+                ..Default::default()
+            },
+        );
+        responders.insert(
+            MetadataProvider::Audible,
+            NormalizedWorkDetail {
+                title: Some("Arbitration Case".to_string()),
+                author_name: Some("Case Author".to_string()),
+                asin: Some("B000ARBA2".to_string()),
+                ..Default::default()
+            },
+        );
+        match run_quorum(&responders, &seed("Arbitration Case", "Case Author")) {
+            Resolution::Resolved { identity, .. } => {
+                assert_eq!(identity.ol_key.as_deref(), Some("OL-ARB"));
+            }
+            other => panic!(
+                "AC-021: differing ASINs must carry zero penalty when everything \
+                 else agrees, got {other:?}"
+            ),
+        }
+    }
+
+    // --- REQ-007 language dimension + REQ-010 real scores (resolve()-level) ---
+
+    fn resolver_with(
+        stubs: Vec<livrarr_external_data::StubProviderClient>,
+        default_language_source: &str,
+    ) -> LiveEnglishIdentityResolver {
+        let clients = stubs
+            .into_iter()
+            .map(|s| (s.provider, ProviderClient::Stub(s)))
+            .collect::<HashMap<_, _>>();
+        LiveEnglishIdentityResolver {
+            clients,
+            cache: Arc::new(TransportCache::new(Duration::from_secs(30))),
+            config: ResolverConfig {
+                gb_key_present: false,
+                default_language_source: default_language_source.to_string(),
+                ..ResolverConfig::default()
+            },
+        }
+    }
+
+    fn plain_seed(title: &str, author: &str, language: Option<&str>) -> WorkSeed {
+        WorkSeed {
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            isbn_13: None,
+            asin: None,
+            title: Some(title.to_string()),
+            author_name: Some(author.to_string()),
+            language: language.map(str::to_string),
+            series_name: None,
+            year: None,
+            user_confirmed: false,
+        }
+    }
+
+    // AC-010: a French-declared payload never merges onto an English work even
+    // with an identical main title — the language veto outranks title similarity.
+    #[tokio::test]
+    async fn ac010_declared_language_mismatch_never_merges_onto_work() {
+        let seed = plain_seed("Dune", "Frank Herbert", Some("en"));
+        let ol = livrarr_external_data::StubProviderClient::new(
+            MetadataProvider::OpenLibrary,
+            ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
+                title: Some("Dune".to_string()),
+                author_name: Some("Frank Herbert".to_string()),
+                ol_key: Some("OL-DUNE-FR".to_string()),
+                language: Some("fr".to_string()),
+                ..NormalizedWorkDetail::default()
+            })),
+        );
+        let resolver = resolver_with(vec![ol], "en");
+
+        let resolution = resolver
+            .resolve(1, &seed, LatencyTier::Interactive)
+            .await
+            .expect("resolve");
+
+        assert!(
+            !matches!(resolution, Resolution::Resolved { .. }),
+            "AC-010: a French-declared payload must never merge onto an English \
+             work, got {resolution:?}"
+        );
+    }
+
+    // AC-011: a language-silent payload on a work outside the install default
+    // lands grey (NeedsConfirmation), never auto-applies — even though the
+    // payload carries a work anchor and would otherwise auto-confirm.
+    #[tokio::test]
+    async fn ac011_language_silent_payload_on_non_default_work_lands_grey() {
+        let seed = plain_seed(
+            "Le Petit Prince",
+            "Antoine de Saint-Exupery",
+            Some("fr"), // the work's own language: not the install default below
+        );
+        let ol = livrarr_external_data::StubProviderClient::new(
+            MetadataProvider::OpenLibrary,
+            ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
+                title: Some("Le Petit Prince".to_string()),
+                author_name: Some("Antoine de Saint-Exupery".to_string()),
+                ol_key: Some("OL-PETIT-PRINCE".to_string()),
+                language: None, // silent
+                ..NormalizedWorkDetail::default()
+            })),
+        );
+        let resolver = resolver_with(vec![ol], "en");
+
+        let resolution = resolver
+            .resolve(1, &seed, LatencyTier::Interactive)
+            .await
+            .expect("resolve");
+
+        assert!(
+            matches!(resolution, Resolution::NeedsConfirmation { .. }),
+            "AC-011: a language-silent payload on a non-default-language work \
+             must land grey, got {resolution:?}"
+        );
+    }
+
+    // REQ-010: a NeedsConfirmation candidate carries a genuinely computed
+    // title-similarity score, not the old hardcoded 1.0 — a near (not exact)
+    // title must land strictly between the grey floor and 1.0.
+    #[tokio::test]
+    async fn real_score_population_computes_actual_similarity_not_hardcoded_one() {
+        let seed = plain_seed("The Wise Man's Fear", "Patrick Rothfuss", Some("en"));
+        let ol = livrarr_external_data::StubProviderClient::new(
+            MetadataProvider::OpenLibrary,
+            ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
+                title: Some("The Wise Man's Fear Chronicle".to_string()),
+                author_name: Some("Patrick Rothfuss".to_string()),
+                language: Some("en".to_string()),
+                ..NormalizedWorkDetail::default()
+            })),
+        );
+        let resolver = resolver_with(vec![ol], "en");
+
+        let resolution = resolver
+            .resolve(1, &seed, LatencyTier::Interactive)
+            .await
+            .expect("resolve");
+
+        match resolution {
+            Resolution::NeedsConfirmation { candidates } => {
+                assert_eq!(candidates.len(), 1);
+                let score = candidates[0].score.title_jaccard;
+                assert!(
+                    (identity_matching::TITLE_GREY_FLOOR..1.0).contains(&score),
+                    "REQ-010: expected a genuinely computed near-match score, got {score}"
+                );
+            }
+            other => panic!("expected NeedsConfirmation with a real score, got {other:?}"),
         }
     }
 }

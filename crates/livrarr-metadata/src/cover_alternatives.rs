@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use livrarr_domain::services::HttpFetcher;
 use livrarr_domain::{
-    CoverCandidateSource, CoverMediaType, InternalCoverCandidate, MetadataProvider, Work,
+    CoverCandidateSource, CoverMediaType, InternalCoverCandidate, MetadataProvider,
+    RequestPriority, Work,
 };
 
 use crate::cover_resolution::should_reject_cover;
@@ -58,10 +60,10 @@ fn media_type_for_provider(provider: MetadataProvider) -> CoverMediaType {
     }
 }
 
-pub async fn fetch_internal_alternatives(
+pub async fn fetch_internal_alternatives<F: HttpFetcher>(
     work: &Work,
     clients: &HashMap<MetadataProvider, ProviderClient>,
-    http: &livrarr_http::HttpClient,
+    http: &F,
 ) -> Vec<InternalCoverCandidate> {
     let eligible = eligible_providers_for_work(work);
     let mut candidates = Vec::new();
@@ -73,9 +75,14 @@ pub async fn fetch_internal_alternatives(
             let client = client.clone();
             let work_clone = work.clone();
             futures.push(async move {
-                let result =
-                    tokio::time::timeout(ALTERNATIVE_FETCH_TIMEOUT, client.fetch(&work_clone))
-                        .await;
+                // Normal: the picker's route here is not fully verified as
+                // interactive (B4 table) — conservative default rather than
+                // an unverified High.
+                let result = tokio::time::timeout(
+                    ALTERNATIVE_FETCH_TIMEOUT,
+                    client.fetch(&work_clone, RequestPriority::Normal),
+                )
+                .await;
                 match result {
                     Ok(outcome) => (provider, extract_cover_info(provider, outcome)),
                     Err(_) => {
@@ -110,7 +117,9 @@ pub async fn fetch_internal_alternatives(
     // ISBN-based covers (English: OL→Amazon, Foreign: CdL→Amazon)
     let isbn = work.isbn_13.as_deref();
     if is_english_work(work) {
-        if let Some(url) = crate::cover::resolve_cover_english(http, isbn).await {
+        if let Some(url) =
+            crate::cover::resolve_cover_english(http, isbn, RequestPriority::Normal).await
+        {
             candidates.push(InternalCoverCandidate {
                 source: CoverCandidateSource::IsbnOl,
                 url,
@@ -118,7 +127,9 @@ pub async fn fetch_internal_alternatives(
                 edition_title: None,
             });
         }
-    } else if let Some(url) = crate::cover::resolve_cover_foreign(http, isbn).await {
+    } else if let Some(url) =
+        crate::cover::resolve_cover_foreign(http, isbn, RequestPriority::Normal).await
+    {
         candidates.push(InternalCoverCandidate {
             source: CoverCandidateSource::IsbnAmazon,
             url,

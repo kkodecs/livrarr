@@ -150,3 +150,46 @@ async fn test_wcc_merge_reuse_ac_027_foreign_work_drops_openlibrary_and_hardcove
         "language-compatible Google Books payload should remain eligible after OL/HC are dropped"
     );
 }
+
+/// REQ-IDs: REQ-017, M-012
+/// Directive: the candidate-reuse merge path (merge_from_cached) applies the same
+/// Goodreads cover gate as the network path — a cached GR payload whose title
+/// shares no tokens with the work title must not have its cover win the merge.
+#[tokio::test]
+async fn test_wcc_merge_reuse_gr_cover_gate_strips_mismatched_cached_cover() {
+    let current_work = Work {
+        identity_status: Default::default(),
+        id: WORK_ID,
+        user_id: USER_ID,
+        title: "The Name of the Wind".to_string(),
+        author_name: "Patrick Rothfuss".to_string(),
+        language: Some("en".to_string()),
+        ol_key: Some("OL15832982W".to_string()),
+        ..Work::default()
+    };
+
+    let payloads = HashMap::from([(
+        MetadataProvider::Goodreads,
+        NormalizedWorkDetail {
+            title: Some("A Darkness at Sethanon".to_string()),
+            author_name: Some("Raymond E. Feist".to_string()),
+            cover_url: Some("https://covers.example/mismatched-gr-cover.jpg".to_string()),
+            gr_key: Some("999".to_string()),
+            ..NormalizedWorkDetail::default()
+        },
+    )]);
+
+    let output = engine()
+        .merge_from_cached(current_work, payloads, vec![], Some("en"))
+        .await
+        .expect("cached merge should succeed");
+
+    let cover_is_mismatched_gr = output
+        .cover_resolution
+        .as_ref()
+        .is_some_and(|c| c.url == "https://covers.example/mismatched-gr-cover.jpg");
+    assert!(
+        !cover_is_mismatched_gr,
+        "mismatched-title GR cover must not win the cached-reuse merge (REQ-017/M-012)"
+    );
+}

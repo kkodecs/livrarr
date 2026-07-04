@@ -236,3 +236,97 @@ Processed all 17 specs chronologically (v2 through consolidation), 4 policies, c
 - Ingested domain knowledge from high-level build artifact review
 - 2026-06-10: insight 49 added — speed baseline + serial-scatter finding, a6 release gate (B + parallelization), F1 live-confirmation + revert. Sprint A closed in ROADMAP.
 - 2026-06-10: insight 16 corrected (metadata_source is a dead column; works.language drives foreign routing) + insight 50 added (Sprint B evidence round: F1 root cause = wrong-book adoption, anchors triple-stored, file logging alive / stale livrarr.txt pointer, no 24h cache). Source: spec-metadata-correctness.md §0b.
+
+## 2026-07-02 — Phase 3 foundation build complete (overnight session)
+Rewrote insight 30: the "rate limiter must reject" rule described the enrichment
+TokenBucket, deleted in Phase 3 stage C. Replaced with the outbound-queue transport
+architecture (pacing/cap/breaker/priority at livrarr-http, R-11 pause semantics,
+reporter split). Insight 49's description of TokenBucket+Semaphore in
+dispatch_enrichment is now historical — the scatter still uses JoinSet but transport
+control lives at the outbound queue. Stages B0..C at commits 19af4d5, 7e76dec,
+556e327, f03b537, 1657d26, f557e07, 97963cf; every stage dual-family reviewed (PASS).
+
+## 2026-07-02 — Phase 4 (data completeness + convergence) built + dual-family reviewed
+All five units built on 97963cf, orchestrator-gate-verified (1094 tests, 10 new),
+Gemini+Codex PASS across 3 review batches, 0 findings; work UNCOMMITTED pending PO go.
+Units: dead `pacing_queue` module deleted (submit was `todo!()`, zero production
+callers); M-013 empty-list guard at extract time (`non_empty_vec` — HC/GB/Readarr all
+emitted `Some(vec![])`, which won the priority walk and ERASED stored genres via the
+un-COALESCEd `genres = ?` bind); M-012 GR cover gate moved into `merge()` (was
+network-path-only; the cached-reuse path also stamped every payload Success→Validated
+trust, amplifying the miss); M-014 `merge_generation` predicate + rows_affected check
+on both `apply_enrichment_merge` UPDATEs; M-017 `converge_outcome` pure fn (Completed
+now requires zero chaseable anchors) + job error-arm backoff. Insights 56-58 added
+(merge chokepoint policies; Completed contract; GR-breaker test flake).
+`livrarr-domain/services/pacing.rs` (PacingLane/ProviderCallOutcome) deliberately left
+— PO decision pending. Packet + unit ledger: `build/plans/packet-phase4.md`.
+
+## 2026-07-03 — Phase 5 (one matching authority) COMPLETE: built, reviewed, merged, deployed
+All Phase-5 units landed on metadata-remediation (overnight autonomous run, PO
+gates pre-approved): H default-language setting (2a12960), A authority module +
+46 trap tests (3454b7a), C decision-diff harness (7ffc697) whose v2 report the
+PO approved as the cutover basis, J AC-012 pin (99c7bd7), I merge-two-works
+(5908fd5), D identity-engine rewire + candidate persistence + refresh gate
+(5801200), F recognition fixes + harness old-side freeze (49648c1), G GR unlock
++ HC Tier-2 delete + dead scaffolding (0ef07d1), E identity key + adopt/dedup +
+recompute (6fa00e9), J2 review surface + conflicts wiring + RSS language-skip
+notifications (a06ba33). Every unit dual-family reviewed to PASS+PASS (codex
+caught 6 real P1s across the night: harness live-call old sides, backfill
+catch-all error masking, resolve/dismiss missing parked-state guards ×2 + the
+orchestrator caught the sibling-key-collision P1 and the scan-flatten
+regression pre-review). Final gate 1221/0 (129 suites); startup recompute
+backfilled all 133 works' stored keys zero-collision (identity_key_generation=1);
+3 works carry segmented keys. Insights 13 (rewritten — GR needs no LLM), 59-61
+added. Hygiene backlog recorded in the phase report: GateReason::
+DeterministicSkipNoLlm rename, orphaned tests/behavioral/test_metadata.rs, two
+stale "askllm" stub docstrings, normalize_for_matching removal once fixtures
+migrate. Spec REQ-013 (per-install) and REQ-015 (c)/(d) amendments applied.
+P11's parenthetical Hardcover example still needs the PO's one-line edit.
+
+## 2026-07-03 — N1: GR series-page parser rewrite (React layout)
+
+GR redesigned /series/<id> to React (books in data-react-props JSON; no
+position labels; old h3/JSON-LD layout gone) → parser silent-empty →
+series-add created 0 works. Rewrote parse_series_detail_html (per-entry
+tolerant parse, loud drift warns, pagination counter blob), roster = header's
+"N primary works" cutoff (live probe 43318 disproved blob-membership==primary:
+27 listed for 3 primaries), positions only from same-series decorations.
+Emptiness never persisted: stored-empty heals on open, monitor never writes an
+empty/partial fetch, every roster save pairs with work_count. Review: r1 2
+findings (collision-branch heal bypass P1, mount-order test gap P2), r2 codex
+partial-pagination P1, r3 PASS×2. 1239 tests green. Fixtures:
+crates/livrarr-external-data/fixtures/. Updated goodreads.md (stale
+"GR requires LLM" + series-page section), series-matching.md, series.md
+(roster amendments), insight 62 added. Gemini note for retro: r1 retry
+findings were verbatim codex copies (verdict-file bleed suspected); 0 unique
+gemini P1s again.
+
+## 2026-07-03 — N4: GR picker through the matching authority
+
+The 2026-07-03 refresh residue (8-9 GR misses, all bare-seed vs subtitled
+GR record) traced to gr_best_match's whole-title jaccard. The picker now
+routes through parse_title/title_verdict (Same or Grey picks, decorated hit
+title parsed, junk filter + author-token guard unchanged, Same>Grey ranking,
+earliest-on-ties). Review r1 codex P1: a picked one-sided-volume Grey could
+self-corroborate downstream because apply_bare_title stripped the decoration
+and agree() ignored series_position — fixed by making the evidence travel
+(autocomplete parses decoration into series fields; candidate/payload carry
+them; agree folds positions into the volume VETO only, incl. blocking the
+edition-bridge rescue). r2 PASS×2. 1250 tests green. Insight 59 amended.
+
+## 2026-07-03 — N3: dead-URL phase1 cover fast-fail
+
+Import profiling showed dead embedded cover URLs burning phase1's full 3s
+budget per book (~40% of machine time), same host repeating across the batch.
+New HttpFetcher::fetch_ssrf_safe_fast_connect (600ms connect budget via a
+third pre-built client sharing the SSRF preflight; default-bodied trait
+method, pre-desugared for trait_variant) + a per-import-run task-local
+negative host cache (manual-import loop only, fail-open everywhere else).
+download_cover_to_disk got a typed error so only connect-class failures mark
+a host dead. Built by a Sonnet agent in a worktree (hybrid with N4);
+PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
+
+## 2026-07-04 — N2 cover pipeline consolidation
+- insights.md: NEW insight 63 (one cover rank / write gate / layout); amended 52(4) (#153 upgrade half now live) and 51(8) (audiobook dims writer closed).
+- architecture/metadata-pathway.md: corrected the stale "OL emits no cover URL" claim; risk section rewritten — cover writes decoupled from the generic merge (write gate).
+- Source: unit N2, merge 9f1f61e (design confer r1/r2 + code review r1 FAIL+FAIL → fix round → r2 PASS+PASS; record at build/reviews/n2-cover-consolidation/).

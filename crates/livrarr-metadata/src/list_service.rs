@@ -7,7 +7,7 @@ use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use tracing::{info, warn};
 
-use livrarr_db::ListImportDb;
+use livrarr_db::{ConfigDb, ListImportDb};
 use livrarr_domain::services::*;
 use livrarr_domain::UserId;
 
@@ -56,6 +56,7 @@ where
         user_id: UserId,
         row: &livrarr_db::ListImportPreviewRow,
         language: Option<&str>,
+        default_language: &str,
     ) -> livrarr_domain::identity::WorkCandidate {
         use livrarr_domain::identity::{
             CapturedIdentity, IdentityState, LatencyTier, PendingReason, RawHarvest,
@@ -122,7 +123,7 @@ where
             livrarr_domain::seed::SeedInput {
                 title: row.title.clone(),
                 author_name: row.author.clone(),
-                language: livrarr_domain::seed::SeedLanguage::resolve(language),
+                language: livrarr_domain::seed::SeedLanguage::resolve(language, default_language),
                 author_ol_key: None,
                 year: row.year,
                 cover_url: None,
@@ -143,7 +144,7 @@ where
 
 impl<D, W, H, B> ListService for ListServiceImpl<D, W, H, B>
 where
-    D: ListImportDb + livrarr_db::WorkDb + Send + Sync,
+    D: ListImportDb + livrarr_db::WorkDb + ConfigDb + Send + Sync,
     W: WorkService + Send + Sync,
     H: HttpFetcher + Send + Sync,
     B: BibliographyTrigger + Send + Sync,
@@ -349,7 +350,16 @@ where
             new_author_id: Option<i64>,
         }
 
+        // The user's default language, read once per confirm run: rows keep
+        // the import's explicit language choice; without one they seed this.
+        let default_language = self
+            .db
+            .get_default_language()
+            .await
+            .map_err(ListServiceError::Db)?;
+
         let resolved_id_ref = &resolved_import_id;
+        let default_language_ref = &default_language;
         let outcomes: Vec<RowOutcome> = stream::iter(row_indices.iter().copied())
             .map(|row_idx| async move {
                 let row = match self
@@ -387,7 +397,7 @@ where
                 // A resolvable row lands Confirmed; a miss lands Pending without
                 // blocking the import.
                 let add_req = self
-                    .resolve_candidate_from_row(user_id, &row, language)
+                    .resolve_candidate_from_row(user_id, &row, language, default_language_ref)
                     .await;
 
                 match self.work_service.add(user_id, add_req).await {

@@ -9,15 +9,14 @@ use livrarr_db::{
 };
 use livrarr_domain::{
     identity::CandidateId, normalize_for_matching, EnrichmentStatus, MetadataProvider,
-    OutcomeClass, UserId, UserRole, Work, WorkId,
+    OutcomeClass, RequestPriority, UserId, UserRole, Work, WorkId,
 };
 use livrarr_external_data::{
     transport_cache::TransportCache, NormalizedWorkDetail, ProviderOutcome,
 };
 use livrarr_metadata::{
-    CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentService,
-    EnrichmentServiceImpl, PacingQueue, PriorityModel, ProviderQueue, ProviderQueueError,
-    ScatterGatherResult,
+    DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentService,
+    EnrichmentServiceImpl, PriorityModel, ProviderQueue, ProviderQueueError, ScatterGatherResult,
 };
 use tokio::sync::Mutex;
 
@@ -62,10 +61,6 @@ impl ProviderQueue for StubProviderQueue {
             persist_scatter_result(db, *user_id, &result).await?;
         }
         Ok(result)
-    }
-
-    fn circuit_state(&self, _provider: MetadataProvider) -> CircuitState {
-        CircuitState::Closed
     }
 }
 
@@ -228,8 +223,6 @@ fn service(
         Arc::new(db),
         Arc::new(queue),
         Arc::new(DefaultMergeEngine::new(PriorityModel::english())),
-        Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-        livrarr_metadata::work_service::StubNoLlm,
         false,
     )
     .with_transport_cache(Arc::new(cache.clone()))
@@ -272,7 +265,13 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
     let service = service(db.clone(), queue, cache.clone());
 
     service
-        .enrich_work(user_id, add_box_work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            add_box_work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("network path should enrich");
 
@@ -292,6 +291,7 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
             author_page_work.id,
             EnrichmentMode::Manual,
             Some(CandidateId("cached-candidate-with-cover".to_string())),
+            RequestPriority::Normal,
         )
         .await
         .expect("candidate reuse path should enrich without a second network dispatch");
@@ -313,7 +313,7 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
 }
 
 #[tokio::test]
-async fn failed_enrichment_sets_failed_and_queue_membership_is_transient() {
+async fn failed_enrichment_sets_failed() {
     // AC-009
     let db = create_test_db().await;
     let (user_id, work) = seed_user_and_work(&db, "failed", "Failed Title").await;
@@ -332,7 +332,13 @@ async fn failed_enrichment_sets_failed_and_queue_membership_is_transient() {
     );
 
     let result = service
-        .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("failed provider run should not block the add");
 
@@ -343,12 +349,6 @@ async fn failed_enrichment_sets_failed_and_queue_membership_is_transient() {
             .unwrap()
             .enrichment_status,
         EnrichmentStatus::Failed
-    );
-
-    let pacing = livrarr_metadata::LivePacingQueue::new(Arc::new(db));
-    assert!(
-        !pacing.has_pending_or_running(work.id),
-        "in-progress is derived from live queue membership, not persisted status"
     );
 }
 
@@ -375,7 +375,13 @@ async fn unconfigured_provider_is_skipped_remaining_providers_save_the_work() {
     );
 
     let result = service
-        .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("unconfigured provider must not block the add");
 
@@ -385,9 +391,15 @@ async fn unconfigured_provider_is_skipped_remaining_providers_save_the_work() {
         saved.description,
         Some("A provider description".to_string())
     );
+    // N2/S2: cover fields no longer persist via the generic field merge this
+    // direct enrich_work() call exercises — only the cover-write gate (one
+    // layer up, in run_unified_enrichment) commits cover_url/source/trust/
+    // dims. The merge's resolved pick is still observable on the in-memory
+    // result, which is what this test (about provider skip behavior, not
+    // the cover gate) actually needs to prove.
     assert_eq!(
-        saved.cover_url,
-        Some("https://covers.example.test/ebook.jpg".to_string())
+        result.cover_resolution.as_ref().map(|r| r.url.as_str()),
+        Some("https://covers.example.test/ebook.jpg")
     );
 }
 
@@ -412,7 +424,13 @@ async fn all_providers_no_usable_data_saves_seed_and_lands_thin_or_failed() {
     );
 
     let result = service
-        .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("empty provider results must not block the add");
 
@@ -446,7 +464,13 @@ async fn one_empty_success_and_rest_errors_lands_thin_not_failed() {
     );
 
     let result = service
-        .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+        .enrich_work(
+            user_id,
+            work.id,
+            EnrichmentMode::Manual,
+            None,
+            RequestPriority::Normal,
+        )
         .await
         .expect("mixed empty-success plus errors should complete");
 

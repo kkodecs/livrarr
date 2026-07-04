@@ -323,6 +323,28 @@ impl LibraryItemDb for SqliteDb {
         Ok(())
     }
 
+    async fn update_library_item_path(
+        &self,
+        user_id: UserId,
+        id: LibraryItemId,
+        new_path: &str,
+    ) -> Result<(), DbError> {
+        let result = sqlx::query("UPDATE library_items SET path = ? WHERE id = ? AND user_id = ?")
+            .bind(new_path)
+            .bind(id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound {
+                entity: "library_item",
+            });
+        }
+        Ok(())
+    }
+
     async fn work_has_library_item(
         &self,
         user_id: UserId,

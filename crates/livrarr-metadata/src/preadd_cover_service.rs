@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use livrarr_domain::services::{PreaddCoverCandidate, PreaddCoverError, PreaddCoverService};
-use livrarr_domain::{MetadataProvider, UserId, Work};
+use livrarr_domain::{MetadataProvider, RequestPriority, UserId, Work};
 
 use livrarr_external_data::provider_client::ProviderClient;
 
@@ -43,8 +43,11 @@ impl PreaddCoverService for LivePreaddCoverService {
                 let work = temp_work.clone();
                 let provider = *provider;
                 handles.push(tokio::spawn(async move {
-                    let result =
-                        tokio::time::timeout(Duration::from_secs(10), client.fetch(&work)).await;
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        client.fetch(&work, RequestPriority::High),
+                    )
+                    .await;
                     (provider, result)
                 }));
             }

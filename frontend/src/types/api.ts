@@ -307,6 +307,43 @@ export interface DeleteWorkResponse {
   warnings: string[];
 }
 
+// Merge duplicates
+export type MergeableField = "series_name" | "series_position";
+export type MergeFieldChoice = "keep_survivor" | "take_loser";
+
+export interface MergeConflict {
+  field: MergeableField;
+  survivorValue: string;
+  loserValue: string;
+}
+
+export interface MergePreviewResponse {
+  survivorId: number;
+  loserId: number;
+  libraryItemsMoving: number;
+  grabsMoving: number;
+  monitorEbookResult: boolean;
+  monitorAudiobookResult: boolean;
+  /** Fields needing an explicit choice before the merge can execute. */
+  conflicts: MergeConflict[];
+}
+
+export interface MergeChoiceEntry {
+  field: MergeableField;
+  choice: MergeFieldChoice;
+}
+
+export interface MergeWorksRequest {
+  choices: MergeChoiceEntry[];
+}
+
+export interface MergeWorksResponse {
+  survivor: WorkDetailResponse;
+  libraryItemsMoved: number;
+  grabsMoved: number;
+  warnings: string[];
+}
+
 // Authors
 export interface AuthorSearchResult {
   olKey: string;
@@ -470,6 +507,108 @@ export interface NotificationResponse {
   data: Record<string, unknown>;
   read: boolean;
   createdAt: string;
+}
+
+// Identity review (AC-013 grey-park surface): a work parked "needs review"
+// with its persisted, real-scored candidates.
+export interface IdentityReviewCandidate {
+  candidateId: string;
+  title: string;
+  authorName: string;
+  language: string | null;
+  olKey: string | null;
+  grKey: string | null;
+  hcKey: string | null;
+  isbn13: string | null;
+  asin: string | null;
+  coverUrl: string | null;
+  sources: string[];
+  titleJaccard: number;
+  authorOverlap: number;
+  existingWorkId: number | null;
+}
+
+export interface IdentityReviewPark {
+  workId: number;
+  title: string;
+  authorName: string;
+  coverUrl: string | null;
+  candidates: IdentityReviewCandidate[];
+}
+
+export interface ResolveIdentityReviewRequest {
+  candidateId: string;
+}
+
+// Identity conflicts (AC-021 work-key contradictions). Field names are
+// camelCase like every other endpoint. Enum VALUES (action/status/kind/source)
+// are snake_case strings, and the nested `incoming` payload keeps snake_case
+// keys — it serializes the domain type IncomingConflictPayload, whose JSON
+// shape is also persisted inside DB conflict rows.
+export type ConflictResolutionAction =
+  | "keep_existing"
+  | "accept_separate"
+  | "replace_anchor"
+  | "merge";
+export type ConflictStatus = "open" | "resolved" | "dismissed";
+export type ConflictSource =
+  | "manual_add"
+  | "manual_import"
+  | "list_import"
+  | "readarr_import"
+  | "series_monitor"
+  | "author_monitor"
+  | "refresh"
+  | "manual_retry"
+  | "convergence";
+export type IdentityConflictKind =
+  | "incoming_different_ol_key"
+  | "incoming_different_gr_key"
+  | "incoming_different_hc_key"
+  | "ol_redirect_collision"
+  | "quorum_tie";
+
+export interface IdentityConflictSummary {
+  id: number;
+  existingWorkId: number;
+  kind: string;
+  incomingTitle: string;
+  incomingAuthor: string;
+  incomingOlKey: string | null;
+  raisedAt: string;
+  raisedBy: string;
+  status: string;
+}
+
+export interface IdentityConflictDetail {
+  id: number;
+  existingWorkId: number;
+  kind: IdentityConflictKind;
+  // Domain-type payload — snake_case keys (see section comment above).
+  incoming: {
+    ol_key: string | null;
+    gr_key: string | null;
+    hc_key: string | null;
+    isbn_13: string | null;
+    asin: string | null;
+    title: string;
+    author_name: string;
+    year: number | null;
+    cover_url: string | null;
+    top_candidates: unknown[];
+  };
+  raisedAt: string;
+  raisedBy: ConflictSource;
+  raisedSourcePath: string | null;
+  status: ConflictStatus;
+  resolvedAt: string | null;
+  resolutionAction: ConflictResolutionAction | null;
+  resolutionNotes: string | null;
+}
+
+export interface ResolveIdentityConflictRequest {
+  action: ConflictResolutionAction;
+  notes?: string;
 }
 
 // Queue
@@ -806,6 +945,14 @@ export interface UpdateMetadataConfigRequest {
   audnexusUrl?: string | null;
   languages?: string[] | null;
   googleBooksApiKey?: string | null;
+}
+
+export interface DefaultLanguageResponse {
+  defaultLanguage: string;
+}
+
+export interface UpdateDefaultLanguageRequest {
+  defaultLanguage: string;
 }
 
 // System

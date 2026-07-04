@@ -5,11 +5,11 @@ use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{absolute_http_cover_url, map_db_err, parse_dt};
 use crate::{
     ApplyEnrichmentMergeRequest, ApplyMergeOutcome, AuthorId, CreateWorkDbRequest, DbError,
-    EnrichmentStatus, MediaType, NarrationType, ProvenanceSetter, UpdateWorkEnrichmentDbRequest,
-    UpdateWorkUserFieldsDbRequest, UserId, Work, WorkDb, WorkId,
+    EnrichmentStatus, MediaType, MergeWorksDbRequest, NarrationType, ProvenanceSetter,
+    UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, UserId, Work, WorkDb, WorkId,
 };
 
-fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
+pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
     let genres_str: Option<String> = row
         .try_get("genres")
         .map_err(|e| DbError::Io(Box::new(e)))?;
@@ -672,6 +672,26 @@ impl WorkDb for SqliteDb {
         Ok(())
     }
 
+    async fn update_audiobook_cover_dimensions(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE works SET audiobook_cover_width = ?, audiobook_cover_height = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(width)
+        .bind(height)
+        .bind(work_id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        Ok(())
+    }
+
     async fn delete_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError> {
         let work = self.get_work(user_id, id).await?;
         sqlx::query("DELETE FROM works WHERE id = ? AND user_id = ?")
@@ -681,6 +701,92 @@ impl WorkDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
         Ok(work)
+    }
+
+    async fn merge_works(&self, req: MergeWorksDbRequest) -> Result<Work, DbError> {
+        if req.survivor_id == req.loser_id {
+            return Err(DbError::Constraint {
+                message: "cannot merge a work into itself".to_string(),
+            });
+        }
+
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+
+        // Re-verify ownership of both ids inside the transaction (defense in
+        // depth — the service layer already checked). NotFound either way,
+        // never distinguishing "doesn't exist" from "not yours" (AC-024).
+        for id in [req.survivor_id, req.loser_id] {
+            let exists: Option<(i64,)> =
+                sqlx::query_as("SELECT id FROM works WHERE id = ? AND user_id = ?")
+                    .bind(id)
+                    .bind(req.user_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(map_db_err)?;
+            if exists.is_none() {
+                return Err(DbError::NotFound { entity: "work" });
+            }
+        }
+
+        // Reassign the loser's library items and grabs to the survivor
+        // BEFORE deleting the loser row — `works` children are
+        // `ON DELETE CASCADE`, so anything still pointing at the loser when
+        // it's deleted would be destroyed, not moved (REQ-015 e).
+        sqlx::query("UPDATE library_items SET work_id = ? WHERE user_id = ? AND work_id = ?")
+            .bind(req.survivor_id)
+            .bind(req.user_id)
+            .bind(req.loser_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
+        sqlx::query("UPDATE grabs SET work_id = ? WHERE user_id = ? AND work_id = ?")
+            .bind(req.survivor_id)
+            .bind(req.user_id)
+            .bind(req.loser_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
+        // Write the caller-resolved user-sovereign field values onto the
+        // survivor (REQ-015 d — the service layer already applied the
+        // OR/conflict-choice logic; this is a plain write).
+        sqlx::query(
+            "UPDATE works SET monitor_ebook = ?, monitor_audiobook = ?, \
+             series_name = ?, series_position = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(req.monitor_ebook)
+        .bind(req.monitor_audiobook)
+        .bind(&req.series_name)
+        .bind(req.series_position)
+        .bind(req.survivor_id)
+        .bind(req.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        // The loser is removed only now that the survivor owns its items
+        // and grabs (REQ-015 e). Everything else FK'd to the loser
+        // (identity anchors, provenance, dissents, history, ...) cascades
+        // away with it — that metadata is system/provider-derived, not
+        // per-user consumption data, so its loss is the intended outcome.
+        sqlx::query("DELETE FROM works WHERE id = ? AND user_id = ?")
+            .bind(req.loser_id)
+            .bind(req.user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
+        let row = sqlx::query("SELECT * FROM works WHERE id = ? AND user_id = ?")
+            .bind(req.survivor_id)
+            .bind(req.user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+        let survivor = row_to_work(row)?;
+
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(survivor)
     }
 
     async fn work_exists_by_ol_key(&self, user_id: UserId, ol_key: &str) -> Result<bool, DbError> {
@@ -817,6 +923,15 @@ impl WorkDb for SqliteDb {
         rows.into_iter().map(row_to_work).collect()
     }
 
+    async fn list_work_owners_all_users(&self) -> Result<Vec<(WorkId, UserId)>, DbError> {
+        let rows: Vec<(WorkId, UserId)> =
+            sqlx::query_as("SELECT id, user_id FROM works ORDER BY id")
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_db_err)?;
+        Ok(rows)
+    }
+
     async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError> {
         let rows = sqlx::query("SELECT * FROM works WHERE identity_status = 'pending'")
             .fetch_all(self.pool())
@@ -894,20 +1009,49 @@ impl WorkDb for SqliteDb {
                 .map(|n| serde_json::to_string(n).map_err(|e| DbError::Io(Box::new(e))))
                 .transpose()?;
             let narration_type_val = u.narration_type.as_ref().map(narration_type_str);
-            let norm_title = u
-                .title
-                .as_deref()
-                .map(livrarr_domain::normalize_for_matching);
-            let norm_author = u
-                .author_name
-                .as_deref()
-                .map(livrarr_domain::normalize_for_matching);
+            // REQ-014: both sides of a stored identity key come from the
+            // same identity_key call when both title and author change
+            // together; when only one changes, the other's component is
+            // computed with an empty counterpart (identity_key's two halves
+            // are independent per-string computations, so this is safe —
+            // see identity_matching::identity_key's doc comment).
+            let (norm_title, norm_author) = match (u.title.as_deref(), u.author_name.as_deref()) {
+                (Some(t), Some(a)) => {
+                    let (nt, na) = livrarr_domain::identity_matching::identity_key(t, a);
+                    (Some(nt), Some(na))
+                }
+                (Some(t), None) => (
+                    Some(livrarr_domain::identity_matching::identity_key(t, "").0),
+                    None,
+                ),
+                (None, Some(a)) => (
+                    None,
+                    Some(livrarr_domain::identity_matching::identity_key("", a).1),
+                ),
+                (None, None) => (None, None),
+            };
 
             // REQ-007: no anchor columns (hc_key/gr_key/ol_key/isbn_13/asin)
             // in this UPDATE — anchors move exclusively via the identity
-            // track. REQ-009: None/empty cover_url and language never clobber
-            // populated values (COALESCE + empty-filtered binds).
-            sqlx::query(
+            // track. REQ-009: None/empty language never clobbers a populated
+            // value (COALESCE + empty-filtered bind).
+            //
+            // S2 binding invariant: cover_url/cover_source/cover_trust/dims
+            // (and the audiobook twins) are NOT written here — cover DB
+            // fields update only via the cover-write gate's atomic commit
+            // (`update_cover_metadata`/`update_audiobook_cover_metadata`) at
+            // an accepted swap or initial save, or at phase-1 create. Writing
+            // cover_url in the generic merge (as this UPDATE used to) let a
+            // rejected candidate's URL persist on the row before the
+            // comparator could veto it — the DB then pointed at art that
+            // wasn't on disk. u.cover_url is carried by the DTO for
+            // callers/tests that inspect the merge's resolved value; this
+            // statement simply never applies it.
+            //
+            // The WHERE clause also requires merge_generation to still match
+            // the value read above; a concurrent writer that already
+            // committed makes this UPDATE affect zero rows.
+            let result = sqlx::query(
                 "UPDATE works SET \
                  title = COALESCE(?, title), subtitle = ?, original_title = ?, \
                  author_name = COALESCE(?, author_name), \
@@ -918,10 +1062,9 @@ impl WorkDb for SqliteDb {
                  duration_seconds = ?, publisher = ?, publish_date = ?, \
                  narrator = ?, narration_type = ?, \
                  abridged = ?, rating = ?, rating_count = ?, \
-                 cover_url = COALESCE(?, cover_url), \
                  enrichment_source = ?, enrichment_status = ?, enriched_at = ?, \
                  merge_generation = merge_generation + 1 \
-                 WHERE id = ? AND user_id = ?",
+                 WHERE id = ? AND user_id = ? AND merge_generation = ?",
             )
             .bind(u.title.as_deref())
             .bind(u.subtitle.as_deref())
@@ -944,30 +1087,37 @@ impl WorkDb for SqliteDb {
             .bind(u.abridged)
             .bind(u.rating)
             .bind(u.rating_count)
-            .bind(absolute_http_cover_url(
-                u.cover_url.as_deref().filter(|s| !s.is_empty()),
-            ))
             .bind(u.enrichment_source.as_deref())
             .bind(status_str)
             .bind(&now)
             .bind(req.work_id)
             .bind(req.user_id)
+            .bind(req.expected_merge_generation)
             .execute(&mut *tx)
             .await
             .map_err(map_db_err)?;
+
+            if result.rows_affected() == 0 {
+                return Ok(ApplyMergeOutcome::Superseded);
+            }
         } else {
             // Status-only path (e.g. Conflict).
-            sqlx::query(
+            let result = sqlx::query(
                 "UPDATE works SET enrichment_status = ?, \
                  merge_generation = merge_generation + 1 \
-                 WHERE id = ? AND user_id = ?",
+                 WHERE id = ? AND user_id = ? AND merge_generation = ?",
             )
             .bind(status_str)
             .bind(req.work_id)
             .bind(req.user_id)
+            .bind(req.expected_merge_generation)
             .execute(&mut *tx)
             .await
             .map_err(map_db_err)?;
+
+            if result.rows_affected() == 0 {
+                return Ok(ApplyMergeOutcome::Superseded);
+            }
         }
 
         // Write provenance upserts.

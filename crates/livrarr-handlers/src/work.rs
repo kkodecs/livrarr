@@ -6,21 +6,24 @@ use axum::Json;
 use axum::response::{IntoResponse, Response};
 
 use crate::context::{
-    HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService, HasEmailService,
-    HasEnrichmentWorkflow, HasFileService, HasIdentityResolver, HasNotificationService,
-    HasSeriesQueryService, HasTagService, HasWorkIdentityRepository, HasWorkService,
+    HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
+    HasEmailService, HasEnrichmentWorkflow, HasFileService, HasIdentityResolver, HasImportService,
+    HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkIdentityRepository,
+    HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
-use crate::types::work::work_to_detail;
+use crate::types::work::{merge_preview_to_response, work_to_detail};
 use crate::{
     AddWorkRequest, AddWorkResponse, ApiError, AuthContext, DeleteWorkResponse, LookupApiResponse,
-    RefreshWorkResponse, UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
+    MergePreviewResponse, MergeWorksRequest, MergeWorksResponse, RefreshWorkResponse,
+    UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
 use livrarr_domain::identity::{AnchorConfidence, AnchorSetter, AnchorType};
 use livrarr_domain::services::{
-    AuthorService, CreateNotificationRequest, EmailService, FileService, NotificationService,
-    SeriesQueryService, WorkIdentityRepository, WorkService, WorkServiceError,
+    AppConfigService, AuthorService, CreateNotificationRequest, EmailService, FileService,
+    ImportService, MergeFieldChoiceEntry, NotificationService, RefreshSurface, SeriesQueryService,
+    WorkIdentityRepository, WorkService, WorkServiceError,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -169,7 +172,8 @@ pub async fn add<
         + HasAuthorService
         + HasSeriesQueryService
         + HasEnrichmentWorkflow
-        + HasIdentityResolver,
+        + HasIdentityResolver
+        + HasAppConfigService,
 >(
     State(state): State<S>,
     ctx: AuthContext,
@@ -179,7 +183,8 @@ pub async fn add<
     use livrarr_domain::identity::{LatencyTier, RawHarvest};
     use livrarr_domain::seed::{seed_add_box, SeedInput, SeedLanguage};
 
-    let language = SeedLanguage::resolve(req.language.as_deref());
+    let default_language = state.app_config_service().get_default_language().await?;
+    let language = SeedLanguage::resolve(req.language.as_deref(), &default_language);
 
     // The UI hands back the picked cover in its proxied display form
     // (`/api/v1/coverproxy?url=<encoded>`); persist the real provider URL so it
@@ -261,7 +266,10 @@ pub async fn add<
         let wid = result.work.id;
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let _ = s.work_service().refresh(uid, wid).await;
+            let _ = s
+                .work_service()
+                .refresh(uid, wid, RefreshSurface::Interactive)
+                .await;
         });
     }
 
@@ -574,6 +582,64 @@ pub async fn delete<S: HasWorkService>(
     Ok(Json(DeleteWorkResponse { warnings: vec![] }))
 }
 
+/// Preview combining `loser_id` into `id` (the survivor) without applying
+/// anything (REQ-015 b). Both works must belong to the caller — enforced by
+/// `WorkService::preview_merge_works` itself, not just here (REQ-015 a).
+pub async fn preview_merge<S: HasWorkService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path((id, loser_id)): Path<(i64, i64)>,
+) -> Result<Json<MergePreviewResponse>, ApiError> {
+    let preview = state
+        .work_service()
+        .preview_merge_works(ctx.user.id, id, loser_id)
+        .await?;
+    Ok(Json(merge_preview_to_response(preview)))
+}
+
+/// Combine `loser_id` into `id` (the survivor): reassigns library items and
+/// grabs, resolves user-sovereign fields, then removes the loser row — all
+/// in one transaction (REQ-015 c/e). Physical file reorganization under the
+/// survivor's canonical path is a separate, best-effort follow-up: it never
+/// blocks or reverses the transaction above, which is the guarantee the
+/// user actually needs (items/grabs moved, loser gone, zero deletions).
+pub async fn merge<S: HasWorkService + HasImportService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path((id, loser_id)): Path<(i64, i64)>,
+    Json(req): Json<MergeWorksRequest>,
+) -> Result<Json<MergeWorksResponse>, ApiError> {
+    let choices = req
+        .choices
+        .into_iter()
+        .map(|c| MergeFieldChoiceEntry {
+            field: c.field,
+            choice: c.choice,
+        })
+        .collect();
+
+    let result = state
+        .work_service()
+        .merge_works(ctx.user.id, id, loser_id, choices)
+        .await?;
+
+    let reorg_warnings = state
+        .import_service()
+        .reorganize_work_files(ctx.user.id, id)
+        .await
+        .unwrap_or_else(|e| vec![format!("file reorganization skipped: {e}")]);
+
+    let mut warnings = result.warnings;
+    warnings.extend(reorg_warnings);
+
+    Ok(Json(MergeWorksResponse {
+        survivor: work_to_detail(&result.survivor),
+        library_items_moved: result.library_items_moved,
+        grabs_moved: result.grabs_moved,
+        warnings,
+    }))
+}
+
 pub async fn refresh<S: HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
@@ -581,7 +647,10 @@ pub async fn refresh<S: HasWorkService>(
 ) -> Result<Json<RefreshWorkResponse>, ApiError> {
     // WorkService::refresh() runs the unified enrichment pipeline:
     // provider dispatch, merge, cover download, and tag sync are all handled inside.
-    let result = state.work_service().refresh(ctx.user.id, id).await?;
+    let result = state
+        .work_service()
+        .refresh(ctx.user.id, id, RefreshSurface::Interactive)
+        .await?;
 
     Ok(Json(RefreshWorkResponse {
         work: work_to_detail(&result.work),
@@ -645,7 +714,12 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
         for work in &works {
             // refresh() funnels through run_unified, which materializes covers and
             // tags itself — the handler does not re-download or re-tag (REQ-001).
-            match s.work_service().refresh(user_id, work.id).await {
+            // Low: unattended refresh-all sweep (B4 table).
+            match s
+                .work_service()
+                .refresh(user_id, work.id, RefreshSurface::Bulk)
+                .await
+            {
                 Ok(_) => {
                     enriched += 1;
                 }
@@ -941,17 +1015,23 @@ pub async fn affirm_pending_anchor<S: HasWorkIdentityRepository + HasWorkService
         .map(|a| a.anchor_value)
         .ok_or(ApiError::NotFound)?;
 
-    // The user verified it: promote pending→confirmed and sync works.*.
+    // The user verified it: promote pending→confirmed, sync works.*, and
+    // immediately recompute + write the identity_status badge in one
+    // atomic transaction (M-020 fix — badge must not wait for bg refresh).
     state
         .work_identity_repo()
-        .confirm_anchor(work_id, anchor_type, &value, AnchorSetter::User)
+        .confirm_anchor_and_recompute_badge(work_id, anchor_type, &value, AnchorSetter::User)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     // Fire-and-forget the enrichment the newly-confirmed anchor unlocks.
     let s = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = s.work_service().refresh(user_id, work_id).await {
+        if let Err(e) = s
+            .work_service()
+            .refresh(user_id, work_id, RefreshSurface::Interactive)
+            .await
+        {
             tracing::debug!(work_id, "post-affirm background enrichment skipped: {e}");
         }
     });

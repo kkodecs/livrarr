@@ -209,6 +209,11 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
                 .put(livrarr_handlers::config::update_metadata::<AppState>),
         )
         .route(
+            "/config/default-language",
+            get(livrarr_handlers::config::get_default_language::<AppState>)
+                .put(livrarr_handlers::config::update_default_language::<AppState>),
+        )
+        .route(
             "/config/metadata/test/hardcover",
             post(livrarr_handlers::config::test_hardcover::<AppState>),
         )
@@ -272,6 +277,14 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .route(
             "/work/{id}/pending-anchors/{anchor_type}/affirm",
             post(livrarr_handlers::work::affirm_pending_anchor::<AppState>),
+        )
+        .route(
+            "/work/{id}/merge/{loser_id}/preview",
+            get(livrarr_handlers::work::preview_merge::<AppState>),
+        )
+        .route(
+            "/work/{id}/merge/{loser_id}",
+            post(livrarr_handlers::work::merge::<AppState>),
         )
         // Authors
         .route(
@@ -477,6 +490,19 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .route(
             "/identity-conflict/{id}/dismiss",
             post(livrarr_handlers::identity_conflicts::dismiss::<AppState>),
+        )
+        // Identity review (AC-013 grey-park surface)
+        .route(
+            "/identity-review",
+            get(livrarr_handlers::identity_review::list::<AppState>),
+        )
+        .route(
+            "/identity-review/{work_id}/resolve",
+            post(livrarr_handlers::identity_review::resolve::<AppState>),
+        )
+        .route(
+            "/identity-review/{work_id}/dismiss",
+            post(livrarr_handlers::identity_review::dismiss::<AppState>),
         )
         // Library files
         .route(

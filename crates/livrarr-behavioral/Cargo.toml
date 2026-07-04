@@ -34,9 +34,14 @@ livrarr-materialize = { workspace = true }
 axum = "0.8"
 assert_matches = "1"
 futures = "0.3"
+rapidfuzz = "0.5"
 tempfile = "3"
 tower = "0.5"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+unicode-normalization = "0.1"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+livrarr-enrichment = { workspace = true }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[test]]
 name = "test_metadata_overhaul_domain"
@@ -161,10 +166,6 @@ path = "../../tests/behavioral/test_ewl_conflict_service.rs"
 [[test]]
 name = "test_ewl_resolver"
 path = "../../tests/behavioral/test_ewl_resolver.rs"
-
-[[test]]
-name = "test_ewl_bulk_resolver"
-path = "../../tests/behavioral/test_ewl_bulk_resolver.rs"
 
 [[test]]
 name = "test_ewl_cover_gate"
@@ -339,10 +340,6 @@ name = "test_metadata_refactor_policy"
 path = "../../tests/behavioral/test_metadata_refactor_policy.rs"
 
 [[test]]
-name = "test_metadata_refactor_pacing"
-path = "../../tests/behavioral/test_metadata_refactor_pacing.rs"
-
-[[test]]
 name = "test_metadata_refactor_materialize"
 path = "../../tests/behavioral/test_metadata_refactor_materialize.rs"
 
@@ -353,10 +350,6 @@ path = "../../tests/behavioral/test_metadata_refactor_merge.rs"
 [[test]]
 name = "test_metadata_refactor_pipeline"
 path = "../../tests/behavioral/test_metadata_refactor_pipeline.rs"
-
-[[test]]
-name = "test_metadata_refactor_cache"
-path = "../../tests/behavioral/test_metadata_refactor_cache.rs"
 
 [[test]]
 name = "test_idu_bulk_import_identity"
@@ -429,3 +422,39 @@ path = "../../tests/behavioral/test_id_completeness.rs"
 [[test]]
 name = "test_uip_resolver_tied"
 path = "../../tests/behavioral/test_uip_resolver_tied.rs"
+
+# --- Phase 5 matching-authority remediation ---
+
+[[test]]
+name = "test_p5_matching_diff"
+path = "../../tests/behavioral/test_p5_matching_diff.rs"
+
+[[test]]
+name = "test_p5_unit_f_recognition"
+path = "../../tests/behavioral/test_p5_unit_f_recognition.rs"
+
+# --- N2 cover pipeline consolidation ---
+
+[[test]]
+name = "test_n2_cover_rank"
+path = "../../tests/behavioral/test_n2_cover_rank.rs"
+
+[[test]]
+name = "test_n2_cover_write_gate"
+path = "../../tests/behavioral/test_n2_cover_write_gate.rs"
+
+[[test]]
+name = "test_n2_cover_migrations"
+path = "../../tests/behavioral/test_n2_cover_migrations.rs"
+
+[[test]]
+name = "test_n2_cover_gate_recovery"
+path = "../../tests/behavioral/test_n2_cover_gate_recovery.rs"
+
+[[test]]
+name = "test_n2_cover_pipeline_wiring"
+path = "../../tests/behavioral/test_n2_cover_pipeline_wiring.rs"
+
+[[test]]
+name = "test_n2_review_fixes"
+path = "../../tests/behavioral/test_n2_review_fixes.rs"

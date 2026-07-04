@@ -2,8 +2,14 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
+use livrarr_domain::services::{
+    cover_bucket_for_host, FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket,
+    UserAgentProfile,
+};
+use livrarr_domain::RequestPriority;
+
 use crate::accessors::CoverProxyCacheAccessor;
-use crate::context::{HasCoverCache, HasHmacKey, HasHttpClient};
+use crate::context::{HasCoverCache, HasHmacKey, HasHttpFetcher};
 
 // 5 MB — accommodates high-resolution covers from providers like Google Books.
 // TODO(alpha6+): reduce stored cover resolution to limit on-disk footprint.
@@ -16,18 +22,21 @@ pub struct CoverProxyQuery {
     pub sig: String,
 }
 
-pub async fn proxy_cover<S: HasCoverCache + HasHttpClient + HasHmacKey>(
+pub async fn proxy_cover<S: HasCoverCache + HasHttpFetcher + HasHmacKey>(
     State(state): State<S>,
     Query(q): Query<CoverProxyQuery>,
 ) -> Response {
     let url = &q.url;
+    // Parsed once — reused for both the allowlist check below and the
+    // pacing-bucket lookup, instead of re-parsing the URL twice.
+    let host = parse_https_host(url);
 
     // HMAC verification: if sig is present, verify it; if absent, fall back to allowlist
     if !q.sig.is_empty() {
         if !verify_proxy_sig(url, &q.sig, state.hmac_key()) {
             return (StatusCode::FORBIDDEN, "invalid signature").into_response();
         }
-    } else if !is_allowed_cover_source(url) {
+    } else if !host.as_deref().is_some_and(is_allowed_host) {
         return (StatusCode::FORBIDDEN, "not an allowed cover source").into_response();
     }
 
@@ -50,36 +59,64 @@ pub async fn proxy_cover<S: HasCoverCache + HasHttpClient + HasHmacKey>(
             .into_response();
     }
 
-    let resp = match state.http_client_safe().get(url).send().await {
+    let bucket = host
+        .as_deref()
+        .map(cover_bucket_for_host)
+        .unwrap_or(RateBucket::None);
+
+    // Runtime URL (insight 37) — SSRF-safe fetch is mandatory here.
+    let req = FetchRequest {
+        url: url.clone(),
+        method: HttpMethod::Get,
+        headers: vec![],
+        body: None,
+        timeout: std::time::Duration::from_secs(30),
+        rate_bucket: bucket,
+        max_body_bytes: MAX_IMAGE_SIZE,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        // The user is looking at the cover grid right now (plan §B3).
+        priority: RequestPriority::Interactive,
+    };
+
+    let resp = match state.http_fetcher().fetch_ssrf_safe(req).await {
         Ok(r) => r,
+        Err(FetchError::BodyTooLarge { .. }) => {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response()
+        }
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
 
-    if !resp.status().is_success() {
+    if !(200..300).contains(&resp.status) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
     let content_type = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| "image/jpeg".to_string());
 
     if !content_type.starts_with("image/") {
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    if let Some(declared) = resp.content_length() {
-        if declared as usize > MAX_IMAGE_SIZE {
+    if let Some(declared) = resp
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.parse::<usize>().ok())
+    {
+        if declared > MAX_IMAGE_SIZE {
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         }
     }
 
-    let data = match resp.bytes().await {
-        Ok(b) if b.len() <= MAX_IMAGE_SIZE => b.to_vec(),
-        _ => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
-    };
+    if resp.body.len() > MAX_IMAGE_SIZE {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let data = resp.body;
 
     state
         .cover_proxy_cache()
@@ -117,21 +154,27 @@ fn verify_proxy_sig(url: &str, sig: &str, key: &[u8]) -> bool {
     subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), sig.as_bytes()).into()
 }
 
-fn is_allowed_cover_source(url: &str) -> bool {
-    let parsed = match reqwest::Url::parse(url) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
+/// Parse `url` and return its lowercased host IFF the scheme is `https`.
+fn parse_https_host(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
     if parsed.scheme() != "https" {
-        return false;
+        return None;
     }
+    parsed.host_str().map(|h| h.to_ascii_lowercase())
+}
 
-    let host = match parsed.host_str() {
-        Some(h) => h.to_ascii_lowercase(),
-        None => return false,
-    };
-
+/// V5: every unified-rank provider's asset host (S1) must be allowed here so
+/// pre-add/alternatives previews never 403. Verified against live code +
+/// production evidence, not assumed: Goodreads (`i.gr-assets.com`,
+/// amazon-family), Hardcover (`assets.hardcover.app`), Google Books
+/// (`books.google.com`, and `books.googleusercontent.com` — the second host
+/// `work_service::cover_source_rank`'s host classifier has always
+/// recognized as Google Books but which this allowlist was missing),
+/// OpenLibrary (`covers.openlibrary.org`), Audible and Audnexus (both
+/// confirmed live to serve from `m.media-amazon.com` — Audnexus mirrors
+/// Audible's own catalog images). Readarr has no asset host of its own (it
+/// relays whichever provider's URL it imported).
+fn is_allowed_host(host: &str) -> bool {
     const ALLOWED_HOSTS: &[&str] = &[
         "images-na.ssl-images-amazon.com",
         "covers.openlibrary.org",
@@ -139,12 +182,13 @@ fn is_allowed_cover_source(url: &str) -> bool {
         "s.lubimyczytac.pl",
         "m.media-amazon.com",
         "books.google.com",
+        "books.googleusercontent.com",
         "contents.kyobobook.co.kr",
         "i.gr-assets.com",
         "assets.hardcover.app",
     ];
 
-    if ALLOWED_HOSTS.iter().any(|h| *h == host) {
+    if ALLOWED_HOSTS.contains(&host) {
         return true;
     }
 
@@ -157,4 +201,34 @@ fn is_allowed_cover_source(url: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_every_unified_rank_provider_asset_host() {
+        // S1/V5: Goodreads, Hardcover, Google Books (both known hosts),
+        // OpenLibrary, Audible + Audnexus (both amazon-hosted, live-verified).
+        for host in [
+            "i.gr-assets.com",
+            "images-na.ssl-images-amazon.com",
+            "m.media-amazon.com",
+            "assets.hardcover.app",
+            "books.google.com",
+            "books.googleusercontent.com",
+            "covers.openlibrary.org",
+        ] {
+            assert!(
+                is_allowed_host(host),
+                "{host} must be an allowed cover host"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unrecognized_host() {
+        assert!(!is_allowed_host("evil.example.com"));
+    }
 }

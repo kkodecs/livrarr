@@ -33,12 +33,12 @@ mod sqlite_field_dissents;
 mod sqlite_grab;
 mod sqlite_history;
 mod sqlite_identity_conflict;
+pub use sqlite_identity_conflict::ConflictApplyError;
 mod sqlite_import;
 mod sqlite_indexer;
 mod sqlite_kash_link;
 mod sqlite_library_item;
 mod sqlite_list_import;
-mod sqlite_metadata_cache;
 mod sqlite_notification;
 mod sqlite_playback_progress;
 mod sqlite_provenance;
@@ -59,6 +59,10 @@ mod sqlite_work_identity;
 mod cross_user_isolation_tests;
 #[cfg(test)]
 mod playback_enhancement_tests;
+#[cfg(test)]
+mod sqlite_affirm_anchor_tests;
+#[cfg(test)]
+mod sqlite_identity_conflict_tests;
 
 // =============================================================================
 // CRATE: livrarr-db
@@ -182,7 +186,8 @@ pub trait WorkDbCreate: Send + Sync {
     /// an existing row; the returned `work` is the existing one.
     ///
     /// Precondition: `normalized_title` and `normalized_author` were computed
-    ///               via `livrarr_domain::normalize_for_matching()`.
+    ///               via `livrarr_domain::identity_matching::identity_key()`
+    ///               (REQ-014; supersedes the retired `normalize_for_matching`).
     async fn create_work(&self, req: CreateWorkDbRequest) -> Result<(Work, bool), DbError>;
 
     async fn create_work_with_anchor(
@@ -293,8 +298,29 @@ pub trait WorkDb: Send + Sync {
         height: i32,
     ) -> Result<(), DbError>;
 
+    async fn update_audiobook_cover_dimensions(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DbError>;
+
     /// Delete work. Returns deleted work for file cleanup.
     async fn delete_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError>;
+
+    /// Merge two works in one transaction (REQ-015): reassigns `loser_id`'s
+    /// library items and grabs to `survivor_id`, writes the caller-resolved
+    /// user-sovereign field values onto the survivor, then deletes the
+    /// loser row — in that order, so FK `ON DELETE CASCADE` from `works`
+    /// never fires on a row that still has children (library_items/grabs
+    /// are reassigned first, so nothing is left to cascade-delete; the
+    /// loser's identity/enrichment metadata, which is NOT reassigned, is
+    /// expected to cascade away with the row). Ownership of both ids by
+    /// `req.user_id` is re-verified inside the transaction — returns
+    /// `NotFound` if either id doesn't belong to the caller, without
+    /// revealing which (AC-024).
+    async fn merge_works(&self, req: MergeWorksDbRequest) -> Result<Work, DbError>;
 
     /// Set (or NULL) a work's series_id directly — the series-reconcile link
     /// path. Unlike `SeriesDb::link_work_to_series` this performs NO
@@ -370,6 +396,12 @@ pub trait WorkDb: Send + Sync {
     ///
     /// Satisfies: RSS-MATCH-001, RSS-FILTER-002
     async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError>;
+
+    /// Every (work id, owning user id) pair, across all users. System startup
+    /// migration only — the S4 cover-layout migration maps a legacy
+    /// root-level cover file's embedded work id to the user directory that
+    /// should own it.
+    async fn list_work_owners_all_users(&self) -> Result<Vec<(WorkId, UserId)>, DbError>;
 
     /// List works stuck in Unenriched state older than threshold (crash recovery).
     async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError>;
@@ -495,6 +527,20 @@ pub struct UpdateWorkUserFieldsDbRequest {
     pub series_position: Option<Option<f64>>,
     pub monitor_ebook: Option<bool>,
     pub monitor_audiobook: Option<bool>,
+}
+
+/// Request for `WorkDb::merge_works` (REQ-015). The monitoring/series
+/// fields carry the FINAL, already-resolved values the survivor should end
+/// up with — the service layer, not the DB layer, decides the OR/conflict
+/// outcome; this request just writes it.
+pub struct MergeWorksDbRequest {
+    pub user_id: UserId,
+    pub survivor_id: WorkId,
+    pub loser_id: WorkId,
+    pub monitor_ebook: bool,
+    pub monitor_audiobook: bool,
+    pub series_name: Option<String>,
+    pub series_position: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +695,16 @@ pub trait LibraryItemDb: Send + Sync {
         file_size: i64,
     ) -> Result<(), DbError>;
 
+    /// Update library item path (after the merge reorganize step physically
+    /// relocates the file, REQ-015 c). `new_path` is relative to the item's
+    /// root folder, matching the convention every other path column uses.
+    async fn update_library_item_path(
+        &self,
+        user_id: UserId,
+        id: LibraryItemId,
+        new_path: &str,
+    ) -> Result<(), DbError>;
+
     /// Check if user has a library item for this work with the given media type.
     ///
     /// Satisfies: RSS-FILTER-002
@@ -729,6 +785,13 @@ pub trait RootFolderDb: Send + Sync {
 #[trait_variant::make(Send)]
 pub trait GrabDb: Send + Sync {
     async fn get_grab(&self, user_id: UserId, id: GrabId) -> Result<Grab, DbError>;
+
+    /// List every grab for a work (merge preview/reassignment, REQ-015 c).
+    async fn list_grabs_by_work(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<Grab>, DbError>;
 
     /// List active grabs (sent/confirmed) for import polling.
     ///
@@ -1067,6 +1130,12 @@ pub trait ConfigDb: Send + Sync {
         &self,
         req: UpdateMetadataConfigRequest,
     ) -> Result<MetadataConfig, DbError>;
+
+    /// Get the default language for newly added works.
+    async fn get_default_language(&self) -> Result<String, DbError>;
+
+    /// Update the default language for newly added works.
+    async fn update_default_language(&self, language: &str) -> Result<String, DbError>;
 
     /// Get email config.
     async fn get_email_config(&self) -> Result<EmailConfig, DbError>;
@@ -1613,39 +1682,6 @@ pub trait SeriesRosterDb: Send + Sync {
     ) -> Result<SeriesRoster, DbError>;
 }
 
-/// One row of the persistent (work, provider) metadata cache (REQ-009). The
-/// payload is stored as opaque JSON so livrarr-db never names external-data's
-/// `NormalizedWorkDetail` (keeps db -> domain only, GC-2); the enrichment cache
-/// adapter (de)serializes it.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MetadataCacheRow {
-    pub payload_json: String,
-    pub fetched_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Persistent (work, provider) metadata cache (REQ-009). The enrichment
-/// provider-gateway wraps this behind a cache abstraction; a refresh bypasses it.
-/// TTL is enforced here via `max_age`.
-#[trait_variant::make(Send)]
-pub trait MetadataCacheDb: Send + Sync {
-    /// The cached payload JSON if present and younger than `max_age`, else None.
-    async fn metadata_cache_get(
-        &self,
-        work_id: livrarr_domain::WorkId,
-        provider: livrarr_domain::MetadataProvider,
-        max_age: std::time::Duration,
-    ) -> Result<Option<MetadataCacheRow>, DbError>;
-
-    /// Upsert a provider payload for (work, provider). INSERT ... ON CONFLICT
-    /// DO UPDATE SET (never INSERT OR REPLACE, insight 20).
-    async fn metadata_cache_put(
-        &self,
-        work_id: livrarr_domain::WorkId,
-        provider: livrarr_domain::MetadataProvider,
-        payload_json: &str,
-    ) -> Result<(), DbError>;
-}
-
 /// Loads the provider-policy table into the in-memory snapshot (REQ-003). The
 /// server holds + atomically swaps the snapshot; runtime lookup is a memory read.
 #[trait_variant::make(Send)]
@@ -2168,6 +2204,19 @@ pub trait ProviderRetryStateDb: Send + Sync {
     ) -> Result<Vec<ProviderRetryState>, DbError>;
 
     async fn record_will_retry(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        provider: MetadataProvider,
+        next_attempt_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ProviderRetryState, DbError>;
+
+    /// Same row shape as [`Self::record_will_retry`] but for a breaker-open
+    /// pause (`WillRetryReason::CircuitOpen`, R-11): sets `next_attempt_at` /
+    /// `last_attempt_at` / `last_outcome = 'will_retry'` WITHOUT incrementing
+    /// `attempts` — a paused provider must not spend retry budget while its
+    /// breaker is open.
+    async fn record_will_retry_paused(
         &self,
         user_id: UserId,
         work_id: WorkId,

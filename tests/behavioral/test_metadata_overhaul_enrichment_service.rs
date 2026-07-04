@@ -28,13 +28,12 @@ use livrarr_db::{
 use livrarr_domain::{
     ApplyMergeOutcome, EnrichmentStatus, FieldProvenance, MediaType, MergeResolved,
     MetadataProvider, NarrationType, OutcomeClass, PermanentFailureReason, ProvenanceSetter,
-    UserId, UserRole, Work, WorkField, WorkId,
+    RequestPriority, UserId, UserRole, Work, WorkField, WorkId,
 };
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 use livrarr_metadata::{
-    CircuitState, EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentService,
-    MergeEngine, MergeError, MergeInput, MergeOutput, ProviderQueue, ProviderQueueError,
-    ScatterGatherResult,
+    EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentService, MergeEngine, MergeError,
+    MergeInput, MergeOutput, ProviderQueue, ProviderQueueError, ScatterGatherResult,
 };
 use tokio::sync::{Mutex, Notify};
 
@@ -162,10 +161,6 @@ impl ProviderQueue for StubProviderQueue {
         }
 
         Ok(plan.result)
-    }
-
-    fn circuit_state(&self, _provider: MetadataProvider) -> CircuitState {
-        CircuitState::Closed
     }
 }
 
@@ -358,6 +353,10 @@ impl WorkDb for SequencedApplyDb {
         self.inner.delete_work(user_id, id).await
     }
 
+    async fn merge_works(&self, req: livrarr_db::MergeWorksDbRequest) -> Result<Work, DbError> {
+        self.inner.merge_works(req).await
+    }
+
     async fn set_work_series_id(
         &self,
         user_id: UserId,
@@ -416,6 +415,10 @@ impl WorkDb for SequencedApplyDb {
 
     async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError> {
         self.inner.list_monitored_works_all_users().await
+    }
+
+    async fn list_work_owners_all_users(&self) -> Result<Vec<(WorkId, UserId)>, DbError> {
+        self.inner.list_work_owners_all_users().await
     }
 
     async fn list_stale_unenriched_works(
@@ -553,6 +556,18 @@ impl WorkDb for SequencedApplyDb {
             .update_cover_dimensions(user_id, work_id, width, height)
             .await
     }
+
+    async fn update_audiobook_cover_dimensions(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DbError> {
+        self.inner
+            .update_audiobook_cover_dimensions(user_id, work_id, width, height)
+            .await
+    }
 }
 
 impl ProvenanceDb for SequencedApplyDb {
@@ -629,6 +644,18 @@ impl ProviderRetryStateDb for SequencedApplyDb {
     ) -> Result<livrarr_db::ProviderRetryState, DbError> {
         self.inner
             .record_will_retry(user_id, work_id, provider, next_attempt_at)
+            .await
+    }
+
+    async fn record_will_retry_paused(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        provider: MetadataProvider,
+        next_attempt_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<livrarr_db::ProviderRetryState, DbError> {
+        self.inner
+            .record_will_retry_paused(user_id, work_id, provider, next_attempt_at)
             .await
     }
 
@@ -893,14 +920,7 @@ where
         + Sync
         + 'static,
 {
-    livrarr_metadata::EnrichmentServiceImpl::new(
-        db,
-        Arc::new(queue),
-        Arc::new(merge_engine),
-        Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-        livrarr_metadata::work_service::StubNoLlm,
-        false,
-    )
+    livrarr_metadata::EnrichmentServiceImpl::new(db, Arc::new(queue), Arc::new(merge_engine), false)
 }
 
 fn persist_scatter_result_hook<DB>(
@@ -1162,7 +1182,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -1261,7 +1287,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -1365,7 +1397,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -1426,7 +1464,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -1480,13 +1524,17 @@ macro_rules! enrichment_service_tests {
                 Arc::new(seq_db),
                 Arc::new(queue),
                 Arc::new(merge_engine),
-                Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-                livrarr_metadata::work_service::StubNoLlm,
                 false,
             );
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -1542,13 +1590,17 @@ macro_rules! enrichment_service_tests {
                 Arc::new(seq_db),
                 Arc::new(queue),
                 Arc::new(merge_engine),
-                Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-                livrarr_metadata::work_service::StubNoLlm,
                 false,
             );
 
             let err = service
-                .enrich_work(h.user_id(), work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    h.user_id(),
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap_err();
 
@@ -1614,7 +1666,13 @@ macro_rules! enrichment_service_tests {
             let first_work = work.clone();
             let first = tokio::spawn(async move {
                 first_service
-                    .enrich_work(first_work.user_id, first_work.id, EnrichmentMode::Background, None)
+                    .enrich_work(
+                        first_work.user_id,
+                        first_work.id,
+                        EnrichmentMode::Background,
+                        None,
+                        RequestPriority::Normal,
+                    )
                     .await
                     .unwrap()
             });
@@ -1627,7 +1685,13 @@ macro_rules! enrichment_service_tests {
             let second = tokio::spawn(async move {
                 let _ = second_started_tx.send(());
                 second_service
-                    .enrich_work(second_work.user_id, second_work.id, EnrichmentMode::Background, None)
+                    .enrich_work(
+                        second_work.user_id,
+                        second_work.id,
+                        EnrichmentMode::Background,
+                        None,
+                        RequestPriority::Normal,
+                    )
                     .await
                     .unwrap()
             });
@@ -1689,7 +1753,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -1776,7 +1846,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let err = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap_err();
 
@@ -1828,7 +1904,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(h.user_id(), work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    h.user_id(),
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -1850,7 +1932,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Manual, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Manual,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -1908,7 +1996,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -1961,7 +2055,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -2016,7 +2116,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(Arc::new(h.db().clone()), queue, merge_engine);
 
             let result = service
-                .enrich_work(h.user_id(), work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    h.user_id(),
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -2071,7 +2177,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, StubMergeEngine::default());
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -2154,13 +2266,17 @@ macro_rules! enrichment_service_tests {
                 db.clone(),
                 Arc::new(queue),
                 Arc::new(merge_engine),
-                Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-                livrarr_metadata::work_service::StubNoLlm,
                 false,
             );
 
             let result = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -2205,7 +2321,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::HardRefresh, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::HardRefresh,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -2247,7 +2369,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -2274,13 +2402,18 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Audible,
                 ]
             );
+            // N2/S1: pm.cover is derived from the unified rank table, not a
+            // copy of pm.content — English is GR → HC → GB → Readarr → OL →
+            // Audnexus → Audible.
             assert_eq!(
                 pm.cover,
                 vec![
-                    MetadataProvider::Hardcover,
                     MetadataProvider::Goodreads,
+                    MetadataProvider::Hardcover,
+                    MetadataProvider::GoogleBooks,
                     MetadataProvider::Readarr,
                     MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audnexus,
                     MetadataProvider::Audible,
                 ]
             );
@@ -2319,7 +2452,13 @@ macro_rules! enrichment_service_tests {
             let service = make_service(db.clone(), queue, merge_engine);
 
             let _ = service
-                .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                 .await
                 .unwrap();
 
@@ -2348,6 +2487,7 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Audible,
                 ]
             );
+            // N2/S1: foreign cover order also carries Audnexus before Audible.
             assert_eq!(
                 pm.cover,
                 vec![
@@ -2356,6 +2496,7 @@ macro_rules! enrichment_service_tests {
                     MetadataProvider::Hardcover,
                     MetadataProvider::Readarr,
                     MetadataProvider::OpenLibrary,
+                    MetadataProvider::Audnexus,
                     MetadataProvider::Audible,
                 ]
             );
@@ -2585,7 +2726,13 @@ macro_rules! enrichment_service_tests {
             let enrich_service = service.clone();
             let enrich = tokio::spawn(async move {
                 enrich_service
-                    .enrich_work(user_id, work.id, EnrichmentMode::Background, None)
+                    .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Background,
+                    None,
+                    RequestPriority::Normal,
+                )
                     .await
                     .unwrap()
             });
@@ -2647,6 +2794,205 @@ macro_rules! enrichment_service_tests {
             assert_eq!(reset_work.enrichment_status, EnrichmentStatus::Unenriched);
             assert_eq!(queue_observer.dispatch_count().await, 1);
         }
+
+        // -----------------------------------------------------------------------
+        // M-010 regression tests: Readarr import payload must reach the merge
+        // -----------------------------------------------------------------------
+
+        #[tokio::test]
+        async fn test_enrich_work_readarr_payload_reaches_merge_as_non_none() {
+            // REQ-ID: M-010 | Contract: enrich_work Step 8 | Behavior: Readarr is
+            // never scattered so it has no DB retry-state row. After the fix the
+            // in-memory payload is used as fallback; before the fix it was silently
+            // dropped (payload=None), contributing zero fields to the merge.
+            let h = <$harness as DbTestHarness>::setup().await;
+            let db = Arc::new(h.db().clone());
+            let user_id = h.user_id();
+            let work = seed_work(h.db(), user_id).await;
+
+            // Queue returns only OpenLibrary:NotFound — Readarr is not in scatter;
+            // it is injected via inject_source_data and appended at Step 4.5.
+            let queue = StubProviderQueue::with_plan(DispatchPlan {
+                result: scatter_result(
+                    work.id,
+                    provider_outcomes_map(&[(MetadataProvider::OpenLibrary, ProviderOutcome::NotFound)]),
+                    true,
+                    false,
+                ),
+                persist_outcomes: Some(persist_scatter_result_hook(db.clone(), user_id)),
+                before_return: None,
+                hold_until: None,
+            });
+
+            let merge_engine = StubMergeEngine::with_output(merge_output_success("Merged Title"));
+            let merge_observer = merge_engine.clone();
+
+            let service = make_service(db.clone(), queue, merge_engine);
+
+            // Pre-inject Readarr source data — the only provider supplying
+            // description and publisher here.
+            service
+                .inject_source_data(
+                    user_id,
+                    work.id,
+                    livrarr_domain::services::SourceProviderData {
+                        description: Some("Readarr-only description".to_string()),
+                        publisher: Some("Readarr Publisher".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+            service
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Manual,
+                    None,
+                    RequestPriority::Normal,
+                )
+                .await
+                .unwrap();
+
+            let seen = merge_observer.inputs().await;
+            assert_eq!(seen.len(), 1, "merge engine must be called exactly once");
+
+            // M-010 regression: before the fix this entry had payload=None.
+            let readarr = seen[0]
+                .provider_results
+                .get(&MetadataProvider::Readarr)
+                .expect("Readarr must appear in merge input provider_results");
+            assert_eq!(readarr.class, OutcomeClass::Success);
+            let payload = readarr
+                .payload
+                .as_ref()
+                .expect("Readarr payload must be Some after M-010 fix, not None");
+            assert_eq!(
+                payload.description.as_deref(),
+                Some("Readarr-only description"),
+                "injected description must reach the merge"
+            );
+            assert_eq!(
+                payload.publisher.as_deref(),
+                Some("Readarr Publisher"),
+                "injected publisher must reach the merge"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_enrich_work_readarr_does_not_override_higher_priority_provider() {
+            // REQ-ID: M-010 | Contract: enrich_work merge priority | Behavior: when
+            // Readarr AND a higher-priority scattered provider both supply a field,
+            // both payloads reach the merge engine (so the engine applies its
+            // priority rules), and the merge engine's output is what gets persisted.
+            let h = <$harness as DbTestHarness>::setup().await;
+            let db = Arc::new(h.db().clone());
+            let user_id = h.user_id();
+            let work = seed_work(h.db(), user_id).await;
+
+            // Goodreads (higher priority than Readarr) returns a description.
+            let queue = StubProviderQueue::with_plan(DispatchPlan {
+                result: scatter_result(
+                    work.id,
+                    provider_outcomes_map(&[(
+                        MetadataProvider::Goodreads,
+                        ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
+                            title: Some("GR Title".to_string()),
+                            description: Some("Goodreads description".to_string()),
+                            author_name: Some("GR Author".to_string()),
+                            ..Default::default()
+                        })),
+                    )]),
+                    true,
+                    false,
+                ),
+                persist_outcomes: Some(persist_scatter_result_hook(db.clone(), user_id)),
+                before_return: None,
+                hold_until: None,
+            });
+
+            // Stub merge engine returns Goodreads description — simulating the
+            // real priority engine choosing GR over Readarr for this field.
+            let merge_engine = StubMergeEngine::with_output(MergeOutput {
+                work_update: Some(MergeResolved::new(UpdateWorkEnrichmentDbRequest {
+                    title: Some("GR Title".to_string()),
+                    author_name: Some("GR Author".to_string()),
+                    description: Some("Goodreads description".to_string()),
+                    ..Default::default()
+                })),
+                provenance_upserts: vec![SetFieldProvenanceRequest {
+                    user_id: 0,
+                    work_id: 0,
+                    field: WorkField::Description,
+                    source: Some(MetadataProvider::Goodreads),
+                    setter: ProvenanceSetter::Provider,
+                    cleared: false,
+                }],
+                provenance_deletes: vec![],
+                enrichment_status: EnrichmentStatus::Enriched,
+                enrichment_source: Some("goodreads".to_string()),
+                cover_resolution: None,
+                audiobook_cover_resolution: None,
+                dissents: vec![],
+            });
+            let merge_observer = merge_engine.clone();
+
+            let service = make_service(db.clone(), queue, merge_engine);
+
+            // Readarr also supplies a description. After M-010 fix it must reach
+            // the merge engine (fixing the drop), but must not override Goodreads.
+            service
+                .inject_source_data(
+                    user_id,
+                    work.id,
+                    livrarr_domain::services::SourceProviderData {
+                        description: Some("Readarr description — must not override GR".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+            let result = service
+                .enrich_work(
+                    user_id,
+                    work.id,
+                    EnrichmentMode::Manual,
+                    None,
+                    RequestPriority::Normal,
+                )
+                .await
+                .unwrap();
+
+            let seen = merge_observer.inputs().await;
+            assert_eq!(seen.len(), 1, "merge engine must be called exactly once");
+
+            // Both providers must reach the merge engine with real payloads.
+            let readarr = seen[0]
+                .provider_results
+                .get(&MetadataProvider::Readarr)
+                .expect("Readarr must appear in merge input");
+            assert_eq!(readarr.class, OutcomeClass::Success);
+            assert!(readarr.payload.is_some(), "Readarr payload must be Some after M-010 fix");
+
+            let goodreads = seen[0]
+                .provider_results
+                .get(&MetadataProvider::Goodreads)
+                .expect("Goodreads must appear in merge input");
+            assert_eq!(goodreads.class, OutcomeClass::Success);
+            assert!(goodreads.payload.is_some(), "Goodreads payload must be Some");
+
+            // The merge engine's output (Goodreads description) must be what is
+            // persisted — Readarr must not silently override it.
+            let persisted = h.db().get_work(user_id, work.id).await.unwrap();
+            assert_eq!(
+                persisted.description.as_deref(),
+                Some("Goodreads description"),
+                "merge engine output (GR) must win over Readarr"
+            );
+            assert_eq!(result.enrichment_status, EnrichmentStatus::Enriched);
+        }
+
+        // -----------------------------------------------------------------------
 
         #[tokio::test]
         async fn test_enrichment_service_reset_for_manual_refresh_does_not_affect_other_users_work() {

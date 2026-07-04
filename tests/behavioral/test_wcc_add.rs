@@ -29,8 +29,8 @@ use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, R
 use livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl;
 use livrarr_metadata::work_service::WorkServiceImpl;
 use livrarr_metadata::{
-    CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentServiceImpl, PriorityModel,
-    ProviderQueue, ProviderQueueError, ScatterGatherResult,
+    DefaultMergeEngine, EnrichmentContext, EnrichmentServiceImpl, PriorityModel, ProviderQueue,
+    ProviderQueueError, ScatterGatherResult,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -64,7 +64,6 @@ fn stub_isbn_resolver() -> LiveEnglishIdentityResolver {
         cache: Arc::new(TransportCache::new(Duration::from_secs(30))),
         config: ResolverConfig {
             gb_key_present: false,
-            llm_configured: false,
             ..ResolverConfig::default()
         },
     }
@@ -178,10 +177,6 @@ impl ProviderQueue for NoProviderDispatchQueue {
             merge_eligible: false,
             deferred: false,
         })
-    }
-
-    fn circuit_state(&self, _provider: MetadataProvider) -> CircuitState {
-        CircuitState::Closed
     }
 }
 
@@ -390,8 +385,6 @@ async fn test_wcc_add_reqs_014_015_add_reuses_cached_payloads_in_process_without
         Arc::new(db.clone()),
         Arc::new(queue),
         Arc::new(DefaultMergeEngine::new(PriorityModel::english())),
-        Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-        livrarr_metadata::work_service::StubNoLlm,
         false,
     )
     .with_transport_cache(cache.clone());

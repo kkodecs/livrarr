@@ -12,8 +12,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub mod author_service;
+pub mod convergence_service;
 pub mod cover;
 pub mod cover_alternatives;
+pub mod cover_layout_migration;
+pub mod cover_provenance_backfill;
+pub mod cover_startup;
+pub mod cover_write_gate;
+pub mod cover_write_gate_recovery;
 pub mod enrichment_workflow_service;
 pub mod http_llm;
 pub mod list_service;
@@ -24,9 +30,7 @@ pub mod series_service;
 pub mod work_service;
 
 // Re-export of the identity-resolution modules (now in livrarr-identity).
-pub use livrarr_identity::{
-    async_resolver, bulk_resolver, english_identity_resolver, title_cleanup,
-};
+pub use livrarr_identity::{async_resolver, english_identity_resolver, title_cleanup};
 
 pub mod author_monitor_workflow;
 pub mod provenance;
@@ -36,14 +40,14 @@ pub mod rss_sync_workflow;
 // (4a). Re-exported here so existing dependents compile unchanged; AC-021 will
 // switch consumers to direct livrarr_enrichment:: imports and delete this shim.
 pub use livrarr_enrichment::provider_queue::{
-    ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
+    ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder,
 };
 pub use livrarr_enrichment::{
-    cover_gate, cover_resolution, llm_ewl, llm_validator, provider_queue, CircuitBreakerConfig,
-    CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentError, EnrichmentMode,
-    EnrichmentResult, EnrichmentService, EnrichmentServiceImpl, LivePacingQueue, MergeEngine,
-    MergeError, MergeInput, MergeOutput, PacingQueue, PriorityModel, ProviderQueue,
-    ProviderQueueConfig, ProviderQueueError, ReconstructedOutcome, ScatterGatherResult,
+    cover_gate, cover_rank, cover_resolution, llm_validator, provider_queue, DefaultMergeEngine,
+    EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentResult, EnrichmentService,
+    EnrichmentServiceImpl, MergeEngine, MergeError, MergeInput, MergeOutput, PriorityModel,
+    ProviderQueue, ProviderQueueConfig, ProviderQueueError, ReconstructedOutcome,
+    ScatterGatherResult,
 };
 
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
@@ -99,37 +103,6 @@ pub enum MetadataError {
     UnsupportedOperation,
     #[error("anti-bot challenge detected")]
     AntiBotChallenge,
-}
-
-// =============================================================================
-// Hardcover Matching
-// =============================================================================
-
-#[trait_variant::make(Send)]
-pub trait HardcoverMatcher: Send + Sync {
-    async fn match_deterministic(
-        &self,
-        title: &str,
-        author: &str,
-        candidates: &[HardcoverCandidate],
-    ) -> Option<HardcoverCandidate>;
-
-    async fn match_llm(
-        &self,
-        work_id: WorkId,
-        title: &str,
-        author: &str,
-        candidates: &[HardcoverCandidate],
-    ) -> Result<HardcoverCandidate, MetadataError>;
-}
-
-#[derive(Debug, Clone)]
-pub struct HardcoverCandidate {
-    pub hc_key: String,
-    pub title: String,
-    pub author_name: Option<String>,
-    pub users_read_count: i64,
-    pub detail: ProviderWorkDetail,
 }
 
 // =============================================================================
@@ -295,6 +268,7 @@ pub mod tests {
             _work_id: WorkId,
             _mode: EnrichmentMode,
             _candidate_id: Option<livrarr_domain::identity::CandidateId>,
+            _priority: livrarr_domain::RequestPriority,
         ) -> Result<EnrichmentResult, EnrichmentError> {
             // TEMP(pk-tdd): stub uses internal scenario mode; real work_id lookup not needed here.
             let work = Work::default();
@@ -430,82 +404,6 @@ pub mod tests {
     pub fn enrichment_stub_llm_fallback() -> StubEnrichment {
         StubEnrichment {
             mode: StubEnrichmentMode::LlmFallback,
-        }
-    }
-
-    // --- Matcher stubs ---
-
-    pub struct StubMatcher {
-        mode: MatcherMode,
-    }
-
-    enum MatcherMode {
-        Hit,
-        Tiebreaker,
-        Ambiguous,
-        LlmTimeout,
-        LlmSuccess,
-    }
-
-    impl HardcoverMatcher for StubMatcher {
-        async fn match_deterministic(
-            &self,
-            _title: &str,
-            _author: &str,
-            candidates: &[HardcoverCandidate],
-        ) -> Option<HardcoverCandidate> {
-            match self.mode {
-                MatcherMode::Hit => candidates.first().cloned(),
-                MatcherMode::Tiebreaker => candidates
-                    .iter()
-                    .max_by_key(|c| c.users_read_count)
-                    .cloned(),
-                MatcherMode::Ambiguous | MatcherMode::LlmTimeout | MatcherMode::LlmSuccess => {
-                    None // ambiguous — defer to LLM
-                }
-            }
-        }
-
-        async fn match_llm(
-            &self,
-            _work_id: WorkId,
-            _title: &str,
-            _author: &str,
-            candidates: &[HardcoverCandidate],
-        ) -> Result<HardcoverCandidate, MetadataError> {
-            match self.mode {
-                MatcherMode::LlmTimeout => Err(MetadataError::Timeout(Duration::from_secs(30))),
-                MatcherMode::LlmSuccess => {
-                    candidates.first().cloned().ok_or(MetadataError::NoMatch)
-                }
-                _ => Err(MetadataError::NoMatch),
-            }
-        }
-    }
-
-    pub fn matcher_deterministic_hit() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::Hit,
-        }
-    }
-    pub fn matcher_deterministic_tiebreaker() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::Tiebreaker,
-        }
-    }
-    pub fn matcher_deterministic_ambiguous() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::Ambiguous,
-        }
-    }
-    pub fn matcher_llm_timeout() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::LlmTimeout,
-        }
-    }
-    pub fn matcher_llm_success() -> StubMatcher {
-        StubMatcher {
-            mode: MatcherMode::LlmSuccess,
         }
     }
 

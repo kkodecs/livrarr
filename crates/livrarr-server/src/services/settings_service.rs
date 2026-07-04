@@ -93,6 +93,23 @@ where
         Ok(cfg)
     }
 
+    async fn get_default_language(&self) -> Result<String, DbError> {
+        self.db.get_default_language().await
+    }
+
+    async fn update_default_language(&self, language: &str) -> Result<String, DbError> {
+        self.db.update_default_language(language).await
+    }
+
+    async fn validate_default_language(&self, language: &str) -> Result<String, String> {
+        let normalized = livrarr_domain::normalize_language(language);
+        if livrarr_external_data::language::is_supported_language(&normalized) {
+            Ok(normalized)
+        } else {
+            Err(format!("unsupported language code: {language}"))
+        }
+    }
+
     async fn validate_metadata_languages(
         &self,
         languages: &[String],
@@ -441,5 +458,34 @@ mod tests {
                 .is_none(),
             "NotConfigured row should be deleted after config save"
         );
+    }
+
+    #[tokio::test]
+    async fn default_language_roundtrip_and_validation() {
+        let db = livrarr_db::create_test_db().await;
+        let svc = LiveSettingsService::new(db);
+
+        // Fresh install: the stored default is "en".
+        assert_eq!(svc.get_default_language().await.unwrap(), "en");
+
+        // Validate + persist "de"; a language-unknown seed then resolves "de".
+        let validated = svc.validate_default_language("de").await.unwrap();
+        assert_eq!(validated, "de");
+        assert_eq!(svc.update_default_language(&validated).await.unwrap(), "de");
+        let stored = svc.get_default_language().await.unwrap();
+        assert_eq!(stored, "de");
+        assert_eq!(
+            livrarr_domain::seed::SeedLanguage::resolve(None, &stored).as_str(),
+            "de"
+        );
+        // An explicit language still wins over the stored default.
+        assert_eq!(
+            livrarr_domain::seed::SeedLanguage::resolve(Some("fr"), &stored).as_str(),
+            "fr"
+        );
+
+        // Validation normalizes full names and rejects unsupported codes.
+        assert_eq!(svc.validate_default_language("German").await.unwrap(), "de");
+        assert!(svc.validate_default_language("xx").await.is_err());
     }
 }

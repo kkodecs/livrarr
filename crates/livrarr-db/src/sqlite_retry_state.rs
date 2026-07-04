@@ -158,6 +158,45 @@ impl crate::ProviderRetryStateDb for SqliteDb {
             })
     }
 
+    async fn record_will_retry_paused(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        provider: MetadataProvider,
+        next_attempt_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ProviderRetryState, DbError> {
+        let provider_str = to_str(provider);
+        let next_str = next_attempt_at.to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO provider_retry_state \
+             (user_id, work_id, provider, attempts, next_attempt_at, \
+             normalized_payload_json, first_suppressed_at, last_attempt_at, last_outcome) \
+             VALUES (?, ?, ?, 0, ?, NULL, NULL, ?, 'will_retry') \
+             ON CONFLICT(work_id, provider) DO UPDATE SET \
+             next_attempt_at = excluded.next_attempt_at, \
+             normalized_payload_json = NULL, \
+             first_suppressed_at = NULL, \
+             last_attempt_at = excluded.last_attempt_at, \
+             last_outcome = 'will_retry'",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(&provider_str)
+        .bind(&next_str)
+        .bind(&now)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        self.get_retry_state(user_id, work_id, provider)
+            .await?
+            .ok_or(DbError::NotFound {
+                entity: "provider_retry_state",
+            })
+    }
+
     async fn record_suppressed(
         &self,
         user_id: UserId,
@@ -368,5 +407,111 @@ impl crate::ProviderRetryStateDb for SqliteDb {
         .await
         .map_err(map_db_err)?;
         Ok(result.rows_affected())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CreateUserDbRequest, CreateWorkDbRequest, ProviderRetryStateDb, UserDb, WorkDbCreate,
+    };
+    use livrarr_domain::UserRole;
+
+    async fn seed_user_and_work(db: &SqliteDb) -> (UserId, WorkId) {
+        let user_id = db
+            .create_user(CreateUserDbRequest {
+                username: "retry_paused_user".to_string(),
+                password_hash: "hash".to_string(),
+                role: UserRole::Admin,
+                api_key_hash: "apikey".to_string(),
+            })
+            .await
+            .unwrap()
+            .id;
+        let (work, _) = db
+            .create_work(CreateWorkDbRequest {
+                user_id,
+                title: "Paused Book".to_string(),
+                author_name: "Paused Author".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        (user_id, work.id)
+    }
+
+    /// R-11: a breaker-open pause must never spend retry-attempt budget — the
+    /// dedicated `record_will_retry_paused` write path leaves `attempts` at 0
+    /// on first insert and does not increment it on repeat calls, unlike
+    /// `record_will_retry`.
+    #[tokio::test]
+    async fn record_will_retry_paused_never_increments_attempts() {
+        let db = crate::test_helpers::create_test_db().await;
+        let (user_id, work_id) = seed_user_and_work(&db).await;
+        let next_attempt_at = Utc::now() + chrono::Duration::seconds(60);
+
+        let first = db
+            .record_will_retry_paused(
+                user_id,
+                work_id,
+                MetadataProvider::OpenLibrary,
+                next_attempt_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.attempts, 0);
+
+        let second = db
+            .record_will_retry_paused(
+                user_id,
+                work_id,
+                MetadataProvider::OpenLibrary,
+                next_attempt_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second.attempts, 0,
+            "repeated breaker-open passes must never accumulate toward the retry budget"
+        );
+    }
+
+    /// A breaker-open pause recorded after real retries have already spent
+    /// budget must leave that prior `attempts` count untouched — it pauses
+    /// the provider, it does not reset or advance the budget.
+    #[tokio::test]
+    async fn record_will_retry_paused_preserves_a_prior_real_attempts_count() {
+        let db = crate::test_helpers::create_test_db().await;
+        let (user_id, work_id) = seed_user_and_work(&db).await;
+        let next_attempt_at = Utc::now() + chrono::Duration::seconds(60);
+
+        db.record_will_retry(
+            user_id,
+            work_id,
+            MetadataProvider::OpenLibrary,
+            next_attempt_at,
+        )
+        .await
+        .unwrap();
+        db.record_will_retry(
+            user_id,
+            work_id,
+            MetadataProvider::OpenLibrary,
+            next_attempt_at,
+        )
+        .await
+        .unwrap();
+
+        let paused = db
+            .record_will_retry_paused(
+                user_id,
+                work_id,
+                MetadataProvider::OpenLibrary,
+                next_attempt_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(paused.attempts, 2);
     }
 }

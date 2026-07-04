@@ -16,11 +16,10 @@ mod audnexus_tracer_tests {
 
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::EnrichmentContext;
-    use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
+    use crate::{EnrichmentMode, ProviderQueue, ProviderQueueConfig};
     use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole};
     use livrarr_external_data::{AudnexusClient, ProviderClient, ProviderOutcome};
-    use livrarr_http::HttpClient;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -48,14 +47,6 @@ mod audnexus_tracer_tests {
     fn audnexus_config() -> ProviderQueueConfig {
         ProviderQueueConfig {
             provider: MetadataProvider::Audnexus,
-            concurrency: 1,
-            requests_per_second: 1.0,
-            circuit_breaker: CircuitBreakerConfig {
-                failure_threshold: 3,
-                evaluation_window_secs: 60,
-                open_duration_secs: 60,
-                half_open_probe_count: 1,
-            },
             max_attempts: 3,
             max_suppressed_passes: 3,
             max_suppression_window_secs: 3600,
@@ -104,8 +95,8 @@ mod audnexus_tracer_tests {
         let url = spawn_canned_audnexus_server(body).await;
 
         let (db, work) = seed_db_and_work().await;
-        let http = HttpClient::builder().build().unwrap();
-        let client = AudnexusClient::new(http, url);
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().unwrap();
+        let client = AudnexusClient::new(fetcher, url);
 
         let queue = DefaultProviderQueueBuilder::new()
             .add_provider(
@@ -150,11 +141,8 @@ mod audnexus_tracer_tests {
         drop(listener);
 
         let (db, work) = seed_db_and_work().await;
-        let http = HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(2))
-            .build()
-            .unwrap();
-        let client = AudnexusClient::new(http, url);
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().unwrap();
+        let client = AudnexusClient::new(fetcher, url);
 
         let queue = DefaultProviderQueueBuilder::new()
             .add_provider(
@@ -188,7 +176,7 @@ mod goodreads_tracer_tests {
 
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::EnrichmentContext;
-    use crate::{CircuitBreakerConfig, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
+    use crate::{EnrichmentMode, ProviderQueue, ProviderQueueConfig};
     use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole, WillRetryReason};
     use livrarr_external_data::{GoodreadsClient, ProviderClient, ProviderOutcome};
@@ -220,14 +208,6 @@ mod goodreads_tracer_tests {
     fn goodreads_config() -> ProviderQueueConfig {
         ProviderQueueConfig {
             provider: MetadataProvider::Goodreads,
-            concurrency: 1,
-            requests_per_second: 1.0,
-            circuit_breaker: CircuitBreakerConfig {
-                failure_threshold: 3,
-                evaluation_window_secs: 60,
-                open_duration_secs: 60,
-                half_open_probe_count: 1,
-            },
             max_attempts: 3,
             max_suppressed_passes: 3,
             max_suppression_window_secs: 3600,
@@ -290,7 +270,8 @@ mod goodreads_tracer_tests {
 
         let (db, work) = seed_db_and_work_with_gr_key(Some("12345.Tracer_Book")).await;
         let http = HttpClient::builder().build().unwrap();
-        let client = GoodreadsClient::new(http, url);
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().unwrap();
+        let client = GoodreadsClient::new(fetcher, http, url);
 
         let queue = DefaultProviderQueueBuilder::new()
             .add_provider(
@@ -350,7 +331,8 @@ mod goodreads_tracer_tests {
 
         let (db, work) = seed_db_and_work_with_gr_key(Some("99999.Blocked")).await;
         let http = HttpClient::builder().build().unwrap();
-        let client = GoodreadsClient::new(http, url);
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().unwrap();
+        let client = GoodreadsClient::new(fetcher, http, url);
 
         let queue = DefaultProviderQueueBuilder::new()
             .add_provider(
@@ -373,5 +355,12 @@ mod goodreads_tracer_tests {
             }
             other => panic!("expected WillRetry {{ AntiBotBlock }}, got {other:?}"),
         }
+
+        // The anti-bot challenge trips the SHARED outbound queue's Goodreads
+        // breaker (`BreakerSignal::TripImmediately`, open for 3600s) — reset
+        // it so this deliberate trip doesn't leak into sibling tests sharing
+        // this process (B2's process-global breaker, M-009).
+        livrarr_http::outbound_queue::shared()
+            .reset_breaker_for_tests(livrarr_domain::services::RateBucket::Goodreads);
     }
 }

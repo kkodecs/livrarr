@@ -193,6 +193,7 @@ where
             max_body_bytes: 512 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         };
         let resp = self
             .fetcher
@@ -250,6 +251,7 @@ where
             max_body_bytes: 512 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         };
         let _resp = self
             .fetcher
@@ -455,6 +457,7 @@ where
             max_body_bytes: 1024 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
         };
 
         let resp = self
@@ -530,10 +533,16 @@ where
             urlencoding::encode(&query),
         );
 
-        let volumes =
-            livrarr_external_data::google_books::fetch_gb_volumes(&self.fetcher, &api_key, url)
-                .await
-                .map_err(AuthorServiceError::Provider)?;
+        // Interactive: `bibliography()` is a synchronous, user-facing lookup
+        // (the author bibliography page), not a background scan.
+        let volumes = livrarr_external_data::google_books::fetch_gb_volumes(
+            &self.fetcher,
+            &api_key,
+            url,
+            RequestPriority::Interactive,
+        )
+        .await
+        .map_err(AuthorServiceError::Provider)?;
 
         let entries: Vec<livrarr_db::BibliographyEntry> = volumes
             .iter()

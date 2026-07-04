@@ -34,5 +34,4 @@ pub trait AuthorMonitorWorkflow: Send + Sync {
         user_id: crate::UserId,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<MonitorReport, MonitorError>;
-    fn trigger_monitor(&self);
 }

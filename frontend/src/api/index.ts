@@ -18,6 +18,9 @@ import type {
   UpdateWorkRequest,
   RefreshWorkResponse,
   DeleteWorkResponse,
+  MergePreviewResponse,
+  MergeWorksRequest,
+  MergeWorksResponse,
   AuthorSearchResult,
   AddAuthorRequest,
   AuthorResponse,
@@ -53,6 +56,8 @@ import type {
   UpdateEmailConfigRequest,
   MetadataConfigResponse,
   UpdateMetadataConfigRequest,
+  DefaultLanguageResponse,
+  UpdateDefaultLanguageRequest,
   IndexerConfigResponse,
   UpdateIndexerConfigRequest,
   HealthCheckResult,
@@ -89,6 +94,12 @@ import type {
   ResumePromptDTO,
   AnchorDTO,
   PendingAnchorDTO,
+  IdentityReviewPark,
+  ResolveIdentityReviewRequest,
+  IdentityConflictSummary,
+  IdentityConflictDetail,
+  ResolveIdentityConflictRequest,
+  ConflictResolutionAction,
 } from "@/types/api";
 
 // Setup
@@ -203,6 +214,17 @@ export const affirmPendingAnchor = (workId: number, anchorType: string) =>
     `/work/${workId}/pending-anchors/${encodeURIComponent(anchorType)}/affirm`,
     { method: "POST" },
   );
+export const previewMergeWorks = (survivorId: number, loserId: number) =>
+  apiFetch<MergePreviewResponse>(`/work/${survivorId}/merge/${loserId}/preview`);
+export const mergeWorks = (
+  survivorId: number,
+  loserId: number,
+  req: MergeWorksRequest,
+) =>
+  apiFetch<MergeWorksResponse>(`/work/${survivorId}/merge/${loserId}`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
 
 // Authors
 export const lookupAuthors = (term: string) =>
@@ -277,6 +299,36 @@ export const dismissNotification = (id: number) =>
   apiFetch<void>(`/notification/${id}`, { method: "DELETE" });
 export const dismissAllNotifications = () =>
   apiFetch<void>("/notification", { method: "DELETE" });
+
+// Identity review (AC-013 grey-park surface)
+export const listIdentityReview = () =>
+  apiFetch<IdentityReviewPark[]>("/identity-review");
+export const resolveIdentityReview = (
+  workId: number,
+  req: ResolveIdentityReviewRequest,
+) =>
+  apiFetch<void>(`/identity-review/${workId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const dismissIdentityReview = (workId: number) =>
+  apiFetch<void>(`/identity-review/${workId}/dismiss`, { method: "POST" });
+
+// Identity conflicts (AC-021 work-key contradictions)
+export const listIdentityConflicts = () =>
+  apiFetch<IdentityConflictSummary[]>("/identity-conflict");
+export const getIdentityConflict = (id: number) =>
+  apiFetch<IdentityConflictDetail>(`/identity-conflict/${id}`);
+export const resolveIdentityConflict = (
+  id: number,
+  req: ResolveIdentityConflictRequest,
+) =>
+  apiFetch<{ status: string; action: ConflictResolutionAction }>(
+    `/identity-conflict/${id}/resolve`,
+    { method: "POST", body: JSON.stringify(req) },
+  );
+export const dismissIdentityConflict = (id: number) =>
+  apiFetch<void>(`/identity-conflict/${id}/dismiss`, { method: "POST" });
 
 // Queue
 export const getQueue = (page = 1) =>
@@ -442,6 +494,13 @@ export const getMetadataConfig = () =>
   apiFetch<MetadataConfigResponse>("/config/metadata");
 export const updateMetadataConfig = (req: UpdateMetadataConfigRequest) =>
   apiFetch<MetadataConfigResponse>("/config/metadata", {
+    method: "PUT",
+    body: JSON.stringify(req),
+  });
+export const getDefaultLanguage = () =>
+  apiFetch<DefaultLanguageResponse>("/config/default-language");
+export const updateDefaultLanguage = (req: UpdateDefaultLanguageRequest) =>
+  apiFetch<DefaultLanguageResponse>("/config/default-language", {
     method: "PUT",
     body: JSON.stringify(req),
   });

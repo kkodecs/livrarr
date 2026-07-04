@@ -8,7 +8,7 @@ use livrarr_db::{
 };
 use livrarr_domain::services::{
     CoverSlotState, LookupRequest, MaterializeRequest, MaterializeService, MaterializeTags,
-    WorkFilter, WorkService,
+    RefreshSurface, WorkFilter, WorkService,
 };
 use livrarr_domain::{normalize_for_matching, CoverTrust, EnrichmentStatus, Work};
 use livrarr_materialize::LiveMaterializeService;
@@ -141,6 +141,7 @@ async fn materialize_saved_cover_reports_decoded_dimensions() {
                 current_url: None,
                 current_path: None,
                 user_locked: false,
+                ..Default::default()
             },
             audiobook_cover: CoverSlotState::default(),
             file_paths: vec![],
@@ -188,7 +189,9 @@ async fn user_set_cover_survives_refresh_byte_identically() {
     .expect("set user cover trust");
     let svc = service(db.clone(), StubEnrichmentWorkflow::succeeding());
 
-    svc.refresh(user_id, work.id).await.expect("refresh work");
+    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
+        .await
+        .expect("refresh work");
     let refreshed = db
         .get_work(user_id, work.id)
         .await

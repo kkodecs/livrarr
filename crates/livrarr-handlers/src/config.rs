@@ -3,15 +3,16 @@ use axum::Json;
 
 use crate::accessors::{LiveMetadataConfigAccessor, RssSyncAccessor};
 use crate::context::{
-    HasAppConfigService, HasEmailService, HasHttpClient, HasIndexerSettingsService, HasLiveConfig,
-    HasProviderStats, HasRssSync, HasRssSyncWorkflow,
+    HasAppConfigService, HasEmailService, HasHttpClient, HasHttpFetcher, HasIndexerSettingsService,
+    HasLiveConfig, HasProviderStats, HasRssSync, HasRssSyncWorkflow,
 };
 
 use crate::middleware::RequireAdmin;
 use crate::{
-    ApiError, AuthContext, EmailConfigResponse, MediaManagementConfigResponse,
-    MetadataConfigResponse, NamingConfigResponse, UpdateEmailApiRequest,
-    UpdateMediaManagementApiRequest, UpdateMetadataApiRequest,
+    ApiError, AuthContext, DefaultLanguageResponse, EmailConfigResponse,
+    MediaManagementConfigResponse, MetadataConfigResponse, NamingConfigResponse,
+    UpdateDefaultLanguageApiRequest, UpdateEmailApiRequest, UpdateMediaManagementApiRequest,
+    UpdateMetadataApiRequest,
 };
 use livrarr_domain::services::{
     AppConfigService, IndexerSettingsService, ProviderStatsService, RssSyncWorkflow,
@@ -263,55 +264,115 @@ pub async fn update_metadata<S: HasAppConfigService + HasProviderStats + HasLive
     Ok(Json(metadata_to_response(cfg, provider_status)))
 }
 
-pub async fn test_hardcover<S: HasAppConfigService + HasHttpClient>(
+pub async fn get_default_language<S: HasAppConfigService>(
+    State(state): State<S>,
+    _admin: RequireAdmin,
+) -> Result<Json<DefaultLanguageResponse>, ApiError> {
+    let default_language = state.app_config_service().get_default_language().await?;
+    Ok(Json(DefaultLanguageResponse { default_language }))
+}
+
+pub async fn update_default_language<S: HasAppConfigService>(
+    State(state): State<S>,
+    _admin: RequireAdmin,
+    Json(req): Json<UpdateDefaultLanguageApiRequest>,
+) -> Result<Json<DefaultLanguageResponse>, ApiError> {
+    let validated = state
+        .app_config_service()
+        .validate_default_language(&req.default_language)
+        .await
+        .map_err(ApiError::BadRequest)?;
+    let default_language = state
+        .app_config_service()
+        .update_default_language(&validated)
+        .await?;
+    Ok(Json(DefaultLanguageResponse { default_language }))
+}
+
+pub async fn test_hardcover<S: HasAppConfigService + HasHttpFetcher>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<(), ApiError> {
+    use livrarr_domain::services::{
+        FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    };
+
     let cfg = state.app_config_service().get_metadata_config().await?;
     let token = cfg
         .hardcover_api_token
         .ok_or_else(|| ApiError::BadRequest("Hardcover API token not configured".into()))?;
 
     let clean = clean_token(&token);
-    let resp = state
-        .http_client()
-        .post("https://api.hardcover.app/v1/graphql")
-        .header("Authorization", format!("Bearer {clean}"))
-        .header("Content-Type", "application/json")
-        .body(r#"{"query":"{ me { id } }"}"#)
-        .send()
-        .await
-        .map_err(|e| {
-            ApiError::BadGateway(format!("Hardcover connection failed: {}", e.without_url()))
-        })?;
+    let req = FetchRequest {
+        url: "https://api.hardcover.app/v1/graphql".to_string(),
+        method: HttpMethod::Post,
+        headers: vec![
+            ("Authorization".into(), format!("Bearer {clean}")),
+            ("Content-Type".into(), "application/json".into()),
+        ],
+        body: Some(br#"{"query":"{ me { id } }"}"#.to_vec()),
+        timeout: std::time::Duration::from_secs(10),
+        rate_bucket: RateBucket::Hardcover,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        // Interactive: an admin's "Test Connection" click, B4 table.
+        priority: livrarr_domain::RequestPriority::Interactive,
+    };
 
-    if !resp.status().is_success() {
+    let resp = state
+        .http_fetcher()
+        .fetch(req)
+        .await
+        .map_err(|e| ApiError::BadGateway(format!("Hardcover connection failed: {e}")))?;
+
+    if !(200..300).contains(&resp.status) {
         return Err(ApiError::BadGateway(format!(
             "Hardcover returned {} — check API token",
-            resp.status()
+            resp.status
         )));
     }
     Ok(())
 }
 
-pub async fn test_audnexus<S: HasAppConfigService + HasHttpClient>(
+pub async fn test_audnexus<S: HasAppConfigService + HasHttpFetcher>(
     State(state): State<S>,
     _admin: RequireAdmin,
 ) -> Result<(), ApiError> {
+    use livrarr_domain::services::{
+        FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    };
+
     let cfg = state.app_config_service().get_metadata_config().await?;
     let url = format!(
         "{}/authors/B000AQ0842",
         cfg.audnexus_url.trim_end_matches('/')
     );
 
-    let resp = state.http_client().get(&url).send().await.map_err(|e| {
-        ApiError::BadGateway(format!("Audnexus connection failed: {}", e.without_url()))
-    })?;
+    let req = FetchRequest {
+        url,
+        method: HttpMethod::Get,
+        headers: vec![],
+        body: None,
+        timeout: std::time::Duration::from_secs(30),
+        rate_bucket: RateBucket::Audnexus,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        // Interactive: an admin's "Test Connection" click, B4 table.
+        priority: livrarr_domain::RequestPriority::Interactive,
+    };
 
-    if !resp.status().is_success() {
+    let resp = state
+        .http_fetcher()
+        .fetch(req)
+        .await
+        .map_err(|e| ApiError::BadGateway(format!("Audnexus connection failed: {e}")))?;
+
+    if !(200..300).contains(&resp.status) {
         return Err(ApiError::BadGateway(format!(
             "Audnexus returned {}",
-            resp.status()
+            resp.status
         )));
     }
     Ok(())

@@ -58,12 +58,13 @@ where
         work_id: WorkId,
         mode: DomainEnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        priority: RequestPriority,
     ) -> Result<DomainEnrichmentResult, EnrichmentWorkflowError> {
         let metadata_mode = convert_mode(mode);
 
         let result = self
             .inner
-            .enrich_work(user_id, work_id, metadata_mode, candidate_id)
+            .enrich_work(user_id, work_id, metadata_mode, candidate_id, priority)
             .await
             .map_err(convert_error)?;
 
@@ -117,6 +118,7 @@ where
         _work_id: WorkId,
         _mode: DomainEnrichmentMode,
         _candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        _priority: RequestPriority,
     ) -> Result<DomainEnrichmentResult, EnrichmentWorkflowError> {
         Err(EnrichmentWorkflowError::Queue(
             "enrichment not available in reset-only mode".into(),

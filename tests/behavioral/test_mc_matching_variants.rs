@@ -27,19 +27,23 @@ fn trailing_unabridged_marker_folds_away() {
 }
 
 #[test]
-fn subtitle_book_number_tail_folds_to_base_title() {
-    // REQ-020/AC-022: form-class representative pair (unit slice); full AC-022
-    // validation runs manual import over the #132 staging dataset at the Test
-    // stage (Q-001).
-    assert_same_variant("Mistborn: The Final Empire, Book 1", "Mistborn");
+fn one_sided_series_tail_does_not_fold_to_base() {
+    // A title carrying a subtitle and volume marker never folds to the bare
+    // base title: the colon-cut fold that once bridged this pair also
+    // bridged every sibling volume ("Mistborn: The Well of Ascension,
+    // Book 2") to the same "Mistborn" key. One-sided tail evidence keeps
+    // distinct keys; near-matches are the composite scorer's job.
+    assert_distinct_variant("Mistborn: The Final Empire, Book 1", "Mistborn");
 }
 
 #[test]
-fn translated_subtitle_variant_compares_on_base_segment() {
-    // REQ-020/AC-022: form-class representative pair (unit slice); full AC-022
-    // validation runs manual import over the #132 staging dataset at the Test
-    // stage (Q-001).
-    assert_same_variant(
+fn differing_subtitles_do_not_fold() {
+    // Substantively different subtitles on both sides keep distinct keys —
+    // the old fold bridged translated editions only via the same colon cut
+    // that also bridged different volumes. Cross-language edition matching
+    // is governed by the language rules and composite scoring, not the
+    // variant fold.
+    assert_distinct_variant(
         "The Witcher: Ostatnie zyczenie",
         "The Witcher: The Last Wish",
     );

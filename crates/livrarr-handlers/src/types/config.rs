@@ -45,6 +45,18 @@ pub struct MetadataConfigResponse {
     pub provider_status: std::collections::HashMap<String, String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultLanguageResponse {
+    pub default_language: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDefaultLanguageApiRequest {
+    pub default_language: String,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestProwlarrRequest {

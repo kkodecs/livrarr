@@ -3,9 +3,16 @@
 //! Replaces LLM-based scraping with direct HTML parsing for foreign language works.
 //! LLM is kept as fallback only (see fallback chain in design doc).
 
+use livrarr_domain::services::{
+    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+};
+use livrarr_domain::RequestPriority;
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
 use livrarr_http::HttpClient;
 use regex::Regex;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 // =============================================================================
 // Types
@@ -15,6 +22,12 @@ use std::sync::LazyLock;
 #[derive(Debug, Clone)]
 pub struct GoodreadsSearchResult {
     pub title: String,
+    /// GR's own undecorated title (`bookTitleBare`): "Pandora's Star" where
+    /// `title` is "Pandora's Star (Commonwealth Saga, #1)". Provider data,
+    /// not a cleaning step — preferred as the payload title so GR's answer
+    /// compares like every other provider's instead of carrying search-card
+    /// series decoration into matching and merge.
+    pub title_bare: Option<String>,
     pub author: Option<String>,
     pub detail_url: String,
     pub cover_url: Option<String>,
@@ -171,7 +184,9 @@ pub fn parse_search_html(html: &str) -> Vec<GoodreadsSearchResult> {
             };
 
         results.push(GoodreadsSearchResult {
+            // Already stripped of its "(Series, #N)" decoration above.
             title: clean_title,
+            title_bare: None,
             author,
             detail_url,
             cover_url,
@@ -198,13 +213,35 @@ struct AutocompleteEntry {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
+    book_title_bare: Option<String>,
+    #[serde(default)]
     book_url: Option<String>,
     #[serde(default)]
     image_url: Option<String>,
     #[serde(default)]
-    avg_rating: Option<String>,
+    avg_rating: Option<StringOrNumber>,
     #[serde(default)]
     author: Option<AutocompleteAuthor>,
+}
+
+/// `avgRating` arrives as a string on most entries ("4.30") but as a bare JSON
+/// number (0.0) on some unrated editions — one such entry must not fail the
+/// batch. Numbers render to the same two-decimal form the strings use, so the
+/// downstream "0.00" = unrated filter applies uniformly.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StringOrNumber {
+    S(String),
+    N(f64),
+}
+
+impl StringOrNumber {
+    fn into_rating_string(self) -> String {
+        match self {
+            StringOrNumber::S(s) => s,
+            StringOrNumber::N(n) => format!("{n:.2}"),
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -221,18 +258,42 @@ struct AutocompleteAuthor {
 /// endpoint is the live discovery path (measured 2026-06-01). A non-array body
 /// (a WAF interstitial or a format change) yields an empty list rather than an
 /// error — the caller unions providers, so a Goodreads miss is not a failure.
+/// Entries deserialize INDIVIDUALLY: one malformed entry drops alone (logged)
+/// instead of failing the whole batch — a single rogue edition in the hit list
+/// used to silently erase every result for that query.
 pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
-    let entries: Vec<AutocompleteEntry> = match serde_json::from_str(body) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
+    let values: Vec<serde_json::Value> = match serde_json::from_str(body) {
+        Ok(values) => values,
+        Err(e) => {
+            tracing::warn!(error = %e, "GR autocomplete body is not a JSON array (WAF interstitial or format change) — treating as no results");
+            return Vec::new();
+        }
     };
-    entries
+    values
         .into_iter()
+        .filter_map(|v| match serde_json::from_value::<AutocompleteEntry>(v) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::warn!(error = %e, "GR autocomplete entry failed to parse — dropping this entry only");
+                None
+            }
+        })
         .filter_map(|e| {
             let title = e.title.filter(|t| !t.trim().is_empty())?;
             let detail_url = e.book_url.filter(|u| !u.trim().is_empty())?;
+            // The search-card decoration "(Series, #N)" is provider data: the
+            // same series/volume evidence the HTML road extracts. It must ride
+            // the result so downstream volume vetoes can see it.
+            let (series_name, series_position) = match RE_TITLE_SERIES.captures(&title) {
+                Some(caps) => (
+                    Some(caps[1].trim().to_string()),
+                    caps[2].parse::<f64>().ok(),
+                ),
+                None => (None, None),
+            };
             Some(GoodreadsSearchResult {
                 title,
+                title_bare: e.book_title_bare.filter(|t| !t.trim().is_empty()),
                 author: e
                     .author
                     .and_then(|a| a.name)
@@ -244,10 +305,14 @@ pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
                     .and_then(|u| crate::provider_util::validate_cover_url(&u, GOODREADS_BASE_URL))
                     .map(|u| crate::provider_util::upscale_cover_url(&u)),
                 year: None,
-                // `avgRating` is a string (e.g. "4.30"); "0.00" means unrated.
-                rating: e.avg_rating.filter(|r| !r.trim().is_empty() && r != "0.00"),
-                series_name: None,
-                series_position: None,
+                // `avgRating` normalizes to a two-decimal string (e.g. "4.30");
+                // "0.00" means unrated.
+                rating: e
+                    .avg_rating
+                    .map(StringOrNumber::into_rating_string)
+                    .filter(|r| !r.trim().is_empty() && r != "0.00"),
+                series_name,
+                series_position,
             })
         })
         .collect()
@@ -480,6 +545,10 @@ pub enum GoodreadsFetchError {
     Network(String),
     /// Detail page returned 200 OK but no JSON-LD or regex fields parsed out.
     Parse,
+    /// The outbound queue's breaker was Open for the Goodreads bucket — no
+    /// HTTP was attempted (R-11: the caller must map this to
+    /// `WillRetryReason::CircuitOpen`, never burn retry budget on it).
+    CircuitOpen(Duration),
 }
 
 /// Build the canonical detail URL for a `gr_key` against the configured base.
@@ -521,85 +590,118 @@ pub fn extract_gr_key(detail_url: &str) -> Option<String> {
     }
 }
 
-/// Fetch a Goodreads HTML page. Adds the Chrome UA header, treats
-/// non-success status and anti-bot challenge pages as errors.
-///
-/// Used by the queue path (`GoodreadsClient` in `provider_client`) and the
-/// identity/series surfaces. Pacing is the caller's responsibility — queue
-/// dispatch goes through the per-provider `TokenBucket`; other surfaces
-/// apply their own Goodreads rate limiting before invoking this.
-pub async fn fetch_goodreads_html(
-    http: &HttpClient,
-    url: &str,
-) -> Result<String, GoodreadsFetchError> {
-    let resp = http
-        .get(url)
-        .header("User-Agent", GOODREADS_USER_AGENT)
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
-        .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR request: {e}")))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(GoodreadsFetchError::HttpStatus(status.as_u16()));
+/// Map an `HttpFetcher` transport failure onto `GoodreadsFetchError`. The
+/// fetcher intercepts HTTP 429 at the transport level (`FetchError::RateLimited`)
+/// rather than surfacing it as a normal response status, so it is translated
+/// back to `HttpStatus(429)` here — preserving the existing 429-vs-other-error
+/// discrimination (`map_fetch_err` treats `HttpStatus(429)` as `RateLimit`, any
+/// other `Network` failure as `ServerError`).
+fn map_transport_err(context: &str, err: FetchError) -> GoodreadsFetchError {
+    match err {
+        FetchError::RateLimited => GoodreadsFetchError::HttpStatus(429),
+        FetchError::CircuitOpen { retry_after } => GoodreadsFetchError::CircuitOpen(retry_after),
+        other => GoodreadsFetchError::Network(format!("{context}: {other}")),
     }
-    let html = resp
-        .text()
+}
+
+/// Fetch a Goodreads HTML page. Adds the Chrome UA and treats non-success
+/// status and anti-bot challenge pages as errors.
+///
+/// Used by the queue path (`GoodreadsClient` in `provider_client`). Pacing is
+/// the outbound queue's responsibility, per the per-provider `RateBucket`.
+pub async fn fetch_goodreads_html<F: HttpFetcher>(
+    fetcher: &F,
+    url: &str,
+    priority: RequestPriority,
+) -> Result<String, GoodreadsFetchError> {
+    let req = FetchRequest {
+        url: url.to_string(),
+        method: HttpMethod::Get,
+        headers: vec![("Accept-Language".to_string(), "en-US,en;q=0.9".to_string())],
+        body: None,
+        timeout: Duration::from_secs(30),
+        rate_bucket: RateBucket::Goodreads,
+        max_body_bytes: 5 * 1024 * 1024,
+        // The fetcher's marker scan is a different, Cloudflare-flavored check —
+        // the GR-specific `is_anti_bot_page` body check below owns this instead.
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Custom(GOODREADS_USER_AGENT.to_string()),
+        priority,
+    };
+    let resp = fetcher
+        .fetch(req)
         .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR body: {e}")))?;
+        .map_err(|e| map_transport_err("GR request", e))?;
+    if !(200..300).contains(&resp.status) {
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Failure);
+        }
+        return Err(GoodreadsFetchError::HttpStatus(resp.status));
+    }
+    let html = String::from_utf8_lossy(&resp.body).into_owned();
     if crate::provider_util::is_anti_bot_page(&html) {
+        // A 200-but-soft-blocked interstitial is a hard block on the
+        // breaker, not a threshold-counted failure (R-8).
+        outbound_queue::shared().report_outcome(
+            RateBucket::Goodreads,
+            BreakerSignal::TripImmediately { open_for: None },
+        );
         return Err(GoodreadsFetchError::AntiBot);
     }
+    outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Success);
     Ok(html)
 }
 
-/// Search Goodreads by `title author` via the WAF-free autocomplete JSON endpoint.
-pub async fn search_goodreads(
-    http: &HttpClient,
+/// Search Goodreads by TITLE ONLY via the WAF-free autocomplete JSON endpoint.
+///
+/// The author deliberately stays OUT of the query string: autocomplete
+/// prefix-matches the raw string, so "Ender's Game Orson Scott Card" ranks
+/// study guides whose TITLES contain "by Orson Scott Card" above the real
+/// record — famous books drown in such parasites and the real book drops out
+/// of the hit list entirely (38/135 imports, live 2026-07-03). Author
+/// agreement is the PICKER's job (`gr_best_match` requires author-token
+/// overlap against each hit's own author field), which is both stricter and
+/// immune to that ranking poison.
+pub async fn search_goodreads<F: HttpFetcher>(
+    fetcher: &F,
     base_url: &str,
     title: &str,
-    author: &str,
+    priority: RequestPriority,
 ) -> Result<Vec<GoodreadsSearchResult>, GoodreadsFetchError> {
     let base = base_url.trim_end_matches('/');
-    let raw_query = format!("{title} {author}");
-    let query = urlencoding::encode(&raw_query);
+    let query = urlencoding::encode(title);
     let url = format!("{base}/book/auto_complete?format=json&q={query}");
-    let resp = http
-        .get(&url)
-        .header("User-Agent", GOODREADS_USER_AGENT)
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
+    let req = FetchRequest {
+        url,
+        method: HttpMethod::Get,
+        headers: vec![("Accept-Language".to_string(), "en-US,en;q=0.9".to_string())],
+        body: None,
+        timeout: Duration::from_secs(30),
+        rate_bucket: RateBucket::Goodreads,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Custom(GOODREADS_USER_AGENT.to_string()),
+        priority,
+    };
+    let resp = fetcher
+        .fetch(req)
         .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(GoodreadsFetchError::HttpStatus(resp.status().as_u16()));
+        .map_err(|e| map_transport_err("GR autocomplete", e))?;
+    if !(200..300).contains(&resp.status) {
+        return Err(GoodreadsFetchError::HttpStatus(resp.status));
     }
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| GoodreadsFetchError::Network(format!("GR autocomplete body: {e}")))?;
+    let body = String::from_utf8_lossy(&resp.body).into_owned();
     Ok(parse_autocomplete_json(&body))
-}
-
-pub async fn search_goodreads_by_query(
-    http: &HttpClient,
-    base_url: &str,
-    query: &str,
-) -> Result<Vec<GoodreadsSearchResult>, GoodreadsFetchError> {
-    let base = base_url.trim_end_matches('/');
-    let encoded = urlencoding::encode(query);
-    let url = format!("{base}/search?q={encoded}");
-    let html = fetch_goodreads_html(http, &url).await?;
-    Ok(parse_search_html(&html))
 }
 
 /// Fetch and parse a Goodreads detail page. Returns `Err(Parse)` if the page
 /// loads but yields no useful fields.
-pub async fn fetch_goodreads_detail(
-    http: &HttpClient,
+pub async fn fetch_goodreads_detail<F: HttpFetcher>(
+    fetcher: &F,
     detail_url: &str,
+    priority: RequestPriority,
 ) -> Result<GoodreadsDetailResult, GoodreadsFetchError> {
-    let html = fetch_goodreads_html(http, detail_url).await?;
+    let html = fetch_goodreads_html(fetcher, detail_url, priority).await?;
     parse_detail_html(&html).ok_or(GoodreadsFetchError::Parse)
 }
 
@@ -956,29 +1058,121 @@ pub struct GoodreadsSeriesBook {
     pub cover_url: Option<String>,
 }
 
-/// Matches position headers: <h3...>Book 1</h3>, <h3...>Book 2.5</h3>
-static RE_SERIES_HEADING: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?si)<h3[^>]*>\s*Book\s+(\d+(?:\.\d+)?)\s*</h3>"#).unwrap());
+/// A parsed GR series detail page (2026-07 React layout).
+///
+/// The page ships books as HTML-attribute-encoded JSON inside
+/// `data-react-props` mounts. Books arrive in document order with the
+/// PRIMARY works first, followed by omnibuses, split editions, and
+/// translations (measured on series 108562 and 43318, 2026-07-03); the
+/// header states how many of the leading entries are primary. The page
+/// renders NO per-book position labels — the only position signal is the
+/// title decoration "(Series Name, #N)".
+#[derive(Debug, Clone, Default)]
+pub struct GoodreadsSeriesPage {
+    /// All parsed book entries, in document order (primaries first).
+    pub books: Vec<GoodreadsSeriesBook>,
+    /// Whether GR reports another page (total-works arithmetic, not primary).
+    pub has_next: bool,
+    /// "N primary works" from the page header — the roster cutoff.
+    /// `None` means the header was missing or unreadable (layout drift).
+    pub primary_count: Option<usize>,
+}
 
-static RE_IMG_SRC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"src="(https?://[^"]+)""#).unwrap());
+/// Matches "N primary works" in the series header subtitle.
+static RE_PRIMARY_COUNT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(\d+)\s+primary work"#).unwrap());
 
-/// Matches book title links after a heading.
-static RE_SERIES_BOOK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?si)<a[^>]*href="(?:https://www\.goodreads\.com)?/book/show/(\d+)[^"]*"[^>]*>\s*(?:<span[^>]*>)?([^<]+?)(?:</span>)?\s*</a>"#,
-    )
-    .unwrap()
+/// One React mount div on the series page; captures the component name. The
+/// props attribute is extracted from the full tag separately — attribute
+/// order inside the tag is not guaranteed.
+static RE_REACT_MOUNT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?si)<div\s[^>]*data-react-class="ReactComponents\.([A-Za-z0-9_]+)"[^>]*>"#)
+        .unwrap()
 });
 
-static RE_SERIES_YEAR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"published\s+(\d{4})"#).unwrap());
+static RE_REACT_PROPS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-react-props="([^"]*)""#).unwrap());
+
+/// `bookId` arrives as a JSON string; tolerate a bare number (the autocomplete
+/// avgRating lesson — one differently-typed field must not drop an entry).
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StringOrInt {
+    S(String),
+    N(i64),
+}
+
+impl StringOrInt {
+    fn into_string(self) -> String {
+        match self {
+            StringOrInt::S(s) => s,
+            StringOrInt::N(n) => n.to_string(),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SeriesPageEntry {
+    book: SeriesPageBook,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeriesPageBook {
+    #[serde(default)]
+    book_id: Option<StringOrInt>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    book_title_bare: Option<String>,
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    publication_date: Option<StringOrInt>,
+}
+
+#[derive(serde::Deserialize)]
+struct SeriesPageHeader {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    subtitle: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeriesPagePagination {
+    #[serde(default)]
+    num_works: Option<i64>,
+    #[serde(default)]
+    current_page_number: Option<i64>,
+    #[serde(default)]
+    per_page: Option<i64>,
+}
+
+/// Normalize a series name for the position rule: a decorated position
+/// counts only when the decoration names THIS page's series (an umbrella
+/// page like Confederation Universe lists books decorated with their
+/// sub-series' numbers — those must never be borrowed).
+fn normalize_series_name(name: &str) -> String {
+    let lower = name.trim().to_lowercase().replace('\u{2019}', "'");
+    let no_suffix = lower.strip_suffix(" series").unwrap_or(&lower).trim_end();
+    let no_prefix = no_suffix.strip_prefix("the ").unwrap_or(no_suffix);
+    no_prefix.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// First 4-digit token of a date string ("1996", "January 1, 1996", …).
+fn year_from_date_str(s: &str) -> Option<i32> {
+    s.split(|c: char| !c.is_ascii_digit())
+        .find(|tok| tok.len() == 4)
+        .and_then(|tok| tok.parse().ok())
+}
 
 /// Decode common HTML entities in a string.
 use livrarr_domain::decode_xml_entities as decode_html_entities;
 
 /// Returns true if a title looks like an omnibus/collection rather than a single work.
-fn is_collection_title(title: &str) -> bool {
+pub fn is_collection_title(title: &str) -> bool {
     let lower = title.to_lowercase();
     // Match common omnibus/collection patterns.
     lower.contains("collection")
@@ -990,88 +1184,167 @@ fn is_collection_title(title: &str) -> bool {
         || (lower.contains("vol.") && lower.contains('-'))
 }
 
-/// Parse a Goodreads series detail page into book entries.
-/// Returns (books, has_next_page).
+/// Parse a Goodreads series detail page (2026-07 React layout).
 ///
-/// Strategy: find all `<h3>Book N</h3>` headings, then find the first book `<a>` link
-/// after each heading. This pairs positions with titles reliably regardless of HTML structure.
-pub fn parse_series_detail_html(html: &str) -> (Vec<GoodreadsSeriesBook>, bool) {
-    let mut results = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+/// Books live as HTML-attribute-encoded JSON inside `data-react-props`
+/// mounts (the pre-2026-07 `<h3>Book N</h3>` layout is gone). Entries parse
+/// INDIVIDUALLY so one rogue entry never erases the page, and every
+/// unreadable shape WARNS — a silent empty is how the last layout drift went
+/// unnoticed. The header mount precedes the list mounts in document order on
+/// every measured page; if GR ever reorders them, positions degrade to None
+/// while the books themselves still parse.
+pub fn parse_series_detail_html(html: &str) -> GoodreadsSeriesPage {
+    let mut page = GoodreadsSeriesPage::default();
+    let mut page_series_name: Option<String> = None;
+    let mut series_list_blobs = 0usize;
+    let mut mounts = 0usize;
 
-    // Collect all position headings with their byte offsets.
-    let headings: Vec<(usize, f64)> = RE_SERIES_HEADING
-        .captures_iter(html)
-        .filter_map(|cap| {
-            let pos = cap[1].parse::<f64>().ok()?;
-            Some((cap.get(0).unwrap().end(), pos))
-        })
-        .collect();
-
-    // For each heading, find the first book link after it.
-    for (i, &(heading_end, position)) in headings.iter().enumerate() {
-        // Search region: from this heading to the next heading (or end of doc).
-        let search_end = headings.get(i + 1).map(|h| h.0).unwrap_or(html.len());
-        let search_region = &html[heading_end..search_end];
-
-        let Some(book_cap) = RE_SERIES_BOOK.captures(search_region) else {
+    for mount in RE_REACT_MOUNT.captures_iter(html) {
+        mounts += 1;
+        let class = mount[1].to_string();
+        if !matches!(
+            class.as_str(),
+            "SeriesHeader" | "SeriesList" | "FullPagePaginationControls"
+        ) {
+            continue;
+        }
+        let tag = mount.get(0).unwrap().as_str();
+        let Some(props) = RE_REACT_PROPS.captures(tag) else {
+            tracing::warn!(component = %class, "GR series page: mount has no props attribute");
             continue;
         };
-
-        let gr_key = book_cap[1].to_string();
-        let raw_title = book_cap[2].trim().to_string();
-        let title = decode_html_entities(&raw_title);
-
-        if title.is_empty() || !seen.insert(gr_key.clone()) {
-            continue;
-        }
-
-        // Filter out omnibus/collection editions.
-        if is_collection_title(&title) {
-            continue;
-        }
-
-        // Look for year after the book link.
-        let book_end = heading_end + book_cap.get(0).unwrap().end();
-        let mut year_end = std::cmp::min(book_end + 500, html.len());
-        while year_end < html.len() && !html.is_char_boundary(year_end) {
-            year_end += 1;
-        }
-        let post_context = &html[book_end..year_end];
-        let year = RE_SERIES_YEAR
-            .captures(post_context)
-            .and_then(|c| c[1].parse::<i32>().ok());
-
-        // Strip series info from title: "Book Title (Series, #1)" → "Book Title"
-        let clean_title = if RE_TITLE_SERIES.is_match(&title) {
-            RE_TITLE_SERIES.replace(&title, "").trim().to_string()
-        } else {
-            title
+        let decoded = decode_html_entities(&props[1]);
+        let value: serde_json::Value = match serde_json::from_str(&decoded) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(component = %class, error = %e,
+                    "GR series page: props blob is not valid JSON — skipping this blob");
+                continue;
+            }
         };
-
-        let cover_url = RE_IMG_SRC.captures_iter(search_region).find_map(|c| {
-            let url = c[1].to_string();
-            if url.contains("nophoto") || url.contains("loading-trans") {
-                return None;
+        match class.as_str() {
+            "SeriesHeader" => {
+                if let Ok(header) = serde_json::from_value::<SeriesPageHeader>(value) {
+                    page_series_name = header.title.as_deref().map(normalize_series_name);
+                    page.primary_count = header
+                        .subtitle
+                        .as_deref()
+                        .and_then(|s| RE_PRIMARY_COUNT.captures(s))
+                        .and_then(|c| c[1].parse::<usize>().ok());
+                    if page.primary_count.is_none() {
+                        tracing::warn!(
+                            subtitle = header.subtitle.as_deref().unwrap_or(""),
+                            "GR series page: header has no 'N primary works' count — layout drifted"
+                        );
+                    }
+                }
             }
-            if validate_cover_url(&url) {
-                Some(crate::provider_util::upscale_cover_url(&url))
-            } else {
-                None
+            "SeriesList" => {
+                series_list_blobs += 1;
+                let Some(entries) = value.get("series").and_then(|s| s.as_array()) else {
+                    tracing::warn!(
+                        "GR series page: SeriesList blob has no `series` array — layout drifted"
+                    );
+                    continue;
+                };
+                for entry in entries {
+                    match serde_json::from_value::<SeriesPageEntry>(entry.clone()) {
+                        Ok(e) => {
+                            if let Some(book) =
+                                series_book_from_blob(e.book, page_series_name.as_deref())
+                            {
+                                page.books.push(book);
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e,
+                            "GR series page: entry failed to parse — dropping this entry only"),
+                    }
+                }
             }
-        });
-
-        results.push(GoodreadsSeriesBook {
-            title: clean_title,
-            gr_key,
-            position: Some(position),
-            year,
-            cover_url,
-        });
+            "FullPagePaginationControls" => {
+                if let Ok(p) = serde_json::from_value::<SeriesPagePagination>(value) {
+                    if let (Some(total), Some(current), Some(per)) =
+                        (p.num_works, p.current_page_number, p.per_page)
+                    {
+                        page.has_next = current.saturating_mul(per) < total;
+                    }
+                }
+            }
+            _ => unreachable!("class list is filtered above"),
+        }
     }
 
-    let has_next = RE_NEXT_PAGE.is_match(html);
-    (results, has_next)
+    // Dedupe by GR key, preserving document order.
+    let mut seen = std::collections::HashSet::new();
+    page.books.retain(|b| seen.insert(b.gr_key.clone()));
+
+    if mounts == 0 {
+        tracing::warn!(
+            "GR series page: no React mounts found — page unreadable or layout replaced again"
+        );
+    } else if series_list_blobs == 0 {
+        tracing::warn!("GR series page: mounts present but no SeriesList blob — layout drifted");
+    } else if page.books.is_empty() {
+        tracing::warn!(
+            "GR series page: SeriesList present but zero books parsed — treat as drift, not truth"
+        );
+    }
+
+    page
+}
+
+/// Build one roster book from a blob entry; `page_series` gates the position
+/// rule (decoration must name this page's series).
+fn series_book_from_blob(
+    book: SeriesPageBook,
+    page_series: Option<&str>,
+) -> Option<GoodreadsSeriesBook> {
+    let Some(gr_key) = book
+        .book_id
+        .map(StringOrInt::into_string)
+        .filter(|k| !k.trim().is_empty())
+    else {
+        tracing::warn!("GR series page: entry has no bookId — dropping this entry only");
+        return None;
+    };
+
+    let decorated = book.title.unwrap_or_default();
+    let position = RE_TITLE_SERIES.captures(&decorated).and_then(|caps| {
+        let decoration_series = normalize_series_name(caps[1].trim());
+        match page_series {
+            Some(p) if p == decoration_series => caps[2].parse::<f64>().ok(),
+            _ => None,
+        }
+    });
+
+    let title = match book.book_title_bare.filter(|t| !t.trim().is_empty()) {
+        Some(bare) => bare.trim().to_string(),
+        None => RE_TITLE_SERIES.replace(&decorated, "").trim().to_string(),
+    };
+    if title.is_empty() {
+        tracing::warn!(gr_key = %gr_key, "GR series page: entry has no usable title — dropping");
+        return None;
+    }
+
+    let year = book
+        .publication_date
+        .map(StringOrInt::into_string)
+        .as_deref()
+        .and_then(year_from_date_str);
+
+    let cover_url = book
+        .image_url
+        .filter(|u| !u.contains("nophoto") && !u.contains("loading-trans"))
+        .and_then(|u| crate::provider_util::validate_cover_url(&u, GOODREADS_BASE_URL))
+        .map(|u| crate::provider_util::upscale_cover_url(&u));
+
+    Some(GoodreadsSeriesBook {
+        title,
+        gr_key,
+        position,
+        year,
+        cover_url,
+    })
 }
 
 // =============================================================================
@@ -1081,6 +1354,172 @@ pub fn parse_series_detail_html(html: &str) -> (Vec<GoodreadsSeriesBook>, bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------
+    // Door-routing: fetch_goodreads_html / search_goodreads go through the
+    // HttpFetcher trait with the Goodreads rate bucket, GET, the exact
+    // Chrome UA string via UserAgentProfile::Custom (not a header — the
+    // fetcher sets UA from `user_agent`), and the Accept-Language header.
+    // anti_bot_check stays false: the app-level `is_anti_bot_page` body scan
+    // owns anti-bot detection for Goodreads, not the fetcher's generic scan.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_sends_goodreads_bucket_get_custom_ua_and_accept_language() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            b"<html><body>ok</body></html>".to_vec(),
+        );
+
+        let html = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(html, "<html><body>ok</body></html>");
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert_eq!(req.url, "https://www.goodreads.com/book/show/1");
+        assert_eq!(req.rate_bucket, RateBucket::Goodreads);
+        assert_eq!(req.method, HttpMethod::Get);
+        match &req.user_agent {
+            UserAgentProfile::Custom(ua) => assert_eq!(ua.as_str(), GOODREADS_USER_AGENT),
+            other => panic!("expected UserAgentProfile::Custom, got {other:?}"),
+        }
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Accept-Language" && v == "en-US,en;q=0.9"));
+        assert!(!req.headers.iter().any(|(k, _)| k == "User-Agent"));
+        assert!(!req.anti_bot_check);
+        assert_eq!(req.timeout, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_maps_anti_bot_body_to_antibot_error() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            br#"<html><div class="cf-browser-verification">Checking...</div></html>"#.to_vec(),
+        );
+
+        let err = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, GoodreadsFetchError::AntiBot));
+    }
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_maps_fetcher_rate_limited_to_http_status_429() {
+        // The fetcher intercepts HTTP 429 as `FetchError::RateLimited` rather
+        // than a normal response — this must still surface as
+        // `HttpStatus(429)` so `map_fetch_err` (provider_client.rs) keeps
+        // classifying it as `WillRetry { RateLimit }`, not `ServerError`.
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+
+        let err = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, GoodreadsFetchError::HttpStatus(429)));
+    }
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_maps_http_500_to_http_status() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
+
+        let err = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, GoodreadsFetchError::HttpStatus(500)));
+    }
+
+    #[tokio::test]
+    async fn search_goodreads_sends_goodreads_bucket_get_autocomplete_url() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"[]".to_vec());
+
+        let hits = search_goodreads(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Dune",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
+
+        assert!(hits.is_empty());
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert_eq!(
+            req.url, "https://www.goodreads.com/book/auto_complete?format=json&q=Dune",
+            "the query is the TITLE ONLY — an appended author makes autocomplete \
+             rank study-guide titles containing the author's name above the real \
+             record; author agreement belongs to the picker"
+        );
+        assert_eq!(req.rate_bucket, RateBucket::Goodreads);
+        assert_eq!(req.method, HttpMethod::Get);
+        match &req.user_agent {
+            UserAgentProfile::Custom(ua) => assert_eq!(ua.as_str(), GOODREADS_USER_AGENT),
+            other => panic!("expected UserAgentProfile::Custom, got {other:?}"),
+        }
+        assert!(!req.anti_bot_check);
+        assert_eq!(req.timeout, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn search_goodreads_parses_canned_autocomplete_response() {
+        let body = r#"[{"title":"The Hobbit","bookUrl":"/book/show/5907","author":{"name":"J.R.R. Tolkien"}}]"#;
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
+
+        let hits = search_goodreads(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Hobbit",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "The Hobbit");
+    }
+
+    #[tokio::test]
+    async fn search_goodreads_maps_fetcher_rate_limited_to_http_status_429() {
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+
+        let err = search_goodreads(
+            &fetcher,
+            "https://www.goodreads.com",
+            "x",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, GoodreadsFetchError::HttpStatus(429)));
+    }
 
     // =========================================================================
     // Live-fetch helper (requires network — tests are #[ignore])
@@ -1307,6 +1746,69 @@ mod tests {
             !cover.contains("_SY75_"),
             "size token not stripped: {cover}"
         );
+    }
+
+    #[test]
+    fn autocomplete_numeric_avg_rating_entry_does_not_poison_the_batch() {
+        // Live regression shape (Pandora's Star, measured 2026-07-03): GR
+        // returns avgRating as a STRING on most entries but as a bare JSON
+        // NUMBER (0.0) on some unrated editions. The old whole-batch parse
+        // failed on that one entry and silently erased every hit for the
+        // query. All four entries must survive; the numeric-0.0 entry parses
+        // with its rating filtered as unrated.
+        let body = r#"[
+            {"imageUrl":"https://i.gr-assets.com/images/S/x/45252._SX50_.jpg","bookId":"45252","workId":"987015","bookUrl":"/book/show/45252.Pandora_s_Star","from_search":true,"from_srp":true,"qid":"DBVOC7gZj0","rank":1,"title":"Pandora's Star (Commonwealth Saga, #1)","bookTitleBare":"Pandora's Star","numPages":988,"avgRating":"4.22","ratingsCount":88123,"author":{"id":25375,"name":"Peter F. Hamilton"},"kcrPreviewUrl":null,"description":{"html":"x","truncated":true,"fullContentUrl":"https://www.goodreads.com/book/show/45252"}},
+            {"imageUrl":"https://i.gr-assets.com/images/S/x/nophoto.jpg","bookId":"138001619","workId":"1","bookUrl":"/book/show/138001619","from_search":true,"from_srp":true,"qid":"DBVOC7gZj0","rank":2,"title":"Pandora's Star by Hamilton, Peter F. [MassMarket(2005)]","bookTitleBare":"Pandora's Star","numPages":null,"avgRating":0.0,"ratingsCount":0,"author":{"id":2,"name":"Peter F. Hamilton"},"kcrPreviewUrl":null},
+            {"imageUrl":"https://i.gr-assets.com/images/S/x/3.jpg","bookId":"219187841","workId":"3","bookUrl":"/book/show/219187841","rank":3,"title":"Pandora's Star (Commonwealth Saga) by Peter F. Hamilton","avgRating":"5.00","ratingsCount":1,"author":{"id":2,"name":"Peter F. Hamilton"}},
+            {"imageUrl":"https://i.gr-assets.com/images/S/x/4.jpg","bookId":"226763120","workId":"4","bookUrl":"/book/show/226763120","rank":4,"title":"Pandora's Star: Commonwealth Saga 1","avgRating":"4.00","ratingsCount":2,"author":{"id":2,"name":"Peter F. Hamilton"}}
+        ]"#;
+        let results = parse_autocomplete_json(body);
+        assert_eq!(
+            results.len(),
+            4,
+            "one numeric-avgRating entry must never erase the batch"
+        );
+        assert_eq!(results[0].title, "Pandora's Star (Commonwealth Saga, #1)");
+        assert_eq!(
+            results[0].title_bare.as_deref(),
+            Some("Pandora's Star"),
+            "bookTitleBare rides along so matching sees GR's own undecorated title"
+        );
+        assert_eq!(results[0].rating.as_deref(), Some("4.22"));
+        assert_eq!(
+            results[1].rating, None,
+            "numeric 0.0 normalizes to \"0.00\" and filters as unrated"
+        );
+        assert_eq!(results[1].author.as_deref(), Some("Peter F. Hamilton"));
+    }
+
+    #[test]
+    fn autocomplete_structurally_broken_entry_drops_alone() {
+        // An entry whose fields are the wrong SHAPE entirely (bookUrl as an
+        // object) drops by itself; its neighbors survive.
+        let body = r#"[
+            {"bookUrl":{"nested":"garbage"},"title":"Broken Entry","avgRating":"4.00"},
+            {"bookId":"5907","bookUrl":"/book/show/5907","title":"Survivor","avgRating":"4.30","author":{"name":"J.R.R. Tolkien"}}
+        ]"#;
+        let results = parse_autocomplete_json(body);
+        assert_eq!(results.len(), 1, "the broken entry drops alone");
+        assert_eq!(results[0].title, "Survivor");
+    }
+
+    #[test]
+    fn autocomplete_decoration_populates_series_fields() {
+        // The search-card decoration is provider data — the volume evidence
+        // must ride the result fields (the HTML road already extracts it).
+        let body = r#"[
+            {"bookId":"47212","bookUrl":"/book/show/47212","title":"Storm Front (The Dresden Files, #1)","bookTitleBare":"Storm Front","author":{"name":"Jim Butcher"}},
+            {"bookId":"11084145","bookUrl":"/book/show/11084145","title":"Steve Jobs","bookTitleBare":"Steve Jobs","author":{"name":"Walter Isaacson"}}
+        ]"#;
+        let results = parse_autocomplete_json(body);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].series_name.as_deref(), Some("The Dresden Files"));
+        assert_eq!(results[0].series_position, Some(1.0));
+        assert_eq!(results[1].series_name, None);
+        assert_eq!(results[1].series_position, None);
     }
 
     #[test]
@@ -1665,5 +2167,266 @@ mod tests {
         assert!(validate_cover_url(
             "https://images.gr-assets.com/books/123.jpg"
         ));
+    }
+
+    // =========================================================================
+    // Series detail page parsing (2026-07 React layout)
+    // =========================================================================
+
+    /// Real page captured 2026-07-03: umbrella series, 5 primary == 5 total,
+    /// decorations name the SUB-series (Night's Dawn).
+    const SERIES_PAGE_CONFEDERATION: &str = include_str!("../fixtures/gr-series-108562.html");
+
+    /// Real page captured 2026-07-03: 3 primary works listed FIRST, followed
+    /// by 24 omnibus/split-edition/translation entries (27 total).
+    const SERIES_PAGE_NIGHTS_DAWN: &str = include_str!("../fixtures/gr-series-43318.html");
+
+    fn attr_encode(json: &str) -> String {
+        json.replace('&', "&amp;").replace('"', "&quot;")
+    }
+
+    /// Build a minimal new-layout series page from raw JSON pieces.
+    fn series_page(
+        header_title: &str,
+        subtitle: &str,
+        series_json: &[&str],
+        pagination_json: Option<&str>,
+    ) -> String {
+        let mut html = String::from("<html><body>");
+        let header = format!(
+            r#"{{"title":"{header_title}","subtitle":"{subtitle}","description":{{"html":""}}}}"#
+        );
+        html.push_str(&format!(
+            r#"<div data-react-class="ReactComponents.SeriesHeader" data-react-props="{}"></div>"#,
+            attr_encode(&header)
+        ));
+        for s in series_json {
+            html.push_str(&format!(
+                r#"<div data-react-class="ReactComponents.SeriesList" data-react-props="{}"></div>"#,
+                attr_encode(s)
+            ));
+        }
+        if let Some(p) = pagination_json {
+            html.push_str(&format!(
+                r#"<div data-react-class="ReactComponents.FullPagePaginationControls" data-react-props="{}"></div>"#,
+                attr_encode(p)
+            ));
+        }
+        html.push_str("</body></html>");
+        html
+    }
+
+    fn series_entry(book_json: &str) -> String {
+        format!(r#"{{"isLibrarianView":false,"readOnlyStars":false,"book":{book_json}}}"#)
+    }
+
+    #[test]
+    fn series_detail_cu_fixture_parses_all_five_books_unnumbered() {
+        let page = parse_series_detail_html(SERIES_PAGE_CONFEDERATION);
+        assert_eq!(page.primary_count, Some(5));
+        assert!(!page.has_next);
+        let keys: Vec<&str> = page.books.iter().map(|b| b.gr_key.as_str()).collect();
+        assert_eq!(keys, ["45245", "479561", "45260", "45257", "126413"]);
+        let titles: Vec<&str> = page.books.iter().map(|b| b.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "The Reality Dysfunction",
+                "The Neutronium Alchemist",
+                "The Naked God",
+                "A Second Chance at Eden",
+                "The Confederation Handbook"
+            ]
+        );
+        assert_eq!(
+            page.books.iter().map(|b| b.year).collect::<Vec<_>>(),
+            [Some(1996), Some(1997), Some(1999), Some(1998), Some(2000)]
+        );
+        // Umbrella page: every decoration names Night's Dawn, not this series —
+        // positions are never borrowed from a different series.
+        assert!(
+            page.books.iter().all(|b| b.position.is_none()),
+            "umbrella page must not borrow sub-series numbers"
+        );
+        let cover = page.books[0].cover_url.as_deref().expect("cover url");
+        assert!(cover.starts_with("https://"), "validated host: {cover}");
+        assert!(!cover.contains("_SY180_"), "size token upscaled: {cover}");
+    }
+
+    #[test]
+    fn series_detail_nd_fixture_lists_primaries_first_with_matching_positions() {
+        let page = parse_series_detail_html(SERIES_PAGE_NIGHTS_DAWN);
+        assert_eq!(page.primary_count, Some(3));
+        assert!(!page.has_next, "27 total works fit one 100-per-page page");
+        assert_eq!(
+            page.books.len(),
+            27,
+            "the parser reports the page faithfully — the primary cutoff is roster policy"
+        );
+        let first3: Vec<(&str, Option<f64>)> = page.books[..3]
+            .iter()
+            .map(|b| (b.gr_key.as_str(), b.position))
+            .collect();
+        assert_eq!(
+            first3,
+            [
+                ("45245", Some(1.0)),
+                ("479561", Some(2.0)),
+                ("45260", Some(3.0))
+            ]
+        );
+        // A translation decorates a DIFFERENT series name ("Zorii Nopții") —
+        // its number never becomes a position.
+        let ro = page
+            .books
+            .iter()
+            .find(|b| b.gr_key == "16111029")
+            .expect("Romanian split edition is on the page");
+        assert_eq!(ro.position, None);
+        // The omnibus decorates a RANGE (#1-3) — not a position.
+        let omnibus = page
+            .books
+            .iter()
+            .find(|b| b.gr_key == "5198367")
+            .expect("trilogy omnibus is on the page");
+        assert_eq!(omnibus.position, None);
+    }
+
+    #[test]
+    fn series_detail_poison_entry_drops_alone() {
+        let good = series_entry(
+            r#"{"bookId":"42","title":"Survivor (Saga, #1)","bookTitleBare":"Survivor","imageUrl":"https://i.gr-assets.com/images/S/x/42._SY180_.jpg","publicationDate":"2001"}"#,
+        );
+        let list = format!(
+            r#"{{"series":[{{"isLibrarianView":false,"readOnlyStars":false,"book":"not an object"}},{good}]}}"#
+        );
+        let html = series_page(
+            "Saga Series",
+            "2 primary works • 2 total works",
+            &[&list],
+            None,
+        );
+        let page = parse_series_detail_html(&html);
+        assert_eq!(page.books.len(), 1, "the rogue entry drops alone");
+        assert_eq!(page.books[0].gr_key, "42");
+        assert_eq!(
+            page.books[0].position,
+            Some(1.0),
+            "decoration names this series — position taken"
+        );
+        assert_eq!(page.books[0].year, Some(2001));
+    }
+
+    #[test]
+    fn series_detail_pagination_from_counter_blob() {
+        let list = format!(
+            r#"{{"series":[{}]}}"#,
+            series_entry(r#"{"bookId":"1","title":"B1","bookTitleBare":"B1"}"#)
+        );
+        let p1 = series_page(
+            "Big Series",
+            "250 primary works • 250 total works",
+            &[&list],
+            Some(r#"{"numWorks":250,"currentPageNumber":1,"perPage":100}"#),
+        );
+        assert!(parse_series_detail_html(&p1).has_next);
+        let p3 = series_page(
+            "Big Series",
+            "250 primary works • 250 total works",
+            &[&list],
+            Some(r#"{"numWorks":250,"currentPageNumber":3,"perPage":100}"#),
+        );
+        assert!(!parse_series_detail_html(&p3).has_next);
+    }
+
+    #[test]
+    fn series_detail_old_layout_is_unreadable_and_empty() {
+        // The pre-2026-07 layout (<h3>Book N</h3> headings) no longer exists on
+        // GR; a page in that shape is DRIFT and must parse as unreadable —
+        // loudly empty — never as data.
+        let html = r#"<h3>Book 1</h3><a href="/book/show/47212">Storm Front</a>
+                      <h3>Book 2</h3><a href="/book/show/47213">Fool Moon</a>"#;
+        let page = parse_series_detail_html(html);
+        assert!(page.books.is_empty());
+        assert_eq!(page.primary_count, None);
+        assert!(!page.has_next);
+    }
+
+    #[test]
+    fn series_detail_missing_primary_count_reports_none() {
+        let list = format!(
+            r#"{{"series":[{}]}}"#,
+            series_entry(r#"{"bookId":"7","title":"X","bookTitleBare":"X"}"#)
+        );
+        let html = series_page("Odd Series", "some redesigned subtitle", &[&list], None);
+        let page = parse_series_detail_html(&html);
+        assert_eq!(
+            page.primary_count, None,
+            "an unparseable header is signalled, never guessed"
+        );
+        assert_eq!(page.books.len(), 1);
+    }
+
+    #[test]
+    fn series_detail_nophoto_cover_dropped_book_kept() {
+        let list = format!(
+            r#"{{"series":[{}]}}"#,
+            series_entry(
+                r#"{"bookId":"9","title":"Y","bookTitleBare":"Y","imageUrl":"https://s.gr-assets.com/assets/nophoto/book/111x148.png"}"#
+            )
+        );
+        let html = series_page("Y Series", "1 primary work • 1 total work", &[&list], None);
+        let page = parse_series_detail_html(&html);
+        assert_eq!(page.books.len(), 1);
+        assert!(page.books[0].cover_url.is_none());
+    }
+
+    #[test]
+    fn series_detail_title_prefers_bare_form_and_strips_decoration_fallback() {
+        let list = format!(
+            r#"{{"series":[{},{}]}}"#,
+            series_entry(r#"{"bookId":"11","title":"Alpha (Greek, #1)","bookTitleBare":"Alpha"}"#),
+            series_entry(r#"{"bookId":"12","title":"Beta (Greek, #2)"}"#)
+        );
+        let html = series_page(
+            "Greek Series",
+            "2 primary works • 2 total works",
+            &[&list],
+            None,
+        );
+        let page = parse_series_detail_html(&html);
+        assert_eq!(page.books[0].title, "Alpha");
+        assert_eq!(
+            page.books[1].title, "Beta",
+            "decoration stripped when GR omits the bare form"
+        );
+        assert_eq!(page.books[1].position, Some(2.0));
+    }
+
+    #[test]
+    fn series_detail_list_before_header_keeps_books_without_positions() {
+        // GR has reordered page components before; the degrade contract is
+        // books retained, positions never guessed from a header not yet seen.
+        let list = format!(
+            r#"{{"series":[{}]}}"#,
+            series_entry(r#"{"bookId":"21","title":"Gamma (Greek, #1)","bookTitleBare":"Gamma"}"#)
+        );
+        let header = r#"{"title":"Greek Series","subtitle":"1 primary work • 1 total work","description":{"html":""}}"#;
+        let html = format!(
+            r#"<html><body><div data-react-class="ReactComponents.SeriesList" data-react-props="{}"></div><div data-react-class="ReactComponents.SeriesHeader" data-react-props="{}"></div></body></html>"#,
+            attr_encode(&list),
+            attr_encode(header)
+        );
+        let page = parse_series_detail_html(&html);
+        assert_eq!(page.books.len(), 1, "books survive mount reordering");
+        assert_eq!(
+            page.books[0].position, None,
+            "no position is assigned from a header that had not been seen yet"
+        );
+        assert_eq!(
+            page.primary_count,
+            Some(1),
+            "the header is still read for the roster cutoff"
+        );
     }
 }

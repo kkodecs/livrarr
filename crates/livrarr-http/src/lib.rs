@@ -1,6 +1,8 @@
 use std::time::Duration;
 
+pub mod breaker;
 pub mod fetcher;
+pub mod outbound_queue;
 pub mod ssrf;
 
 /// Composable HTTP client.
@@ -104,8 +106,6 @@ pub enum HttpClientError {
 // ---------------------------------------------------------------------------
 // v2.1 — HTTP Client Contracts
 // ---------------------------------------------------------------------------
-
-pub mod rate_limit;
 
 /// Max response body size for downloads and covers.
 ///

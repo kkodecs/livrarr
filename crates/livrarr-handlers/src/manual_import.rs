@@ -42,7 +42,7 @@ use crate::middleware::RequireAdmin;
 use crate::ApiError;
 use livrarr_domain::services::{
     AppConfigService, AuthorService, ImportFileResult, ImportService, ImportSingleFileRequest,
-    ManualImportService, MatchingService, WorkService,
+    ManualImportService, MatchingService, RefreshSurface, WorkService,
 };
 use livrarr_domain::{classify_file, MediaType};
 
@@ -846,24 +846,38 @@ pub async fn import<S: ManualImportHandlerContext>(
         .app_config_service()
         .get_media_management_config()
         .await?;
+    // The user's default language, read once per import request: items whose
+    // file and picked candidate both carry no language seed this value.
+    let default_language = state.app_config_service().get_default_language().await?;
 
-    let mut results = Vec::new();
     let mut author_ol_cache: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
 
-    for item in &req.items {
-        let result = import_single_item(
-            &state,
-            user_id,
-            item,
-            &existing_works,
-            &root_folders,
-            &media_mgmt,
-            &mut author_ol_cache,
-        )
-        .await;
-        results.push(result);
-    }
+    // One negative cover-host cache for the whole batch (dead-URL phase1
+    // fast-fail): once a book's embedded cover URL fails to connect, later
+    // books in this SAME request skip the doomed connect for that host. The
+    // scope ends when the block below returns, so nothing survives past this
+    // request — the next import (or a concurrent one on another task) starts
+    // with an empty cache.
+    let results = livrarr_domain::services::with_cover_host_cache(async {
+        let mut results = Vec::new();
+        for item in &req.items {
+            let result = import_single_item(
+                &state,
+                user_id,
+                item,
+                &existing_works,
+                &root_folders,
+                &media_mgmt,
+                &mut author_ol_cache,
+                &default_language,
+            )
+            .await;
+            results.push(result);
+        }
+        results
+    })
+    .await;
 
     // Background refresh for each imported work: fills in anchors (GR/HC/ASIN)
     // that initial enrichment misses because they require the identity road.
@@ -871,7 +885,10 @@ pub async fn import<S: ManualImportHandlerContext>(
         let s = state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let _ = s.work_service().refresh(user_id, work_id).await;
+            let _ = s
+                .work_service()
+                .refresh(user_id, work_id, RefreshSurface::Interactive)
+                .await;
         });
     }
 
@@ -882,6 +899,7 @@ pub async fn import<S: ManualImportHandlerContext>(
 // Import helpers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn import_single_item<S: ManualImportHandlerContext>(
     state: &S,
     user_id: i64,
@@ -890,6 +908,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
     root_folders: &[livrarr_domain::RootFolder],
     _media_mgmt: &livrarr_domain::settings::MediaManagementConfig,
     author_ol_cache: &mut std::collections::HashMap<String, Option<String>>,
+    default_language: &str,
 ) -> ImportResult {
     let source = PathBuf::from(&item.path);
 
@@ -917,19 +936,27 @@ async fn import_single_item<S: ManualImportHandlerContext>(
         }
     };
 
-    let work_id =
-        match find_or_create_work(state, user_id, item, existing_works, author_ol_cache).await {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("manual import: work creation failed for {}: {e}", item.path);
-                return ImportResult {
-                    path: item.path.clone(),
-                    status: ImportStatus::Failed,
-                    work_id: None,
-                    error: Some(format!("work creation failed: {e}")),
-                };
-            }
-        };
+    let work_id = match find_or_create_work(
+        state,
+        user_id,
+        item,
+        existing_works,
+        author_ol_cache,
+        default_language,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            warn!("manual import: work creation failed for {}: {e}", item.path);
+            return ImportResult {
+                path: item.path.clone(),
+                status: ImportStatus::Failed,
+                work_id: None,
+                error: Some(format!("work creation failed: {e}")),
+            };
+        }
+    };
 
     let target_path = state.import_service().build_target_path(
         &root_folder.path,
@@ -1020,6 +1047,7 @@ async fn find_or_create_work<
     item: &ImportItem,
     existing_works: &[livrarr_domain::Work],
     author_ol_cache: &mut std::collections::HashMap<String, Option<String>>,
+    default_language: &str,
 ) -> Result<i64, ApiError> {
     if let Some(work) = find_existing_work(existing_works, &item.ol_key, &item.title, &item.author)
     {
@@ -1081,6 +1109,7 @@ async fn find_or_create_work<
     // edition), then the picked candidate's language, then English.
     let language = livrarr_domain::seed::SeedLanguage::resolve(
         file_language.or_else(|| item.language.clone()).as_deref(),
+        default_language,
     );
 
     let resolved = state

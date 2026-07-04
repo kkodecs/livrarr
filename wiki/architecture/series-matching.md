@@ -18,4 +18,4 @@ Background job (24h interval) polls providers for new works by monitored authors
 
 ## Matching Strategy
 
-Deterministic matching first (ISBN, ASIN, provider-specific IDs). Fuzzy title matching as fallback. LLM validator for ambiguous cases only.
+Fully deterministic (Phase 5, 2026-07-03): provider IDs first (ISBN, ASIN, GR/OL/HC keys), then the one matching authority's verdicts (`livrarr-domain/src/identity_matching.rs`, insight #59). No LLM chooses a match anywhere; ambiguity parks for user review (grey never absorbs).

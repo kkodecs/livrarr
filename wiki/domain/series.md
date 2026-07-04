@@ -54,15 +54,26 @@ and flags propagate to linked works; unmonitoring clears them.
 - Error semantics: user-edit reconcile failures **propagate** (no self-heal exists);
   create-path failures warn only (startup back-fill self-heals links).
 
-## Roster (REQ-010, series_roster table)
+## Roster (REQ-010, series_roster table; amended by N1 2026-07-03)
 
 Persisted GR roster per series (parsed primary works: title/gr_key/position/year),
 migration 062, FK CASCADE. Written by the monitor worker (write-through of the fetch
-it already does) and once on first expansion; **expansions never refetch** (a parsed-
-empty result is stored too). `GET /series/{id}/books` merges roster ↔ linked works:
-normalized GR key first, then `find_matching_work` (the same matcher as linking —
-one authority), claim-once, linked works never dropped. Display-only road: never
-creates works, never writes FKs.
+it already does) and on expansion when no usable roster is stored. **Emptiness is
+never truth (N1):** an empty parse is never persisted, never overwrites stored data
+(monitor skips write-through AND the work_count update), and a stored-empty row
+reads as absent — the next expansion refetches, so rosters damaged during the
+2026-07 GR-layout break heal on open. A pagination walk that collects fewer books
+than the header's declared primary count yields EMPTY (drift), never a partial
+roster. Every roster save pairs with a `work_count` update (count IS the GR roster
+size, ST-007). Non-empty stored rosters still never refetch. On the 2026-07 GR
+layout the roster = the first "N primary works" entries (see
+[goodreads.md](../integrations/goodreads.md) § Series pages); positions come only
+from same-series title decorations — umbrella-series rosters ride unnumbered.
+`GET /series/{id}/books` merges roster ↔ linked works: normalized GR key first,
+then `find_matching_work` (the same matcher as linking — one authority),
+claim-once, linked works never dropped. Display-only road: never creates works,
+never writes FKs; an empty fetch degrades to linked-only rows with
+`roster_available: false`.
 
 ## Anti-bot (ST-012)
 

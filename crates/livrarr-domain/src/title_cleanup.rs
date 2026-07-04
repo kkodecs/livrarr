@@ -25,17 +25,17 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 /// Trailing parenthetical at the end of a title, e.g. "(Series, #1)".
-static RE_TRAILING_PAREN: LazyLock<Regex> =
+pub(crate) static RE_TRAILING_PAREN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*\(([^()]+)\)\s*$").unwrap());
 
 /// Series info inside parens: "Series Name, #N" or "Series Name #N" or
 /// "Book N of Series" (case-insensitive).
-static RE_SERIES_PAREN: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static RE_SERIES_PAREN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^.+,?\s*#\s*\d+(\.\d+)?$|^Book\s+\w+\s+of\s+.+$|^.+\s+series$").unwrap()
 });
 
 /// Format marker inside parens: "(Audiobook)", "(Unabridged)", etc.
-static RE_FORMAT_PAREN: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static RE_FORMAT_PAREN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)^(audiobook|unabridged|abridged|ebook|kindle\s+edition|hardcover|paperback|mass\s+market|illustrated|annotated)$",
     )
@@ -43,10 +43,11 @@ static RE_FORMAT_PAREN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Year inside parens: "(1963)" or "(1963 ed.)" or "(2010 reissue)".
-static RE_YEAR_PAREN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}(\s+\w+)?$").unwrap());
+pub(crate) static RE_YEAR_PAREN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d{4}(\s+\w+)?$").unwrap());
 
 /// Edition marker inside parens: "(Deluxe Edition)", "(Anniversary Edition)".
-static RE_EDITION_PAREN: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static RE_EDITION_PAREN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)^(original|reissue|anniversary|deluxe|special|director'?s\s+cut|revised|updated|expanded|collector'?s|definitive)\s+edition$",
     )

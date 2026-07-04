@@ -467,7 +467,9 @@ Current providers:
   `work.gr_key` exists. Search requires LLM disambiguation for candidate choice;
   if the LLM cannot select a candidate, Goodreads returns no payload.
 - `OpenLibrary`: REST metadata provider. Useful for OL keys, descriptions, and
-  ISBNs. It currently does not produce a cover URL in the normalized detail.
+  ISBNs. Emits a cover URL in the normalized detail when the OL record carries
+  a cover id (`covers.openlibrary.org/b/id/{id}-L.jpg?default=false`) — an
+  earlier version of this page wrongly said it emitted none.
 - `Audnexus`: audiobook-focused provider for narration, duration, and ASIN-like
   audio metadata.
 - `Readarr`: synthetic provider produced from injected `SourceProviderData`, not
@@ -686,9 +688,12 @@ Improvement direction:
 Manual import is the biggest convergence risk because it does not pass rich
 source metadata into add/enrichment.
 
-Cover resolution is coupled to provider field merge. If no provider wins
-`cover_url`, cover download never starts even if a cover could be found from an
-ISBN or provider key.
+Cover resolution is separate from the generic field merge (N2, 2026-07-04):
+the merge computes a `CoverResolution` per slot but writes NO cover columns;
+the cover write gate (`livrarr-metadata/src/cover_write_gate.rs`) downloads,
+measures, compares against the incumbent, and commits file + DB atomically.
+If no provider offers a cover URL, no download starts — resolving covers from
+a bare ISBN/key when every payload lacks one remains future work.
 
 Provider retry state is durable and intentionally suppresses repeated work. That
 means pipeline changes should have a way to invalidate stale terminal outcomes.

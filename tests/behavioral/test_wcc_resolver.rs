@@ -48,7 +48,6 @@ fn make_resolver(
 fn full_config() -> ResolverConfig {
     ResolverConfig {
         gb_key_present: true,
-        llm_configured: false,
         ..ResolverConfig::default()
     }
 }
@@ -203,6 +202,21 @@ fn test_wcc_resolver_ac_030_select_providers_excludes_prerequisite_lacking_but_k
     assert!(
         selected.len() >= 2,
         "REQ-008: an ISBN seed must not be narrowed to a single hardcoded provider"
+    );
+}
+
+/// REQ-IDs: REQ-012
+/// Directive: Goodreads participates in identity provider selection for every
+/// install (D6) — there is no `llm_configured`-style field on `ResolverConfig`
+/// left to gate it on. An ebook-axis seed selects Goodreads regardless.
+#[test]
+fn test_wcc_resolver_req_012_select_providers_includes_goodreads_without_llm() {
+    let resolver = make_resolver(vec![], full_config());
+    let selected = resolver.select_providers(&isbn_seed(), LatencyTier::Interactive);
+
+    assert!(
+        selected.contains(&MetadataProvider::Goodreads),
+        "REQ-012: Goodreads must be selected for identity regardless of LLM configuration"
     );
 }
 
@@ -462,4 +476,70 @@ fn test_wcc_resolver_ac_024_build_transient_work_from_seed_carries_identifiers_w
     assert_eq!(transient.ol_key.as_deref(), Some("OL45883W"));
     assert_eq!(transient.gr_key.as_deref(), Some("234225"));
     assert_eq!(transient.hc_key.as_deref(), Some("HC-DUNE"));
+}
+
+// =============================================================================
+// B4: the resolver's tier→priority mapping (packet-b4-priorities.md item 3 —
+// Interactive->High, Background->Low, Bulk->Low), observed via the stub
+// client's recorded `RequestPriority` (item 5 — "resolver maps Interactive->High").
+// =============================================================================
+
+#[tokio::test]
+async fn test_wcc_resolver_interactive_tier_maps_to_high_priority() {
+    let hc = StubProviderClient::new(
+        MetadataProvider::Hardcover,
+        success(detail("Dune", "Frank Herbert")),
+    );
+    let resolver = make_resolver(vec![hc.clone()], full_config());
+
+    resolver
+        .resolve(USER_ID, &isbn_seed(), LatencyTier::Interactive)
+        .await
+        .expect("resolve should succeed");
+
+    assert_eq!(
+        hc.last_priority(),
+        Some(livrarr_domain::RequestPriority::High),
+        "LatencyTier::Interactive must map to RequestPriority::High"
+    );
+}
+
+#[tokio::test]
+async fn test_wcc_resolver_background_tier_maps_to_low_priority() {
+    let hc = StubProviderClient::new(
+        MetadataProvider::Hardcover,
+        success(detail("Dune", "Frank Herbert")),
+    );
+    let resolver = make_resolver(vec![hc.clone()], full_config());
+
+    resolver
+        .resolve(USER_ID, &isbn_seed(), LatencyTier::Background)
+        .await
+        .expect("resolve should succeed");
+
+    assert_eq!(
+        hc.last_priority(),
+        Some(livrarr_domain::RequestPriority::Low),
+        "LatencyTier::Background must map to RequestPriority::Low"
+    );
+}
+
+#[tokio::test]
+async fn test_wcc_resolver_bulk_tier_maps_to_low_priority() {
+    let hc = StubProviderClient::new(
+        MetadataProvider::Hardcover,
+        success(detail("Dune", "Frank Herbert")),
+    );
+    let resolver = make_resolver(vec![hc.clone()], full_config());
+
+    resolver
+        .resolve(USER_ID, &isbn_seed(), LatencyTier::Bulk)
+        .await
+        .expect("resolve should succeed");
+
+    assert_eq!(
+        hc.last_priority(),
+        Some(livrarr_domain::RequestPriority::Low),
+        "LatencyTier::Bulk must map to RequestPriority::Low"
+    );
 }

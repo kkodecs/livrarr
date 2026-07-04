@@ -18,4 +18,5 @@ livrarr-domain = { workspace = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 tempfile = "3"
+thiserror = { workspace = true }
 tracing = "0.1"

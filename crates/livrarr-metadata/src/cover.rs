@@ -1,4 +1,8 @@
-use livrarr_http::HttpClient;
+use livrarr_domain::services::{
+    is_known_dead_host, mark_cover_host_dead, FetchRequest, HttpFetcher, HttpMethod, RateBucket,
+    UserAgentProfile,
+};
+use livrarr_domain::RequestPriority;
 
 use livrarr_external_data::provider_util::upscale_cover_url;
 
@@ -14,21 +18,69 @@ fn is_valid_isbn(isbn: &str) -> bool {
         && (last[0].is_ascii_digit() || last[0] == b'X' || last[0] == b'x')
 }
 
+/// GET `url` on `bucket` via the queue-routed, SSRF-safe fetcher. `None` on
+/// any transport error or a non-2xx status — the silent-None style the
+/// direct-`HttpClient` callers this replaces already used.
+async fn get_ok<F: HttpFetcher>(
+    fetcher: &F,
+    url: &str,
+    bucket: RateBucket,
+    priority: RequestPriority,
+) -> Option<livrarr_domain::services::FetchResponse> {
+    let req = FetchRequest {
+        url: url.to_string(),
+        method: HttpMethod::Get,
+        headers: vec![],
+        body: None,
+        timeout: std::time::Duration::from_secs(30),
+        rate_bucket: bucket,
+        max_body_bytes: 10 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority,
+    };
+    let resp = fetcher.fetch_ssrf_safe(req).await.ok()?;
+    (200..300).contains(&resp.status).then_some(resp)
+}
+
+/// Case-insensitive `Content-Length` lookup.
+fn declared_content_length(headers: &[(String, String)]) -> Option<usize> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.parse::<usize>().ok())
+}
+
+/// Amazon/CdL return a tiny placeholder image for a missing cover — filter it
+/// out. Prefer the declared `Content-Length`; if the header is absent, fall
+/// back to the actual downloaded body length (available now that the
+/// queue-routed fetcher always reads the full body, unlike the lazy
+/// `reqwest::Response` this replaces). Either way: tiny = placeholder = filtered.
+fn passes_placeholder_filter(resp: &livrarr_domain::services::FetchResponse) -> bool {
+    let len = declared_content_length(&resp.headers).unwrap_or(resp.body.len());
+    len > 1000
+}
+
 /// Attempt to resolve a cover image URL from an ISBN using OpenLibrary.
 /// Used for English works only.
-pub async fn resolve_cover_by_isbn_ol(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
+pub async fn resolve_cover_by_isbn_ol<F: HttpFetcher>(
+    fetcher: &F,
+    isbn: Option<&str>,
+    priority: RequestPriority,
+) -> Option<String> {
     let isbn = isbn?;
     if !is_valid_isbn(isbn) {
         return None;
     }
 
     let ol_url = format!("https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?default=false");
-    if let Ok(resp) = http.get(&ol_url).send().await {
-        if resp.status().is_success() {
-            return Some(format!(
-                "https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg",
-            ));
-        }
+    if get_ok(fetcher, &ol_url, RateBucket::OpenLibraryCovers, priority)
+        .await
+        .is_some()
+    {
+        return Some(format!(
+            "https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg",
+        ));
     }
 
     None
@@ -38,7 +90,11 @@ pub async fn resolve_cover_by_isbn_ol(http: &HttpClient, isbn: Option<&str>) -> 
 /// No API key, no scraping — just URL construction from ISBN-10.
 /// Returns the URL directly (Amazon returns 200 for valid ISBNs with covers,
 /// or a 1x1 pixel for missing ones — we check Content-Length to filter).
-pub async fn resolve_cover_by_isbn_amazon(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
+pub async fn resolve_cover_by_isbn_amazon<F: HttpFetcher>(
+    fetcher: &F,
+    isbn: Option<&str>,
+    priority: RequestPriority,
+) -> Option<String> {
     let isbn = isbn?;
     if !is_valid_isbn(isbn) {
         return None;
@@ -56,18 +112,9 @@ pub async fn resolve_cover_by_isbn_amazon(http: &HttpClient, isbn: Option<&str>)
     let url =
         format!("https://images-na.ssl-images-amazon.com/images/P/{isbn10}.01._SCLZZZZZZZ_.jpg");
 
-    if let Ok(resp) = http.get(&url).send().await {
-        if resp.status().is_success() {
-            // Amazon returns a tiny 1x1 GIF for missing covers — filter by Content-Length.
-            // Real covers are >1KB.
-            if let Some(len) = resp.content_length() {
-                if len > 1000 {
-                    return Some(url);
-                }
-            } else {
-                // No Content-Length header — accept it (could be chunked)
-                return Some(url);
-            }
+    if let Some(resp) = get_ok(fetcher, &url, RateBucket::None, priority).await {
+        if passes_placeholder_filter(&resp) {
+            return Some(url);
         }
     }
 
@@ -96,9 +143,10 @@ fn isbn13_to_isbn10(isbn13: &str) -> Option<String> {
 
 /// Resolve a cover using Casa del Libro's predictable ISBN-to-URL pattern.
 /// Works for Spanish ISBNs (978-84-...) with very high hit rate.
-pub async fn resolve_cover_by_isbn_casadellibro(
-    http: &HttpClient,
+pub async fn resolve_cover_by_isbn_casadellibro<F: HttpFetcher>(
+    fetcher: &F,
     isbn: Option<&str>,
+    priority: RequestPriority,
 ) -> Option<String> {
     let isbn = isbn?;
     if !is_valid_isbn(isbn) {
@@ -111,15 +159,9 @@ pub async fn resolve_cover_by_isbn_casadellibro(
     let last2 = &clean[11..13];
     let n = (clean.as_bytes()[12] - b'0') % 10; // last digit mod 10
     let url = format!("https://imagessl{n}.casadellibro.com/a/l/s5/{last2}/{clean}.webp");
-    if let Ok(resp) = http.get(&url).send().await {
-        if resp.status().is_success() {
-            if let Some(len) = resp.content_length() {
-                if len > 1000 {
-                    return Some(url);
-                }
-            } else {
-                return Some(url);
-            }
+    if let Some(resp) = get_ok(fetcher, &url, RateBucket::None, priority).await {
+        if passes_placeholder_filter(&resp) {
+            return Some(url);
         }
     }
     None
@@ -128,20 +170,28 @@ pub async fn resolve_cover_by_isbn_casadellibro(
 /// Resolve cover for foreign (non-English) works.
 /// Chain: Casa del Libro ISBN → Amazon ISBN → nothing.
 /// CdL covers are proxied through /api/v1/coverproxy to bypass their CDN browser-blocking.
-pub async fn resolve_cover_foreign(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
-    if let Some(url) = resolve_cover_by_isbn_casadellibro(http, isbn).await {
+pub async fn resolve_cover_foreign<F: HttpFetcher>(
+    fetcher: &F,
+    isbn: Option<&str>,
+    priority: RequestPriority,
+) -> Option<String> {
+    if let Some(url) = resolve_cover_by_isbn_casadellibro(fetcher, isbn, priority).await {
         return Some(url);
     }
-    resolve_cover_by_isbn_amazon(http, isbn).await
+    resolve_cover_by_isbn_amazon(fetcher, isbn, priority).await
 }
 
 /// Resolve cover for English works (existing behavior).
 /// Chain: OL ISBN → Amazon ISBN.
-pub async fn resolve_cover_english(http: &HttpClient, isbn: Option<&str>) -> Option<String> {
-    if let Some(url) = resolve_cover_by_isbn_ol(http, isbn).await {
+pub async fn resolve_cover_english<F: HttpFetcher>(
+    fetcher: &F,
+    isbn: Option<&str>,
+    priority: RequestPriority,
+) -> Option<String> {
+    if let Some(url) = resolve_cover_by_isbn_ol(fetcher, isbn, priority).await {
         return Some(url);
     }
-    resolve_cover_by_isbn_amazon(http, isbn).await
+    resolve_cover_by_isbn_amazon(fetcher, isbn, priority).await
 }
 
 // =============================================================================
@@ -149,8 +199,6 @@ pub async fn resolve_cover_english(http: &HttpClient, isbn: Option<&str>) -> Opt
 // =============================================================================
 
 use std::time::Duration;
-
-use livrarr_domain::services::HttpFetcher;
 
 fn classify_cover_url(url: &str) -> &'static str {
     if url.contains("hardcover.app") || url.contains("assets.hardcover") {
@@ -162,6 +210,16 @@ fn classify_cover_url(url: &str) -> &'static str {
     }
 }
 
+/// Lower-cased host for the phase1 negative cache. `None` on an unparseable
+/// URL — `valid_url` already ran it through `validate_cover_url`, so this is
+/// only reachable for a URL whose host `url::Url` itself can't extract
+/// (host-less scheme edge cases); the cache is simply not consulted for it.
+fn cover_url_host(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_lowercase))
+}
+
 /// Try to get a cover on disk within 3 seconds. Returns the cover file mtime on success.
 ///
 /// Branch A: download existing URL immediately (any host, with GR upscaling).
@@ -169,7 +227,6 @@ fn classify_cover_url(url: &str) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch_phase1_cover<H: HttpFetcher>(
     http_fetcher: &H,
-    hc_http: &HttpClient,
     title: &str,
     author: &str,
     request_cover_url: Option<&str>,
@@ -188,8 +245,26 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
     // Branch A: download existing URL directly (any provider)
     if let Some(url) = valid_url {
         let source = classify_cover_url(url);
+        let host = cover_url_host(url);
+
+        // The same dead host tends to repeat across a whole import batch
+        // (books from one source share a host) — once this run has seen this
+        // host fail to connect, later books skip straight to a miss instead
+        // of burning their own 3s budget on a doomed connect.
+        if let Some(h) = host.as_deref() {
+            if is_known_dead_host(h) {
+                tracing::debug!(
+                    work_id,
+                    host = h,
+                    "phase1 cover skip: host failed to connect earlier this run"
+                );
+                return None;
+            }
+        }
+
         let preferred = upscale_cover_url(url);
         let preferred_changed = preferred != url;
+        let mut saw_connect_failure = false;
 
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining > Duration::from_millis(200) {
@@ -201,6 +276,8 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                     covers_dir,
                     work_id,
                     "",
+                    RequestPriority::High,
+                    true,
                 ),
             )
             .await;
@@ -213,6 +290,9 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                     "phase1 cover acquired"
                 );
                 return cover_file_mtime(covers_dir, work_id);
+            }
+            if let Ok(Err(e)) = &result {
+                saw_connect_failure |= e.is_connect_failure();
             }
         }
 
@@ -227,6 +307,8 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                         covers_dir,
                         work_id,
                         "",
+                        RequestPriority::High,
+                        true,
                     ),
                 )
                 .await;
@@ -240,6 +322,19 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                     );
                     return cover_file_mtime(covers_dir, work_id);
                 }
+                if let Ok(Err(e)) = &result {
+                    saw_connect_failure |= e.is_connect_failure();
+                }
+            }
+        }
+
+        // Only a transport-level connect/timeout failure marks the host dead
+        // (DownloadCoverError::is_connect_failure) — a 404 or a decode
+        // rejection means the host answered fine and must not poison a later
+        // book that has a working cover URL on the same host.
+        if saw_connect_failure {
+            if let Some(h) = host {
+                mark_cover_host_dead(&h);
             }
         }
 
@@ -251,14 +346,17 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
         return None;
     }
 
-    // Branch B: no URL provided — HC search as recovery
+    // Branch B: no URL provided — HC search as recovery. Not the direct-
+    // download leg the negative host cache targets (a batch-wide dead host
+    // comes from a per-book embedded URL, not HC's own asset host), so this
+    // download keeps the normal connect budget and skips the cache.
     if let Some(token) = hc_token {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining > Duration::from_millis(500) {
             let hc_timeout = remaining.min(Duration::from_secs(2));
             match tokio::time::timeout(
                 hc_timeout,
-                fast_hc_cover_search(hc_http, title, author, token),
+                fast_hc_cover_search(http_fetcher, title, author, token, RequestPriority::High),
             )
             .await
             {
@@ -274,6 +372,8 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
                                     covers_dir,
                                     work_id,
                                     "",
+                                    RequestPriority::High,
+                                    false,
                                 ),
                             )
                             .await,
@@ -308,46 +408,23 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
     None
 }
 
-async fn fast_hc_cover_search(
-    http: &HttpClient,
+async fn fast_hc_cover_search<F: HttpFetcher>(
+    fetcher: &F,
     title: &str,
     author: &str,
     token: &str,
+    priority: RequestPriority,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    use livrarr_external_data::hardcover::HARDCOVER_API_URL;
-
-    let query = r#"query SearchBooks($query: String!) {
-        search(query: $query, query_type: "books", per_page: 10) { results }
-    }"#;
+    use livrarr_external_data::hardcover::{hc_extract_hits, hc_post, hc_search_body};
 
     let clean_title = title
         .rfind('(')
         .filter(|_| title.ends_with(')'))
         .map(|i| title[..i].trim())
         .unwrap_or(title);
-    let body = serde_json::json!({
-        "query": query,
-        "variables": {"query": format!("\"{clean_title}\"")}
-    });
-
-    let resp = http
-        .post(HARDCOVER_API_URL)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        return Err(format!("HC HTTP {}", resp.status()).into());
-    }
-
-    let data: serde_json::Value = resp.json().await?;
-    let hits = data
-        .pointer("/data/search/results/hits")
-        .and_then(|r| r.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let body = hc_search_body(10, &format!("\"{clean_title}\""));
+    let data = hc_post(fetcher, body, token, priority).await?;
+    let hits = hc_extract_hits(&data);
 
     let title_lower = clean_title.trim().to_lowercase();
     let author_lower = author.trim().to_lowercase();
@@ -465,5 +542,266 @@ mod tests {
     fn isbn13_to_isbn10_invalid() {
         assert_eq!(isbn13_to_isbn10("1234567890"), None);
         assert_eq!(isbn13_to_isbn10("9791234567890"), None);
+    }
+}
+
+/// Behavioral coverage for the dead-host fast-fail: (a) a connect failure
+/// marks the host and a later book on that host skips its fetch, (b) a live
+/// URL is unaffected, (c) the cache never leaks across separate runs or
+/// outside any run scope, and (d) only a connect-class failure marks a host
+/// — a plain 404 from an otherwise-live host must not poison it.
+#[cfg(test)]
+mod phase1_fast_fail_tests {
+    use super::*;
+    use livrarr_domain::services::{with_cover_host_cache, FetchError, FetchResponse};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A fetcher whose `fetch_ssrf_safe` answers per-host: hosts in
+    /// `dead_hosts` always fail with a connect-class `FetchError`; URLs in
+    /// `not_found_urls` return a live 404; everything else returns a 200.
+    /// Body bytes are never a real JPEG — `download_cover_to_disk` tolerates
+    /// that (dims come back `None`, non-fatal); only the status/error matters
+    /// for this test's assertions.
+    struct StubFetcher {
+        dead_hosts: Vec<String>,
+        not_found_urls: Vec<String>,
+        call_count: AtomicUsize,
+    }
+
+    impl StubFetcher {
+        fn new(dead_hosts: &[&str]) -> Self {
+            Self {
+                dead_hosts: dead_hosts.iter().map(|s| s.to_string()).collect(),
+                not_found_urls: Vec::new(),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_not_found(not_found_urls: &[&str]) -> Self {
+            Self {
+                dead_hosts: Vec::new(),
+                not_found_urls: not_found_urls.iter().map(|s| s.to_string()).collect(),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl HttpFetcher for StubFetcher {
+        async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+            self.fetch_ssrf_safe(req).await
+        }
+
+        async fn fetch_ssrf_safe(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let host = cover_url_host(&req.url);
+            if host
+                .as_deref()
+                .map(|h| self.dead_hosts.iter().any(|d| d == h))
+                .unwrap_or(false)
+            {
+                return Err(FetchError::Connection("simulated dead host".into()));
+            }
+            if self.not_found_urls.contains(&req.url) {
+                return Ok(FetchResponse {
+                    status: 404,
+                    headers: vec![],
+                    body: vec![],
+                });
+            }
+            Ok(FetchResponse {
+                status: 200,
+                headers: vec![],
+                body: b"fake-cover-bytes".to_vec(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_host_failure_marks_host_and_second_book_with_same_host_skips_fetch() {
+        let stub = StubFetcher::new(&["dead.example.com"]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        with_cover_host_cache(async {
+            let r1 = fetch_phase1_cover(
+                &stub,
+                "Book One",
+                "Author",
+                Some("https://dead.example.com/cover1.jpg"),
+                None,
+                dir.path(),
+                101,
+            )
+            .await;
+            assert_eq!(r1, None, "dead host: phase1 must report a miss");
+            assert_eq!(
+                stub.calls(),
+                1,
+                "book 1 attempts exactly once (no GR/HC upscaling for this host, so no 2nd attempt)"
+            );
+
+            let r2 = fetch_phase1_cover(
+                &stub,
+                "Book Two",
+                "Author",
+                Some("https://dead.example.com/cover2.jpg"),
+                None,
+                dir.path(),
+                102,
+            )
+            .await;
+            assert_eq!(r2, None);
+            assert_eq!(
+                stub.calls(),
+                1,
+                "book 2 must skip the fetch entirely — the host is already known dead"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn live_url_fetch_is_unaffected() {
+        let stub = StubFetcher::new(&["dead.example.com"]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        with_cover_host_cache(async {
+            let r = fetch_phase1_cover(
+                &stub,
+                "Live Book",
+                "Author",
+                Some("https://good.example.com/cover.jpg"),
+                None,
+                dir.path(),
+                201,
+            )
+            .await;
+            assert!(r.is_some(), "a live host must still acquire a cover");
+            assert_eq!(stub.calls(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn dead_host_cache_does_not_leak_across_separate_runs() {
+        let stub = StubFetcher::new(&["dead.example.com"]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        with_cover_host_cache(async {
+            let _ = fetch_phase1_cover(
+                &stub,
+                "Run1 Book",
+                "Author",
+                Some("https://dead.example.com/c1.jpg"),
+                None,
+                dir.path(),
+                301,
+            )
+            .await;
+        })
+        .await;
+        assert_eq!(stub.calls(), 1, "run 1 attempted once");
+
+        with_cover_host_cache(async {
+            let _ = fetch_phase1_cover(
+                &stub,
+                "Run2 Book",
+                "Author",
+                Some("https://dead.example.com/c2.jpg"),
+                None,
+                dir.path(),
+                302,
+            )
+            .await;
+        })
+        .await;
+        assert_eq!(
+            stub.calls(),
+            2,
+            "a fresh run must attempt again — no cross-run leak"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_any_run_scope_the_check_is_a_noop_every_book_attempts() {
+        // Every WorkService::add caller other than manual import (direct add,
+        // list import, Readarr import, author monitor, background retry)
+        // never wraps itself in with_cover_host_cache — must never panic,
+        // must always attempt the fetch (fail-open).
+        let stub = StubFetcher::new(&["dead.example.com"]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let _ = fetch_phase1_cover(
+            &stub,
+            "No Scope 1",
+            "Author",
+            Some("https://dead.example.com/c1.jpg"),
+            None,
+            dir.path(),
+            401,
+        )
+        .await;
+        let _ = fetch_phase1_cover(
+            &stub,
+            "No Scope 2",
+            "Author",
+            Some("https://dead.example.com/c2.jpg"),
+            None,
+            dir.path(),
+            402,
+        )
+        .await;
+        assert_eq!(
+            stub.calls(),
+            2,
+            "no active run scope — no caching, both books attempted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_404_on_one_book_does_not_poison_a_later_book_on_the_same_host() {
+        // The host is live (it answers with a real 404, not a connect
+        // failure) — a later book with a working URL on that SAME host must
+        // still be attempted, not silently skipped.
+        let stub = StubFetcher::with_not_found(&["https://flaky.example.com/missing.jpg"]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        with_cover_host_cache(async {
+            let r1 = fetch_phase1_cover(
+                &stub,
+                "Missing Cover",
+                "Author",
+                Some("https://flaky.example.com/missing.jpg"),
+                None,
+                dir.path(),
+                501,
+            )
+            .await;
+            assert_eq!(r1, None);
+
+            let r2 = fetch_phase1_cover(
+                &stub,
+                "Working Cover",
+                "Author",
+                Some("https://flaky.example.com/present.jpg"),
+                None,
+                dir.path(),
+                502,
+            )
+            .await;
+            assert!(
+                r2.is_some(),
+                "same host, different URL that works — must not have been skipped"
+            );
+            assert_eq!(
+                stub.calls(),
+                2,
+                "both books attempted — the 404 never marked the host dead"
+            );
+        })
+        .await;
     }
 }

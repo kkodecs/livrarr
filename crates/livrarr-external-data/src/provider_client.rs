@@ -17,10 +17,14 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use livrarr_domain::services::{
-    CallOperation, CallOutcomeClass, ProviderCallRecord, ProviderCallSink,
+    CallOperation, CallOutcomeClass, FetchRequest, HttpFetcher, HttpMethod, ProviderCallRecord,
+    ProviderCallSink, RateBucket, UserAgentProfile,
 };
-use livrarr_domain::{AnchorQuery, MetadataProvider, WillRetryReason, Work};
+use livrarr_domain::{AnchorQuery, MetadataProvider, RequestPriority, WillRetryReason, Work};
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
 use livrarr_http::HttpClient;
+use std::time::Duration;
 
 use crate::audnexus::{query_audnexus, query_audnexus_by_asin, AudnexusCache, AudnexusResult};
 use crate::goodreads::{self, GoodreadsDetailResult, GoodreadsFetchError, GOODREADS_BASE_URL};
@@ -43,21 +47,33 @@ pub enum ProviderClient {
 }
 
 impl ProviderClient {
-    pub async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    /// `priority` is the caller's queue-ordering hint (B4): the identity
+    /// fan-out and other lookup/discovery callers pass their own
+    /// `RequestPriority` through to whatever transport request this ends up
+    /// making. Providers with no live request on this surface (e.g. a
+    /// key-direct path) simply ignore it.
+    pub async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         match self {
-            Self::Stub(s) => s.fetch(work).await,
-            Self::Audnexus(a) => a.fetch(work).await,
-            Self::Hardcover(h) => h.fetch(work).await,
-            Self::OpenLibrary(o) => o.fetch(work).await,
-            Self::Goodreads(g) => g.fetch(work).await,
-            Self::GoogleBooks(g) => g.fetch(work).await,
-            Self::Audible(a) => a.fetch(work).await,
+            Self::Stub(s) => {
+                *s.last_priority.lock().unwrap() = Some(priority);
+                s.fetch(work).await
+            }
+            Self::Audnexus(a) => a.fetch(work, priority).await,
+            Self::Hardcover(h) => h.fetch(work, priority).await,
+            Self::OpenLibrary(o) => o.fetch(work, priority).await,
+            Self::Goodreads(g) => g.fetch(work, priority).await,
+            Self::GoogleBooks(g) => g.fetch(work, priority).await,
+            Self::Audible(a) => a.fetch(work, priority).await,
         }
     }
 
     /// Anchor-only enrichment fetch (REQ-006). Each provider accepts exactly
     /// the spec's anchor mapping — GoogleBooks: Isbn13; Goodreads: GrKey ONLY
-    /// (the GR ISBN→LLM tier is an identity-surface capability, never an
+    /// (the GR ISBN/title-search tier is an identity-surface capability, never an
     /// enrichment fetch); Hardcover: HcKey or Isbn13; OpenLibrary: OlKey or
     /// Isbn13; Audnexus/Audible: Asin. No branch falls back to text search —
     /// those paths live only behind the lookup/identity entry points. A
@@ -67,6 +83,7 @@ impl ProviderClient {
         &self,
         query: AnchorQuery,
         language: Option<&str>,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let provider = self.provider();
         if !anchor_kind_accepted(provider, &query) {
@@ -80,15 +97,20 @@ impl ProviderClient {
         let started_at = Utc::now();
         let t0 = std::time::Instant::now();
         let outcome = match (self, &query) {
-            (Self::Stub(s), _) => s.fire().await,
-            (Self::Audnexus(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin).await,
-            (Self::Hardcover(h), q) => h.fetch_by_anchor_query(q).await,
-            (Self::OpenLibrary(o), q) => o.fetch_by_anchor_query(q).await,
-            (Self::Goodreads(g), AnchorQuery::GrKey(key)) => {
-                g.fetch_detail_by_key(key, language).await
+            (Self::Stub(s), _) => {
+                *s.last_priority.lock().unwrap() = Some(priority);
+                s.fire().await
             }
-            (Self::GoogleBooks(g), AnchorQuery::Isbn13(isbn)) => g.fetch_by_isbn(isbn).await,
-            (Self::Audible(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin).await,
+            (Self::Audnexus(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin, priority).await,
+            (Self::Hardcover(h), q) => h.fetch_by_anchor_query(q, priority).await,
+            (Self::OpenLibrary(o), q) => o.fetch_by_anchor_query(q, priority).await,
+            (Self::Goodreads(g), AnchorQuery::GrKey(key)) => {
+                g.fetch_detail_by_key(key, language, priority).await
+            }
+            (Self::GoogleBooks(g), AnchorQuery::Isbn13(isbn)) => {
+                g.fetch_by_isbn(isbn, priority).await
+            }
+            (Self::Audible(a), AnchorQuery::Asin(asin)) => a.fetch_by_asin(asin, priority).await,
             // Unreachable: the acceptance gate above filtered every other pairing.
             _ => return ProviderOutcome::NotFound,
         };
@@ -159,7 +181,7 @@ impl ProviderClient {
 }
 
 /// REQ-006 anchor mapping: which anchor kinds each provider's enrichment
-/// surface accepts. GR is GrKey ONLY (its ISBN→LLM tier is an identity-surface
+/// surface accepts. GR is GrKey ONLY (its ISBN/title-search tier is an identity-surface
 /// capability); HC/OL accept their own key or ISBN; Audnexus/Audible are
 /// ASIN-keyed; GB is ISBN-keyed. Llm/Readarr are never scatter providers.
 fn anchor_kind_accepted(provider: MetadataProvider, query: &AnchorQuery) -> bool {
@@ -180,6 +202,20 @@ fn anchor_kind_accepted(provider: MetadataProvider, query: &AnchorQuery) -> bool
                 AnchorQuery::Asin(_)
             )
     )
+}
+
+/// Common `WillRetry { CircuitOpen }` mapping (R-11 / Step 4): every provider
+/// client that detects `ProviderFetchError::CircuitOpen` /
+/// `FetchError::CircuitOpen` maps it through this one helper, never to
+/// `RateLimit` (corrupts retry accounting) and never to `Suppressed` (burns
+/// suppression budget).
+fn circuit_open_outcome(retry_after: Duration) -> ProviderOutcome<NormalizedWorkDetail> {
+    ProviderOutcome::WillRetry {
+        reason: WillRetryReason::CircuitOpen,
+        next_attempt_at: Utc::now()
+            + chrono::Duration::from_std(retry_after)
+                .unwrap_or_else(|_| chrono::Duration::seconds(60)),
+    }
 }
 
 /// REQ-001 outcome mapping: ProviderOutcome (the control-flow vocabulary) →
@@ -206,6 +242,13 @@ fn outcome_record_class(
             WillRetryReason::ServerError => {
                 (CallOutcomeClass::Error, Some("server_error".to_string()))
             }
+            // Observability only — mirrors the queue's existing
+            // `record_queue_skip` precedent of tagging a pacing/breaker skip
+            // as RateLimited with a `detail` string.
+            WillRetryReason::CircuitOpen => (
+                CallOutcomeClass::RateLimited,
+                Some("circuit_open".to_string()),
+            ),
         },
         ProviderOutcome::PermanentFailure { reason } => {
             (CallOutcomeClass::Error, Some(format!("{reason:?}")))
@@ -228,6 +271,10 @@ pub struct StubProviderClient {
     call_count: Arc<AtomicUsize>,
     /// Optional fetch delay so tests can drive the resolver's per-call timeout.
     delay: Option<std::time::Duration>,
+    /// Last `RequestPriority` this stub received via either `fetch` (the
+    /// identity fan-out) or `fetch_by_anchor` (the enrichment queue) — B4.
+    /// `None` until a call happens.
+    last_priority: Arc<Mutex<Option<RequestPriority>>>,
 }
 
 impl StubProviderClient {
@@ -238,6 +285,7 @@ impl StubProviderClient {
             panic_on_call: false,
             call_count: Arc::new(AtomicUsize::new(0)),
             delay: None,
+            last_priority: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -249,6 +297,7 @@ impl StubProviderClient {
             panic_on_call: true,
             call_count: Arc::new(AtomicUsize::new(0)),
             delay: None,
+            last_priority: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -261,6 +310,13 @@ impl StubProviderClient {
 
     pub fn call_count(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
+    }
+
+    /// The `RequestPriority` the most recent `fetch`/`fetch_by_anchor` call
+    /// carried (B4) — lets a test assert a caller's priority actually
+    /// reached the provider client, not just that a call happened.
+    pub fn last_priority(&self) -> Option<RequestPriority> {
+        *self.last_priority.lock().unwrap()
     }
 
     /// Shared scripted-call body for both fetch surfaces: counts the call,
@@ -299,7 +355,7 @@ impl StubProviderClient {
 ///     each provider's failure taxonomy gets pulled into typed errors.
 #[derive(Clone)]
 pub struct AudnexusClient {
-    http: HttpClient,
+    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     base_url: String,
     retry_backoff_secs: i64,
     cache: AudnexusCache,
@@ -308,9 +364,12 @@ pub struct AudnexusClient {
 }
 
 impl AudnexusClient {
-    pub fn new(http: HttpClient, base_url: impl Into<String>) -> Self {
+    pub fn new(
+        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
-            http,
+            fetcher,
             base_url: base_url.into(),
             retry_backoff_secs: 5 * 60,
             cache: crate::audnexus::AudnexusCache::new(),
@@ -329,20 +388,28 @@ impl AudnexusClient {
         self
     }
 
-    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         let result = query_audnexus(
-            &self.http,
+            &self.fetcher,
             &self.base_url,
             work.asin.as_deref(),
             &work.title,
             &work.author_name,
             &self.cache,
+            priority,
         )
         .await;
 
         match result {
             Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
             Ok(None) => ProviderOutcome::NotFound,
+            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(_) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
@@ -351,10 +418,19 @@ impl AudnexusClient {
     }
 
     /// Anchor-only fetch (REQ-006): ASIN lookup with no title/author fallback.
-    async fn fetch_by_asin(&self, asin: &str) -> ProviderOutcome<NormalizedWorkDetail> {
-        match query_audnexus_by_asin(&self.http, &self.base_url, asin, &self.cache).await {
+    async fn fetch_by_asin(
+        &self,
+        asin: &str,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        match query_audnexus_by_asin(&self.fetcher, &self.base_url, asin, &self.cache, priority)
+            .await
+        {
             Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
             Ok(None) => ProviderOutcome::NotFound,
+            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(_) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
@@ -415,17 +491,18 @@ fn audnexus_payload(audnexus: AudnexusResult) -> NormalizedWorkDetail {
 /// Real-network Hardcover adapter. Wraps `crate::hardcover::query_hardcover`
 /// and maps its return value onto `ProviderOutcome<NormalizedWorkDetail>`.
 ///
-/// Holds a clone of `MetadataConfig` because the inner query consults
-/// `llm_enabled` / `llm_endpoint` / `llm_api_key` / `llm_model` for the Tier 2
-/// disambiguation fallback. The orchestration cutover may rework that path so
-/// the LLM fan-out happens through `MetadataProvider::Llm` instead — until then,
-/// HC owns its own LLM call.
+/// Holds the shared `HttpFetcherImpl` (all HC HTTP rides the outbound queue)
+/// and a `LiveMetadataConfig` handle read per fetch for `hardcover_enabled` +
+/// `hardcover_api_token`, so config changes take effect without restart. The
+/// title+author query is deterministic and two-tier (REQ-016/D10): exact
+/// title + author-in-list match first, then the shared 0.75 title+author
+/// picker; nothing clearing the bar means HC abstains (`NoMatch`) rather
+/// than adopting a fuzzy hit.
 #[derive(Clone)]
 pub struct HardcoverClient {
-    http: HttpClient,
+    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     /// Reads `hardcover_enabled` + `hardcover_api_token` per fetch — config
     /// changes via UI take effect on the next enrichment without restart.
-    /// Also exposes `llm_*` fields for the inner llm_disambiguate fallback.
     live_config: crate::live_config::LiveMetadataConfig,
     retry_backoff_secs: i64,
     #[allow(dead_code)] // read at green: REQ-001 record emission
@@ -433,9 +510,12 @@ pub struct HardcoverClient {
 }
 
 impl HardcoverClient {
-    pub fn new(http: HttpClient, live_config: crate::live_config::LiveMetadataConfig) -> Self {
+    pub fn new(
+        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+        live_config: crate::live_config::LiveMetadataConfig,
+    ) -> Self {
         Self {
-            http,
+            fetcher,
             live_config,
             retry_backoff_secs: 5 * 60,
             call_sink: None,
@@ -460,6 +540,7 @@ impl HardcoverClient {
     async fn fetch_by_anchor_query(
         &self,
         query: &AnchorQuery,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let cfg = self.live_config.snapshot();
         if !cfg.hardcover_enabled {
@@ -482,15 +563,19 @@ impl HardcoverClient {
             AnchorQuery::Isbn13(isbn) => {
                 let normalized = livrarr_domain::normalize_isbn(isbn);
                 match crate::hardcover::query_hardcover_by_isbn(
-                    &self.http,
+                    &self.fetcher,
                     &normalized,
                     &token,
                     cfg.as_ref(),
+                    priority,
                 )
                 .await
                 {
-                    Ok(Some(hc)) => self.build_success(hc, &token).await,
+                    Ok(Some(hc)) => self.build_success(hc, &token, priority).await,
                     Ok(None) => ProviderOutcome::NotFound,
+                    Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
+                        circuit_open_outcome(retry_after)
+                    }
                     Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
                         reason: livrarr_domain::WillRetryReason::ServerError,
                         next_attempt_at: Utc::now()
@@ -510,7 +595,11 @@ impl HardcoverClient {
         }
     }
 
-    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         let cfg = self.live_config.snapshot();
         if !cfg.hardcover_enabled {
             return ProviderOutcome::NotConfigured;
@@ -533,15 +622,18 @@ impl HardcoverClient {
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
             let normalized = livrarr_domain::normalize_isbn(isbn);
             match crate::hardcover::query_hardcover_by_isbn(
-                &self.http,
+                &self.fetcher,
                 &normalized,
                 &token,
                 cfg.as_ref(),
+                priority,
             )
             .await
             {
                 Ok(Some(hc)) => {
-                    if let ProviderOutcome::Success(mut p) = self.build_success(hc, &token).await {
+                    if let ProviderOutcome::Success(mut p) =
+                        self.build_success(hc, &token, priority).await
+                    {
                         p.isbn_13 = Some(normalized.clone());
                         return ProviderOutcome::Success(p);
                     }
@@ -549,6 +641,9 @@ impl HardcoverClient {
                 }
                 Ok(None) => {
                     tracing::debug!(isbn = %normalized, "HC ISBN search: no verified match");
+                }
+                Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
+                    return circuit_open_outcome(retry_after);
                 }
                 Err(crate::hardcover::HardcoverError::Http(e)) => {
                     tracing::debug!(isbn = %normalized, error = %e, "HC ISBN search failed");
@@ -566,20 +661,23 @@ impl HardcoverClient {
 
         // Title+author search (existing behavior)
         let result = query_hardcover(
-            &self.http,
+            &self.fetcher,
             &work.title,
             &work.author_name,
             &token,
-            cfg.as_ref(),
+            priority,
         )
         .await;
 
         match result {
-            Ok(hc) => self.build_success(hc, &token).await,
+            Ok(hc) => self.build_success(hc, &token, priority).await,
             Err(
                 crate::hardcover::HardcoverError::NoResults
                 | crate::hardcover::HardcoverError::NoMatch(_),
             ) => ProviderOutcome::NotFound,
+            Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
@@ -591,6 +689,7 @@ impl HardcoverClient {
         &self,
         hc: crate::hardcover::HardcoverResult,
         token: &str,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let year = hc
             .publish_date
@@ -600,8 +699,14 @@ impl HardcoverClient {
 
         let mut isbn_13 = hc.isbn_13.clone();
         if let Some(ref hc_id) = hc.hc_key {
-            if let Ok(Some(better_isbn)) =
-                crate::hardcover::fetch_hardcover_editions(&self.http, hc_id, token, "en").await
+            if let Ok(Some(better_isbn)) = crate::hardcover::fetch_hardcover_editions(
+                &self.fetcher,
+                hc_id,
+                token,
+                "en",
+                priority,
+            )
+            .await
             {
                 isbn_13 = Some(better_isbn);
             }
@@ -646,16 +751,16 @@ impl HardcoverClient {
 /// hitting the network.
 #[derive(Clone)]
 pub struct OpenLibraryClient {
-    http: HttpClient,
+    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     retry_backoff_secs: i64,
     #[allow(dead_code)] // read at green: REQ-001 record emission
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
 impl OpenLibraryClient {
-    pub fn new(http: HttpClient) -> Self {
+    pub fn new(fetcher: livrarr_http::fetcher::HttpFetcherImpl) -> Self {
         Self {
-            http,
+            fetcher,
             retry_backoff_secs: 5 * 60,
             call_sink: None,
         }
@@ -677,14 +782,18 @@ impl OpenLibraryClient {
     async fn fetch_by_anchor_query(
         &self,
         query: &AnchorQuery,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         match query {
-            AnchorQuery::OlKey(key) => self.detail_by_key(key).await,
+            AnchorQuery::OlKey(key) => self.detail_by_key(key, priority).await,
             AnchorQuery::Isbn13(isbn) => {
                 let normalized = livrarr_domain::normalize_isbn(isbn);
-                match self.isbn_lookup(&normalized).await {
-                    Ok(Some(ol_work_key)) => self.detail_by_key(&ol_work_key).await,
+                match self.isbn_lookup(&normalized, priority).await {
+                    Ok(Some(ol_work_key)) => self.detail_by_key(&ol_work_key, priority).await,
                     Ok(None) => ProviderOutcome::NotFound,
+                    Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                        circuit_open_outcome(retry_after)
+                    }
                     Err(_) => ProviderOutcome::WillRetry {
                         reason: livrarr_domain::WillRetryReason::ServerError,
                         next_attempt_at: Utc::now()
@@ -696,13 +805,22 @@ impl OpenLibraryClient {
         }
     }
 
-    /// OL detail fetch by work key. `query_ol_detail`'s error is an opaque
-    /// string (parse and transport are indistinguishable), so a miss maps to
-    /// NotFound — mirroring the seeded fetch's tier behavior, never a text
-    /// search.
-    async fn detail_by_key(&self, ol_key: &str) -> ProviderOutcome<NormalizedWorkDetail> {
-        match query_ol_detail(&self.http, ol_key).await {
+    /// OL detail fetch by work key. `query_ol_detail`'s error is mostly opaque
+    /// (parse and 4xx/5xx are indistinguishable), so a miss maps to NotFound —
+    /// mirroring the seeded fetch's tier behavior, never a text search. A
+    /// breaker-open pause is the one error kind that must NOT collapse into
+    /// NotFound (R-11: NotFound is phase-2 terminal — persisting it would turn
+    /// a temporary pause into a permanent miss).
+    async fn detail_by_key(
+        &self,
+        ol_key: &str,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        match query_ol_detail(&self.fetcher, ol_key, priority).await {
             Ok(detail) => ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail))),
+            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(e) => {
                 tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail miss");
                 ProviderOutcome::NotFound
@@ -710,21 +828,27 @@ impl OpenLibraryClient {
         }
     }
 
-    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         // Tier 1: ISBN lookup
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
             let normalized = livrarr_domain::normalize_isbn(isbn);
-            match self.isbn_lookup(&normalized).await {
-                Ok(Some(ol_work_key)) => match query_ol_detail(&self.http, &ol_work_key).await {
-                    Ok(detail) => {
-                        let mut payload = self.build_payload(&ol_work_key, detail);
-                        payload.isbn_13 = Some(normalized.clone());
-                        return ProviderOutcome::Success(Box::new(payload));
+            match self.isbn_lookup(&normalized, priority).await {
+                Ok(Some(ol_work_key)) => {
+                    match query_ol_detail(&self.fetcher, &ol_work_key, priority).await {
+                        Ok(detail) => {
+                            let mut payload = self.build_payload(&ol_work_key, detail);
+                            payload.isbn_13 = Some(normalized.clone());
+                            return ProviderOutcome::Success(Box::new(payload));
+                        }
+                        Err(e) => {
+                            tracing::debug!(isbn = %normalized, error = %e, "OL ISBN detail miss");
+                        }
                     }
-                    Err(e) => {
-                        tracing::debug!(isbn = %normalized, error = %e, "OL ISBN detail miss");
-                    }
-                },
+                }
                 Ok(None) => {
                     tracing::debug!(isbn = %normalized, "OL ISBN lookup: no work found");
                 }
@@ -736,7 +860,7 @@ impl OpenLibraryClient {
 
         // Tier 2: ol_key direct lookup (existing behavior)
         if let Some(ol_key) = work.ol_key.as_deref().filter(|s| !s.is_empty()) {
-            match query_ol_detail(&self.http, ol_key).await {
+            match query_ol_detail(&self.fetcher, ol_key, priority).await {
                 Ok(detail) => {
                     return ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail)));
                 }
@@ -747,9 +871,12 @@ impl OpenLibraryClient {
         }
 
         // Tier 3: title+author search fallback
-        match self.title_author_search(work).await {
+        match self.title_author_search(work, priority).await {
             Ok(Some(payload)) => ProviderOutcome::Success(Box::new(payload)),
             Ok(None) => ProviderOutcome::NotFound,
+            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                circuit_open_outcome(retry_after)
+            }
             Err(_) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
@@ -775,60 +902,64 @@ impl OpenLibraryClient {
         }
     }
 
-    async fn isbn_lookup(&self, isbn: &str) -> Result<Option<String>, String> {
-        let url = format!("https://openlibrary.org/isbn/{isbn}.json");
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("OL ISBN fetch failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            return Ok(None);
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("OL ISBN parse error: {e}"))?;
-
-        let ol_work_key = data
-            .get("works")
-            .and_then(|w| w.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|w| w.get("key"))
-            .and_then(|k| k.as_str())
-            .map(|k| k.strip_prefix("/works/").unwrap_or(k).to_string());
-
-        Ok(ol_work_key)
+    async fn isbn_lookup(
+        &self,
+        isbn: &str,
+        priority: RequestPriority,
+    ) -> Result<Option<String>, crate::types::ProviderFetchError> {
+        crate::openlibrary::isbn_lookup(&self.fetcher, isbn, priority).await
     }
 
     async fn title_author_search(
         &self,
         work: &Work,
-    ) -> Result<Option<NormalizedWorkDetail>, String> {
+        priority: RequestPriority,
+    ) -> Result<Option<NormalizedWorkDetail>, crate::types::ProviderFetchError> {
         let query = format!("{} {}", work.title, work.author_name);
         let url = format!(
             "https://openlibrary.org/search.json?q={}&fields=key,title,author_name&limit=10",
             urlencoding::encode(&query)
         );
 
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("OL search failed: {e}"))?;
+        let req = FetchRequest {
+            url,
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(30),
+            rate_bucket: RateBucket::OpenLibrary,
+            max_body_bytes: 2 * 1024 * 1024,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+            priority,
+        };
+        let resp = match self.fetcher.fetch(req).await {
+            Ok(r) => r,
+            Err(livrarr_domain::services::FetchError::CircuitOpen { retry_after }) => {
+                return Err(crate::types::ProviderFetchError::CircuitOpen(retry_after));
+            }
+            Err(e) => {
+                return Err(crate::types::ProviderFetchError::Other(format!(
+                    "OL search failed: {e}"
+                )))
+            }
+        };
 
-        if !resp.status().is_success() {
-            return Err(format!("OL search returned {}", resp.status()));
+        if !(200..300).contains(&resp.status) {
+            if (500..600).contains(&resp.status) {
+                outbound_queue::shared()
+                    .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+            }
+            return Err(crate::types::ProviderFetchError::Other(format!(
+                "OL search returned {}",
+                resp.status
+            )));
         }
 
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("OL search parse error: {e}"))?;
+        let data: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| {
+            crate::types::ProviderFetchError::Other(format!("OL search parse error: {e}"))
+        })?;
+        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
 
         let docs = data
             .get("docs")
@@ -874,7 +1005,7 @@ impl OpenLibraryClient {
             None => return Ok(None),
         };
 
-        match query_ol_detail(&self.http, &ol_key).await {
+        match query_ol_detail(&self.fetcher, &ol_key, priority).await {
             Ok(detail) => Ok(Some(self.build_payload(&ol_key, detail))),
             Err(_) => Ok(None),
         }
@@ -888,7 +1019,35 @@ impl OpenLibraryClient {
 #[derive(Debug, Clone)]
 struct GrCandidateText {
     title: String,
+    /// GR's own undecorated form of `title` (`bookTitleBare`), when the
+    /// autocomplete hit carried one. Preferred as the payload title: the
+    /// decorated form ("Pandora's Star (Commonwealth Saga, #1)") reads as a
+    /// one-sided series marker to the identity authority and keeps GR's
+    /// answer out of the quorum cluster it belongs to.
+    title_bare: Option<String>,
     author: Option<String>,
+    /// Cover from the autocomplete/search hit. Kept so a GR payload still
+    /// carries a cover when the detail page won't fetch (anti-bot): GR outranks
+    /// OpenLibrary in the cover priority, so this wins over the OL/ISBN fallback
+    /// that otherwise produces the weaker import covers.
+    cover_url: Option<String>,
+    /// Series evidence from the hit's search-card decoration. Travels into
+    /// the payload so the identity quorum's volume veto can see the volume
+    /// the picker saw — a picked later-volume record must never read as a
+    /// bare-title twin downstream.
+    series_name: Option<String>,
+    series_position: Option<f64>,
+}
+
+impl GrCandidateText {
+    /// The hit's cover, validated + upscaled, ready to use as a payload cover
+    /// (same treatment `normalize` gives the detail-page cover).
+    fn cover(&self) -> Option<String> {
+        self.cover_url
+            .clone()
+            .filter(|u| goodreads::validate_cover_url(u))
+            .map(|u| crate::provider_util::upscale_cover_url(&u))
+    }
 }
 
 /// A resolved GR detail target plus the candidate text that chose it
@@ -896,7 +1055,6 @@ struct GrCandidateText {
 struct ResolvedGrDetail {
     url: String,
     candidate: Option<GrCandidateText>,
-    via_isbn: Option<String>,
 }
 
 /// Real-network Goodreads adapter. Wraps the lifted
@@ -906,14 +1064,13 @@ struct ResolvedGrDetail {
 /// Resolution order:
 ///   1. If `work.gr_key` is populated, fetch the detail page directly
 ///      (skips a search round-trip — see R-21 canonical-identity policy).
-///   2. Otherwise, search by `title author` and use the LLM to disambiguate
-///      among hits. GR is a hostile scraping target (anti-bot, HTML drift,
-///      noisy results full of study guides and alternate editions) — naive
-///      first-hit matching is unreliable, and LLM judgment is required.
-///      Without an LLM configured, this path returns `NotFound`. Use
-///      Hardcover + OpenLibrary for LLM-free English enrichment; GR
-///      contributes cover quality + supplemental fields when LLM is
-///      available.
+///   2. Otherwise, search by `title author` and pick deterministically among
+///      hits (`gr_best_match`: junk-edition filter + the shared title+author
+///      picker, REQ-012/D6/ST-07) — no LLM is involved in the pick. GR is a
+///      hostile scraping target (anti-bot, HTML drift, noisy results full of
+///      study guides and alternate editions), so a wrong pick is worse than
+///      none: nothing clearing the bar means GR abstains rather than
+///      adopting a fuzzy match.
 ///   3. Resolve the chosen hit's (often relative) `detail_url` against
 ///      `base_url` and fetch the detail page.
 ///
@@ -929,6 +1086,9 @@ struct ResolvedGrDetail {
 ///   - Detail page returned 200 OK but unparseable → `NotFound`.
 #[derive(Clone)]
 pub struct GoodreadsClient {
+    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+    /// Kept solely for the `llm_extract_payload` pass-through — the LLM
+    /// caller is out of scope for the outbound queue.
     http: HttpClient,
     base_url: String,
     retry_backoff_secs: i64,
@@ -942,8 +1102,13 @@ pub struct GoodreadsClient {
 }
 
 impl GoodreadsClient {
-    pub fn new(http: HttpClient, base_url: impl Into<String>) -> Self {
+    pub fn new(
+        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+        http: HttpClient,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
+            fetcher,
             http,
             base_url: base_url.into(),
             retry_backoff_secs: 5 * 60,
@@ -980,9 +1145,11 @@ impl GoodreadsClient {
         &self,
         gr_key: &str,
         language: Option<&str>,
+        priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let detail_url = goodreads::detail_url_for_gr_key(&self.base_url, gr_key);
-        let html = match goodreads::fetch_goodreads_html(&self.http, &detail_url).await {
+        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url, priority).await
+        {
             Ok(h) => h,
             Err(err) => return self.map_fetch_err(err),
         };
@@ -1007,6 +1174,13 @@ impl GoodreadsClient {
     /// HTML where JSON-LD/regex parsing misses). Returns None when the LLM is
     /// not configured or its extraction also parses nothing — callers fall
     /// through; Some(Err) carries fetch-class errors.
+    ///
+    /// Contract (REQ-012/confer b): this is repair, not selection — a payload
+    /// built here carries zero extra trust. It returns the same
+    /// `NormalizedWorkDetail` shape as a direct parse, with no provenance or
+    /// confidence marker distinguishing it, so it rides through the same
+    /// deterministic matching, vetoes, and bars as any other payload; repair
+    /// can never raise confidence.
     async fn llm_extract_payload(
         &self,
         html: &str,
@@ -1055,14 +1229,17 @@ impl GoodreadsClient {
         }
     }
 
-    async fn fetch(&self, work: &Work) -> ProviderOutcome<NormalizedWorkDetail> {
+    async fn fetch(
+        &self,
+        work: &Work,
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
         let had_gr_key = work.gr_key.as_deref().is_some_and(|k| !k.is_empty());
-        let resolved = match self.resolve_detail_url(work).await {
+        let resolved = match self.resolve_detail_url(work, priority).await {
             Ok(Some(resolved)) => resolved,
             Ok(None) => return ProviderOutcome::NotFound,
             Err(err) => return self.map_fetch_err(err),
         };
-        let via_isbn = resolved.via_isbn;
         let detail_url = resolved.url;
 
         // Extract gr_key from the resolved URL so the key survives a page
@@ -1072,12 +1249,13 @@ impl GoodreadsClient {
         // Direct parse path. On Parse failure, optionally fall through to
         // LLM extraction if configured (typical for foreign-language pages
         // where JSON-LD / regex don't match the locale-specific HTML).
-        let html = match goodreads::fetch_goodreads_html(&self.http, &detail_url).await {
+        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url, priority).await
+        {
             Ok(h) => h,
             Err(err) => {
                 if !had_gr_key {
-                    if let Some(mut payload) = self
-                        .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
+                    if let Some(payload) = self
+                        .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate, priority)
                         .await
                     {
                         tracing::info!(
@@ -1085,9 +1263,6 @@ impl GoodreadsClient {
                             verified = payload.title.is_some(),
                             "GR page fetch failed; returning key payload"
                         );
-                        if let Some(ref isbn) = via_isbn {
-                            payload.isbn_13 = Some(isbn.clone());
-                        }
                         return ProviderOutcome::Success(Box::new(payload));
                     }
                 }
@@ -1097,9 +1272,13 @@ impl GoodreadsClient {
 
         if let Some(detail) = goodreads::parse_detail_html(&html) {
             let mut payload = self.normalize(&detail_url, detail);
-            if let Some(ref isbn) = via_isbn {
-                payload.isbn_13 = Some(isbn.clone());
+            // Detail page parsed but carried no cover — fall back to the cover
+            // that came with the search hit (GR outranks OL, so this beats the
+            // ISBN-resolved OL cover the merge would otherwise use).
+            if payload.cover_url.is_none() {
+                payload.cover_url = resolved.candidate.as_ref().and_then(|c| c.cover());
             }
+            apply_candidate_text(&mut payload, &resolved.candidate);
             return ProviderOutcome::Success(Box::new(payload));
         }
 
@@ -1114,9 +1293,7 @@ impl GoodreadsClient {
                     if payload.gr_key.is_none() {
                         payload.gr_key = resolved_gr_key;
                     }
-                    if let Some(ref isbn) = via_isbn {
-                        payload.isbn_13 = Some(isbn.clone());
-                    }
+                    apply_candidate_text(&mut payload, &resolved.candidate);
                     return ProviderOutcome::Success(Box::new(payload));
                 }
                 Err(err) => return self.map_fetch_err(err),
@@ -1126,8 +1303,8 @@ impl GoodreadsClient {
         // All parse paths failed; fall back to a key payload carrying
         // whatever GR-sourced candidate text can vouch for the key.
         if !had_gr_key {
-            if let Some(mut payload) = self
-                .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate)
+            if let Some(payload) = self
+                .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate, priority)
                 .await
             {
                 tracing::info!(
@@ -1135,9 +1312,6 @@ impl GoodreadsClient {
                     verified = payload.title.is_some(),
                     "GR parse failed; returning key payload"
                 );
-                if let Some(ref isbn) = via_isbn {
-                    payload.isbn_13 = Some(isbn.clone());
-                }
                 return ProviderOutcome::Success(Box::new(payload));
             }
         }
@@ -1158,44 +1332,67 @@ impl GoodreadsClient {
         work: &Work,
         resolved_gr_key: &Option<String>,
         candidate: &Option<GrCandidateText>,
+        priority: RequestPriority,
     ) -> Option<NormalizedWorkDetail> {
         let key = resolved_gr_key.as_ref()?;
 
         let confirmed = match candidate {
             Some(c) => Some(c.clone()),
-            None => self.confirm_key_via_search(work, key).await,
+            None => self.confirm_key_via_search(work, key, priority).await,
         };
 
-        let (title, author_name) = match confirmed {
-            Some(c) => (Some(c.title), c.author),
-            None => (None, None),
+        let cover_url = confirmed.as_ref().and_then(|c| c.cover());
+        let (title, author_name, series_name, series_position) = match confirmed {
+            // Same bare-over-decorated preference as the detail path. The
+            // decoration's series evidence rides along: the volume the picker
+            // saw must stay visible to the identity quorum's veto.
+            Some(c) => (
+                Some(c.title_bare.unwrap_or(c.title)),
+                c.author,
+                c.series_name,
+                c.series_position,
+            ),
+            None => (None, None, None, None),
         };
         Some(NormalizedWorkDetail {
             title,
             author_name,
+            series_name,
+            series_position,
             gr_key: Some(key.clone()),
+            cover_url,
             ..Default::default()
         })
     }
 
     /// One search round-trip to vouch for an LLM-direct key: returns the
     /// matching hit's text only when the hit's own gr_key equals the key.
-    async fn confirm_key_via_search(&self, work: &Work, key: &str) -> Option<GrCandidateText> {
+    async fn confirm_key_via_search(
+        &self,
+        work: &Work,
+        key: &str,
+        priority: RequestPriority,
+    ) -> Option<GrCandidateText> {
         let hits =
-            goodreads::search_goodreads(&self.http, &self.base_url, &work.title, &work.author_name)
+            goodreads::search_goodreads(&self.fetcher, &self.base_url, &work.title, priority)
                 .await
                 .ok()?;
         hits.iter()
             .find(|h| goodreads::extract_gr_key(&h.detail_url).as_deref() == Some(key))
             .map(|h| GrCandidateText {
                 title: h.title.clone(),
+                title_bare: h.title_bare.clone(),
                 author: h.author.clone(),
+                cover_url: h.cover_url.clone(),
+                series_name: h.series_name.clone(),
+                series_position: h.series_position,
             })
     }
 
     async fn resolve_detail_url(
         &self,
         work: &Work,
+        priority: RequestPriority,
     ) -> Result<Option<ResolvedGrDetail>, GoodreadsFetchError> {
         // 1. work.gr_key — canonical GR identity. No candidate text: the key
         // is already established, nothing needs vouching.
@@ -1203,136 +1400,88 @@ impl GoodreadsClient {
             return Ok(Some(ResolvedGrDetail {
                 url: goodreads::detail_url_for_gr_key(&self.base_url, key),
                 candidate: None,
-                via_isbn: None,
             }));
-        }
-
-        // 2. ISBN search — exact match via isbn: prefix query.
-        if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
-            let normalized = livrarr_domain::normalize_isbn(isbn);
-            let query = format!("isbn:{normalized}");
-            match goodreads::search_goodreads_by_query(&self.http, &self.base_url, &query).await {
-                Ok(hits) if !hits.is_empty() => {
-                    if let Some(live) = &self.live_config {
-                        let cfg = live.snapshot();
-                        match gr_llm_disambiguate(
-                            &self.http,
-                            cfg.as_ref(),
-                            &work.title,
-                            &work.author_name,
-                            &hits,
-                        )
-                        .await
-                        {
-                            Ok(Some(idx)) => {
-                                tracing::info!(isbn = %normalized, chosen_idx = idx, "LLM selected GR ISBN result");
-                                return Ok(Some(ResolvedGrDetail {
-                                    url: goodreads::resolve_detail_url(
-                                        &self.base_url,
-                                        &hits[idx].detail_url,
-                                    ),
-                                    candidate: Some(GrCandidateText {
-                                        title: hits[idx].title.clone(),
-                                        author: hits[idx].author.clone(),
-                                    }),
-                                    via_isbn: Some(normalized.clone()),
-                                }));
-                            }
-                            Ok(None) => {
-                                tracing::debug!(isbn = %normalized, "LLM declined all GR ISBN candidates");
-                            }
-                            Err(e) => {
-                                tracing::debug!(isbn = %normalized, error = %e, "GR ISBN LLM disambiguation failed");
-                            }
-                        }
-                    }
-                }
-                Ok(_) => {
-                    tracing::debug!(isbn = %isbn, "GR ISBN search: no results");
-                }
-                Err(e) => {
-                    tracing::debug!(isbn = %isbn, error = ?e, "GR ISBN search failed");
-                }
-            }
         }
 
         let title = &work.title;
         let author = &work.author_name;
 
-        // 3. Search GR by title+author (autocomplete — GR's own data) + LLM
-        // disambiguation among the REAL hits. Runs before any LLM-recalled
-        // key: a key chosen from live hits cannot be a hallucination, and it
-        // arrives with candidate text that can vouch for it (#148; PO
-        // decision 2026-06-11 after a live LLM-direct key proved wrong).
-        let mut hits =
-            goodreads::search_goodreads(&self.http, &self.base_url, title, author).await?;
+        // 2. Search GR by title+author via the WAF-free autocomplete endpoint,
+        // then a deterministic best-match pick (no LLM). A fetch error here is
+        // most often GR rate-limiting / anti-bot during a bulk burst — log it
+        // (previously a silent `?`, which hid these failures) and still
+        // propagate so map_fetch_err can schedule a retry.
+        let mut hits = match goodreads::search_goodreads(
+            &self.fetcher,
+            &self.base_url,
+            title,
+            priority,
+        )
+        .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(title = %title, error = ?e, "GR autocomplete failed (likely rate-limit/anti-bot)");
+                return Err(e);
+            }
+        };
 
         if hits.is_empty() && !title.is_ascii() {
             let ascii_title: String = title.chars().filter(|c| c.is_ascii()).collect();
             if !ascii_title.trim().is_empty() {
-                hits =
-                    goodreads::search_goodreads(&self.http, &self.base_url, &ascii_title, author)
-                        .await?;
-            }
-        }
-
-        if !hits.is_empty() {
-            if let Some(live) = &self.live_config {
-                let cfg = live.snapshot();
-                match gr_llm_disambiguate(&self.http, cfg.as_ref(), title, author, &hits).await {
-                    Ok(Some(idx)) => {
-                        tracing::info!(title = %title, chosen_idx = idx, "LLM selected GR search result");
-                        return Ok(Some(ResolvedGrDetail {
-                            url: goodreads::resolve_detail_url(
-                                &self.base_url,
-                                &hits[idx].detail_url,
-                            ),
-                            candidate: Some(GrCandidateText {
-                                title: hits[idx].title.clone(),
-                                author: hits[idx].author.clone(),
-                            }),
-                            via_isbn: None,
-                        }));
-                    }
-                    Ok(None) => {
-                        tracing::debug!(title = %title, "LLM declined all GR candidates");
-                    }
+                hits = match goodreads::search_goodreads(
+                    &self.fetcher,
+                    &self.base_url,
+                    &ascii_title,
+                    priority,
+                )
+                .await
+                {
+                    Ok(h) => h,
                     Err(e) => {
-                        tracing::debug!(title = %title, error = %e, "GR LLM disambiguation unavailable");
+                        tracing::warn!(title = %title, error = ?e, "GR autocomplete (ascii retry) failed (likely rate-limit/anti-bot)");
+                        return Err(e);
                     }
-                }
+                };
             }
         }
 
-        // 4. Last resort: ask the LLM to recall the GR key from its own
-        // knowledge — hallucination-prone, so the downstream quarantine
-        // (confirm-or-drop, REQ-024) is what makes this safe to keep.
-        if let Some(live) = &self.live_config {
-            let cfg = live.snapshot();
-            match gr_llm_key_lookup(&self.http, cfg.as_ref(), title, author).await {
-                Ok(Some(key)) => {
-                    tracing::info!(title = %title, gr_key = %key, "LLM resolved GR key directly (unconfirmed)");
-                    return Ok(Some(ResolvedGrDetail {
-                        url: goodreads::detail_url_for_gr_key(&self.base_url, &key),
-                        candidate: None,
-                        via_isbn: None,
-                    }));
-                }
-                Ok(None) => {
-                    tracing::debug!(title = %title, "LLM returned no GR key");
-                }
-                Err(e) => {
-                    tracing::debug!(title = %title, error = %e, "LLM GR key lookup unavailable");
-                }
-            }
+        if let Some(idx) = gr_best_match(title, author, &hits) {
+            tracing::debug!(title = %title, chosen_idx = idx, "GR search result selected (deterministic)");
+            return Ok(Some(ResolvedGrDetail {
+                url: goodreads::resolve_detail_url(&self.base_url, &hits[idx].detail_url),
+                candidate: Some(GrCandidateText {
+                    title: hits[idx].title.clone(),
+                    title_bare: hits[idx].title_bare.clone(),
+                    author: hits[idx].author.clone(),
+                    cover_url: hits[idx].cover_url.clone(),
+                    series_name: hits[idx].series_name.clone(),
+                    series_position: hits[idx].series_position,
+                }),
+            }));
         }
 
+        // No confident GR match. Identity must degrade without an LLM (spec:
+        // work-creation-consistency) — we do NOT ask an LLM to recall a key
+        // from memory: a fabricated key is worse than no key. The other
+        // providers carry identity; GR simply abstains. Log so abstains are
+        // visible (empty results vs hits-present-but-no-confident-match).
+        if hits.is_empty() {
+            tracing::debug!(title = %title, "GR autocomplete: no results");
+        } else {
+            tracing::debug!(
+                title = %title,
+                hit_count = hits.len(),
+                "GR abstained: no confident title/author match"
+            );
+        }
         Ok(None)
     }
 
     fn map_fetch_err(&self, err: GoodreadsFetchError) -> ProviderOutcome<NormalizedWorkDetail> {
         let backoff = chrono::Duration::seconds(self.retry_backoff_secs);
         match err {
+            GoodreadsFetchError::CircuitOpen(retry_after) => circuit_open_outcome(retry_after),
             GoodreadsFetchError::AntiBot => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::AntiBotBlock,
                 next_attempt_at: Utc::now() + backoff,
@@ -1408,197 +1557,210 @@ impl GoodreadsClient {
     }
 }
 
-/// Construct a `GoodreadsClient` against the production Goodreads URL.
-impl GoodreadsClient {
-    pub fn production(http: HttpClient) -> Self {
-        Self::new(http, GOODREADS_BASE_URL)
+/// Prefer GR's own undecorated title (`bookTitleBare`) over whatever the
+/// detail page or LLM extraction produced. GR's display titles carry
+/// "(Series, #N)" search-card decoration that reads as a one-sided series
+/// marker to the identity authority — the decorated form keeps an otherwise
+/// correct GR answer out of the quorum cluster. Series name/position ride
+/// their own payload fields, so nothing is lost: when the detail parse left
+/// them empty, the candidate's decoration evidence fills them, keeping the
+/// volume the picker saw visible to the quorum's veto. Provider data
+/// selection, not a cleaning step: every value comes from GR itself.
+fn apply_candidate_text(payload: &mut NormalizedWorkDetail, candidate: &Option<GrCandidateText>) {
+    let Some(c) = candidate.as_ref() else { return };
+    if let Some(bare) = c.title_bare.as_deref().filter(|t| !t.trim().is_empty()) {
+        payload.title = Some(bare.to_string());
+    }
+    if payload.series_name.is_none() {
+        payload.series_name = c.series_name.clone();
+    }
+    if payload.series_position.is_none() {
+        payload.series_position = c.series_position;
     }
 }
 
-/// LLM disambiguation for GR search results — same pattern as HC's llm_disambiguate.
-async fn gr_llm_disambiguate(
-    http: &HttpClient,
-    cfg: &livrarr_domain::settings::MetadataConfig,
+/// Junk Goodreads editions that share a title with the real book (study
+/// guides, summaries). Filtered before the deterministic match — the job the
+/// removed LLM disambiguation prompt did ("reject SparkNotes/CliffsNotes...").
+fn is_gr_junk_edition(title: &str) -> bool {
+    const JUNK: [&str; 6] = [
+        "sparknotes",
+        "cliffsnotes",
+        "bookrags",
+        "study guide",
+        "summary of",
+        "summary and analysis",
+    ];
+    let lower = title.to_lowercase();
+    JUNK.iter().any(|needle| lower.contains(needle))
+}
+
+/// Deterministic Goodreads search-hit selection — no LLM. Drop junk
+/// editions, require author-token overlap (unchanged guard), then judge the
+/// title through the one matching authority: `Same` or `Grey` (the authority
+/// floors grey at 0.75 of the MAIN title) picks; `Different` and
+/// `VetoVolume` never do. The hit's DECORATED title is parsed — decoration
+/// "(Series, #N)" reads structurally as a series marker and its volume
+/// evidence participates in the veto, while a subtitled record still matches
+/// a bare seed on main-title equality (the 2026-07-03 refresh-residue
+/// shape). Ranking: Same beats Grey, higher grey score beats lower, then
+/// author overlap; earliest hit wins ties (GR relevance order). Returns
+/// None when nothing qualifies — a wrong GR key is worse than none, so GR
+/// abstains.
+fn gr_best_match(
     title: &str,
     author: &str,
     hits: &[goodreads::GoodreadsSearchResult],
-) -> Result<Option<usize>, String> {
-    if !cfg.llm_enabled {
-        return Err("LLM disabled".into());
-    }
-    let endpoint = cfg
-        .llm_endpoint
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM not configured")?;
-    let api_key = cfg
-        .llm_api_key
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM API key not configured")?;
-    let model = cfg
-        .llm_model
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM model not configured")?;
+) -> Option<usize> {
+    use livrarr_domain::identity_matching::{parse_title, title_verdict, TitleVerdict};
+    use livrarr_domain::text_norm;
 
-    let mut candidates = String::new();
-    for (i, hit) in hits.iter().enumerate() {
-        let a = hit.author.as_deref().unwrap_or("?");
-        let y = hit
-            .year
-            .map(|y| y.to_string())
-            .unwrap_or_else(|| "?".into());
-        candidates.push_str(&format!("{i}: \"{}\" by {a} ({y})\n", hit.title));
-    }
+    let seed = parse_title(title);
+    let seed_author_tokens = text_norm::author_tokens(author);
 
-    let prompt = format!(
-        "I'm looking for the book \"{title}\" by {author}.\n\n\
-         These are search results from Goodreads:\n{candidates}\n\
-         Which result (by number) is the correct match? \
-         Reject study guides, summaries, SparkNotes, BookRags, and CliffsNotes — those are NOT the real book.\n\
-         Reply with ONLY the number. If none match, reply \"none\"."
-    );
-
-    let url = format!(
-        "{}chat/completions",
-        endpoint.trim_end_matches('/').to_owned() + "/"
-    );
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
-        "temperature": 0.0,
-    });
-
-    let resp = http
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("LLM request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM HTTP {status}: {text}"));
-    }
-
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("LLM parse error: {e}"))?;
-
-    let answer = data
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-
-    tracing::debug!(
-        candidates_count = hits.len(),
-        raw_answer = %answer,
-        "GR LLM disambiguation"
-    );
-
-    if answer == "none" || answer.is_empty() {
-        return Ok(None);
-    }
-
-    match answer.parse::<usize>() {
-        Ok(idx) if idx < hits.len() => Ok(Some(idx)),
-        _ => {
-            tracing::warn!(answer = %answer, "GR LLM returned unparseable disambiguation result");
-            Ok(None)
+    // (index, tier: Same=2 / Grey=1, grey score, author overlap)
+    let mut best: Option<(usize, u8, f64, u32)> = None;
+    for (idx, h) in hits.iter().enumerate() {
+        if is_gr_junk_edition(&h.title) {
+            continue;
         }
+        let author_overlap = seed_author_tokens
+            .intersection(&text_norm::author_tokens(
+                h.author.as_deref().unwrap_or_default(),
+            ))
+            .count() as u32;
+        if author_overlap < 1 {
+            continue;
+        }
+        let (tier, score) = match title_verdict(&seed, &parse_title(&h.title)) {
+            TitleVerdict::Same => (2u8, 1.0),
+            TitleVerdict::Grey { score } => (1u8, score),
+            TitleVerdict::Different | TitleVerdict::VetoVolume => continue,
+        };
+        let beats_best = match best {
+            None => true,
+            Some((_, best_tier, best_score, best_overlap)) => {
+                tier > best_tier
+                    || (tier == best_tier
+                        && (score > best_score
+                            || (score == best_score && author_overlap > best_overlap)))
+            }
+        };
+        if beats_best {
+            best = Some((idx, tier, score, author_overlap));
+        }
+    }
+    best.map(|(idx, ..)| idx)
+}
+
+/// Construct a `GoodreadsClient` against the production Goodreads URL.
+impl GoodreadsClient {
+    pub fn production(fetcher: livrarr_http::fetcher::HttpFetcherImpl, http: HttpClient) -> Self {
+        Self::new(fetcher, http, GOODREADS_BASE_URL)
     }
 }
 
-async fn gr_llm_key_lookup(
-    http: &HttpClient,
-    cfg: &livrarr_domain::settings::MetadataConfig,
-    title: &str,
-    author: &str,
-) -> Result<Option<String>, String> {
-    if !cfg.llm_enabled {
-        return Err("LLM disabled".into());
-    }
-    let endpoint = cfg
-        .llm_endpoint
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM not configured")?;
-    let api_key = cfg
-        .llm_api_key
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM API key not configured")?;
-    let model = cfg
-        .llm_model
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or("LLM model not configured")?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::goodreads::GoodreadsSearchResult;
 
-    let prompt = format!(
-        "What is the Goodreads numeric book ID for \"{title}\" by {author}? \
-         Return ONLY a JSON object: {{\"gr_id\": \"<numeric_id>\"}}. \
-         IMPORTANT: If you are not confident you have the correct ID, \
-         return {{\"gr_id\": null}}. Do NOT guess or fabricate an ID. \
-         A wrong ID is worse than no ID. No explanation."
-    );
-
-    let url = format!(
-        "{}chat/completions",
-        endpoint.trim_end_matches('/').to_owned() + "/"
-    );
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 30,
-        "temperature": 0.0,
-    });
-
-    let resp = http
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("LLM request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM HTTP {status}: {text}"));
-    }
-
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("LLM parse error: {e}"))?;
-
-    let answer = data
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-
-    let parsed: Result<serde_json::Value, _> = serde_json::from_str(answer);
-    let gr_id = parsed
-        .ok()
-        .and_then(|v| v.get("gr_id")?.as_str().map(String::from));
-
-    match gr_id {
-        Some(id) if !id.is_empty() && id != "null" => {
-            tracing::debug!(title = %title, gr_key = %id, "LLM provided GR key");
-            Ok(Some(id))
+    fn hit(title: &str, title_bare: Option<&str>, author: &str) -> GoodreadsSearchResult {
+        GoodreadsSearchResult {
+            title: title.to_string(),
+            title_bare: title_bare.map(str::to_string),
+            author: Some(author.to_string()),
+            detail_url: "/book/show/1".to_string(),
+            cover_url: None,
+            year: None,
+            rating: None,
+            series_name: None,
+            series_position: None,
         }
-        _ => Ok(None),
+    }
+
+    #[test]
+    fn picker_matches_subtitled_record_from_bare_seed() {
+        // The 2026-07-03 bulk-refresh residue shape: the seed title is bare
+        // while GR's record carries the full subtitle — a whole-title token
+        // comparison dilutes below any flat bar, but the authority sees equal
+        // main titles with a one-sided subtitle (grey, floored).
+        let hits = vec![hit(
+            "The Power Broker: Robert Moses and the Fall of New York",
+            Some("The Power Broker: Robert Moses and the Fall of New York"),
+            "Robert A. Caro",
+        )];
+        assert_eq!(
+            gr_best_match("The Power Broker", "Robert A. Caro", &hits),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn picker_takes_decorated_series_hit_for_bare_seed() {
+        // Search-card decoration "(Series, #N)" is structural to the
+        // authority (a series marker), never a similarity penalty.
+        let hits = vec![hit(
+            "Storm Front (The Dresden Files, #1)",
+            Some("Storm Front"),
+            "Jim Butcher",
+        )];
+        assert_eq!(gr_best_match("Storm Front", "Jim Butcher", &hits), Some(0));
+    }
+
+    #[test]
+    fn picker_still_rejects_sequels() {
+        let hits = vec![hit("Dune Messiah", Some("Dune Messiah"), "Frank Herbert")];
+        assert_eq!(gr_best_match("Dune", "Frank Herbert", &hits), None);
+    }
+
+    #[test]
+    fn picker_requires_author_overlap() {
+        let hits = vec![hit(
+            "The Power Broker: Robert Moses and the Fall of New York",
+            None,
+            "Somebody Else",
+        )];
+        assert_eq!(
+            gr_best_match("The Power Broker", "Robert A. Caro", &hits),
+            None
+        );
+    }
+
+    #[test]
+    fn picker_vetoes_conflicting_volumes() {
+        // Equal mains but contradicting volume evidence must never auto-pick —
+        // the decoration carries the hit's volume, the seed carries its own.
+        let hits = vec![hit("Alpha (Saga, #3)", Some("Alpha"), "Ann Author")];
+        assert_eq!(gr_best_match("Alpha, Vol. 2", "Ann Author", &hits), None);
+    }
+
+    #[test]
+    fn picker_prefers_exact_match_over_subtitled_grey() {
+        let hits = vec![
+            hit(
+                "The Power Broker: Robert Moses and the Fall of New York",
+                None,
+                "Robert A. Caro",
+            ),
+            hit("The Power Broker", None, "Robert A. Caro"),
+        ];
+        assert_eq!(
+            gr_best_match("The Power Broker", "Robert A. Caro", &hits),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn picker_junk_filter_still_applies() {
+        let hits = vec![hit(
+            "Summary of The Power Broker by Robert A. Caro",
+            None,
+            "Robert A. Caro",
+        )];
+        assert_eq!(
+            gr_best_match("The Power Broker", "Robert A. Caro", &hits),
+            None
+        );
     }
 }

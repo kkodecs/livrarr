@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::Router;
 use livrarr_domain::services::*;
+use livrarr_domain::RequestPriority;
 use livrarr_http::fetcher::HttpFetcherImpl;
 use tokio::net::TcpListener;
 
@@ -35,6 +36,7 @@ fn default_req(url: &str) -> FetchRequest {
         max_body_bytes: 1024 * 1024, // 1MB default
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
+        priority: RequestPriority::Normal,
     }
 }
 
@@ -234,6 +236,20 @@ async fn test_ssrf_rejects_embedded_credentials() {
 }
 
 #[tokio::test]
+async fn test_fast_connect_rejects_loopback_same_as_ssrf_safe() {
+    // fetch_ssrf_safe_fast_connect shares fetch_ssrf_safe's SSRF preflight
+    // (fetch_ssrf_safe_impl) — this guards against a refactor that
+    // accidentally drops the check for the new client.
+    let fetcher = HttpFetcherImpl::new().unwrap();
+    let req = default_req("http://127.0.0.1/test");
+    let err = fetcher.fetch_ssrf_safe_fast_connect(req).await.unwrap_err();
+    assert!(
+        matches!(err, FetchError::Ssrf(_)),
+        "expected Ssrf, got: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_ssrf_rejects_non_http_schemes() {
     // PRIM-HTTP-003: file://, ftp://, gopher:// schemes must be rejected
     let fetcher = HttpFetcherImpl::new().unwrap();
@@ -286,6 +302,22 @@ async fn test_ssrf_allows_valid_public_url() {
     let fetcher = HttpFetcherImpl::new().unwrap();
     let req = default_req("http://45.32.72.229:19876/destination");
     let resp = fetcher.fetch_ssrf_safe(req).await.unwrap();
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body, b"arrived");
+}
+
+#[tokio::test]
+#[ignore = "requires VPS tunnel: ssh -L 19876:127.0.0.1:19876 ktown"]
+async fn test_fast_connect_allows_valid_public_url() {
+    // PRIM-HTTP-003 parity: fetch_ssrf_safe_fast_connect succeeds against a
+    // live, responsive host exactly like fetch_ssrf_safe — the tighter
+    // connect budget must not break a normal server. Not runnable without
+    // the VPS tunnel (same constraint as test_ssrf_allows_valid_public_url);
+    // no loopback/private target can stand in — fetch_ssrf_safe_impl's SSRF
+    // preflight rejects those before either client is ever used.
+    let fetcher = HttpFetcherImpl::new().unwrap();
+    let req = default_req("http://45.32.72.229:19876/destination");
+    let resp = fetcher.fetch_ssrf_safe_fast_connect(req).await.unwrap();
     assert_eq!(resp.status, 200);
     assert_eq!(resp.body, b"arrived");
 }

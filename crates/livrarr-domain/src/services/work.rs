@@ -233,6 +233,72 @@ pub struct EagerQuery {
     pub isbn: Option<String>,
 }
 
+/// A user-sovereign field that both works in a merge can independently
+/// carry a value for (REQ-015 d). Title and author are deliberately
+/// excluded — the survivor's identity fields are not up for negotiation in
+/// a merge; only the survivor's own value is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeableField {
+    SeriesName,
+    SeriesPosition,
+}
+
+/// Which side's value to keep for one [`MergeableField`] conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeFieldChoice {
+    KeepSurvivor,
+    TakeLoser,
+}
+
+/// One explicit choice supplied to [`WorkService::merge_works`].
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct MergeFieldChoiceEntry {
+    pub field: MergeableField,
+    pub choice: MergeFieldChoice,
+}
+
+/// A field where both works carry a differing user value. Surfaced by
+/// [`WorkService::preview_merge_works`]; the loser's value is shown, never
+/// silently discarded (REQ-015 d).
+#[derive(Debug, Clone)]
+pub struct MergeFieldConflict {
+    pub field: MergeableField,
+    pub survivor_value: String,
+    pub loser_value: String,
+}
+
+/// The plan for combining two works, computed without applying anything
+/// (REQ-015 b).
+#[derive(Debug, Clone)]
+pub struct MergePreview {
+    pub survivor_id: WorkId,
+    pub loser_id: WorkId,
+    /// Library items that will reassign to the survivor.
+    pub library_items_moving: usize,
+    /// Grabs that will reassign to the survivor.
+    pub grabs_moving: usize,
+    /// Monitoring flags are additive (OR'd) — never a conflict.
+    pub monitor_ebook_result: bool,
+    pub monitor_audiobook_result: bool,
+    /// Fields needing an explicit choice at execute time (AC-025).
+    pub conflicts: Vec<MergeFieldConflict>,
+}
+
+/// Outcome of [`WorkService::merge_works`].
+#[derive(Debug, Clone)]
+pub struct MergeWorksResult {
+    pub survivor: Work,
+    pub library_items_moved: usize,
+    pub grabs_moved: usize,
+    /// Non-fatal issues from the best-effort physical file reorganization
+    /// step (REQ-015 c) — e.g. a destination path collision left a file at
+    /// its prior location. The DB reassignment itself always completes in
+    /// full; these are reorg-only warnings, never a sign of lost data.
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorkServiceError {
     #[error("work not found")]
@@ -251,6 +317,11 @@ pub enum WorkServiceError {
     Cover(String),
     #[error("database error: {0}")]
     Db(#[from] DbError),
+    /// A merge left one or more conflicting fields without an explicit
+    /// choice (REQ-015 d, AC-025). The caller must re-request with a
+    /// [`MergeFieldChoiceEntry`] for every field listed.
+    #[error("merge requires an explicit choice for: {0:?}")]
+    MergeChoiceRequired(Vec<MergeableField>),
 }
 
 /// Outcome of one [`WorkService::converge_work`] pass, driving the background
@@ -263,6 +334,16 @@ pub enum ConvergeOutcome {
     Completed,
     StillIncomplete,
     Terminal,
+}
+
+/// Surface that triggered a [`WorkService::refresh`] call. `Interactive` — a
+/// person is watching (existing behavior). `Bulk` — an unattended sweep;
+/// provider work rides the outbound queue at Low priority with background
+/// identity semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshSurface {
+    Interactive,
+    Bulk,
 }
 
 #[trait_variant::make(Send)]
@@ -318,6 +399,7 @@ pub trait WorkService: Send + Sync {
         &self,
         user_id: UserId,
         work_id: WorkId,
+        surface: RefreshSurface,
     ) -> Result<RefreshWorkResult, WorkServiceError>;
     /// User-triggered bulk recovery (REQ-011 / PO §7): sweep every "incomplete"
     /// work for the user — Failed, Unenriched, or identity-Pending — and re-run
@@ -392,6 +474,35 @@ pub trait WorkService: Send + Sync {
         work_id: WorkId,
         threshold: u32,
     ) -> Result<ConvergeOutcome, WorkServiceError>;
+
+    /// Compute the merge plan for combining `loser_id` into `survivor_id`
+    /// without applying anything (REQ-015 b). Both works must belong to
+    /// `user_id` — a cross-user pair or an unknown id returns `NotFound`,
+    /// never leaking whether the other id exists (AC-024).
+    async fn preview_merge_works(
+        &self,
+        user_id: UserId,
+        survivor_id: WorkId,
+        loser_id: WorkId,
+    ) -> Result<MergePreview, WorkServiceError>;
+
+    /// Combine two works (REQ-015): `loser_id`'s library items and grabs
+    /// reassign to `survivor_id`, monitoring flags OR together, and
+    /// `choices` resolves every field [`preview_merge_works`] listed as
+    /// conflicting — a conflicting field with no matching entry refuses the
+    /// whole call (`MergeChoiceRequired`, AC-025) rather than guessing.
+    /// The DB reassignment and loser deletion happen in one transaction
+    /// (REQ-015 e); physical file reorganization under the survivor's
+    /// canonical path is a separate, best-effort follow-up performed by the
+    /// caller via `ImportService::reorganize_work_files` — this method
+    /// never touches the filesystem and never deletes a file.
+    async fn merge_works(
+        &self,
+        user_id: UserId,
+        survivor_id: WorkId,
+        loser_id: WorkId,
+        choices: Vec<MergeFieldChoiceEntry>,
+    ) -> Result<MergeWorksResult, WorkServiceError>;
 }
 
 /// RAII slot for the per-user bulk-refresh guard (REQ-016). Acquired via

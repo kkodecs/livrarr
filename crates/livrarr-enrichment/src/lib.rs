@@ -18,19 +18,15 @@ use livrarr_domain::{
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 
 pub mod cover_gate;
+pub mod cover_rank;
 pub mod cover_resolution;
-pub mod llm_ewl;
 pub mod llm_validator;
-pub mod pacing_queue;
 pub mod provider_queue;
 
 #[cfg(test)]
 mod provider_queue_tracer_tests;
 
-pub use pacing_queue::{LivePacingQueue, PacingQueue};
-pub use provider_queue::{
-    ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder, InitialCircuitState,
-};
+pub use provider_queue::{ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder};
 
 /// No-op `LlmCaller` used as the default `L` type parameter for
 /// `EnrichmentServiceImpl` when no LLM is configured. Relocated here from
@@ -53,12 +49,15 @@ pub trait EnrichmentService: Send + Sync {
     /// when `Some`, the pipeline consumes that picked candidate's cached discovery
     /// payloads (zero network) before gateway-fetching the rest; `None` = enrich
     /// from the network.
+    /// `priority` (B4) drives the `EnrichmentContext` handed to
+    /// `ProviderQueue::dispatch_enrichment` — independent of `mode`.
     async fn enrich_work(
         &self,
         user_id: UserId,
         work_id: WorkId,
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        priority: RequestPriority,
     ) -> Result<EnrichmentResult, EnrichmentError>;
 
     /// TEMP(pk-tdd): compile-only scaffold — reset work for manual refresh.
@@ -161,42 +160,12 @@ pub struct EnrichmentContext {
     pub mode: EnrichmentMode,
 }
 
-/// Circuit breaker state for a provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CircuitState {
-    Closed,
-    Open,
-    HalfOpen,
-}
-
-/// Per-provider circuit breaker configuration.
-///
-/// R-22
-#[derive(Debug, Clone)]
-pub struct CircuitBreakerConfig {
-    /// Number of consecutive failures within `evaluation_window_secs` that trips Closed → Open.
-    pub failure_threshold: u32,
-    /// Rolling window over which failures are counted.
-    pub evaluation_window_secs: u64,
-    /// How long the breaker stays Open before transitioning to HalfOpen.
-    pub open_duration_secs: u64,
-    /// In HalfOpen, allow this many probe attempts before deciding Open vs Closed.
-    pub half_open_probe_count: u32,
-}
-
 /// Per-provider queue configuration.
 ///
 /// R-22
 #[derive(Debug, Clone)]
 pub struct ProviderQueueConfig {
     pub provider: livrarr_domain::MetadataProvider,
-    /// Max in-flight requests against this provider. Reserved 1 slot for Background
-    /// when concurrency >= 2 (priority class semantics — not exercised by tests yet).
-    pub concurrency: u32,
-    /// Pacing limit. Not enforced by the queue runtime in this phase — see deferred
-    /// notes in the plan. Field kept on the contract so adapters can query it.
-    pub requests_per_second: f64,
-    pub circuit_breaker: CircuitBreakerConfig,
     pub max_attempts: u32,
     pub max_suppressed_passes: u32,
     pub max_suppression_window_secs: u64,
@@ -212,8 +181,8 @@ pub enum ProviderQueueError {
     Db(#[from] DbError),
 }
 
-/// Shared per-provider request queue. Scatter-gather dispatch with per-provider
-/// circuit breakers and durable phase-1 outcome persistence.
+/// Shared per-provider request queue. Scatter-gather dispatch with durable
+/// phase-1 outcome persistence.
 ///
 /// R-22
 #[trait_variant::make(Send)]
@@ -223,8 +192,6 @@ pub trait ProviderQueue: Send + Sync {
         work: &Work,
         context: EnrichmentContext,
     ) -> Result<ScatterGatherResult, ProviderQueueError>;
-
-    fn circuit_state(&self, provider: livrarr_domain::MetadataProvider) -> CircuitState;
 }
 
 /// TEMP(pk-tdd): reconstructed per-provider outcome for merge input.
@@ -244,7 +211,9 @@ pub struct PriorityModel {
 }
 
 impl PriorityModel {
-    /// English: HC → GR → Readarr → OL → Audible, Audio: Audible → Audnexus → HC.
+    /// English content/description order is unchanged by N2 (cover-only
+    /// consolidation); `cover`/`audio` are derived from the single rank table
+    /// (S1) — see `cover_rank::CoverRankModel::EbookEnglish`/`Audiobook`.
     pub fn english() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
@@ -262,18 +231,16 @@ impl PriorityModel {
                 P::OpenLibrary,
                 P::Audible,
             ],
-            cover: vec![
-                P::Hardcover,
-                P::Goodreads,
-                P::Readarr,
-                P::OpenLibrary,
-                P::Audible,
-            ],
-            audio: vec![P::Audible, P::Audnexus, P::Hardcover],
+            cover: crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::EbookEnglish)
+                .to_vec(),
+            audio: crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::Audiobook)
+                .to_vec(),
         }
     }
 
-    /// Foreign: GB → GR → HC → Readarr → OL → Audible, Audio: Audible → Audnexus → HC.
+    /// Foreign content/description order is unchanged by N2; `cover`/`audio`
+    /// are derived from the single rank table (S1) — see
+    /// `cover_rank::CoverRankModel::EbookForeign`/`Audiobook`.
     pub fn foreign() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
@@ -293,15 +260,10 @@ impl PriorityModel {
                 P::OpenLibrary,
                 P::Audible,
             ],
-            cover: vec![
-                P::GoogleBooks,
-                P::Goodreads,
-                P::Hardcover,
-                P::Readarr,
-                P::OpenLibrary,
-                P::Audible,
-            ],
-            audio: vec![P::Audible, P::Audnexus, P::Hardcover],
+            cover: crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::EbookForeign)
+                .to_vec(),
+            audio: crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::Audiobook)
+                .to_vec(),
         }
     }
 
@@ -427,11 +389,14 @@ impl MergeEngine for DefaultMergeEngine {
         // caller is configured. Language routing (REQ-014/#133) is enforced here at
         // the single chokepoint both the cached and network entry paths funnel through,
         // so a foreign work can never take English OpenLibrary/Hardcover metadata.
-        // `had_providers` is captured BEFORE the policy drop: providers that were
+        // The Goodreads cover gate (REQ-017) is the second chokepoint policy enforced
+        // here, so a mismatched-title GR cover can never win on either entry path.
+        // `had_providers` is captured BEFORE the policy drops: providers that were
         // attempted but all excluded yield a status-only output (REQ-014), while an
         // empty dispatch re-materializes current state as before.
         let had_providers = !inputs.provider_results.is_empty();
         let inputs = drop_language_incompatible_providers(inputs);
+        let inputs = apply_gr_cover_gate(inputs);
         merge_impl(inputs, had_providers)
     }
 
@@ -491,6 +456,59 @@ fn drop_language_incompatible_providers(mut inputs: MergeInput) -> MergeInput {
         inputs
             .provider_results
             .retain(|provider, _| !matches!(provider, P::OpenLibrary | P::Hardcover));
+    }
+    inputs
+}
+
+/// Enforce the Goodreads cover gate (REQ-017): for an English work with an OL
+/// key, a Goodreads payload's cover_url only survives if its title clears the
+/// deterministic Jaccard threshold against the work title. Called once at the
+/// `MergeEngine::merge` chokepoint so the cached-reuse path and the network
+/// path share one cover-gating policy — the same centralization
+/// `drop_language_incompatible_providers` applies to the language-routing
+/// policy (#133).
+fn apply_gr_cover_gate(mut inputs: MergeInput) -> MergeInput {
+    if inputs.current_work.language.as_deref() == Some("en") && inputs.current_work.ol_key.is_some()
+    {
+        if let Some(gr_outcome) = inputs
+            .provider_results
+            .get_mut(&livrarr_domain::MetadataProvider::Goodreads)
+        {
+            if let Some(ref mut payload) = gr_outcome.payload {
+                if payload.cover_url.is_some() {
+                    let anchor = crate::cover_gate::OlAnchor {
+                        title: &inputs.current_work.title,
+                        author_name: &inputs.current_work.author_name,
+                        year: inputs.current_work.year,
+                        isbn: inputs.current_work.isbn_13.as_deref(),
+                        ol_key: inputs.current_work.ol_key.as_deref().unwrap_or(""),
+                    };
+                    let candidate = crate::cover_gate::GrCandidate {
+                        title: payload.title.as_deref().unwrap_or(""),
+                        author_name: payload.author_name.as_deref().unwrap_or(""),
+                        year: payload.year,
+                        isbn: None,
+                        gr_key: payload.gr_key.as_deref().unwrap_or(""),
+                    };
+                    // REQ-005/REQ-016 (zero LLM): the merge is deterministic and
+                    // LLM-free, so a borderline title is a strip either way — the
+                    // gate itself has no LLM tier to select (D10).
+                    let outcome = crate::cover_gate::evaluate_gr_cover_gate(&anchor, &candidate);
+                    match outcome {
+                        crate::cover_gate::CoverGateOutcome::Apply { .. } => {}
+                        other => {
+                            tracing::info!(
+                                work_id = inputs.current_work.id,
+                                ?other,
+                                "cover gate: stripping GR cover_url"
+                            );
+                            payload.cover_url = None;
+                            payload.gr_key = None;
+                        }
+                    }
+                }
+            }
+        }
     }
     inputs
 }
@@ -565,7 +583,7 @@ fn extract_provider_field(field: WorkField, detail: &NormalizedWorkDetail) -> Fi
         WorkField::Year => FieldValue::Int(detail.year),
         WorkField::SeriesName => FieldValue::Str(non_blank(&detail.series_name)),
         WorkField::SeriesPosition => FieldValue::Float(detail.series_position),
-        WorkField::Genres => FieldValue::Strings(detail.genres.clone()),
+        WorkField::Genres => FieldValue::Strings(non_empty_vec(&detail.genres)),
         WorkField::Language => FieldValue::Str(non_blank(&detail.language)),
         WorkField::PageCount => FieldValue::Int(detail.page_count),
         WorkField::DurationSeconds => FieldValue::Int(detail.duration_seconds),
@@ -576,7 +594,7 @@ fn extract_provider_field(field: WorkField, detail: &NormalizedWorkDetail) -> Fi
         WorkField::GrKey => FieldValue::Str(non_blank(&detail.gr_key)),
         WorkField::Isbn13 => FieldValue::Str(non_blank(&detail.isbn_13)),
         WorkField::Asin => FieldValue::Str(non_blank(&detail.asin)),
-        WorkField::Narrator => FieldValue::Strings(detail.narrator.clone()),
+        WorkField::Narrator => FieldValue::Strings(non_empty_vec(&detail.narrator)),
         WorkField::NarrationType => FieldValue::NarrationType(detail.narration_type),
         WorkField::Abridged => FieldValue::Bool(detail.abridged),
         WorkField::Rating => FieldValue::Float(detail.rating),
@@ -620,6 +638,11 @@ fn extract_current_field(field: WorkField, work: &Work) -> FieldValue {
 /// Returns None if the string is None or whitespace-only after trimming.
 fn non_blank(s: &Option<String>) -> Option<String> {
     s.as_ref().filter(|v| !v.trim().is_empty()).cloned()
+}
+
+/// Returns None if the list is None or empty — an empty offer is no offer.
+fn non_empty_vec(v: &Option<Vec<String>>) -> Option<Vec<String>> {
+    v.as_ref().filter(|list| !list.is_empty()).cloned()
 }
 
 /// Returns None if the owned string is empty or whitespace-only.
@@ -1207,21 +1230,11 @@ async fn persist_dissents<DB: livrarr_db::FieldDissentDb>(
 }
 
 /// Enrichment service implementation.
-/// Generic over DB, Q (ProviderQueue), ME (MergeEngine), V (LlmValidator),
-/// and L (LlmCaller for cover gate disambiguation).
-pub struct EnrichmentServiceImpl<DB, Q, ME, V, L = crate::StubNoLlm> {
+/// Generic over DB, Q (ProviderQueue), and ME (MergeEngine).
+pub struct EnrichmentServiceImpl<DB, Q, ME> {
     db: Arc<DB>,
     queue: Arc<Q>,
     merge_engine: Arc<ME>,
-    /// Cross-provider semantic validator. Kept for API compatibility; Step 8.5
-    /// (LLM identity-validation) is removed per REQ-005 (zero LLM in pipeline).
-    #[allow(dead_code)]
-    validator: Arc<V>,
-    /// LLM caller. Kept for API compatibility; no longer called in the pipeline
-    /// (REQ-005). The cover-gate AskLlm path is replaced with conservative strip.
-    #[allow(dead_code)]
-    llm: L,
-    llm_configured: bool,
     /// Per-work lock map [I-12]: serializes concurrent enrichment calls for the same (user_id, work_id).
     locks: Arc<PerWorkLocks>,
     /// Pre-injected source provider data (e.g., from Readarr import).
@@ -1240,7 +1253,7 @@ pub struct EnrichmentServiceImpl<DB, Q, ME, V, L = crate::StubNoLlm> {
     call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 
-impl<DB, Q, ME, V, L> EnrichmentServiceImpl<DB, Q, ME, V, L>
+impl<DB, Q, ME> EnrichmentServiceImpl<DB, Q, ME>
 where
     DB: livrarr_db::WorkDb
         + livrarr_db::ProvenanceDb
@@ -1252,24 +1265,14 @@ where
         + 'static,
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
-    V: crate::llm_validator::LlmValidator + Send + Sync + 'static,
-    L: livrarr_domain::services::LlmCaller + Send + Sync + 'static,
 {
-    pub fn new(
-        db: Arc<DB>,
-        queue: Arc<Q>,
-        merge_engine: Arc<ME>,
-        validator: Arc<V>,
-        llm: L,
-        llm_configured: bool,
-    ) -> Self {
+    /// `_llm_configured` is retained for call-site compatibility — the merge is
+    /// purely deterministic (REQ-005), so the flag has no effect on behavior.
+    pub fn new(db: Arc<DB>, queue: Arc<Q>, merge_engine: Arc<ME>, _llm_configured: bool) -> Self {
         Self {
             db,
             queue,
             merge_engine,
-            validator,
-            llm,
-            llm_configured,
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             source_data_store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             transport_cache: None,
@@ -1311,7 +1314,7 @@ where
     }
 }
 
-impl<DB, Q, ME, V, L> EnrichmentService for EnrichmentServiceImpl<DB, Q, ME, V, L>
+impl<DB, Q, ME> EnrichmentService for EnrichmentServiceImpl<DB, Q, ME>
 where
     DB: livrarr_db::WorkDb
         + livrarr_db::ProvenanceDb
@@ -1323,8 +1326,6 @@ where
         + 'static,
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
-    V: crate::llm_validator::LlmValidator + Send + Sync + 'static,
-    L: livrarr_domain::services::LlmCaller + Send + Sync + 'static,
 {
     async fn enrich_work(
         &self,
@@ -1332,6 +1333,7 @@ where
         work_id: WorkId,
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        priority: RequestPriority,
     ) -> Result<EnrichmentResult, EnrichmentError> {
         let _enrich_span = livrarr_domain::perf::StageTimer::start("enrich", work_id);
         // Step 1: Acquire per-work lock [I-12]
@@ -1459,11 +1461,9 @@ where
         // Step 3: Read merge_generation before dispatch (for CAS baseline)
         let mut generation = self.db.get_merge_generation(user_id, work_id).await?;
 
-        // Step 4: Dispatch to provider queue
-        let context = EnrichmentContext {
-            priority: RequestPriority::Normal,
-            mode,
-        };
+        // Step 4: Dispatch to provider queue. `priority` is the caller's
+        // explicit queue-ordering hint (B4) — it no longer hardcodes Normal.
+        let context = EnrichmentContext { priority, mode };
         let mut scatter_result = self.queue.dispatch_enrichment(&work, context).await?;
 
         // Step 4.5: Append source provider data (Readarr import) if pre-injected.
@@ -1526,8 +1526,13 @@ where
 
         for (provider, outcome) in &scatter_result.outcomes {
             match outcome {
-                ProviderOutcome::Success(_) => {
-                    // Read back the persisted payload from DB
+                ProviderOutcome::Success(in_mem) => {
+                    // Read back the persisted payload from DB.
+                    // Scattered providers always have a retry-state row with
+                    // `normalized_payload_json` (written by `persist_phase1_outcome`).
+                    // Non-scattered providers (e.g. Readarr import) carry their
+                    // payload only in memory — the DB lookup returns None and we
+                    // fall back to the in-memory value so they contribute to the merge.
                     let retry_state = self.db.get_retry_state(user_id, work_id, *provider).await?;
                     let payload =
                         if let Some(ref state) = retry_state {
@@ -1544,6 +1549,11 @@ where
                         } else {
                             None
                         };
+                    // Fall back to the in-memory payload when the DB has no row.
+                    // Preserves restart-safety for scattered providers (their DB row
+                    // is always found); lets non-scattered providers (Readarr and any
+                    // future additions) reach the merge without special-casing.
+                    let payload = payload.or_else(|| Some((**in_mem).clone()));
                     reconstructed.insert(
                         *provider,
                         ReconstructedOutcome {
@@ -1613,59 +1623,6 @@ where
         // the pipeline. Per-provider Conflict outcomes are dissent-isolated by
         // the merge (REQ-014); identity_not_found keeps its identity-track
         // sources only.
-
-        // Cover gate: for English works with an OL key, filter GR cover_urls
-        // through the deterministic Jaccard gate before merge (REQ-017).
-        let reconstructed = if current_work.language.as_deref() == Some("en")
-            && current_work.ol_key.is_some()
-        {
-            let mut filtered = reconstructed;
-            if let Some(gr_outcome) = filtered.get_mut(&livrarr_domain::MetadataProvider::Goodreads)
-            {
-                if let Some(ref mut payload) = gr_outcome.payload {
-                    if payload.cover_url.is_some() {
-                        let anchor = crate::cover_gate::OlAnchor {
-                            title: &current_work.title,
-                            author_name: &current_work.author_name,
-                            year: current_work.year,
-                            isbn: current_work.isbn_13.as_deref(),
-                            ol_key: current_work.ol_key.as_deref().unwrap_or(""),
-                        };
-                        let candidate = crate::cover_gate::GrCandidate {
-                            title: payload.title.as_deref().unwrap_or(""),
-                            author_name: payload.author_name.as_deref().unwrap_or(""),
-                            year: payload.year,
-                            isbn: None,
-                            gr_key: payload.gr_key.as_deref().unwrap_or(""),
-                        };
-                        let outcome = crate::cover_gate::evaluate_gr_cover_gate(
-                            &anchor,
-                            &candidate,
-                            self.llm_configured,
-                        );
-                        // REQ-005 (zero LLM): AskLlm borderline cases are treated
-                        // conservatively as a strip — the GR cover is rejected.
-                        // The deterministic Jaccard gate's Apply / non-Apply outcomes
-                        // are unchanged.
-                        match outcome {
-                            crate::cover_gate::CoverGateOutcome::Apply { .. } => {}
-                            other => {
-                                tracing::info!(
-                                    work_id,
-                                    ?other,
-                                    "cover gate: stripping GR cover_url"
-                                );
-                                payload.cover_url = None;
-                                payload.gr_key = None;
-                            }
-                        }
-                    }
-                }
-            }
-            filtered
-        } else {
-            reconstructed
-        };
 
         // Determine priority model based on work language
         let priority_model = PriorityModel::for_language(current_work.language.as_deref());

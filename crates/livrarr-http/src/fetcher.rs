@@ -3,83 +3,22 @@
 //! Provides rate-limited HTTP fetching with SSRF protection, anti-bot detection,
 //! and streaming body-size enforcement.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use livrarr_domain::services::{
-    FetchError, FetchRequest, FetchResponse, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    FetchError, FetchRequest, FetchResponse, HttpFetcher, HttpMethod, UserAgentProfile,
 };
-use tokio::time::Instant;
 
+use crate::breaker::BreakerSignal;
+use crate::outbound_queue;
 use crate::ssrf;
 
-// ---------------------------------------------------------------------------
-// Rate limiter
-// ---------------------------------------------------------------------------
-
-struct BucketLimiter {
-    min_interval: Duration,
-    last_request: Instant,
-}
-
-/// Simple per-bucket rate limiter. Blocks (sleeps) until the minimum interval
-/// since the last request in the same bucket has elapsed.
-#[derive(Clone)]
-struct RateLimiterMap {
-    buckets: Arc<Mutex<HashMap<RateBucket, BucketLimiter>>>,
-}
-
-impl RateLimiterMap {
-    fn new() -> Self {
-        Self {
-            buckets: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    async fn acquire(&self, bucket: &RateBucket) {
-        let interval = Self::interval_for(bucket);
-        if interval.is_zero() {
-            return;
-        }
-
-        let sleep_until = {
-            let mut map = self.buckets.lock().unwrap();
-            let now = Instant::now();
-            let entry = map.entry(bucket.clone()).or_insert_with(|| BucketLimiter {
-                min_interval: interval,
-                last_request: now - interval, // allow first request immediately
-            });
-            entry.min_interval = interval;
-
-            let earliest = entry.last_request + entry.min_interval;
-            if earliest > now {
-                entry.last_request = earliest;
-                Some(earliest)
-            } else {
-                entry.last_request = now;
-                None
-            }
-        };
-
-        if let Some(deadline) = sleep_until {
-            tokio::time::sleep_until(deadline).await;
-        }
-    }
-
-    fn interval_for(bucket: &RateBucket) -> Duration {
-        match bucket {
-            RateBucket::OpenLibrary => Duration::from_secs(1),
-            RateBucket::Goodreads => Duration::from_secs(1),
-            RateBucket::Hardcover => Duration::from_secs(1),
-            RateBucket::Audnexus => Duration::from_secs(2),
-            RateBucket::Audible => Duration::from_millis(150),
-            RateBucket::GoogleBooks => Duration::from_secs(1),
-            RateBucket::Indexer(_) => Duration::from_millis(500),
-            RateBucket::None => Duration::ZERO,
-        }
-    }
-}
+/// TCP-connect budget for `fetch_ssrf_safe_fast_connect`. A dead/unreachable
+/// host fails here in well under a second instead of riding out whatever the
+/// caller's overall `req.timeout` (or an outer deadline wrapping the call,
+/// like phase1 cover download's 3s budget) happens to be. Chosen to comfortably
+/// cover a slow-but-live handshake while cutting off a black-holed host fast.
+const FAST_CONNECT_TIMEOUT: Duration = Duration::from_millis(600);
 
 // ---------------------------------------------------------------------------
 // Anti-bot detection
@@ -131,7 +70,11 @@ fn user_agent_string(profile: &UserAgentProfile) -> String {
 pub struct HttpFetcherImpl {
     client: reqwest::Client,
     ssrf_client: reqwest::Client,
-    rate_limiters: RateLimiterMap,
+    /// Same SSRF-safe configuration as `ssrf_client`, plus `FAST_CONNECT_TIMEOUT`.
+    /// A separate, persistent client (not built per-request) so repeated calls
+    /// against the same live host within one process still get connection
+    /// reuse — only `fetch_ssrf_safe_fast_connect` uses it.
+    fast_connect_ssrf_client: reqwest::Client,
 }
 
 impl HttpFetcherImpl {
@@ -148,10 +91,17 @@ impl HttpFetcherImpl {
             .build()
             .map_err(|e| e.to_string())?;
 
+        let fast_connect_ssrf_client = reqwest::Client::builder()
+            .dns_resolver(ssrf::SsrfSafeResolver::new())
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(FAST_CONNECT_TIMEOUT)
+            .build()
+            .map_err(|e| e.to_string())?;
+
         Ok(Self {
             client,
             ssrf_client,
-            rate_limiters: RateLimiterMap::new(),
+            fast_connect_ssrf_client,
         })
     }
 
@@ -161,8 +111,18 @@ impl HttpFetcherImpl {
         client: &reqwest::Client,
         req: FetchRequest,
     ) -> Result<FetchResponse, FetchError> {
-        // Rate limit
-        self.rate_limiters.acquire(&req.rate_bucket).await;
+        // Wait our turn in the process-global outbound queue: paced per bucket, with a
+        // bounded number of in-flight sends. Hold the permit across the send and body
+        // read — it releases the in-flight slot on drop. An Open breaker resolves to
+        // an error instead of a permit (R-3): no HTTP happens, and this call does not
+        // report a breaker outcome — no attempt was made to report on.
+        let _permit = match outbound_queue::shared()
+            .acquire(req.rate_bucket.clone(), req.priority)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(retry_after) => return Err(FetchError::CircuitOpen { retry_after }),
+        };
 
         // Build request
         let method = match req.method {
@@ -187,19 +147,31 @@ impl HttpFetcherImpl {
             builder = builder.body(body);
         }
 
-        // Send
-        let response = builder.send().await.map_err(|e| {
-            if e.is_timeout() {
-                FetchError::Timeout(req.timeout)
-            } else {
-                FetchError::Connection(e.to_string())
+        // Send. do_fetch is the single choke point for every FetchError it
+        // generates/intercepts itself (Timeout, Connection, RateLimited,
+        // BodyTooLarge) — each reports exactly one breaker Failure so a
+        // transport failure is never double-counted against the caller's own
+        // response-derived reporting.
+        let response = match builder.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = if e.is_timeout() {
+                    FetchError::Timeout(req.timeout)
+                } else {
+                    FetchError::Connection(e.to_string())
+                };
+                outbound_queue::shared()
+                    .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
+                return Err(err);
             }
-        })?;
+        };
 
         let status = response.status().as_u16();
 
         // 429 → RateLimited
         if status == 429 {
+            outbound_queue::shared()
+                .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
             return Err(FetchError::RateLimited);
         }
 
@@ -224,17 +196,25 @@ impl HttpFetcherImpl {
         let mut stream = response;
 
         loop {
-            let chunk = stream.chunk().await.map_err(|e| {
-                if e.is_timeout() {
-                    FetchError::Timeout(req.timeout)
-                } else {
-                    FetchError::Connection(e.to_string())
+            let chunk = match stream.chunk().await {
+                Ok(c) => c,
+                Err(e) => {
+                    let err = if e.is_timeout() {
+                        FetchError::Timeout(req.timeout)
+                    } else {
+                        FetchError::Connection(e.to_string())
+                    };
+                    outbound_queue::shared()
+                        .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
+                    return Err(err);
                 }
-            })?;
+            };
 
             match chunk {
                 Some(bytes) => {
                     if body.len() + bytes.len() > max_bytes {
+                        outbound_queue::shared()
+                            .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
                         return Err(FetchError::BodyTooLarge { max_bytes });
                     }
                     body.extend_from_slice(&bytes);
@@ -243,9 +223,14 @@ impl HttpFetcherImpl {
             }
         }
 
-        // Anti-bot check (only on HTML content types)
+        // Anti-bot check (only on HTML content types): an interstitial is a hard
+        // block on any breaker bucket, not a threshold-counted failure.
         if req.anti_bot_check && is_anti_bot_content_type(&content_type) && scan_for_anti_bot(&body)
         {
+            outbound_queue::shared().report_outcome(
+                req.rate_bucket.clone(),
+                BreakerSignal::TripImmediately { open_for: None },
+            );
             return Err(FetchError::AntiBotDetected);
         }
 
@@ -255,14 +240,16 @@ impl HttpFetcherImpl {
             body,
         })
     }
-}
 
-impl HttpFetcher for HttpFetcherImpl {
-    async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
-        self.do_fetch(&self.client, req).await
-    }
-
-    async fn fetch_ssrf_safe(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+    /// Shared body for `fetch_ssrf_safe` and `fetch_ssrf_safe_fast_connect` —
+    /// identical SSRF preflight and manual redirect loop, differing only in
+    /// which pre-built client (and therefore which connect-phase budget)
+    /// carries the actual sends.
+    async fn fetch_ssrf_safe_impl(
+        &self,
+        req: FetchRequest,
+        client: &reqwest::Client,
+    ) -> Result<FetchResponse, FetchError> {
         // Pre-flight validation
         let parsed =
             url::Url::parse(&req.url).map_err(|e| FetchError::Ssrf(format!("invalid URL: {e}")))?;
@@ -338,9 +325,10 @@ impl HttpFetcher for HttpFetcherImpl {
                 max_body_bytes: req.max_body_bytes,
                 anti_bot_check: req.anti_bot_check,
                 user_agent: req.user_agent.clone(),
+                priority: req.priority,
             };
 
-            let result = self.do_fetch(&self.ssrf_client, follow_req).await?;
+            let result = self.do_fetch(client, follow_req).await?;
 
             if !(300..400).contains(&result.status) {
                 return Ok(result);
@@ -430,5 +418,23 @@ impl HttpFetcher for HttpFetcherImpl {
         }
 
         Err(FetchError::Connection("too many redirects".to_string()))
+    }
+}
+
+impl HttpFetcher for HttpFetcherImpl {
+    async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+        self.do_fetch(&self.client, req).await
+    }
+
+    async fn fetch_ssrf_safe(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+        self.fetch_ssrf_safe_impl(req, &self.ssrf_client).await
+    }
+
+    async fn fetch_ssrf_safe_fast_connect(
+        &self,
+        req: FetchRequest,
+    ) -> Result<FetchResponse, FetchError> {
+        self.fetch_ssrf_safe_impl(req, &self.fast_connect_ssrf_client)
+            .await
     }
 }

@@ -9,8 +9,8 @@ This page is also a deprecation-tracking page. We should be actively reducing GR
 - **No official API since 2020-12-08.** Goodreads deprecated the public API; existing keys broke ~2022. Amazon (which acquired GR in 2013) cut the external data feed. **No public signal of reopening.**
 - **What we do:** scrape JSON-LD blobs embedded in `/book/show/<id>` and `/series/<id>` pages.
 - **Anti-bot defense GR runs:** **Cloudflare + DataDome** with TLS/HTTP2 fingerprinting, IP reputation scoring, behavioral analysis, Turnstile challenges.
-- **Our current rate limit:** 1 req/sec (60/min) — **5-7x more aggressive than the polite floor** observed by surviving scrapers. **This is real risk; see "Open work" below.**
-- **Insight #13:** Goodreads requires LLM disambiguation to be useful — the search-result hit list is noisy with study guides, alternate editions, and foreign-language alternates. Without LLM, our GR client returns NotFound. This isn't a bug; it's intentional design.
+- **Our current rate limit:** GR bucket paced at 1.5s through the process-global outbound queue (insight #30) — still above the 5-7s polite floor observed by surviving scrapers; see "Open work" below.
+- **Matching is fully deterministic since Phase 5 (2026-07-03, insight #13):** junk-edition filter + the shared 0.75 picker with explicit abstain. No LLM chooses a match anywhere; the only LLM on a GR path is `llm_extract_payload` (HTML-parse repair — repair, not selection). An earlier version of this page said "GR requires LLM disambiguation" — wrong since Phase 5.
 
 ## Authentication
 
@@ -21,9 +21,36 @@ This page is also a deprecation-tracking page. We should be actively reducing GR
 | Endpoint | Use | Stability |
 |---|---|---|
 | `/book/show/<id>` | Book detail; series position; rating; description; cover URL | High — JSON-LD blob is server-rendered, stable |
-| `/series/<id>` | Series ordering, member books | High — JSON-LD blob is server-rendered |
+| `/series/<id>` | Series member books | **Redesigned ~2026-07** — React layout, books as `data-react-props` JSON (see "Series pages" below); the old `<h3>Book N</h3>` + JSON-LD layout is GONE |
 | `/author/show/<id>` | Author bio, bibliography links | Medium |
 | `/search?q=...` | Search results | **Volatile + disallowed by robots.txt** — risky to hit |
+
+## Series pages (2026-07 React layout — N1, measured on 108562 + 43318)
+
+- Books ship as HTML-attribute-encoded JSON inside `data-react-props` mounts
+  (`ReactComponents.SeriesHeader` / `SeriesList` / `FullPagePaginationControls`);
+  multiple `SeriesList` blobs per page (split around ad slots).
+- **The list carries ALL editions, primaries FIRST**: series 43318 (Night's
+  Dawn, "3 primary works • 27 total works") lists the 3 primaries, then the
+  omnibus, split editions, and Romanian/Italian/Polish translations. The
+  header subtitle's "N primary works" is the ONLY primary-set signal — the
+  roster keeps the first N entries (`fetch_series_roster_pages`); a shortfall
+  vs N (unreadable later page) means drift and yields an EMPTY roster, never
+  a partial one.
+- **No per-book position labels exist anywhere on the page.** The only
+  position signal is the title decoration "(Series Name, #N)", trusted only
+  when it names the page's own series — umbrella pages (108562 Confederation
+  Universe decorates with "Night's Dawn, #N") never borrow sub-series
+  numbers; those books ride unnumbered, in page order.
+- Pagination is the counter blob (`numWorks`/`currentPageNumber`/`perPage`);
+  `numWorks` counts TOTAL works, not primaries. The old `next_page` link is
+  gone (the author series LIST page `/series/list?id=` still uses the old
+  layout + `RE_NEXT_PAGE` — unverified since the redesign; candidate for the
+  N5 drift probes).
+- Parser: `parse_series_detail_html` (livrarr-external-data `goodreads.rs`) —
+  per-entry tolerant JSON parsing, WARN on every unreadable shape (insight
+  #62). Real captured pages live at
+  `crates/livrarr-external-data/fixtures/gr-series-{108562,43318}.html`.
 
 ## Rate limits (no published spec)
 

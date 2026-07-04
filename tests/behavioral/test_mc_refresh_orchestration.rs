@@ -10,8 +10,12 @@ use livrarr_behavioral::stubs::{create_test_user, StubEnrichmentWorkflow, StubHt
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::{CreateWorkDbRequest, ProviderRetryStateDb, WorkDb, WorkDbCreate};
 use livrarr_domain::identity::{AnchorSetter, AnchorType};
-use livrarr_domain::services::{WorkIdentityRepository, WorkService};
-use livrarr_domain::{normalize_for_matching, MetadataProvider, OutcomeClass, Work};
+use livrarr_domain::services::{
+    EnrichmentMode, RefreshSurface, WorkIdentityRepository, WorkService,
+};
+use livrarr_domain::{
+    normalize_for_matching, IdentityStatus, MetadataProvider, OutcomeClass, RequestPriority, Work,
+};
 use livrarr_external_data::transport_cache::TransportCache;
 use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
@@ -55,7 +59,6 @@ fn resolver_with_stubs(stubs: Vec<StubProviderClient>) -> LiveEnglishIdentityRes
         cache: std::sync::Arc::new(TransportCache::new(std::time::Duration::from_secs(30))),
         config: ResolverConfig {
             gb_key_present: false,
-            llm_configured: false,
             ..ResolverConfig::default()
         },
     }
@@ -123,7 +126,10 @@ async fn refresh_syncs_gr_key_on_flm_match_then_runs_scatter() {
         resolver_with_stubs(vec![ol.clone()]),
     );
 
-    let result = svc.refresh(user_id, work.id).await.expect("refresh work");
+    let result = svc
+        .refresh(user_id, work.id, RefreshSurface::Interactive)
+        .await
+        .expect("refresh work");
     let refreshed = db
         .get_work(user_id, work.id)
         .await
@@ -177,6 +183,11 @@ async fn dead_ended_completion_suppression_survives_plain_refresh() {
         .await
         .expect("seed work missing only gr_key");
     assert!(created);
+    // The refresh enrichment gate requires a settled identity; this fixture's
+    // point is the chaseable gate, so the anchor-rich work is marked Confirmed.
+    db.set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
+        .await
+        .expect("mark work confirmed");
     db.confirm_anchor(
         work.id,
         AnchorType::new(AnchorType::HC_WORK),
@@ -201,7 +212,9 @@ async fn dead_ended_completion_suppression_survives_plain_refresh() {
         resolver_with_stubs(vec![ol.clone()]),
     );
 
-    svc.refresh(user_id, work.id).await.expect("refresh work");
+    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
+        .await
+        .expect("refresh work");
 
     assert_eq!(
         ol.call_count(),
@@ -265,7 +278,7 @@ async fn explicit_retry_reset_reenables_completion_suppression_matrix() {
     let ol = gr_key_bearing_ol_stub("Retry Matrix");
     let svc = service_with_resolver(db.clone(), workflow, resolver_with_stubs(vec![ol.clone()]));
 
-    svc.refresh(user_id, work.id)
+    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
         .await
         .expect("plain refresh should not clear suppression");
     assert!(
@@ -288,7 +301,7 @@ async fn explicit_retry_reset_reenables_completion_suppression_matrix() {
     );
 
     let calls_before_retry = ol.call_count();
-    svc.refresh(user_id, work.id)
+    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
         .await
         .expect("refresh after explicit retry");
     assert!(
@@ -303,5 +316,63 @@ async fn explicit_retry_reset_reenables_completion_suppression_matrix() {
             .as_deref(),
         Some("234225"),
         "AC-010: the re-attempted completion persists the recovered anchor"
+    );
+}
+
+#[tokio::test]
+async fn refresh_interactive_surface_dispatches_scatter_at_normal_priority() {
+    // B4 table: a watched single-work refresh dispatches the enrichment scatter
+    // at Manual mode + Normal priority.
+    let db = livrarr_db::test_helpers::create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let work = seed_gr_keyless_work(&db, user_id, "Interactive Surface Priority").await;
+    let workflow = StubEnrichmentWorkflow::succeeding();
+    let ol = gr_key_bearing_ol_stub("Interactive Surface Priority");
+    let svc = service_with_resolver(db.clone(), workflow.clone(), resolver_with_stubs(vec![ol]));
+
+    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
+        .await
+        .expect("refresh work");
+
+    let contexts = workflow.enrich_contexts();
+    assert!(
+        !contexts.is_empty(),
+        "refresh must dispatch the enrichment scatter"
+    );
+    assert!(
+        contexts.iter().all(|(mode, priority)| matches!(
+            (mode, priority),
+            (EnrichmentMode::Manual, RequestPriority::Normal)
+        )),
+        "an interactive refresh dispatches at Manual mode / Normal priority"
+    );
+}
+
+#[tokio::test]
+async fn refresh_bulk_surface_dispatches_scatter_at_low_priority() {
+    // B4 table: an unattended bulk sweep (refresh-all, retry-all-incomplete)
+    // rides the outbound queue at Low priority; the mode stays Manual.
+    let db = livrarr_db::test_helpers::create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let work = seed_gr_keyless_work(&db, user_id, "Bulk Surface Priority").await;
+    let workflow = StubEnrichmentWorkflow::succeeding();
+    let ol = gr_key_bearing_ol_stub("Bulk Surface Priority");
+    let svc = service_with_resolver(db.clone(), workflow.clone(), resolver_with_stubs(vec![ol]));
+
+    svc.refresh(user_id, work.id, RefreshSurface::Bulk)
+        .await
+        .expect("refresh work");
+
+    let contexts = workflow.enrich_contexts();
+    assert!(
+        !contexts.is_empty(),
+        "refresh must dispatch the enrichment scatter"
+    );
+    assert!(
+        contexts.iter().all(|(mode, priority)| matches!(
+            (mode, priority),
+            (EnrichmentMode::Manual, RequestPriority::Low)
+        )),
+        "a bulk refresh dispatches at Manual mode / Low priority"
     );
 }

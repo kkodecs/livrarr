@@ -1,7 +1,14 @@
+use livrarr_domain::services::{
+    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+};
 use livrarr_domain::text_norm;
-use livrarr_http::HttpClient;
+use livrarr_domain::RequestPriority;
+use livrarr_http::breaker::BreakerSignal;
+use livrarr_http::outbound_queue;
 use serde::Deserialize;
+use std::time::Duration;
 
+use crate::types::ProviderFetchError;
 use crate::NormalizedWorkDetail;
 
 const BASE_URL: &str = "https://api.audible.com/1.0/catalog/products";
@@ -66,16 +73,16 @@ struct AudibleSearchResponse {
 
 #[derive(Clone)]
 pub struct AudibleCatalogClient {
-    pub http: livrarr_http::HttpClient,
+    pub fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     pub retry_backoff_secs: i64,
     #[allow(dead_code)] // read at green: REQ-001 record emission
     call_sink: Option<std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 
 impl AudibleCatalogClient {
-    pub fn new(http: livrarr_http::HttpClient, retry_backoff_secs: i64) -> Self {
+    pub fn new(fetcher: livrarr_http::fetcher::HttpFetcherImpl, retry_backoff_secs: i64) -> Self {
         Self {
-            http,
+            fetcher,
             retry_backoff_secs,
             call_sink: None,
         }
@@ -100,12 +107,17 @@ impl AudibleCatalogClient {
     /// is canonical identity, so no title rescoring applies here — the scoring
     /// in the seeded fetch guards wrong-ASIN adoption on the text path, which
     /// does not exist on this surface.
-    pub async fn fetch_by_asin(&self, asin: &str) -> crate::ProviderOutcome<NormalizedWorkDetail> {
-        match lookup_audible_by_asin(&self.http, asin).await {
+    pub async fn fetch_by_asin(
+        &self,
+        asin: &str,
+        priority: RequestPriority,
+    ) -> crate::ProviderOutcome<NormalizedWorkDetail> {
+        match lookup_audible_by_asin(&self.fetcher, asin, priority).await {
             Ok(Some(product)) => {
                 crate::ProviderOutcome::Success(Box::new(map_audible_to_detail(&product)))
             }
             Ok(None) => crate::ProviderOutcome::NotFound,
+            Err(ProviderFetchError::CircuitOpen(retry_after)) => circuit_open_outcome(retry_after),
             Err(_) => crate::ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: chrono::Utc::now()
@@ -117,10 +129,11 @@ impl AudibleCatalogClient {
     pub async fn fetch(
         &self,
         work: &livrarr_domain::Work,
+        priority: RequestPriority,
     ) -> crate::ProviderOutcome<NormalizedWorkDetail> {
         // ASIN direct lookup
         if let Some(asin) = work.asin.as_deref().filter(|s| !s.is_empty()) {
-            match lookup_audible_by_asin(&self.http, asin).await {
+            match lookup_audible_by_asin(&self.fetcher, asin, priority).await {
                 Ok(Some(product)) => {
                     let author = product
                         .authors
@@ -152,6 +165,9 @@ impl AudibleCatalogClient {
                 Ok(None) => {
                     tracing::debug!(asin = %asin, "Audible ASIN lookup: not found");
                 }
+                Err(ProviderFetchError::CircuitOpen(retry_after)) => {
+                    return circuit_open_outcome(retry_after);
+                }
                 Err(_) => {
                     return crate::ProviderOutcome::WillRetry {
                         reason: livrarr_domain::WillRetryReason::ServerError,
@@ -163,7 +179,7 @@ impl AudibleCatalogClient {
         }
 
         // Title+author search
-        match search_audible(&self.http, &work.title, &work.author_name, 10).await {
+        match search_audible(&self.fetcher, &work.title, &work.author_name, 10, priority).await {
             Ok(products) if products.is_empty() => crate::ProviderOutcome::NotFound,
             Ok(products) => {
                 // Feed multiple title variants per product (raw, series-stripped,
@@ -196,6 +212,7 @@ impl AudibleCatalogClient {
 
                 crate::ProviderOutcome::NotFound
             }
+            Err(ProviderFetchError::CircuitOpen(retry_after)) => circuit_open_outcome(retry_after),
             Err(_) => crate::ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: chrono::Utc::now()
@@ -205,14 +222,49 @@ impl AudibleCatalogClient {
     }
 }
 
+/// Common `WillRetry { CircuitOpen }` mapping (R-11), local to this module —
+/// mirrors `provider_client::circuit_open_outcome` for the one client
+/// (`AudibleCatalogClient`) whose enrichment-surface methods live outside
+/// `provider_client.rs`.
+fn circuit_open_outcome(retry_after: Duration) -> crate::ProviderOutcome<NormalizedWorkDetail> {
+    crate::ProviderOutcome::WillRetry {
+        reason: livrarr_domain::WillRetryReason::CircuitOpen,
+        next_attempt_at: chrono::Utc::now()
+            + chrono::Duration::from_std(retry_after)
+                .unwrap_or_else(|_| chrono::Duration::seconds(60)),
+    }
+}
+
 // ─── API functions ───────────────────────────────────────────────────────
 
-pub async fn search_audible(
-    http: &HttpClient,
+/// The fixed transport parameters every Audible API request carries. Audible
+/// has no auth and no existing rate-limit-specific outcome discrimination —
+/// any non-success status (including a fetcher-intercepted HTTP 429) maps to
+/// the same generic `Err(String)` the pre-fetcher code already produced for
+/// ANY non-success status, so no special `FetchError` translation is needed
+/// here (unlike Goodreads/OpenLibrary/GoogleBooks/Audnexus).
+fn audible_request(url: String, priority: RequestPriority) -> FetchRequest {
+    FetchRequest {
+        url,
+        method: HttpMethod::Get,
+        headers: vec![],
+        body: None,
+        timeout: Duration::from_secs(30),
+        rate_bucket: RateBucket::Audible,
+        max_body_bytes: 2 * 1024 * 1024,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority,
+    }
+}
+
+pub async fn search_audible<F: HttpFetcher>(
+    fetcher: &F,
     title: &str,
     author: &str,
     max_results: u32,
-) -> Result<Vec<AudibleProduct>, String> {
+    priority: RequestPriority,
+) -> Result<Vec<AudibleProduct>, ProviderFetchError> {
     let url = format!(
         "{}?title={}&author={}&num_results={}&products_sort_by=Relevance&response_groups={}",
         BASE_URL,
@@ -222,28 +274,40 @@ pub async fn search_audible(
         urlencoding::encode(RESPONSE_GROUPS),
     );
 
-    let resp = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Audible search failed: {e}"))?;
+    let resp = match fetcher.fetch(audible_request(url, priority)).await {
+        Ok(r) => r,
+        Err(FetchError::CircuitOpen { retry_after }) => {
+            return Err(ProviderFetchError::CircuitOpen(retry_after));
+        }
+        Err(e) => {
+            return Err(ProviderFetchError::Other(format!(
+                "Audible search failed: {e}"
+            )))
+        }
+    };
 
-    if !resp.status().is_success() {
-        return Err(format!("Audible returned {}", resp.status()));
+    if !(200..300).contains(&resp.status) {
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
+        }
+        return Err(ProviderFetchError::Other(format!(
+            "Audible returned {}",
+            resp.status
+        )));
     }
 
-    let data: AudibleSearchResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Audible parse error: {e}"))?;
+    let data: AudibleSearchResponse = serde_json::from_slice(&resp.body)
+        .map_err(|e| ProviderFetchError::Other(format!("Audible parse error: {e}")))?;
+    outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Success);
 
     Ok(data.products)
 }
 
-pub async fn lookup_audible_by_asin(
-    http: &HttpClient,
+pub async fn lookup_audible_by_asin<F: HttpFetcher>(
+    fetcher: &F,
     asin: &str,
-) -> Result<Option<AudibleProduct>, String> {
+    priority: RequestPriority,
+) -> Result<Option<AudibleProduct>, ProviderFetchError> {
     let url = format!(
         "{}/{}?response_groups={}",
         BASE_URL,
@@ -251,20 +315,31 @@ pub async fn lookup_audible_by_asin(
         urlencoding::encode(RESPONSE_GROUPS),
     );
 
-    let resp = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Audible ASIN lookup failed: {e}"))?;
+    let resp = match fetcher.fetch(audible_request(url, priority)).await {
+        Ok(r) => r,
+        Err(FetchError::CircuitOpen { retry_after }) => {
+            return Err(ProviderFetchError::CircuitOpen(retry_after));
+        }
+        Err(e) => {
+            return Err(ProviderFetchError::Other(format!(
+                "Audible ASIN lookup failed: {e}"
+            )))
+        }
+    };
 
-    if !resp.status().is_success() {
-        return Err(format!("Audible returned {}", resp.status()));
+    if !(200..300).contains(&resp.status) {
+        if (500..600).contains(&resp.status) {
+            outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
+        }
+        return Err(ProviderFetchError::Other(format!(
+            "Audible returned {}",
+            resp.status
+        )));
     }
 
-    let data: AudibleSearchResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Audible parse error: {e}"))?;
+    let data: AudibleSearchResponse = serde_json::from_slice(&resp.body)
+        .map_err(|e| ProviderFetchError::Other(format!("Audible parse error: {e}")))?;
+    outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Success);
 
     Ok(data.products.into_iter().next())
 }
@@ -404,5 +479,138 @@ pub fn map_audible_to_detail(product: &AudibleProduct) -> NormalizedWorkDetail {
             .as_deref()
             .map(livrarr_domain::normalize_language),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------
+    // Door-routing: search_audible / lookup_audible_by_asin go through the
+    // HttpFetcher trait with the Audible rate bucket, GET, no auth.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn search_audible_sends_audible_bucket_get_with_query_params() {
+        let canned = serde_json::json!({"products": []});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        let products = search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
+
+        assert!(products.is_empty());
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert!(req.url.starts_with(BASE_URL));
+        assert!(req.url.contains("title=Dune"));
+        assert!(req.url.contains("num_results=10"));
+        assert_eq!(req.rate_bucket, RateBucket::Audible);
+        assert_eq!(req.method, HttpMethod::Get);
+        assert!(req.headers.is_empty());
+        assert!(matches!(req.user_agent, UserAgentProfile::Server));
+        assert!(!req.anti_bot_check);
+        assert_eq!(req.timeout, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn lookup_audible_by_asin_sends_audible_bucket_get_asin_path() {
+        let canned = serde_json::json!({"products": [{"asin": "B000FC0PBC", "title": "Dune"}]});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        let product = lookup_audible_by_asin(&fetcher, "B000FC0PBC", RequestPriority::Normal)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(product.asin.as_deref(), Some("B000FC0PBC"));
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].url.starts_with(&format!("{BASE_URL}/B000FC0PBC")));
+        assert_eq!(reqs[0].rate_bucket, RateBucket::Audible);
+    }
+
+    #[tokio::test]
+    async fn lookup_audible_by_asin_returns_none_for_empty_products() {
+        let canned = serde_json::json!({"products": []});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        let product = lookup_audible_by_asin(&fetcher, "B0MISSING", RequestPriority::Normal)
+            .await
+            .unwrap();
+
+        assert!(product.is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // Error mapping: any non-success status (including a fetcher-
+    // intercepted 429) maps to a generic `Err(String)` — Audible has no
+    // rate-limit-specific outcome, matching the pre-fetcher behavior.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn search_audible_maps_http_500_to_err() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
+
+        let err = search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "Audible returned 500");
+    }
+
+    #[tokio::test]
+    async fn search_audible_maps_fetcher_rate_limited_to_err() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::RateLimited,
+        );
+
+        let err = search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Audible search failed"));
+    }
+
+    #[tokio::test]
+    async fn lookup_audible_by_asin_maps_network_error_to_err() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::Connection("refused".to_string()),
+        );
+
+        let err = lookup_audible_by_asin(&fetcher, "B000FC0PBC", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Audible ASIN lookup failed"));
     }
 }

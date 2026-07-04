@@ -115,3 +115,25 @@ impl<T> ProviderOutcome<T> {
         !matches!(self, Self::Conflict { .. })
     }
 }
+
+/// Transport/provider failure for query functions that don't already have a
+/// typed error enum (OpenLibrary, Audnexus, Audible). Distinguishes a
+/// breaker-open pause (R-11: the enrichment-surface caller must map this to
+/// `WillRetryReason::CircuitOpen`, never burn retry budget on it) from any
+/// other opaque failure.
+#[derive(Debug, Clone)]
+pub enum ProviderFetchError {
+    CircuitOpen(std::time::Duration),
+    Other(String),
+}
+
+impl std::fmt::Display for ProviderFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CircuitOpen(d) => write!(f, "circuit open, retry after {d:?}"),
+            Self::Other(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl std::error::Error for ProviderFetchError {}

@@ -2,6 +2,7 @@ use livrarr_db::{
     ConfigDb, CreateNotificationDbRequest, DownloadClientDb, GrabDb, IndexerDb, LibraryItemDb,
     NotificationDb, WorkDb,
 };
+use livrarr_domain::identity_matching::LanguageVerdict;
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use livrarr_matching::MatchCandidate as M4Candidate;
@@ -67,6 +68,12 @@ where
             .await
             .map_err(RssSyncError::Db)?;
 
+        let default_language = self
+            .db
+            .get_default_language()
+            .await
+            .map_err(RssSyncError::Db)?;
+
         let indexers = self
             .db
             .list_enabled_rss_indexers()
@@ -114,6 +121,14 @@ where
                 max_body_bytes: 5 * 1024 * 1024,
                 anti_bot_check: false,
                 user_agent: UserAgentProfile::Server,
+                // Normal (B4 table, mixed callers — verified against the packet's
+                // assumption): `run_sync` is shared by the scheduled background
+                // job (`jobs/rss_sync.rs`) AND the user-facing "sync now" handler
+                // (`handlers/config.rs::trigger_rss_sync`, any authenticated user).
+                // One priority per call, like the parked `fetch_gr_html` case —
+                // stays Normal rather than picking a value that's wrong for one
+                // of the two callers.
+                priority: RequestPriority::Normal,
             };
 
             match self.http.fetch(req).await {
@@ -251,6 +266,11 @@ where
 
         let threshold = config.rss_match_threshold;
         let mut n_matched: usize = 0;
+        let mut n_lang_veto: usize = 0;
+        let mut n_lang_grey: usize = 0;
+        // Per-work tally of language-grey skips this run (AC-022 surfacing):
+        // work_id -> (user_id, title, skipped release count).
+        let mut lang_grey_by_work: HashMap<i64, (i64, String, usize)> = HashMap::new();
 
         // Phase 1: Per-release, find best work per (user, media_type).
         struct ReleaseMatch {
@@ -343,6 +363,31 @@ where
                             if *pub_dt < work.added_at {
                                 continue;
                             }
+                        }
+
+                        // D7 recognition corollary (REQ-011): a release
+                        // declaring a language different from the work is a
+                        // hard veto; a language-silent release only matches
+                        // works whose language is the install default —
+                        // background sync never silently grabs the rest.
+                        match livrarr_matching::release_language_verdict(
+                            parsed.language.as_deref(),
+                            work.language.as_deref(),
+                            &default_language,
+                        ) {
+                            LanguageVerdict::Veto => {
+                                n_lang_veto += 1;
+                                continue;
+                            }
+                            LanguageVerdict::Grey => {
+                                n_lang_grey += 1;
+                                lang_grey_by_work
+                                    .entry(work.id)
+                                    .and_modify(|(_, _, count)| *count += 1)
+                                    .or_insert_with(|| (work.user_id, work.title.clone(), 1));
+                                continue;
+                            }
+                            LanguageVerdict::Neutral => {}
                         }
 
                         let best_score = livrarr_matching::best_match_score(&parsed, cand);
@@ -564,9 +609,44 @@ where
 
         report.releases_matched = n_matched;
 
+        if n_lang_grey > 0 {
+            report.warnings.push(format!(
+                "{n_lang_grey} release-work pairing(s) skipped: release declares no language \
+                 and the work's language isn't the install default — needs manual confirmation \
+                 via interactive search"
+            ));
+        }
+
+        // AC-022 surfacing: the warnings line above is log-only — give the user
+        // a visible notification per affected work. Deduped per (work, day) so a
+        // persisting gap re-notifies daily instead of once-ever or every 15min
+        // tick (rss_sync_interval_minutes default).
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        for (work_id, (owner_id, title, count)) in &lang_grey_by_work {
+            let plural = if *count == 1 { "" } else { "s" };
+            let _ = self
+                .db
+                .create_notification(CreateNotificationDbRequest {
+                    user_id: *owner_id,
+                    notification_type: NotificationType::RssLanguageSkipped,
+                    ref_key: Some(format!("rss-lang-grey:{work_id}:{today}")),
+                    message: format!(
+                        "{count} release{plural} skipped for {title}: language unconfirmed — \
+                         grab manually via search"
+                    ),
+                    data: serde_json::json!({
+                        "workId": work_id,
+                        "title": title,
+                        "count": count,
+                    }),
+                })
+                .await;
+        }
+
         info!(
             "RSS sync: {n_fetched} releases, {n_parsed} parsed, {n_unparsed} unparseable, \
-             {n_matched} matched, {n_grabbed} grabbed, {n_skipped} filtered"
+             {n_matched} matched, {n_grabbed} grabbed, {n_skipped} filtered, \
+             {n_lang_veto} language-veto, {n_lang_grey} language-grey"
         );
 
         Ok(report)

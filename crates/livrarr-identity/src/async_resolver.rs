@@ -207,11 +207,14 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
             }
             verdict = ResolverVerdictKind::Unresolved;
         }
-        Resolution::NeedsConfirmation { .. } => {
+        Resolution::NeedsConfirmation { candidates } => {
             // REQ-005: ambiguous candidates — mode decides ONLY on a Pending work.
             // Background surfaces NeedsReview; Interactive leaves it Pending for a
             // user pick. A settled work is never downgraded by a weak verdict.
             if prior == IdentityStatus::Pending && matches!(mode, IdentityMode::Background) {
+                // Persist the ranked candidates behind this park (REQ-010),
+                // queryable per work — previously discarded on this exact path.
+                repo.record_review_candidates(work.id, &candidates).await?;
                 repo.set_needs_review(work.id).await?;
                 final_status = IdentityStatus::NeedsReview;
             }

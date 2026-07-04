@@ -11,8 +11,8 @@ use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
 use livrarr_metadata::{
-    CircuitBreakerConfig, DefaultProviderQueueBuilder, EnrichmentContext, EnrichmentMode,
-    ProviderQueue, ProviderQueueConfig,
+    DefaultProviderQueueBuilder, EnrichmentContext, EnrichmentMode, ProviderQueue,
+    ProviderQueueConfig,
 };
 
 #[derive(Default)]
@@ -35,14 +35,6 @@ impl ProviderCallSink for RecordingSink {
 fn default_config(provider: MetadataProvider) -> ProviderQueueConfig {
     ProviderQueueConfig {
         provider,
-        concurrency: 2,
-        requests_per_second: 1000.0,
-        circuit_breaker: CircuitBreakerConfig {
-            failure_threshold: 3,
-            evaluation_window_secs: 60,
-            open_duration_secs: 60,
-            half_open_probe_count: 1,
-        },
         max_attempts: 3,
         max_suppressed_passes: 3,
         max_suppression_window_secs: 3600,
@@ -193,7 +185,11 @@ async fn test_mc_anchor_query_variant_set_has_no_title_author_and_fetch_by_ancho
         ProviderOutcome::NotFound,
     ));
     let _ = client
-        .fetch_by_anchor(AnchorQuery::GrKey("12345".to_string()), Some("en"))
+        .fetch_by_anchor(
+            AnchorQuery::GrKey("12345".to_string()),
+            Some("en"),
+            RequestPriority::Normal,
+        )
         .await;
 }
 
@@ -206,7 +202,11 @@ async fn test_mc_provider_client_fetch_by_anchor_mapping_rejects_wrong_anchor_ki
     ));
 
     let outcome = client
-        .fetch_by_anchor(AnchorQuery::Isbn13("9780140447934".to_string()), Some("en"))
+        .fetch_by_anchor(
+            AnchorQuery::Isbn13("9780140447934".to_string()),
+            Some("en"),
+            RequestPriority::Normal,
+        )
         .await;
 
     assert!(matches!(outcome, ProviderOutcome::NotFound));

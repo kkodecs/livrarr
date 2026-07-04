@@ -1,4 +1,5 @@
 pub mod identity;
+pub mod identity_matching;
 pub mod kash;
 pub mod keyed_mutex;
 pub mod normalization;
@@ -189,6 +190,10 @@ pub enum NotificationType {
     RssGrabbed,
     /// RSS sync grab failed (download client unreachable or rejected).
     RssGrabFailed,
+    /// RSS sync skipped one or more releases that declared no language against
+    /// a work outside the user's default language (REQ-011/AC-022) — surfaces
+    /// the silent, background-only skip so it never sits in unnoticed limbo.
+    RssLanguageSkipped,
 }
 
 /// Narration type for audiobook metadata.
@@ -880,6 +885,13 @@ pub fn derive_sort_name(display_name: &str) -> String {
 /// dots and underscores with spaces so that Livrarr-imported filenames
 /// (which use underscores for illegal chars) match back to their DB titles.
 ///
+/// Superseded in production by [`identity_matching::identity_key`] (REQ-014):
+/// this recipe keeps stopwords and accents (no leading-article drop, no
+/// accent strip), which is exactly the mismatch ST-04 named. No production
+/// call site uses this function anymore; it is retained because existing
+/// test fixtures across the suite construct `normalized_title`/
+/// `normalized_author` values with it.
+///
 /// Satisfies: SCAN-002, SCAN-003
 pub fn normalize_for_matching(s: &str) -> String {
     const ILLEGAL: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
@@ -988,13 +1000,17 @@ pub fn classify_file(path: &std::path::Path) -> Option<MediaType> {
 }
 
 pub fn decode_xml_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
+    // `&amp;` must decode LAST: decoding it first turns a literal `&amp;quot;`
+    // into `&quot;`, which the later pass then wrongly decodes again —
+    // corrupting any payload (e.g. attribute-encoded JSON) that carries
+    // entity text inside strings.
+    s.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
         .replace("&#39;", "'")
         .replace("&#x27;", "'")
+        .replace("&amp;", "&")
 }
 
 /// Proxy an external cover URL through the internal cover proxy endpoint.
@@ -1197,28 +1213,6 @@ pub enum WorkField {
     CoverUrl,
 }
 
-impl WorkField {
-    /// TEMP(pk-tdd): compile-only scaffold — returns the normalization class for this field.
-    pub fn normalization_class(self) -> NormalizationClass {
-        match self {
-            WorkField::Description => NormalizationClass::RichText,
-            WorkField::Title
-            | WorkField::SortTitle
-            | WorkField::Subtitle
-            | WorkField::OriginalTitle
-            | WorkField::AuthorName
-            | WorkField::SeriesName
-            | WorkField::Publisher
-            | WorkField::Narrator
-            | WorkField::NarrationType => NormalizationClass::DisplayText,
-            WorkField::Isbn13 | WorkField::Asin | WorkField::OlKey | WorkField::GrKey => {
-                NormalizationClass::Identifier
-            }
-            _ => NormalizationClass::DisplayText,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvenanceSetter {
@@ -1385,6 +1379,10 @@ pub enum WillRetryReason {
     RateLimit,
     ServerError,
     AntiBotBlock,
+    /// The outbound queue's breaker was Open for this provider's bucket
+    /// (R-11): a pause, not a step toward a retry-budget dead-end — must
+    /// never consume the attempt or suppression budget.
+    CircuitOpen,
 }
 
 /// Reason a provider permanently failed for this work.

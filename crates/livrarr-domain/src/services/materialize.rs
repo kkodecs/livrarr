@@ -33,12 +33,20 @@ pub struct MaterializeTags {
 pub struct CoverSlotState {
     /// The cover URL the merge chose for this slot (`None` = no new cover).
     pub chosen_new_url: Option<String>,
-    /// The cover URL currently on the work (drives the non-destructive/replace decision).
+    /// The URL the slot's existing on-disk file came from — the PRE-merge
+    /// stored value, never the post-merge one (which always equals
+    /// `chosen_new_url` and would mask a changed pick behind a stale file).
+    /// Drives the download-vs-no-op decision together with file presence.
     pub current_url: Option<String>,
     /// The cover file already on disk for this slot, if any.
     pub current_path: Option<String>,
     /// True if the user locked this cover (provenance Setter=User) — never overwrite (REQ-008).
     pub user_locked: bool,
+    /// Bytes the cover-write gate already downloaded and committed to disk
+    /// this pass (S2). When set, materialize skips its own download for this
+    /// slot (the file is already correct) and embeds these bytes in the tag
+    /// write instead — the accepted-swap retag trigger (V2).
+    pub prefetched_bytes: Option<Vec<u8>>,
 }
 
 /// Everything materialize needs for PURE I/O (REQ-012, R-001). The caller

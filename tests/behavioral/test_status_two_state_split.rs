@@ -25,8 +25,8 @@ use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 use livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl;
 use livrarr_metadata::work_service::WorkServiceImpl;
 use livrarr_metadata::{
-    CircuitState, DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentServiceImpl,
-    MergeEngine, MergeInput, MergeOutput, PriorityModel, ProviderQueue, ProviderQueueError,
+    DefaultMergeEngine, EnrichmentContext, EnrichmentMode, EnrichmentServiceImpl, MergeEngine,
+    MergeInput, MergeOutput, PriorityModel, ProviderQueue, ProviderQueueError,
     ReconstructedOutcome, ScatterGatherResult,
 };
 
@@ -241,6 +241,7 @@ impl EnrichmentWorkflow for SpyEnrichmentWorkflow {
         _work_id: WorkId,
         _mode: WorkflowMode,
         _candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        _priority: livrarr_domain::RequestPriority,
     ) -> Result<WorkflowResult, EnrichmentWorkflowError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         Ok(WorkflowResult {
@@ -316,31 +317,19 @@ impl ProviderQueue for TextlessProviderQueue {
             deferred: false,
         })
     }
-
-    fn circuit_state(&self, _provider: MetadataProvider) -> CircuitState {
-        CircuitState::Closed
-    }
 }
 
 fn real_textless_workflow(
     db: livrarr_db::sqlite::SqliteDb,
     user_id: UserId,
 ) -> EnrichmentWorkflowImpl<
-    EnrichmentServiceImpl<
-        livrarr_db::sqlite::SqliteDb,
-        TextlessProviderQueue,
-        DefaultMergeEngine,
-        livrarr_metadata::llm_validator::NoOpLlmValidator,
-        livrarr_metadata::work_service::StubNoLlm,
-    >,
+    EnrichmentServiceImpl<livrarr_db::sqlite::SqliteDb, TextlessProviderQueue, DefaultMergeEngine>,
     livrarr_db::sqlite::SqliteDb,
 > {
     let enrichment = EnrichmentServiceImpl::new(
         Arc::new(db.clone()),
         Arc::new(TextlessProviderQueue::new(db.clone(), user_id)),
         Arc::new(DefaultMergeEngine::new(PriorityModel::english())),
-        Arc::new(livrarr_metadata::llm_validator::NoOpLlmValidator::new()),
-        livrarr_metadata::work_service::StubNoLlm,
         false,
     );
 

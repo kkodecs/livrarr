@@ -467,11 +467,8 @@ pub async fn cover<S: HasAuthService + HasDataDir>(
 ) -> Result<Response, Response> {
     let _user = basic_auth(&state, &headers).await?;
 
-    let cover_path = crate::mediacover::resolve_cover_path(state.data_dir(), work_id, "");
-
-    if !cover_path.exists() {
-        return Err(StatusCode::NOT_FOUND.into_response());
-    }
+    let cover_path = crate::mediacover::resolve_cover_path(state.data_dir(), work_id, "")
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
 
     let bytes = tokio::fs::read(&cover_path)
         .await

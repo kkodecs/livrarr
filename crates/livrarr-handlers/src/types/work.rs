@@ -1,3 +1,4 @@
+use livrarr_domain::services::{MergeFieldChoice, MergeableField};
 use livrarr_domain::{
     identity::CandidateId, AuthorId, CoverTrust, EnrichmentStatus, IdentityStatus, LibraryItemId,
     MediaType, NarrationType, Work, WorkId,
@@ -226,6 +227,29 @@ pub fn work_to_detail(w: &Work) -> WorkDetailResponse {
     work_to_detail_with_cover_mtime(w, None, None)
 }
 
+/// Convert a domain `MergePreview` into its API DTO.
+pub fn merge_preview_to_response(
+    p: livrarr_domain::services::MergePreview,
+) -> MergePreviewResponse {
+    MergePreviewResponse {
+        survivor_id: p.survivor_id,
+        loser_id: p.loser_id,
+        library_items_moving: p.library_items_moving,
+        grabs_moving: p.grabs_moving,
+        monitor_ebook_result: p.monitor_ebook_result,
+        monitor_audiobook_result: p.monitor_audiobook_result,
+        conflicts: p
+            .conflicts
+            .into_iter()
+            .map(|c| MergeConflictDTO {
+                field: c.field,
+                survivor_value: c.survivor_value,
+                loser_value: c.loser_value,
+            })
+            .collect(),
+    }
+}
+
 pub fn work_to_detail_with_cover_mtime(
     w: &Work,
     cover_mtime: Option<i64>,
@@ -299,6 +323,55 @@ pub struct LibraryItemResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteWorkResponse {
+    pub warnings: Vec<String>,
+}
+
+// --- Merge duplicates (REQ-015) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeConflictDTO {
+    pub field: MergeableField,
+    pub survivor_value: String,
+    pub loser_value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergePreviewResponse {
+    pub survivor_id: WorkId,
+    pub loser_id: WorkId,
+    pub library_items_moving: usize,
+    pub grabs_moving: usize,
+    pub monitor_ebook_result: bool,
+    pub monitor_audiobook_result: bool,
+    /// Fields where both works carry a differing value — the execute call
+    /// refuses unless every entry here has a matching choice (AC-025).
+    pub conflicts: Vec<MergeConflictDTO>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeChoiceEntryDTO {
+    pub field: MergeableField,
+    pub choice: MergeFieldChoice,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeWorksRequest {
+    #[serde(default)]
+    pub choices: Vec<MergeChoiceEntryDTO>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeWorksResponse {
+    pub survivor: WorkDetailResponse,
+    pub library_items_moved: usize,
+    pub grabs_moved: usize,
+    /// Warnings from the best-effort physical file reorganization step —
+    /// never a sign of lost data (REQ-015 c guarantees zero deletions).
     pub warnings: Vec<String>,
 }
 

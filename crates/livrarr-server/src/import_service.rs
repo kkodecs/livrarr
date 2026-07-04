@@ -509,6 +509,46 @@ impl ImportService for LiveImportService {
         }
     }
 
+    async fn reorganize_work_files(
+        &self,
+        user_id: i64,
+        work_id: i64,
+    ) -> Result<Vec<String>, ServiceError> {
+        use livrarr_domain::services::ImportIoService;
+
+        let work = self.import_io.get_work(user_id, work_id).await?;
+        let items = self
+            .import_io
+            .list_library_items_by_work(user_id, work_id)
+            .await?;
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let root_folders = self.import_io.list_root_folders().await?;
+
+        let (mut warnings, moved_items) =
+            reorganize_items(&*self.import_io, user_id, &work, items, &root_folders).await;
+
+        if !moved_items.is_empty()
+            && work.enrichment_status != livrarr_domain::EnrichmentStatus::Unenriched
+        {
+            use livrarr_domain::services::TagService;
+            let tag_results = self
+                .tag_service
+                .retag_library_items(&work, &moved_items)
+                .await;
+            warnings.extend(tag_results.into_iter().filter(|r| !r.succeeded).map(|r| {
+                format!(
+                    "tag rewrite warning (item {}): {}",
+                    r.library_item_id,
+                    r.error.unwrap_or_else(|| "unknown error".to_string())
+                )
+            }));
+        }
+
+        Ok(warnings)
+    }
+
     fn build_target_path(
         &self,
         root_folder_path: &str,
@@ -528,5 +568,499 @@ impl ImportService for LiveImportService {
             source,
             source_root,
         )
+    }
+}
+
+/// How a file physically reached its new target during reorganization —
+/// determines how a failed follow-up path-record update is reverted.
+enum MoveMethod {
+    /// `rename` moved it; revert = rename back.
+    Renamed,
+    /// Cross-device copy + source removal (the EXDEV fallback); revert =
+    /// copy back (when the source was actually removed) and delete OUR
+    /// copy at the target — never user data.
+    Copied { original_removed: bool },
+}
+
+/// Per-item move-and-record loop behind
+/// `LiveImportService::reorganize_work_files`, generic over the IO seam so
+/// the record-failure/revert/heal behavior is testable with a
+/// fault-injecting stub. Returns (warnings, items whose stored path changed
+/// this pass — the retag set).
+///
+/// Consistency invariant: an item is never left unlocatable. Either the
+/// file and its path record agree when an iteration ends, or the warning
+/// names both locations and the mismatch is exactly the shape the heal
+/// branch repairs on the next pass.
+async fn reorganize_items<IO: livrarr_domain::services::ImportIoService>(
+    io: &IO,
+    user_id: i64,
+    work: &livrarr_domain::Work,
+    items: Vec<livrarr_domain::LibraryItem>,
+    root_folders: &[livrarr_domain::RootFolder],
+) -> (Vec<String>, Vec<livrarr_domain::LibraryItem>) {
+    let mut warnings = Vec::new();
+    let mut moved_items = Vec::new();
+
+    for item in items {
+        let Some(root) = root_folders.iter().find(|rf| rf.id == item.root_folder_id) else {
+            warnings.push(format!(
+                "{}: root folder no longer exists — left in place",
+                item.path
+            ));
+            continue;
+        };
+
+        let current_abs = format!("{}/{}", root.path.trim_end_matches('/'), item.path);
+        let current_path = Path::new(&current_abs);
+
+        // Same naming/layout rule the import path uses — never
+        // reimplemented here.
+        let new_target = crate::infra::import_pipeline::build_target_path(
+            &root.path,
+            user_id,
+            &work.author_name,
+            &work.title,
+            item.media_type,
+            current_path,
+            current_path,
+        );
+        if new_target == current_abs {
+            continue; // already at its canonical path
+        }
+        let new_path = PathBuf::from(&new_target);
+        let new_relative = new_target
+            .strip_prefix(&root.path)
+            .unwrap_or(&new_target)
+            .trim_start_matches('/')
+            .to_string();
+
+        let source_exists = tokio::fs::try_exists(current_path).await.unwrap_or(false);
+        let target_exists = tokio::fs::try_exists(&new_path).await.unwrap_or(false);
+
+        // Self-healing: nothing at the recorded path but the computed target
+        // is occupied — a previous pass moved the file and failed to record
+        // it. Repair the record only; no file operation.
+        if !source_exists && target_exists {
+            match io
+                .update_library_item_path(user_id, item.id, &new_relative)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        item_id = item.id,
+                        "reorganize: healed stale path record — file was already at its target"
+                    );
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "{}: file is already at {new_target} but the path record could not be repaired: {e}",
+                        item.path
+                    ));
+                }
+            }
+            continue;
+        }
+
+        if target_exists {
+            // Never overwrite — the item is left at its current path,
+            // still owned by the survivor in the DB. No file is ever
+            // deleted or clobbered here.
+            warnings.push(format!(
+                "{}: destination already occupied — left at its current path",
+                item.path
+            ));
+            continue;
+        }
+
+        if let Some(parent) = new_path.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                warnings.push(format!(
+                    "{}: could not create destination directory: {e}",
+                    item.path
+                ));
+                continue;
+            }
+        }
+
+        let move_method = match tokio::fs::rename(&current_abs, &new_path).await {
+            Ok(()) => MoveMethod::Renamed,
+            Err(e) => {
+                // Cross-device rename: fall back to copy-then-remove-source,
+                // the same EXDEV posture the CWA copy path already uses.
+                if e.raw_os_error() != Some(libc::EXDEV) {
+                    warnings.push(format!("{}: move failed: {e}", item.path));
+                    continue;
+                }
+                if let Err(e) = livrarr_library::atomic_copy(current_path, &new_path).await {
+                    warnings.push(format!("{}: cross-device copy failed: {e}", item.path));
+                    continue;
+                }
+                let original_removed = match tokio::fs::remove_file(&current_abs).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            item_id = item.id,
+                            error = %e,
+                            "reorganize: cross-device copy succeeded but removing the old file failed — duplicate left on disk"
+                        );
+                        false
+                    }
+                };
+                MoveMethod::Copied { original_removed }
+            }
+        };
+
+        match io
+            .update_library_item_path(user_id, item.id, &new_relative)
+            .await
+        {
+            Ok(()) => {
+                let mut moved = item.clone();
+                moved.path = new_relative;
+                moved_items.push(moved);
+            }
+            Err(e) => {
+                // The file moved but the record didn't. Put the file back
+                // (undoing only our own move/copy) so record and disk agree
+                // again and a plain retry works. If the revert itself
+                // fails, the warning names BOTH locations and the heal
+                // branch above repairs it on the next pass.
+                warnings.push(
+                    revert_physical_move(
+                        &move_method,
+                        &current_abs,
+                        &new_path,
+                        &item.path,
+                        &new_target,
+                        &e.to_string(),
+                    )
+                    .await,
+                );
+            }
+        }
+    }
+
+    (warnings, moved_items)
+}
+
+/// Best-effort undo of a just-performed physical move after the path-record
+/// update failed, so disk and record stay consistent. Returns the warning to
+/// surface. When the revert itself fails, the warning carries BOTH paths —
+/// the stale recorded location and the file's actual location — so recovery
+/// (automatic, via the heal branch on the next pass, or manual) is
+/// unambiguous.
+async fn revert_physical_move(
+    method: &MoveMethod,
+    current_abs: &str,
+    new_path: &Path,
+    stored_relative: &str,
+    new_target: &str,
+    record_error: &str,
+) -> String {
+    match method {
+        MoveMethod::Renamed => match tokio::fs::rename(new_path, current_abs).await {
+            Ok(()) => format!(
+                "{stored_relative}: path record update failed ({record_error}); \
+                 the move was reverted — retry the reorganize later"
+            ),
+            Err(re) => format!(
+                "{stored_relative}: path record update failed ({record_error}) and the \
+                 revert also failed ({re}); the record still points at {current_abs} but \
+                 the file is at {new_target} — the next reorganize heals this automatically"
+            ),
+        },
+        MoveMethod::Copied {
+            original_removed: true,
+        } => match livrarr_library::atomic_copy(new_path, Path::new(current_abs)).await {
+            Ok(_) => {
+                let mut warning = format!(
+                    "{stored_relative}: path record update failed ({record_error}); \
+                     the file was copied back — retry the reorganize later"
+                );
+                if let Err(e) = tokio::fs::remove_file(new_path).await {
+                    warning.push_str(&format!(
+                        " (note: our extra copy at {new_target} could not be removed: {e})"
+                    ));
+                }
+                warning
+            }
+            Err(re) => format!(
+                "{stored_relative}: path record update failed ({record_error}) and the \
+                 copy-back also failed ({re}); the record still points at {current_abs} but \
+                 the file is at {new_target} — the next reorganize heals this automatically"
+            ),
+        },
+        MoveMethod::Copied {
+            original_removed: false,
+        } => {
+            // The original never left the recorded path (its removal failed
+            // right after the copy), so the record is already consistent —
+            // reverting means deleting only the extra copy WE created at
+            // the target, never user data.
+            match tokio::fs::remove_file(new_path).await {
+                Ok(()) => format!(
+                    "{stored_relative}: path record update failed ({record_error}); the \
+                     file never left its recorded path and our extra copy was removed — \
+                     retry the reorganize later"
+                ),
+                Err(re) => format!(
+                    "{stored_relative}: path record update failed ({record_error}); the \
+                     file is still at its recorded path {current_abs}, but an extra copy \
+                     remains at {new_target} ({re})"
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod reorganize_tests {
+    use super::*;
+    use livrarr_domain::services::{ImportIoService, ImportIoServiceError};
+    use livrarr_domain::{
+        DbError, DownloadClient, DownloadClientId, Grab, GrabId, LibraryItem, LibraryItemId,
+        RemotePathMapping, RootFolder, RootFolderId, TagStatus, UserId, Work, WorkId,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// Fault-injecting stand-in for the IO seam: `update_library_item_path`
+    /// fails a configured number of times, then succeeds and records the
+    /// write. Every other method is unreachable from `reorganize_items`.
+    struct StubIo {
+        path_updates: Mutex<Vec<(LibraryItemId, String)>>,
+        failures_left: AtomicUsize,
+    }
+
+    impl StubIo {
+        fn failing(times: usize) -> Self {
+            Self {
+                path_updates: Mutex::new(Vec::new()),
+                failures_left: AtomicUsize::new(times),
+            }
+        }
+    }
+
+    impl ImportIoService for StubIo {
+        async fn update_library_item_path(
+            &self,
+            _user_id: UserId,
+            item_id: LibraryItemId,
+            new_path: &str,
+        ) -> Result<(), ImportIoServiceError> {
+            let should_fail = self
+                .failures_left
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            if should_fail {
+                return Err(ImportIoServiceError::Db(DbError::Constraint {
+                    message: "injected path-update failure".into(),
+                }));
+            }
+            self.path_updates
+                .lock()
+                .unwrap()
+                .push((item_id, new_path.to_string()));
+            Ok(())
+        }
+
+        async fn get_grab(&self, _: UserId, _: GrabId) -> Result<Grab, ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+
+        async fn get_download_client(
+            &self,
+            _: DownloadClientId,
+        ) -> Result<DownloadClient, ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+
+        async fn set_grab_content_path(
+            &self,
+            _: UserId,
+            _: GrabId,
+            _: &str,
+        ) -> Result<(), ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+
+        async fn get_work(&self, _: UserId, _: WorkId) -> Result<Work, ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+
+        async fn list_library_items_by_work(
+            &self,
+            _: UserId,
+            _: WorkId,
+        ) -> Result<Vec<LibraryItem>, ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+
+        async fn get_root_folder(
+            &self,
+            _: RootFolderId,
+        ) -> Result<RootFolder, ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+
+        async fn list_root_folders(&self) -> Result<Vec<RootFolder>, ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+
+        async fn list_remote_path_mappings(
+            &self,
+        ) -> Result<Vec<RemotePathMapping>, ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+
+        async fn update_library_item_size(
+            &self,
+            _: UserId,
+            _: LibraryItemId,
+            _: i64,
+        ) -> Result<(), ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+
+        async fn create_library_item(
+            &self,
+            _: livrarr_domain::services::CreateLibraryItemRequest,
+        ) -> Result<LibraryItem, ImportIoServiceError> {
+            unreachable!("not used by reorganize_items")
+        }
+    }
+
+    fn test_item(id: i64, root_id: i64, path: &str) -> LibraryItem {
+        LibraryItem {
+            id,
+            user_id: 1,
+            work_id: 1,
+            root_folder_id: root_id,
+            path: path.into(),
+            media_type: MediaType::Ebook,
+            file_size: 4,
+            import_id: None,
+            imported_at: chrono::Utc::now(),
+            tag_status: TagStatus::Pending,
+            tagged_at_generation: 0,
+            duration_seconds: None,
+            chapter_scan_status: None,
+        }
+    }
+
+    fn test_work() -> Work {
+        Work {
+            user_id: 1,
+            title: "New Title".into(),
+            author_name: "New Author".into(),
+            ..Work::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn record_failure_after_move_reverts_file_and_plain_retry_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().to_string_lossy().into_owned();
+        let root = RootFolder {
+            id: 7,
+            path: root_path.clone(),
+            media_type: MediaType::Ebook,
+        };
+
+        let old_abs = format!("{root_path}/stale/old.epub");
+        tokio::fs::create_dir_all(format!("{root_path}/stale"))
+            .await
+            .unwrap();
+        tokio::fs::write(&old_abs, b"book").await.unwrap();
+        let new_abs = format!("{root_path}/1/New Author/New Title.epub");
+
+        let io = StubIo::failing(1);
+        let work = test_work();
+
+        let (warnings, moved) = reorganize_items(
+            &io,
+            1,
+            &work,
+            vec![test_item(11, 7, "stale/old.epub")],
+            std::slice::from_ref(&root),
+        )
+        .await;
+
+        // The failed record update reverted the physical move — disk and
+        // record agree again (both at the old path); nothing entered the
+        // retag set, and the item stayed locatable throughout.
+        assert!(moved.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("reverted"),
+            "warning was: {}",
+            warnings[0]
+        );
+        assert!(tokio::fs::try_exists(&old_abs).await.unwrap());
+        assert!(!tokio::fs::try_exists(&new_abs).await.unwrap());
+        assert!(io.path_updates.lock().unwrap().is_empty());
+
+        // With the fault cleared, a plain retry completes the move end to end.
+        let (warnings2, moved2) = reorganize_items(
+            &io,
+            1,
+            &work,
+            vec![test_item(11, 7, "stale/old.epub")],
+            std::slice::from_ref(&root),
+        )
+        .await;
+        assert!(warnings2.is_empty(), "{warnings2:?}");
+        assert_eq!(moved2.len(), 1);
+        assert!(!tokio::fs::try_exists(&old_abs).await.unwrap());
+        assert!(tokio::fs::try_exists(&new_abs).await.unwrap());
+        assert_eq!(
+            io.path_updates.lock().unwrap().as_slice(),
+            &[(11, "1/New Author/New Title.epub".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn orphaned_file_at_target_is_healed_record_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().to_string_lossy().into_owned();
+        let root = RootFolder {
+            id: 7,
+            path: root_path.clone(),
+            media_type: MediaType::Ebook,
+        };
+
+        // The orphan window's aftermath (a historical failure, or a failed
+        // revert): the file already lives at the computed target while the
+        // record still points at a path with nothing there.
+        let new_abs = format!("{root_path}/1/New Author/New Title.epub");
+        tokio::fs::create_dir_all(format!("{root_path}/1/New Author"))
+            .await
+            .unwrap();
+        tokio::fs::write(&new_abs, b"book").await.unwrap();
+        let old_abs = format!("{root_path}/stale/old.epub");
+
+        let io = StubIo::failing(0);
+        let work = test_work();
+
+        let (warnings, moved) = reorganize_items(
+            &io,
+            1,
+            &work,
+            vec![test_item(11, 7, "stale/old.epub")],
+            std::slice::from_ref(&root),
+        )
+        .await;
+
+        // Recognized as already-moved: the record is repaired with zero
+        // file operations and the item is locatable again.
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(moved.is_empty(), "heal is record-only — no retag set");
+        assert_eq!(
+            io.path_updates.lock().unwrap().as_slice(),
+            &[(11, "1/New Author/New Title.epub".to_string())]
+        );
+        assert!(tokio::fs::try_exists(&new_abs).await.unwrap());
+        assert!(!tokio::fs::try_exists(&old_abs).await.unwrap());
     }
 }

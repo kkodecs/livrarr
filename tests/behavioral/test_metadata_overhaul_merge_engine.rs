@@ -864,7 +864,7 @@ async fn test_merge_engine_hard_refresh_suppressed_preserves_last_known_good_val
 
 #[tokio::test]
 async fn test_merge_engine_english_priority_model_uses_documented_provider_order() {
-    // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: English priority model uses HC→GR→OL for content, HC→OL→GR for description, and HC→GR→OL for cover
+    // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: English priority model uses HC→GR→OL for content, HC→OL→GR for description, and (N2/S1) GR→HC→...→OL for cover
     let engine = make_engine();
 
     let input = MergeInput {
@@ -913,7 +913,9 @@ async fn test_merge_engine_english_priority_model_uses_documented_provider_order
         .cover_resolution
         .as_ref()
         .expect("should resolve a cover");
-    assert_eq!(cover.url, "https://example.test/hc-cover.jpg");
+    // N2/S1: the unified cover rank table puts Goodreads first for English
+    // (GR → HC → GB → Readarr → OL → Audnexus → Audible), not Hardcover.
+    assert_eq!(cover.url, "https://example.test/gr-cover.jpg");
 }
 
 #[tokio::test]
@@ -1000,6 +1002,137 @@ async fn test_merge_engine_whitespace_only_high_priority_value_does_not_block_fa
     let upsert = provenance_upsert(&output, WorkField::Subtitle)
         .expect("expected provenance upsert for subtitle");
     assert_eq!(upsert.source, Some(MetadataSource::Goodreads));
+}
+
+#[tokio::test]
+async fn test_merge_engine_empty_genres_high_priority_does_not_block_fallback() {
+    // REQ-ID: M-013 | Contract: MergeEngine::merge | Behavior: an empty genres list from a high-priority provider is not a value, so a lower-priority provider's real genres win
+    let engine = make_engine();
+
+    let input = MergeInput {
+        current_work: Work {
+            identity_status: Default::default(),
+            id: WORK_ID,
+            user_id: USER_ID,
+            language: Some("en".to_string()),
+            ..Default::default()
+        },
+        current_provenance: vec![],
+        provider_results: HashMap::from([
+            (
+                MetadataSource::Hardcover,
+                success(NormalizedWorkDetail {
+                    genres: Some(vec![]),
+                    ..empty_detail()
+                }),
+            ),
+            (
+                MetadataSource::Goodreads,
+                success(NormalizedWorkDetail {
+                    genres: Some(vec!["Fantasy".to_string(), "Adventure".to_string()]),
+                    ..empty_detail()
+                }),
+            ),
+        ]),
+        mode: EnrichmentMode::Background,
+        priority_model: PriorityModel::english(),
+    };
+
+    let output = merge(&engine, input).await;
+
+    assert_eq!(
+        resolved(&output).genres.as_ref(),
+        Some(&vec!["Fantasy".to_string(), "Adventure".to_string()])
+    );
+    let upsert = provenance_upsert(&output, WorkField::Genres)
+        .expect("expected provenance upsert for genres");
+    assert_eq!(upsert.source, Some(MetadataSource::Goodreads));
+}
+
+#[tokio::test]
+async fn test_merge_engine_all_empty_genres_retains_current_genres() {
+    // REQ-ID: M-013 | Contract: MergeEngine::merge | Behavior: when every provider offers an empty genres list, the current stored genres are retained (last-known-good; no erasure)
+    let engine = make_engine();
+
+    let input = MergeInput {
+        current_work: Work {
+            identity_status: Default::default(),
+            id: WORK_ID,
+            user_id: USER_ID,
+            genres: Some(vec!["Mystery".to_string()]),
+            ..Default::default()
+        },
+        current_provenance: vec![],
+        provider_results: HashMap::from([
+            (
+                MetadataSource::Hardcover,
+                success(NormalizedWorkDetail {
+                    genres: Some(vec![]),
+                    ..empty_detail()
+                }),
+            ),
+            (
+                MetadataSource::Goodreads,
+                success(NormalizedWorkDetail {
+                    genres: Some(vec![]),
+                    ..empty_detail()
+                }),
+            ),
+        ]),
+        mode: EnrichmentMode::Background,
+        priority_model: PriorityModel::english(),
+    };
+
+    let output = merge(&engine, input).await;
+
+    assert_eq!(
+        resolved(&output).genres.as_ref(),
+        Some(&vec!["Mystery".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn test_merge_engine_empty_narrator_does_not_block_fallback() {
+    // REQ-ID: M-013 | Contract: MergeEngine::merge | Behavior: an empty narrator list from a high-priority audio provider is not a value, so a lower-priority provider's real narrator wins
+    let engine = make_engine();
+
+    let input = MergeInput {
+        current_work: Work {
+            identity_status: Default::default(),
+            id: WORK_ID,
+            user_id: USER_ID,
+            ..Default::default()
+        },
+        current_provenance: vec![],
+        provider_results: HashMap::from([
+            (
+                MetadataSource::Audible,
+                success(NormalizedWorkDetail {
+                    narrator: Some(vec![]),
+                    ..empty_detail()
+                }),
+            ),
+            (
+                MetadataSource::Audnexus,
+                success(NormalizedWorkDetail {
+                    narrator: Some(vec!["Real Narrator".to_string()]),
+                    ..empty_detail()
+                }),
+            ),
+        ]),
+        mode: EnrichmentMode::Background,
+        priority_model: PriorityModel::english(),
+    };
+
+    let output = merge(&engine, input).await;
+
+    assert_eq!(
+        resolved(&output).narrator.as_ref(),
+        Some(&vec!["Real Narrator".to_string()])
+    );
+    let upsert = provenance_upsert(&output, WorkField::Narrator)
+        .expect("expected provenance upsert for narrator");
+    assert_eq!(upsert.source, Some(MetadataSource::Audnexus));
 }
 
 #[tokio::test]
@@ -1370,5 +1503,102 @@ async fn test_merge_language_fills_when_blank() {
         resolved.language.as_deref(),
         Some("fr"),
         "a provider may fill a blank language"
+    );
+}
+
+/// REQ-ID: M-012 | Contract: MergeEngine::merge | Behavior: the Goodreads cover
+/// gate (REQ-017) runs at the merge chokepoint for every caller — a Goodreads
+/// cover whose title fails the deterministic Jaccard check must not win the
+/// cover field even though Goodreads outranks OpenLibrary in the English cover
+/// priority list; a Goodreads cover whose title clears the threshold may win.
+#[tokio::test]
+async fn test_merge_engine_gr_cover_gate_at_chokepoint() {
+    let engine = make_engine();
+
+    let base_work = Work {
+        identity_status: Default::default(),
+        id: WORK_ID,
+        user_id: USER_ID,
+        title: "The Name of the Wind".to_string(),
+        author_name: "Patrick Rothfuss".to_string(),
+        language: Some("en".to_string()),
+        ol_key: Some("OL15832982W".to_string()),
+        ..Default::default()
+    };
+
+    // Mismatched GR title: the gate strips the GR cover, so OpenLibrary's cover wins.
+    let mismatched_output = merge(
+        &engine,
+        MergeInput {
+            current_work: base_work.clone(),
+            current_provenance: vec![],
+            provider_results: HashMap::from([
+                (
+                    MetadataSource::Goodreads,
+                    success(NormalizedWorkDetail {
+                        title: Some("A Darkness at Sethanon".to_string()),
+                        cover_url: Some("https://example.test/gr-cover.jpg".to_string()),
+                        ..empty_detail()
+                    }),
+                ),
+                (
+                    MetadataSource::OpenLibrary,
+                    success(NormalizedWorkDetail {
+                        cover_url: Some("https://example.test/ol-cover.jpg".to_string()),
+                        ..empty_detail()
+                    }),
+                ),
+            ]),
+            mode: EnrichmentMode::Background,
+            priority_model: PriorityModel::english(),
+        },
+    )
+    .await;
+
+    let mismatched_cover = mismatched_output
+        .cover_resolution
+        .as_ref()
+        .expect("should resolve a cover");
+    assert_eq!(
+        mismatched_cover.url, "https://example.test/ol-cover.jpg",
+        "mismatched GR title must not win the cover gate"
+    );
+
+    // Matching GR title (Jaccard >= 0.6): the gate applies, GR outranks OL for cover.
+    let matching_output = merge(
+        &engine,
+        MergeInput {
+            current_work: base_work,
+            current_provenance: vec![],
+            provider_results: HashMap::from([
+                (
+                    MetadataSource::Goodreads,
+                    success(NormalizedWorkDetail {
+                        title: Some("The Name of the Wind".to_string()),
+                        cover_url: Some("https://example.test/gr-cover.jpg".to_string()),
+                        ..empty_detail()
+                    }),
+                ),
+                (
+                    MetadataSource::OpenLibrary,
+                    success(NormalizedWorkDetail {
+                        cover_url: Some("https://example.test/ol-cover.jpg".to_string()),
+                        ..empty_detail()
+                    }),
+                ),
+            ]),
+            mode: EnrichmentMode::Background,
+            priority_model: PriorityModel::english(),
+        },
+    )
+    .await;
+
+    let matching_cover = matching_output
+        .cover_resolution
+        .as_ref()
+        .expect("should resolve a cover");
+    assert_eq!(
+        matching_cover.url, "https://example.test/gr-cover.jpg",
+        "matching GR title should be allowed to win the cover gate"
     );
 }
