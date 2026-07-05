@@ -132,11 +132,17 @@ pub fn parse_release_title_with_candidates(
 }
 
 /// Score parsed extractions against a single candidate.
-/// Returns the best (highest) score across all extractions. Range: 0.0–1.0.
+/// Returns the best (highest) score across extractions that pass the hard
+/// gate (see [`fails_hard_gate`]) — an author-less extraction never wins a
+/// score, however high `score_candidate` would otherwise put it (issue #142:
+/// the candidate-substring fallback echoes the candidate's own title back as
+/// the extraction, manufacturing a perfect title_sim with no author to check
+/// it against). Range: 0.0–1.0; 0.0 when every extraction fails the gate.
 pub fn best_match_score(parsed: &ParsedRelease, candidate: &MatchCandidate) -> f64 {
     parsed
         .extractions
         .iter()
+        .filter(|ext| !m4_scoring::fails_hard_gate(ext, candidate))
         .map(|ext| m4_scoring::score_candidate(ext, candidate))
         .fold(0.0_f64, f64::max)
 }
@@ -213,4 +219,70 @@ pub fn string_similarity(a: &str, b: &str) -> f64 {
 /// Compute author similarity with name canonicalization.
 pub fn author_similarity(a: &str, b: &str) -> f64 {
     m4_scoring::author_similarity(a, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(title: &str, author: &str) -> MatchCandidate {
+        MatchCandidate {
+            title: title.to_string(),
+            author: author.to_string(),
+            year: None,
+            work_key: "OL1W".to_string(),
+            author_key: None,
+            cover_url: None,
+            series: None,
+            series_position: None,
+            provider: MatchProvider::OpenLibrary,
+            score: 0.0,
+        }
+    }
+
+    // Issue #142: a monitored work's title landing as a bare substring of an
+    // unrelated release title (a magazine mentioning the book, not the book
+    // itself) must never auto-grab. The candidate-substring fallback finds
+    // no author in either release, so the hard gate must zero both out.
+    #[test]
+    fn substring_title_hit_with_no_author_never_scores() {
+        let candidates = [("The Civil War", "Bruce Catton")];
+        let parsed = parse_release_title_with_candidates(
+            "The.Civil.War.Monitor.Summer.2026.HYBRID.MAGAZINE.eBook-21A1",
+            &candidates,
+        );
+        let score = best_match_score(&parsed, &candidate("The Civil War", "Bruce Catton"));
+        assert_eq!(
+            score, 0.0,
+            "an author-less substring match must never clear the RSS threshold"
+        );
+    }
+
+    #[test]
+    fn short_title_inside_word_never_scores() {
+        let candidates = [("Us", "Terrence Real")];
+        let parsed = parse_release_title_with_candidates(
+            "Brew.Your.Own.July-August.2026.HYBRID.MAGAZINE.eBook-21A1",
+            &candidates,
+        );
+        let score = best_match_score(&parsed, &candidate("Us", "Terrence Real"));
+        assert_eq!(
+            score, 0.0,
+            "'us' inside 'august' must never clear the RSS threshold"
+        );
+    }
+
+    #[test]
+    fn candidate_fallback_hit_with_real_author_still_scores() {
+        let candidates = [("Project Hail Mary", "Andy Weir")];
+        let parsed = parse_release_title_with_candidates(
+            "Project.Hail.Mary.by.Andy.Weir.2026.EPUB",
+            &candidates,
+        );
+        let score = best_match_score(&parsed, &candidate("Project Hail Mary", "Andy Weir"));
+        assert!(
+            score > 0.8,
+            "a real title+author match must still score highly: got {score}"
+        );
+    }
 }
