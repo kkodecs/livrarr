@@ -203,8 +203,20 @@ export const deleteWork = (id: number) =>
   });
 export const refreshWork = (id: number) =>
   apiFetch<RefreshWorkResponse>(`/work/${id}/refresh`, { method: "POST" });
-export const refreshAllWorks = () =>
-  apiFetch<void>("/work/refresh", { method: "POST" });
+export const refreshAllWorks = (params?: {
+  language?: string;
+  mediaType?: string;
+  monitored?: boolean;
+  enrichmentStatus?: string;
+}) => {
+  const sp = new URLSearchParams();
+  if (params?.language) sp.set("language", params.language);
+  if (params?.mediaType) sp.set("media_type", params.mediaType);
+  if (params?.monitored !== undefined) sp.set("monitored", String(params.monitored));
+  if (params?.enrichmentStatus) sp.set("enrichment_status", params.enrichmentStatus);
+  const qs = sp.toString();
+  return apiFetch<void>(`/work/refresh${qs ? `?${qs}` : ""}`, { method: "POST" });
+};
 export const retryAllIncomplete = () =>
   apiFetch<void>("/work/retry-incomplete", { method: "POST" });
 export const getPendingAnchors = (workId: number) =>

@@ -120,9 +120,13 @@ export function WorksPage() {
   const totalPages = computeTotalPages(total, PAGE_SIZE);
 
   const refreshMutation = useMutation({
-    mutationFn: refreshAllWorks,
+    mutationFn: () =>
+      refreshAllWorks({
+        language: languageFilter || undefined,
+        mediaType: mediaTypeFilter || undefined,
+      }),
     onSuccess: () => toast.success("Refreshing all works"),
-    onError: () => toast.error("Failed to refresh works"),
+    onError: (e: Error) => toast.error(e.message),
   });
 
   const retryMutation = useMutation({
@@ -245,7 +249,10 @@ export function WorksPage() {
     // If all filtered works are selected, use refreshAll
     if (allSelected && filtered.length === (works?.length ?? 0)) {
       try {
-        await refreshAllWorks();
+        await refreshAllWorks({
+          language: languageFilter || undefined,
+          mediaType: mediaTypeFilter || undefined,
+        });
         toast.success("Refreshing all works");
       } catch {
         toast.error("Failed to refresh works");
