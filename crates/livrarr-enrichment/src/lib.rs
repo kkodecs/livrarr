@@ -686,16 +686,14 @@ const MERGE_FIELDS: &[WorkField] = &[
     WorkField::RatingCount,
 ];
 
-/// Text fields covered by the REQ-013 language-dissent pass.
-const TEXT_DISSENT_FIELDS: &[WorkField] = &[
-    WorkField::Description,
-    WorkField::Subtitle,
-    WorkField::SeriesName,
-    WorkField::Genres,
-];
-
-fn is_text_dissent_field(field: WorkField) -> bool {
-    TEXT_DISSENT_FIELDS.contains(&field)
+/// A field participates in the REQ-013 language-dissent pass unless it is
+/// audio-category. Audio fields (duration/narrator/narration_type/abridged)
+/// come only from Audible/Audnexus, and a foreign-language work can
+/// legitimately have a different-language audiobook edition — guarding them
+/// would strip correct sole-source audio metadata. Fail-closed: every other
+/// field (including ones added later) is gated by default.
+fn is_language_dissent_field(field: WorkField) -> bool {
+    !matches!(field_category(field), FieldCategory::Audio)
 }
 
 /// Display text for a field value, used for dissent rows; `None` when absent.
@@ -823,7 +821,10 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
         };
     for provider in &language_incompatible {
         if let Some(Some(detail)) = eligible_providers.get(provider) {
-            for &field in TEXT_DISSENT_FIELDS {
+            for &field in MERGE_FIELDS
+                .iter()
+                .filter(|&&f| is_language_dissent_field(f))
+            {
                 if let Some(offered) = field_value_text(&extract_provider_field(field, detail)) {
                     dissent_seeds.push((
                         *provider,
@@ -874,7 +875,7 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
         for &provider in priority_list {
             // REQ-013: language-incompatible providers never win text fields
             // (their offered values are already dissent seeds).
-            if is_text_dissent_field(field) && language_incompatible.contains(&provider) {
+            if is_language_dissent_field(field) && language_incompatible.contains(&provider) {
                 continue;
             }
             if let Some(Some(detail)) = eligible_providers.get(&provider) {
