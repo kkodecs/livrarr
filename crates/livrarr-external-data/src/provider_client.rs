@@ -585,11 +585,30 @@ impl HardcoverClient {
                 }
             }
             AnchorQuery::HcKey(key) => {
-                tracing::warn!(
-                    hc_key = %key,
-                    "Hardcover by-key enrichment fetch has no existing query path — NotFound"
-                );
-                ProviderOutcome::NotFound
+                let book_id = match key.trim().parse::<i64>() {
+                    Ok(id) => id,
+                    Err(_) => return ProviderOutcome::NotFound,
+                };
+                match crate::hardcover::query_hardcover_by_key(
+                    &self.fetcher,
+                    book_id,
+                    &token,
+                    priority,
+                )
+                .await
+                {
+                    Ok(Some(hc)) => self.build_success(hc, &token, priority).await,
+                    Ok(None) => ProviderOutcome::NotFound,
+                    Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
+                        circuit_open_outcome(retry_after)
+                    }
+                    Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
+                        reason: livrarr_domain::WillRetryReason::ServerError,
+                        next_attempt_at: Utc::now()
+                            + chrono::Duration::seconds(self.retry_backoff_secs),
+                    },
+                    Err(_) => ProviderOutcome::NotFound,
+                }
             }
             _ => ProviderOutcome::NotFound,
         }

@@ -560,6 +560,105 @@ pub async fn query_hardcover_by_isbn<F: HttpFetcher>(
     Ok(None)
 }
 
+/// GraphQL query for fetching a single Hardcover book by its numeric `id`
+/// (the `hc_key` anchor). Depth-limited: no author/series/edition joins, so
+/// callers get title/subtitle/description/pages/rating/cover only.
+fn hc_book_by_key_graphql() -> &'static str {
+    r#"query GetBookByKey($id: Int!) {
+        books_by_pk(id: $id) {
+            title
+            subtitle
+            description
+            release_date
+            pages
+            rating
+            ratings_count
+            image { url }
+        }
+    }"#
+}
+
+/// Fetch a Hardcover book directly by its known `hc_key` (numeric book id).
+///
+/// This is a high-confidence exact match (unlike the fuzzy `SearchBooks`
+/// path), so `subtitle` is populated here. Author, series, publisher,
+/// genres, and ISBN are not available at this query depth — callers needing
+/// an ISBN already make a separate `fetch_hardcover_editions` call
+/// (see `build_success`).
+pub async fn query_hardcover_by_key<F: HttpFetcher>(
+    fetcher: &F,
+    book_id: i64,
+    token: &str,
+    priority: RequestPriority,
+) -> Result<Option<HardcoverResult>, HardcoverError> {
+    let body = serde_json::json!({
+        "query": hc_book_by_key_graphql(),
+        "variables": {"id": book_id}
+    });
+    let data = hc_post(fetcher, body, token, priority).await?;
+
+    let doc = match data.pointer("/data/books_by_pk") {
+        None => return Ok(None),
+        Some(v) if v.is_null() => return Ok(None),
+        Some(v) => v,
+    };
+
+    let title = doc
+        .get("title")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let subtitle = doc
+        .get("subtitle")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let description = doc
+        .get("description")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let page_count = doc.get("pages").and_then(|v| v.as_i64()).map(|v| v as i32);
+
+    let publish_date = doc
+        .get("release_date")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let cover_url = doc
+        .pointer("/image/url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let rating = doc.get("rating").and_then(|v| v.as_f64());
+    let rating_count = doc
+        .get("ratings_count")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
+    Ok(Some(HardcoverResult {
+        title,
+        author_name: None,
+        subtitle,
+        original_title: None,
+        description,
+        series_name: None,
+        series_position: None,
+        genres: None,
+        page_count,
+        publisher: None,
+        publish_date,
+        hc_key: Some(book_id.to_string()),
+        isbn_13: None,
+        cover_url,
+        rating,
+        rating_count,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,5 +838,104 @@ mod tests {
             HardcoverError::Http(msg) => assert!(msg.contains("timeout")),
             other => panic!("expected Http variant, got {other:?}"),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // query_hardcover_by_key: hc_key anchor fetch (GetBookByKey), used by
+    // provider_client.rs's AnchorQuery::HcKey arm.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn query_hardcover_by_key_sends_hardcover_bucket_post_bearer_auth_and_id_variable() {
+        let canned = serde_json::json!({"data": {"books_by_pk": null}});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        query_hardcover_by_key(&fetcher, 10257, "test-token", RequestPriority::High)
+            .await
+            .unwrap();
+
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        let req = &reqs[0];
+        assert_eq!(req.url, HARDCOVER_API_URL);
+        assert_eq!(req.rate_bucket, RateBucket::Hardcover);
+        assert_eq!(req.method, HttpMethod::Post);
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer test-token"));
+        let sent_body: Value = serde_json::from_slice(req.body.as_ref().unwrap()).unwrap();
+        assert_eq!(sent_body["variables"], serde_json::json!({"id": 10257}));
+        assert_transport_params(req, RequestPriority::High);
+    }
+
+    #[tokio::test]
+    async fn query_hardcover_by_key_maps_full_response_into_hardcover_result() {
+        // Shape matches the live-prototyped GetBookByKey response
+        // (2026-07-05, book id 1): rating is a float, release_date is
+        // "YYYY-MM-DD", pages/ratings_count are ints.
+        let canned = serde_json::json!({
+            "data": {
+                "books_by_pk": {
+                    "title": "I Am Legend",
+                    "subtitle": "And Other Stories",
+                    "description": "A vampire novel.",
+                    "release_date": "1954-01-01",
+                    "release_year": 1954,
+                    "pages": 161,
+                    "rating": 3.9038461538461538,
+                    "ratings_count": 26,
+                    "image": {"url": "https://assets.hardcover.app/edition/x.jpeg"}
+                }
+            }
+        });
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        let result = query_hardcover_by_key(&fetcher, 10257, "tok", RequestPriority::Normal)
+            .await
+            .unwrap()
+            .expect("expected Some(HardcoverResult)");
+
+        assert_eq!(result.title.as_deref(), Some("I Am Legend"));
+        assert_eq!(result.subtitle.as_deref(), Some("And Other Stories"));
+        assert_eq!(result.description.as_deref(), Some("A vampire novel."));
+        assert_eq!(result.publish_date.as_deref(), Some("1954-01-01"));
+        assert_eq!(result.page_count, Some(161));
+        assert_eq!(result.rating, Some(3.9038461538461538));
+        assert_eq!(result.rating_count, Some(26));
+        assert_eq!(
+            result.cover_url.as_deref(),
+            Some("https://assets.hardcover.app/edition/x.jpeg")
+        );
+        assert_eq!(result.hc_key.as_deref(), Some("10257"));
+        // Not available at this query depth — must stay None per design.
+        assert_eq!(result.author_name, None);
+        assert_eq!(result.original_title, None);
+        assert_eq!(result.publisher, None);
+        assert_eq!(result.series_name, None);
+        assert_eq!(result.series_position, None);
+        assert_eq!(result.genres, None);
+        assert_eq!(result.isbn_13, None);
+    }
+
+    #[tokio::test]
+    async fn query_hardcover_by_key_returns_none_for_null_books_by_pk() {
+        let canned = serde_json::json!({"data": {"books_by_pk": null}});
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        let result = query_hardcover_by_key(&fetcher, 999999999, "tok", RequestPriority::Normal)
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
     }
 }
