@@ -14,9 +14,9 @@ COPY frontend/ ./
 RUN pnpm build
 
 # ─────────────────────────────────────────────
-# Stage 2: Build backend (musl static binary)
+# Stage 2a: chef base — toolchain + cargo-chef, cached independent of source
 # ─────────────────────────────────────────────
-FROM rust:1.94-alpine AS backend
+FROM rust:1.94-alpine AS chef
 
 WORKDIR /app
 
@@ -29,6 +29,35 @@ RUN apk add --no-cache musl-dev gcc curl && \
     if [ "$TARGETARCH" = "arm64" ] && [ "$BUILDARCH" = "amd64" ]; then \
       curl -fsSL https://github.com/kkodecs/livrarr/releases/download/toolchain/aarch64-linux-musl-cross.tgz | tar -xz -C /usr/local && \
       rustup target add aarch64-unknown-linux-musl; \
+    fi && \
+    cargo install cargo-chef --version 0.1.77 --locked
+
+# ─────────────────────────────────────────────
+# Stage 2b: planner — compute the dependency-only recipe from Cargo.lock
+# ─────────────────────────────────────────────
+FROM chef AS planner
+
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ ./.cargo/
+COPY crates/ ./crates/
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ─────────────────────────────────────────────
+# Stage 2c: backend — cook deps from the recipe (cache hit unless Cargo.lock
+# changed), then build our own crates against the pre-built deps.
+# ─────────────────────────────────────────────
+FROM chef AS backend
+
+ARG TARGETARCH
+ARG BUILDARCH
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN if [ "$TARGETARCH" = "arm64" ] && [ "$BUILDARCH" = "amd64" ]; then \
+      CC_aarch64_unknown_linux_musl=/usr/local/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc \
+      cargo chef cook --release -p livrarr-server --target aarch64-unknown-linux-musl --recipe-path recipe.json; \
+    else \
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc \
+      cargo chef cook --release -p livrarr-server --recipe-path recipe.json; \
     fi
 
 COPY Cargo.toml Cargo.lock ./
