@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/pii-check.py",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/pii-check.py\"",
             "statusMessage": "Checking for PII before commit..."
           }
         ]
