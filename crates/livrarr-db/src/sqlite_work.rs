@@ -126,9 +126,6 @@ pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError>
             .map(|s| parse_identity_status(&s))
             .transpose()?
             .unwrap_or_default(),
-        enrichment_retry_count: row
-            .try_get::<i32, _>("enrichment_retry_count")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
         enriched_at: enriched_at_str.map(|s| parse_dt(&s)).transpose()?,
         enrichment_source: row
             .try_get("enrichment_source")
@@ -1524,24 +1521,13 @@ impl crate::WorkDbCreate for SqliteDb {
 }
 
 impl crate::EnrichmentRetryDb for SqliteDb {
-    async fn list_works_for_retry(&self) -> Result<Vec<Work>, crate::DbError> {
-        let rows = sqlx::query(
-            "SELECT * FROM works WHERE enrichment_status = 'failed' \
-             AND enrichment_retry_count < 3 ORDER BY id",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_db_err)?;
-        rows.into_iter().map(row_to_work).collect()
-    }
-
     async fn reset_enrichment_for_refresh(
         &self,
         user_id: UserId,
         work_id: crate::WorkId,
     ) -> Result<(), crate::DbError> {
         let result = sqlx::query(
-            "UPDATE works SET enrichment_status = 'pending', enrichment_retry_count = 0 \
+            "UPDATE works SET enrichment_status = 'pending' \
              WHERE id = ? AND user_id = ?",
         )
         .bind(work_id)
@@ -1552,36 +1538,6 @@ impl crate::EnrichmentRetryDb for SqliteDb {
         if result.rows_affected() == 0 {
             return Err(crate::DbError::NotFound { entity: "work" });
         }
-        Ok(())
-    }
-
-    async fn increment_retry_count(
-        &self,
-        user_id: UserId,
-        work_id: crate::WorkId,
-    ) -> Result<(), crate::DbError> {
-        sqlx::query(
-            "UPDATE works SET enrichment_retry_count = enrichment_retry_count + 1 \
-             WHERE id = ? AND user_id = ?",
-        )
-        .bind(work_id)
-        .bind(user_id)
-        .execute(self.pool())
-        .await
-        .map_err(map_db_err)?;
-
-        // Transition to exhausted if count >= 3 and status is failed.
-        sqlx::query(
-            "UPDATE works SET enrichment_status = 'exhausted' \
-             WHERE id = ? AND user_id = ? AND enrichment_retry_count >= 3 \
-             AND enrichment_status = 'failed'",
-        )
-        .bind(work_id)
-        .bind(user_id)
-        .execute(self.pool())
-        .await
-        .map_err(map_db_err)?;
-
         Ok(())
     }
 }

@@ -432,10 +432,6 @@ pub struct Work {
     /// anchor-derived (D-013); see [`IdentityStatus`].
     #[serde(default)]
     pub identity_status: IdentityStatus,
-    /// v2.1 — persisted retry counter for enrichment retry queue.
-    /// Satisfies: IMPL-JOBS-005
-    #[serde(default)]
-    pub enrichment_retry_count: i32,
     pub enriched_at: Option<DateTime<Utc>>,
     pub enrichment_source: Option<String>,
     pub cover_url: Option<String>,

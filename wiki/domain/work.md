@@ -20,7 +20,7 @@ The primary entity in Livrarr (Principle 1: work-first, not author-first). A Wor
 - Title, original title, description, publication date
 - ISBN, ASIN, Hardcover key, OpenLibrary key, GoodReads key
 - Media type (ebook, audiobook, or both)
-- Enrichment status, enriched_at, enrichment_retry_count
+- Enrichment status, enriched_at
 - merge_generation (CAS guard for atomic enrichment merge)
 
 ## Provenance

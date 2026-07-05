@@ -71,7 +71,6 @@ fn sample_work(series_position: Option<f64>) -> Work {
         rating: Some(4.25),
         rating_count: Some(128),
         enrichment_status: EnrichmentStatus::Unenriched,
-        enrichment_retry_count: 0,
         enriched_at: None,
         enrichment_source: None,
         cover_url: Some("https://example.test/cover.jpg".to_string()),
