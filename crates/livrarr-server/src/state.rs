@@ -141,15 +141,12 @@ pub struct AppState {
         Arc<tokio::sync::Mutex<crate::readarr_import_service::ReadarrImportProgress>>,
     /// In-progress manual import scan results — OL matches stream in via polling.
     pub manual_import_scans: Arc<ManualImportScanMap>,
-    /// Phase 1.5 plumbing: live `DefaultProviderQueue` constructed at startup
-    /// from the persisted `MetadataConfig` snapshot. Wired into `AppState` so
-    /// call sites can begin migrating off the legacy `enrich_work` /
-    /// `enrich_foreign_work` standalone functions one at a time. Not yet on
-    /// the live enrichment path.
+    /// Live `DefaultProviderQueue` constructed at startup from the persisted
+    /// `MetadataConfig` snapshot — the provider dispatch layer behind the live
+    /// enrichment path (work service / unified enrichment).
     pub provider_queue: Arc<LiveProviderQueue>,
-    /// Phase 1.5 plumbing: live `EnrichmentServiceImpl` wrapping
-    /// `provider_queue` + `DefaultMergeEngine`. Same status as `provider_queue`
-    /// — wired but not yet driving live enrichment.
+    /// Live `EnrichmentServiceImpl` wrapping `provider_queue` + the merge
+    /// engine — drives live enrichment through the work service.
     pub enrichment_service: Arc<LiveEnrichmentService>,
 
     // --- Service layer (Phase 4) ---

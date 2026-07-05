@@ -353,24 +353,9 @@ async fn main() {
         let db_arc = Arc::new(db.clone());
         let queue = Arc::new(builder.build(db_arc.clone()));
 
-        // Merge engine: LLM arbitration when llm_enabled + credentials present,
-        // deterministic priority fallback otherwise. Reads llm_configured from
-        // the startup-time snapshot; runtime changes take effect on next restart.
-        let merge_engine = {
-            let cfg = live_metadata_config.snapshot();
-            let llm_configured = cfg.llm_enabled
-                && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
-                && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
-            let llm_caller = livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
-                live_metadata_config.clone(),
-                http_client.clone(),
-            );
-            Arc::new(m::DefaultMergeEngine::new_with_llm(
-                m::PriorityModel::english(),
-                llm_caller,
-                llm_configured,
-            ))
-        };
+        // Merge engine: purely deterministic (REQ-005) — the per-merge priority
+        // model comes from `MergeInput`; no LLM is consulted anywhere in merge.
+        let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
 
         let llm_configured = live_metadata_config.snapshot().llm_enabled;
         let service = Arc::new(
@@ -412,7 +397,6 @@ async fn main() {
         tag_service_arc.clone(),
         settings_service_arc.clone(),
         http_client_safe.clone(),
-        data_dir_arc.clone(),
     ));
     // Build trusted origins from configured indexers + download clients.
     let trusted_origins = Arc::new(livrarr_http::ssrf::TrustedOrigins::new());
@@ -544,23 +528,8 @@ async fn main() {
             svc_enrichment.clone(),
             svc_db.clone(),
         );
-        let ws_merge_engine = {
-            let cfg = live_metadata_config.snapshot();
-            let llm_configured = cfg.llm_enabled
-                && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
-                && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
-            let llm_caller = livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
-                live_metadata_config.clone(),
-                livrarr_http::HttpClient::builder()
-                    .build()
-                    .expect("LLM HttpClient for work service merge engine"),
-            );
-            livrarr_metadata::DefaultMergeEngine::new_with_llm(
-                livrarr_metadata::PriorityModel::english(),
-                llm_caller,
-                llm_configured,
-            )
-        };
+        let ws_merge_engine =
+            livrarr_metadata::DefaultMergeEngine::new(livrarr_metadata::PriorityModel::english());
         Arc::new(
             livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
                 svc_db.clone(),
@@ -707,22 +676,9 @@ async fn main() {
                         .expect("LLM HttpClient for list service"),
                 ),
                 data_dir.clone(),
-                {
-                    let cfg = live_metadata_config.snapshot();
-                    let llm_configured = cfg.llm_enabled
-                        && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
-                        && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
-                    livrarr_metadata::DefaultMergeEngine::new_with_llm(
-                        livrarr_metadata::PriorityModel::english(),
-                        livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
-                            live_metadata_config.clone(),
-                            livrarr_http::HttpClient::builder()
-                                .build()
-                                .expect("LLM HttpClient for list service merge engine"),
-                        ),
-                        llm_configured,
-                    )
-                },
+                livrarr_metadata::DefaultMergeEngine::new(
+                    livrarr_metadata::PriorityModel::english(),
+                ),
                 tag_service_arc.clone(),
             );
             Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
@@ -763,22 +719,9 @@ async fn main() {
                         .expect("LLM HttpClient for author monitor"),
                 ),
                 data_dir.clone(),
-                {
-                    let cfg = live_metadata_config.snapshot();
-                    let llm_configured = cfg.llm_enabled
-                        && cfg.llm_endpoint.as_deref().is_some_and(|s| !s.is_empty())
-                        && cfg.llm_api_key.as_deref().is_some_and(|s| !s.is_empty());
-                    livrarr_metadata::DefaultMergeEngine::new_with_llm(
-                        livrarr_metadata::PriorityModel::english(),
-                        livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
-                            live_metadata_config.clone(),
-                            livrarr_http::HttpClient::builder()
-                                .build()
-                                .expect("LLM HttpClient for author monitor merge engine"),
-                        ),
-                        llm_configured,
-                    )
-                },
+                livrarr_metadata::DefaultMergeEngine::new(
+                    livrarr_metadata::PriorityModel::english(),
+                ),
                 tag_service_arc.clone(),
             );
             Arc::new(
@@ -849,6 +792,7 @@ async fn main() {
                 data_dir_arc.clone(),
                 work_service_arc.clone(),
                 svc_db.clone(),
+                import_workflow_arc.clone(),
             ),
         ),
         cover_service,
@@ -914,7 +858,7 @@ async fn main() {
         ),
     };
 
-    // Step 7: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
+    // Step 11: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
     livrarr_server::jobs::recover_interrupted_state(&state).await;
 
     // Pre-warm SQLite page cache so first request isn't slow.
@@ -927,13 +871,13 @@ async fn main() {
         .fetch_one(state.db.pool())
         .await;
 
-    // Step 8: Start background jobs (JOBS-001).
+    // Step 12: Start background jobs (JOBS-001).
     job_runner.start(state.clone()).await;
 
-    // Step 9: Build router.
+    // Step 13: Build router.
     let app = build_router(state, ui_dir);
 
-    // Step 10: Bind HTTP server.
+    // Step 14: Bind HTTP server.
     let addr = format!("{}:{}", config.server.bind_address, config.server.port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
@@ -943,26 +887,40 @@ async fn main() {
         }
     };
 
-    tokio::spawn(livrarr_server::jobs::chapter_backfill::run_chapter_backfill(svc_db.clone()));
-    // Covers startup sequence — ONE task because the passes inside it are
+    job_runner
+        .spawn_startup_pass(
+            "chapter_backfill",
+            svc_db.clone(),
+            livrarr_server::jobs::chapter_backfill::run_chapter_backfill(svc_db.clone()),
+        )
+        .await;
+    // Covers startup sequence — ONE pass because the passes inside it are
     // order-dependent: the layout migration must settle the per-user
     // directory tree before recovery converges pending cover writes against
     // it, and the provenance backfill must only stamp rows recovery has
     // finished healing. The sequencing itself lives in
     // livrarr_metadata::cover_startup.
-    tokio::spawn(
-        livrarr_server::jobs::cover_startup::run_cover_startup_passes(
+    job_runner
+        .spawn_startup_pass(
+            "cover_startup",
             svc_db.clone(),
-            data_dir.join("covers"),
-        ),
-    );
-    tokio::spawn(livrarr_server::jobs::series_backfill::run_series_backfill(
-        svc_db.clone(),
-    ));
+            livrarr_server::jobs::cover_startup::run_cover_startup_passes(
+                svc_db.clone(),
+                data_dir.join("covers"),
+            ),
+        )
+        .await;
+    job_runner
+        .spawn_startup_pass(
+            "series_backfill",
+            svc_db.clone(),
+            livrarr_server::jobs::series_backfill::run_series_backfill(svc_db.clone()),
+        )
+        .await;
 
     info!("Listening on {addr}");
 
-    // Step 9: Serve with graceful shutdown on SIGTERM/Ctrl+C.
+    // Step 15: Serve with graceful shutdown on SIGTERM/Ctrl+C.
     // Cancel background jobs immediately when signal fires (before HTTP drain).
     // Remove PID file early so a container restart doesn't deadlock on stale lock.
     let job_cancel = job_runner.cancel_token();

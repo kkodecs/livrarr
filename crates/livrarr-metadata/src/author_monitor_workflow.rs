@@ -542,7 +542,12 @@ where
                                 },
                             );
                             match self.work_service.add(author_ref.user_id, candidate).await {
-                                Ok(_work) => {
+                                Ok(work_result) => {
+                                    let ws = self.work_service.clone();
+                                    let (uid, wid) = (author_ref.user_id, work_result.work.id);
+                                    tokio::spawn(async move {
+                                        let _ = ws.converge_work(uid, wid, 3).await;
+                                    });
                                     let notif_ok = self
                                         .db
                                         .create_notification(CreateNotificationDbRequest {

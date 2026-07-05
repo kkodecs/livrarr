@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::atomic_copy;
@@ -8,8 +9,9 @@ use livrarr_db::{
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::{
-    ChapterExtractionError, ChapterExtractor, FailedFile, ImportResult, ImportWorkflow,
-    ImportWorkflowError, ImportedFile, ScanConfirmation, SkippedFile,
+    ChapterExtractionError, ChapterExtractor, FailedFile, ImportFileOutcome, ImportFileRequest,
+    ImportResult, ImportWorkflow, ImportWorkflowError, ImportedFile, Materialization, SkipReason,
+    SkippedFile,
 };
 use livrarr_domain::{
     classify_file, sanitize_path_component, DbError, EventType, GrabId, GrabStatus, MediaType,
@@ -20,6 +22,8 @@ use sha2::{Digest, Sha256};
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
+
+static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct ImportWorkflowImpl<D> {
     db: D,
@@ -77,6 +81,232 @@ where
             work_id,
         )
         .await;
+    }
+
+    /// Lock-free core for `ImportWorkflow::import_file`. `import_file` (the
+    /// trait method) acquires the per-(user, work) lock first; `import_grab`
+    /// already holds that lock for its whole run and calls this directly —
+    /// `KeyedMutex` is not re-entrant, so it must never call `import_file`.
+    ///
+    /// Generalizes the orphan-adoption branch `import_grab` used to run
+    /// inline: target-exists + no row for this work adopts the on-disk file
+    /// (`Copy`/`HardlinkFirst` require the target's size to match the
+    /// source's; `AdoptInPlace` never checks, since source and target are the
+    /// same file by definition). A row for a different work at the same path
+    /// is a `PathCollision`, whether detected directly (size mismatch) or via
+    /// the database's own cross-work rejection.
+    async fn import_file_locked(
+        &self,
+        user_id: UserId,
+        req: ImportFileRequest,
+    ) -> Result<ImportFileOutcome, ImportWorkflowError> {
+        let root_folder = self
+            .db
+            .get_root_folder(req.root_folder_id)
+            .await
+            .map_err(ImportWorkflowError::Db)?;
+
+        let target = Path::new(&root_folder.path).join(&req.target_relative);
+        validate_target_path(&target, &root_folder.path)
+            .map_err(ImportWorkflowError::ImportFailed)?;
+
+        let target_clone = target.clone();
+        let target_exists = tokio::task::spawn_blocking(move || target_clone.exists())
+            .await
+            .unwrap_or(false);
+
+        if target_exists {
+            let existing_items = self
+                .db
+                .list_library_items_by_work(user_id, req.work_id)
+                .await
+                .map_err(ImportWorkflowError::Db)?;
+
+            if existing_items
+                .iter()
+                .any(|li| li.root_folder_id == req.root_folder_id && li.path == req.target_relative)
+            {
+                return Ok(ImportFileOutcome::Skipped {
+                    reason: SkipReason::AlreadyImported,
+                });
+            }
+
+            // Adoption: create the row from the on-disk file, no file I/O.
+            // Copy/HardlinkFirst must confirm the file is actually ours —
+            // a colliding different book virtually never matches size.
+            let file_size: i64 = match req.materialization {
+                Materialization::AdoptInPlace => {
+                    let target_for_meta = target.clone();
+                    tokio::task::spawn_blocking(move || {
+                        target_for_meta
+                            .metadata()
+                            .map(|m| m.len() as i64)
+                            .unwrap_or(0)
+                    })
+                    .await
+                    .unwrap_or(0)
+                }
+                Materialization::Copy | Materialization::HardlinkFirst => {
+                    let source_path = req.source.clone();
+                    let target_for_meta = target.clone();
+                    let (source_size, target_size) = tokio::task::spawn_blocking(move || {
+                        (
+                            std::fs::metadata(&source_path).map(|m| m.len()).ok(),
+                            std::fs::metadata(&target_for_meta).map(|m| m.len()).ok(),
+                        )
+                    })
+                    .await
+                    .unwrap_or((None, None));
+
+                    if source_size.is_none() || source_size != target_size {
+                        return Err(ImportWorkflowError::PathCollision(req.target_relative));
+                    }
+                    target_size.unwrap_or(0) as i64
+                }
+            };
+
+            let item = match self
+                .db
+                .create_library_item(CreateLibraryItemDbRequest {
+                    user_id,
+                    work_id: req.work_id,
+                    root_folder_id: req.root_folder_id,
+                    path: req.target_relative.clone(),
+                    media_type: req.media_type,
+                    file_size,
+                    import_id: req.import_id.clone(),
+                    tag_status: livrarr_db::TagStatus::Pending,
+                    tagged_at_generation: 0,
+                })
+                .await
+            {
+                Ok(item) => item,
+                Err(DbError::Constraint { .. }) => {
+                    return Err(ImportWorkflowError::PathCollision(req.target_relative));
+                }
+                Err(e) => return Err(ImportWorkflowError::Db(e)),
+            };
+
+            if req.extract_chapters {
+                extract_chapters_and_kash(
+                    &self.db,
+                    &self.extractor,
+                    item.id,
+                    &target,
+                    req.media_type,
+                    user_id,
+                    req.work_id,
+                )
+                .await;
+            }
+
+            return Ok(ImportFileOutcome::Adopted {
+                item_id: item.id,
+                path: req.target_relative,
+            });
+        }
+
+        // Target absent: materialize per mode.
+        let target_parent = target.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let target_file_name = target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // Bytes land at a unique per-attempt staging name and reach the final
+        // path only after the DB row commits, so a cross-work collision never
+        // leaves this work's bytes at a path another work's row claims; plain
+        // rename is the finalize — the row committed first is the authority
+        // for the path, and cross-process races are excluded by the data-dir
+        // PID lock at startup. A crashed attempt's orphaned staging file is
+        // inert (unique name, never enumerated or served) and is deliberately
+        // NOT swept here: a pre-clean pass could race a concurrent
+        // same-target import's active staging file.
+        let staging = target_parent.join(format!(
+            "{target_file_name}.stg{}",
+            STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        let file_size: u64 = match req.materialization {
+            Materialization::AdoptInPlace => {
+                return Err(ImportWorkflowError::SourceNotResolved(format!(
+                    "adopt-in-place target does not exist: {}",
+                    target.display()
+                )));
+            }
+            Materialization::Copy => atomic_copy(&req.source, &staging)
+                .await
+                .map_err(|e| ImportWorkflowError::ImportFailed(format!("copy failed: {e}")))?,
+            Materialization::HardlinkFirst => materialize_hardlink_first(&req.source, &staging)
+                .await
+                .map_err(ImportWorkflowError::ImportFailed)?,
+        };
+
+        let item = match self
+            .db
+            .create_library_item(CreateLibraryItemDbRequest {
+                user_id,
+                work_id: req.work_id,
+                root_folder_id: req.root_folder_id,
+                path: req.target_relative.clone(),
+                media_type: req.media_type,
+                file_size: file_size as i64,
+                import_id: req.import_id.clone(),
+                tag_status: livrarr_db::TagStatus::Pending,
+                tagged_at_generation: 0,
+            })
+            .await
+        {
+            Ok(item) => item,
+            Err(DbError::Constraint { .. }) => {
+                let staging_cleanup = staging.clone();
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(&staging_cleanup))
+                    .await;
+                return Err(ImportWorkflowError::PathCollision(req.target_relative));
+            }
+            Err(e) => {
+                let staging_cleanup = staging.clone();
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(&staging_cleanup))
+                    .await;
+                return Err(ImportWorkflowError::Db(e));
+            }
+        };
+
+        if let Err(e) = tokio::fs::rename(&staging, &target).await {
+            let staging_cleanup = staging.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || std::fs::remove_file(&staging_cleanup)).await;
+            // Roll the row back so the failure shape is "no row, no file" —
+            // never a committed row pointing at a path with nothing on disk.
+            let _ = self.db.delete_library_item(user_id, item.id).await;
+            tracing::warn!(
+                staging = %staging.display(),
+                target = %target.display(),
+                error = %e,
+                "finalize rename failed after library item commit; row rolled back"
+            );
+            return Err(ImportWorkflowError::ImportFailed(format!(
+                "finalize rename failed: {e}"
+            )));
+        }
+
+        if req.extract_chapters {
+            extract_chapters_and_kash(
+                &self.db,
+                &self.extractor,
+                item.id,
+                &target,
+                req.media_type,
+                user_id,
+                req.work_id,
+            )
+            .await;
+        }
+
+        Ok(ImportFileOutcome::Imported {
+            item_id: item.id,
+            path: req.target_relative,
+        })
     }
 }
 
@@ -214,6 +444,53 @@ fn validate_target_path(target: &Path, root_folder_path: &str) -> Result<(), Str
         ));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Materialization
+// ---------------------------------------------------------------------------
+
+/// Hard-links the source into place; falls back to a size-verified copy when
+/// the link fails (e.g. the source and target are on different filesystems).
+/// Lifted from the Readarr import road's `materialize_file` so grab import,
+/// Readarr import, and future doors share one implementation. Returns the
+/// final file size in bytes (needed by callers to populate `file_size` on
+/// the created `LibraryItem` row).
+async fn materialize_hardlink_first(src: &Path, dst: &Path) -> Result<u64, String> {
+    let src = src.to_path_buf();
+    let dst = dst.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+        }
+        if std::fs::hard_link(&src, &dst).is_ok() {
+            let size = std::fs::metadata(&dst)
+                .map_err(|e| format!("cannot stat hardlinked file: {e}"))?
+                .len();
+            return Ok(size);
+        }
+        let parent = dst.parent().ok_or("dest has no parent")?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| format!("tempfile create failed: {e}"))?;
+        let source_size = std::fs::metadata(&src)
+            .map_err(|e| format!("cannot stat source: {e}"))?
+            .len();
+        let copied = std::io::copy(
+            &mut std::fs::File::open(&src).map_err(|e| format!("open source failed: {e}"))?,
+            &mut tmp,
+        )
+        .map_err(|e| format!("copy failed: {e}"))?;
+        if copied != source_size {
+            return Err(format!(
+                "copy size mismatch: copied {copied} vs source {source_size}"
+            ));
+        }
+        tmp.persist(&dst)
+            .map_err(|e| format!("rename failed: {e}"))?;
+        Ok(copied)
+    })
+    .await
+    .expect("spawn_blocking panicked")
 }
 
 // ---------------------------------------------------------------------------
@@ -780,30 +1057,22 @@ where
         let mut skipped_files = Vec::new();
         let mut warnings = Vec::new();
 
-        // Pre-load existing library items for this work to avoid N+1 dedup queries.
-        let existing_items = self
-            .db
-            .list_library_items_by_work(user_id, work_id)
-            .await
-            .unwrap_or_default();
-        let existing_paths: std::collections::HashSet<&str> =
-            existing_items.iter().map(|li| li.path.as_str()).collect();
-
         // Process each file
         for sf in &source_files {
             let media_type = sf.media_type;
+            let source_name = sf
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
 
             // Find root folder for this media type
             let root_folder = match root_folders.iter().find(|rf| rf.media_type == media_type) {
                 Some(rf) => rf,
                 None => {
                     failed_files.push(FailedFile {
-                        source_name: sf
-                            .path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
+                        source_name,
                         error: format!("no root folder for {:?}", media_type),
                     });
                     continue;
@@ -821,189 +1090,81 @@ where
                 &source,
             );
 
-            let target = PathBuf::from(&target_path);
-
-            // Validate path (no traversal)
-            if let Err(e) = validate_target_path(&target, &root_folder.path) {
-                failed_files.push(FailedFile {
-                    source_name: sf
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                    error: e,
-                });
-                continue;
-            }
-
-            // Compute relative path for DB storage
+            // Compute relative path — the request into the shared import core
+            // takes a root-relative path, not the door's absolute one.
             let relative = target_path
                 .strip_prefix(&root_folder.path)
                 .unwrap_or(&target_path)
                 .trim_start_matches('/')
                 .to_string();
 
-            // Check if target already exists
-            let target_clone = target.clone();
-            let target_exists = tokio::task::spawn_blocking(move || target_clone.exists())
-                .await
-                .unwrap_or(false);
+            let req = ImportFileRequest {
+                work_id,
+                root_folder_id: root_folder.id,
+                source: sf.path.clone(),
+                target_relative: relative,
+                media_type,
+                materialization: Materialization::Copy,
+                import_id: None,
+                extract_chapters: true,
+            };
 
-            if target_exists {
-                // Check for existing library item (dedup) using pre-loaded set.
-                if existing_paths.contains(relative.as_str()) {
-                    // Already imported — skip
+            match self.import_file_locked(user_id, req).await {
+                Ok(ImportFileOutcome::Imported { item_id, path }) => {
+                    let file_size = self
+                        .db
+                        .get_library_item(user_id, item_id)
+                        .await
+                        .map(|item| item.file_size)
+                        .unwrap_or(0);
+                    imported_files.push(ImportedFile {
+                        source_name,
+                        target_relative_path: path,
+                        media_type,
+                        file_size: file_size as u64,
+                        library_item_id: item_id,
+                        tags_written: false,
+                        cwa_copied: false,
+                    });
+                }
+                Ok(ImportFileOutcome::Adopted { item_id, path }) => {
+                    let file_size = self
+                        .db
+                        .get_library_item(user_id, item_id)
+                        .await
+                        .map(|item| item.file_size)
+                        .unwrap_or(0);
+                    imported_files.push(ImportedFile {
+                        source_name,
+                        target_relative_path: path,
+                        media_type,
+                        file_size: file_size as u64,
+                        library_item_id: item_id,
+                        tags_written: false,
+                        cwa_copied: false,
+                    });
+                    warnings.push(format!("adopted orphaned file: {}", target_path));
+                }
+                Ok(ImportFileOutcome::Skipped {
+                    reason: SkipReason::AlreadyImported,
+                }) => {
                     skipped_files.push(SkippedFile {
-                        source_name: sf
-                            .path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
+                        source_name,
                         reason: "already imported (dedup)".into(),
                     });
-                    continue;
                 }
-
-                // Orphan adoption: file exists on disk but no DB record
-                let target_for_meta = target.clone();
-                let file_size = tokio::task::spawn_blocking(move || {
-                    target_for_meta
-                        .metadata()
-                        .map(|m| m.len() as i64)
-                        .unwrap_or(0)
-                })
-                .await
-                .unwrap_or(0);
-
-                match self
-                    .db
-                    .create_library_item(CreateLibraryItemDbRequest {
-                        user_id,
-                        work_id,
-                        root_folder_id: root_folder.id,
-                        path: relative.clone(),
-                        media_type,
-                        file_size,
-                        import_id: None,
-                        tag_status: livrarr_db::TagStatus::Pending,
-                        tagged_at_generation: 0,
-                    })
-                    .await
-                {
-                    Ok(item) => {
-                        imported_files.push(ImportedFile {
-                            source_name: sf
-                                .path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned(),
-                            target_relative_path: relative,
-                            media_type,
-                            file_size: file_size as u64,
-                            library_item_id: item.id,
-                            tags_written: false,
-                            cwa_copied: false,
-                        });
-                        warnings.push(format!("adopted orphaned file: {}", target_path));
-                        extract_chapters_and_kash(
-                            &self.db,
-                            &self.extractor,
-                            item.id,
-                            &target,
-                            media_type,
-                            user_id,
-                            work_id,
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        failed_files.push(FailedFile {
-                            source_name: sf
-                                .path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned(),
-                            error: format!("orphan adoption DB error: {e}"),
-                        });
-                    }
-                }
-                continue;
-            }
-
-            // Copy file to target (atomic copy)
-            let src_path = sf.path.clone();
-            let dst_path = target.clone();
-            match atomic_copy(&src_path, &dst_path).await {
-                Ok(copied) => {
-                    // Create library item
-                    match self
-                        .db
-                        .create_library_item(CreateLibraryItemDbRequest {
-                            user_id,
-                            work_id,
-                            root_folder_id: root_folder.id,
-                            path: relative.clone(),
-                            media_type,
-                            file_size: copied as i64,
-                            import_id: None,
-                            tag_status: livrarr_db::TagStatus::Pending,
-                            tagged_at_generation: 0,
-                        })
-                        .await
-                    {
-                        Ok(item) => {
-                            imported_files.push(ImportedFile {
-                                source_name: sf
-                                    .path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned(),
-                                target_relative_path: relative,
-                                media_type,
-                                file_size: copied,
-                                library_item_id: item.id,
-                                tags_written: false,
-                                cwa_copied: false,
-                            });
-                            extract_chapters_and_kash(
-                                &self.db,
-                                &self.extractor,
-                                item.id,
-                                &target,
-                                media_type,
-                                user_id,
-                                work_id,
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            // File copied but DB failed — leave file on disk for retry recovery
-                            failed_files.push(FailedFile {
-                                source_name: sf
-                                    .path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned(),
-                                error: format!("DB error after copy: {e}"),
-                            });
-                        }
-                    }
+                Err(ImportWorkflowError::PathCollision(path)) => {
+                    failed_files.push(FailedFile {
+                        source_name,
+                        error: format!(
+                            "path collision: {path} already claimed by a different work"
+                        ),
+                    });
                 }
                 Err(e) => {
                     failed_files.push(FailedFile {
-                        source_name: sf
-                            .path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
-                        error: format!("copy failed: {e}"),
+                        source_name,
+                        error: e.to_string(),
                     });
                 }
             }
@@ -1061,32 +1222,13 @@ where
         })
     }
 
-    async fn retry_import(
+    async fn import_file(
         &self,
         user_id: UserId,
-        grab_id: GrabId,
-    ) -> Result<ImportResult, ImportWorkflowError> {
-        // Set grab status back to Importing
-        self.db
-            .update_grab_status(user_id, grab_id, GrabStatus::Importing, None)
-            .await
-            .map_err(|e| match e {
-                DbError::NotFound { .. } => ImportWorkflowError::GrabNotFound,
-                other => ImportWorkflowError::Db(other),
-            })?;
-
-        // Re-run import pipeline — dedup inside import_grab handles already-imported files
-        self.import_grab(user_id, grab_id).await
-    }
-
-    async fn confirm_scan(
-        &self,
-        _user_id: UserId,
-        _scan_id: &str,
-        _selections: Vec<ScanConfirmation>,
-    ) -> Result<ImportResult, ImportWorkflowError> {
-        // Scan-based import will move to ManualImportService (deferred).
-        Err(ImportWorkflowError::ScanExpired)
+        req: ImportFileRequest,
+    ) -> Result<ImportFileOutcome, ImportWorkflowError> {
+        let _guard = self.import_locks.lock((user_id, req.work_id)).await;
+        self.import_file_locked(user_id, req).await
     }
 }
 

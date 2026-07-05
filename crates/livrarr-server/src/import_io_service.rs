@@ -131,24 +131,4 @@ where
             .await
             .map_err(map_db_err)
     }
-
-    async fn create_library_item(
-        &self,
-        req: livrarr_domain::services::CreateLibraryItemRequest,
-    ) -> Result<LibraryItem, ImportIoServiceError> {
-        self.db
-            .create_library_item(livrarr_db::CreateLibraryItemDbRequest {
-                user_id: req.user_id,
-                work_id: req.work_id,
-                root_folder_id: req.root_folder_id,
-                path: req.path,
-                media_type: req.media_type,
-                file_size: req.file_size,
-                import_id: req.import_id,
-                tag_status: livrarr_db::TagStatus::Pending,
-                tagged_at_generation: 0,
-            })
-            .await
-            .map_err(map_db_err)
-    }
 }

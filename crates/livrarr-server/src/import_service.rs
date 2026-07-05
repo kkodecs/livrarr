@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use livrarr_domain::services::{
-    AppConfigService, ImportFileResult, ImportGrabResult, ImportService, ImportSingleFileRequest,
-    ServiceError,
+    AdoptScannedFileRequest, AppConfigService, ImportFileOutcome, ImportFileRequest,
+    ImportFileResult, ImportGrabResult, ImportService, ImportSingleFileRequest,
+    ImportWorkflowError, Materialization, ServiceError,
 };
-use livrarr_domain::MediaType;
+use livrarr_domain::{MediaType, Work};
 use livrarr_http::HttpClient;
-use livrarr_tagwrite::TagWriteStatus;
 
 use crate::infra::email;
 use crate::infra::import_pipeline::cwa_copy;
@@ -25,7 +25,6 @@ pub struct LiveImportService {
     tag_service: Arc<crate::tag_service::LiveTagService<LiveImportIoService>>,
     settings_service: Arc<LiveSettingsService>,
     http_client_safe: HttpClient,
-    data_dir: Arc<PathBuf>,
 }
 
 impl LiveImportService {
@@ -35,7 +34,6 @@ impl LiveImportService {
         tag_service: Arc<crate::tag_service::LiveTagService<LiveImportIoService>>,
         settings_service: Arc<LiveSettingsService>,
         http_client_safe: HttpClient,
-        data_dir: Arc<PathBuf>,
     ) -> Self {
         Self {
             import_io,
@@ -43,7 +41,6 @@ impl LiveImportService {
             tag_service,
             settings_service,
             http_client_safe,
-            data_dir,
         }
     }
 }
@@ -59,138 +56,68 @@ impl LiveImportService {
         media_type: MediaType,
         user_id: i64,
         work_id: i64,
-        tag_metadata: Option<&livrarr_tagwrite::TagMetadata>,
-        cover: Option<&[u8]>,
+        work: &Work,
+        import_id: Option<String>,
         media_mgmt: &livrarr_db::MediaManagementConfig,
         author_name: &str,
         title: &str,
-    ) -> Result<(), ImportFileError> {
-        let tmp_path = format!("{target_path}.tmp");
-        let tmp_target = PathBuf::from(&tmp_path);
-        let target = PathBuf::from(target_path);
-
-        // Copy source → .tmp.
-        let src = source.to_path_buf();
-        let tmp_clone = tmp_target.clone();
-        let copy_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            if let Some(parent) = tmp_clone.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("create_dir_all failed: {e}"))?;
-            }
-            std::fs::copy(&src, &tmp_clone).map_err(|e| format!("copy failed: {e}"))?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| ImportFileError::Failed(format!("spawn error: {e}")))?;
-
-        if let Err(e) = copy_result {
-            let _ = std::fs::remove_file(&tmp_target); // clean partial .tmp
-            return Err(ImportFileError::Failed(format!(
-                "{}: {e}",
-                source.display()
-            )));
-        }
-
-        // Tag the .tmp if enrichment data available.
-        let mut tag_warning = None;
-        if let Some(metadata) = tag_metadata {
-            tracing::debug!(path = %tmp_path, "writing tags");
-            match livrarr_tagwrite::write_tags(
-                tmp_path.clone(),
-                metadata.clone(),
-                cover.map(|c| c.to_vec()),
-            )
-            .await
-            {
-                Ok(TagWriteStatus::Written) => {
-                    tracing::info!(path = %tmp_path, "tags written successfully");
-                }
-                Ok(_) => {
-                    tracing::info!(path = %tmp_path, "tag write skipped (unsupported/no data)");
-                }
-                Err(e) => {
-                    tracing::warn!(path = %tmp_path, error = %e, "tag write failed, using original file");
-                    tag_warning = Some(format!("tag write failed for {}: {e}", source.display()));
-                }
-            }
-        }
-
-        // Finalize: rename .tmp → final, or re-copy untagged on tag failure.
-        let src2 = source.to_path_buf();
-        let tmp_fin = tmp_target.clone();
-        let final_t = target.clone();
-        let tw = tag_warning.is_some();
-        let fin_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            if tw {
-                // Tag failed — re-copy source to a temp file, fsync, then rename atomically.
-                let _ = std::fs::remove_file(&tmp_fin);
-                let fallback = tmp_fin.with_extension("fallback.tmp");
-                std::fs::copy(&src2, &fallback).map_err(|e| {
-                    let _ = std::fs::remove_file(&fallback);
-                    format!("fallback copy failed: {e}")
-                })?;
-                if let Ok(f) = std::fs::File::open(&fallback) {
-                    let _ = f.sync_all();
-                }
-                std::fs::rename(&fallback, &final_t).map_err(|e| {
-                    let _ = std::fs::remove_file(&fallback);
-                    format!("fallback rename failed: {e}")
-                })?;
-            } else {
-                // Fsync the tagged .tmp to disk before atomic rename so partial writes
-                // (e.g., tag crate buffered data) can't be lost on power failure.
-                if let Ok(f) = std::fs::File::open(&tmp_fin) {
-                    let _ = f.sync_all();
-                }
-                std::fs::rename(&tmp_fin, &final_t).map_err(|e| format!("rename failed: {e}"))?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| ImportFileError::Failed(format!("spawn error: {e}")))?;
-
-        if let Err(e) = fin_result {
-            let _ = std::fs::remove_file(&tmp_target);
-            return Err(ImportFileError::Failed(format!(
-                "{}: {e}",
-                source.display()
-            )));
-        }
-
-        // Measure file size post-tag.
-        let file_size = target.metadata().map(|m| m.len() as i64).unwrap_or(0);
-
-        // Create library item.
-        let relative = target_path
+    ) -> Result<ImportFileOutcome, ImportFileError> {
+        let target_relative = target_path
             .strip_prefix(root_folder_path)
             .unwrap_or(target_path)
             .trim_start_matches('/')
             .to_string();
 
-        use livrarr_domain::services::ImportIoService;
-        let item = self
-            .import_io
-            .create_library_item(livrarr_domain::services::CreateLibraryItemRequest {
+        use livrarr_domain::services::ImportWorkflow;
+        let outcome = self
+            .import_workflow
+            .import_file(
                 user_id,
-                work_id,
-                root_folder_id,
-                path: relative,
-                media_type,
-                file_size,
-                import_id: None,
-            })
+                ImportFileRequest {
+                    work_id,
+                    root_folder_id,
+                    source: source.to_path_buf(),
+                    target_relative,
+                    media_type,
+                    materialization: Materialization::Copy,
+                    import_id,
+                    extract_chapters: true,
+                },
+            )
             .await
-            .map_err(|e| {
-                // Do NOT delete the file — leave on disk for retry recovery.
-                ImportFileError::Failed(format!("DB error: {e}"))
-            })?;
+            .map_err(|e| ImportFileError::Failed(format!("{}: {e}", source.display())))?;
 
-        // Extract audiobook chapters (M4B) so manual-imported items populate
-        // `audiobook_chapters` like the grab import path does. Non-fatal:
-        // extraction failures are logged inside the workflow, never fail import.
-        self.import_workflow
-            .extract_chapters_for_item(item.id, &target, media_type, user_id, work_id)
-            .await;
+        let item_id = match &outcome {
+            ImportFileOutcome::Skipped { .. } => return Ok(outcome),
+            ImportFileOutcome::Imported { item_id, .. } => *item_id,
+            ImportFileOutcome::Adopted { item_id, .. } => *item_id,
+        };
+
+        // Retag unconditionally — mirrors this door's prior ungated
+        // tag-on-import behavior (build_tag_metadata was always called
+        // regardless of enrichment status), now routed through TagService
+        // instead of the old inline write_tags call. Same post-step shape as
+        // import_grab (:353), minus the enrichment-status gate.
+        use livrarr_domain::services::{ImportIoService, TagService};
+        let mut tag_warning: Option<String> = None;
+        let items = self
+            .import_io
+            .list_library_items_by_work(user_id, work_id)
+            .await
+            .unwrap_or_default();
+        if let Some(item) = items.iter().find(|i| i.id == item_id) {
+            let tag_results = self
+                .tag_service
+                .retag_library_items(work, std::slice::from_ref(item))
+                .await;
+            if let Some(result) = tag_results.into_iter().find(|r| !r.succeeded) {
+                tag_warning = Some(format!(
+                    "tag write failed for {}: {}",
+                    source.display(),
+                    result.error.unwrap_or_else(|| "unknown error".to_string())
+                ));
+            }
+        }
 
         // CWA integration (ebooks only, non-fatal).
         if media_type == MediaType::Ebook {
@@ -226,6 +153,10 @@ impl LiveImportService {
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
+                    let file_size = Path::new(target_path)
+                        .metadata()
+                        .map(|m| m.len() as i64)
+                        .unwrap_or(0);
                     if email::ACCEPTED_EXTENSIONS.contains(&ext.as_str())
                         && file_size <= email::MAX_EMAIL_SIZE
                     {
@@ -255,7 +186,7 @@ impl LiveImportService {
 
         match tag_warning {
             Some(w) => Err(ImportFileError::Warning(w)),
-            None => Ok(()),
+            None => Ok(outcome),
         }
     }
 }
@@ -473,14 +404,6 @@ impl ImportService for LiveImportService {
             Err(e) => return ImportFileResult::Failed(format!("failed to load work: {e}")),
         };
 
-        let tag_metadata = crate::infra::import_pipeline::build_tag_metadata(&work);
-        let cover_data = crate::infra::import_pipeline::read_cover_bytes(
-            &self.data_dir,
-            req.user_id,
-            req.work_id,
-        )
-        .await;
-
         let media_mgmt = match self.settings_service.get_media_management_config().await {
             Ok(cfg) => cfg,
             Err(e) => return ImportFileResult::Failed(format!("failed to load media config: {e}")),
@@ -495,18 +418,44 @@ impl ImportService for LiveImportService {
                 req.media_type,
                 req.user_id,
                 req.work_id,
-                Some(&tag_metadata),
-                cover_data.as_deref(),
+                &work,
+                req.import_id.clone(),
                 &media_mgmt,
                 &req.author_name,
                 &req.title,
             )
             .await
         {
-            Ok(()) => ImportFileResult::Ok,
+            Ok(ImportFileOutcome::Skipped { .. }) => {
+                ImportFileResult::Skipped(format!("{} already imported", req.target_path))
+            }
+            Ok(_) => ImportFileResult::Ok,
             Err(ImportFileError::Warning(w)) => ImportFileResult::Warning(w),
             Err(ImportFileError::Failed(e)) => ImportFileResult::Failed(e),
         }
+    }
+
+    async fn adopt_scanned_file(
+        &self,
+        user_id: i64,
+        req: AdoptScannedFileRequest,
+    ) -> Result<ImportFileOutcome, ImportWorkflowError> {
+        use livrarr_domain::services::ImportWorkflow;
+        self.import_workflow
+            .import_file(
+                user_id,
+                ImportFileRequest {
+                    work_id: req.work_id,
+                    root_folder_id: req.root_folder_id,
+                    source: req.path,
+                    target_relative: req.target_relative,
+                    media_type: req.media_type,
+                    materialization: Materialization::AdoptInPlace,
+                    import_id: None,
+                    extract_chapters: false,
+                },
+            )
+            .await
     }
 
     async fn reorganize_work_files(
@@ -922,13 +871,6 @@ mod reorganize_tests {
         ) -> Result<(), ImportIoServiceError> {
             unreachable!("not used by reorganize_items")
         }
-
-        async fn create_library_item(
-            &self,
-            _: livrarr_domain::services::CreateLibraryItemRequest,
-        ) -> Result<LibraryItem, ImportIoServiceError> {
-            unreachable!("not used by reorganize_items")
-        }
     }
 
     fn test_item(id: i64, root_id: i64, path: &str) -> LibraryItem {
@@ -1062,5 +1004,209 @@ mod reorganize_tests {
         );
         assert!(tokio::fs::try_exists(&new_abs).await.unwrap());
         assert!(!tokio::fs::try_exists(&old_abs).await.unwrap());
+    }
+}
+
+// =============================================================================
+// Manual-import door (R7) tests — no tests/behavioral harness can reach this
+// door (livrarr-behavioral does not depend on livrarr-server), so this
+// mirrors the `reorganize_tests` precedent above: a real SqliteDb-backed
+// `LiveImportService`, constructed the same way `main.rs` wires it, minus a
+// real HTTP client / production ChapterExtractor (neither is exercised by an
+// .epub fixture — see NoopChapterExtractor below).
+// =============================================================================
+
+#[cfg(test)]
+mod manual_import_door_tests {
+    use super::*;
+    use livrarr_db::{LibraryItemDb, RootFolderDb, UserDb, WorkDbCreate};
+
+    /// `do_import_single_file` requests `extract_chapters: true` unconditionally,
+    /// but the core only ever calls the extractor for a `.m4b` extension (see
+    /// `try_extract_chapters`) — every fixture here is a fake `.epub`, so this
+    /// is never actually invoked.
+    struct NoopChapterExtractor;
+    impl livrarr_domain::services::ChapterExtractor for NoopChapterExtractor {
+        fn extract_m4b_chapters(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<
+            livrarr_domain::services::ChapterExtractionResult,
+            livrarr_domain::services::ChapterExtractionError,
+        > {
+            unreachable!("test fixtures are .epub, never .m4b")
+        }
+    }
+
+    fn make_service(db: livrarr_db::sqlite::SqliteDb, data_dir: Arc<PathBuf>) -> LiveImportService {
+        let import_io = Arc::new(LiveImportIoService::new(db.clone()));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(2));
+        let import_workflow = Arc::new(LiveImportWorkflow::new(
+            db.clone(),
+            semaphore,
+            data_dir.clone(),
+            Arc::new(NoopChapterExtractor),
+        ));
+        let tag_service = Arc::new(crate::tag_service::LiveTagService::new(
+            import_io.clone(),
+            data_dir.clone(),
+        ));
+        let settings_service = Arc::new(LiveSettingsService::new(db.clone()));
+        let http_client_safe = livrarr_http::HttpClientBuilder::default().build().unwrap();
+        LiveImportService::new(
+            import_io,
+            import_workflow,
+            tag_service,
+            settings_service,
+            http_client_safe,
+        )
+    }
+
+    #[tokio::test]
+    async fn manual_import_lands_pending_row_and_retag_does_not_fail_the_import() {
+        // The door's own copy/tag/rename pipeline is gone; import_single_file
+        // must now go through the core (`ImportWorkflow::import_file`, Copy
+        // mode) and land a Pending row, then run TagService::retag_library_items
+        // as an unconditional post-step (never a hard failure for this door).
+        let db = livrarr_db::create_test_db().await;
+        let user = db
+            .create_user(livrarr_db::CreateUserDbRequest {
+                username: "manualdoor".into(),
+                password_hash: "hash".into(),
+                role: livrarr_domain::UserRole::Admin,
+                api_key_hash: "keyhash".into(),
+            })
+            .await
+            .unwrap();
+        let (work, _) = db
+            .create_work(livrarr_db::CreateWorkDbRequest {
+                user_id: user.id,
+                title: "Door Book".into(),
+                author_name: "Door Author".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let library_dir = tempfile::tempdir().unwrap();
+        let rf = db
+            .create_root_folder(library_dir.path().to_str().unwrap(), MediaType::Ebook)
+            .await
+            .unwrap();
+
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_path = source_dir.path().join("book.epub");
+        std::fs::write(&source_path, b"test content for import").unwrap();
+
+        let data_dir = Arc::new(library_dir.path().to_path_buf());
+        let svc = make_service(db.clone(), data_dir);
+
+        let target_path = format!("{}/Door Author/Door Book.epub", rf.path);
+        let req = ImportSingleFileRequest {
+            source: source_path,
+            target_path,
+            root_folder_path: rf.path.clone(),
+            root_folder_id: rf.id,
+            media_type: MediaType::Ebook,
+            user_id: user.id,
+            work_id: work.id,
+            author_name: "Door Author".into(),
+            title: "Door Book".into(),
+            import_id: None,
+        };
+
+        let result = svc.import_single_file(req).await;
+        assert!(
+            !matches!(result, ImportFileResult::Failed(_)),
+            "expected import to succeed (Ok or Warning), got {result:?}"
+        );
+
+        let items = db
+            .list_library_items_by_work(user.id, work.id)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1, "the core must create exactly one row");
+        assert_eq!(
+            items[0].tag_status,
+            livrarr_db::TagStatus::Pending,
+            "tag_status is set at creation by the core and is not flipped by \
+             the synchronous retag step — only the tag_convergence job does that"
+        );
+        assert!(
+            std::path::Path::new(&format!("{}/{}", rf.path, items[0].path)).exists(),
+            "the file must actually land at the target path"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_import_second_call_for_same_target_is_skipped() {
+        // The old pipeline had no dedup surface for this door (a re-import
+        // hit a raw DB constraint error). The core's outcome matrix now
+        // reports Skipped(AlreadyImported), which import_single_file must
+        // surface as ImportFileResult::Skipped rather than a generic Failed.
+        let db = livrarr_db::create_test_db().await;
+        let user = db
+            .create_user(livrarr_db::CreateUserDbRequest {
+                username: "manualdoor2".into(),
+                password_hash: "hash".into(),
+                role: livrarr_domain::UserRole::Admin,
+                api_key_hash: "keyhash2".into(),
+            })
+            .await
+            .unwrap();
+        let (work, _) = db
+            .create_work(livrarr_db::CreateWorkDbRequest {
+                user_id: user.id,
+                title: "Door Book Two".into(),
+                author_name: "Door Author Two".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let library_dir = tempfile::tempdir().unwrap();
+        let rf = db
+            .create_root_folder(library_dir.path().to_str().unwrap(), MediaType::Ebook)
+            .await
+            .unwrap();
+
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_path = source_dir.path().join("book.epub");
+        std::fs::write(&source_path, b"test content for import").unwrap();
+
+        let data_dir = Arc::new(library_dir.path().to_path_buf());
+        let svc = make_service(db.clone(), data_dir);
+
+        let target_path = format!("{}/Door Author Two/Door Book Two.epub", rf.path);
+        let build_req = || ImportSingleFileRequest {
+            source: source_path.clone(),
+            target_path: target_path.clone(),
+            root_folder_path: rf.path.clone(),
+            root_folder_id: rf.id,
+            media_type: MediaType::Ebook,
+            user_id: user.id,
+            work_id: work.id,
+            author_name: "Door Author Two".into(),
+            title: "Door Book Two".into(),
+            import_id: None,
+        };
+
+        let first = svc.import_single_file(build_req()).await;
+        assert!(
+            !matches!(first, ImportFileResult::Failed(_)),
+            "first import should succeed, got {first:?}"
+        );
+
+        let second = svc.import_single_file(build_req()).await;
+        assert!(
+            matches!(second, ImportFileResult::Skipped(_)),
+            "re-importing the same target should be skipped, got {second:?}"
+        );
+
+        let items = db
+            .list_library_items_by_work(user.id, work.id)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1, "dedup must not create a second row");
     }
 }

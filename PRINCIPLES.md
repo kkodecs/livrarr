@@ -104,6 +104,7 @@ Stop and reconsider when a change introduces any of these:
 - A new abstraction that exists mostly to feel more "architected"
 - A background task with no shutdown path
 - A migration that edits an already-shipped file
+- A `pub` type that nothing outside its own crate uses — `pub` is a promise no caller consumes; prefer `pub(crate)` (the test and the 2×2 that separates real plumbing from leaks: architecture-review AR-13)
 
 ---
 

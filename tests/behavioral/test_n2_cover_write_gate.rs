@@ -11,7 +11,10 @@ use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb, WorkD
 use livrarr_domain::{
     normalize_for_matching, CoverMediaType, CoverResolution, CoverTrust, UserRole, Work,
 };
-use livrarr_metadata::cover_write_gate::{run_cover_write_gate, CoverWriteGateInput, GateOutcome};
+use livrarr_metadata::cover_write_gate::{
+    run_cover_write_gate, run_user_cover_write, CandidateMeta, CoverWriteGateInput, GateOutcome,
+    UserCoverError, UserCoverInput, UserCoverPayload,
+};
 
 fn fake_jpeg(width: u32, height: u32) -> Vec<u8> {
     let img = image::RgbImage::new(width, height);
@@ -515,4 +518,302 @@ async fn refresh_with_unchanged_pick_and_file_present_is_idempotent_no_redownloa
         0,
         "an unchanged pick with the file already present must not re-download every refresh"
     );
+}
+
+// =============================================================================
+// R3 — user covers through the write gate (`run_user_cover_write`)
+// =============================================================================
+
+/// Pre-refactor sidecars always had `url` as a required plain string.
+/// `#[serde(default)]` on the new `Option<String>` field must not break
+/// parsing a v1 file left on disk across an upgrade — this is a pure serde
+/// round-trip check, independent of the DB/filesystem harness above.
+#[test]
+fn v1_candidate_meta_with_string_url_still_deserializes() {
+    let json = r#"{"url":"https://i.gr-assets.com/old.jpg","source":"goodreads","trust":"validated","width":500,"height":700}"#;
+    let meta: CandidateMeta = serde_json::from_str(json).unwrap();
+    assert_eq!(meta.url.as_deref(), Some("https://i.gr-assets.com/old.jpg"));
+    assert_eq!(meta.source, "goodreads");
+    assert_eq!(meta.trust, CoverTrust::Validated);
+    assert_eq!((meta.width, meta.height), (500, 700));
+}
+
+#[tokio::test]
+async fn user_select_replaces_an_existing_user_trust_cover() {
+    // The enrichment gate's User-NoOp guard must NOT apply to a user's own
+    // pick — replacing an earlier User-trust cover with a new one is exactly
+    // the case `run_user_cover_write` exists to serve.
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_dir = tempfile::tempdir().unwrap();
+
+    db.update_cover_metadata(
+        user_id,
+        work.id,
+        Some("https://example.test/old-user-pick.jpg"),
+        "user_upload",
+        CoverTrust::User,
+        900,
+        1300,
+    )
+    .await
+    .unwrap();
+
+    let http = StubHttpFetcher::with_ok(200, fake_jpeg(640, 960));
+
+    let outcome = run_user_cover_write(
+        &db,
+        &http,
+        user_id,
+        UserCoverInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Ebook,
+            payload: UserCoverPayload::Url {
+                url: "https://covers.openlibrary.org/new-user-pick.jpg".into(),
+                source: "isbn_ol".into(),
+            },
+        },
+    )
+    .await
+    .expect("a user write must not error here");
+
+    assert!(
+        matches!(
+            outcome,
+            GateOutcome::Accepted {
+                width: 640,
+                height: 960,
+                ..
+            }
+        ),
+        "a user's own pick must replace their own earlier User-trust cover, not NoOp: {outcome:?}"
+    );
+    assert_eq!(http.call_count(), 1);
+
+    let after = db.get_work(user_id, work.id).await.unwrap();
+    assert_eq!(
+        after.cover_url.as_deref(),
+        Some("https://covers.openlibrary.org/new-user-pick.jpg")
+    );
+    assert_eq!(after.cover_source.as_deref(), Some("isbn_ol"));
+    assert_eq!(after.cover_trust, CoverTrust::User);
+    assert!(
+        after.cover_manual,
+        "the ebook slot derives cover_manual from trust=User via update_cover_metadata"
+    );
+}
+
+#[tokio::test]
+async fn upload_rejects_bad_magic_bytes() {
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_dir = tempfile::tempdir().unwrap();
+    let http = StubHttpFetcher::new();
+
+    let result = run_user_cover_write(
+        &db,
+        &http,
+        user_id,
+        UserCoverInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Ebook,
+            payload: UserCoverPayload::Bytes {
+                data: b"this is plainly not an image".to_vec(),
+            },
+        },
+    )
+    .await;
+
+    match result {
+        Err(UserCoverError::Validation(msg)) => {
+            assert!(msg.contains("unsupported format"), "message was: {msg}");
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+    assert_eq!(http.call_count(), 0, "an upload must never hit the network");
+    let after = db.get_work(user_id, work.id).await.unwrap();
+    assert!(
+        after.cover_url.is_none(),
+        "a rejected upload must not touch the row"
+    );
+}
+
+#[tokio::test]
+async fn upload_rejects_oversized_file() {
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_dir = tempfile::tempdir().unwrap();
+    let http = StubHttpFetcher::new();
+
+    let oversized = vec![0u8; 5 * 1024 * 1024 + 1];
+    let result = run_user_cover_write(
+        &db,
+        &http,
+        user_id,
+        UserCoverInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Ebook,
+            payload: UserCoverPayload::Bytes { data: oversized },
+        },
+    )
+    .await;
+
+    match result {
+        Err(UserCoverError::Validation(msg)) => {
+            assert!(msg.contains("too large"), "message was: {msg}");
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+    let after = db.get_work(user_id, work.id).await.unwrap();
+    assert!(after.cover_url.is_none());
+}
+
+#[tokio::test]
+async fn upload_rejects_oversized_dimensions() {
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_dir = tempfile::tempdir().unwrap();
+    let http = StubHttpFetcher::new();
+
+    // A thin 8001x1 JPEG trips the >8000-per-side cap without allocating a
+    // huge buffer.
+    let huge = fake_jpeg(8001, 1);
+    let result = run_user_cover_write(
+        &db,
+        &http,
+        user_id,
+        UserCoverInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Ebook,
+            payload: UserCoverPayload::Bytes { data: huge },
+        },
+    )
+    .await;
+
+    match result {
+        Err(UserCoverError::Validation(msg)) => {
+            assert!(msg.contains("too large"), "message was: {msg}");
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn upload_valid_png_is_reencoded_to_jpeg_and_accepted() {
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_dir = tempfile::tempdir().unwrap();
+    let http = StubHttpFetcher::new();
+
+    let png_bytes = include_bytes!("fixtures/test_cover_100x150.png").to_vec();
+    assert!(
+        png_bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+        "fixture must actually be a PNG"
+    );
+
+    let outcome = run_user_cover_write(
+        &db,
+        &http,
+        user_id,
+        UserCoverInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Ebook,
+            payload: UserCoverPayload::Bytes { data: png_bytes },
+        },
+    )
+    .await
+    .expect("a valid PNG must be accepted");
+
+    match outcome {
+        GateOutcome::Accepted {
+            bytes,
+            width,
+            height,
+        } => {
+            assert_eq!((width, height), (100, 150));
+            assert!(
+                bytes.starts_with(&[0xFF, 0xD8]),
+                "an uploaded PNG must be re-encoded to JPEG before being written to disk"
+            );
+        }
+        other => panic!("expected Accepted, got {other:?}"),
+    }
+    assert_eq!(http.call_count(), 0, "an upload must never hit the network");
+
+    let after = db.get_work(user_id, work.id).await.unwrap();
+    assert_eq!(after.cover_source.as_deref(), Some("user_upload"));
+    assert_eq!(after.cover_trust, CoverTrust::User);
+    assert!(after.cover_url.is_none(), "an upload has no source URL");
+    assert!(after.cover_manual);
+
+    let final_path = covers_dir.path().join(format!("{}.jpg", work.id));
+    let on_disk = tokio::fs::read(&final_path).await.unwrap();
+    assert!(on_disk.starts_with(&[0xFF, 0xD8]));
+}
+
+#[tokio::test]
+async fn enrichment_still_noops_after_a_real_user_cover_write() {
+    // Regression pin for the refactor: after a user's OWN write lands (via
+    // `run_user_cover_write`, not a synthetic DB-only seed), the enrichment
+    // entry point must still respect it — never re-download, never touch
+    // the row.
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_dir = tempfile::tempdir().unwrap();
+
+    let http = StubHttpFetcher::with_ok(200, fake_jpeg(900, 1300));
+    let user_outcome = run_user_cover_write(
+        &db,
+        &http,
+        user_id,
+        UserCoverInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Ebook,
+            payload: UserCoverPayload::Url {
+                url: "https://example.test/user-pick.jpg".into(),
+                source: "isbn_ol".into(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(user_outcome.is_accepted());
+    assert_eq!(http.call_count(), 1);
+
+    let enrich_outcome = run_cover_write_gate(
+        &db,
+        &http,
+        user_id,
+        CoverWriteGateInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Ebook,
+            resolution: ebook_resolution(
+                "https://i.gr-assets.com/never.jpg",
+                "goodreads",
+                CoverTrust::Validated,
+            ),
+        },
+    )
+    .await;
+
+    assert!(matches!(enrich_outcome, GateOutcome::NoOp));
+    assert_eq!(
+        http.call_count(),
+        1,
+        "the enrichment attempt must never download — the User-trust guard blocks before fetch"
+    );
+    let after = db.get_work(user_id, work.id).await.unwrap();
+    assert_eq!(
+        after.cover_url.as_deref(),
+        Some("https://example.test/user-pick.jpg"),
+        "the user's own pick must survive an enrichment attempt"
+    );
+    assert_eq!(after.cover_trust, CoverTrust::User);
 }

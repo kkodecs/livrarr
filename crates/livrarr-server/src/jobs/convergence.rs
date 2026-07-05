@@ -10,8 +10,8 @@ use livrarr_domain::services::{ConvergeOutcome, WorkService};
 
 /// Convergence sweep — drives incomplete works toward full identity + enrichment.
 ///
-/// Disabled by default (`[convergence] enabled = false`); enabling it is an
-/// operational decision gated on the target library's worst-case provider volume.
+/// Enabled by default; `[convergence] enabled = false` opts out — the lever
+/// for libraries where worst-case provider volume is a concern.
 /// When enabled, each tick walks every user, selects the works due for a
 /// convergence pass, runs one `converge_work` pass over each, and paces the work's
 /// next attempt via `next_convergence_at`.

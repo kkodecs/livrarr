@@ -4,51 +4,9 @@ pub mod cross_format_service;
 pub mod file_service;
 pub mod import_workflow;
 
-use livrarr_domain::{
-    sanitize_path_component, DbError, Grab, GrabId, GrabStatus, LibraryItemId, MediaType,
-    RootFolderId, UserId, WorkId,
-};
+use livrarr_domain::{DbError, GrabStatus, MediaType, RootFolderId, UserId, WorkId};
 // Re-export classify_file from domain.
 pub use livrarr_domain::classify_file;
-
-/// Import pipeline -- processes completed downloads.
-#[trait_variant::make(Send)]
-pub trait ImportService: Send + Sync {
-    /// Run import for a completed grab.
-    async fn import_grab(&self, grab: &Grab) -> Result<ImportResult, ImportError>;
-
-    /// Retry a failed import.
-    async fn retry_import(&self, user_id: UserId, grab_id: GrabId) -> Result<(), ImportError>;
-}
-
-pub struct ImportResult {
-    pub grab_id: GrabId,
-    pub final_status: GrabStatus,
-    pub imported_files: Vec<ImportedFile>,
-    pub skipped_files: Vec<SkippedFile>,
-    pub failed_files: Vec<FailedFile>,
-    pub warnings: Vec<String>,
-}
-
-pub struct ImportedFile {
-    pub source_path: String,
-    pub target_path: String,
-    pub media_type: MediaType,
-    pub file_size: i64,
-    pub library_item_id: LibraryItemId,
-    pub tags_written: bool,
-    pub cwa_copied: bool,
-}
-
-pub struct SkippedFile {
-    pub source_path: String,
-    pub reason: String,
-}
-
-pub struct FailedFile {
-    pub source_path: String,
-    pub error: String,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
@@ -154,71 +112,6 @@ pub enum ScanError {
     Io(String),
     #[error("database error: {0}")]
     Db(#[from] DbError),
-}
-
-// ---------------------------------------------------------------------------
-// CWA Integration
-// ---------------------------------------------------------------------------
-
-/// CWA downstream integration (non-fatal).
-pub fn copy_to_cwa(
-    source_path: &str,
-    cwa_ingest_path: &str,
-    user_id: UserId,
-    author: &str,
-    title: &str,
-    extension: &str,
-) -> CwaResult {
-    let author_san = sanitize_path_component(author, "Unknown Author");
-    let title_san = sanitize_path_component(title, "Unknown Title");
-    let dst_dir = std::path::Path::new(cwa_ingest_path)
-        .join(user_id.to_string())
-        .join(&author_san);
-    let dst = dst_dir.join(format!("{}.{}", title_san, extension));
-
-    if dst.exists() {
-        return CwaResult {
-            success: false,
-            warning: Some(format!("destination already exists: {}", dst.display())),
-        };
-    }
-
-    if let Err(e) = std::fs::create_dir_all(&dst_dir) {
-        return CwaResult {
-            success: false,
-            warning: Some(format!("failed to create CWA directory: {e}")),
-        };
-    }
-
-    // Try hardlink first
-    match std::fs::hard_link(source_path, &dst) {
-        Ok(()) => CwaResult {
-            success: true,
-            warning: None,
-        },
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            // EXDEV — cross-filesystem, fallback to copy
-            match std::fs::copy(source_path, &dst) {
-                Ok(_) => CwaResult {
-                    success: true,
-                    warning: None,
-                },
-                Err(e) => CwaResult {
-                    success: false,
-                    warning: Some(format!("CWA copy failed: {e}")),
-                },
-            }
-        }
-        Err(e) => CwaResult {
-            success: false,
-            warning: Some(format!("CWA hardlink failed: {e}")),
-        },
-    }
-}
-
-pub struct CwaResult {
-    pub success: bool,
-    pub warning: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -2,9 +2,8 @@
 //! calls from the readarr_import handler.
 
 use livrarr_db::{
-    AuthorDb, CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest, ImportDb,
-    LibraryItemDb, RootFolderDb, UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest,
-    WorkDb,
+    AuthorDb, CreateAuthorDbRequest, CreateImportDbRequest, ImportDb, LibraryItemDb, RootFolderDb,
+    UpdateWorkUserFieldsDbRequest, WorkDb,
 };
 use livrarr_domain::{
     Author, DbError, Import, LibraryItem, LibraryItemId, RootFolder, RootFolderId, UserId, Work,
@@ -80,24 +79,12 @@ pub trait ReadarrImportService: Send + Sync {
 
     // -- Work operations (run_import) --
     async fn list_works(&self, user_id: UserId) -> Result<Vec<Work>, ReadarrImportError>;
-    async fn update_work_enrichment(
-        &self,
-        user_id: UserId,
-        work_id: WorkId,
-        req: UpdateWorkEnrichmentDbRequest,
-    ) -> Result<Work, ReadarrImportError>;
     async fn update_work_user_fields(
         &self,
         user_id: UserId,
         work_id: WorkId,
         req: UpdateWorkUserFieldsDbRequest,
     ) -> Result<Work, ReadarrImportError>;
-
-    // -- Library item creation (run_import) --
-    async fn create_library_item(
-        &self,
-        req: CreateLibraryItemDbRequest,
-    ) -> Result<LibraryItem, ReadarrImportError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,18 +191,6 @@ where
         Ok(self.db.list_works(user_id).await?)
     }
 
-    async fn update_work_enrichment(
-        &self,
-        user_id: UserId,
-        work_id: WorkId,
-        req: UpdateWorkEnrichmentDbRequest,
-    ) -> Result<Work, ReadarrImportError> {
-        Ok(self
-            .db
-            .update_work_enrichment(user_id, work_id, req)
-            .await?)
-    }
-
     async fn update_work_user_fields(
         &self,
         user_id: UserId,
@@ -226,13 +201,6 @@ where
             .db
             .update_work_user_fields(user_id, work_id, req)
             .await?)
-    }
-
-    async fn create_library_item(
-        &self,
-        req: CreateLibraryItemDbRequest,
-    ) -> Result<LibraryItem, ReadarrImportError> {
-        Ok(self.db.create_library_item(req).await?)
     }
 }
 

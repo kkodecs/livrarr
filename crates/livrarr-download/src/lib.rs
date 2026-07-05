@@ -1,10 +1,8 @@
 pub mod grab_service;
 pub mod release_service;
 
-use livrarr_domain::services::Release;
 use livrarr_domain::{
-    DbError, DownloadClient, DownloadClientId, Grab, GrabId, GrabStatus, QueueStatus,
-    RemotePathMapping, UserId, WorkId,
+    DbError, DownloadClient, DownloadClientId, GrabId, QueueStatus, RemotePathMapping, WorkId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -107,34 +105,6 @@ pub struct QBitTorrent {
     pub category: String,
 }
 
-// ---------------------------------------------------------------------------
-// Download Service (orchestrator)
-// ---------------------------------------------------------------------------
-
-/// Download operations -- grab, queue, release search.
-#[trait_variant::make(Send)]
-pub trait DownloadService: Send + Sync {
-    /// Search for releases via Prowlarr.
-    async fn search_releases(
-        &self,
-        user_id: UserId,
-        work_id: WorkId,
-    ) -> Result<Vec<Release>, DownloadError>;
-
-    /// Grab a release. Validates, selects client, adds torrent, polls for confirmation.
-    async fn grab(&self, user_id: UserId, req: GrabRequest) -> Result<GrabResult, DownloadError>;
-
-    /// Get live queue from all enabled qBit clients.
-    async fn get_queue(&self, user_id: UserId) -> Result<QueueResponse, DownloadError>;
-
-    /// Remove grab from Livrarr tracking. Torrent stays in qBit.
-    async fn remove_from_queue(
-        &self,
-        user_id: UserId,
-        grab_id: GrabId,
-    ) -> Result<(), DownloadError>;
-}
-
 #[derive(Debug)]
 pub struct GrabRequest {
     pub work_id: WorkId,
@@ -158,40 +128,6 @@ impl Default for GrabRequest {
             size: None,
             download_client_id: None,
             source: TorrentSource::Magnet(String::new()),
-        }
-    }
-}
-
-pub struct GrabResult {
-    pub grab: Grab,
-    pub status: GrabStatus,
-    pub warning: Option<String>,
-}
-
-impl Default for GrabResult {
-    fn default() -> Self {
-        Self {
-            grab: Grab {
-                id: 0,
-                user_id: 0,
-                work_id: 0,
-                download_client_id: 0,
-                title: String::new(),
-                indexer: String::new(),
-                guid: String::new(),
-                size: None,
-                download_url: String::new(),
-                download_id: None,
-                status: GrabStatus::Sent,
-                import_error: None,
-                media_type: None,
-                content_path: None,
-                grabbed_at: chrono::Utc::now(),
-                import_retry_count: 0,
-                import_failed_at: None,
-            },
-            status: GrabStatus::Sent,
-            warning: None,
         }
     }
 }

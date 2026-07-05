@@ -93,7 +93,7 @@ describe('Auth State Machine Contract', () => {
     const loginResponse: LoginResponse = { token: 'abc123hextoken' };
     const adminUser: UserResponse = {
       id: 1,
-      username: '[REDACTED]',
+      username: 'testuser',
       role: 'admin',
       createdAt: '2026-03-31T00:00:00Z',
       updatedAt: '2026-03-31T00:00:00Z',
@@ -113,7 +113,7 @@ describe('Auth State Machine Contract', () => {
     const meResponse: AuthMeResponse = {
       user: {
         id: 1,
-        username: '[REDACTED]',
+        username: 'testuser',
         role: 'admin',
         createdAt: '2026-03-31T00:00:00Z',
         updatedAt: '2026-03-31T00:00:00Z',

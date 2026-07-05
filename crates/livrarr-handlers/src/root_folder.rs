@@ -3,14 +3,17 @@ use std::path::PathBuf;
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::context::{HasFileService, HasImportIoService, HasRootFolderService, HasWorkService};
+use crate::context::{HasFileService, HasImportService, HasRootFolderService, HasWorkService};
 use crate::middleware::RequireAdmin;
 use crate::{
     ApiError, CreateRootFolderRequest, RootFolderResponse, ScanErrorEntry, ScanResult,
     ScanUnmatchedFile,
 };
 use livrarr_domain::identity_matching::identity_key_flat;
-use livrarr_domain::services::{FileService, ImportIoService, RootFolderService, WorkService};
+use livrarr_domain::services::{
+    AdoptScannedFileRequest, FileService, ImportFileOutcome, ImportService, ImportWorkflowError,
+    RootFolderService, WorkService,
+};
 use livrarr_domain::{classify_file, MediaType};
 
 fn disk_space(path: &str) -> (Option<i64>, Option<i64>) {
@@ -97,9 +100,7 @@ pub async fn delete<S: HasRootFolderService>(
     Ok(())
 }
 
-pub async fn scan<
-    S: HasRootFolderService + HasWorkService + HasFileService + HasImportIoService,
->(
+pub async fn scan<S: HasRootFolderService + HasWorkService + HasFileService + HasImportService>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Path(id): Path<i64>,
@@ -256,30 +257,44 @@ pub async fn scan<
         match matched_work {
             Some(work) => {
                 let relative_str = relative_to_root.to_string_lossy().to_string();
-                let already_tracked = existing_items
-                    .iter()
-                    .any(|li| li.root_folder_id == rf.id && li.path == relative_str);
+                let already_tracked = existing_items.iter().any(|li| {
+                    li.work_id == work.id && li.root_folder_id == rf.id && li.path == relative_str
+                });
 
                 if !already_tracked {
-                    let file_size = sf.path.metadata().map(|m| m.len() as i64).unwrap_or(0);
                     match state
-                        .import_io_service()
-                        .create_library_item(livrarr_domain::services::CreateLibraryItemRequest {
+                        .import_service()
+                        .adopt_scanned_file(
                             user_id,
-                            work_id: work.id,
-                            root_folder_id: rf.id,
-                            path: relative_str,
-                            media_type,
-                            file_size,
-                            import_id: None,
-                        })
+                            AdoptScannedFileRequest {
+                                work_id: work.id,
+                                root_folder_id: rf.id,
+                                path: sf.path.clone(),
+                                target_relative: relative_str,
+                                media_type,
+                            },
+                        )
                         .await
                     {
-                        Ok(_) => matched += 1,
+                        Ok(
+                            ImportFileOutcome::Adopted { .. }
+                            | ImportFileOutcome::Imported { .. }
+                            | ImportFileOutcome::Skipped { .. },
+                        ) => {
+                            matched += 1;
+                        }
+                        Err(ImportWorkflowError::PathCollision(path)) => {
+                            errors.push(ScanErrorEntry {
+                                path: sf.path.display().to_string(),
+                                message: format!(
+                                    "path collision: {path} already claimed by a different work"
+                                ),
+                            });
+                        }
                         Err(e) => {
                             errors.push(ScanErrorEntry {
                                 path: sf.path.display().to_string(),
-                                message: format!("failed to create library item: {e}"),
+                                message: format!("failed to adopt file: {e}"),
                             });
                         }
                     }

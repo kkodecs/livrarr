@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
+use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::{CreateNotificationDbRequest, NotificationDb, UserDb};
 use livrarr_domain::{NotificationType, UserRole};
 
@@ -21,7 +22,6 @@ pub mod author_monitor;
 pub mod convergence;
 pub mod download_poller;
 pub mod maintenance;
-pub mod repair;
 pub mod rss_sync;
 pub mod tag_convergence;
 
@@ -240,6 +240,71 @@ impl JobRunner {
                         debug!("job '{job_name}' cancelled during interval sleep");
                         break;
                     },
+                }
+            }
+        });
+
+        self.handles.lock().await.push(handle);
+    }
+
+    /// Run a one-shot startup pass under the runner's rails: registered in
+    /// `job_statuses()` (interval 0 marks one-shot), panic-isolated with admin
+    /// notification (JOBS-002), and abandoned at shutdown via the runner's
+    /// CancellationToken. `db` is used for the panic notification only.
+    pub async fn spawn_startup_pass<Fut>(&self, name: &str, db: SqliteDb, pass: Fut)
+    where
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let status = self.status.clone();
+        let cancel = self.cancel.clone();
+        let job_name = name.to_string();
+
+        self.status.write().await.push(JobStatus {
+            name: job_name.clone(),
+            interval: Duration::ZERO,
+            last_run: None,
+            running: false,
+            panic_notified: false,
+        });
+
+        let handle = tokio::spawn(async move {
+            set_job_running(&status, &job_name, true).await;
+
+            // Child task for panic isolation, same as spawn_job ticks (JOBS-002).
+            let mut pass_handle = tokio::spawn(pass);
+
+            tokio::select! {
+                res = &mut pass_handle => {
+                    match res {
+                        Ok(()) => {
+                            let mut statuses = status.write().await;
+                            if let Some(s) = statuses.iter_mut().find(|s| s.name == job_name) {
+                                s.last_run = Some(chrono::Utc::now());
+                                s.running = false;
+                            }
+                            debug!("startup pass '{job_name}' completed");
+                        }
+                        Err(join_err) if join_err.is_panic() => {
+                            let payload = join_err.into_panic();
+                            let msg = payload
+                                .downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown panic".to_string());
+                            error!("startup pass '{job_name}' panicked: {msg}");
+                            set_job_running(&status, &job_name, false).await;
+                            notify_admins_of_panic(&db, &job_name, &msg).await;
+                        }
+                        Err(join_err) => {
+                            warn!("startup pass '{job_name}' task cancelled: {join_err}");
+                            set_job_running(&status, &job_name, false).await;
+                        }
+                    }
+                }
+                _ = cancel.cancelled() => {
+                    debug!("startup pass '{job_name}' abandoned at shutdown");
+                    pass_handle.abort();
+                    set_job_running(&status, &job_name, false).await;
                 }
             }
         });

@@ -192,7 +192,7 @@ async fn recover_one<D: WorkDb + Sync>(
         )
     };
 
-    let row_matches_meta = row_url.as_deref() == Some(meta.url.as_str())
+    let row_matches_meta = row_url.as_deref() == meta.url.as_deref()
         && row_source.as_deref() == Some(meta.source.as_str())
         && row_trust == meta.trust
         && row_w == meta.width
@@ -234,7 +234,7 @@ async fn recover_one<D: WorkDb + Sync>(
             db.update_audiobook_cover_metadata(
                 user_id,
                 work_id,
-                Some(&meta.url),
+                meta.url.as_deref(),
                 &meta.source,
                 meta.trust,
                 meta.width,
@@ -245,7 +245,7 @@ async fn recover_one<D: WorkDb + Sync>(
             db.update_cover_metadata(
                 user_id,
                 work_id,
-                Some(&meta.url),
+                meta.url.as_deref(),
                 &meta.source,
                 meta.trust,
                 meta.width,

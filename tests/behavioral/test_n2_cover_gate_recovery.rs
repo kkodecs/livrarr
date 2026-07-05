@@ -60,6 +60,34 @@ async fn write_meta(
         .unwrap();
 }
 
+/// Like `write_meta`, but for a user-upload-shaped sidecar, whose `url` is
+/// `None` (no source URL to record — this is unrepresentable in the pre-R3
+/// sidecar schema, which is exactly the gap the `Option<String>` migration
+/// closes).
+async fn write_meta_opt_url(
+    path: &std::path::Path,
+    url: Option<&str>,
+    source: &str,
+    trust: CoverTrust,
+    w: i32,
+    h: i32,
+) {
+    let json = serde_json::json!({
+        "url": url,
+        "source": source,
+        "trust": match trust {
+            CoverTrust::Unvalidated => "unvalidated",
+            CoverTrust::Validated => "validated",
+            CoverTrust::User => "user",
+        },
+        "width": w,
+        "height": h,
+    });
+    tokio::fs::write(path, serde_json::to_vec(&json).unwrap())
+        .await
+        .unwrap();
+}
+
 fn no_candidate_files_survive(user_dir: &std::path::Path, work_id: i64) -> bool {
     let names = [
         format!("{work_id}.candidate.tmp"),
@@ -365,4 +393,109 @@ async fn ac11_orphan_work_candidate_is_discarded() {
     assert_eq!(report.orphaned, 1);
     assert!(!tmp_path.exists());
     assert!(!meta_path.exists());
+}
+
+// =============================================================================
+// R3 — recovery for user-initiated writes (url: None sidecars)
+// =============================================================================
+
+#[tokio::test]
+async fn user_upload_heals_row_to_none_url_and_user_trust_when_tmp_is_gone() {
+    // tmp gone (rename already ran) but the row disagrees with the meta —
+    // healing a user-upload-shaped candidate (url: None) must land `None`
+    // on the row, not a fabricated URL, and must stamp User trust.
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_root = tempfile::tempdir().unwrap();
+    let user_dir = covers_root.path().join(user_id.to_string());
+    tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+    // Row still shows the OLD pre-commit incumbent (simulating the DB
+    // commit's own write having been lost independently of the rename).
+    db.update_cover_metadata(
+        user_id,
+        work.id,
+        Some("https://old.example/incumbent.jpg"),
+        "hardcover",
+        CoverTrust::Validated,
+        800,
+        1200,
+    )
+    .await
+    .unwrap();
+    let final_path = user_dir.join(format!("{}.jpg", work.id));
+    tokio::fs::write(&final_path, b"uploaded-jpeg-bytes")
+        .await
+        .unwrap();
+
+    let meta_path = user_dir.join(format!("{}.candidate.meta.json", work.id));
+    write_meta_opt_url(&meta_path, None, "user_upload", CoverTrust::User, 400, 600).await;
+
+    let report = recover_pending_cover_writes(&db, covers_root.path()).await;
+    assert_eq!(report.healed, 1);
+
+    let after = db.get_work(user_id, work.id).await.unwrap();
+    assert_eq!(
+        after.cover_url, None,
+        "healing a url-less upload candidate must not fabricate a URL"
+    );
+    assert_eq!(after.cover_source.as_deref(), Some("user_upload"));
+    assert_eq!(after.cover_trust, CoverTrust::User);
+    assert_eq!((after.cover_width, after.cover_height), (400, 600));
+    assert!(
+        after.cover_manual,
+        "the heal goes through the same update_cover_metadata that derives cover_manual from trust"
+    );
+    assert!(no_candidate_files_survive(&user_dir, work.id));
+}
+
+#[tokio::test]
+async fn user_upload_candidate_is_discarded_when_crash_landed_before_db_commit() {
+    // meta+tmp exist (url: None, a user-upload-shaped candidate), but the
+    // row is still the OLD incumbent — never matched the candidate, so
+    // nothing was ever accepted. Recovery must discard, not fabricate.
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_root = tempfile::tempdir().unwrap();
+    let user_dir = covers_root.path().join(user_id.to_string());
+    tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+    db.update_cover_metadata(
+        user_id,
+        work.id,
+        Some("https://old.example/incumbent.jpg"),
+        "hardcover",
+        CoverTrust::Validated,
+        800,
+        1200,
+    )
+    .await
+    .unwrap();
+    let final_path = user_dir.join(format!("{}.jpg", work.id));
+    tokio::fs::write(&final_path, b"incumbent-bytes")
+        .await
+        .unwrap();
+
+    let tmp_path = user_dir.join(format!("{}.candidate.tmp", work.id));
+    let meta_path = user_dir.join(format!("{}.candidate.meta.json", work.id));
+    tokio::fs::write(&tmp_path, b"pending-upload-bytes")
+        .await
+        .unwrap();
+    write_meta_opt_url(&meta_path, None, "user_upload", CoverTrust::User, 400, 600).await;
+
+    let report = recover_pending_cover_writes(&db, covers_root.path()).await;
+    assert_eq!(report.discarded, 1);
+
+    let after = db.get_work(user_id, work.id).await.unwrap();
+    assert_eq!(
+        after.cover_url.as_deref(),
+        Some("https://old.example/incumbent.jpg"),
+        "an undecided user-upload candidate must never be healed onto the row"
+    );
+    assert_eq!(after.cover_source.as_deref(), Some("hardcover"));
+    assert_eq!(
+        tokio::fs::read(&final_path).await.unwrap(),
+        b"incumbent-bytes"
+    );
+    assert!(no_candidate_files_survive(&user_dir, work.id));
 }

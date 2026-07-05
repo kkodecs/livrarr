@@ -9,12 +9,14 @@ use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::WorkDb;
 use livrarr_domain::services::CoverServiceError;
 use livrarr_domain::{
-    CoverCandidate, CoverCandidateSource, CoverMediaType, CoverTrust, InternalCoverCandidate,
-    MetadataProvider, UserId, Work, WorkId,
+    CoverCandidate, CoverCandidateSource, CoverMediaType, InternalCoverCandidate, MetadataProvider,
+    UserId, Work, WorkId,
 };
 use livrarr_external_data::provider_client::ProviderClient;
 use livrarr_http::fetcher::HttpFetcherImpl;
-use livrarr_metadata::cover_resolution::measure_dimensions;
+use livrarr_metadata::cover_write_gate::{
+    run_user_cover_write, GateOutcome, UserCoverError, UserCoverInput, UserCoverPayload,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -184,7 +186,6 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
             .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
 
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-        let suffix = media_type.suffix();
 
         // Resolve the cover URL based on source type
         let url = match &source {
@@ -216,64 +217,25 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
             }
         };
 
-        // Download the cover
-        livrarr_materialize::download_cover_to_disk(
-            &self.http_fetcher,
-            &url,
-            &covers_dir,
-            work_id,
-            suffix,
-            livrarr_domain::RequestPriority::Normal,
-            false,
-        )
-        .await
-        .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
-
-        // Measure dimensions
-        let cover_path = covers_dir.join(format!("{work_id}{suffix}.jpg"));
-        let (w, h) = measure_dimensions(&cover_path).unwrap_or((0, 0));
-
-        // Invalidate thumbnails
-        let thumb = covers_dir.join(format!("{work_id}{suffix}_thumb.jpg"));
-        let _ = tokio::fs::remove_file(&thumb).await;
-        if media_type == CoverMediaType::Ebook && work.audiobook_cover_url.is_none() {
-            let audio_thumb = covers_dir.join(format!("{work_id}_audio_thumb.jpg"));
-            let _ = tokio::fs::remove_file(&audio_thumb).await;
-        }
-
-        // Update DB with User trust — branch on media type
         let source_name = source_display_name(&source);
-        match media_type {
-            CoverMediaType::Ebook => {
-                self.db
-                    .update_cover_metadata(
-                        user_id,
-                        work_id,
-                        Some(&url),
-                        &source_name,
-                        CoverTrust::User,
-                        w as i32,
-                        h as i32,
-                    )
-                    .await
-            }
-            CoverMediaType::Audiobook => {
-                self.db
-                    .update_audiobook_cover_metadata(
-                        user_id,
-                        work_id,
-                        Some(&url),
-                        &source_name,
-                        CoverTrust::User,
-                        w as i32,
-                        h as i32,
-                    )
-                    .await
-            }
-        }
-        .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
 
-        Ok(())
+        let outcome = run_user_cover_write(
+            &self.db,
+            &self.http_fetcher,
+            user_id,
+            UserCoverInput {
+                covers_dir,
+                work_id,
+                media_type,
+                payload: UserCoverPayload::Url {
+                    url,
+                    source: source_name,
+                },
+            },
+        )
+        .await;
+
+        map_user_cover_outcome(outcome)
     }
 
     async fn upload_cover(
@@ -283,126 +245,41 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
         data: &[u8],
         media_type: CoverMediaType,
     ) -> Result<(), CoverServiceError> {
-        const MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
-
-        if data.len() > MAX_UPLOAD_SIZE {
-            return Err(CoverServiceError::UploadValidation(format!(
-                "file too large: {} bytes (max {})",
-                data.len(),
-                MAX_UPLOAD_SIZE
-            )));
-        }
-
-        // Validate magic bytes
-        if !(data.starts_with(&[0xFF, 0xD8]) // JPEG
-            || data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) // PNG
-            || (data.len() >= 12 && &data[8..12] == b"WEBP"))
-        // WebP
-        {
-            return Err(CoverServiceError::UploadValidation(
-                "unsupported format: must be JPEG, PNG, or WebP".into(),
-            ));
-        }
-
-        // Decode + re-encode as JPEG in blocking thread
-        let data_owned = data.to_vec();
-        let jpeg_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-            let img = image::load_from_memory(&data_owned)
-                .map_err(|e| format!("image decode failed: {e}"))?;
-
-            if img.width() > 8000 || img.height() > 8000 {
-                return Err(format!(
-                    "image too large: {}x{} (max 8000x8000)",
-                    img.width(),
-                    img.height()
-                ));
-            }
-
-            let mut buf = std::io::Cursor::new(Vec::new());
-            img.write_to(&mut buf, image::ImageFormat::Jpeg)
-                .map_err(|e| format!("JPEG encode failed: {e}"))?;
-            Ok(buf.into_inner())
-        })
-        .await
-        .map_err(|e| CoverServiceError::Internal(e.to_string()))?
-        .map_err(CoverServiceError::UploadValidation)?;
-
-        // Atomic write to disk
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-        tokio::fs::create_dir_all(&covers_dir)
-            .await
-            .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
 
-        let suffix = media_type.suffix();
-        let cover_path = covers_dir.join(format!("{work_id}{suffix}.jpg"));
-        let tmp_path = cover_path.with_extension("jpg.upload.tmp");
+        let outcome = run_user_cover_write(
+            &self.db,
+            &self.http_fetcher,
+            user_id,
+            UserCoverInput {
+                covers_dir,
+                work_id,
+                media_type,
+                payload: UserCoverPayload::Bytes {
+                    data: data.to_vec(),
+                },
+            },
+        )
+        .await;
 
-        let tmp_clone = tmp_path.clone();
-        let bytes = jpeg_bytes;
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            use std::io::Write;
-            let mut f = std::fs::File::create(&tmp_clone)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| CoverServiceError::Internal(e.to_string()))?
-        .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
+        map_user_cover_outcome(outcome)
+    }
+}
 
-        tokio::fs::rename(&tmp_path, &cover_path)
-            .await
-            .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
-
-        // Measure dimensions
-        let (w, h) = measure_dimensions(&cover_path).unwrap_or((0, 0));
-
-        // Invalidate thumbnails
-        let thumb = covers_dir.join(format!("{work_id}{suffix}_thumb.jpg"));
-        let _ = tokio::fs::remove_file(&thumb).await;
-
-        let work = self
-            .db
-            .get_work(user_id, work_id)
-            .await
-            .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
-        if media_type == CoverMediaType::Ebook && work.audiobook_cover_url.is_none() {
-            let audio_thumb = covers_dir.join(format!("{work_id}_audio_thumb.jpg"));
-            let _ = tokio::fs::remove_file(&audio_thumb).await;
-        }
-
-        // Update DB — branch on media type
-        match media_type {
-            CoverMediaType::Ebook => {
-                self.db
-                    .update_cover_metadata(
-                        user_id,
-                        work_id,
-                        None,
-                        "user_upload",
-                        CoverTrust::User,
-                        w as i32,
-                        h as i32,
-                    )
-                    .await
-            }
-            CoverMediaType::Audiobook => {
-                self.db
-                    .update_audiobook_cover_metadata(
-                        user_id,
-                        work_id,
-                        None,
-                        "user_upload",
-                        CoverTrust::User,
-                        w as i32,
-                        h as i32,
-                    )
-                    .await
-            }
-        }
-        .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
-
-        Ok(())
+/// Both `select_cover` and `upload_cover` end the same way: offer the
+/// resolved candidate to the write gate and translate its outcome. A user
+/// write never legitimately produces `NoOp`/`AlreadyCurrent`/`Rejected` (the
+/// gate skips those guards for this entry point) — that path is treated as
+/// an internal error rather than silently swallowed.
+fn map_user_cover_outcome(
+    outcome: Result<GateOutcome, UserCoverError>,
+) -> Result<(), CoverServiceError> {
+    match outcome {
+        Ok(GateOutcome::Accepted { .. }) => Ok(()),
+        Ok(other) => Err(CoverServiceError::Internal(format!(
+            "cover write gate: unexpected outcome for a user cover write: {other:?}"
+        ))),
+        Err(UserCoverError::Validation(m)) => Err(CoverServiceError::UploadValidation(m)),
     }
 }
 
