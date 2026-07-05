@@ -8,7 +8,6 @@ node_modules/
 !.claude/hooks/
 .claude/hooks/*
 !.claude/hooks/pii-check.py
-!.claude/hooks/pii-denylist.txt
 .serena/
 .gemini/
 .mcp.json
