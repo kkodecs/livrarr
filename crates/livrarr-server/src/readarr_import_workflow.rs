@@ -1325,12 +1325,21 @@ impl ImportRunner {
                 let ws = work_service.clone();
                 async move {
                     match ws.add(user_id, p.candidate).await {
-                        Ok(result) => AddOutcome {
-                            rd_book_id: p.rd_book_id,
-                            work_id: Some(result.work.id),
-                            was_created: result.created,
-                            error: None,
-                        },
+                        Ok(result) => {
+                            if result.created {
+                                let ws2 = ws.clone();
+                                let (uid, wid) = (user_id, result.work.id);
+                                tokio::spawn(async move {
+                                    let _ = ws2.converge_work(uid, wid, 3).await;
+                                });
+                            }
+                            AddOutcome {
+                                rd_book_id: p.rd_book_id,
+                                work_id: Some(result.work.id),
+                                was_created: result.created,
+                                error: None,
+                            }
+                        }
                         Err(e) => {
                             warn!(title = %p.title, "Failed to create work: {e}");
                             AddOutcome {

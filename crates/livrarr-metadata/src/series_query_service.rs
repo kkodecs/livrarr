@@ -881,6 +881,11 @@ where
                 Ok(result) => {
                     if result.created {
                         created += 1;
+                        let work_service = self.work_service.clone();
+                        let (uid, wid) = (author.user_id, result.work.id);
+                        tokio::spawn(async move {
+                            let _ = work_service.converge_work(uid, wid, 3).await;
+                        });
                         tracing::debug!(
                             work_id = result.work.id,
                             title = %book.title,
