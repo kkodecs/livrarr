@@ -192,7 +192,7 @@ unless noted. The 2026-06-28 audit's line numbers are STALE — do not use them.
     the 0.75-auto behavior at the identity seat is gone.
 
 - **REQ-005 — Author rule (D9).** Cleaned full author names must match
-  (order-normalized: "[REDACTED], [REDACTED]" = "[REDACTED] [REDACTED]"; initials normalized). Decidable
+  (order-normalized: "Smith, John" = "John Smith"; initials normalized). Decidable
   agreement rules (r1 R-002): (a) ≥1 full-name match (initials compatible with
   the expanded name on a matching surname) → authors AGREE; unmatched EXTRA
   credited names on either side (translators, illustrators, one-sided co-authors)

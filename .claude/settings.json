@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/pii-check.py",
+            "statusMessage": "Checking for PII before commit..."
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Agent",
+      "Bash(cargo test *)",
+      "Bash(cargo check *)",
+      "Bash(cargo clippy *)",
+      "Bash(git grep *)",
+      "mcp__serena__find_symbol",
+      "mcp__code-index__search_code",
+      "mcp__serena__get_symbols_overview",
+      "mcp__serena__find_referencing_symbols"
+    ]
+  }
+}
