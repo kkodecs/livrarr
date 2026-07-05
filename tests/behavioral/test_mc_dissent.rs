@@ -216,3 +216,155 @@ async fn test_mc_foreign_work_drops_hc_ol_payloads_on_cached_and_network_merge_p
     assert!(cached.work_update.is_none());
     assert!(network.work_update.is_none());
 }
+
+#[tokio::test]
+async fn test_mc_language_incompatible_content_field_page_count_year_dissented_and_suppressed() {
+    // Bug #133: the language guard must extend beyond text fields to every
+    // Content-category field (page_count, year, etc.), not just
+    // Description/Subtitle/SeriesName/Genres.
+    let results = std::collections::HashMap::from([
+        (
+            MetadataProvider::GoogleBooks,
+            ReconstructedOutcome {
+                class: OutcomeClass::Success,
+                payload: Some(NormalizedWorkDetail {
+                    page_count: Some(111),
+                    year: Some(1850),
+                    ..detail("Le Comte de Monte-Cristo", "english edition", Some("en"))
+                }),
+            },
+        ),
+        (
+            // Goodreads, not Hardcover/OpenLibrary: those two are hard-dropped
+            // from every foreign-language merge by drop_language_incompatible_providers
+            // (REQ-027) before merge_impl ever runs, regardless of this fix.
+            MetadataProvider::Goodreads,
+            ReconstructedOutcome {
+                class: OutcomeClass::Success,
+                payload: Some(NormalizedWorkDetail {
+                    page_count: Some(999),
+                    year: Some(1844),
+                    ..detail("Le Comte de Monte-Cristo", "french edition", Some("fr"))
+                }),
+            },
+        ),
+    ]);
+
+    let output = DefaultMergeEngine
+        .merge(MergeInput {
+            current_work: current_work("fr"),
+            current_provenance: Vec::new(),
+            provider_results: results,
+            mode: EnrichmentMode::Manual,
+            priority_model: PriorityModel::for_language(Some("fr")),
+        })
+        .await
+        .unwrap();
+
+    let update = output
+        .work_update
+        .expect("french-language provider still contributes");
+    assert_eq!(update.0.page_count, Some(999));
+    assert_eq!(update.0.year, Some(1844));
+
+    assert!(output.dissents.iter().any(|row| {
+        row.reason == DissentReason::LanguageIncompatible
+            && row.field == "page_count"
+            && row.provider == "google_books"
+    }));
+}
+
+#[tokio::test]
+async fn test_mc_language_incompatible_audio_fields_exempt_from_dissent_guard() {
+    // Bug #133 audio exemption: Audible-only audio metadata (narrator,
+    // duration) must not be suppressed or dissented even though the
+    // audiobook's language differs from the (foreign) work language — a
+    // foreign work can legitimately have a different-language audiobook
+    // edition, since audio only ever comes from Audible/Audnexus.
+    let results = std::collections::HashMap::from([(
+        MetadataProvider::Audible,
+        ReconstructedOutcome {
+            class: OutcomeClass::Success,
+            payload: Some(NormalizedWorkDetail {
+                narrator: Some(vec!["Jean Reno".to_string()]),
+                duration_seconds: Some(36000),
+                ..detail("Le Comte de Monte-Cristo", "audio edition", Some("en"))
+            }),
+        },
+    )]);
+
+    let output = DefaultMergeEngine
+        .merge(MergeInput {
+            current_work: current_work("fr"),
+            current_provenance: Vec::new(),
+            provider_results: results,
+            mode: EnrichmentMode::Manual,
+            priority_model: PriorityModel::for_language(Some("fr")),
+        })
+        .await
+        .unwrap();
+
+    let update = output
+        .work_update
+        .expect("audio-only provider still contributes");
+    assert_eq!(update.0.narrator, Some(vec!["Jean Reno".to_string()]));
+    assert_eq!(update.0.duration_seconds, Some(36000));
+
+    assert!(!output
+        .dissents
+        .iter()
+        .any(|row| row.field == "narrator" || row.field == "duration_seconds"));
+}
+
+#[tokio::test]
+async fn test_mc_language_incompatible_series_position_dissented_and_suppressed() {
+    // Bug #133: SeriesPosition (Content-category) now receives the same
+    // language-dissent guard SeriesName already had.
+    let results = std::collections::HashMap::from([
+        (
+            MetadataProvider::GoogleBooks,
+            ReconstructedOutcome {
+                class: OutcomeClass::Success,
+                payload: Some(NormalizedWorkDetail {
+                    series_position: Some(2.0),
+                    ..detail("Le Comte de Monte-Cristo", "english edition", Some("en"))
+                }),
+            },
+        ),
+        (
+            // Goodreads, not Hardcover/OpenLibrary: those two are hard-dropped
+            // from every foreign-language merge by drop_language_incompatible_providers
+            // (REQ-027) before merge_impl ever runs, regardless of this fix.
+            MetadataProvider::Goodreads,
+            ReconstructedOutcome {
+                class: OutcomeClass::Success,
+                payload: Some(NormalizedWorkDetail {
+                    series_position: Some(3.0),
+                    ..detail("Le Comte de Monte-Cristo", "french edition", Some("fr"))
+                }),
+            },
+        ),
+    ]);
+
+    let output = DefaultMergeEngine
+        .merge(MergeInput {
+            current_work: current_work("fr"),
+            current_provenance: Vec::new(),
+            provider_results: results,
+            mode: EnrichmentMode::Manual,
+            priority_model: PriorityModel::for_language(Some("fr")),
+        })
+        .await
+        .unwrap();
+
+    let update = output
+        .work_update
+        .expect("french-language provider still contributes");
+    assert_eq!(update.0.series_position, Some(3.0));
+
+    assert!(output.dissents.iter().any(|row| {
+        row.reason == DissentReason::LanguageIncompatible
+            && row.field == "series_position"
+            && row.provider == "google_books"
+    }));
+}
