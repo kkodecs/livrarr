@@ -21,19 +21,29 @@ The hard problem is metadata. Book metadata is fragmented across hostile sources
 
 ## Core Product Commitments
 
+### Work-First, Not Author-First
+
+The user wants a book. Authors are metadata, not the entry point. The Work — a title, independent of format, edition, or packaging — is the primary entity in the data model, the UI, and every workflow. Users search for works, add works, then find and grab releases in whichever media type (ebook or audiobook) they want.
+
+This is why Livrarr manages both formats as one app instead of two: a Work spans formats. Fragmenting the same book across separate ebook and audiobook records would scatter the same title across multiple places in the UI.
+
 ### User Intent Is Final — and Nothing Happens Without It
 
 When a user makes a decision — affirm a book, resolve a conflict, select from search — the system must act on it immediately and completely. No silently ignored actions. No badge that never updates. No state the user cannot escape without deleting and re-adding.
 
 User intent sits at the top of every decision hierarchy. If the system ignores a user action, that is a bug.
 
-The corollary: Livrarr does not take actions on a user's files or data without explicit consent. No silent writes, no behind-the-scenes modifications. If Livrarr wants to do something to a user's file, it asks first. Tag writing is an offer, not an automatic step.
+The corollary: Livrarr does not take actions on a user's files or data without a triggering user action. No silent writes outside that action's scope, no behind-the-scenes modifications to files already settled in the library. Tag writing at import time is part of adding the book — the user's add *is* the consent, not a separate automatic step done with no triggering action at all. A file already in the library is not modified again without a new, explicit user action — except to complete a workflow the user already started (e.g., a tag rewrite once an async metadata resolution fills in what was missing at add time).
 
 ### Uncertainty Is Visible, Not Silent
 
 When Livrarr cannot identify a book with confidence, it must say so. Works that cannot be identified go into a review queue for the user to resolve. There are no stuck states, no silent limbo, no permanent terminal states the user cannot clear.
 
 An honest "I don't know" is better than a confident wrong answer.
+
+Enrichment follows the same rule, applied to timing: it is synchronous where the user is watching (Add Work, manual-import review) and converges in the background where they are not (list/Readarr import, series/author monitors). A background-created work may sit identity-pending for a while, but it must converge to a resolved identity or surface a terminal needs-review state — never sit in silent limbo indefinitely.
+
+The same honesty applies to failure: a provider timing out, an external dependency failing, or a downstream integration erroring degrades what Livrarr can offer — it never corrupts stored state or silently drops the user's original intent. A failed CWA copy logs a warning while the main import still succeeds; a failed provider fetch still creates the work with whatever data is available.
 
 ### Identity Has One Confidence Hierarchy
 
@@ -54,6 +64,12 @@ A metadata provider (Goodreads, Hardcover, OpenLibrary, Google Books, Audnexus, 
 
 Adding a new provider means implementing the trait contract — nothing else changes. Provider-specific behavior (auth, parsing, quirks) lives inside the provider and does not leak into the identity engine, the enrichment orchestrator, or the merge layer.
 
+### LLM as Metadata Advisor
+
+LLMs assist with metadata repair — for example, extracting fields from provider HTML that deterministic parsing misses. An LLM never selects a match, never triggers a download, never mutates library state, and never auto-accepts a result. Deterministic matching decides; ambiguity goes to the user, not an LLM.
+
+Livrarr is fully functional with no LLM configured. LLMs are probabilistic; they advise, they don't decide.
+
 ### The Canonical Transport Is the Only Transport
 
 All outbound HTTP goes through `livrarr-http`. No exceptions.
@@ -69,11 +85,21 @@ Production code must not issue raw `reqwest` calls outside this crate. Productio
 
 ### Files Are the Artifact
 
-The book file on disk is what Livrarr manages. The file is the thing the user cares about — not Livrarr's database representation of it.
+The book file on disk is what Livrarr manages. The file is the thing the user cares about — not Livrarr's database representation of it. A correctly tagged EPUB or M4B is self-contained: it works in any tool without Livrarr.
 
-This means: Livrarr organizes, serves, and tracks files. It does not modify them without the user's explicit consent. Tag writing (embedding metadata into EPUB/M4B/MP3) is an offer the user can accept or decline — it is never done automatically or silently.
+Livrarr owns the layout it writes into: ebooks flat (`{root}/{user_id}/{Author}/{Title}.ext`), audiobooks in their own directory (`{root}/{user_id}/{Author}/{Title}/{files}`), separate roots per media type. Downstream tools adapt to Livrarr's output, not the other way around.
+
+Import copies files from the download directory into the organized library — the original stays in the download directory for torrent seeding, and the library copy is independent of the source. The one exception is the CWA downstream integration, which hardlinks first (falling back to copy) because that copy is never modified. No other path hardlinks into the library.
 
 A library managed by Livrarr must remain useful if Livrarr is uninstalled. The files are the user's; Livrarr is the manager, not the owner.
+
+### Automated Discovery, Automated Organization
+
+Author monitoring auto-adds new works. RSS sync auto-grabs matching releases for monitored works. After the grab, the system handles everything: download, import, organize, tag. The user sets policy — what to monitor, match thresholds — the system executes it. Manual intervention is reserved for genuinely ambiguous cases.
+
+### Ecosystem Citizen
+
+Livrarr integrates with the tools self-hosted users already run: Prowlarr, qBittorrent, Audiobookshelf, Kavita, Calibre-Web Automated. It follows Servarr conventions for API shape and terminology rather than inventing its own. Self-hosted users already have a stack; Livrarr fits into it, it does not replace it.
 
 ### Privacy by Default
 
@@ -84,6 +110,12 @@ External calls — to metadata providers (Goodreads, Hardcover, OpenLibrary, etc
 What never leaves the machine: file paths, filenames, checksums, reading history, reading position, user preferences, credentials, or any information that could identify the user or their specific copy of a file.
 
 No telemetry. No tracking. Livrarr does not phone home.
+
+### Secure by Default
+
+Self-hosted doesn't mean insecure. Passwords are hashed with argon2id. Session tokens and API keys are stored as SHA-256 hashes — shown once in plaintext, never retrievable again. There is no anonymous access and no network-based auth bypass. The one exception is download-client passwords, stored plaintext per Servarr convention and redacted in API responses.
+
+Self-hosted users are exposed to their local network; secure defaults protect them without requiring configuration.
 
 ---
 
