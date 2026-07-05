@@ -701,8 +701,21 @@ where
                     return None;
                 }
                 let mut e = entries[idx].clone();
+                // Fidelity guard (#53): the LLM is asked only to fix spelling
+                // and capitalization (instruction 3 above), not rewrite the
+                // work. A garbled or wrong-book replacement (e.g. mixing up
+                // two same-author titles) scores low here and the original
+                // scraped title is kept instead of the LLM's output. 0.75
+                // mirrors `identity_matching::TITLE_GREY_FLOOR`, the
+                // established "still plausibly the same title" bar used
+                // elsewhere in the codebase.
                 if let Some(t) = entry.get("title").and_then(|v| v.as_str()) {
-                    e.title = t.to_string();
+                    let candidate = t.trim();
+                    if !candidate.is_empty()
+                        && livrarr_matching::string_similarity(&e.title, candidate) >= 0.75
+                    {
+                        e.title = candidate.to_string();
+                    }
                 }
                 e.series_name = entry
                     .get("series")
