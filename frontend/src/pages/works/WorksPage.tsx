@@ -861,16 +861,18 @@ function PosterView({
                     </Link>
                   ) : work.authorName}
                 </p>
-                {work.seriesName && (
-                  <p className="truncate text-xs text-zinc-500">
-                    {work.seriesId ? (
-                      <Link to={`/series/${work.seriesId}`} onClick={(e) => e.stopPropagation()} className="hover:text-brand">
-                        {work.seriesName}
-                      </Link>
-                    ) : work.seriesName}
-                    {work.seriesPosition != null && ` #${work.seriesPosition}`}
-                  </p>
-                )}
+                <p className="min-h-4 truncate text-xs text-zinc-500">
+                  {work.seriesName && (
+                    <>
+                      {work.seriesId ? (
+                        <Link to={`/series/${work.seriesId}`} onClick={(e) => e.stopPropagation()} className="hover:text-brand">
+                          {work.seriesName}
+                        </Link>
+                      ) : work.seriesName}
+                      {work.seriesPosition != null && ` #${work.seriesPosition}`}
+                    </>
+                  )}
+                </p>
                 {(() => {
                   const bp = bestProgress(work.libraryItems);
                   return bp ? (

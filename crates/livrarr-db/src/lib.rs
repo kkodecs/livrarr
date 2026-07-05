@@ -1370,18 +1370,12 @@ impl From<UpdateIndexerParams> for UpdateIndexerDbRequest {
 /// Satisfies: IMPL-JOBS-005
 #[trait_variant::make(Send)]
 pub trait EnrichmentRetryDb: Send + Sync {
-    /// List works eligible for retry: status in (failed, partial), retry_count < 3.
-    async fn list_works_for_retry(&self) -> Result<Vec<Work>, DbError>;
-
-    /// Reset enrichment for manual refresh: retry_count=0, status=pending.
+    /// Reset enrichment for manual refresh: status=pending.
     async fn reset_enrichment_for_refresh(
         &self,
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<(), DbError>;
-
-    /// Increment retry count. If count >= 3 and status is failed, transition to exhausted.
-    async fn increment_retry_count(&self, user_id: UserId, work_id: WorkId) -> Result<(), DbError>;
 }
 
 // ---------------------------------------------------------------------------

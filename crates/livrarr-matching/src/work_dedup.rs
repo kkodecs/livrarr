@@ -267,7 +267,6 @@ mod tests {
             rating: None,
             rating_count: None,
             enrichment_status: livrarr_domain::EnrichmentStatus::Unenriched,
-            enrichment_retry_count: 0,
             enriched_at: None,
             enrichment_source: None,
             cover_url: None,
