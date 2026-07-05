@@ -1889,7 +1889,7 @@ function CoverSection({
 
       {/* Upload fallback when alternatives not shown */}
       {!showAlternatives && (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1.5 cursor-pointer rounded bg-zinc-700 px-3 py-1.5 text-xs text-zinc-100 hover:bg-zinc-600">
             <Upload size={12} />
             Upload ebook cover
@@ -1899,6 +1899,19 @@ function CoverSection({
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) uploadMutation.mutate({ file, mediaType: "ebook" });
+              }}
+              className="hidden"
+            />
+          </label>
+          <label className="flex items-center gap-1.5 cursor-pointer rounded bg-zinc-700 px-3 py-1.5 text-xs text-zinc-100 hover:bg-zinc-600">
+            <Upload size={12} />
+            Upload audiobook cover
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) uploadMutation.mutate({ file, mediaType: "audiobook" });
               }}
               className="hidden"
             />

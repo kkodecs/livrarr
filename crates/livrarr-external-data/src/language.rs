@@ -150,8 +150,14 @@ pub fn is_llm_configured(
 
 /// Determine provider priority order based on work language.
 /// English (or unknown) → English priority. Everything else → foreign priority.
+///
+/// The language string is reduced to its primary subtag before matching, so
+/// BCP-47 locale tags like `en-US` or `en_us` route the same as bare `en`.
 pub fn provider_priority(language: Option<&str>) -> ProviderPriority {
-    match language.map(|l| l.trim().to_lowercase()).as_deref() {
+    let primary = language
+        .map(|l| l.trim().to_lowercase())
+        .map(|l| l.split(['-', '_']).next().unwrap_or("").to_string());
+    match primary.as_deref() {
         None | Some("en") | Some("eng") | Some("english") | Some("") => ProviderPriority::English,
         Some(_) => ProviderPriority::Foreign,
     }
@@ -161,4 +167,39 @@ pub fn provider_priority(language: Option<&str>) -> ProviderPriority {
 pub enum ProviderPriority {
     English,
     Foreign,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_priority_routes_english_locale_tags_as_english() {
+        // Bare and unknown → English.
+        assert_eq!(provider_priority(None), ProviderPriority::English);
+        assert_eq!(provider_priority(Some("en")), ProviderPriority::English);
+        assert_eq!(provider_priority(Some("eng")), ProviderPriority::English);
+        assert_eq!(
+            provider_priority(Some("English")),
+            ProviderPriority::English
+        );
+        assert_eq!(provider_priority(Some("")), ProviderPriority::English);
+
+        // BCP-47 locale tags for English must not misroute to the foreign path (#96).
+        assert_eq!(provider_priority(Some("en-US")), ProviderPriority::English);
+        assert_eq!(provider_priority(Some("en_us")), ProviderPriority::English);
+        assert_eq!(provider_priority(Some("en-GB")), ProviderPriority::English);
+        assert_eq!(
+            provider_priority(Some(" EN-us ")),
+            ProviderPriority::English
+        );
+    }
+
+    #[test]
+    fn provider_priority_routes_foreign_locale_tags_as_foreign() {
+        assert_eq!(provider_priority(Some("de")), ProviderPriority::Foreign);
+        assert_eq!(provider_priority(Some("de-DE")), ProviderPriority::Foreign);
+        assert_eq!(provider_priority(Some("fr_FR")), ProviderPriority::Foreign);
+        assert_eq!(provider_priority(Some("por")), ProviderPriority::Foreign);
+    }
 }
