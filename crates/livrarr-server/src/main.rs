@@ -397,7 +397,6 @@ async fn main() {
         tag_service_arc.clone(),
         settings_service_arc.clone(),
         http_client_safe.clone(),
-        data_dir_arc.clone(),
     ));
     // Build trusted origins from configured indexers + download clients.
     let trusted_origins = Arc::new(livrarr_http::ssrf::TrustedOrigins::new());
@@ -793,6 +792,7 @@ async fn main() {
                 data_dir_arc.clone(),
                 work_service_arc.clone(),
                 svc_db.clone(),
+                import_workflow_arc.clone(),
             ),
         ),
         cover_service,

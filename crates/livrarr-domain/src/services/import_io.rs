@@ -1,17 +1,7 @@
 use crate::{
-    DbError, DownloadClient, DownloadClientId, Grab, GrabId, LibraryItem, LibraryItemId, MediaType,
+    DbError, DownloadClient, DownloadClientId, Grab, GrabId, LibraryItem, LibraryItemId,
     RemotePathMapping, RootFolder, RootFolderId, UserId, Work, WorkId,
 };
-
-pub struct CreateLibraryItemRequest {
-    pub user_id: UserId,
-    pub work_id: WorkId,
-    pub root_folder_id: RootFolderId,
-    pub path: String,
-    pub media_type: MediaType,
-    pub file_size: i64,
-    pub import_id: Option<String>,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportIoServiceError {
@@ -88,9 +78,4 @@ pub trait ImportIoService: Send + Sync {
         item_id: LibraryItemId,
         new_path: &str,
     ) -> Result<(), ImportIoServiceError>;
-
-    async fn create_library_item(
-        &self,
-        req: CreateLibraryItemRequest,
-    ) -> Result<LibraryItem, ImportIoServiceError>;
 }

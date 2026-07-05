@@ -2,8 +2,8 @@
 //! calls from the readarr_import handler.
 
 use livrarr_db::{
-    AuthorDb, CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest, ImportDb,
-    LibraryItemDb, RootFolderDb, UpdateWorkUserFieldsDbRequest, WorkDb,
+    AuthorDb, CreateAuthorDbRequest, CreateImportDbRequest, ImportDb, LibraryItemDb, RootFolderDb,
+    UpdateWorkUserFieldsDbRequest, WorkDb,
 };
 use livrarr_domain::{
     Author, DbError, Import, LibraryItem, LibraryItemId, RootFolder, RootFolderId, UserId, Work,
@@ -85,12 +85,6 @@ pub trait ReadarrImportService: Send + Sync {
         work_id: WorkId,
         req: UpdateWorkUserFieldsDbRequest,
     ) -> Result<Work, ReadarrImportError>;
-
-    // -- Library item creation (run_import) --
-    async fn create_library_item(
-        &self,
-        req: CreateLibraryItemDbRequest,
-    ) -> Result<LibraryItem, ReadarrImportError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,13 +201,6 @@ where
             .db
             .update_work_user_fields(user_id, work_id, req)
             .await?)
-    }
-
-    async fn create_library_item(
-        &self,
-        req: CreateLibraryItemDbRequest,
-    ) -> Result<LibraryItem, ReadarrImportError> {
-        Ok(self.db.create_library_item(req).await?)
     }
 }
 

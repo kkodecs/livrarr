@@ -1,6 +1,7 @@
 use crate::{GrabStatus, LibraryItem, MediaType, Work};
 
 use super::common::ServiceError;
+use super::import::{ImportFileOutcome, ImportWorkflowError};
 use super::work::TagSyncItemResult;
 
 #[derive(Debug, Clone)]
@@ -30,8 +31,26 @@ pub struct ImportSingleFileRequest {
 #[derive(Debug)]
 pub enum ImportFileResult {
     Ok,
+    /// The target already had a `LibraryItem` for this work at this exact
+    /// path — nothing was materialized, and this is not a failure (mirrors
+    /// `ImportFileOutcome::Skipped { reason: SkipReason::AlreadyImported }`).
+    Skipped(String),
     Warning(String),
     Failed(String),
+}
+
+/// Request to adopt a file the library scan found already sitting in a root
+/// folder. The file IS the target (`Materialization::AdoptInPlace`) — scan
+/// has already resolved the owning work via its `identity_key_flat` match.
+#[derive(Debug)]
+pub struct AdoptScannedFileRequest {
+    pub work_id: i64,
+    pub root_folder_id: i64,
+    /// Absolute path to the file on disk; source == target.
+    pub path: std::path::PathBuf,
+    /// Relative to the root folder.
+    pub target_relative: String,
+    pub media_type: MediaType,
 }
 
 #[trait_variant::make(Send)]
@@ -43,6 +62,15 @@ pub trait ImportService: Send + Sync {
     ) -> Result<ImportGrabResult, ServiceError>;
 
     async fn import_single_file(&self, req: ImportSingleFileRequest) -> ImportFileResult;
+
+    /// Adopt a file the library scan found already sitting in a root folder
+    /// (`Materialization::AdoptInPlace` — no copy/link, no tags/CWA/email;
+    /// scan's tag policy stays on the R10 convergence job).
+    async fn adopt_scanned_file(
+        &self,
+        user_id: i64,
+        req: AdoptScannedFileRequest,
+    ) -> Result<ImportFileOutcome, ImportWorkflowError>;
 
     /// Best-effort physical reorganization of a work's already-imported
     /// files onto the standard naming/layout path (the merge "files

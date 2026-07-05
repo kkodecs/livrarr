@@ -1,4 +1,4 @@
-use crate::{DbError, GrabId, GrabStatus, MediaType, UserId};
+use crate::{DbError, GrabId, GrabStatus, LibraryItemId, MediaType, RootFolderId, UserId, WorkId};
 
 #[derive(Debug)]
 pub struct ImportResult {
@@ -49,8 +49,63 @@ pub enum ImportWorkflowError {
     ImportFailed(String),
     #[error("tag write failed: {0}")]
     TagWriteFailed(String),
+    #[error("path collision: {0} already claimed by a different work")]
+    PathCollision(String),
     #[error("database error: {0}")]
     Db(#[from] DbError),
+}
+
+/// How a source file becomes the on-disk file backing a `LibraryItem`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Materialization {
+    /// Copy the source into place (`atomic_copy`).
+    Copy,
+    /// Hard link the source into place; falls back to a size-verified copy
+    /// when the link fails (e.g. cross-device).
+    HardlinkFirst,
+    /// The source already IS the target — used by doors (e.g. library scan)
+    /// that discover a file already sitting in a root folder.
+    AdoptInPlace,
+}
+
+/// Request to bring one file into the library as a `LibraryItem`, shared by
+/// every import door (grab import, manual import, Readarr import, scan).
+#[derive(Debug)]
+pub struct ImportFileRequest {
+    pub work_id: WorkId,
+    pub root_folder_id: RootFolderId,
+    /// Absolute path to the source file. For `AdoptInPlace` this IS the
+    /// on-disk file (source == target).
+    pub source: std::path::PathBuf,
+    /// Relative to the root folder; computed by the calling door.
+    pub target_relative: String,
+    pub media_type: MediaType,
+    pub materialization: Materialization,
+    pub import_id: Option<String>,
+    pub extract_chapters: bool,
+}
+
+/// Why a file was not imported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    AlreadyImported,
+}
+
+/// Result of `ImportWorkflow::import_file`.
+#[derive(Debug)]
+pub enum ImportFileOutcome {
+    /// A new file was materialized and a `LibraryItem` created.
+    Imported {
+        item_id: LibraryItemId,
+        path: String,
+    },
+    /// A file already on disk (no prior `LibraryItem`) was adopted.
+    Adopted {
+        item_id: LibraryItemId,
+        path: String,
+    },
+    /// The target already has a `LibraryItem` for this work at this path.
+    Skipped { reason: SkipReason },
 }
 
 #[trait_variant::make(Send)]
@@ -60,11 +115,11 @@ pub trait ImportWorkflow: Send + Sync {
         user_id: UserId,
         grab_id: GrabId,
     ) -> Result<ImportResult, ImportWorkflowError>;
-    async fn retry_import(
+    async fn import_file(
         &self,
         user_id: UserId,
-        grab_id: GrabId,
-    ) -> Result<ImportResult, ImportWorkflowError>;
+        req: ImportFileRequest,
+    ) -> Result<ImportFileOutcome, ImportWorkflowError>;
 }
 
 /// Fire-and-forget bibliography fetch trigger for newly created authors.

@@ -1003,6 +1003,18 @@ async fn import_single_item<S: ManualImportHandlerContext>(
                 error: None,
             }
         }
+        ImportFileResult::Skipped(msg) => {
+            info!(
+                "manual import: skipped {} for work {} ({msg})",
+                item.path, work_id
+            );
+            ImportResult {
+                path: item.path.clone(),
+                status: ImportStatus::Skipped,
+                work_id: Some(work_id),
+                error: None,
+            }
+        }
         ImportFileResult::Failed(e) => {
             warn!(
                 "manual import: failed {} for work {}: {e}",

@@ -440,18 +440,14 @@ impl ImportWorkflow for StubImportWorkflow {
         })
     }
 
-    async fn retry_import(
+    async fn import_file(
         &self,
         _user_id: UserId,
-        grab_id: GrabId,
-    ) -> Result<ImportResult, ImportWorkflowError> {
-        Ok(ImportResult {
-            grab_id,
-            final_status: GrabStatus::Imported,
-            imported_files: vec![],
-            failed_files: vec![],
-            skipped_files: vec![],
-            warnings: vec![],
+        req: ImportFileRequest,
+    ) -> Result<ImportFileOutcome, ImportWorkflowError> {
+        Ok(ImportFileOutcome::Imported {
+            item_id: 0,
+            path: req.target_relative,
         })
     }
 }

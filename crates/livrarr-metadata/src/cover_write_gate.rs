@@ -8,10 +8,18 @@
 //! enrichment field merge — so the row always describes the file actually on
 //! disk (the binding invariant).
 //!
+//! A user's own choice (`select_cover`/`upload_cover`, via
+//! [`run_user_cover_write`]) runs the identical crash-safe commit protocol —
+//! same slot lock, same tmp+meta/DB/rename/cleanup steps — but skips the
+//! enrichment-only guards: a user's pick is absolute, including replacing
+//! their own earlier one. The two entry points share every stage from
+//! "acquire candidate bytes" onward (R3).
+//!
 //! Commit order (every step durable before the next is visible):
 //! 1. write `{id}{suffix}.candidate.tmp` (bytes) + `.candidate.meta.json`
 //!    (url/source/trust/dims) before anything else changes.
-//! 2. the comparator decides accept/reject.
+//! 2. the comparator decides accept/reject (enrichment only — a user's own
+//!    pick always accepts once its bytes are validated).
 //! 3. reject: delete both candidate files, row and final file untouched.
 //! 4. accept: update the DB row (url/source/trust/dims) — the commit point.
 //! 5. rename tmp -> final (atomic, same filesystem).
@@ -58,10 +66,14 @@ pub(crate) async fn lock_slot(
 
 /// The durable sidecar recording a pending candidate's intended DB values.
 /// Crash recovery reads this to tell a committed-but-unfinished save apart
-/// from an undecided or rejected one.
+/// from an undecided or rejected one. `url` is `None` for a user's byte
+/// upload (there is no source URL to record); `#[serde(default)]` keeps
+/// existing v1 sidecars — where `url` was a required `String` — parsing
+/// unchanged (they deserialize as `Some(..)`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CandidateMeta {
-    pub url: String,
+    #[serde(default)]
+    pub url: Option<String>,
     pub source: String,
     pub trust: CoverTrust,
     pub width: i32,
@@ -167,12 +179,9 @@ where
 
     let _slot_guard = lock_slot(user_id, work_id, media_type).await;
 
-    let work = match db.get_work(user_id, work_id).await {
+    let work = match read_work_row(db, user_id, work_id).await {
         Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(work_id, error = %e, "cover write gate: work row unreadable");
-            return GateOutcome::NoOp;
-        }
+        Err(outcome) => return outcome,
     };
     let current = current_state_for_slot(&work, media_type);
     let foreign = matches!(
@@ -202,35 +211,27 @@ where
         return GateOutcome::DownloadFailed;
     }
 
-    let (bytes, dims) = match livrarr_materialize::fetch_and_decode_cover(
-        http,
-        &resolution.url,
-        RequestPriority::Normal,
-        false,
-    )
-    .await
-    {
+    let (bytes, new_w, new_h) = match fetch_candidate_bytes(http, work_id, &resolution.url).await {
         Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(work_id, error = %e, "cover write gate: candidate download failed");
-            return GateOutcome::DownloadFailed;
-        }
+        Err(outcome) => return outcome,
     };
-    let (new_w, new_h) = dims.unwrap_or((0, 0));
 
     let tmp_path = candidate_tmp_path(&covers_dir, work_id, suffix);
     let meta_path = candidate_meta_path(&covers_dir, work_id, suffix);
+    let meta = CandidateMeta {
+        url: Some(resolution.url.clone()),
+        source: resolution.source.clone(),
+        trust: resolution.trust,
+        width: new_w,
+        height: new_h,
+    };
 
-    if write_candidate_files(&tmp_path, &meta_path, &bytes, &resolution, new_w, new_h)
+    if write_candidate_files(&tmp_path, &meta_path, &bytes, &meta)
         .await
         .is_err()
     {
-        // Meta first, then tmp (see the REJECT cleanup below for why the
-        // order matters): recovery's discriminator for "the accept path's
-        // rename already ran" is "tmp is gone" — that must never be true
-        // while an undecided/rejected candidate's meta still exists.
-        let _ = tokio::fs::remove_file(&meta_path).await;
-        let _ = tokio::fs::remove_file(&tmp_path).await;
+        // See `discard_candidate_files`'s doc for why the order matters.
+        discard_candidate_files(&meta_path, &tmp_path).await;
         return GateOutcome::DownloadFailed;
     }
 
@@ -250,99 +251,233 @@ where
     };
 
     if !accept {
-        // Meta first, then tmp. Recovery treats "tmp gone, meta present" as
-        // proof the ACCEPT path's atomic rename already ran (row was already
-        // committed to match meta) — so a reject's two-step cleanup must
-        // never pass through that same observable state, or a crash between
-        // the two deletes would make recovery wrongly "heal" the row to a
-        // candidate that was actually rejected. Deleting meta first means
-        // the only interleaved state a crash can leave is "meta gone, tmp
-        // still present" — invisible to recovery (which scans for meta
-        // files), so the orphaned tmp is inert: never rewritten to, never
-        // renamed to the served path, and physically distinct from the
-        // final `.jpg` name.
-        let _ = tokio::fs::remove_file(&meta_path).await;
-        let _ = tokio::fs::remove_file(&tmp_path).await;
+        // See `discard_candidate_files`'s doc for why the order matters.
+        discard_candidate_files(&meta_path, &tmp_path).await;
         return GateOutcome::Rejected;
     }
 
-    let db_result = match media_type {
-        CoverMediaType::Ebook => {
-            db.update_cover_metadata(
-                user_id,
-                work_id,
-                Some(&resolution.url),
-                &resolution.source,
-                resolution.trust,
-                new_w,
-                new_h,
-            )
-            .await
+    commit_and_finalize(
+        db,
+        user_id,
+        work_id,
+        media_type,
+        &covers_dir,
+        &tmp_path,
+        &meta_path,
+        &final_path,
+        sibling_cover_url.as_deref(),
+        meta,
+        bytes,
+    )
+    .await
+}
+
+/// One user-chosen cover, offered to [`run_user_cover_write`].
+pub struct UserCoverInput {
+    pub covers_dir: PathBuf,
+    pub work_id: WorkId,
+    pub media_type: CoverMediaType,
+    pub payload: UserCoverPayload,
+}
+
+/// A user's cover choice arrives either as a resolved URL (`select_cover`,
+/// picking one of the alternatives already offered) or raw bytes
+/// (`upload_cover`).
+pub enum UserCoverPayload {
+    Url { url: String, source: String },
+    Bytes { data: Vec<u8> },
+}
+
+/// Failure detail a bare [`GateOutcome`] can't carry: a user's upload bytes
+/// failed validation (size cap, format, dimensions), and the caller needs
+/// the specific reason to surface to the user (HTTP 400) — the same
+/// messages `cover_service.rs` used to construct directly before this
+/// validation moved into the gate as the single validation site (AR-11).
+#[derive(Debug)]
+pub enum UserCoverError {
+    Validation(String),
+}
+
+/// Offer one user-chosen cover (a `select_cover` pick or an `upload_cover`
+/// byte payload) to the same crash-safe protocol [`run_cover_write_gate`]
+/// uses — same slot lock, same tmp+meta commit/rename/cleanup steps — but
+/// without the enrichment-only guards: a user's choice is absolute and must
+/// be able to replace even their own earlier User-trust pick, exactly the
+/// case `run_cover_write_gate`'s User-NoOp guard blocks. Only a `Bytes`
+/// payload can fail outright (validation); a resolved `Url` behaves like any
+/// other candidate fetch and reports failure via `GateOutcome::DownloadFailed`.
+pub async fn run_user_cover_write<D, H>(
+    db: &D,
+    http: &H,
+    user_id: UserId,
+    input: UserCoverInput,
+) -> Result<GateOutcome, UserCoverError>
+where
+    D: WorkDb + Sync,
+    H: HttpFetcher,
+{
+    let UserCoverInput {
+        covers_dir,
+        work_id,
+        media_type,
+        payload,
+    } = input;
+
+    let _slot_guard = lock_slot(user_id, work_id, media_type).await;
+
+    let work = match read_work_row(db, user_id, work_id).await {
+        Ok(w) => w,
+        Err(outcome) => return Ok(outcome),
+    };
+    let sibling_cover_url = work.audiobook_cover_url.clone();
+
+    let suffix = media_type.suffix();
+    let final_path = final_cover_path(&covers_dir, work_id, suffix);
+
+    if tokio::fs::create_dir_all(&covers_dir).await.is_err() {
+        return Ok(GateOutcome::DownloadFailed);
+    }
+
+    let (bytes, width, height, meta_url, source) = match payload {
+        UserCoverPayload::Url { url, source } => {
+            match fetch_candidate_bytes(http, work_id, &url).await {
+                Ok((bytes, w, h)) => (bytes, w, h, Some(url), source),
+                Err(outcome) => return Ok(outcome),
+            }
         }
-        CoverMediaType::Audiobook => {
-            db.update_audiobook_cover_metadata(
-                user_id,
-                work_id,
-                Some(&resolution.url),
-                &resolution.source,
-                resolution.trust,
-                new_w,
-                new_h,
-            )
-            .await
+        UserCoverPayload::Bytes { data } => {
+            let (jpeg_bytes, w, h) = validate_and_reencode_upload(data)
+                .await
+                .map_err(UserCoverError::Validation)?;
+            (jpeg_bytes, w, h, None, "user_upload".to_string())
         }
     };
-    if let Err(e) = db_result {
-        // Leave tmp+meta in place — the next startup recovery pass discards
-        // them (row != meta, since the commit never happened).
-        tracing::warn!(work_id, error = %e, "cover write gate: DB commit failed");
-        return GateOutcome::DownloadFailed;
+
+    let tmp_path = candidate_tmp_path(&covers_dir, work_id, suffix);
+    let meta_path = candidate_meta_path(&covers_dir, work_id, suffix);
+    let meta = CandidateMeta {
+        url: meta_url,
+        source,
+        trust: CoverTrust::User,
+        width,
+        height,
+    };
+
+    if write_candidate_files(&tmp_path, &meta_path, &bytes, &meta)
+        .await
+        .is_err()
+    {
+        discard_candidate_files(&meta_path, &tmp_path).await;
+        return Ok(GateOutcome::DownloadFailed);
     }
 
-    if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
-        // DB already committed (the commit point). Recovery completes the
-        // rename from meta+tmp at next startup/first-read.
-        tracing::warn!(work_id, error = %e, "cover write gate: rename after commit failed");
-        return GateOutcome::Accepted {
-            bytes,
-            width: new_w,
-            height: new_h,
-        };
-    }
-    let _ = tokio::fs::remove_file(&meta_path).await;
-
-    invalidate_thumbnails(
-        &covers_dir,
+    Ok(commit_and_finalize(
+        db,
+        user_id,
         work_id,
-        suffix,
         media_type,
+        &covers_dir,
+        &tmp_path,
+        &meta_path,
+        &final_path,
         sibling_cover_url.as_deref(),
-    )
-    .await;
-
-    GateOutcome::Accepted {
+        meta,
         bytes,
-        width: new_w,
-        height: new_h,
+    )
+    .await)
+}
+
+/// Read the work row inside the slot lock. Both entry points treat an
+/// unreadable row identically: there's nothing to compare against or
+/// update, so the safest response is a no-op.
+async fn read_work_row<D: WorkDb + Sync>(
+    db: &D,
+    user_id: UserId,
+    work_id: WorkId,
+) -> Result<Work, GateOutcome> {
+    db.get_work(user_id, work_id).await.map_err(|e| {
+        tracing::warn!(work_id, error = %e, "cover write gate: work row unreadable");
+        GateOutcome::NoOp
+    })
+}
+
+/// Fetch and decode one candidate's bytes via the SSRF-safe fetcher — the
+/// acquisition step shared by both entry points for URL-sourced candidates
+/// (a provider/enrichment pick and a user's `select_cover`). Dimensions
+/// default to `(0, 0)` when the format can't be measured, matching
+/// `fetch_and_decode_cover`'s non-fatal passthrough policy.
+async fn fetch_candidate_bytes<H: HttpFetcher>(
+    http: &H,
+    work_id: WorkId,
+    url: &str,
+) -> Result<(Vec<u8>, i32, i32), GateOutcome> {
+    match livrarr_materialize::fetch_and_decode_cover(http, url, RequestPriority::Normal, false)
+        .await
+    {
+        Ok((bytes, dims)) => {
+            let (w, h) = dims.unwrap_or((0, 0));
+            Ok((bytes, w, h))
+        }
+        Err(e) => {
+            tracing::debug!(work_id, error = %e, "cover write gate: candidate download failed");
+            Err(GateOutcome::DownloadFailed)
+        }
     }
+}
+
+/// Upload validation moved verbatim from `cover_service.rs`'s old
+/// `upload_cover` (AR-11 — the gate is now the single validation site): a
+/// 5MB size cap, a magic-byte sniff (JPEG/PNG/WebP), a decode, a maximum
+/// dimension cap (8000x8000), and an always-re-encode-to-JPEG step. Runs in
+/// a blocking thread — decode/encode are CPU-bound.
+async fn validate_and_reencode_upload(data: Vec<u8>) -> Result<(Vec<u8>, i32, i32), String> {
+    const MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
+
+    if data.len() > MAX_UPLOAD_SIZE {
+        return Err(format!(
+            "file too large: {} bytes (max {})",
+            data.len(),
+            MAX_UPLOAD_SIZE
+        ));
+    }
+
+    if !(data.starts_with(&[0xFF, 0xD8]) // JPEG
+        || data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) // PNG
+        || (data.len() >= 12 && &data[8..12] == b"WEBP"))
+    // WebP
+    {
+        return Err("unsupported format: must be JPEG, PNG, or WebP".into());
+    }
+
+    tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, i32, i32), String> {
+        let img =
+            image::load_from_memory(&data).map_err(|e| format!("image decode failed: {e}"))?;
+
+        if img.width() > 8000 || img.height() > 8000 {
+            return Err(format!(
+                "image too large: {}x{} (max 8000x8000)",
+                img.width(),
+                img.height()
+            ));
+        }
+        let (width, height) = (img.width() as i32, img.height() as i32);
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Jpeg)
+            .map_err(|e| format!("JPEG encode failed: {e}"))?;
+        Ok((buf.into_inner(), width, height))
+    })
+    .await
+    .map_err(|e| format!("spawn error: {e}"))?
 }
 
 async fn write_candidate_files(
     tmp_path: &Path,
     meta_path: &Path,
     bytes: &[u8],
-    resolution: &CoverResolution,
-    width: i32,
-    height: i32,
+    meta: &CandidateMeta,
 ) -> std::io::Result<()> {
-    let meta = CandidateMeta {
-        url: resolution.url.clone(),
-        source: resolution.source.clone(),
-        trust: resolution.trust,
-        width,
-        height,
-    };
-    let meta_json = serde_json::to_vec(&meta)
+    let meta_json = serde_json::to_vec(meta)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let tmp_owned = tmp_path.to_path_buf();
@@ -361,6 +496,100 @@ async fn write_candidate_files(
     })
     .await
     .map_err(std::io::Error::other)?
+}
+
+/// Discard an undecided/rejected candidate's on-disk state. Meta first, then
+/// tmp: recovery treats "tmp gone, meta present" as proof the ACCEPT path's
+/// atomic rename already ran (row was already committed to match meta) — so
+/// this two-step cleanup must never pass through that same observable state,
+/// or a crash between the two deletes would make recovery wrongly "heal" the
+/// row to a candidate that was actually rejected/never decided. Deleting
+/// meta first means the only interleaved state a crash can leave is "meta
+/// gone, tmp still present" — invisible to recovery (which scans for meta
+/// files), so the orphaned tmp is inert: never rewritten to, never renamed
+/// to the served path, and physically distinct from the final `.jpg` name.
+async fn discard_candidate_files(meta_path: &Path, tmp_path: &Path) {
+    let _ = tokio::fs::remove_file(meta_path).await;
+    let _ = tokio::fs::remove_file(tmp_path).await;
+}
+
+/// Commit an accepted candidate: DB write (the commit point), rename tmp ->
+/// final, delete the meta sidecar, invalidate thumbnails. Shared by both
+/// entry points — the protocol from here on is identical whether the
+/// candidate came from enrichment or a user's own pick.
+#[allow(clippy::too_many_arguments)]
+async fn commit_and_finalize<D: WorkDb + Sync>(
+    db: &D,
+    user_id: UserId,
+    work_id: WorkId,
+    media_type: CoverMediaType,
+    covers_dir: &Path,
+    tmp_path: &Path,
+    meta_path: &Path,
+    final_path: &Path,
+    sibling_cover_url: Option<&str>,
+    meta: CandidateMeta,
+    bytes: Vec<u8>,
+) -> GateOutcome {
+    let db_result = match media_type {
+        CoverMediaType::Ebook => {
+            db.update_cover_metadata(
+                user_id,
+                work_id,
+                meta.url.as_deref(),
+                &meta.source,
+                meta.trust,
+                meta.width,
+                meta.height,
+            )
+            .await
+        }
+        CoverMediaType::Audiobook => {
+            db.update_audiobook_cover_metadata(
+                user_id,
+                work_id,
+                meta.url.as_deref(),
+                &meta.source,
+                meta.trust,
+                meta.width,
+                meta.height,
+            )
+            .await
+        }
+    };
+    if let Err(e) = db_result {
+        // Leave tmp+meta in place — the next startup recovery pass discards
+        // them (row != meta, since the commit never happened).
+        tracing::warn!(work_id, error = %e, "cover write gate: DB commit failed");
+        return GateOutcome::DownloadFailed;
+    }
+
+    if let Err(e) = tokio::fs::rename(tmp_path, final_path).await {
+        // DB already committed (the commit point). Recovery completes the
+        // rename from meta+tmp at next startup/first-read.
+        tracing::warn!(work_id, error = %e, "cover write gate: rename after commit failed");
+        return GateOutcome::Accepted {
+            bytes,
+            width: meta.width,
+            height: meta.height,
+        };
+    }
+    let _ = tokio::fs::remove_file(meta_path).await;
+
+    invalidate_thumbnails(
+        covers_dir,
+        work_id,
+        media_type.suffix(),
+        media_type,
+        sibling_cover_url,
+    )
+    .await;
+
+    GateOutcome::Accepted {
+        bytes,
+        width: meta.width,
+        height: meta.height,
+    }
 }
 
 /// Remove the slot's thumbnail after its cover file changed, plus the

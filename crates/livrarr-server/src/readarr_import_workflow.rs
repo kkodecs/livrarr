@@ -7,9 +7,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use livrarr_db::sqlite::SqliteDb;
-use livrarr_db::{
-    ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest, CreateLibraryItemDbRequest,
-};
+use livrarr_db::{ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest};
 use livrarr_domain::identity_matching::identity_key;
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::{
@@ -35,9 +33,11 @@ pub struct LiveReadarrImportWorkflow {
     data_dir: Arc<std::path::PathBuf>,
     work_service: Arc<LiveWorkService>,
     db: SqliteDb,
+    import_workflow: Arc<crate::state::LiveImportWorkflow>,
 }
 
 impl LiveReadarrImportWorkflow {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         http_client: HttpClient,
         readarr_import_service: Arc<ReadarrImportServiceImpl>,
@@ -45,6 +45,7 @@ impl LiveReadarrImportWorkflow {
         data_dir: Arc<std::path::PathBuf>,
         work_service: Arc<LiveWorkService>,
         db: SqliteDb,
+        import_workflow: Arc<crate::state::LiveImportWorkflow>,
     ) -> Self {
         Self {
             http_client,
@@ -53,6 +54,7 @@ impl LiveReadarrImportWorkflow {
             data_dir,
             work_service,
             db,
+            import_workflow,
         }
     }
 }
@@ -180,6 +182,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         let readarr_import_service = self.readarr_import_service.clone();
         let readarr_import_progress = self.readarr_import_progress.clone();
         let work_service = self.work_service.clone();
+        let import_workflow = self.import_workflow.clone();
         let id = import_id.clone();
 
         tokio::spawn(async move {
@@ -208,6 +211,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
                 req,
                 work_service,
                 default_language,
+                import_workflow,
             );
             if let Err(e) = runner.run().await {
                 error!(import_id = %id, "Readarr import failed: {e}");
@@ -505,34 +509,6 @@ fn apply_path_translation(
         }
         _ => path.to_string(),
     }
-}
-
-fn materialize_file(source: &Path, dest: &Path) -> Result<(), String> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
-    }
-    if std::fs::hard_link(source, dest).is_ok() {
-        return Ok(());
-    }
-    let parent = dest.parent().ok_or("dest has no parent")?;
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| format!("tempfile create failed: {e}"))?;
-    let source_size = std::fs::metadata(source)
-        .map_err(|e| format!("cannot stat source: {e}"))?
-        .len();
-    let copied = std::io::copy(
-        &mut std::fs::File::open(source).map_err(|e| format!("open source failed: {e}"))?,
-        &mut tmp,
-    )
-    .map_err(|e| format!("copy failed: {e}"))?;
-    if copied != source_size {
-        return Err(format!(
-            "copy size mismatch: copied {copied} vs source {source_size}"
-        ));
-    }
-    tmp.persist(dest)
-        .map_err(|e| format!("rename failed: {e}"))?;
-    Ok(())
 }
 
 fn media_type_str(mt: MediaType) -> &'static str {
@@ -875,6 +851,7 @@ struct ImportRunner {
     req: ReadarrImportRequest,
     work_service: Arc<LiveWorkService>,
     default_language: String,
+    import_workflow: Arc<crate::state::LiveImportWorkflow>,
     author_map_rd: HashMap<i64, i64>,
     work_map_rd: HashMap<i64, i64>,
     authors_created: i64,
@@ -894,6 +871,7 @@ impl ImportRunner {
         req: ReadarrImportRequest,
         work_service: Arc<LiveWorkService>,
         default_language: String,
+        import_workflow: Arc<crate::state::LiveImportWorkflow>,
     ) -> Self {
         Self {
             http_client,
@@ -904,6 +882,7 @@ impl ImportRunner {
             req,
             work_service,
             default_language,
+            import_workflow,
             author_map_rd: HashMap::new(),
             work_map_rd: HashMap::new(),
             authors_created: 0,
@@ -1508,60 +1487,60 @@ impl ImportRunner {
                 &rd_file.path,
             );
 
-            if dest.exists() {
-                self.files_skipped += 1;
-                let mut prog = self.progress().lock().await;
-                prog.files_processed += 1;
-                prog.files_skipped += 1;
-                continue;
-            }
-
-            let mat_src = source.clone();
-            let mat_dst = dest.clone();
-            let mat_result =
-                tokio::task::spawn_blocking(move || materialize_file(&mat_src, &mat_dst)).await;
-            if let Err(e) = mat_result.unwrap_or_else(|e| Err(format!("spawn error: {e}"))) {
-                warn!(src = %rd_file.path, dest = %dest.display(), "File materialization failed: {e}");
-                self.files_skipped += 1;
-                let mut prog = self.progress().lock().await;
-                prog.files_processed += 1;
-                prog.files_skipped += 1;
-                prog.errors.push(format!("File '{}': {e}", rd_file.path));
-                continue;
-            }
-
+            // The shared import core's adopt/dedup outcome matrix decides
+            // existing-target handling: row for this work at this path →
+            // Skipped; orphan file matching the source's size → Adopted;
+            // otherwise → PathCollision. A re-run after a crashed prior
+            // migration therefore adopts its already-hardlinked files.
             let rel_path = dest
                 .strip_prefix(livrarr_root_path)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| dest.to_string_lossy().to_string());
 
+            use livrarr_domain::services::ImportWorkflow;
             match self
-                .readarr_import_service
-                .create_library_item(CreateLibraryItemDbRequest {
-                    user_id: self.user_id,
-                    work_id,
-                    root_folder_id: self.req.livrarr_root_folder_id,
-                    path: rel_path,
-                    media_type,
-                    file_size: rd_file.size,
-                    import_id: Some(self.import_id.clone()),
-                    tag_status: livrarr_db::TagStatus::Pending,
-                    tagged_at_generation: 0,
-                })
+                .import_workflow
+                .import_file(
+                    self.user_id,
+                    livrarr_domain::services::ImportFileRequest {
+                        work_id,
+                        root_folder_id: self.req.livrarr_root_folder_id,
+                        source,
+                        target_relative: rel_path,
+                        media_type,
+                        materialization: livrarr_domain::services::Materialization::HardlinkFirst,
+                        import_id: Some(self.import_id.clone()),
+                        extract_chapters: false,
+                    },
+                )
                 .await
             {
-                Ok(_) => {
+                Ok(
+                    livrarr_domain::services::ImportFileOutcome::Imported { .. }
+                    | livrarr_domain::services::ImportFileOutcome::Adopted { .. },
+                ) => {
                     self.files_imported += 1;
                 }
-                Err(crate::readarr_import_service::ReadarrImportError::Db(
-                    livrarr_domain::DbError::Constraint { .. },
-                )) => {
-                    self.files_skipped += 1;
-                }
-                Err(e) => {
-                    warn!(path = %rd_file.path, "Failed to create library item: {e}");
+                Ok(livrarr_domain::services::ImportFileOutcome::Skipped { .. }) => {
                     self.files_skipped += 1;
                     let mut prog = self.progress().lock().await;
+                    prog.files_skipped += 1;
+                }
+                Err(livrarr_domain::services::ImportWorkflowError::PathCollision(path)) => {
+                    warn!(path = %rd_file.path, "Path collision on import: {path} already claimed by a different work");
+                    self.files_skipped += 1;
+                    let mut prog = self.progress().lock().await;
+                    prog.files_skipped += 1;
+                    prog.errors.push(format!(
+                        "File '{}': path collision — already claimed by a different work",
+                        rd_file.path
+                    ));
+                }
+                Err(e) => {
+                    warn!(path = %rd_file.path, "Failed to import file: {e}");
+                    self.files_skipped += 1;
+                    let mut prog = self.progress().lock().await;
+                    prog.files_skipped += 1;
                     prog.errors
                         .push(format!("LibraryItem for '{}': {e}", rd_file.path));
                 }

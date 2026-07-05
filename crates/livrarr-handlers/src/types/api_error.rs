@@ -234,6 +234,9 @@ impl From<livrarr_domain::services::ImportWorkflowError> for ApiError {
             }
             ImportWorkflowError::ImportFailed(msg) => ApiError::Internal(msg),
             ImportWorkflowError::TagWriteFailed(msg) => ApiError::Internal(msg),
+            ImportWorkflowError::PathCollision(path) => ApiError::Conflict {
+                reason: format!("{path} is already claimed by a different work"),
+            },
             ImportWorkflowError::Db(db_err) => ApiError::Db(db_err),
         }
     }

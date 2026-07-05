@@ -4,50 +4,9 @@ pub mod cross_format_service;
 pub mod file_service;
 pub mod import_workflow;
 
-use livrarr_domain::{
-    DbError, Grab, GrabId, GrabStatus, LibraryItemId, MediaType, RootFolderId, UserId, WorkId,
-};
+use livrarr_domain::{DbError, GrabStatus, MediaType, RootFolderId, UserId, WorkId};
 // Re-export classify_file from domain.
 pub use livrarr_domain::classify_file;
-
-/// Import pipeline -- processes completed downloads.
-#[trait_variant::make(Send)]
-pub trait ImportService: Send + Sync {
-    /// Run import for a completed grab.
-    async fn import_grab(&self, grab: &Grab) -> Result<ImportResult, ImportError>;
-
-    /// Retry a failed import.
-    async fn retry_import(&self, user_id: UserId, grab_id: GrabId) -> Result<(), ImportError>;
-}
-
-pub struct ImportResult {
-    pub grab_id: GrabId,
-    pub final_status: GrabStatus,
-    pub imported_files: Vec<ImportedFile>,
-    pub skipped_files: Vec<SkippedFile>,
-    pub failed_files: Vec<FailedFile>,
-    pub warnings: Vec<String>,
-}
-
-pub struct ImportedFile {
-    pub source_path: String,
-    pub target_path: String,
-    pub media_type: MediaType,
-    pub file_size: i64,
-    pub library_item_id: LibraryItemId,
-    pub tags_written: bool,
-    pub cwa_copied: bool,
-}
-
-pub struct SkippedFile {
-    pub source_path: String,
-    pub reason: String,
-}
-
-pub struct FailedFile {
-    pub source_path: String,
-    pub error: String,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
