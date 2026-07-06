@@ -850,11 +850,13 @@ export interface TestIndexerResponse {
 export interface IndexerConfigResponse {
   rssSyncIntervalMinutes: number;
   rssMatchThreshold: number;
+  rssGrabFailureLimit: number;
 }
 
 export interface UpdateIndexerConfigRequest {
   rssSyncIntervalMinutes?: number;
   rssMatchThreshold?: number;
+  rssGrabFailureLimit?: number;
 }
 
 export interface ProwlarrConfigResponse {

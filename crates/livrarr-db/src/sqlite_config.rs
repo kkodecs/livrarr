@@ -361,6 +361,9 @@ impl ConfigDb for SqliteDb {
             rss_match_threshold: row
                 .try_get::<f64, _>("rss_match_threshold")
                 .map_err(|e| DbError::Io(Box::new(e)))?,
+            rss_grab_failure_limit: row
+                .try_get::<i32, _>("rss_grab_failure_limit")
+                .map_err(|e| DbError::Io(Box::new(e)))?,
         })
     }
 
@@ -376,14 +379,19 @@ impl ConfigDb for SqliteDb {
         let threshold = req
             .rss_match_threshold
             .unwrap_or(current.rss_match_threshold);
+        let failure_limit = req
+            .rss_grab_failure_limit
+            .unwrap_or(current.rss_grab_failure_limit);
 
         sqlx::query(
             "UPDATE indexer_config SET \
-             rss_sync_interval_minutes = ?, rss_match_threshold = ? \
+             rss_sync_interval_minutes = ?, rss_match_threshold = ?, \
+             rss_grab_failure_limit = ? \
              WHERE id = 1",
         )
         .bind(interval)
         .bind(threshold)
+        .bind(failure_limit)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?;

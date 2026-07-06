@@ -194,6 +194,11 @@ pub enum NotificationType {
     /// a work outside the user's default language (REQ-011/AC-022) — surfaces
     /// the silent, background-only skip so it never sits in unnoticed limbo.
     RssLanguageSkipped,
+    /// RSS sync suppressed further auto-grab attempts for a work+media_type
+    /// after too many terminal failures (importFailed/failed) within the
+    /// 30-day window — prevents re-downloading a release that keeps failing
+    /// to import. Fires once per (work, media_type). Satisfies: 114a.
+    RssGrabSuppressed,
 }
 
 /// Narration type for audiobook metadata.
@@ -784,6 +789,10 @@ pub struct IndexerRssState {
 pub struct IndexerConfig {
     pub rss_sync_interval_minutes: i32,
     pub rss_match_threshold: f64,
+    /// Max terminal-failed (importFailed/failed) grabs per (work, media_type)
+    /// in a 30-day window before RSS auto-grab suppresses further attempts.
+    /// 0 disables the cap. Default 3. Satisfies: 114a.
+    pub rss_grab_failure_limit: i32,
 }
 
 /// Import record — tracks a Readarr library import.

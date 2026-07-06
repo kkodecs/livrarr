@@ -852,3 +852,236 @@ async fn test_rss_sync_declared_language_match_still_grabs() {
     assert_eq!(report.grabs_succeeded, 1);
     assert_eq!(release_svc.grab_call_count().await, 1);
 }
+
+// =============================================================================
+// RSS auto-grab failure cap (114a) — never re-grab a release/work that keeps
+// failing to import.
+// =============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rss_sync_skips_already_failed_release() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+
+    let indexer = seed_rss_indexer(&db, "TestIndexer", "http://indexer.test").await;
+    db.upsert_rss_state(indexer.id, Some("2024-12-01"), "old-guid")
+        .await
+        .unwrap();
+
+    let work = seed_monitored_work(&db, user_id, "The Way of Kings", "Brandon Sanderson").await;
+    let dc = db
+        .create_download_client(CreateDownloadClientDbRequest {
+            name: "TestClient".into(),
+            implementation: DownloadClientImplementation::QBittorrent,
+            host: "localhost".into(),
+            port: 8080,
+            use_ssl: false,
+            skip_ssl_validation: false,
+            url_base: None,
+            username: None,
+            password: None,
+            category: "books".into(),
+            download_dir: None,
+            enabled: true,
+            api_key: None,
+        })
+        .await
+        .unwrap();
+
+    // A grab with guid "g1" already ended in importFailed for this work.
+    db.upsert_grab(CreateGrabDbRequest {
+        user_id,
+        work_id: work.id,
+        download_client_id: dc.id,
+        title: "Failed grab".into(),
+        indexer: "TestIndexer".into(),
+        guid: "g1".into(),
+        size: Some(1_000_000),
+        download_url: "http://example.com/dl".into(),
+        download_id: None,
+        status: GrabStatus::ImportFailed,
+        media_type: Some(MediaType::Ebook),
+    })
+    .await
+    .unwrap();
+
+    // The RSS feed offers the SAME guid again — must never be re-grabbed.
+    let feed = rss_xml(&[(
+        "The Way of Kings Brandon Sanderson EPUB",
+        "g1",
+        "http://indexer.test/dl/1",
+        1_000_000,
+    )]);
+
+    let http = StubHttpFetcher::with_ok(200, feed);
+    let release_svc = Arc::new(StubReleaseService::succeeding());
+    let db_arc = Arc::new(db);
+
+    let workflow = RssSyncWorkflowImpl::new(db_arc.clone(), Arc::new(http), release_svc.clone());
+    let report = workflow.run_sync().await.unwrap();
+
+    assert_eq!(report.grabs_attempted, 0);
+    assert_eq!(release_svc.grab_call_count().await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rss_sync_suppresses_after_failure_cap() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+
+    let indexer = seed_rss_indexer(&db, "TestIndexer", "http://indexer.test").await;
+    db.upsert_rss_state(indexer.id, Some("2024-12-01"), "old-guid")
+        .await
+        .unwrap();
+
+    let work = seed_monitored_work(&db, user_id, "The Way of Kings", "Brandon Sanderson").await;
+    let dc = db
+        .create_download_client(CreateDownloadClientDbRequest {
+            name: "TestClient".into(),
+            implementation: DownloadClientImplementation::QBittorrent,
+            host: "localhost".into(),
+            port: 8080,
+            use_ssl: false,
+            skip_ssl_validation: false,
+            url_base: None,
+            username: None,
+            password: None,
+            category: "books".into(),
+            download_dir: None,
+            enabled: true,
+            api_key: None,
+        })
+        .await
+        .unwrap();
+
+    // 3 distinct failed grabs for this work+ebook — hits the default cap (3).
+    for i in 0..3 {
+        db.upsert_grab(CreateGrabDbRequest {
+            user_id,
+            work_id: work.id,
+            download_client_id: dc.id,
+            title: format!("Failed grab {i}"),
+            indexer: "TestIndexer".into(),
+            guid: format!("failed-guid-{i}"),
+            size: Some(1_000_000),
+            download_url: "http://example.com/dl".into(),
+            download_id: None,
+            status: GrabStatus::ImportFailed,
+            media_type: Some(MediaType::Ebook),
+        })
+        .await
+        .unwrap();
+    }
+
+    // A brand-new guid appears in the feed — must be suppressed, not grabbed.
+    let feed = rss_xml(&[(
+        "The Way of Kings Brandon Sanderson EPUB",
+        "guid-new-after-cap",
+        "http://indexer.test/dl/1",
+        1_000_000,
+    )]);
+
+    let http = StubHttpFetcher::with_ok(200, feed);
+    let release_svc = Arc::new(StubReleaseService::succeeding());
+    let db_arc = Arc::new(db);
+
+    let workflow = RssSyncWorkflowImpl::new(db_arc.clone(), Arc::new(http), release_svc.clone());
+    let report = workflow.run_sync().await.unwrap();
+
+    assert_eq!(report.grabs_attempted, 0);
+    assert_eq!(release_svc.grab_call_count().await, 0);
+
+    let notifs = db_arc.list_notifications(user_id, false).await.unwrap();
+    let suppressed: Vec<_> = notifs
+        .iter()
+        .filter(|n| n.notification_type == NotificationType::RssGrabSuppressed)
+        .collect();
+    assert_eq!(
+        suppressed.len(),
+        1,
+        "expected exactly one RssGrabSuppressed notification for the work, got: {:?}",
+        notifs
+            .iter()
+            .map(|n| (&n.notification_type, &n.message))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        suppressed[0].message.contains(&work.title),
+        "suppression notification should name the work, got: {}",
+        suppressed[0].message
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rss_sync_below_failure_cap_still_grabs() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+
+    let indexer = seed_rss_indexer(&db, "TestIndexer", "http://indexer.test").await;
+    db.upsert_rss_state(indexer.id, Some("2024-12-01"), "old-guid")
+        .await
+        .unwrap();
+
+    let work = seed_monitored_work(&db, user_id, "The Way of Kings", "Brandon Sanderson").await;
+    let dc = db
+        .create_download_client(CreateDownloadClientDbRequest {
+            name: "TestClient".into(),
+            implementation: DownloadClientImplementation::QBittorrent,
+            host: "localhost".into(),
+            port: 8080,
+            use_ssl: false,
+            skip_ssl_validation: false,
+            url_base: None,
+            username: None,
+            password: None,
+            category: "books".into(),
+            download_dir: None,
+            enabled: true,
+            api_key: None,
+        })
+        .await
+        .unwrap();
+
+    // Only 2 failed grabs — below the default cap of 3, so the grab proceeds.
+    for i in 0..2 {
+        db.upsert_grab(CreateGrabDbRequest {
+            user_id,
+            work_id: work.id,
+            download_client_id: dc.id,
+            title: format!("Failed grab {i}"),
+            indexer: "TestIndexer".into(),
+            guid: format!("failed-guid-below-{i}"),
+            size: Some(1_000_000),
+            download_url: "http://example.com/dl".into(),
+            download_id: None,
+            status: GrabStatus::ImportFailed,
+            media_type: Some(MediaType::Ebook),
+        })
+        .await
+        .unwrap();
+    }
+
+    let feed = rss_xml(&[(
+        "The Way of Kings Brandon Sanderson EPUB",
+        "guid-new-below-cap",
+        "http://indexer.test/dl/1",
+        1_000_000,
+    )]);
+
+    let http = StubHttpFetcher::with_ok(200, feed);
+    let release_svc = Arc::new(StubReleaseService::succeeding());
+    let db_arc = Arc::new(db);
+
+    let workflow = RssSyncWorkflowImpl::new(db_arc.clone(), Arc::new(http), release_svc.clone());
+    let report = workflow.run_sync().await.unwrap();
+
+    assert_eq!(report.grabs_attempted, 1);
+    assert_eq!(report.grabs_succeeded, 1);
+    assert_eq!(release_svc.grab_call_count().await, 1);
+}
+
+// NOTE: A "failure older than 30 days does not count toward the cap" window
+// test was in the plan but is SKIPPED — `CreateGrabDbRequest` has no
+// `grabbed_at` field and `upsert_grab` always stamps `grabbed_at = now()`
+// server-side (crates/livrarr-db/src/sqlite_grab.rs), so a test cannot seed
+// an old failed grab without a DB-level backdoor. Not faked.

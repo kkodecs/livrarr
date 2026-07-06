@@ -149,6 +149,7 @@ pub struct UpdateEmailParams {
 pub struct UpdateIndexerConfigParams {
     pub rss_sync_interval_minutes: Option<i32>,
     pub rss_match_threshold: Option<f64>,
+    pub rss_grab_failure_limit: Option<i32>,
 }
 
 // =============================================================================

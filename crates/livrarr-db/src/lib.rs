@@ -862,6 +862,32 @@ pub trait GrabDb: Send + Sync {
         media_type: MediaType,
     ) -> Result<bool, DbError>;
 
+    /// Check if a grab already exists for this exact release (guid) in a
+    /// terminal-failed state (importFailed/failed) for this user+work+media_type.
+    /// A fresh grab row must never re-attempt a release that already failed.
+    ///
+    /// Satisfies: 114a (Part 1)
+    async fn release_already_failed(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        media_type: MediaType,
+        guid: &str,
+    ) -> Result<bool, DbError>;
+
+    /// Count terminal-failed grabs (importFailed/failed) for this
+    /// user+work+media_type since the given timestamp. Never counts `removed`
+    /// grabs. Feeds the rss_grab_failure_limit 30-day cap.
+    ///
+    /// Satisfies: 114a (Part 2)
+    async fn recent_failed_grab_count(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        media_type: MediaType,
+        since: DateTime<Utc>,
+    ) -> Result<i64, DbError>;
+
     /// List importFailed grabs eligible for retry (backoff expired, under max retries).
     async fn list_retriable_grabs(&self, max_retries: i32) -> Result<Vec<Grab>, DbError>;
 
@@ -1196,6 +1222,7 @@ pub struct UpdateEmailConfigRequest {
 pub struct UpdateIndexerConfigRequest {
     pub rss_sync_interval_minutes: Option<i32>,
     pub rss_match_threshold: Option<f64>,
+    pub rss_grab_failure_limit: Option<i32>,
 }
 
 pub struct UpdateMetadataConfigRequest {
@@ -1282,6 +1309,7 @@ impl From<UpdateIndexerConfigParams> for UpdateIndexerConfigRequest {
         Self {
             rss_sync_interval_minutes: p.rss_sync_interval_minutes,
             rss_match_threshold: p.rss_match_threshold,
+            rss_grab_failure_limit: p.rss_grab_failure_limit,
         }
     }
 }

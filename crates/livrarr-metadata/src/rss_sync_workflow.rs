@@ -532,6 +532,87 @@ where
                 Ok(false) => {}
             }
 
+            // 114a Part 1: never re-grab a release that already failed for this
+            // exact (user, work, media_type, guid) — a fresh grab row must not
+            // reset the failure history for the same release.
+            match self
+                .db
+                .release_already_failed(gc.user_id, gc.work_id, gc.media_type, &gc.feed_item.guid)
+                .await
+            {
+                Ok(true) => {
+                    n_skipped += 1;
+                    continue;
+                }
+                Err(e) => {
+                    warn!("RSS sync: release_already_failed error: {e}");
+                    n_skipped += 1;
+                    continue;
+                }
+                Ok(false) => {}
+            }
+
+            // 114a Part 2: cap total terminal failures per (work, media_type)
+            // within a 30-day window. 0 disables the cap.
+            if config.rss_grab_failure_limit > 0 {
+                let since = chrono::Utc::now() - chrono::Duration::days(30);
+                match self
+                    .db
+                    .recent_failed_grab_count(gc.user_id, gc.work_id, gc.media_type, since)
+                    .await
+                {
+                    Ok(count) if count >= config.rss_grab_failure_limit as i64 => {
+                        n_skipped += 1;
+
+                        if let Some(title) = candidates
+                            .iter()
+                            .find(|(w, _)| w.id == gc.work_id)
+                            .map(|(w, _)| w.title.clone())
+                        {
+                            let mt_str = match gc.media_type {
+                                MediaType::Ebook => "ebook",
+                                MediaType::Audiobook => "audiobook",
+                            };
+                            if let Err(e) = self
+                                .db
+                                .create_notification(CreateNotificationDbRequest {
+                                    user_id: gc.user_id,
+                                    notification_type: NotificationType::RssGrabSuppressed,
+                                    ref_key: Some(format!(
+                                        "rss-grab-suppressed:{}:{}",
+                                        gc.work_id, mt_str
+                                    )),
+                                    message: format!(
+                                        "RSS auto-grab paused for {title}: {count} failed \
+                                         attempt(s) in the last 30 days — grab manually via search"
+                                    ),
+                                    data: serde_json::json!({
+                                        "workId": gc.work_id,
+                                        "title": title,
+                                        "count": count,
+                                    }),
+                                })
+                                .await
+                            {
+                                warn!(
+                                    "RSS sync: failed to record RssGrabSuppressed notification \
+                                     for work {}: {e}",
+                                    gc.work_id
+                                );
+                            }
+                        }
+
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("RSS sync: recent_failed_grab_count error: {e}");
+                        n_skipped += 1;
+                        continue;
+                    }
+                }
+            }
+
             debug!(
                 "RSS sync: grabbing '{}' for work {} via {}",
                 gc.feed_item.title, gc.work_id, gc.indexer_name

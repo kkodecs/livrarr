@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
@@ -350,6 +350,59 @@ impl GrabDb for SqliteDb {
         .map_err(map_db_err)?;
         let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(Box::new(e)))?;
         Ok(cnt > 0)
+    }
+
+    async fn release_already_failed(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        media_type: MediaType,
+        guid: &str,
+    ) -> Result<bool, DbError> {
+        let mt = match media_type {
+            MediaType::Ebook => "ebook",
+            MediaType::Audiobook => "audiobook",
+        };
+        let row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM grabs \
+             WHERE user_id = ? AND work_id = ? AND media_type = ? AND guid = ? \
+             AND status IN ('importFailed', 'failed')",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(mt)
+        .bind(guid)
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        let cnt: i64 = row.try_get("cnt").map_err(|e| DbError::Io(Box::new(e)))?;
+        Ok(cnt > 0)
+    }
+
+    async fn recent_failed_grab_count(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        media_type: MediaType,
+        since: DateTime<Utc>,
+    ) -> Result<i64, DbError> {
+        let mt = match media_type {
+            MediaType::Ebook => "ebook",
+            MediaType::Audiobook => "audiobook",
+        };
+        let row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM grabs \
+             WHERE user_id = ? AND work_id = ? AND media_type = ? \
+             AND status IN ('importFailed', 'failed') AND grabbed_at >= ?",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(mt)
+        .bind(since.to_rfc3339())
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        row.try_get("cnt").map_err(|e| DbError::Io(Box::new(e)))
     }
 
     async fn list_retriable_grabs(&self, max_retries: i32) -> Result<Vec<Grab>, DbError> {

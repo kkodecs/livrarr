@@ -550,6 +550,13 @@ pub async fn update_indexer_config<S: HasIndexerSettingsService>(
             ));
         }
     }
+    if let Some(limit) = req.rss_grab_failure_limit {
+        if limit != 0 && !(1..=20).contains(&limit) {
+            return Err(ApiError::BadRequest(
+                "rss_grab_failure_limit must be 0 (disabled) or between 1 and 20".into(),
+            ));
+        }
+    }
     let c = state
         .indexer_settings_service()
         .update_indexer_config(req)
