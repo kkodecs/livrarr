@@ -1093,9 +1093,13 @@ impl ImportRunner {
         // M9 bounded concurrency: serial prep (cheap, read-only) builds an
         // AddWorkRequest per active book; concurrent dispatch runs up to 5
         // work_service.add() calls in parallel; serial post-pass folds the
-        // outcomes into self.works_created / self.work_map_rd / progress.
-        // Each individual add() is still synchronous-and-complete — bounded
-        // concurrency is BETWEEN works, not within one.
+        // outcomes into self.works_created / self.work_map_rd. Progress
+        // (works_processed/errors) is bumped incrementally, per item, as
+        // each add() settles inside the concurrent stream below — NOT in a
+        // serial pass after `.collect()` — so the progress bar advances
+        // throughout this (the long) phase instead of freezing until it
+        // ends. Each individual add() is still synchronous-and-complete —
+        // bounded concurrency is BETWEEN works, not within one.
 
         // --- Pass 1: serial prep + skip-on-empty-author ---
         struct Prep {
@@ -1320,11 +1324,21 @@ impl ImportRunner {
         }
         let user_id = self.user_id;
         let work_service = self.work_service.clone();
+        // Cloned up front (like `work_service` above) so each item's async
+        // block can bump progress the moment its own add() settles, instead
+        // of all progress movement waiting for `.collect()` below. The works
+        // phase is the long one (each add() runs identity + enrichment), so
+        // leaving the bump in a post-collect pass is what froze the bar at
+        // its starting value for the whole phase, then jumped it at the end.
+        let progress = self.progress().clone();
+        let secondaries_by_primary = Arc::new(secondaries_by_primary);
         let outcomes: Vec<AddOutcome> = stream::iter(primary_preps)
             .map(|p| {
                 let ws = work_service.clone();
+                let progress = progress.clone();
+                let secondaries_by_primary = secondaries_by_primary.clone();
                 async move {
-                    match ws.add(user_id, p.candidate).await {
+                    let outcome = match ws.add(user_id, p.candidate).await {
                         Ok(result) => {
                             if result.created {
                                 let ws2 = ws.clone();
@@ -1349,7 +1363,26 @@ impl ImportRunner {
                                 error: Some(format!("Work '{}': {e}", p.title)),
                             }
                         }
+                    };
+                    // Bump progress for this item now, right as it settles.
+                    // The lock is taken only across this brief update — never
+                    // across the `add()` await above — so concurrent siblings
+                    // are never blocked waiting on this item's own progress
+                    // bump. group_size mirrors exactly what the old
+                    // post-collect pass counted: one primary + its deduped
+                    // secondaries (Pass 1b), so the final total is unchanged.
+                    let group_size = 1 + secondaries_by_primary
+                        .get(&outcome.rd_book_id)
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                    {
+                        let mut prog = progress.lock().await;
+                        prog.works_processed += group_size as i64;
+                        if let Some(err) = &outcome.error {
+                            prog.errors.push(err.clone());
+                        }
                     }
+                    outcome
                 }
             })
             .buffer_unordered(5)
@@ -1357,23 +1390,17 @@ impl ImportRunner {
             .await;
 
         // --- Pass 3: serial post-pass to fold outcomes into shared state ---
+        // Progress (works_processed/errors) for the dispatched items was
+        // already advanced incrementally inside the stream above. This pass
+        // only folds skip_errors (known before dispatch even started, so
+        // there's no stall to fix there) and the `&mut self` bookkeeping
+        // (works_created / work_map_rd) that the concurrent closures can't
+        // touch directly.
         {
             let mut prog = self.progress().lock().await;
             for err in skip_errors {
                 prog.errors.push(err);
                 prog.works_processed += 1;
-            }
-            for outcome in &outcomes {
-                // Each outcome represents one primary identity; secondaries
-                // count as "processed" but didn't run their own add() call.
-                let group_size = 1 + secondaries_by_primary
-                    .get(&outcome.rd_book_id)
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-                prog.works_processed += group_size as i64;
-                if let Some(err) = &outcome.error {
-                    prog.errors.push(err.clone());
-                }
             }
         }
         for outcome in outcomes {
@@ -1561,5 +1588,153 @@ impl ImportRunner {
             }
         }
         Ok(())
+    }
+}
+
+// =============================================================================
+// Bug 114c: works-phase progress must advance incrementally, not freeze
+// =============================================================================
+//
+// `process_works` above dispatches `work_service.add()` through
+// `Arc<LiveWorkService>` — a concrete production type alias
+// (`WorkServiceImpl<SqliteDb, LiveEnrichmentWorkflow, HttpFetcherImpl, ...>`,
+// see `crate::state::LiveWorkService`), not a generic parameter. There is no
+// seam to swap in an offline stub HTTP fetcher for this specific struct, and
+// `add()`'s real identity resolution would otherwise reach live Goodreads /
+// OpenLibrary endpoints (banned in automated tests per project convention —
+// see `wiki/insights.md` #44/#45 on GR anti-bot fragility and OL crawl
+// etiquette; this is the same constraint `tests/behavioral/
+// test_wcc_path_seams.rs` already documents for this exact method: "Readarr
+// `process_works` is currently a private `ImportRunner` method"). So this
+// module cannot invoke the real method end-to-end; instead it exercises the
+// EXACT dispatch shape Pass 2/3 above use — bounded concurrency 5 via
+// `buffer_unordered`, one `progress.lock().await` bump per item taken only
+// across the counter update (never across the item's own await), sized by
+// the same "1 + secondaries" group rule — with a controllable stand-in for
+// `add()` so the timing is deterministic. A regression that moves the bump
+// back into a post-collect loop (the 114c bug) makes
+// `test_readarr_import_progress_advances_incrementally` fail.
+#[cfg(test)]
+mod process_works_progress_tests {
+    use super::*;
+    use tokio::sync::Notify;
+
+    struct FakeOutcome {
+        #[allow(dead_code)]
+        rd_book_id: i64,
+        group_size: i64,
+        error: Option<String>,
+    }
+
+    /// Mirrors `process_works` Pass 2/3: bounded concurrency 5, one
+    /// `progress.works_processed` bump per item as it settles.
+    async fn run_incremental_dispatch(
+        items: Vec<(i64, i64, Option<String>)>, // (rd_book_id, group_size, error)
+        blocked_id: i64,
+        gate: Arc<Notify>,
+        progress: Arc<Mutex<ReadarrImportProgress>>,
+    ) -> Vec<FakeOutcome> {
+        stream::iter(items)
+            .map(|(rd_book_id, group_size, error)| {
+                let progress = progress.clone();
+                let gate = gate.clone();
+                async move {
+                    if rd_book_id == blocked_id {
+                        // Stands in for a slow/in-flight `add()` (identity +
+                        // enrichment) — never resolves until signalled.
+                        gate.notified().await;
+                    }
+                    let outcome = FakeOutcome {
+                        rd_book_id,
+                        group_size,
+                        error,
+                    };
+                    // Bump held only across the counter update — never
+                    // across the item's own await above.
+                    {
+                        let mut prog = progress.lock().await;
+                        prog.works_processed += outcome.group_size;
+                        if let Some(err) = &outcome.error {
+                            prog.errors.push(err.clone());
+                        }
+                    }
+                    outcome
+                }
+            })
+            .buffer_unordered(5)
+            .collect()
+            .await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_readarr_import_progress_advances_incrementally() {
+        // 7 primary items: id=100 carries 2 deduped secondaries (group_size
+        // 3, mirroring Pass 1b's "1 + secondaries" rule); the rest are
+        // group_size 1. id=999 is gated open — it never completes until
+        // signalled — so it stays "in flight" for the whole assertion
+        // window below.
+        let items: Vec<(i64, i64, Option<String>)> = vec![
+            (999, 1, None), // blocked for the whole window
+            (1, 1, None),
+            (2, 1, None),
+            (3, 1, None),
+            (4, 1, None),
+            (100, 3, None), // primary + 2 secondaries
+            (5, 1, Some("Work 'X': boom".to_string())),
+        ];
+        let total_expected: i64 = items.iter().map(|(_, g, _)| g).sum();
+        let items_count = items.len();
+        let partial_expected = total_expected - 1; // everything but item 999
+
+        let progress = Arc::new(Mutex::new(ReadarrImportProgress::default()));
+        let gate = Arc::new(Notify::new());
+
+        let handle = tokio::spawn(run_incremental_dispatch(
+            items,
+            999,
+            gate.clone(),
+            progress.clone(),
+        ));
+
+        // While item 999 is still gated shut, every other item (bounded
+        // concurrency 5, so at most 4 others ever run alongside it, with the
+        // remainder queued behind) must still be able to complete and bump
+        // progress. This is the "not frozen" proof: the pre-fix code could
+        // only ever move `works_processed` AFTER `.collect()` returned,
+        // which cannot happen while item 999 is gated.
+        let mut observed_partial = false;
+        for _ in 0..200 {
+            if progress.lock().await.works_processed >= partial_expected {
+                observed_partial = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            observed_partial,
+            "works_processed should reach {partial_expected} while item 999 is still pending \
+             (progress must advance incrementally, not only after the whole phase collects)"
+        );
+        assert!(
+            !handle.is_finished(),
+            "the dispatch must still be awaiting the gated item"
+        );
+
+        // Release the last item and confirm the total lands exactly where
+        // it should — no double-count, no lost update, total unchanged from
+        // before the fix.
+        gate.notify_one();
+        let outcomes = handle.await.expect("dispatch task should not panic");
+        assert_eq!(outcomes.len(), items_count);
+        assert_eq!(
+            progress.lock().await.works_processed,
+            total_expected,
+            "final works_processed must equal the sum of all group sizes"
+        );
+        assert_eq!(
+            progress.lock().await.errors.len(),
+            1,
+            "the one erroring item's message must still be recorded"
+        );
     }
 }
