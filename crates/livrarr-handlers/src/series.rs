@@ -186,6 +186,7 @@ pub async fn list_series<S: HasSeriesQueryService>(
             monitor_ebook: s.monitor_ebook,
             monitor_audiobook: s.monitor_audiobook,
             works_in_library: s.works_in_library,
+            language: s.language,
         })
         .collect();
 
@@ -219,6 +220,7 @@ pub async fn refresh_series<S: HasSeriesQueryService>(
             monitor_ebook: s.monitor_ebook,
             monitor_audiobook: s.monitor_audiobook,
             works_in_library: s.works_in_library,
+            language: s.language,
         })
         .collect();
 
@@ -290,6 +292,7 @@ pub async fn monitor_series<S: HasSeriesQueryService>(
             monitor_ebook: view.monitor_ebook,
             monitor_audiobook: view.monitor_audiobook,
             works_in_library: 0,
+            language: view.language,
         }),
     ))
 }
@@ -345,6 +348,7 @@ pub async fn promote_series<S: HasSeriesQueryService>(
                             monitor_ebook: c.monitor_ebook,
                             monitor_audiobook: c.monitor_audiobook,
                             works_in_library: c.works_in_library,
+                            language: c.language,
                         })
                         .collect(),
                 }),
@@ -416,6 +420,7 @@ pub async fn promote_series<S: HasSeriesQueryService>(
                 monitor_ebook: view.monitor_ebook,
                 monitor_audiobook: view.monitor_audiobook,
                 works_in_library: view.works_in_library,
+                language: view.language,
             }),
             candidates: Vec::new(),
         }),
@@ -514,5 +519,6 @@ pub async fn update_series<S: HasSeriesQueryService>(
         monitor_ebook: view.monitor_ebook,
         monitor_audiobook: view.monitor_audiobook,
         works_in_library: view.works_in_library,
+        language: view.language,
     }))
 }

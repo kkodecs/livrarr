@@ -291,6 +291,7 @@ fn bibliography_to_json(
             "seriesName": e.series_name,
             "seriesPosition": e.series_position,
             "alreadyInLibrary": e.already_in_library,
+            "language": e.language,
         })).collect::<Vec<_>>(),
         "llmFiltered": !result.raw_available || result.filtered_count != result.raw_count,
         "rawAvailable": result.raw_available,
@@ -298,4 +299,48 @@ fn bibliography_to_json(
         "rawCount": result.raw_count,
         "fetchedAt": result.fetched_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use livrarr_domain::services::{BibliographyEntry, BibliographyResult};
+
+    #[test]
+    fn bibliography_to_json_serializes_language() {
+        // #112: this function hand-builds a serde_json::Value — a struct
+        // field added upstream is silently dropped here unless this literal
+        // map is also updated (the exact gap review round 2 caught).
+        let result = BibliographyResult {
+            entries: vec![
+                BibliographyEntry {
+                    title: "Known Foreign".into(),
+                    year: None,
+                    ol_key: None,
+                    series_name: None,
+                    series_position: None,
+                    already_in_library: false,
+                    language: Some("es".into()),
+                },
+                BibliographyEntry {
+                    title: "Unknown".into(),
+                    year: None,
+                    ol_key: None,
+                    series_name: None,
+                    series_position: None,
+                    already_in_library: false,
+                    language: None,
+                },
+            ],
+            filtered_count: 2,
+            raw_count: 2,
+            raw_available: false,
+            fetched_at: "now".into(),
+        };
+
+        let json = bibliography_to_json(1, result);
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["language"], serde_json::json!("es"));
+        assert_eq!(entries[1]["language"], serde_json::Value::Null);
+    }
 }

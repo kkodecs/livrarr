@@ -54,6 +54,9 @@ pub struct BibliographyEntry {
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
     pub already_in_library: bool,
+    /// ISO 639-1 code if a real edition in some language was confirmed;
+    /// `None` means Unknown (shown by default).
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -17,6 +17,23 @@ fn make_svc(db: SqliteDb) -> AuthorServiceImpl<SqliteDb, StubHttpFetcher, StubLl
     AuthorServiceImpl::new(db, StubHttpFetcher::new(), StubLlmCaller::not_configured())
 }
 
+fn make_svc_with_fetcher(
+    db: SqliteDb,
+    fetcher: StubHttpFetcher,
+) -> AuthorServiceImpl<SqliteDb, StubHttpFetcher, StubLlmCaller> {
+    AuthorServiceImpl::new(db, fetcher, StubLlmCaller::not_configured())
+}
+
+fn ok_json(
+    body: serde_json::Value,
+) -> Result<livrarr_domain::services::FetchResponse, livrarr_domain::services::FetchError> {
+    Ok(livrarr_domain::services::FetchResponse {
+        status: 200,
+        headers: vec![],
+        body: serde_json::to_vec(&body).unwrap(),
+    })
+}
+
 async fn setup_user(db: &SqliteDb) -> i64 {
     db.create_user(CreateUserDbRequest {
         username: "testuser".into(),
@@ -495,6 +512,7 @@ async fn test_author_bibliography_returns_entries() {
             year: Some(2020),
             series_name: None,
             series_position: None,
+            language: None,
         },
         livrarr_db::BibliographyEntry {
             ol_key: Some("/works/OL20W".to_string()),
@@ -502,6 +520,7 @@ async fn test_author_bibliography_returns_entries() {
             year: Some(2021),
             series_name: None,
             series_position: None,
+            language: None,
         },
     ];
     db2.save_bibliography(author.author().id, &db_entries, None)
@@ -519,6 +538,145 @@ async fn test_author_bibliography_returns_entries() {
     assert_eq!(result.entries[1].title, "Book Two");
     assert_eq!(result.entries[1].year, Some(2021));
     assert_eq!(result.entries[1].ol_key.as_deref(), Some("/works/OL20W"));
+}
+
+#[tokio::test]
+async fn test_author_bibliography_classifies_language_via_ol_search() {
+    // #112: OL works.json entries get a language classification from a
+    // single batched OL author-search — a presence check against the
+    // author's effective language, never a Google Books call for this path.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+
+    let works_json = serde_json::json!({
+        "entries": [
+            {"key": "/works/OL1W", "title": "English Book", "first_publish_date": "2020"},
+            {"key": "/works/OL2W", "title": "Foreign Only Book", "first_publish_date": "2021"},
+            {"key": "/works/OL3W", "title": "No Data Book", "first_publish_date": "2022"},
+        ]
+    });
+    // A merged multi-language Work (English + Spanish editions) must still
+    // classify as the target language — presence check, not single-language.
+    let search_json = serde_json::json!({
+        "numFound": 3,
+        "docs": [
+            {"key": "/works/OL1W", "title": "English Book", "language": ["spa", "eng"]},
+            {"key": "/works/OL2W", "title": "Foreign Only Book", "language": ["spa"]},
+        ]
+    });
+
+    let fetcher = StubHttpFetcher::new();
+    fetcher.push_response(ok_json(works_json));
+    fetcher.push_response(ok_json(search_json));
+    let svc = make_svc_with_fetcher(db, fetcher);
+
+    let author = svc
+        .add(
+            user_id,
+            AddAuthorRequest {
+                name: "Test Author".into(),
+                ol_key: Some("/authors/OL1A".into()),
+                monitored: false,
+                sort_name: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let result = svc
+        .refresh_bibliography(user_id, author.author().id)
+        .await
+        .unwrap();
+
+    assert_eq!(result.entries.len(), 3);
+    let by_key = |k: &str| {
+        result
+            .entries
+            .iter()
+            .find(|e| e.ol_key.as_deref() == Some(k))
+            .unwrap()
+    };
+    assert_eq!(
+        by_key("OL1W").language.as_deref(),
+        Some("en"),
+        "merged Work with an English edition among others must classify as English, not foreign"
+    );
+    assert_eq!(
+        by_key("OL2W").language.as_deref(),
+        Some("es"),
+        "Work with only foreign editions must classify as foreign"
+    );
+    assert_eq!(
+        by_key("OL3W").language.as_deref(),
+        Some("en"),
+        "a Work with zero language signal must default to the target language \
+         (#112 follow-up: absence of evidence isn't evidence of foreign — a \
+         real 'language unknown' tag on most of an author's own catalog read \
+         as broken, not cautious), not stay Unknown"
+    );
+}
+
+#[tokio::test]
+async fn test_author_bibliography_ol_search_paginates_to_full_coverage() {
+    // #112 review round 1: a fixed single search.json page silently drops
+    // overflow entries to Unknown for prolific authors. Verify pagination
+    // actually walks a second page rather than stopping at the first.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+
+    let works_json = serde_json::json!({
+        "entries": [
+            {"key": "/works/OL1W", "title": "Book One", "first_publish_date": "2020"},
+            {"key": "/works/OL101W", "title": "Book On Page Two", "first_publish_date": "2020"},
+        ]
+    });
+    // Page 1: exactly PAGE_SIZE docs (forces pagination to continue) but
+    // numFound says there's one more beyond it.
+    let mut page1_docs: Vec<serde_json::Value> = (0..100)
+        .map(|i| serde_json::json!({"key": format!("/works/OLpadding{i}W"), "title": "padding", "language": ["eng"]}))
+        .collect();
+    page1_docs[0] =
+        serde_json::json!({"key": "/works/OL1W", "title": "Book One", "language": ["eng"]});
+    let page1 = serde_json::json!({"numFound": 101, "docs": page1_docs});
+    let page2 = serde_json::json!({
+        "numFound": 101,
+        "docs": [{"key": "/works/OL101W", "title": "Book On Page Two", "language": ["spa"]}]
+    });
+
+    let fetcher = StubHttpFetcher::new();
+    fetcher.push_response(ok_json(works_json));
+    fetcher.push_response(ok_json(page1));
+    fetcher.push_response(ok_json(page2));
+    let svc = make_svc_with_fetcher(db, fetcher);
+
+    let author = svc
+        .add(
+            user_id,
+            AddAuthorRequest {
+                name: "Test Author".into(),
+                ol_key: Some("/authors/OL1A".into()),
+                monitored: false,
+                sort_name: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let result = svc
+        .refresh_bibliography(user_id, author.author().id)
+        .await
+        .unwrap();
+
+    let page_two_entry = result
+        .entries
+        .iter()
+        .find(|e| e.ol_key.as_deref() == Some("OL101W"))
+        .expect("entry from the second search page must be present");
+    assert_eq!(
+        page_two_entry.language.as_deref(),
+        Some("es"),
+        "an entry only classifiable from page 2 must actually be classified — pagination must have run"
+    );
 }
 
 #[tokio::test]
@@ -570,6 +728,7 @@ async fn test_author_bibliography_already_in_library_flag() {
                 year: Some(2020),
                 series_name: None,
                 series_position: None,
+                language: None,
             },
             livrarr_db::BibliographyEntry {
                 ol_key: Some("/works/OL20W".to_string()),
@@ -577,6 +736,7 @@ async fn test_author_bibliography_already_in_library_flag() {
                 year: Some(2021),
                 series_name: None,
                 series_position: None,
+                language: None,
             },
         ],
         None,
@@ -653,6 +813,7 @@ async fn test_author_bibliography_already_in_library_flag_across_a_subtitle() {
             year: Some(2000),
             series_name: None,
             series_position: None,
+            language: None,
         }],
         None,
     )

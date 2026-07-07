@@ -56,6 +56,123 @@ where
     /// only with a non-empty roster in hand.
     /// Load a series' FK-linked works with their library items, sorted by
     /// position — the shared road of `get_detail` and `series_books`.
+    ///
+    /// #112: classify each series entry's language via Google Books. GR gives
+    /// no language signal, but (unlike the bibliography path) the series name
+    /// GR hands us is already in whatever language the series actually is —
+    /// so a straight title search has no translation title-mismatch problem.
+    /// Confidence gate reuses the project's one matching authority
+    /// (`identity_matching::title_verdict`/`author_verdict`, wiki insight
+    /// #59) instead of inventing new fuzzy-match logic: only trust a GB
+    /// volume's language if its title is Same/Grey against the series name
+    /// and its author doesn't Disagree.
+    ///
+    /// No GB key configured, no qualifying match, or any fetch error all
+    /// default to `target_language` rather than Unknown — absence of
+    /// evidence isn't evidence of a foreign series (same rule as the
+    /// bibliography path's `classify_ol_language`; a real PO-reported
+    /// "language unknown" showing on an author's own well-known series was
+    /// confusing, not cautious). A confidently-detected OTHER language still
+    /// overrides this and is flagged normally.
+    /// "Author's language" for #112 classification — same resolution order
+    /// as `author_service.rs`'s `fetch_bibliography_entries`.
+    async fn effective_target_language(&self, author: &Author) -> String {
+        match &author.monitor_language {
+            Some(lang) => lang.clone(),
+            None => self
+                .db
+                .get_default_language()
+                .await
+                .unwrap_or_else(|_| "en".to_string()),
+        }
+    }
+
+    async fn classify_series_languages(
+        &self,
+        author_name: &str,
+        target_language: &str,
+        entries: Vec<SeriesCacheEntry>,
+    ) -> Vec<SeriesCacheEntry> {
+        let api_key = match self.db.get_metadata_config().await {
+            Ok(cfg) => cfg.google_books_api_key.filter(|k| !k.is_empty()),
+            Err(_) => None,
+        };
+        let Some(api_key) = api_key else {
+            return entries
+                .into_iter()
+                .map(|mut e| {
+                    e.language = Some(target_language.to_string());
+                    e
+                })
+                .collect();
+        };
+
+        let mut out = Vec::with_capacity(entries.len());
+        for mut entry in entries {
+            entry.language = Some(
+                self.classify_one_series_language(&api_key, author_name, &entry.name)
+                    .await
+                    .unwrap_or_else(|| target_language.to_string()),
+            );
+            out.push(entry);
+        }
+        out
+    }
+
+    async fn classify_one_series_language(
+        &self,
+        api_key: &str,
+        author_name: &str,
+        series_name: &str,
+    ) -> Option<String> {
+        let query = format!("intitle:\"{series_name}\" inauthor:\"{author_name}\"");
+        let url = format!(
+            "https://www.googleapis.com/books/v1/volumes?q={}&maxResults=5&fields=items(volumeInfo(title,authors,language))",
+            urlencoding::encode(&query),
+        );
+
+        // Interactive: both callers (list_author_series, refresh_author_series)
+        // are synchronous, user-facing series-tab loads, not background scans.
+        let volumes = livrarr_external_data::google_books::fetch_gb_volumes(
+            &self.fetcher,
+            api_key,
+            url,
+            RequestPriority::Interactive,
+        )
+        .await
+        .ok()?;
+
+        let series_parsed = livrarr_domain::identity_matching::parse_title(series_name);
+        let author_list = vec![author_name.to_string()];
+
+        volumes.iter().find_map(|vol| {
+            let vi = vol.volume_info.as_ref()?;
+            let title = vi.title.as_ref()?;
+            let lang = vi.language.as_ref()?;
+
+            let vol_parsed = livrarr_domain::identity_matching::parse_title(title);
+            let title_ok = matches!(
+                livrarr_domain::identity_matching::title_verdict(&series_parsed, &vol_parsed),
+                livrarr_domain::identity_matching::TitleVerdict::Same
+                    | livrarr_domain::identity_matching::TitleVerdict::Grey { .. }
+            );
+            if !title_ok {
+                return None;
+            }
+
+            let vol_authors = vi.authors.clone().unwrap_or_default();
+            let author_ok = !matches!(
+                livrarr_domain::identity_matching::author_verdict(&author_list, &vol_authors),
+                livrarr_domain::identity_matching::AuthorVerdict::Disagree
+            );
+            if !author_ok {
+                return None;
+            }
+
+            Some(livrarr_domain::normalize_language(lang))
+        })
+    }
+
     async fn linked_series_works(
         &self,
         user_id: UserId,
@@ -438,6 +555,7 @@ where
             monitor_ebook: updated.monitor_ebook,
             monitor_audiobook: updated.monitor_audiobook,
             works_in_library: count,
+            language: None,
         })
     }
 
@@ -487,6 +605,10 @@ where
                     (cached.entries, cached.raw_entries, Some(cached.fetched_at))
                 } else {
                     let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+                    let target_language = self.effective_target_language(&author).await;
+                    let raw_entries = self
+                        .classify_series_languages(&author.name, &target_language, raw_entries)
+                        .await;
                     let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
                         .await
                         .unwrap_or_else(|| raw_entries.clone());
@@ -568,6 +690,10 @@ where
 
         let _ = self.db.delete_series_cache(author_id).await;
         let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+        let target_language = self.effective_target_language(&author).await;
+        let raw_entries = self
+            .classify_series_languages(&author.name, &target_language, raw_entries)
+            .await;
         let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
             .await
             .unwrap_or_else(|| raw_entries.clone());
@@ -659,6 +785,14 @@ where
                 }
             })?;
 
+        // The series' own detected content language (from GB, computed at
+        // fetch/refresh time — see fetch_author_series_pages) is ground
+        // truth when known; it overrides whatever the section-wide dropdown
+        // sent, so a foreign-only series can't be mis-stamped with the
+        // author's default language regardless of what the UI sent (#112).
+        let detected_language = cache_entry.language.clone();
+        let effective_language = detected_language.clone().or_else(|| req.language.clone());
+
         let series = self
             .db
             .upsert_series(CreateSeriesDbRequest {
@@ -668,8 +802,7 @@ where
                 gr_key: req.gr_key.clone(),
                 monitor_ebook: req.monitor_ebook,
                 monitor_audiobook: req.monitor_audiobook,
-                monitor_language: req
-                    .language
+                monitor_language: effective_language
                     .as_deref()
                     .map(livrarr_domain::normalize_language),
                 work_count: cache_entry.book_count,
@@ -685,6 +818,7 @@ where
             monitor_ebook: series.monitor_ebook,
             monitor_audiobook: series.monitor_audiobook,
             works_in_library: 0,
+            language: detected_language,
         })
     }
 
@@ -1468,6 +1602,9 @@ async fn fetch_author_series_pages<F: HttpFetcher>(
             name: e.name,
             gr_key: e.gr_key,
             book_count: e.book_count,
+            // GR gives no language signal at all (#112) — classified
+            // separately, after the fetch, via Google Books.
+            language: None,
         }));
 
         if !has_next || page >= 10 {
@@ -1523,6 +1660,7 @@ fn build_merged_series_list(
                 monitor_ebook,
                 monitor_audiobook,
                 works_in_library,
+                language: ce.language.clone(),
             }
         })
         .collect();
@@ -1549,6 +1687,9 @@ fn build_merged_series_list(
             monitor_ebook: s.monitor_ebook,
             monitor_audiobook: s.monitor_audiobook,
             works_in_library,
+            // DB-only stub, no matching cache entry — no detected-language
+            // signal exists for it.
+            language: None,
         });
     }
 
@@ -1625,6 +1766,7 @@ async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
                         name: ke.name.unwrap_or_else(|| orig.name.clone()),
                         gr_key: orig.gr_key.clone(),
                         book_count: orig.book_count,
+                        language: orig.language.clone(),
                     })
                 })
                 .collect()

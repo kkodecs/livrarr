@@ -8,3 +8,6 @@ test-results/
 playwright-report/
 blob-report/
 playwright/.cache/
+# Local-only dev/verification scripts (mirrors the repo-root scripts/ convention)
+scripts/
+build/

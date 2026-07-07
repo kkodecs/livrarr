@@ -13,6 +13,7 @@ pub struct SeriesResponse {
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
     pub works_in_library: i64,
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

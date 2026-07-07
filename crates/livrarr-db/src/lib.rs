@@ -1498,6 +1498,12 @@ pub struct BibliographyEntry {
     pub year: Option<i32>,
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
+    /// ISO 639-1 code if a real edition in some language was confirmed; `None`
+    /// means no language signal was found anywhere (Unknown, not "English").
+    /// `#[serde(default)]` so cached JSON blobs written before this field
+    /// existed deserialize as `None` rather than failing.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 fn empty_string_as_none<'de, D: serde::Deserializer<'de>>(
@@ -1542,6 +1548,10 @@ pub struct SeriesCacheEntry {
     pub name: String,
     pub gr_key: String,
     pub book_count: i32,
+    /// ISO 639-1 code if a confident Google Books match was found; `None`
+    /// means Unknown (shown by default, not treated as foreign).
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Cached series list for an author.

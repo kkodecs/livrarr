@@ -102,6 +102,10 @@ pub struct UpdateSeriesView {
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
     pub works_in_library: i64,
+    /// Always `None` here — this view comes from a flags-only update with no
+    /// cache lookup; the frontend re-fetches the series list (which does
+    /// carry the real detected language) after any mutation.
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +133,9 @@ pub struct AuthorSeriesItemView {
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
     pub works_in_library: i64,
+    /// ISO 639-1 code if a confident Google Books match was found for this
+    /// series; `None` means Unknown (shown by default).
+    pub language: Option<String>,
 }
 
 #[derive(Debug)]
@@ -150,6 +157,11 @@ pub struct MonitorSeriesView {
     pub monitor_ebook: bool,
     pub monitor_audiobook: bool,
     pub works_in_library: i64,
+    /// The series' own detected content language, if known — the ground
+    /// truth for what was actually just monitored (distinct from
+    /// `monitor_language`, which is what gets stamped on works this series
+    /// creates).
+    pub language: Option<String>,
 }
 
 #[derive(Debug)]

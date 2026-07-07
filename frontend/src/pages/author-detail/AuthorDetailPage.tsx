@@ -40,6 +40,14 @@ import { cn } from "@/utils/cn";
 import { HelpTip } from "@/components/HelpTip";
 import type { AuthorDetailResponse } from "@/types/api";
 
+// #112: a plain, human-readable label for a language code — "Auto: ES"
+// meant nothing to a user seeing it for the first time; a flag + real
+// language name needs no explanation.
+function languageLabel(code: string): string {
+  const known = SUPPORTED_LANGUAGES.find((l) => l.code === code);
+  return known ? `${known.flag} ${known.englishName}` : code.toUpperCase();
+}
+
 export default function AuthorDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -47,6 +55,9 @@ export default function AuthorDetailPage() {
   const authorId = Number(id);
 
   const [deleteOpen, setDeleteOpen] = useState(false);
+  // #112: one shared toggle for both Series and Bibliography (was two
+  // independent per-section toggles that could disagree on what's hidden).
+  const [showAllLanguages, setShowAllLanguages] = useState(false);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["author", id],
@@ -122,6 +133,10 @@ export default function AuthorDetailPage() {
   // monitoring is enabled.
   const displayedLanguage =
     author.monitorLanguage ?? (author.monitored ? "en" : (suggestedLanguage ?? "en"));
+  // #112: the single language a series/bibliography entry is compared
+  // against to decide "does this match the author" — the persisted monitor
+  // setting, same fallback used everywhere else on this page.
+  const authorLanguage = author.monitorLanguage ?? "en";
 
   return (
     <>
@@ -217,6 +232,7 @@ export default function AuthorDetailPage() {
             <HelpTip text="Auto-add new works by this author when detected." />
           </button>
           <span className="inline-flex items-center gap-1.5">
+            <span className="text-xs text-zinc-500">Monitor language:</span>
             <select
               value={displayedLanguage}
               onChange={(e) => updateMutation.mutate({ monitorLanguage: e.target.value })}
@@ -229,8 +245,22 @@ export default function AuthorDetailPage() {
                 </option>
               ))}
             </select>
-            <HelpTip text="Language for works the monitor auto-adds. Pre-filled from this author's library." />
+            <HelpTip text="Language stamped on new works this author's monitor auto-adds (and the fallback for series with no detected language of their own). Pre-filled from this author's library." />
           </span>
+        </div>
+
+        {/* #112: one shared language-visibility filter for both the Series
+            and Bibliography sections below — a single control, not one per
+            section, so they can't disagree on what's hidden. */}
+        <div className="mb-4 flex items-center gap-2 text-sm">
+          <span className="text-muted">Discovery view:</span>
+          <button
+            onClick={() => setShowAllLanguages((v) => !v)}
+            className="rounded border border-border px-2.5 py-1 text-xs text-zinc-300 hover:bg-surface-hover"
+          >
+            {showAllLanguages ? "All languages" : `${authorLanguage.toUpperCase()} + unknown only`}
+          </button>
+          <HelpTip text="Filters foreign-language editions and series out of the lists below by default. Unknown-language entries always show — they aren't confirmed foreign." />
         </div>
 
         {/* Works list */}
@@ -269,9 +299,20 @@ export default function AuthorDetailPage() {
           </div>
         )}
         {/* Series */}
-        <SeriesSection authorId={authorId} author={author} />
+        <SeriesSection
+          authorId={authorId}
+          author={author}
+          authorLanguage={authorLanguage}
+          showAllLanguages={showAllLanguages}
+        />
         {/* Bibliography */}
-        <BibliographySection authorId={authorId} author={author} libraryOlKeys={new Set(works.map((w) => w.olKey).filter(Boolean) as string[])} />
+        <BibliographySection
+          authorId={authorId}
+          author={author}
+          authorLanguage={authorLanguage}
+          showAllLanguages={showAllLanguages}
+          libraryOlKeys={new Set(works.map((w) => w.olKey).filter(Boolean) as string[])}
+        />
       </PageContent>
 
       {/* Delete Confirm */}
@@ -291,10 +332,14 @@ export default function AuthorDetailPage() {
 function BibliographySection({
   authorId,
   author,
+  authorLanguage,
+  showAllLanguages,
   libraryOlKeys,
 }: {
   authorId: number;
   author: AuthorDetailResponse["author"];
+  authorLanguage: string;
+  showAllLanguages: boolean;
   libraryOlKeys: Set<string>;
 }) {
   const queryClient = useQueryClient();
@@ -321,7 +366,12 @@ function BibliographySection({
   });
 
   const addMutation = useMutation({
-    mutationFn: (entry: { olKey: string | null; title: string; year: number | null }) => {
+    mutationFn: (entry: {
+      olKey: string | null;
+      title: string;
+      year: number | null;
+      language?: string | null;
+    }) => {
       setAddingKey(entry.title);
       return addWork({
         olKey: entry.olKey || null,
@@ -330,6 +380,10 @@ function BibliographySection({
         authorOlKey: author.olKey ?? null,
         year: entry.year,
         coverUrl: null,
+        // #112: an unknown-language entry should still get the author's own
+        // language, not silently fall through to the install-wide default
+        // (which ignored the author page you're looking at entirely).
+        language: entry.language ?? authorLanguage,
       });
     },
     onSuccess: (data, entry) => {
@@ -347,6 +401,10 @@ function BibliographySection({
 
   const hasBib = bib && bib.entries.length > 0;
   const isFetching = isLoading || refreshMutation.isPending;
+  const visibleEntries = (bib?.entries ?? []).filter(
+    (e) => showAllLanguages || e.language == null || e.language === authorLanguage,
+  );
+  const hiddenCount = (bib?.entries.length ?? 0) - visibleEntries.length;
 
   return (
     <section className="mt-8">
@@ -354,6 +412,9 @@ function BibliographySection({
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">
           Bibliography
         </h2>
+        {hasBib && !showAllLanguages && hiddenCount > 0 && (
+          <span className="text-xs text-zinc-600">({hiddenCount} hidden by language filter)</span>
+        )}
         {bib?.rawAvailable && (
           <div className="flex items-center rounded border border-border text-xs">
             <button
@@ -397,11 +458,18 @@ function BibliographySection({
       {!hasBib && !isFetching && (
         <p className="text-sm text-zinc-500">No bibliography available.</p>
       )}
-      {hasBib && <div className="overflow-x-auto rounded border border-border">
+      {hasBib && visibleEntries.length === 0 && (
+        <p className="text-sm text-zinc-500">
+          All entries are in other languages — use the "Discovery view" toggle above to see them.
+        </p>
+      )}
+      {hasBib && visibleEntries.length > 0 && <div className="overflow-x-auto rounded border border-border">
         <table className="w-full text-sm">
           <tbody>
-            {bib!.entries.map((entry) => {
+            {visibleEntries.map((entry) => {
               const inLibrary = entry.alreadyInLibrary || (entry.olKey != null && libraryOlKeys.has(entry.olKey)) || addedKeys.has(entry.title);
+              const isForeign = entry.language != null && entry.language !== authorLanguage;
+              const isUnknownLanguage = entry.language == null;
               return (
                 <tr
                   key={`${entry.olKey ?? ''}-${entry.title}-${entry.year ?? ''}`}
@@ -413,6 +481,19 @@ function BibliographySection({
                   <td className="px-2 py-1.5">
                     <span className="font-medium">{entry.title}</span>
                     {inLibrary && <span className="ml-2 text-xs text-green-600">In Library</span>}
+                    {isForeign && (
+                      <span className="ml-2 rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">
+                        {languageLabel(entry.language!)}
+                      </span>
+                    )}
+                    {isUnknownLanguage && (
+                      <span
+                        className="ml-2 text-xs italic text-zinc-600"
+                        title="Couldn't confirm what language this is — shown by default rather than guessed."
+                      >
+                        language unknown
+                      </span>
+                    )}
                     {entry.seriesName && (
                       <span className="ml-2 text-xs text-zinc-500">
                         {entry.seriesName}
@@ -448,17 +529,18 @@ function BibliographySection({
 function SeriesSection({
   authorId,
   author,
+  authorLanguage,
+  showAllLanguages,
 }: {
   authorId: number;
   author: AuthorDetailResponse["author"];
+  authorLanguage: string;
+  showAllLanguages: boolean;
 }) {
   const queryClient = useQueryClient();
   const [monitoringKey, setMonitoringKey] = useState<string | null>(null);
   const [resolveOpen, setResolveOpen] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
-  // Language for works the monitors in this section create (REQ-003) — one
-  // choice per author block, defaulted to the author's persisted setting.
-  const [language, setLanguage] = useState(author.monitorLanguage ?? "en");
 
   // Only show if author has grKey.
   const hasGrKey = !!author.grKey;
@@ -483,7 +565,10 @@ function SeriesSection({
   const monitorMutation = useMutation({
     mutationFn: (params: { grKey: string; monitorEbook: boolean; monitorAudiobook: boolean }) => {
       setMonitoringKey(params.grKey);
-      return monitorSeries(authorId, { ...params, language });
+      // #112: the backend overrides this with the series' own detected
+      // language whenever one is known — this is only the fallback for a
+      // series with no detected language (series_query_service.rs monitor_series).
+      return monitorSeries(authorId, { ...params, language: authorLanguage });
     },
     onSuccess: () => {
       setMonitoringKey(null);
@@ -543,6 +628,10 @@ function SeriesSection({
 
   const hasSeries = data && data.series.length > 0;
   const isFetching = isLoading || refreshMutation.isPending;
+  const visibleSeries = (data?.series ?? []).filter(
+    (s) => showAllLanguages || s.language == null || s.language === authorLanguage,
+  );
+  const hiddenSeriesCount = (data?.series.length ?? 0) - visibleSeries.length;
 
   return (
     <section className="mt-8">
@@ -550,6 +639,9 @@ function SeriesSection({
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">
           Series
         </h2>
+        {hasSeries && !showAllLanguages && hiddenSeriesCount > 0 && (
+          <span className="text-xs text-zinc-600">({hiddenSeriesCount} hidden by language filter)</span>
+        )}
         {data?.rawAvailable && (
           <div className="flex items-center rounded border border-border text-xs">
             <button
@@ -589,30 +681,24 @@ function SeriesSection({
             Refresh
           </button>
         )}
-        <select
-          value={language}
-          onChange={(e) => setLanguage(e.target.value)}
-          className="ml-auto h-6 rounded border border-border bg-zinc-800 px-1 text-xs text-zinc-100"
-        >
-          {SUPPORTED_LANGUAGES.map((lang) => (
-            <option key={lang.code} value={lang.code}>
-              {lang.flag} {lang.code}
-            </option>
-          ))}
-        </select>
-        <HelpTip text="Language stamped on works the monitors here add. Pre-filled from this author's setting." />
       </div>
       {!hasSeries && !isFetching && (
         <p className="text-sm text-zinc-500">No series found on Goodreads.</p>
       )}
-      {hasSeries && (
+      {hasSeries && visibleSeries.length === 0 && (
+        <p className="text-sm text-zinc-500">
+          All series are in other languages — use the "Discovery view" toggle above to see them.
+        </p>
+      )}
+      {hasSeries && visibleSeries.length > 0 && (
         <div className="overflow-x-auto rounded border border-border">
           <table className="w-full text-sm">
             <tbody>
-              {data!.series.map((s) => (
+              {visibleSeries.map((s) => (
                 <SeriesRow
                   key={s.grKey}
                   series={s}
+                  authorLanguage={authorLanguage}
                   isMonitoring={monitoringKey === s.grKey}
                   onMonitor={(monitorEbook, monitorAudiobook) =>
                     monitorMutation.mutate({
@@ -634,16 +720,20 @@ function SeriesSection({
 
 function SeriesRow({
   series,
+  authorLanguage,
   isMonitoring,
   onMonitor,
   onUnmonitor,
 }: {
   series: SeriesResponse;
+  authorLanguage: string;
   isMonitoring: boolean;
   onMonitor: (ebook: boolean, audiobook: boolean) => void;
   onUnmonitor: () => void;
 }) {
   const isMonitored = series.monitorEbook || series.monitorAudiobook;
+  const isForeign = series.language != null && series.language !== authorLanguage;
+  const isUnknownLanguage = series.language == null;
 
   return (
     <tr className="border-b border-border/50">
@@ -656,6 +746,22 @@ function SeriesRow({
             )}
           />
           <span className="font-medium text-zinc-200">{series.name}</span>
+          {isForeign && (
+            <span
+              className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400"
+              title="Detected automatically. If you monitor this series, books it creates will use this language, not the Monitor language setting above."
+            >
+              {languageLabel(series.language!)}
+            </span>
+          )}
+          {isUnknownLanguage && (
+            <span
+              className="text-xs italic text-zinc-600"
+              title="Couldn't confirm what language this is — shown by default rather than guessed."
+            >
+              language unknown
+            </span>
+          )}
         </div>
         {isMonitored && (
           <div className="ml-4 mt-0.5 flex gap-2 text-xs text-zinc-500">

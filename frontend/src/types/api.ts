@@ -389,6 +389,9 @@ export interface BibliographyEntry {
   seriesName?: string | null;
   seriesPosition?: number | null;
   alreadyInLibrary?: boolean;
+  /** ISO 639-1 code if a real edition's language was confirmed; `null` means
+   * unknown — shown by default, not treated as foreign. */
+  language?: string | null;
 }
 
 export interface AuthorBibliography {
@@ -410,6 +413,9 @@ export interface SeriesResponse {
   monitorEbook: boolean;
   monitorAudiobook: boolean;
   worksInLibrary: number;
+  /** ISO 639-1 code if a confident Google Books match was found; `null`
+   * means unknown — shown by default, not treated as foreign. */
+  language?: string | null;
 }
 
 export interface SeriesListResponse {

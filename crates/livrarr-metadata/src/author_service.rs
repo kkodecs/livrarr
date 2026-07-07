@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -6,6 +7,39 @@ use livrarr_db::{
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
+
+/// Classify a bibliography entry's language from the batched OL author-search
+/// map (#112): a presence check, not a single classification.
+///
+/// Absence of a language tag is NOT evidence of a foreign language — measured
+/// live, only ~67-69% of even a well-known English author's own OL Works
+/// carry a language tag at all (PO-reported: a real "language unknown" label
+/// on the majority of an English author's own catalog reads as broken, not
+/// cautious). So a Work with no signal defaults to the target language,
+/// matching what the page already assumes; a Work that DOES carry language
+/// data, none of which is the target, is genuine foreign-language evidence
+/// and stays flagged.
+fn classify_ol_language(
+    ol_key: Option<&str>,
+    lang_map: &HashMap<String, Vec<String>>,
+    target_language: &str,
+) -> Option<String> {
+    let Some(key) = ol_key else {
+        return Some(target_language.to_string());
+    };
+    let Some(raw_langs) = lang_map.get(key) else {
+        return Some(target_language.to_string());
+    };
+    let normalized: Vec<String> = raw_langs
+        .iter()
+        .map(|l| livrarr_domain::normalize_language(l))
+        .collect();
+    if normalized.iter().any(|l| l == target_language) {
+        Some(target_language.to_string())
+    } else {
+        normalized.into_iter().next()
+    }
+}
 
 pub struct AuthorServiceImpl<D, F, L> {
     db: D,
@@ -412,13 +446,25 @@ where
         author: &Author,
         user_id: UserId,
     ) -> Vec<livrarr_db::BibliographyEntry> {
+        // "Author's language" for #112 classification: their own monitor
+        // setting if configured, else the install default — same resolution
+        // order as insight #53's dominant_language/suggested_language.
+        let target_language = match &author.monitor_language {
+            Some(lang) => lang.clone(),
+            None => self
+                .db
+                .get_default_language()
+                .await
+                .unwrap_or_else(|_| "en".to_string()),
+        };
+
         // Try OL first
         let ol_result = async {
             let ol_key = match author.ol_key.as_deref() {
                 Some(k) => k.to_string(),
                 None => self.resolve_ol_key(user_id, author).await?,
             };
-            self.fetch_ol_bibliography(&ol_key).await
+            self.fetch_ol_bibliography(&ol_key, &target_language).await
         }
         .await;
 
@@ -433,7 +479,10 @@ where
         }
 
         // Fallback to Google Books
-        match self.fetch_gb_bibliography(&author.name).await {
+        match self
+            .fetch_gb_bibliography(&author.name, &target_language)
+            .await
+        {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::warn!(author = %author.name, "GB bibliography also failed: {e}");
@@ -445,6 +494,7 @@ where
     async fn fetch_ol_bibliography(
         &self,
         ol_key: &str,
+        target_language: &str,
     ) -> Result<Vec<livrarr_db::BibliographyEntry>, AuthorServiceError> {
         let url = format!("https://openlibrary.org/authors/{ol_key}/works.json?limit=100");
         let req = FetchRequest {
@@ -476,7 +526,7 @@ where
         let data: serde_json::Value = serde_json::from_slice(&resp.body)
             .map_err(|e| AuthorServiceError::Provider(format!("OL parse: {e}")))?;
 
-        let entries = data
+        let mut entries: Vec<livrarr_db::BibliographyEntry> = data
             .get("entries")
             .and_then(|e| e.as_array())
             .map(|arr| {
@@ -496,18 +546,145 @@ where
                             year,
                             series_name: None,
                             series_position: None,
+                            language: None,
                         })
                     })
                     .collect()
             })
             .unwrap_or_default();
 
+        // #112: classify each entry's language via a batched OL search — a
+        // presence check ("does this Work have a target-language edition"),
+        // not a single classification, so a merged multi-language OL Work
+        // stays visible as long as one of its editions is in the target
+        // language. Best-effort: any failure just leaves entries Unknown
+        // (never blocks the bibliography from displaying).
+        let lang_map = self.fetch_ol_author_languages(ol_key).await;
+        if !lang_map.is_empty() {
+            for entry in &mut entries {
+                entry.language =
+                    classify_ol_language(entry.ol_key.as_deref(), &lang_map, target_language);
+            }
+        }
+
         Ok(entries)
+    }
+
+    /// Batched OL search — returns bare work key -> raw OL language codes
+    /// (3-letter, e.g. "eng","spa") for every work by this OL author key.
+    /// Paginates via `offset` until `numFound` is exhausted. The page cap is
+    /// a defensive error guard, not a normal path: hitting it logs a warning
+    /// rather than silently treating overflow entries as ordinary Unknown
+    /// (#112 review round 1 — a fixed single page silently re-creates the
+    /// leak for any author with 100+ works).
+    async fn fetch_ol_author_languages(&self, ol_author_key: &str) -> HashMap<String, Vec<String>> {
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: usize = 10;
+
+        let mut map = HashMap::new();
+        let mut offset = 0usize;
+        let mut num_found: Option<usize> = None;
+
+        for page in 0..MAX_PAGES {
+            let url = format!(
+                "https://openlibrary.org/search.json?q=author_key:{ol_author_key}&fields=key,title,language&limit={PAGE_SIZE}&offset={offset}"
+            );
+            let req = FetchRequest {
+                url,
+                method: HttpMethod::Get,
+                headers: vec![],
+                body: None,
+                timeout: Duration::from_secs(10),
+                rate_bucket: RateBucket::OpenLibrary,
+                max_body_bytes: 2 * 1024 * 1024,
+                anti_bot_check: false,
+                user_agent: UserAgentProfile::Server,
+                priority: RequestPriority::Normal,
+            };
+
+            let resp = match self.fetcher.fetch(req).await {
+                Ok(r) if r.status == 200 => r,
+                Ok(r) => {
+                    tracing::warn!(
+                        ol_author_key,
+                        status = r.status,
+                        "OL author-language search returned non-200; stopping pagination"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        ol_author_key,
+                        "OL author-language search failed ({e}); stopping pagination"
+                    );
+                    break;
+                }
+            };
+
+            let data: serde_json::Value = match serde_json::from_slice(&resp.body) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(ol_author_key, "OL author-language search parse failed: {e}");
+                    break;
+                }
+            };
+
+            if num_found.is_none() {
+                num_found = data
+                    .get("numFound")
+                    .and_then(|n| n.as_u64())
+                    .map(|n| n as usize);
+            }
+
+            let docs = data
+                .get("docs")
+                .and_then(|d| d.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let page_len = docs.len();
+
+            for doc in &docs {
+                let Some(key) = doc.get("key").and_then(|k| k.as_str()) else {
+                    continue;
+                };
+                let bare_key = key.trim_start_matches("/works/").to_string();
+                let langs: Vec<String> = doc
+                    .get("language")
+                    .and_then(|l| l.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !langs.is_empty() {
+                    map.insert(bare_key, langs);
+                }
+            }
+
+            offset += PAGE_SIZE;
+            let exhausted = page_len < PAGE_SIZE || num_found.is_some_and(|n| offset >= n);
+            if exhausted {
+                break;
+            }
+            if page == MAX_PAGES - 1 {
+                tracing::warn!(
+                    ol_author_key,
+                    num_found = ?num_found,
+                    pages_fetched = MAX_PAGES,
+                    "OL author-language search hit the defensive page cap; \
+                     some works may be unclassified (Unknown)"
+                );
+            }
+        }
+
+        map
     }
 
     async fn fetch_gb_bibliography(
         &self,
         author_name: &str,
+        target_language: &str,
     ) -> Result<Vec<livrarr_db::BibliographyEntry>, AuthorServiceError> {
         let api_key = match self.db.get_metadata_config().await {
             Ok(cfg) => match cfg
@@ -561,6 +738,14 @@ where
                     year,
                     series_name: None,
                     series_position: None,
+                    // No language on this volume isn't evidence of foreign —
+                    // same "no signal ⇒ assume target" rule as the OL path.
+                    language: Some(
+                        vi.language
+                            .as_deref()
+                            .map(livrarr_domain::normalize_language)
+                            .unwrap_or_else(|| target_language.to_string()),
+                    ),
                 })
             })
             .collect();
@@ -629,6 +814,7 @@ where
                     series_name: b.series_name,
                     series_position: b.series_position,
                     already_in_library,
+                    language: b.language,
                 }
             })
             .collect()
