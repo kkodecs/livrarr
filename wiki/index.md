@@ -47,6 +47,10 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 - [Audnexus](integrations/audnexus.md) — 300/min rate limit, 24h cache + 304 revalidation, self-hostable as fallback
 - [Goodreads](integrations/goodreads.md) — no API since 2020 (scraping); DataDome anti-bot; **we're currently 5-7x over the polite rate floor**
 
+## Deployment
+
+- [Container Permissions (PUID/PGID)](deployment/container-permissions.md) — root-start/drop model, cap set, hardened & rootless modes, Unraid/Proxmox gotchas, upgrade impact
+
 ## Decisions
 
 - [Key Decisions](decisions/key-decisions.md) — hardlink policy, config, indexers, AppState, security

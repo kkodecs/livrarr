@@ -2,6 +2,10 @@ services:
   livrarr:
     image: ghcr.io/kkodecs/livrarr:0.1.0-alpha5   # pin to a specific release; avoid :latest for alpha
     container_name: livrarr
+    environment:
+      - PUID=1000            # your host user id  (run `id -u`)
+      - PGID=1000            # your host group id (run `id -g`)
+      - TZ=Etc/UTC           # e.g. America/New_York
     ports:
       - 8789:8789
     volumes:
@@ -13,6 +17,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:                 # minimal set: fix /config ownership, then drop root → PUID:PGID
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
     mem_limit: 512m
     cpus: 2.0
     healthcheck:
@@ -21,3 +30,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+# ── Hardened (never-root) alternative ────────────────────────────────────────
+# Prefer maximum lockdown over convenience? Run as a fixed user with no added
+# capabilities — Livrarr then never starts as root. Pre-create and own ./config first:
+#     mkdir -p config && sudo chown -R 1000:1000 config
+# Then, in the service above, DELETE the `cap_add:` block and add:
+#     user: "1000:1000"
+# In this mode PUID/PGID are ignored (the `user:` value wins).

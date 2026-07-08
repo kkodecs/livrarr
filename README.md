@@ -96,15 +96,27 @@ level = "info"       # trace | debug | info | warn | error
 | Calibre-Web Automated | No | Downstream ebook delivery |
 | AudioBookShelf | No | Downstream audiobook delivery |
 
-### Permissions
+### Permissions (PUID / PGID)
 
-Livrarr runs as UID/GID 1000 inside the container. All mounted paths must be accessible by that user:
+Set `PUID`/`PGID` to your host user so Livrarr reads and writes your files with the right ownership — the same convention as Sonarr/Radarr. On startup the container briefly runs as root, fixes ownership of `/config`, then drops to `PUID:PGID` and runs the app as that user. It never leaves the app running as root, and it only ever changes ownership of `/config` — never your library.
 
-- `/config` — must be **writable** (database, covers, config file)
-- `/books` — must be **writable** (Livrarr moves files here on import)
-- `/downloads` — must be **readable** (completed download directory)
+```yaml
+environment:
+  - PUID=1000   # run `id -u` on the host
+  - PGID=1000   # run `id -g` on the host
+```
 
-If you're on a different UID, `chown 1000:1000` the host directories before starting.
+Mounted paths must be accessible by that user:
+
+- `/config` — **writable** (database, covers, config file); ownership is auto-fixed to `PUID:PGID`
+- `/books` — **writable** (Livrarr moves files here on import); you own this
+- `/downloads` — **readable** (completed download directory); you own this
+
+Livrarr auto-fixes `/config` only — make sure your library and downloads are already owned by (or accessible to) your `PUID:PGID`.
+
+**Hardened / rootless:** to never run as root at all, delete the `cap_add:` block and set `user: "1000:1000"` (pre-`chown` your `./config` on the host first); in this mode `PUID`/`PGID` are ignored. Rootless Docker/Podman **must** use this mode. On Kubernetes use `securityContext.runAsUser/runAsGroup/fsGroup`. With SELinux, add `:z`/`:Z` to your bind mounts.
+
+**Upgrading from an older build?** If you used the simple Quick Start compose, nothing changes. If you copied the hardened `docker-compose.yml` (with `cap_drop: ALL`), add the `cap_add:` block (or switch to `user: "1000:1000"`) — otherwise the container stops on start with a message telling you exactly what to do.
 
 ### Download path mapping
 
@@ -120,7 +132,6 @@ Livrarr and your download client must see completed downloads at the **same host
 ## Alpha Limitations
 
 - Multi-user partially implemented — additional users can log in but share admin indexers/clients. Treat as single-user for alpha.
-- PUID/PGID not configurable — runs as UID/GID 1000 (fix in beta)
 - Cover accuracy can still vary for some titles (especially Goodreads matches). A manual refresh usually fixes it.
 
 ---

@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!--
+  Unraid Community Applications template for Livrarr.
+  Caps are declared here in ExtraParams because Unraid does NOT honour compose
+  `cap_add`. Livrarr auto-fixes ownership of /config only; /books must be writable
+  and /downloads readable by the PUID/PGID you set (Unraid default 99:100).
+-->
+<Container version="2">
+  <Name>Livrarr</Name>
+  <Repository>ghcr.io/kkodecs/livrarr:0.1.0-alpha5</Repository>
+  <Registry>https://github.com/kkodecs/livrarr/pkgs/container/livrarr</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/kkodecs/livrarr/issues</Support>
+  <Project>https://github.com/kkodecs/livrarr</Project>
+  <Overview>Self-hosted ebook and audiobook library manager for the *arr ecosystem — finds, grabs, organizes, enriches, and reads your books. Single container, single SQLite database.</Overview>
+  <Category>MediaApp:Books Downloaders:</Category>
+  <WebUI>http://[IP]:[PORT:8789]/</WebUI>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams>--cap-drop=ALL --cap-add=CHOWN --cap-add=SETUID --cap-add=SETGID --cap-add=DAC_OVERRIDE --security-opt no-new-privileges:true</ExtraParams>
+  <PostArgs/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Description>Self-hosted ebook and audiobook library manager for the *arr ecosystem. Set PUID/PGID to your Unraid user (default 99:100). Livrarr fixes ownership of /config automatically; ensure /books is writable and /downloads readable by that user.</Description>
+  <Config Name="WebUI Port" Target="8789" Default="8789" Mode="tcp" Description="Web UI port" Type="Port" Display="always" Required="true" Mask="false">8789</Config>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/livrarr" Mode="rw" Description="Database, covers, config.toml (ownership auto-fixed to PUID:PGID)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/livrarr</Config>
+  <Config Name="Books" Target="/books" Default="/mnt/user/media/books" Mode="rw" Description="Your ebook/audiobook library root (must be writable by PUID:PGID)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/media/books</Config>
+  <Config Name="Downloads" Target="/downloads" Default="/mnt/user/downloads" Mode="rw" Description="Download client complete dir (must be readable by PUID:PGID; same host path as your client)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/downloads</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User id Livrarr runs as (Unraid default 99)" Type="Variable" Display="always" Required="true" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group id Livrarr runs as (Unraid default 100)" Type="Variable" Display="always" Required="true" Mask="false">100</Config>
+  <Config Name="TZ" Target="TZ" Default="Etc/UTC" Mode="" Description="Timezone, e.g. America/New_York" Type="Variable" Display="always" Required="false" Mask="false">Etc/UTC</Config>
+</Container>

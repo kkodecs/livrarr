@@ -77,7 +77,7 @@ RUN if [ "$TARGETARCH" = "arm64" ] && [ "$BUILDARCH" = "amd64" ]; then \
 # ─────────────────────────────────────────────
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata tini
+RUN apk add --no-cache ca-certificates tzdata tini su-exec
 
 # Non-root user
 RUN addgroup -g 1000 livrarr && \
@@ -94,13 +94,15 @@ RUN --mount=type=bind,from=backend,source=/app,target=/build \
       cp /build/target/release/livrarr ./livrarr; \
     fi
 COPY --from=frontend /app/dist ./ui
+COPY docker/entrypoint.sh /entrypoint.sh
 
-RUN chown -R livrarr:livrarr /app
-
-USER livrarr
+# Start as root so the entrypoint can apply PUID/PGID, fix /config ownership, and drop
+# privileges (LinuxServer.io pattern). The entrypoint always execs the app as a non-root
+# user (default 1000:1000); it never leaves the app running as root.
+RUN chown -R livrarr:livrarr /app && chmod +x /entrypoint.sh
 
 VOLUME ["/config"]
 
 EXPOSE 8789
 
-ENTRYPOINT ["/sbin/tini", "--", "/app/livrarr", "--data", "/config", "--ui-dir", "/app/ui"]
+ENTRYPOINT ["/entrypoint.sh"]
