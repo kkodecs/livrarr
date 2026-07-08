@@ -5,12 +5,15 @@ pub mod keyed_mutex;
 pub mod normalization;
 pub mod perf;
 pub mod readarr;
+pub mod redact;
 pub mod seed;
 pub mod services;
 pub mod settings;
 pub mod text_norm;
 pub mod title_cleanup;
 pub mod torznab;
+
+pub use redact::redact_secrets;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

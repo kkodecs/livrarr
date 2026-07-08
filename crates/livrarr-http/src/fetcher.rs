@@ -158,7 +158,11 @@ impl HttpFetcherImpl {
                 let err = if e.is_timeout() {
                     FetchError::Timeout(req.timeout)
                 } else {
-                    FetchError::Connection(e.to_string())
+                    FetchError::Connection(format!(
+                        "{}: {}",
+                        livrarr_domain::redact_secrets(&req.url),
+                        e.without_url()
+                    ))
                 };
                 outbound_queue::shared()
                     .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
@@ -202,7 +206,11 @@ impl HttpFetcherImpl {
                     let err = if e.is_timeout() {
                         FetchError::Timeout(req.timeout)
                     } else {
-                        FetchError::Connection(e.to_string())
+                        FetchError::Connection(format!(
+                            "{}: {}",
+                            livrarr_domain::redact_secrets(&req.url),
+                            e.without_url()
+                        ))
                     };
                     outbound_queue::shared()
                         .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
@@ -436,5 +444,49 @@ impl HttpFetcher for HttpFetcherImpl {
     ) -> Result<FetchResponse, FetchError> {
         self.fetch_ssrf_safe_impl(req, &self.fast_connect_ssrf_client)
             .await
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+    use livrarr_domain::services::RateBucket;
+    use livrarr_domain::RequestPriority;
+
+    /// REQ-004 / AC-002: a failed fetch whose URL carries a secret must not leak
+    /// that secret into the `FetchError` string — which is exactly the string the
+    /// RSS-sync WARN log emits verbatim (`rss_sync.rs:66`). Drives a real
+    /// connection failure (port 1 refuses) so the reqwest error is genuine, then
+    /// asserts the sentinel apikey never survives into the error text.
+    #[tokio::test]
+    async fn failed_fetch_redacts_apikey_in_error() {
+        let fetcher = HttpFetcherImpl::new().unwrap();
+        let req = FetchRequest {
+            url: "http://127.0.0.1:1/2/api?apikey=FAKEKEYSENTINEL".to_string(),
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(2),
+            rate_bucket: RateBucket::None,
+            max_body_bytes: 4096,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
+        };
+
+        let err = fetcher
+            .fetch(req)
+            .await
+            .expect_err("connecting to 127.0.0.1:1 must fail");
+        let msg = err.to_string();
+
+        assert!(
+            !msg.contains("FAKEKEYSENTINEL"),
+            "apikey leaked into fetch error (would reach logs): {msg}"
+        );
+        assert!(
+            msg.contains("[REDACTED]"),
+            "expected redacted url in error, got: {msg}"
+        );
     }
 }

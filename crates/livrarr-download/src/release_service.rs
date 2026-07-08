@@ -203,23 +203,19 @@ where
                             all_results.extend(results);
                         }
                         Ok(TorznabParseResult::Error { code, description }) => {
-                            warnings.push(format!(
+                            warnings.push(redact_secrets(&format!(
                                 "indexer {indexer_name}: error {code}: {description}"
-                            ));
+                            )));
                         }
                         Err(e) => {
-                            warnings.push(format!("indexer {indexer_name}: {e}"));
+                            warnings.push(redact_secrets(&format!("indexer {indexer_name}: {e}")));
                         }
                     }
                 }
                 Ok((indexer_name, Err(err_msg))) => {
-                    // Don't expose API keys in warnings
-                    let safe_msg = if err_msg.contains("apikey=") {
-                        "request failed".to_string()
-                    } else {
-                        err_msg
-                    };
-                    warnings.push(format!("indexer {indexer_name}: {safe_msg}"));
+                    warnings.push(redact_secrets(&format!(
+                        "indexer {indexer_name}: {err_msg}"
+                    )));
                 }
                 Err(join_err) => {
                     warnings.push(format!("indexer task panicked: {join_err}"));
