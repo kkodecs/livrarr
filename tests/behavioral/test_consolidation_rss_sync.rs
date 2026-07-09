@@ -774,6 +774,70 @@ async fn test_rss_sync_silent_release_skips_nondefault_language_work() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rss_sync_unmatched_silent_release_not_counted_as_language_skip() {
+    // Regression: the language gate must run AFTER the title/author match, so a
+    // language-silent release that does not match the work is never tallied as a
+    // "skip" against it. Before the fix, every silent feed item was counted
+    // against every non-default-language work, inflating the RssLanguageSkipped
+    // notification to the feed size regardless of relevance.
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+
+    let indexer = seed_rss_indexer(&db, "TestIndexer", "http://indexer.test").await;
+    db.upsert_rss_state(indexer.id, Some("2024-12-01"), "old-guid")
+        .await
+        .unwrap();
+
+    db.update_default_language("en").await.unwrap();
+    // A non-English (German) work: a silent release is "grey" for it.
+    let work = seed_monitored_work_with_language(
+        &db,
+        user_id,
+        "The Way of Kings",
+        "Brandon Sanderson",
+        Some("de"),
+    )
+    .await;
+    seed_download_client(&db).await;
+
+    // A language-silent release with a completely different title AND author —
+    // it scores well below the match threshold against the German work.
+    let feed = rss_xml(&[(
+        "Dune Frank Herbert EPUB",
+        "guid-unrelated-silent",
+        "http://indexer.test/dl/1",
+        1_000_000,
+    )]);
+
+    let http = StubHttpFetcher::with_ok(200, feed);
+    let release_svc = Arc::new(StubReleaseService::succeeding());
+    let db_arc = Arc::new(db);
+
+    let workflow = RssSyncWorkflowImpl::new(db_arc.clone(), Arc::new(http), release_svc.clone());
+    let report = workflow.run_sync().await.unwrap();
+
+    assert_eq!(report.grabs_attempted, 0);
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("language")),
+        "an unrelated release must not raise any language-skip warning, got: {:?}",
+        report.warnings
+    );
+
+    let notifs = db_arc.list_notifications(user_id, false).await.unwrap();
+    assert!(
+        !notifs
+            .iter()
+            .any(|n| n.notification_type == NotificationType::RssLanguageSkipped),
+        "an unrelated release must not create a language-skip notification naming {}, got: {:?}",
+        work.title,
+        notifs
+            .iter()
+            .map(|n| (&n.notification_type, &n.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_rss_sync_silent_release_still_grabs_for_default_language_work() {
     let db = create_test_db().await;
     let user_id = create_test_user(&db).await;

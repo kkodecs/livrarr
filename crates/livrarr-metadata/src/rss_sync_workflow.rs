@@ -365,6 +365,19 @@ where
                             }
                         }
 
+                        // Match first: only a release that actually scores as
+                        // this work (title/author >= threshold) may proceed. The
+                        // language gate below counts a skip per (release, work)
+                        // pairing, so it MUST run after the match — otherwise an
+                        // unrelated language-silent release is tallied against
+                        // every non-default-language work in the library,
+                        // inflating the skip count to the whole feed size.
+                        let best_score = livrarr_matching::best_match_score(&parsed, cand);
+
+                        if best_score < threshold {
+                            continue;
+                        }
+
                         // D7 recognition corollary (REQ-011): a release
                         // declaring a language different from the work is a
                         // hard veto; a language-silent release only matches
@@ -388,12 +401,6 @@ where
                                 continue;
                             }
                             LanguageVerdict::Neutral => {}
-                        }
-
-                        let best_score = livrarr_matching::best_match_score(&parsed, cand);
-
-                        if best_score < threshold {
-                            continue;
                         }
 
                         // RSS-MATCH-001: best score wins. Tie: lower work_id.
