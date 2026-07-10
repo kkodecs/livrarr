@@ -19,20 +19,13 @@ use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
-use livrarr_metadata::work_service::{StubNoLlm, StubTagService, WorkServiceImpl};
-use livrarr_metadata::{DefaultMergeEngine, PriorityModel};
+use livrarr_metadata::work_service::{StubNoLlm, WorkServiceImpl};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-type TestWorkService = WorkServiceImpl<
-    SqliteDb,
-    StubEnrichmentWorkflow,
-    StubHttpFetcher,
-    StubNoLlm,
-    DefaultMergeEngine,
-    StubTagService,
->;
+type TestWorkService =
+    WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher, StubNoLlm>;
 
 const AUTHOR: &str = "S6 Contract Author";
 const PENDING_TITLE: &str = "Pending Identity Title";
@@ -105,13 +98,8 @@ fn service(
         db,
         workflow,
         StubHttpFetcher::new(),
-        livrarr_http::HttpClient::builder()
-            .build()
-            .expect("test HttpClient"),
         StubNoLlm,
         test_data_dir(),
-        DefaultMergeEngine::new(PriorityModel::english()),
-        Arc::new(StubTagService),
     );
 
     match resolver {

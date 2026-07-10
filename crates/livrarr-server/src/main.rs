@@ -528,15 +528,12 @@ async fn main() {
             svc_enrichment.clone(),
             svc_db.clone(),
         );
-        let ws_merge_engine =
-            livrarr_metadata::DefaultMergeEngine::new(livrarr_metadata::PriorityModel::english());
         Arc::new(
             livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
                 svc_db.clone(),
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for work service"),
-                http_client.clone(),
                 livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
@@ -544,8 +541,6 @@ async fn main() {
                         .expect("LLM HttpClient for work service"),
                 ),
                 data_dir.clone(),
-                ws_merge_engine,
-                tag_service_arc.clone(),
             )
             .with_resolver(identity_resolver_arc.clone()),
         )
@@ -562,7 +557,6 @@ async fn main() {
             data_dir_arc.clone(),
         ))
     };
-    let http_client_for_services = http_client.clone();
     let state = AppState {
         db,
         auth_service,
@@ -668,7 +662,6 @@ async fn main() {
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for list work service"),
-                http_client_for_services.clone(),
                 livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
@@ -676,10 +669,6 @@ async fn main() {
                         .expect("LLM HttpClient for list service"),
                 ),
                 data_dir.clone(),
-                livrarr_metadata::DefaultMergeEngine::new(
-                    livrarr_metadata::PriorityModel::english(),
-                ),
-                tag_service_arc.clone(),
             );
             Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
                 svc_db.clone(),
@@ -711,7 +700,6 @@ async fn main() {
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for author monitor work service"),
-                http_client_for_services.clone(),
                 livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
                     livrarr_http::HttpClient::builder()
@@ -719,10 +707,6 @@ async fn main() {
                         .expect("LLM HttpClient for author monitor"),
                 ),
                 data_dir.clone(),
-                livrarr_metadata::DefaultMergeEngine::new(
-                    livrarr_metadata::PriorityModel::english(),
-                ),
-                tag_service_arc.clone(),
             );
             Arc::new(
                 livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::new(

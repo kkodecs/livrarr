@@ -59,8 +59,6 @@ pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     LiveEnrichmentWorkflow,
     livrarr_http::fetcher::HttpFetcherImpl,
     livrarr_external_data::llm_caller_service::LlmCallerImpl,
-    livrarr_metadata::DefaultMergeEngine,
-    LiveTagServiceImpl,
 >;
 pub type LiveGrabService = livrarr_download::grab_service::GrabServiceImpl<SqliteDb>;
 pub type LiveReleaseService = livrarr_download::release_service::ReleaseServiceImpl<

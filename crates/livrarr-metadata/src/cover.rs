@@ -237,7 +237,7 @@ pub async fn fetch_phase1_cover<H: HttpFetcher>(
     let start = tokio::time::Instant::now();
     let deadline = start + Duration::from_secs(3);
 
-    let unproxied = request_cover_url.map(crate::work_service::unproxy_cover_url);
+    let unproxied = request_cover_url.map(livrarr_domain::unproxy_cover_url);
     let valid_url = unproxied
         .as_deref()
         .filter(|u| livrarr_external_data::provider_util::validate_cover_url(u, "").is_some());

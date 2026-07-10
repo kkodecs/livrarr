@@ -37,17 +37,10 @@ use livrarr_handlers::AuthContext;
 use livrarr_metadata::async_resolver::settle_identity;
 use livrarr_metadata::english_identity_resolver::EnglishIdentityResolver;
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
-use livrarr_metadata::work_service::{StubNoLlm, StubTagService, WorkServiceImpl};
-use livrarr_metadata::{DefaultMergeEngine, PriorityModel};
+use livrarr_metadata::work_service::{StubNoLlm, WorkServiceImpl};
 
-type TestWorkService = WorkServiceImpl<
-    SqliteDb,
-    StubEnrichmentWorkflow,
-    StubHttpFetcher,
-    StubNoLlm,
-    DefaultMergeEngine,
-    StubTagService,
->;
+type TestWorkService =
+    WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher, StubNoLlm>;
 
 struct ScriptedResolver {
     calls: AtomicUsize,
@@ -106,16 +99,11 @@ fn service(
         db,
         workflow,
         StubHttpFetcher::new(),
-        livrarr_http::HttpClient::builder()
-            .build()
-            .expect("test HttpClient"),
         StubNoLlm,
         tempfile::tempdir()
             .expect("test data dir")
             .path()
             .to_path_buf(),
-        DefaultMergeEngine::new(PriorityModel::english()),
-        Arc::new(StubTagService),
     );
 
     match resolver {

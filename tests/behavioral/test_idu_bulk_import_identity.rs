@@ -20,10 +20,7 @@ use livrarr_external_data::{
 };
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
 use livrarr_metadata::list_service::{ListServiceImpl, NoOpBibliographyTrigger};
-use livrarr_metadata::work_service::{
-    StubNoEnrichment, StubNoLlm, StubTagService, WorkServiceImpl,
-};
-use livrarr_metadata::{DefaultMergeEngine, PriorityModel};
+use livrarr_metadata::work_service::{StubNoEnrichment, StubNoLlm, WorkServiceImpl};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,14 +32,7 @@ const DUNE_ROW_ISBN: &str = "9780441013593";
 const RESOLVED_OL_KEY: &str = "OL27448W";
 const RESOLVED_ISBN: &str = "9780441172719";
 
-type TestWorkService = WorkServiceImpl<
-    SqliteDb,
-    StubNoEnrichment,
-    StubHttpFetcher,
-    StubNoLlm,
-    DefaultMergeEngine,
-    StubTagService,
->;
+type TestWorkService = WorkServiceImpl<SqliteDb, StubNoEnrichment, StubHttpFetcher, StubNoLlm>;
 
 type TestListService =
     ListServiceImpl<SqliteDb, TestWorkService, StubHttpFetcher, NoOpBibliographyTrigger>;
@@ -81,13 +71,8 @@ async fn make_service_with_resolver(
         db.clone(),
         StubNoEnrichment,
         http.clone(),
-        livrarr_http::HttpClient::builder()
-            .build()
-            .expect("test HttpClient"),
         StubNoLlm,
         test_data_dir(),
-        DefaultMergeEngine::new(PriorityModel::english()),
-        Arc::new(StubTagService),
     )
     .with_resolver(Arc::new(resolver));
 

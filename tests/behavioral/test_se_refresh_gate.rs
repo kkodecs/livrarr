@@ -20,8 +20,6 @@ type TestWorkService = WorkServiceImpl<
     StubEnrichmentWorkflow,
     StubHttpFetcher,
     livrarr_metadata::work_service::StubNoLlm,
-    livrarr_metadata::DefaultMergeEngine,
-    livrarr_metadata::work_service::StubTagService,
 >;
 
 fn resolver_with_stubs(stubs: Vec<StubProviderClient>) -> LiveEnglishIdentityResolver {
@@ -48,16 +46,11 @@ fn service_with_resolver(
         db,
         workflow,
         StubHttpFetcher::new(),
-        livrarr_http::HttpClient::builder()
-            .build()
-            .expect("test HttpClient"),
         livrarr_metadata::work_service::StubNoLlm,
         tempfile::tempdir()
             .expect("test data dir")
             .path()
             .to_path_buf(),
-        livrarr_metadata::DefaultMergeEngine::new(livrarr_metadata::PriorityModel::english()),
-        std::sync::Arc::new(livrarr_metadata::work_service::StubTagService),
     )
     .with_resolver(std::sync::Arc::new(resolver))
 }

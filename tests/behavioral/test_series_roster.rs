@@ -30,8 +30,6 @@ type TestWorkService = WorkServiceImpl<
     StubEnrichmentWorkflow,
     StubHttpFetcher,
     livrarr_metadata::work_service::StubNoLlm,
-    livrarr_metadata::DefaultMergeEngine,
-    livrarr_metadata::work_service::StubTagService,
 >;
 
 type TestSeriesService =

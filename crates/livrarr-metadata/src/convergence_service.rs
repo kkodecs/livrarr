@@ -22,8 +22,8 @@ use crate::work_service::{chaseable_anchor_types, WorkServiceImpl};
 /// identity permits, and account dead-end retry counters.
 ///
 /// Called exclusively by the `WorkService::converge_work` thin wrapper.
-pub(crate) async fn converge_work<D, E, H, L, M, T>(
-    svc: &WorkServiceImpl<D, E, H, L, M, T>,
+pub(crate) async fn converge_work<D, E, H, L>(
+    svc: &WorkServiceImpl<D, E, H, L>,
     user_id: UserId,
     work_id: WorkId,
     threshold: u32,
@@ -45,8 +45,6 @@ where
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
-    M: crate::MergeEngine + Send + Sync,
-    T: livrarr_domain::services::TagService + Send + Sync,
 {
     // Fresh row (R-10): the job hands us an id; re-read so we settle on truth.
     let work = svc.get(user_id, work_id).await?;
@@ -234,8 +232,8 @@ fn converge_outcome(
 ///   materialize).
 ///
 /// Called exclusively by the `WorkService::retry_all_incomplete` thin wrapper.
-pub(crate) async fn retry_all_incomplete<D, E, H, L, M, T>(
-    svc: &WorkServiceImpl<D, E, H, L, M, T>,
+pub(crate) async fn retry_all_incomplete<D, E, H, L>(
+    svc: &WorkServiceImpl<D, E, H, L>,
     user_id: UserId,
 ) -> Result<RetrySummary, WorkServiceError>
 where
@@ -255,8 +253,6 @@ where
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
-    M: crate::MergeEngine + Send + Sync,
-    T: livrarr_domain::services::TagService + Send + Sync,
 {
     // Single pass over every "incomplete" work — Failed, Unenriched, or
     // identity-Pending — filtered in memory (like refresh_all). This REPLACES

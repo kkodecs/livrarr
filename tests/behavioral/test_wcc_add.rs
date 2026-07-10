@@ -89,8 +89,6 @@ fn service(
     livrarr_metadata::work_service::StubNoEnrichment,
     StubHttpFetcher,
     livrarr_metadata::work_service::StubNoLlm,
-    livrarr_metadata::DefaultMergeEngine,
-    livrarr_metadata::work_service::StubTagService,
 > {
     WorkServiceImpl::without_enrichment(
         db,

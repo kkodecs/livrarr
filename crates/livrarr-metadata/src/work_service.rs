@@ -29,31 +29,12 @@ struct CachedLookup {
     created_at: Instant,
 }
 
-pub struct WorkServiceImpl<
-    D,
-    E,
-    H,
-    L = StubNoLlm,
-    M = crate::DefaultMergeEngine,
-    T = StubTagService,
-> {
+pub struct WorkServiceImpl<D, E, H, L = StubNoLlm> {
     pub(crate) db: D,
     enrichment: E,
     http: H,
-    // Unread: the phase1 cover recovery path's Hardcover calls go through
-    // `http` (HttpFetcher), not this raw client. Retained for construction
-    // compatibility across the service's call sites.
-    #[allow(dead_code)]
-    http_client: livrarr_http::HttpClient,
     llm: L,
     data_dir: PathBuf,
-    // merge_engine and tag_service are reserved for future slices (S8+).
-    // materialize now owns the save step (S7); direct use will resume
-    // when the provider-policy pipeline is wired end-to-end.
-    #[allow(dead_code)]
-    merge_engine: M,
-    #[allow(dead_code)]
-    tag_service: Arc<T>,
     refresh_locks: KeyedMutex<(UserId, WorkId)>,
     bulk_refresh_users: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
     lookup_cache: Arc<std::sync::Mutex<HashMap<(String, String), CachedLookup>>>,
@@ -64,19 +45,14 @@ pub struct WorkServiceImpl<
     pub(crate) resolver: Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
 }
 
-impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm, crate::DefaultMergeEngine, StubTagService> {
+impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm> {
     pub fn new(db: D, enrichment: E, http: H, data_dir: PathBuf) -> Self {
         Self {
             db,
             enrichment,
             http,
-            http_client: livrarr_http::HttpClient::builder()
-                .build()
-                .expect("default HttpClient"),
             llm: StubNoLlm,
             data_dir,
-            merge_engine: crate::DefaultMergeEngine::new(crate::PriorityModel::english()),
-            tag_service: Arc::new(StubTagService),
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -85,52 +61,16 @@ impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm, crate::DefaultMergeEngine, Stu
     }
 }
 
-impl<D, E, H, L> WorkServiceImpl<D, E, H, L, crate::DefaultMergeEngine, StubTagService> {
-    /// Construct with a custom LLM caller but stub merge engine and tag service.
-    /// Use `new_with_all` for production wiring of merge engine and tag service.
-    pub fn new_with_llm(db: D, enrichment: E, http: H, llm: L, data_dir: PathBuf) -> Self {
-        Self {
-            db,
-            enrichment,
-            http,
-            http_client: livrarr_http::HttpClient::builder()
-                .build()
-                .expect("default HttpClient"),
-            llm,
-            data_dir,
-            merge_engine: crate::DefaultMergeEngine::new(crate::PriorityModel::english()),
-            tag_service: Arc::new(StubTagService),
-            refresh_locks: KeyedMutex::new(),
-            bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            resolver: None,
-        }
-    }
-}
-
-impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T> {
+impl<D, E, H, L> WorkServiceImpl<D, E, H, L> {
     /// Construct with all dependencies explicitly wired.
-    /// Used by server AppState for production wiring of merge engine and tag service.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_all(
-        db: D,
-        enrichment: E,
-        http: H,
-        http_client: livrarr_http::HttpClient,
-        llm: L,
-        data_dir: PathBuf,
-        merge_engine: M,
-        tag_service: Arc<T>,
-    ) -> Self {
+    /// Used by server AppState for production wiring.
+    pub fn new_with_all(db: D, enrichment: E, http: H, llm: L, data_dir: PathBuf) -> Self {
         Self {
             db,
             enrichment,
             http,
-            http_client,
             llm,
             data_dir,
-            merge_engine,
-            tag_service,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -155,19 +95,13 @@ impl<D, H> WorkServiceImpl<D, (), H> {
         db: D,
         http: H,
         data_dir: PathBuf,
-    ) -> WorkServiceImpl<D, StubNoEnrichment, H, StubNoLlm, crate::DefaultMergeEngine, StubTagService>
-    {
+    ) -> WorkServiceImpl<D, StubNoEnrichment, H, StubNoLlm> {
         WorkServiceImpl {
             db,
             enrichment: StubNoEnrichment,
             http,
-            http_client: livrarr_http::HttpClient::builder()
-                .build()
-                .expect("default HttpClient"),
             llm: StubNoLlm,
             data_dir,
-            merge_engine: crate::DefaultMergeEngine::new(crate::PriorityModel::english()),
-            tag_service: Arc::new(StubTagService),
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -215,19 +149,6 @@ impl EnrichmentWorkflow for StubNoEnrichment {
         _data: livrarr_domain::services::SourceProviderData,
     ) {
         // no-op stub
-    }
-}
-
-/// No-op TagService stub. Used for `without_enrichment` construction and tests.
-pub struct StubTagService;
-
-impl livrarr_domain::services::TagService for StubTagService {
-    async fn retag_library_items(
-        &self,
-        _work: &livrarr_domain::Work,
-        _items: &[livrarr_domain::LibraryItem],
-    ) -> Vec<livrarr_domain::services::TagSyncItemResult> {
-        Vec::new()
     }
 }
 
@@ -408,7 +329,7 @@ fn lookup_results_from_resolution(
     }
 }
 
-impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>
+impl<D, E, H, L> WorkServiceImpl<D, E, H, L>
 where
     D: livrarr_domain::services::WorkIdentityRepository + Send + Sync,
 {
@@ -442,7 +363,7 @@ where
     }
 }
 
-impl<D, E, H, L, M, T> WorkService for WorkServiceImpl<D, E, H, L, M, T>
+impl<D, E, H, L> WorkService for WorkServiceImpl<D, E, H, L>
 where
     D: WorkDb
         + WorkDbCreate
@@ -460,8 +381,6 @@ where
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
-    M: crate::MergeEngine + Send + Sync,
-    T: livrarr_domain::services::TagService + Send + Sync,
 {
     async fn add(
         &self,
@@ -1517,23 +1436,6 @@ where
     // (handler-level spawning for long-running background work). This stub
     // never wired up — the handler does its own list + spawn + iterate +
     // finish_bulk_refresh directly.
-    // async fn refresh_all(&self, user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError> {
-    //     let works = self
-    //         .db
-    //         .list_works(user_id)
-    //         .await
-    //         .map_err(WorkServiceError::Db)?;
-    //
-    //     let total_works = works.len();
-    //
-    //     if !self.try_start_bulk_refresh(user_id) {
-    //         return Err(WorkServiceError::Enrichment(
-    //             "bulk refresh already in progress".into(),
-    //         ));
-    //     }
-    //
-    //     Ok(RefreshAllHandle { total_works })
-    // }
 
     async fn upload_cover(
         &self,
@@ -2218,13 +2120,11 @@ fn merge_field_conflicts(survivor: &Work, loser: &Work) -> Vec<MergeFieldConflic
     conflicts
 }
 
-impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>
+impl<D, E, H, L> WorkServiceImpl<D, E, H, L>
 where
     D: WorkDb + ConfigDb + Send + Sync,
     H: HttpFetcher + Send + Sync,
     L: LlmCaller + Send + Sync,
-    M: crate::MergeEngine + Send + Sync,
-    T: livrarr_domain::services::TagService + Send + Sync,
 {
     async fn llm_filter_search(&self, query: &str, results: &[LookupResult]) -> Option<Vec<usize>> {
         let mut listing = String::new();
@@ -2612,7 +2512,7 @@ where
 // add() helpers
 // =============================================================================
 
-impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>
+impl<D, E, H, L> WorkServiceImpl<D, E, H, L>
 where
     D: WorkDb
         + WorkDbCreate
@@ -2628,8 +2528,6 @@ where
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
-    M: crate::MergeEngine + Send + Sync,
-    T: livrarr_domain::services::TagService + Send + Sync,
 {
     async fn try_dedup_by_normalized(
         &self,
@@ -2993,7 +2891,7 @@ where
 // Unified enrichment pipeline
 // =============================================================================
 
-impl<D, E, H, L, M, T> WorkServiceImpl<D, E, H, L, M, T>
+impl<D, E, H, L> WorkServiceImpl<D, E, H, L>
 where
     D: WorkDb
         + LibraryItemDb
@@ -3007,8 +2905,6 @@ where
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
-    M: crate::MergeEngine + Send + Sync,
-    T: livrarr_domain::services::TagService + Send + Sync,
 {
     /// Run the full enrichment pipeline synchronously (REQ-001/012).
     ///
@@ -3453,16 +3349,6 @@ fn best_same_work_cover(
     match best_url {
         Some(u) if Some(u) != selected.cover_url.as_deref() => Some(u.to_string()),
         _ => None,
-    }
-}
-
-pub fn unproxy_cover_url(url: &str) -> String {
-    if let Some(rest) = url.strip_prefix("/api/v1/coverproxy?url=") {
-        urlencoding::decode(rest)
-            .map(|s| s.into_owned())
-            .unwrap_or_else(|_| url.to_string())
-    } else {
-        url.to_string()
     }
 }
 
