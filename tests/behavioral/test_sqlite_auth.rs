@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
-use librarr_db::pool::{create_sqlite_pool, run_migrations};
-use librarr_db::sqlite::SqliteDb;
-use librarr_db::{
+use livrarr_db::pool::{create_sqlite_pool, run_migrations};
+use livrarr_db::sqlite::SqliteDb;
+use livrarr_db::{
     CompleteSetupDbRequest, CreateUserDbRequest, DbError, Session, SessionDb, UpdateUserDbRequest,
     UserDb, UserRole,
 };
@@ -23,7 +23,7 @@ fn assert_is_constraint(err: DbError) {
 
 fn assert_is_not_found(err: DbError) {
     match err {
-        DbError::NotFound => {}
+        DbError::NotFound { .. } => {}
         other => panic!("expected DbError::NotFound, got: {:?}", other),
     }
 }

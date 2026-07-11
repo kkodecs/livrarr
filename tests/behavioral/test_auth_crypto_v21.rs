@@ -1,4 +1,4 @@
-use librarr_server::auth_crypto::{AuthCryptoService, RealAuthCrypto};
+use livrarr_server::auth_crypto::{AuthCryptoService, RealAuthCrypto};
 
 async fn new_test_auth_crypto() -> impl AuthCryptoService {
     RealAuthCrypto

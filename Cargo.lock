@@ -1582,6 +1582,7 @@ dependencies = [
  "livrarr-matching",
  "livrarr-materialize",
  "livrarr-metadata",
+ "livrarr-server",
  "livrarr-tagwrite",
  "rapidfuzz",
  "serde",

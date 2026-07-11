@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use librarr_domain::{classify_file, derive_sort_name, sanitize_path_component, MediaType};
+use livrarr_domain::{classify_file, derive_sort_name, sanitize_path_component, MediaType};
 
 // =============================================================================
 // sanitize_path_component — IMPORT-011
