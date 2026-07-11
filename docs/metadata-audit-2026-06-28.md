@@ -1,11 +1,58 @@
 # Metadata System Audit — 2026-06-28
 
+> **⟢ 2026-07-10 UPDATE — this report has been re-audited against current code.** Most findings are now **FIXED**. See the **Status Reconciliation** section immediately below (before the Executive summary). **Do not act on any finding body in this report without checking its current status there** — the bodies below are preserved verbatim as the historical 2026-06-28 record.
+
 **Scope:** the metadata subsystem — providers, identity, enrichment, merge, materialize, and the service layer that drives them (8 crates).
 **Type:** read-only. Zero code changed.
 **Method:** five parallel inventory agents (Serena/LSP-driven), then the orchestrator re-opened every load-bearing `path:line` before writing. Citations the orchestrator personally opened are marked ✓-verified; the rest rest on subagent symbol-reference checks and are flagged as such.
 **Reconciliation:** this extends the 2026-06-07 lifecycle audit (`docs/metadata-lifecycle-audit-*.md`). Where that audit's findings are now fixed, I say so and move on. The new ground here is the **transport fork** and the **matching fork** — which the prior audit explicitly did not cover.
 
 > **Line numbers:** orchestrator-opened citations use 1-based editor lines (exact). Subagent-sourced citations may be ±a few lines (Serena reports 0-based). Every claim states which.
+
+---
+
+## ⟢ STATUS RECONCILIATION — re-audited 2026-07-10
+
+> **Added 2026-07-10. Everything from the "Executive summary" heading down is the original 2026-06-28 report, preserved verbatim as a historical record.** This reconciliation was produced by **six parallel sonnet+Serena verification agents** (one per subsystem), each re-opening the cited code on current `main` (HEAD `4f0ef232`). The orchestrator then **personally re-read the load-bearing lines** for the four High-severity findings (M-001, M-002, M-019, M-020) and for M-003 / M-005 / M-011. `✓` below = orchestrator-opened this pass; the rest rest on a verification agent's read plus commit/line evidence.
+
+**Headline: the correctness spine is fixed.** Of the 21 findings + 4 minor items — **17 fully fixed, 2 substantially fixed / partial (M-003; the stale-comment minor), 1 closed as an intentional PO decision (M-008), 1 open structural (M-005, the god object — and it *grew*), 3 open but latent / defense-in-depth (M-021 + the two minor gate/guard items — zero live impact today), 1 moot (code deleted).** Both "things to fix, in that order" from the original bottom line — **rate-limiting (M-001) and matching (M-002)** — are done, via a Phase-3 process-global outbound queue and a Phase-5 single matching authority. The only substantive open work is **maintainability, not correctness**.
+
+**The original "8 worst problems," now:** ①matching fork ✅ · ②unthrottled identity ✅ · ③fragmented rate limiting ✅ · ④Hardcover copy-paste ✅ (query consolidated) · ⑤provider parsed twice ✅ · **⑥god object ❌ OPEN (grew to 3,742 lines)** · ⑦dead-code pile ✅ (deleted) · ⑧audiobook cover dims ✅.
+
+| Finding | Orig sev | Status 2026-07-10 | Current evidence | Note |
+|---|---|---|---|---|
+| **M-001** rate fragmentation / unthrottled identity | High | ✅ FIXED ✓ | every send waits on `outbound_queue::shared().acquire()` (`fetcher.rs:119`); identity fan-out routes through it (`english_identity_resolver.rs:108`) | Phase-3 process-global queue; Audnexus/Audible moved onto the fetcher, their buckets now reachable |
+| **M-002** matching fork | High | ✅ FIXED ✓ | single authority `livrarr-domain/identity_matching.rs`; `agree()` delegates (`english_identity_resolver.rs:540-564`) | private colon-truncating matcher **deleted**; Phase 5 |
+| **M-003** Hardcover query ×4 | Med-High | ◑ SUBSTANTIALLY FIXED ✓ | one `hc_search_body`/`hc_post` builder; all 4 sites use the shared query builder | intentional residual: `lookup_hardcover` keeps its own rate-limited transport (not `hc_post`); per_page/quoting preserved by design (cross-family-approved) |
+| **M-004** provider parse split (OL) | Med | ✅ FIXED | `lookup_openlibrary` → `search_openlibrary` 1-line delegate; inline OL parser gone | `lookup_*` still live as methods on `WorkServiceImpl` (ties to M-005), but the duplicated-parsing harm is resolved |
+| **M-005** god object `work_service.rs` | Med | ❌ **OPEN** ✓ | **3,742 lines** (was 3,684 — *grew*) | `convergence_service.rs` extraction (−346) was offset by later feature work; roadmap A3 not done |
+| **M-006** dead code (all items) | Med | ✅ FIXED | `bulk_resolver`, `llm_ewl`, `rate_limit.rs` deleted; `validator`/`.llm`/`confirm_title_jaccard`/`trigger_monitor`/`goodreads_rate_limiter` all gone | ⚠ wiki insight 9g is now **stale** (still describes `trigger_monitor` as a live stub) |
+| **M-007** audiobook cover dims | Low-Med | ✅ FIXED | `update_audiobook_cover_dimensions`; cover-write-gate writes both slots | |
+| **M-008** cover gate 0.6 vs identity 0.75 | Low-Med | ⏹ CLOSED (intentional) | thresholds unchanged but now share one scorer | PO decision **D5** (phase-5 matching spec): keep 0.6 by design; answers original open question #1 |
+| **M-009** per-instance limiter | High | ✅ FIXED | limiter state moved into the `outbound_queue::shared()` singleton | instance count now irrelevant to coordination |
+| **M-010** Readarr dropped before merge | High | ✅ FIXED | in-memory payload fallback (`enrichment/lib.rs:1530-1557`) | |
+| **M-011** dead 24h `metadata_cache` | Low | ✅ FIXED ✓ | table dropped (`migration 066`); trait + impl deleted | went beyond "dead" to "deleted" |
+| **M-012** cover gate skipped on reuse | Low-Med | ✅ FIXED | `apply_gr_cover_gate` moved inside `merge()`; both entry paths cross it | |
+| **M-013** HC empty-genres blocks lower providers | Med | ✅ FIXED | `non_empty_vec()` guard (`enrichment/lib.rs:583/593`) | also fixed the GB/Readarr latent same-pattern |
+| **M-014** CAS has no DB generation predicate | Med | ✅ FIXED | UPDATE now `... AND merge_generation = ?` (`sqlite_work.rs:1064/1105`) + rows-affected check | |
+| **M-015** `supersede_anchor` partial sync | Low/latent | ✅ FIXED (still dead code) | now syncs all 5 anchors (`sqlite_work_identity.rs:112-221`) | still zero callers — a defused landmine |
+| **M-016** `raise_identity_conflict` not transactional | Med | ✅ FIXED | check→insert→badge now one transaction (`sqlite_work_identity.rs:391-463`) + tests | |
+| **M-017** converge false-`Completed` | Med-Low | ✅ FIXED | `converge_outcome` requires zero chaseable anchors; error arm now backs off one cadence | |
+| **M-018** convergence amplifies M-001 | Med | ✅ FIXED | convergence rides the shared queue at Low priority | follows from M-001 |
+| **M-019** Conflict irresolvable terminal | **High** | ✅ FIXED ✓ | `apply_conflict_resolution` writes the badge in-tx (`sqlite_identity_conflict.rs:389-395`); old fns dead | |
+| **M-020** affirm silently ineffective | **High** | ✅ FIXED ✓ | `confirm_anchor_and_recompute_badge` writes badge atomically at affirm time (`work.rs:1020-1025`) | + dedicated grey-park (NeedsReview) exit added |
+| **M-021** `identity_not_found` dropped | Low/latent | ⚠ OPEN (latent) | still dropped by refresh/converge; producer still hard-`false` everywhere | zero impact until the LLM identity-validator is re-wired — unchanged from the audit's own characterization |
+| minor — unchecked semaphore permit | Low | ⏹ MOOT | `TokenBucket` deleted; the surviving `acquire` is `.expect()`'d with a documented invariant | |
+| minor — `NotFound` missing from 2 enrichment gates | Low | ⚠ OPEN | gates unchanged (`work_service.rs:2782`, `convergence_service.rs:127`) | benign (selection query never fetches `not_found`) |
+| minor — 4 status writers lack `user_id` guard | Low | ⚠ OPEN | unchanged; the new M-019/M-020 fix functions **repeat** the bare-`id` pattern | defense-in-depth only (`work_id` globally unique; callers pre-check ownership) |
+| minor — stale `_priority_model` / LLM-arbitration comment | Low | ◑ PARTIAL | the cited `main.rs` comment is fixed; a sibling stale comment survives at `enrichment/lib.rs:313` ("Async because the LLM arbitration path makes a network call") | |
+| M-022 (Gemini-proposed, was unverified) | — | ❔ still unverified | not re-checked this pass | never a confirmed finding |
+
+**Remediation roadmap status:** Phase A — A1 (delete dead code) ✅, A2 (audiobook dims) ✅, **A3 (split the god object) ❌ not done**. Phase B — B1 (Hardcover) ◑ query consolidated but not a full gateway struct; B2 (move `lookup_*` into gateways) ◑ parsing dedup done, methods still on `WorkServiceImpl`. Phase C — C1 (process-global limiter) ✅. Phase D — D1 (unify matching + rewrite the false-green colon test) ✅.
+
+**Net for a planner:** the only substantive open work is **A3 — split `work_service.rs`** (and B2's gateway-struct form rides on it). Everything else still open is latent or defense-in-depth. The F1 "snapshot the DB before a bulk run" caution still applies operationally, but the correctness bugs that made bulk refresh dangerous (M-001, M-002, M-010, M-013) are fixed.
+
+**Provenance / confidence:** four High-severity findings (M-001, M-002, M-019, M-020) plus M-003/M-005/M-011 were re-opened in source by the orchestrator (✓). The remaining verdicts come from the six verification agents with current `path:line` + commit evidence (fixes landed in commits `af709f01`, `8a4bed1f`, `8b5188d8`, `e12c9838`, `4f0f02a9`, `af709f01`, and the Phase-3/Phase-5 series — all confirmed ancestors of HEAD). No behavior was executed/reproduced (static verification only); the ~2–5s latency and 429-rate questions from the original open-questions list remain measurement items, not code claims.
 
 ---
 

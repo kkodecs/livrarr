@@ -460,7 +460,7 @@ path = "../../tests/behavioral/test_n2_cover_pipeline_wiring.rs"
 name = "test_n2_review_fixes"
 path = "../../tests/behavioral/test_n2_review_fixes.rs"
 
-# --- Orphan-test cleanup 2026-07-11 (see build/reports/orphan-test-triage-2026-07-11.md) ---
+# --- Orphan-test cleanup 2026-07-11 (see docs/orphan-test-triage-2026-07-11.md) ---
 
 [[test]]
 name = "test_auth_crypto_v21"

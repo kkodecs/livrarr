@@ -336,3 +336,14 @@ PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
 - crates/server.md: LiveSettingsService trait count corrected (seven, verified against settings_service.rs impls); import_pipeline "no network calls" claim corrected (two fetchers use an explicit HttpClient).
 - roads.md (untracked, provenance pending PO confirm): stale cover_backfill dead-code row marked DONE.
 - NEW docs/architecture-review-briefing.md — review entry point (reading order, doc trust table, intentional-debt register, day-one items).
+
+## 2026-07-10 — audit-the-audit + god-object design session
+- insights.md 9g: corrected stale `trigger_monitor` claim — stub + trait method were DELETED (af709f01, M-006); trait has only `run_monitor` (verified against monitor.rs:31-37).
+- docs/metadata-audit-2026-06-28.md: added "Status Reconciliation — re-audited 2026-07-10" section (6 sonnet+Serena verify agents + orchestrator re-reads): 17 findings fixed, M-008 closed-intentional, M-005 god object OPEN (grew to 3,742), M-021 + 2 minor guards latent-open. Original bodies preserved as history.
+- NEW (untracked, repo root): responsiveness-recommendations.md, design-work-service-split.md, reviews-work-service-split.md — see handoff-work-service-split.md in kk-build state.
+
+## 2026-07-11 — work-service-split executed (insights 64, 65; handlers.md Has* table)
+
+- Added insight 64 (DiscoveryService split: new domain trait + DiscoveryServiceImpl; WorkServiceImpl<D,E,H> lifecycle-only) and 65 (30/129 tests/behavioral files are unregistered orphans — check Cargo.toml registration before trusting/editing).
+- handlers.md capability table: +HasDiscoveryService row; HasWorkService row now notes the 17-method trait.
+- Source: work-service-split series 2734fd02, 7c1de013, 3521c940, 0094e805 + cross-family review (Codex PASS; Gemini fact-checked — orphan discovery real & pre-existing, attribution refuted).

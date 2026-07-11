@@ -2,14 +2,14 @@
 //! as a `[[test]]` target in `crates/livrarr-behavioral/Cargo.toml` or listed
 //! in `PARKED` below with a reason. Prevents the manifest from silently
 //! drifting out of sync with the files on disk again — see the 2026-07-11
-//! orphan-test cleanup, `build/reports/orphan-test-triage-2026-07-11.md`
+//! orphan-test cleanup, `docs/orphan-test-triage-2026-07-11.md`
 //! (30 files were found unregistered and had never been compiled).
 
 use std::path::Path;
 
 /// Files deliberately left unregistered pending the PO's standing
 /// "commit the behavioral suite / CI" decision — see
-/// `build/reports/orphan-test-triage-2026-07-11.md`. Anything else found in
+/// `docs/orphan-test-triage-2026-07-11.md`. Anything else found in
 /// `tests/behavioral/` must be registered in
 /// `crates/livrarr-behavioral/Cargo.toml`.
 const PARKED: &[&str] = &[

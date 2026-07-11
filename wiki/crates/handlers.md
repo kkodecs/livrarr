@@ -10,7 +10,8 @@ Each `Has*` trait exposes one service to handlers via an accessor method. `AppCo
 
 | Trait | Exposes |
 |---|---|
-| `HasWorkService` | Work CRUD and search |
+| `HasWorkService` | Work CRUD, refresh, merge (17-method `WorkService`; discovery moved out 2026-07-11) |
+| `HasDiscoveryService` | Provider search: `lookup`, `lookup_filtered`, `eager_match_by_author` (`DiscoveryService`, work-service-split) |
 | `HasFileService` | Library file management |
 | `HasAuthorService` | Author CRUD |
 | `HasSeriesService` | Series write operations |
