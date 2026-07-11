@@ -7,7 +7,7 @@
 //! the `livrarr-behavioral` test crate currently has no `livrarr-handlers`
 //! dev-dependency and this task forbids Cargo.toml edits. These tests therefore
 //! pin the same add/search JSON contract while invoking the currently compilable
-//! real seams: `WorkService::lookup_filtered` and `WorkService::add`.
+//! real seams: `DiscoveryService::lookup_filtered` and `WorkService::add`.
 
 mod common;
 

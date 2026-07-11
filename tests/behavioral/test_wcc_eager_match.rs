@@ -1,7 +1,7 @@
 // tests/behavioral/test_wcc_eager_match.rs
 #![allow(dead_code, unused_imports)]
 
-//! Behavioral tests for WorkService::eager_match_by_author (#97).
+//! Behavioral tests for DiscoveryService::eager_match_by_author (#97).
 //!
 //! The eager pass is the cheap best-guess discovery for manual import: it
 //! groups parsed files by author and issues ONE author-scoped query per
