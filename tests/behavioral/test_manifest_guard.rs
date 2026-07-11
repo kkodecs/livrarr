@@ -7,16 +7,12 @@
 
 use std::path::Path;
 
-/// Files deliberately left unregistered pending the PO's standing
-/// "commit the behavioral suite / CI" decision — see
+/// Files deliberately left unregistered, each with a reason — see
 /// `docs/orphan-test-triage-2026-07-11.md`. Anything else found in
 /// `tests/behavioral/` must be registered in
-/// `crates/livrarr-behavioral/Cargo.toml`.
-const PARKED: &[&str] = &[
-    "test_verify_e2.rs",
-    "test_cup_convergence.rs",
-    "test_metadata_redesign_phase3a.rs",
-];
+/// `crates/livrarr-behavioral/Cargo.toml`. Empty as of 2026-07-11:
+/// the three parked files were resolved (one ported, two dropped).
+const PARKED: &[&str] = &[];
 
 #[test]
 fn all_behavioral_test_files_are_registered_or_parked() {

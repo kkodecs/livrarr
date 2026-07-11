@@ -82,3 +82,43 @@ Orchestrator spot-verified the load-bearing claims noted below. Full agent evide
    "commit the behavioral suite / CI" decision (recommended), or schedule as its own unit?
 3. The **11 SPEC-DOC/DEAD/REDUNDANT**: delete, or move to an archive dir so the manifest gap
    stops lying about coverage?
+
+## Resolution (PO decisions, 2026-07-11 suite-consolidation session)
+
+All decisions above plus the standing suite/CI question were settled; the guard's PARKED
+list is now empty.
+
+- **CI stays Docker-build-only** — PO explicitly declined a cargo-test CI job. (The suite
+  itself was ALREADY tracked and public — the "local-only" belief this doc's era carried
+  was wrong; `tests/` in .gitignore only blocks new untracked files.)
+- **Thin retry: settled-is-correct.** Thin works are deliberately not auto-rechased
+  (`converge_outcome` design, wiki insight 57). `test_verify_g2` was therefore
+  wrong-by-design and is deleted (was registered + #[ignore]'d).
+- **test_verify_e2: ported.** Its original proof mechanism (setter-provenance signature of
+  a pre-`settle_identity` code shape) was obsolete and tautological on today's path. The
+  port pins the surviving contract: a verified resolve persists EVERY non-null anchor even
+  when `ol_key` is absent (`settle_identity` → `merge_missing_anchors`) — a case no other
+  registered test covers (`test_s6_retry_all_incomplete`'s resolver stubs always return
+  `ol_key`). Registered; green.
+- **test_cup_convergence: deleted.** Its 8 scenarios drove `converge_pending_due`, which
+  never shipped; the shipped equivalents (`converge_work` + `list_convergence_due` +
+  `next_convergence_at` pacing) are covered by `test_id_completeness`
+  (selector-branches/guards/clock + converge-work terminal/settle/enrich tests) and the
+  `converge_outcome` unit tests. Residue not obviously covered anywhere, recorded for a
+  future convergence/chase-policy test pass: batch-limit assertion (`list_convergence_due`
+  LIMIT / job `batch_size`), bare-ISBN-seed self-resolution to Provisional, and
+  convergence-vs-bulk-refresh-guard interaction (whether the shipped job even has the
+  guard interaction was NOT verified — verify before authoring).
+- **test_metadata_redesign_phase3a: deleted.** The triage verdict above ("drives live
+  add()", S) was wrong: the file drives `add(AddWorkRequest)`, an overload that no longer
+  exists. `AddWorkRequest` (`livrarr-domain/src/services/work.rs`) has ZERO references
+  anywhere — dead code, candidate for removal. Live `add(user_id, WorkCandidate)` coverage:
+  `test_wcc_add`, `test_mc_add_doors`. Phase3a intent-scenarios without live coverage
+  (ol_key-dedup, concurrent-add race, monitor-flag defaults, enrichment-failure→Ok/Failed,
+  empty-title validation, source-data-before-enrichment) map onto the registered-but-inert
+  `#[ignore] todo!()` bodies in `test_ewl_work_service_add.rs` — the natural home if ever
+  revived.
+- **AppState test builder: deferred** — build it when the first handler-level integration
+  test is actually written (its only would-be consumer was deleted in the cleanup).
+
+Workspace after this pass: 1471 passed / 0 failed / 299 ignored / 143 suites.
