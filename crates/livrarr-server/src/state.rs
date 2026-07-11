@@ -58,6 +58,11 @@ pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     SqliteDb,
     LiveEnrichmentWorkflow,
     livrarr_http::fetcher::HttpFetcherImpl,
+>;
+
+pub type LiveDiscoveryService = livrarr_metadata::discovery_service::DiscoveryServiceImpl<
+    SqliteDb,
+    livrarr_http::fetcher::HttpFetcherImpl,
     livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
 pub type LiveGrabService = livrarr_download::grab_service::GrabServiceImpl<SqliteDb>;
@@ -152,6 +157,7 @@ pub struct AppState {
     pub series_service: Arc<LiveSeriesService>,
     pub series_query_service: Arc<LiveSeriesQueryService>,
     pub work_service: Arc<LiveWorkService>,
+    pub discovery_service: Arc<LiveDiscoveryService>,
     pub grab_service: Arc<LiveGrabService>,
     pub release_service: Arc<LiveReleaseService>,
     pub file_service: Arc<LiveFileService>,
@@ -340,9 +346,9 @@ impl livrarr_handlers::accessors::TrustedOriginsRebuilder for TrustedOriginsRebu
 use livrarr_handlers::context::{
     HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
     HasBookmarkService, HasChapterService, HasCoverCache, HasCoverService, HasDataDir,
-    HasDownloadClientCredentialService, HasDownloadClientSettingsService, HasEmailService,
-    HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService, HasHmacKey,
-    HasHttpClient, HasHttpFetcher, HasIdentityConflictService, HasIdentityResolver,
+    HasDiscoveryService, HasDownloadClientCredentialService, HasDownloadClientSettingsService,
+    HasEmailService, HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService,
+    HasHmacKey, HasHttpClient, HasHttpFetcher, HasIdentityConflictService, HasIdentityResolver,
     HasImportIoService, HasImportService, HasImportWorkflow, HasIndexerCredentialService,
     HasIndexerSettingsService, HasListService, HasLiveConfig, HasLogSurface, HasManualImportScan,
     HasManualImportService, HasMatchingService, HasNotificationService, HasPreaddCoverService,
@@ -356,6 +362,13 @@ impl HasWorkService for AppState {
     type WorkSvc = LiveWorkService;
     fn work_service(&self) -> &Self::WorkSvc {
         &self.work_service
+    }
+}
+
+impl HasDiscoveryService for AppState {
+    type DiscoverySvc = LiveDiscoveryService;
+    fn discovery_service(&self) -> &Self::DiscoverySvc {
+        &self.discovery_service
     }
 }
 

@@ -7,9 +7,9 @@ use axum::response::{IntoResponse, Response};
 
 use crate::context::{
     HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
-    HasEmailService, HasEnrichmentWorkflow, HasFileService, HasIdentityResolver, HasImportService,
-    HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkIdentityRepository,
-    HasWorkService,
+    HasDiscoveryService, HasEmailService, HasEnrichmentWorkflow, HasFileService,
+    HasIdentityResolver, HasImportService, HasNotificationService, HasSeriesQueryService,
+    HasTagService, HasWorkIdentityRepository, HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
@@ -21,9 +21,9 @@ use crate::{
 };
 use livrarr_domain::identity::{AnchorConfidence, AnchorSetter, AnchorType};
 use livrarr_domain::services::{
-    AppConfigService, AuthorService, CreateNotificationRequest, EmailService, FileService,
-    ImportService, MergeFieldChoiceEntry, NotificationService, RefreshSurface, SeriesQueryService,
-    WorkIdentityRepository, WorkService, WorkServiceError,
+    AppConfigService, AuthorService, CreateNotificationRequest, DiscoveryService, EmailService,
+    FileService, ImportService, MergeFieldChoiceEntry, NotificationService, RefreshSurface,
+    SeriesQueryService, WorkIdentityRepository, WorkService, WorkServiceError,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -117,7 +117,7 @@ where
     Ok(Json(candidates))
 }
 
-pub async fn lookup<S: HasWorkService>(
+pub async fn lookup<S: HasDiscoveryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Query(q): Query<LookupQuery>,
@@ -129,7 +129,7 @@ pub async fn lookup<S: HasWorkService>(
     let raw = q.raw.unwrap_or(false);
 
     let resp = state
-        .work_service()
+        .discovery_service()
         .lookup_filtered(ctx.user.id, req, raw)
         .await?;
 

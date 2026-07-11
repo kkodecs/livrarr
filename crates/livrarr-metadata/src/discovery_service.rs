@@ -6,6 +6,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub struct StubNoLlm;
+
+impl LlmCaller for StubNoLlm {
+    async fn call(&self, _req: LlmCallRequest) -> Result<LlmCallResponse, LlmError> {
+        Err(LlmError::NotConfigured)
+    }
+}
+
 pub(crate) struct CachedLookup {
     filtered: Vec<LookupResult>,
     raw: Vec<LookupResult>,
@@ -35,6 +43,75 @@ impl<'a, C, H, L> Clone for DiscoveryCtx<'a, C, H, L> {
 }
 
 impl<'a, C, H, L> Copy for DiscoveryCtx<'a, C, H, L> {}
+
+pub struct DiscoveryServiceImpl<C, H, L = StubNoLlm> {
+    config: C,
+    http: H,
+    llm: L,
+    lookup_cache: Arc<Mutex<HashMap<(String, String), CachedLookup>>>,
+    resolver: Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
+}
+
+impl<C, H, L> DiscoveryServiceImpl<C, H, L> {
+    fn discovery_ctx(&self) -> DiscoveryCtx<'_, C, H, L> {
+        DiscoveryCtx {
+            config: &self.config,
+            http: &self.http,
+            llm: &self.llm,
+            lookup_cache: &self.lookup_cache,
+            resolver: &self.resolver,
+        }
+    }
+
+    pub fn new(config: C, http: H, llm: L) -> Self {
+        Self {
+            config,
+            http,
+            llm,
+            lookup_cache: Arc::new(Mutex::new(HashMap::new())),
+            resolver: None,
+        }
+    }
+
+    /// Inject the multi-provider identity resolver so `lookup_filtered` routes
+    /// discovery through the federated fan-out (the #97 path) instead of the
+    /// legacy sequential lookup chain.
+    pub fn with_resolver(
+        mut self,
+        resolver: Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>,
+    ) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+}
+
+impl<C, H, L> DiscoveryService for DiscoveryServiceImpl<C, H, L>
+where
+    C: livrarr_db::ConfigDb + Send + Sync,
+    H: HttpFetcher + Send + Sync,
+    L: LlmCaller + Send + Sync,
+{
+    async fn lookup(&self, req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError> {
+        lookup(self.discovery_ctx(), req).await
+    }
+
+    async fn lookup_filtered(
+        &self,
+        user_id: UserId,
+        req: LookupRequest,
+        raw: bool,
+    ) -> Result<LookupResponse, WorkServiceError> {
+        lookup_filtered(self.discovery_ctx(), user_id, req, raw).await
+    }
+
+    async fn eager_match_by_author(
+        &self,
+        user_id: UserId,
+        queries: Vec<EagerQuery>,
+    ) -> Result<Vec<(usize, LookupResult)>, WorkServiceError> {
+        eager_match_by_author(self.discovery_ctx(), user_id, queries).await
+    }
+}
 
 /// Take one provider's discovery result (relevance-ordered), logging a failure or
 /// timeout rather than failing the whole search. Generic over the provider error

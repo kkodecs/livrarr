@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::context::{
-    HasAppConfigService, HasAuthorService, HasImportService, HasManualImportScan,
-    HasManualImportService, HasMatchingService, HasWorkService,
+    HasAppConfigService, HasAuthorService, HasDiscoveryService, HasImportService,
+    HasManualImportScan, HasManualImportService, HasMatchingService, HasWorkService,
 };
 
 pub trait ManualImportHandlerContext:
@@ -16,6 +16,7 @@ pub trait ManualImportHandlerContext:
     + HasAppConfigService
     + HasAuthorService
     + HasWorkService
+    + HasDiscoveryService
     + HasImportService
     + Clone
     + Send
@@ -31,6 +32,7 @@ impl<T> ManualImportHandlerContext for T where
         + HasAppConfigService
         + HasAuthorService
         + HasWorkService
+        + HasDiscoveryService
         + HasImportService
         + Clone
         + Send
@@ -41,8 +43,8 @@ impl<T> ManualImportHandlerContext for T where
 use crate::middleware::RequireAdmin;
 use crate::ApiError;
 use livrarr_domain::services::{
-    AppConfigService, AuthorService, ImportFileResult, ImportService, ImportSingleFileRequest,
-    ManualImportService, MatchingService, RefreshSurface, WorkService,
+    AppConfigService, AuthorService, DiscoveryService, ImportFileResult, ImportService,
+    ImportSingleFileRequest, ManualImportService, MatchingService, RefreshSurface, WorkService,
 };
 use livrarr_domain::{classify_file, MediaType};
 
@@ -685,7 +687,7 @@ pub async fn scan<S: ManualImportHandlerContext>(
             let group_author = group.first().map(|q| q.author.clone()).unwrap_or_default();
             let t_g = std::time::Instant::now();
             let matches = bg_state
-                .work_service()
+                .discovery_service()
                 .eager_match_by_author(user_id, group)
                 .await
                 .unwrap_or_default();
@@ -774,7 +776,7 @@ pub async fn scan_progress<S: HasManualImportScan>(
     }))
 }
 
-pub async fn search<S: HasManualImportScan + HasManualImportService + HasWorkService>(
+pub async fn search<S: HasDiscoveryService + HasManualImportScan + HasManualImportService>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Json(req): Json<SearchRequest>,
@@ -793,7 +795,7 @@ pub async fn search<S: HasManualImportScan + HasManualImportService + HasWorkSer
     // fan-out the Add Work box uses (Google Books / OpenLibrary / Hardcover /
     // Goodreads), not the legacy OpenLibrary-only path.
     let resp = state
-        .work_service()
+        .discovery_service()
         .lookup_filtered(
             user_id,
             livrarr_domain::services::LookupRequest {

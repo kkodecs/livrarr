@@ -1,12 +1,13 @@
 use livrarr_domain::services::{
     AppConfigService, AuthorMonitorWorkflow, AuthorService, BookmarkService, ChapterService,
-    CoverService, DownloadClientCredentialService, DownloadClientSettingsService, EmailService,
-    EnrichmentWorkflow, FileService, GrabService, HistoryService, IdentityConflictService,
-    IdentityResolver, ImportIoService, ImportService, ImportWorkflow, IndexerCredentialService,
-    IndexerSettingsService, ListService, ManualImportService, MatchingService, NotificationService,
-    ProviderStatsService, QueueService, ReadarrImportWorkflow, ReleaseService,
-    RemotePathMappingService, RootFolderService, RssSyncWorkflow, SeriesQueryService,
-    SeriesService, TagService, WorkIdentityRepository, WorkService,
+    CoverService, DiscoveryService, DownloadClientCredentialService, DownloadClientSettingsService,
+    EmailService, EnrichmentWorkflow, FileService, GrabService, HistoryService,
+    IdentityConflictService, IdentityResolver, ImportIoService, ImportService, ImportWorkflow,
+    IndexerCredentialService, IndexerSettingsService, ListService, ManualImportService,
+    MatchingService, NotificationService, ProviderStatsService, QueueService,
+    ReadarrImportWorkflow, ReleaseService, RemotePathMappingService, RootFolderService,
+    RssSyncWorkflow, SeriesQueryService, SeriesService, TagService, WorkIdentityRepository,
+    WorkService,
 };
 use livrarr_http::HttpClient;
 
@@ -25,6 +26,11 @@ use crate::types::auth::AuthService as AuthServiceTrait;
 pub trait HasWorkService: Clone + Send + Sync + 'static {
     type WorkSvc: WorkService + Send + Sync + 'static;
     fn work_service(&self) -> &Self::WorkSvc;
+}
+
+pub trait HasDiscoveryService: Clone + Send + Sync + 'static {
+    type DiscoverySvc: DiscoveryService + Send + Sync + 'static;
+    fn discovery_service(&self) -> &Self::DiscoverySvc;
 }
 
 pub trait HasWorkIdentityRepository: Clone + Send + Sync + 'static {

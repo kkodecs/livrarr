@@ -21,7 +21,7 @@ use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::*;
 use livrarr_domain::services::*;
 use livrarr_domain::UserRole;
-use livrarr_metadata::work_service::WorkServiceImpl;
+use livrarr_metadata::discovery_service::{DiscoveryServiceImpl, StubNoLlm};
 
 fn test_data_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("livrarr-test-eager-{}", std::process::id()))
@@ -156,7 +156,7 @@ async fn test_eager_match_groups_one_author_into_single_call() {
         ("OL3W", "Children of Dune", "Frank Herbert"),
     ]);
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = WorkServiceImpl::without_enrichment(db, http.clone(), test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http.clone(), StubNoLlm);
 
     let queries = vec![
         query(0, "Dune", "Frank Herbert"),
@@ -204,7 +204,7 @@ async fn test_eager_match_two_authors_two_calls_no_cross_bleed() {
         ("OL_FOUND", "Foundation", "Isaac Asimov"),
     ]);
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = WorkServiceImpl::without_enrichment(db, http.clone(), test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http.clone(), StubNoLlm);
 
     let queries = vec![
         query(0, "Dune", "Frank Herbert"),
@@ -236,7 +236,7 @@ async fn test_eager_match_omits_unmatched_title() {
     // Corpus has only "Dune"; the queried title is absent from it.
     let body = ol_search_body(&[("OL_DUNE", "Dune", "Frank Herbert")]);
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = WorkServiceImpl::without_enrichment(db, http.clone(), test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http.clone(), StubNoLlm);
 
     let queries = vec![query(0, "A Totally Different Book", "Frank Herbert")];
 
@@ -265,7 +265,7 @@ async fn test_eager_match_isbn_beats_title() {
         ("Dune Messiah", "Frank Herbert", "9780593098233"),
     ]);
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = WorkServiceImpl::without_enrichment(db, http.clone(), test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http.clone(), StubNoLlm);
 
     // The parsed title is garbage, but the file carries Dune's ISBN.
     let queries = vec![EagerQuery {
@@ -321,7 +321,7 @@ async fn test_eager_match_no_cross_author_anchor_graft() {
     }))
     .unwrap();
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http, StubNoLlm);
 
     // The file's ISBN pins the anchorless Google Books volume as the pick.
     let queries = vec![EagerQuery {
@@ -363,7 +363,7 @@ async fn test_eager_match_german_file_picks_german_over_english() {
         ("Der Steppenwolf", "Hermann Hesse", "9780000000002", "de"),
     ]);
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http, StubNoLlm);
 
     let queries = vec![query_lang(
         0,
@@ -393,7 +393,7 @@ async fn test_eager_match_german_file_abstains_when_only_english() {
 
     let body = gb_volumes_body_lang(&[("Der Steppenwolf", "Hermann Hesse", "9780000000001", "en")]);
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http, StubNoLlm);
 
     let queries = vec![query_lang(
         0,
@@ -424,7 +424,7 @@ async fn test_eager_match_unknown_language_still_matches() {
         "en",
     )]);
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http, StubNoLlm);
 
     let queries = vec![query_lang(
         0,
@@ -489,7 +489,7 @@ async fn test_eager_match_anchor_graft_respects_language() {
     }))
     .unwrap();
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http, StubNoLlm);
 
     let queries = vec![EagerQuery {
         id: 0,
@@ -546,7 +546,7 @@ async fn test_eager_match_fallback_finds_title_when_author_batch_abstains() {
         body: fallback_body,
     }));
 
-    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http, StubNoLlm);
 
     let queries = vec![query(0, "Leviathan Wakes", "James S. A. Corey")];
     let matches = svc.eager_match_by_author(user_id, queries).await.unwrap();
@@ -590,7 +590,7 @@ async fn test_eager_match_fallback_guard_holds_on_wrong_book() {
         body: fallback_body,
     }));
 
-    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http, StubNoLlm);
 
     let queries = vec![query(0, "Leviathan Wakes", "James S. A. Corey")];
     let matches = svc.eager_match_by_author(user_id, queries).await.unwrap();
@@ -638,7 +638,7 @@ async fn test_eager_match_fallback_guard_holds_on_wrong_language() {
         body: fallback_body,
     }));
 
-    let svc = WorkServiceImpl::without_enrichment(db, http, test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http, StubNoLlm);
 
     let queries = vec![query_lang(
         0,

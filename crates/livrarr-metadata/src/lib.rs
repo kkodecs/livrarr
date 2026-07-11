@@ -20,7 +20,7 @@ pub mod cover_provenance_backfill;
 pub mod cover_startup;
 pub mod cover_write_gate;
 pub mod cover_write_gate_recovery;
-mod discovery_service;
+pub mod discovery_service;
 pub mod enrichment_workflow_service;
 pub mod http_llm;
 pub mod list_service;

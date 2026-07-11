@@ -16,7 +16,7 @@ use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::*;
 use livrarr_domain::services::*;
 use livrarr_domain::UserRole;
-use livrarr_metadata::work_service::WorkServiceImpl;
+use livrarr_metadata::discovery_service::{DiscoveryServiceImpl, StubNoLlm};
 
 fn test_data_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("livrarr-test-fanout-{}", std::process::id()))
@@ -80,7 +80,7 @@ async fn test_lookup_fans_out_across_providers_not_first_hit() {
     // (non-empty), the other providers parse it as their own format and yield
     // nothing — but all of them are still queried by the fan-out.
     let http = StubHttpFetcher::with_ok(200, gb_one_result());
-    let svc = WorkServiceImpl::without_enrichment(db, http.clone(), test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http.clone(), StubNoLlm);
 
     let _ = svc
         .lookup(LookupRequest {

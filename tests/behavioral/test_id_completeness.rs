@@ -37,10 +37,9 @@ use livrarr_handlers::AuthContext;
 use livrarr_metadata::async_resolver::settle_identity;
 use livrarr_metadata::english_identity_resolver::EnglishIdentityResolver;
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
-use livrarr_metadata::work_service::{StubNoLlm, WorkServiceImpl};
+use livrarr_metadata::work_service::WorkServiceImpl;
 
-type TestWorkService =
-    WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher, StubNoLlm>;
+type TestWorkService = WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher>;
 
 struct ScriptedResolver {
     calls: AtomicUsize,
@@ -95,11 +94,10 @@ fn service(
     workflow: StubEnrichmentWorkflow,
     resolver: Option<LiveEnglishIdentityResolver>,
 ) -> TestWorkService {
-    let svc = WorkServiceImpl::new_with_all(
+    let svc = WorkServiceImpl::new(
         db,
         workflow,
         StubHttpFetcher::new(),
-        StubNoLlm,
         tempfile::tempdir()
             .expect("test data dir")
             .path()

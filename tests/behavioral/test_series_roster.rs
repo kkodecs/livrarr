@@ -22,15 +22,11 @@ use livrarr_domain::services::{
     FetchResponse, MonitorSeriesServiceRequest, SeriesMonitorWorkerParams, SeriesQueryService,
 };
 use livrarr_domain::UserId;
+use livrarr_metadata::discovery_service::StubNoLlm;
 use livrarr_metadata::series_query_service::SeriesQueryServiceImpl;
-use livrarr_metadata::work_service::{StubNoLlm, WorkServiceImpl};
+use livrarr_metadata::work_service::WorkServiceImpl;
 
-type TestWorkService = WorkServiceImpl<
-    SqliteDb,
-    StubEnrichmentWorkflow,
-    StubHttpFetcher,
-    livrarr_metadata::work_service::StubNoLlm,
->;
+type TestWorkService = WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher>;
 
 type TestSeriesService =
     SeriesQueryServiceImpl<SqliteDb, StubHttpFetcher, TestWorkService, StubNoLlm>;

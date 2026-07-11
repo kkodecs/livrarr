@@ -1538,24 +1538,6 @@ impl WorkService for StubWorkService {
     async fn download_cover(&self, _: UserId, _: WorkId) -> Result<Vec<u8>, WorkServiceError> {
         unreachable!("not used by scan")
     }
-    async fn lookup(&self, _: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError> {
-        unreachable!("not used by scan")
-    }
-    async fn lookup_filtered(
-        &self,
-        _: UserId,
-        _: LookupRequest,
-        _: bool,
-    ) -> Result<LookupResponse, WorkServiceError> {
-        unreachable!("not used by scan")
-    }
-    async fn eager_match_by_author(
-        &self,
-        _: UserId,
-        _: Vec<EagerQuery>,
-    ) -> Result<Vec<(usize, LookupResult)>, WorkServiceError> {
-        unreachable!("not used by scan")
-    }
     async fn search_works(
         &self,
         _: UserId,

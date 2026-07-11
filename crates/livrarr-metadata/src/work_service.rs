@@ -10,79 +10,36 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub struct StubNoLlm;
-
-impl LlmCaller for StubNoLlm {
-    async fn call(&self, _req: LlmCallRequest) -> Result<LlmCallResponse, LlmError> {
-        Err(LlmError::NotConfigured)
-    }
-}
-
-pub struct WorkServiceImpl<D, E, H, L = StubNoLlm> {
+pub struct WorkServiceImpl<D, E, H> {
     pub(crate) db: D,
     enrichment: E,
     http: H,
-    llm: L,
     data_dir: PathBuf,
     refresh_locks: KeyedMutex<(UserId, WorkId)>,
     bulk_refresh_users: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
-    lookup_cache:
-        Arc<std::sync::Mutex<HashMap<(String, String), crate::discovery_service::CachedLookup>>>,
-    /// Optional multi-provider identity resolver. When present, `lookup_filtered`
-    /// routes discovery through the federated fan-out (the #97 path) instead of
-    /// the legacy sequential lookup chain. `None` keeps the legacy chain
-    /// (back-compat until the resolver is composed in the server).
+    /// Optional multi-provider identity resolver used by the add-time and
+    /// mid-enrichment identity leg (`settle_identity`, REQ-010). `None` skips
+    /// that leg (back-compat until the resolver is composed in the server).
     pub(crate) resolver: Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
 }
 
-impl<D, E, H, L> WorkServiceImpl<D, E, H, L> {
-    fn discovery_ctx(&self) -> crate::discovery_service::DiscoveryCtx<'_, D, H, L> {
-        crate::discovery_service::DiscoveryCtx {
-            config: &self.db,
-            http: &self.http,
-            llm: &self.llm,
-            lookup_cache: &self.lookup_cache,
-            resolver: &self.resolver,
-        }
-    }
-}
-
-impl<D, E, H> WorkServiceImpl<D, E, H, StubNoLlm> {
+impl<D, E, H> WorkServiceImpl<D, E, H> {
     pub fn new(db: D, enrichment: E, http: H, data_dir: PathBuf) -> Self {
         Self {
             db,
             enrichment,
             http,
-            llm: StubNoLlm,
             data_dir,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             resolver: None,
         }
     }
 }
 
-impl<D, E, H, L> WorkServiceImpl<D, E, H, L> {
-    /// Construct with all dependencies explicitly wired.
-    /// Used by server AppState for production wiring.
-    pub fn new_with_all(db: D, enrichment: E, http: H, llm: L, data_dir: PathBuf) -> Self {
-        Self {
-            db,
-            enrichment,
-            http,
-            llm,
-            data_dir,
-            refresh_locks: KeyedMutex::new(),
-            bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            resolver: None,
-        }
-    }
-
-    /// Inject the multi-provider identity resolver so `lookup_filtered` routes
-    /// discovery through the federated fan-out (the #97 path) instead of the
-    /// legacy sequential lookup chain.
+impl<D, E, H> WorkServiceImpl<D, E, H> {
+    /// Inject the multi-provider identity resolver used by the add-time and
+    /// mid-enrichment identity leg (`settle_identity`, REQ-010).
     pub fn with_resolver(
         mut self,
         resolver: Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>,
@@ -97,16 +54,14 @@ impl<D, H> WorkServiceImpl<D, (), H> {
         db: D,
         http: H,
         data_dir: PathBuf,
-    ) -> WorkServiceImpl<D, StubNoEnrichment, H, StubNoLlm> {
+    ) -> WorkServiceImpl<D, StubNoEnrichment, H> {
         WorkServiceImpl {
             db,
             enrichment: StubNoEnrichment,
             http,
-            llm: StubNoLlm,
             data_dir,
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            lookup_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             resolver: None,
         }
     }
@@ -206,7 +161,7 @@ fn conflict_source_for(setter: ProvenanceSetter) -> livrarr_domain::identity::Co
     }
 }
 
-impl<D, E, H, L> WorkServiceImpl<D, E, H, L>
+impl<D, E, H> WorkServiceImpl<D, E, H>
 where
     D: livrarr_domain::services::WorkIdentityRepository + Send + Sync,
 {
@@ -240,7 +195,7 @@ where
     }
 }
 
-impl<D, E, H, L> WorkService for WorkServiceImpl<D, E, H, L>
+impl<D, E, H> WorkService for WorkServiceImpl<D, E, H>
 where
     D: WorkDb
         + WorkDbCreate
@@ -257,7 +212,6 @@ where
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
-    L: LlmCaller + Send + Sync,
 {
     async fn add(
         &self,
@@ -1407,28 +1361,6 @@ where
         Ok(bytes)
     }
 
-    async fn lookup(&self, req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError> {
-        crate::discovery_service::lookup(self.discovery_ctx(), req).await
-    }
-
-    async fn lookup_filtered(
-        &self,
-        user_id: UserId,
-        req: LookupRequest,
-        raw: bool,
-    ) -> Result<LookupResponse, WorkServiceError> {
-        crate::discovery_service::lookup_filtered(self.discovery_ctx(), user_id, req, raw).await
-    }
-
-    async fn eager_match_by_author(
-        &self,
-        _user_id: UserId,
-        queries: Vec<EagerQuery>,
-    ) -> Result<Vec<(usize, LookupResult)>, WorkServiceError> {
-        crate::discovery_service::eager_match_by_author(self.discovery_ctx(), _user_id, queries)
-            .await
-    }
-
     async fn search_works(
         &self,
         user_id: UserId,
@@ -1642,7 +1574,7 @@ fn merge_field_conflicts(survivor: &Work, loser: &Work) -> Vec<MergeFieldConflic
 // add() helpers
 // =============================================================================
 
-impl<D, E, H, L> WorkServiceImpl<D, E, H, L>
+impl<D, E, H> WorkServiceImpl<D, E, H>
 where
     D: WorkDb
         + WorkDbCreate
@@ -1657,7 +1589,6 @@ where
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
-    L: LlmCaller + Send + Sync,
 {
     async fn try_dedup_by_normalized(
         &self,
@@ -2021,7 +1952,7 @@ where
 // Unified enrichment pipeline
 // =============================================================================
 
-impl<D, E, H, L> WorkServiceImpl<D, E, H, L>
+impl<D, E, H> WorkServiceImpl<D, E, H>
 where
     D: WorkDb
         + LibraryItemDb
@@ -2034,7 +1965,6 @@ where
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
-    L: LlmCaller + Send + Sync,
 {
     /// Run the full enrichment pipeline synchronously (REQ-001/012).
     ///

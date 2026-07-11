@@ -30,12 +30,7 @@ async fn create_user(db: &SqliteDb, suffix: &str) -> UserId {
 
 fn service(
     db: SqliteDb,
-) -> WorkServiceImpl<
-    SqliteDb,
-    livrarr_metadata::work_service::StubNoEnrichment,
-    StubHttpFetcher,
-    livrarr_metadata::work_service::StubNoLlm,
-> {
+) -> WorkServiceImpl<SqliteDb, livrarr_metadata::work_service::StubNoEnrichment, StubHttpFetcher> {
     WorkServiceImpl::without_enrichment(
         db,
         StubHttpFetcher::new(),

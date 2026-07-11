@@ -23,12 +23,7 @@ use livrarr_external_data::{
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
 use livrarr_metadata::work_service::WorkServiceImpl;
 
-type TestWorkService = WorkServiceImpl<
-    SqliteDb,
-    StubEnrichmentWorkflow,
-    StubHttpFetcher,
-    livrarr_metadata::work_service::StubNoLlm,
->;
+type TestWorkService = WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher>;
 
 /// An OpenLibrary stub whose payload resolves the work AND carries the missing
 /// Goodreads key — completion captures anchors from any provider's payload.
@@ -67,11 +62,10 @@ fn service_with_resolver(
     workflow: StubEnrichmentWorkflow,
     resolver: LiveEnglishIdentityResolver,
 ) -> TestWorkService {
-    WorkServiceImpl::new_with_all(
+    WorkServiceImpl::new(
         db,
         workflow,
         StubHttpFetcher::new(),
-        livrarr_metadata::work_service::StubNoLlm,
         tempfile::tempdir()
             .expect("test data dir")
             .path()

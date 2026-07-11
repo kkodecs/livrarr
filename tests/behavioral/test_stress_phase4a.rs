@@ -11,6 +11,7 @@ use livrarr_domain::identity::{IdentityState, PendingReason, WorkCandidate, Work
 use livrarr_domain::services::*;
 use livrarr_domain::{MediaType, UserRole};
 use livrarr_library::file_service::FileServiceImpl;
+use livrarr_metadata::discovery_service::{DiscoveryServiceImpl, StubNoLlm};
 use livrarr_metadata::list_service::{ListServiceImpl, NoOpBibliographyTrigger};
 use livrarr_metadata::work_service::WorkServiceImpl;
 use std::path::PathBuf;
@@ -234,7 +235,7 @@ async fn test_work_download_cover_missing_file_returns_not_found() {
 async fn test_work_lookup_empty_term_returns_empty_results() {
     let db = create_test_db().await;
     let http = stub_http();
-    let svc = WorkServiceImpl::without_enrichment(db, http.clone(), test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http.clone(), StubNoLlm);
 
     let result = svc
         .lookup(LookupRequest {
@@ -252,7 +253,7 @@ async fn test_work_lookup_empty_term_returns_empty_results() {
 async fn test_work_lookup_unsupported_lang_returns_error() {
     let db = create_test_db().await;
     let http = stub_http();
-    let svc = WorkServiceImpl::without_enrichment(db, http.clone(), test_data_dir());
+    let svc = DiscoveryServiceImpl::new(db, http.clone(), StubNoLlm);
 
     let result = svc
         .lookup(LookupRequest {

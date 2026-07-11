@@ -15,12 +15,7 @@ use livrarr_external_data::{
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
 use livrarr_metadata::work_service::WorkServiceImpl;
 
-type TestWorkService = WorkServiceImpl<
-    SqliteDb,
-    StubEnrichmentWorkflow,
-    StubHttpFetcher,
-    livrarr_metadata::work_service::StubNoLlm,
->;
+type TestWorkService = WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher>;
 
 fn resolver_with_stubs(stubs: Vec<StubProviderClient>) -> LiveEnglishIdentityResolver {
     let clients = stubs
@@ -42,11 +37,10 @@ fn service_with_resolver(
     workflow: StubEnrichmentWorkflow,
     resolver: LiveEnglishIdentityResolver,
 ) -> TestWorkService {
-    WorkServiceImpl::new_with_all(
+    WorkServiceImpl::new(
         db,
         workflow,
         StubHttpFetcher::new(),
-        livrarr_metadata::work_service::StubNoLlm,
         tempfile::tempdir()
             .expect("test data dir")
             .path()

@@ -220,34 +220,6 @@ impl WorkService for StubWorkService {
         Ok(vec![])
     }
 
-    async fn lookup(&self, _req: LookupRequest) -> Result<Vec<LookupResult>, WorkServiceError> {
-        Ok(vec![])
-    }
-
-    async fn lookup_filtered(
-        &self,
-        _user_id: UserId,
-        req: LookupRequest,
-        _raw: bool,
-    ) -> Result<LookupResponse, WorkServiceError> {
-        let results = self.lookup(req).await?;
-        let count = results.len();
-        Ok(LookupResponse {
-            results,
-            filtered_count: count,
-            raw_count: count,
-            raw_available: false,
-        })
-    }
-
-    async fn eager_match_by_author(
-        &self,
-        _user_id: UserId,
-        _queries: Vec<EagerQuery>,
-    ) -> Result<Vec<(usize, LookupResult)>, WorkServiceError> {
-        Ok(vec![])
-    }
-
     async fn search_works(
         &self,
         _user_id: UserId,

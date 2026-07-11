@@ -17,7 +17,7 @@ use livrarr_db::{CreateUserDbRequest, UserDb};
 use livrarr_domain::identity::{
     CandidateId, CapturedIdentity, IdentityMethod, IdentityState, WorkCandidate, WorkSeedFields,
 };
-use livrarr_domain::services::{LookupRequest, WorkService};
+use livrarr_domain::services::{DiscoveryService, LookupRequest, WorkService};
 use livrarr_domain::{
     EnrichmentStatus, MetadataProvider, ProvenanceSetter, UserId, UserRole, Work,
 };
@@ -25,6 +25,7 @@ use livrarr_external_data::transport_cache::TransportCache;
 use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
+use livrarr_metadata::discovery_service::DiscoveryServiceImpl;
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
 use livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl;
 use livrarr_metadata::work_service::WorkServiceImpl;
@@ -84,12 +85,7 @@ async fn create_user(db: &SqliteDb, suffix: &str) -> UserId {
 fn service(
     db: SqliteDb,
     http: StubHttpFetcher,
-) -> WorkServiceImpl<
-    SqliteDb,
-    livrarr_metadata::work_service::StubNoEnrichment,
-    StubHttpFetcher,
-    livrarr_metadata::work_service::StubNoLlm,
-> {
+) -> WorkServiceImpl<SqliteDb, livrarr_metadata::work_service::StubNoEnrichment, StubHttpFetcher> {
     WorkServiceImpl::without_enrichment(
         db,
         http,
@@ -294,9 +290,12 @@ async fn test_wcc_add_ac_024_add_work_discovery_threads_provider_ids_and_suppres
     let user_id = create_user(&db, "ac024").await;
     let http = StubHttpFetcher::new();
     let http_spy = http.clone();
-    let service = service(db, http).with_resolver(Arc::new(stub_isbn_resolver()));
+    let service = service(db.clone(), http.clone()).with_resolver(Arc::new(stub_isbn_resolver()));
+    let discovery =
+        DiscoveryServiceImpl::new(db, http, livrarr_metadata::discovery_service::StubNoLlm)
+            .with_resolver(Arc::new(stub_isbn_resolver()));
 
-    let lookup = service
+    let lookup = discovery
         .lookup_filtered(
             user_id,
             LookupRequest {

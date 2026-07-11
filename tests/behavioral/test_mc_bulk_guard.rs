@@ -6,12 +6,8 @@ use livrarr_db::sqlite::SqliteDb;
 use livrarr_domain::services::{BulkRefreshGuard, WorkService};
 use livrarr_metadata::work_service::WorkServiceImpl;
 
-type TestWorkService = WorkServiceImpl<
-    SqliteDb,
-    livrarr_metadata::work_service::StubNoEnrichment,
-    StubHttpFetcher,
-    livrarr_metadata::work_service::StubNoLlm,
->;
+type TestWorkService =
+    WorkServiceImpl<SqliteDb, livrarr_metadata::work_service::StubNoEnrichment, StubHttpFetcher>;
 
 fn service(db: SqliteDb) -> TestWorkService {
     WorkServiceImpl::without_enrichment(

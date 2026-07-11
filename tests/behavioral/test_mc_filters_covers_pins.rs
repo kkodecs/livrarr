@@ -7,19 +7,14 @@ use livrarr_db::{
     WorkDb, WorkDbCreate,
 };
 use livrarr_domain::services::{
-    CoverSlotState, LookupRequest, MaterializeRequest, MaterializeService, MaterializeTags,
-    RefreshSurface, WorkFilter, WorkService,
+    CoverSlotState, DiscoveryService, LookupRequest, MaterializeRequest, MaterializeService,
+    MaterializeTags, RefreshSurface, WorkFilter, WorkService,
 };
 use livrarr_domain::{normalize_for_matching, CoverTrust, EnrichmentStatus, Work};
 use livrarr_materialize::LiveMaterializeService;
 use livrarr_metadata::work_service::WorkServiceImpl;
 
-type TestWorkService = WorkServiceImpl<
-    SqliteDb,
-    StubEnrichmentWorkflow,
-    StubHttpFetcher,
-    livrarr_metadata::work_service::StubNoLlm,
->;
+type TestWorkService = WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher>;
 
 fn service(db: SqliteDb, workflow: StubEnrichmentWorkflow) -> TestWorkService {
     WorkServiceImpl::new(
@@ -240,13 +235,10 @@ async fn cjk_discovery_result_does_not_inherit_query_language() {
     }))
     .expect("gb body");
     let http = StubHttpFetcher::with_ok(200, body);
-    let svc = livrarr_metadata::work_service::WorkServiceImpl::without_enrichment(
+    let svc = livrarr_metadata::discovery_service::DiscoveryServiceImpl::new(
         db,
         http,
-        tempfile::tempdir()
-            .expect("test data dir")
-            .path()
-            .to_path_buf(),
+        livrarr_metadata::discovery_service::StubNoLlm,
     );
 
     let results = svc

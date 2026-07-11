@@ -10,8 +10,8 @@ use livrarr_db::{
 };
 use livrarr_domain::identity::{AnchorConfidence, AnchorType, ConflictSource, IdentityMode};
 use livrarr_domain::services::{
-    ConvergeOutcome, EnrichmentMode, EnrichmentWorkflow, HttpFetcher, LlmCaller, RefreshSurface,
-    RetrySummary, WorkService, WorkServiceError,
+    ConvergeOutcome, EnrichmentMode, EnrichmentWorkflow, HttpFetcher, RefreshSurface, RetrySummary,
+    WorkService, WorkServiceError,
 };
 use livrarr_domain::{EnrichmentStatus, IdentityStatus, UserId, Work, WorkId};
 
@@ -22,8 +22,8 @@ use crate::work_service::{chaseable_anchor_types, WorkServiceImpl};
 /// identity permits, and account dead-end retry counters.
 ///
 /// Called exclusively by the `WorkService::converge_work` thin wrapper.
-pub(crate) async fn converge_work<D, E, H, L>(
-    svc: &WorkServiceImpl<D, E, H, L>,
+pub(crate) async fn converge_work<D, E, H>(
+    svc: &WorkServiceImpl<D, E, H>,
     user_id: UserId,
     work_id: WorkId,
     threshold: u32,
@@ -44,7 +44,6 @@ where
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
-    L: LlmCaller + Send + Sync,
 {
     // Fresh row (R-10): the job hands us an id; re-read so we settle on truth.
     let work = svc.get(user_id, work_id).await?;
@@ -232,8 +231,8 @@ fn converge_outcome(
 ///   materialize).
 ///
 /// Called exclusively by the `WorkService::retry_all_incomplete` thin wrapper.
-pub(crate) async fn retry_all_incomplete<D, E, H, L>(
-    svc: &WorkServiceImpl<D, E, H, L>,
+pub(crate) async fn retry_all_incomplete<D, E, H>(
+    svc: &WorkServiceImpl<D, E, H>,
     user_id: UserId,
 ) -> Result<RetrySummary, WorkServiceError>
 where
@@ -252,7 +251,6 @@ where
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
     H: HttpFetcher + Clone + Send + Sync + 'static,
-    L: LlmCaller + Send + Sync,
 {
     // Single pass over every "incomplete" work — Failed, Unenriched, or
     // identity-Pending — filtered in memory (like refresh_all). This REPLACES

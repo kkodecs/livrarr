@@ -529,22 +529,30 @@ async fn main() {
             svc_db.clone(),
         );
         Arc::new(
-            livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
+            livrarr_metadata::work_service::WorkServiceImpl::new(
                 svc_db.clone(),
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for work service"),
-                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
-                    live_metadata_config.clone(),
-                    livrarr_http::HttpClient::builder()
-                        .build()
-                        .expect("LLM HttpClient for work service"),
-                ),
                 data_dir.clone(),
             )
             .with_resolver(identity_resolver_arc.clone()),
         )
     };
+    let discovery_service_arc = Arc::new(
+        livrarr_metadata::discovery_service::DiscoveryServiceImpl::new(
+            svc_db.clone(),
+            livrarr_http::fetcher::HttpFetcherImpl::new()
+                .expect("HttpFetcherImpl construction for discovery service"),
+            livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
+                live_metadata_config.clone(),
+                livrarr_http::HttpClient::builder()
+                    .build()
+                    .expect("LLM HttpClient for work service"),
+            ),
+        )
+        .with_resolver(identity_resolver_arc.clone()),
+    );
     // Cover service + HMAC key
     let hmac_key = livrarr_server::cover_service::generate_hmac_key();
     let cover_service = {
@@ -610,6 +618,7 @@ async fn main() {
             ),
         ),
         work_service: work_service_arc.clone(),
+        discovery_service: discovery_service_arc.clone(),
         grab_service: Arc::new(livrarr_download::grab_service::GrabServiceImpl::new(
             svc_db.clone(),
         )),
@@ -657,17 +666,11 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
-            let ws = livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
                 svc_db.clone(),
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for list work service"),
-                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
-                    live_metadata_config.clone(),
-                    livrarr_http::HttpClient::builder()
-                        .build()
-                        .expect("LLM HttpClient for list service"),
-                ),
                 data_dir.clone(),
             );
             Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
@@ -695,17 +698,11 @@ async fn main() {
                 svc_enrichment.clone(),
                 svc_db.clone(),
             );
-            let ws = livrarr_metadata::work_service::WorkServiceImpl::new_with_all(
+            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
                 svc_db.clone(),
                 ew,
                 livrarr_http::fetcher::HttpFetcherImpl::new()
                     .expect("HttpFetcherImpl construction for author monitor work service"),
-                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
-                    live_metadata_config.clone(),
-                    livrarr_http::HttpClient::builder()
-                        .build()
-                        .expect("LLM HttpClient for author monitor"),
-                ),
                 data_dir.clone(),
             );
             Arc::new(

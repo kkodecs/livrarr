@@ -19,13 +19,12 @@ use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
-use livrarr_metadata::work_service::{StubNoLlm, WorkServiceImpl};
+use livrarr_metadata::work_service::WorkServiceImpl;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-type TestWorkService =
-    WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher, StubNoLlm>;
+type TestWorkService = WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher>;
 
 const AUTHOR: &str = "S6 Contract Author";
 const PENDING_TITLE: &str = "Pending Identity Title";
@@ -94,13 +93,7 @@ fn service(
     workflow: StubEnrichmentWorkflow,
     resolver: Option<LiveEnglishIdentityResolver>,
 ) -> TestWorkService {
-    let svc = WorkServiceImpl::new_with_all(
-        db,
-        workflow,
-        StubHttpFetcher::new(),
-        StubNoLlm,
-        test_data_dir(),
-    );
+    let svc = WorkServiceImpl::new(db, workflow, StubHttpFetcher::new(), test_data_dir());
 
     match resolver {
         Some(resolver) => svc.with_resolver(Arc::new(resolver)),
