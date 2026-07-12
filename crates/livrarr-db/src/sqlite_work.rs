@@ -909,6 +909,28 @@ impl WorkDb for SqliteDb {
         row.map(row_to_work).transpose()
     }
 
+    async fn find_works_by_bridge(
+        &self,
+        user_id: UserId,
+        isbn_13: Option<&str>,
+        asin: Option<&str>,
+    ) -> Result<Vec<Work>, DbError> {
+        if isbn_13.is_none() && asin.is_none() {
+            return Ok(vec![]);
+        }
+        let rows = sqlx::query(
+            "SELECT * FROM works WHERE user_id = ?1 \
+             AND ((?2 IS NOT NULL AND isbn_13 = ?2) OR (?3 IS NOT NULL AND asin = ?3))",
+        )
+        .bind(user_id)
+        .bind(isbn_13)
+        .bind(asin)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        rows.into_iter().map(row_to_work).collect()
+    }
+
     async fn list_monitored_works_all_users(&self) -> Result<Vec<Work>, DbError> {
         let rows = sqlx::query(
             "SELECT * FROM works WHERE monitor_ebook = 1 OR monitor_audiobook = 1 \

@@ -307,6 +307,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
                 .delete(livrarr_handlers::author::delete::<AppState>),
         )
         .route(
+            "/author/{id}/merge",
+            post(livrarr_handlers::author::merge::<AppState>),
+        )
+        .route(
             "/author/{id}/bibliography",
             get(livrarr_handlers::author::bibliography::<AppState>),
         )

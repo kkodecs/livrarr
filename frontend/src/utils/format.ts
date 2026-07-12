@@ -51,6 +51,8 @@ export function getCoverUrl(workId: number, v?: number, mediaType?: "ebook" | "a
   return v ? `${base}?v=${v}` : base;
 }
 
-export function getCoverThumbUrl(workId: number): string {
-  return `/api/v1/mediacover/${workId}/thumb.jpg`;
+export function getCoverThumbUrl(workId: number, v?: number, mediaType?: "ebook" | "audiobook"): string {
+  const file = mediaType === "audiobook" ? "audiocover_thumb.jpg" : "thumb.jpg";
+  const base = `/api/v1/mediacover/${workId}/${file}`;
+  return v ? `${base}?v=${v}` : base;
 }

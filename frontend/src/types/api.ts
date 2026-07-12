@@ -238,6 +238,7 @@ export interface WorkDetailResponse {
   rating: number | null;
   ratingCount: number | null;
   enrichmentStatus: EnrichmentStatus;
+  enriching: boolean;
   identityStatus: IdentityStatus;
   enrichedAt: string | null;
   enrichmentSource: string | null;

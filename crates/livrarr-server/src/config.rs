@@ -26,6 +26,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub convergence: ConvergenceConfig,
+
+    #[serde(default)]
+    pub metadata_cache: MetadataCacheConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +196,42 @@ fn default_convergence_batch_size() -> i64 {
 
 fn default_convergence_attempt_threshold() -> u32 {
     3
+}
+
+// ---------------------------------------------------------------------------
+// MetadataCacheConfig
+// ---------------------------------------------------------------------------
+
+/// [metadata_cache] section — the persistent provider-response cache (REQ-009).
+///
+/// Background metadata flows (convergence, re-adds, list import, monitors)
+/// serve provider detail payloads from this cache while fresh; the user's
+/// per-work Refresh and Refresh All bypass it and overwrite entries. TOML
+/// only — no environment-variable override path exists.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetadataCacheConfig {
+    #[serde(default = "default_metadata_cache_ttl_days")]
+    pub ttl_days: u64,
+
+    #[serde(default = "default_metadata_cache_max_rows")]
+    pub max_rows: i64,
+}
+
+impl Default for MetadataCacheConfig {
+    fn default() -> Self {
+        Self {
+            ttl_days: default_metadata_cache_ttl_days(),
+            max_rows: default_metadata_cache_max_rows(),
+        }
+    }
+}
+
+fn default_metadata_cache_ttl_days() -> u64 {
+    7
+}
+
+fn default_metadata_cache_max_rows() -> i64 {
+    100_000
 }
 
 // ---------------------------------------------------------------------------

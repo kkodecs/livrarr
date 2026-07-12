@@ -111,8 +111,10 @@ pub async fn upload_cover_handler<S: HasCoverService>(
 pub async fn get_audiobook_cover<S: HasDataDir>(
     State(state): State<S>,
     Path(id): Path<i64>,
+    Query(q): Query<crate::mediacover::CoverQuery>,
     req_headers: HeaderMap,
 ) -> Response {
+    let versioned = q.v.is_some();
     let data_dir = state.data_dir().to_path_buf();
     let audio_path = {
         let dd = data_dir.clone();
@@ -123,7 +125,7 @@ pub async fn get_audiobook_cover<S: HasDataDir>(
     };
 
     if let Some(path) = audio_path {
-        return serve_image(&path, id, &req_headers).await;
+        return serve_image(&path, id, &req_headers, versioned).await;
     }
 
     let ebook_path = tokio::task::spawn_blocking(move || resolve_cover_path(&data_dir, id, ""))
@@ -132,7 +134,7 @@ pub async fn get_audiobook_cover<S: HasDataDir>(
         .flatten();
 
     match ebook_path {
-        Some(path) => serve_image(&path, id, &req_headers).await,
+        Some(path) => serve_image(&path, id, &req_headers, versioned).await,
         None => placeholder_response(),
     }
 }
@@ -140,8 +142,10 @@ pub async fn get_audiobook_cover<S: HasDataDir>(
 pub async fn get_audiobook_thumb<S: HasDataDir>(
     State(state): State<S>,
     Path(id): Path<i64>,
+    Query(q): Query<crate::mediacover::CoverQuery>,
     req_headers: HeaderMap,
 ) -> Response {
+    let versioned = q.v.is_some();
     let data_dir = state.data_dir().to_path_buf();
     let audio_full = {
         let dd = data_dir.clone();
@@ -152,7 +156,7 @@ pub async fn get_audiobook_thumb<S: HasDataDir>(
     };
 
     let Some(audio_full) = audio_full else {
-        return crate::mediacover::get_thumb(State(state), Path(id), req_headers).await;
+        return crate::mediacover::get_thumb(State(state), Path(id), Query(q), req_headers).await;
     };
 
     // The thumbnail lives next to the cover it renders — same user directory.
@@ -162,7 +166,7 @@ pub async fn get_audiobook_thumb<S: HasDataDir>(
         .unwrap_or_else(|| audio_full.with_file_name(format!("{id}_audio_thumb.jpg")));
 
     if audio_thumb.exists() {
-        return serve_image(&audio_thumb, id, &req_headers).await;
+        return serve_image(&audio_thumb, id, &req_headers, versioned).await;
     }
 
     if let Ok(bytes) = tokio::fs::read(&audio_full).await {
@@ -182,8 +186,8 @@ pub async fn get_audiobook_thumb<S: HasDataDir>(
     }
 
     if audio_thumb.exists() {
-        serve_image(&audio_thumb, id, &req_headers).await
+        serve_image(&audio_thumb, id, &req_headers, versioned).await
     } else {
-        serve_image(&audio_full, id, &req_headers).await
+        serve_image(&audio_full, id, &req_headers, versioned).await
     }
 }

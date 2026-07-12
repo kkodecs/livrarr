@@ -26,6 +26,7 @@ import {
   ImagePlus,
   Upload,
   GitMerge,
+  AlertTriangle,
 } from "lucide-react";
 import {
   getWork,
@@ -66,6 +67,8 @@ import {
 import { BookCover } from "@/components/BookCover";
 import ProgressBadge from "@/components/ProgressBadge";
 import { PendingAnchorBanner } from "@/components/PendingAnchorBanner";
+import { deriveEnrichmentPillState } from "@/utils/enrichmentPill";
+import { nextEnrichmentPollIntervalMs } from "@/utils/enrichmentPoll";
 
 type ReleaseSortField = "title" | "indexer" | "size" | "seeders" | "leechers" | "publishDate";
 import type {
@@ -98,6 +101,10 @@ export default function WorkDetailPage() {
   const [coverPollBaseline, setCoverPollBaseline] = useState<
     { ebook: number | null; audiobook: number | null } | undefined
   >(undefined);
+  // D-006: wall-clock start of the current enrichment run. Set/read inside
+  // refetchInterval so it tracks real elapsed time across polls, not React's
+  // render cadence; reset to null whenever the work isn't enriching.
+  const enrichingSinceRef = useRef<number | null>(null);
 
   const {
     data: work,
@@ -109,8 +116,18 @@ export default function WorkDetailPage() {
     queryFn: () => getWork(Number(id)),
     enabled: !!id,
     refetchInterval: (query) => {
-      const status = query.state.data?.enrichmentStatus;
-      if (status === "unenriched") return 3_000;
+      if (query.state.data?.enriching) {
+        if (enrichingSinceRef.current === null) {
+          enrichingSinceRef.current = Date.now();
+        }
+        const nextInterval = nextEnrichmentPollIntervalMs(Date.now() - enrichingSinceRef.current);
+        if (nextInterval !== false) return nextInterval;
+        // Hard cap reached — fall through and stop; the pill degrades to
+        // "attention" (see pillEnriching below) instead of trusting a
+        // frozen enriching=true forever.
+      } else {
+        enrichingSinceRef.current = null;
+      }
       if (coverPollBaseline === undefined) return false;
       const ebook = query.state.data?.coverMtime ?? null;
       const audiobook = query.state.data?.audiobookCoverMtime ?? null;
@@ -120,6 +137,14 @@ export default function WorkDetailPage() {
       return unchanged ? 1_000 : false;
     },
   });
+
+  // Effective "still usefully in flight" signal for the header pill: true
+  // only while enriching AND we haven't given up polling (D-006 60s cap /
+  // REQ-008). Skeletons elsewhere key off the raw work.enriching instead.
+  const enrichingElapsedMs =
+    enrichingSinceRef.current === null ? 0 : Date.now() - enrichingSinceRef.current;
+  const pillEnriching =
+    !!work?.enriching && nextEnrichmentPollIntervalMs(enrichingElapsedMs) !== false;
 
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -237,6 +262,9 @@ export default function WorkDetailPage() {
             } as UpdateWorkRequest)
           }
           onEditCover={() => setEditOpen(true)}
+          pillEnriching={pillEnriching}
+          onRefresh={() => refreshMutation.mutate()}
+          refreshing={refreshMutation.isPending}
         />
 
         <PendingAnchorBanner workId={work.id} />
@@ -512,11 +540,17 @@ function WorkHeader({
   activeGrabs,
   onToggleMonitor,
   onEditCover,
+  pillEnriching,
+  onRefresh,
+  refreshing,
 }: {
   work: WorkDetailResponse;
   activeGrabs: Set<string>;
   onToggleMonitor: (field: "monitorEbook" | "monitorAudiobook") => void;
   onEditCover: () => void;
+  pillEnriching: boolean;
+  onRefresh: () => void;
+  refreshing: boolean;
 }) {
   const ebookItems = work.libraryItems?.filter((li) => li.mediaType === "ebook") ?? [];
   const audioItems = work.libraryItems?.filter((li) => li.mediaType === "audiobook") ?? [];
@@ -556,6 +590,7 @@ function WorkHeader({
               coverVersion={work.coverMtime ?? undefined}
               className="h-full w-full rounded-lg shadow-lg"
               iconSize={32}
+              variant="full"
             />
             {(ebookItems.length > 0 || (audioItems.length > 0 && !showSeparateAudioCover)) && (
               <div className="absolute inset-0 flex items-center justify-center gap-4 opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 rounded-lg">
@@ -597,6 +632,7 @@ function WorkHeader({
                 mediaType="audiobook"
                 className="h-full w-full rounded-lg shadow-lg"
                 iconSize={32}
+                variant="full"
               />
               {audioItems[0] && (
                 <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 rounded-lg">
@@ -621,9 +657,17 @@ function WorkHeader({
         )}
       </div>
       <div className="min-w-0 flex-1 text-center sm:text-left">
-        <div className="flex items-baseline gap-2">
-          <h1 className="text-2xl font-bold text-zinc-100">{work.title}</h1>
-          <span className="text-xs text-zinc-600">#{work.id}</span>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-baseline gap-2">
+            <h1 className="text-2xl font-bold text-zinc-100">{work.title}</h1>
+            <span className="text-xs text-zinc-600">#{work.id}</span>
+          </div>
+          <EnrichmentPill
+            enriching={pillEnriching}
+            enrichmentStatus={work.enrichmentStatus}
+            onRefresh={onRefresh}
+            refreshing={refreshing}
+          />
         </div>
 
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
@@ -638,12 +682,14 @@ function WorkHeader({
             <span className="text-muted">{work.authorName}</span>
           )}
           {work.year && <span className="text-muted">({work.year})</span>}
-          {work.seriesName && (
+          {work.seriesName ? (
             <span className="text-muted">
               {work.seriesName}
               {work.seriesPosition != null && ` #${work.seriesPosition}`}
             </span>
-          )}
+          ) : work.enriching ? (
+            <SkeletonBlock className="h-3.5 w-24" />
+          ) : null}
         </div>
 
         <div className="mt-3 flex items-center gap-4">
@@ -677,7 +723,7 @@ function WorkHeader({
           </a>
         )}
 
-        {work.genres && work.genres.length > 0 && (
+        {work.genres && work.genres.length > 0 ? (
           <div className="mt-3 flex flex-wrap gap-1.5">
             {work.genres.map((genre) => (
               <span
@@ -688,13 +734,25 @@ function WorkHeader({
               </span>
             ))}
           </div>
-        )}
+        ) : work.enriching ? (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            <SkeletonBlock className="h-5 w-16" />
+            <SkeletonBlock className="h-5 w-20" />
+            <SkeletonBlock className="h-5 w-14" />
+          </div>
+        ) : null}
 
-        {work.description && (
+        {work.description ? (
           <p className="mt-4 line-clamp-4 text-sm text-zinc-400">
             {work.description}
           </p>
-        )}
+        ) : work.enriching ? (
+          <div className="mt-4 space-y-1.5">
+            <SkeletonBlock className="h-3 w-full" />
+            <SkeletonBlock className="h-3 w-full" />
+            <SkeletonBlock className="h-3 w-2/3" />
+          </div>
+        ) : null}
 
       </div>
     </div>
@@ -1359,8 +1417,35 @@ const EVENT_ICONS: Record<string, typeof Download> = {
 
 // --- Book Information Tab ---
 
-function MetadataRow({ label, value }: { label: string; value: React.ReactNode }) {
-  if (!value) return null;
+function SkeletonBlock({ className }: { className?: string }) {
+  return (
+    <span
+      aria-hidden
+      className={cn("inline-block animate-pulse rounded bg-zinc-700/60", className)}
+    />
+  );
+}
+
+function MetadataRow({
+  label,
+  value,
+  skeleton,
+}: {
+  label: string;
+  value: React.ReactNode;
+  skeleton?: boolean;
+}) {
+  if (!value) {
+    if (!skeleton) return null;
+    return (
+      <div className="flex gap-4 py-2 border-b border-border/30">
+        <dt className="w-36 shrink-0 text-xs text-muted uppercase tracking-wide">{label}</dt>
+        <dd className="text-sm">
+          <SkeletonBlock className="h-3.5 w-32" />
+        </dd>
+      </div>
+    );
+  }
   return (
     <div className="flex gap-4 py-2 border-b border-border/30">
       <dt className="w-36 shrink-0 text-xs text-muted uppercase tracking-wide">{label}</dt>
@@ -1389,6 +1474,91 @@ function StatusBadge({ tone, label, tip }: { tone: BadgeTone; label: string; tip
       <HelpTip text={tip} />
     </span>
   );
+}
+
+
+// Enrichment progress pill (spec REQ-005, design D-006) — header-only,
+// enrichment-only signal. Never replaces or hides the Identity/Details
+// StatusBadges above; those keep rendering exactly as today (AC-010).
+function EnrichmentPill({
+  enriching,
+  enrichmentStatus,
+  onRefresh,
+  refreshing,
+}: {
+  enriching: boolean;
+  enrichmentStatus: EnrichmentStatus;
+  onRefresh: () => void;
+  refreshing: boolean;
+}) {
+  const pillState = deriveEnrichmentPillState(enriching, enrichmentStatus);
+  const prevStateRef = useRef(pillState);
+  const [showCompleteFlash, setShowCompleteFlash] = useState(false);
+
+  // "complete" is shown only as a brief transition flash right after the
+  // page itself observes fetching -> complete — never as a permanent badge
+  // on every already-enriched book.
+  useEffect(() => {
+    if (prevStateRef.current === "fetching" && pillState === "complete") {
+      setShowCompleteFlash(true);
+      prevStateRef.current = pillState;
+      const timer = setTimeout(() => setShowCompleteFlash(false), 4_000);
+      return () => clearTimeout(timer);
+    }
+    prevStateRef.current = pillState;
+  }, [pillState]);
+
+  if (pillState === "fetching") {
+    return (
+      <span
+        className={cn(
+          "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium",
+          BADGE_TONE.zinc.wrap,
+        )}
+      >
+        <Loader2 size={12} className="animate-spin" />
+        Fetching details…
+      </span>
+    );
+  }
+
+  if (pillState === "attention") {
+    return (
+      <span
+        className={cn(
+          "inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium",
+          BADGE_TONE.amber.wrap,
+        )}
+      >
+        <AlertTriangle size={12} />
+        Couldn’t fetch everything
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={refreshing}
+          className="rounded bg-zinc-700/70 px-2 py-0.5 text-[11px] font-medium text-zinc-100 hover:bg-zinc-600/70 disabled:opacity-50"
+        >
+          Retry
+        </button>
+      </span>
+    );
+  }
+
+  if (showCompleteFlash) {
+    return (
+      <span
+        className={cn(
+          "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium",
+          BADGE_TONE.green.wrap,
+        )}
+      >
+        <Check size={12} />
+        Details complete
+      </span>
+    );
+  }
+
+  return null;
 }
 
 // Identity state machine (REQ-014) — "which book is this?". The section header
@@ -1459,24 +1629,38 @@ function BookInformationTab({
         <dl className="mt-4">
           {work.originalTitle && <MetadataRow label="Original title" value={work.originalTitle} />}
           <MetadataRow label="Year" value={work.year} />
-          {work.seriesName && (
-            <MetadataRow label="Series" value={
-              `${work.seriesName}${work.seriesPosition != null ? ` #${work.seriesPosition}` : ""}`
-            } />
+          {(work.seriesName || work.enriching) && (
+            <MetadataRow
+              label="Series"
+              value={
+                work.seriesName
+                  ? `${work.seriesName}${work.seriesPosition != null ? ` #${work.seriesPosition}` : ""}`
+                  : null
+              }
+              skeleton={work.enriching}
+            />
           )}
-          {work.genres && work.genres.length > 0 && (
-            <MetadataRow label="Genres" value={work.genres.join(", ")} />
-          )}
-          <MetadataRow label="Publisher" value={work.publisher} />
+          {(work.genres && work.genres.length > 0) || work.enriching ? (
+            <MetadataRow
+              label="Genres"
+              value={work.genres && work.genres.length > 0 ? work.genres.join(", ") : null}
+              skeleton={work.enriching}
+            />
+          ) : null}
+          <MetadataRow label="Publisher" value={work.publisher} skeleton={work.enriching} />
           <MetadataRow label="Publish date" value={work.publishDate} />
-          <MetadataRow label="Language" value={work.language?.toUpperCase()} />
+          <MetadataRow label="Language" value={work.language?.toUpperCase()} skeleton={work.enriching} />
           <MetadataRow label="Pages" value={work.pageCount} />
           {work.durationSeconds && (
             <MetadataRow label="Duration" value={formatDuration(work.durationSeconds)} />
           )}
-          {work.narrator && work.narrator.length > 0 && (
-            <MetadataRow label="Narrator" value={work.narrator.join(", ")} />
-          )}
+          {(work.narrator && work.narrator.length > 0) || work.enriching ? (
+            <MetadataRow
+              label="Narrator"
+              value={work.narrator && work.narrator.length > 0 ? work.narrator.join(", ") : null}
+              skeleton={work.enriching}
+            />
+          ) : null}
           {work.narrationType && <MetadataRow label="Narration" value={work.narrationType} />}
           {work.abridged && <MetadataRow label="Abridged" value="Yes" />}
           {work.rating != null && (

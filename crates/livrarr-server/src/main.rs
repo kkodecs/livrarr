@@ -180,6 +180,13 @@ async fn main() {
         .expect("failed to build SSRF-safe HTTP client");
     let http_fetcher =
         livrarr_http::fetcher::HttpFetcherImpl::new().expect("failed to build HTTP fetcher");
+    // Shared LLM-endpoint client: unrestricted trust class (admin-configured
+    // infrastructure, same as http_client), 60s budget for slow local instances.
+    let llm_http_client = livrarr_http::HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent(&ua)
+        .build()
+        .expect("failed to build LLM HTTP client");
     let job_runner = livrarr_server::jobs::JobRunner::new();
 
     // Provider call-record sink (REQ-001): bounded fire-and-forget channel +
@@ -349,6 +356,13 @@ async fn main() {
         // Pipeline-level skip records (no anchor / policy) flow through the
         // queue's own sink seam (REQ-001).
         builder = builder.with_call_sink(call_sink.clone());
+
+        // Persistent provider-response cache (REQ-009): TOML-configured TTL
+        // and row cap, no env-var override (Servarr convention).
+        builder = builder.with_provider_cache(
+            chrono::Duration::days(config.metadata_cache.ttl_days as i64),
+            config.metadata_cache.max_rows,
+        );
 
         let db_arc = Arc::new(db.clone());
         let queue = Arc::new(builder.build(db_arc.clone()));
@@ -532,8 +546,7 @@ async fn main() {
             livrarr_metadata::work_service::WorkServiceImpl::new(
                 svc_db.clone(),
                 ew,
-                livrarr_http::fetcher::HttpFetcherImpl::new()
-                    .expect("HttpFetcherImpl construction for work service"),
+                http_fetcher.clone(),
                 data_dir.clone(),
             )
             .with_resolver(identity_resolver_arc.clone()),
@@ -542,13 +555,10 @@ async fn main() {
     let discovery_service_arc = Arc::new(
         livrarr_metadata::discovery_service::DiscoveryServiceImpl::new(
             svc_db.clone(),
-            livrarr_http::fetcher::HttpFetcherImpl::new()
-                .expect("HttpFetcherImpl construction for discovery service"),
+            http_fetcher.clone(),
             livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                 live_metadata_config.clone(),
-                livrarr_http::HttpClient::builder()
-                    .build()
-                    .expect("LLM HttpClient for work service"),
+                llm_http_client.clone(),
             ),
         )
         .with_resolver(identity_resolver_arc.clone()),
@@ -591,13 +601,10 @@ async fn main() {
         // --- Service layer (Phase 4) ---
         author_service: Arc::new(livrarr_metadata::author_service::AuthorServiceImpl::new(
             svc_db.clone(),
-            livrarr_http::fetcher::HttpFetcherImpl::new()
-                .expect("HttpFetcherImpl construction for author service"),
+            http_fetcher.clone(),
             livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                 live_metadata_config.clone(),
-                livrarr_http::HttpClient::builder()
-                    .build()
-                    .expect("LLM HttpClient"),
+                llm_http_client.clone(),
             ),
         )),
         series_service: Arc::new(livrarr_metadata::series_service::SeriesServiceImpl::new(
@@ -606,14 +613,11 @@ async fn main() {
         series_query_service: Arc::new(
             livrarr_metadata::series_query_service::SeriesQueryServiceImpl::new(
                 svc_db.clone(),
-                livrarr_http::fetcher::HttpFetcherImpl::new()
-                    .expect("HttpFetcherImpl construction for series query service"),
+                http_fetcher.clone(),
                 work_service_arc.clone(),
                 livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
                     live_metadata_config.clone(),
-                    livrarr_http::HttpClient::builder()
-                        .build()
-                        .expect("LLM HttpClient for series query"),
+                    llm_http_client.clone(),
                 ),
             ),
         ),
@@ -624,7 +628,7 @@ async fn main() {
         )),
         release_service: Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
             svc_db.clone(),
-            livrarr_http::fetcher::HttpFetcherImpl::new().expect("HttpFetcherImpl construction"),
+            http_fetcher.clone(),
             trusted_origins_arc.clone(),
         )),
         file_service: Arc::new(livrarr_library::file_service::FileServiceImpl::new(
@@ -646,17 +650,13 @@ async fn main() {
         rss_sync_workflow: {
             let rs = Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
                 svc_db.clone(),
-                livrarr_http::fetcher::HttpFetcherImpl::new()
-                    .expect("HttpFetcherImpl construction for rss sync"),
+                http_fetcher.clone(),
                 trusted_origins_arc.clone(),
             ));
             Arc::new(
                 livrarr_metadata::rss_sync_workflow::RssSyncWorkflowImpl::new(
                     Arc::new(svc_db.clone()),
-                    Arc::new(
-                        livrarr_http::fetcher::HttpFetcherImpl::new()
-                            .expect("HttpFetcherImpl construction for rss sync fetch"),
-                    ),
+                    Arc::new(http_fetcher.clone()),
                     rs,
                 ),
             )
@@ -669,15 +669,13 @@ async fn main() {
             let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
                 svc_db.clone(),
                 ew,
-                livrarr_http::fetcher::HttpFetcherImpl::new()
-                    .expect("HttpFetcherImpl construction for list work service"),
+                http_fetcher.clone(),
                 data_dir.clone(),
             );
             Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
                 svc_db.clone(),
                 ws,
-                livrarr_http::fetcher::HttpFetcherImpl::new()
-                    .expect("HttpFetcherImpl construction for list service"),
+                http_fetcher.clone(),
                 livrarr_metadata::list_service::NoOpBibliographyTrigger,
             ))
         },
@@ -701,18 +699,14 @@ async fn main() {
             let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
                 svc_db.clone(),
                 ew,
-                livrarr_http::fetcher::HttpFetcherImpl::new()
-                    .expect("HttpFetcherImpl construction for author monitor work service"),
+                http_fetcher.clone(),
                 data_dir.clone(),
             );
             Arc::new(
                 livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::new(
                     Arc::new(svc_db.clone()),
                     Arc::new(ws),
-                    Arc::new(
-                        livrarr_http::fetcher::HttpFetcherImpl::new()
-                            .expect("HttpFetcherImpl construction for author monitor"),
-                    ),
+                    Arc::new(http_fetcher.clone()),
                 ),
             )
         },
@@ -977,8 +971,13 @@ fn init_tracing(
         LogLevel::Error => "error",
     };
 
-    let filter = EnvFilter::try_new(format!("livrarr={level},tower_http={level}"))
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    // RUST_LOG, when set, replaces the config-derived filter wholesale — the
+    // only way to enable non-livrarr targets (e.g. reqwest/hyper connect
+    // tracing for connection-reuse measurement). Unset = config behavior.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::try_new(format!("livrarr={level},tower_http={level}"))
+            .unwrap_or_else(|_| EnvFilter::new("info"))
+    });
 
     let (filter, reload_handle) = tracing_subscriber::reload::Layer::new(filter);
 

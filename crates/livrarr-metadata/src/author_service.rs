@@ -59,6 +59,21 @@ where
     F: HttpFetcher + Send + Sync,
     L: LlmCaller + Send + Sync,
 {
+    async fn merge(
+        &self,
+        user_id: UserId,
+        survivor_id: AuthorId,
+        loser_id: AuthorId,
+    ) -> Result<livrarr_domain::services::AuthorMergeReport, AuthorServiceError> {
+        self.db
+            .merge_authors(user_id, survivor_id, loser_id)
+            .await
+            .map_err(|e| match e {
+                DbError::NotFound { .. } => AuthorServiceError::NotFound,
+                other => AuthorServiceError::Db(other),
+            })
+    }
+
     async fn add(
         &self,
         user_id: UserId,
@@ -78,6 +93,16 @@ where
             .await
             .map_err(AuthorServiceError::Db)?
         {
+            // Monotonic key policy [REV codex R-13]: fill a missing stored
+            // ol_key from the request, never overwrite a populated one — OL
+            // assigns different keys to the same person across spellings, so
+            // passing a conflicting key straight through would corrupt the
+            // stored identity on a same-name re-add.
+            let ol_key = if existing.ol_key.is_none() {
+                req.ol_key.map(Some)
+            } else {
+                None
+            };
             let updated = self
                 .db
                 .update_author(
@@ -86,7 +111,43 @@ where
                     UpdateAuthorDbRequest {
                         name: None,
                         sort_name: req.sort_name.map(Some),
-                        ol_key: req.ol_key.map(Some),
+                        ol_key,
+                        gr_key: None,
+                        monitored: None,
+                        monitor_new_items: None,
+                        monitor_since: None,
+                        monitor_language: None,
+                    },
+                )
+                .await
+                .map_err(AuthorServiceError::Db)?;
+            return Ok(AddAuthorResult::Updated(updated));
+        }
+
+        let authors = self
+            .db
+            .list_authors(user_id)
+            .await
+            .map_err(AuthorServiceError::Db)?;
+        let names: Vec<String> = authors.iter().map(|a| a.name.clone()).collect();
+        if let Some(i) = livrarr_domain::identity_matching::unambiguous_author_match(&name, &names)
+        {
+            let adopted = &authors[i];
+            // Same monotonic key policy as the exact-hit arm above.
+            let ol_key = if adopted.ol_key.is_none() {
+                req.ol_key.map(Some)
+            } else {
+                None
+            };
+            let updated = self
+                .db
+                .update_author(
+                    user_id,
+                    adopted.id,
+                    UpdateAuthorDbRequest {
+                        name: None,
+                        sort_name: req.sort_name.map(Some),
+                        ol_key,
                         gr_key: None,
                         monitored: None,
                         monitor_new_items: None,

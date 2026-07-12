@@ -1268,6 +1268,21 @@ pub enum RequestPriority {
     Interactive,
 }
 
+/// Whether an enrichment pass may satisfy provider fetches from the
+/// persistent provider-response cache (REQ-009). Orthogonal to
+/// [`RequestPriority`]: priority orders the outbound queue, freshness decides
+/// whether a fetch consults the cache at all (D-004).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// A fresh cached payload (age < TTL) satisfies the fetch with zero
+    /// provider HTTP. Background flows: convergence, re-adds, list import,
+    /// monitors.
+    PreferCache,
+    /// Ignore cached payloads; make the real fetch and overwrite the cache
+    /// entry. User-triggered Refresh / Refresh All.
+    Bypass,
+}
+
 /// Normalization class for a field or work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NormalizationClass {

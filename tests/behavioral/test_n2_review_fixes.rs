@@ -433,6 +433,17 @@ impl WorkDb for HookedWorkDb {
             .await
     }
 
+    async fn find_works_by_bridge(
+        &self,
+        user_id: UserId,
+        isbn_13: Option<&str>,
+        asin: Option<&str>,
+    ) -> Result<Vec<Work>, DbError> {
+        self.inner
+            .find_works_by_bridge(user_id, isbn_13, asin)
+            .await
+    }
+
     async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError> {
         self.inner.list_identity_pending_works().await
     }

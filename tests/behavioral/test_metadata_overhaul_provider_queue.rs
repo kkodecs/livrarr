@@ -72,6 +72,7 @@ fn background_context() -> EnrichmentContext {
     EnrichmentContext {
         priority: RequestPriority::Low,
         mode: EnrichmentMode::Background,
+        freshness: livrarr_domain::Freshness::PreferCache,
     }
 }
 
@@ -79,6 +80,7 @@ fn manual_context() -> EnrichmentContext {
     EnrichmentContext {
         priority: RequestPriority::High,
         mode: EnrichmentMode::Manual,
+        freshness: livrarr_domain::Freshness::PreferCache,
     }
 }
 
@@ -86,6 +88,7 @@ fn hard_refresh_context() -> EnrichmentContext {
     EnrichmentContext {
         priority: RequestPriority::High,
         mode: EnrichmentMode::HardRefresh,
+        freshness: livrarr_domain::Freshness::PreferCache,
     }
 }
 

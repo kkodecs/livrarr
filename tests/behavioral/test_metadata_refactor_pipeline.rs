@@ -271,6 +271,7 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
             EnrichmentMode::Manual,
             None,
             RequestPriority::Normal,
+            livrarr_domain::Freshness::Bypass,
         )
         .await
         .expect("network path should enrich");
@@ -292,6 +293,7 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
             EnrichmentMode::Manual,
             Some(CandidateId("cached-candidate-with-cover".to_string())),
             RequestPriority::Normal,
+            livrarr_domain::Freshness::Bypass,
         )
         .await
         .expect("candidate reuse path should enrich without a second network dispatch");
@@ -338,6 +340,7 @@ async fn failed_enrichment_sets_failed() {
             EnrichmentMode::Manual,
             None,
             RequestPriority::Normal,
+            livrarr_domain::Freshness::Bypass,
         )
         .await
         .expect("failed provider run should not block the add");
@@ -381,6 +384,7 @@ async fn unconfigured_provider_is_skipped_remaining_providers_save_the_work() {
             EnrichmentMode::Manual,
             None,
             RequestPriority::Normal,
+            livrarr_domain::Freshness::Bypass,
         )
         .await
         .expect("unconfigured provider must not block the add");
@@ -430,6 +434,7 @@ async fn all_providers_no_usable_data_saves_seed_and_lands_thin_or_failed() {
             EnrichmentMode::Manual,
             None,
             RequestPriority::Normal,
+            livrarr_domain::Freshness::Bypass,
         )
         .await
         .expect("empty provider results must not block the add");
@@ -470,6 +475,7 @@ async fn one_empty_success_and_rest_errors_lands_thin_not_failed() {
             EnrichmentMode::Manual,
             None,
             RequestPriority::Normal,
+            livrarr_domain::Freshness::Bypass,
         )
         .await
         .expect("mixed empty-success plus errors should complete");

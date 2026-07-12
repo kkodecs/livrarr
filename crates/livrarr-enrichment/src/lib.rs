@@ -51,6 +51,8 @@ pub trait EnrichmentService: Send + Sync {
     /// from the network.
     /// `priority` (B4) drives the `EnrichmentContext` handed to
     /// `ProviderQueue::dispatch_enrichment` — independent of `mode`.
+    /// `freshness` (REQ-009) decides whether provider fetches may be served
+    /// from the persistent provider-response cache — orthogonal to `priority`.
     async fn enrich_work(
         &self,
         user_id: UserId,
@@ -58,6 +60,7 @@ pub trait EnrichmentService: Send + Sync {
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
         priority: RequestPriority,
+        freshness: livrarr_domain::Freshness,
     ) -> Result<EnrichmentResult, EnrichmentError>;
 
     /// TEMP(pk-tdd): compile-only scaffold — reset work for manual refresh.
@@ -158,6 +161,9 @@ pub struct ScatterGatherResult {
 pub struct EnrichmentContext {
     pub priority: RequestPriority,
     pub mode: EnrichmentMode,
+    /// REQ-009: whether this dispatch may satisfy provider fetches from the
+    /// persistent provider-response cache (D-004 — orthogonal to `priority`).
+    pub freshness: livrarr_domain::Freshness,
 }
 
 /// Per-provider queue configuration.
@@ -1335,6 +1341,7 @@ where
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
         priority: RequestPriority,
+        freshness: livrarr_domain::Freshness,
     ) -> Result<EnrichmentResult, EnrichmentError> {
         let _enrich_span = livrarr_domain::perf::StageTimer::start("enrich", work_id);
         // Step 1: Acquire per-work lock [I-12]
@@ -1464,7 +1471,11 @@ where
 
         // Step 4: Dispatch to provider queue. `priority` is the caller's
         // explicit queue-ordering hint (B4) — it no longer hardcodes Normal.
-        let context = EnrichmentContext { priority, mode };
+        let context = EnrichmentContext {
+            priority,
+            mode,
+            freshness,
+        };
         let mut scatter_result = self.queue.dispatch_enrichment(&work, context).await?;
 
         // Step 4.5: Append source provider data (Readarr import) if pre-injected.

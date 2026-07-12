@@ -266,6 +266,26 @@ pub async fn bibliography<S: HasAuthorService>(
     Ok(Json(bibliography_to_json(id, result)))
 }
 
+#[derive(serde::Deserialize)]
+pub struct MergeAuthorBody {
+    pub loser_id: i64,
+}
+
+/// POST /author/{survivor_id}/merge — merge `loser_id` into the path author
+/// (author-dedup). Returns the merge report.
+pub async fn merge<S: HasAuthorService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Json(body): Json<MergeAuthorBody>,
+) -> Result<Json<livrarr_domain::services::AuthorMergeReport>, ApiError> {
+    let report = state
+        .author_service()
+        .merge(ctx.user.id, id, body.loser_id)
+        .await?;
+    Ok(Json(report))
+}
+
 pub async fn refresh_bibliography<S: HasAuthorService>(
     State(state): State<S>,
     ctx: AuthContext,

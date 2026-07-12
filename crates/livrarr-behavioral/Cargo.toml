@@ -17,6 +17,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+toml = "1.1"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 trait-variant = { workspace = true }
@@ -493,5 +494,23 @@ path = "../../tests/behavioral/test_verify_e2.rs"
 [[test]]
 name = "test_manifest_guard"
 path = "../../tests/behavioral/test_manifest_guard.rs"
+
+[[test]]
+name = "test_responsiveness_add"
+path = "../../tests/behavioral/test_responsiveness_add.rs"
+
+[[test]]
+name = "test_responsiveness_cache"
+path = "../../tests/behavioral/test_responsiveness_cache.rs"
+
+[[test]]
+name = "test_responsiveness_bulk"
+path = "../../tests/behavioral/test_responsiveness_bulk.rs"
+
+# --- Author dedup RED suite ---
+
+[[test]]
+name = "test_author_dedup"
+path = "../../tests/behavioral/test_author_dedup.rs"
 
 # --- End orphan-test cleanup 2026-07-11 ---

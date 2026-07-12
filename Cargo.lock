@@ -1592,6 +1592,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "toml",
  "tower",
  "trait-variant",
  "unicode-normalization",

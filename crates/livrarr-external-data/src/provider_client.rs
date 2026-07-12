@@ -131,7 +131,7 @@ impl ProviderClient {
 
     fn sink_ref(&self) -> Option<&Arc<dyn ProviderCallSink>> {
         match self {
-            Self::Stub(_) => None,
+            Self::Stub(s) => s.call_sink.as_ref(),
             Self::Audnexus(a) => a.call_sink.as_ref(),
             Self::Hardcover(h) => h.call_sink.as_ref(),
             Self::OpenLibrary(o) => o.call_sink.as_ref(),
@@ -142,10 +142,10 @@ impl ProviderClient {
     }
 
     /// Inject the call-record sink (REQ-001) into the wrapped client.
-    /// Stub clients are test doubles and don't record.
+    /// Stub clients record through the same central wrapper as real clients when a sink is injected.
     pub fn with_call_sink(self, sink: Arc<dyn ProviderCallSink>) -> Self {
         match self {
-            Self::Stub(c) => Self::Stub(c),
+            Self::Stub(c) => Self::Stub(c.with_call_sink(sink)),
             Self::Audnexus(c) => Self::Audnexus(c.with_call_sink(sink)),
             Self::Hardcover(c) => Self::Hardcover(c.with_call_sink(sink)),
             Self::OpenLibrary(c) => Self::OpenLibrary(c.with_call_sink(sink)),
@@ -275,6 +275,7 @@ pub struct StubProviderClient {
     /// identity fan-out) or `fetch_by_anchor` (the enrichment queue) — B4.
     /// `None` until a call happens.
     last_priority: Arc<Mutex<Option<RequestPriority>>>,
+    call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
 impl StubProviderClient {
@@ -286,6 +287,7 @@ impl StubProviderClient {
             call_count: Arc::new(AtomicUsize::new(0)),
             delay: None,
             last_priority: Arc::new(Mutex::new(None)),
+            call_sink: None,
         }
     }
 
@@ -298,6 +300,7 @@ impl StubProviderClient {
             call_count: Arc::new(AtomicUsize::new(0)),
             delay: None,
             last_priority: Arc::new(Mutex::new(None)),
+            call_sink: None,
         }
     }
 
@@ -305,6 +308,11 @@ impl StubProviderClient {
     /// `call_timeout` and exercise the abstention path (REQ-025).
     pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
         self.delay = Some(delay);
+        self
+    }
+
+    pub fn with_call_sink(mut self, sink: Arc<dyn ProviderCallSink>) -> Self {
+        self.call_sink = Some(sink);
         self
     }
 

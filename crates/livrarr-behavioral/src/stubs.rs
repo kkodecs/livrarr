@@ -216,6 +216,10 @@ pub struct StubEnrichmentWorkflow {
     /// (mode, priority) of every enrich_work call, in order — lets tests assert
     /// the dispatch settings a caller threaded through the pipeline.
     enrich_contexts: Arc<Mutex<Vec<(EnrichmentMode, livrarr_domain::RequestPriority)>>>,
+    /// Freshness of every enrich_work call, in order — lets tests pin the
+    /// per-door cache policy (REQ-009/D-004: refresh Bypass, background
+    /// PreferCache).
+    freshness_calls: Arc<Mutex<Vec<livrarr_domain::Freshness>>>,
     reset_call_count: Arc<AtomicUsize>,
     reset_work_ids: Arc<Mutex<Vec<WorkId>>>,
 }
@@ -227,6 +231,7 @@ impl StubEnrichmentWorkflow {
             call_count: Arc::new(AtomicUsize::new(0)),
             work_ids: Arc::new(Mutex::new(Vec::new())),
             enrich_contexts: Arc::new(Mutex::new(Vec::new())),
+            freshness_calls: Arc::new(Mutex::new(Vec::new())),
             reset_call_count: Arc::new(AtomicUsize::new(0)),
             reset_work_ids: Arc::new(Mutex::new(Vec::new())),
         }
@@ -238,6 +243,7 @@ impl StubEnrichmentWorkflow {
             call_count: Arc::new(AtomicUsize::new(0)),
             work_ids: Arc::new(Mutex::new(Vec::new())),
             enrich_contexts: Arc::new(Mutex::new(Vec::new())),
+            freshness_calls: Arc::new(Mutex::new(Vec::new())),
             reset_call_count: Arc::new(AtomicUsize::new(0)),
             reset_work_ids: Arc::new(Mutex::new(Vec::new())),
         }
@@ -245,6 +251,10 @@ impl StubEnrichmentWorkflow {
 
     pub fn enrich_contexts(&self) -> Vec<(EnrichmentMode, livrarr_domain::RequestPriority)> {
         self.enrich_contexts.lock().unwrap().clone()
+    }
+
+    pub fn freshness_calls(&self) -> Vec<livrarr_domain::Freshness> {
+        self.freshness_calls.lock().unwrap().clone()
     }
 
     pub fn call_count(&self) -> usize {
@@ -272,8 +282,10 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
         mode: EnrichmentMode,
         _candidate_id: Option<livrarr_domain::identity::CandidateId>,
         priority: livrarr_domain::RequestPriority,
+        freshness: livrarr_domain::Freshness,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.freshness_calls.lock().unwrap().push(freshness);
         self.work_ids.lock().unwrap().push(work_id);
         self.enrich_contexts.lock().unwrap().push((mode, priority));
 

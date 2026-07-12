@@ -180,7 +180,7 @@ pub async fn add<
     Json(req): Json<AddWorkRequest>,
 ) -> Result<Json<AddWorkResponse>, ApiError> {
     let author_name_for_gr = req.author_name.clone();
-    use livrarr_domain::identity::{LatencyTier, RawHarvest};
+    use livrarr_domain::identity::RawHarvest;
     use livrarr_domain::seed::{seed_add_box, SeedInput, SeedLanguage};
 
     let default_language = state.app_config_service().get_default_language().await?;
@@ -196,44 +196,30 @@ pub async fn add<
         .map(livrarr_domain::unproxy_cover_url);
     let cover_is_manual = req.cover_manual && cover_url.is_some();
 
-    // Resolve identity through the shared resolver — the one place every door
-    // turns raw anchors into a Confirmed/Pending/Conflict badge (P1). Boundary
-    // sanitization (normalize + drop malformed anchors) happens inside
-    // resolve_identity; an isbn/asin-only pick still fans out to find a work anchor.
+    // Local-only identity derivation (REQ-004): sanitize the harvest and take
+    // the badge the seed itself supports — zero network before the response.
+    // Same-book duplicates are caught by add_fast's local dedup (work-anchor,
+    // verdict-gated bridge, normalized); provider-backed identity completion
+    // and any resulting conflict surface through the background completion,
+    // exactly like the batch doors.
     let resolved = state
         .work_service()
-        .resolve_identity(
-            ctx.user.id,
-            RawHarvest {
-                ol_key: req.ol_key.clone(),
-                gr_key: req.gr_key.clone(),
-                hc_key: req.hc_key.clone(),
-                isbn: req.isbn_13.clone(),
-                asin: req.asin.clone(),
-                title: Some(req.title.clone()),
-                author_name: Some(req.author_name.clone()),
-                language: Some(language.as_str().to_string()),
-                series_name: None,
-                year: req.year,
-                user_confirmed: true,
-            },
-            LatencyTier::Interactive,
-        )
-        .await
+        .resolve_identity_local(RawHarvest {
+            ol_key: req.ol_key.clone(),
+            gr_key: req.gr_key.clone(),
+            hc_key: req.hc_key.clone(),
+            isbn: req.isbn_13.clone(),
+            asin: req.asin.clone(),
+            title: Some(req.title.clone()),
+            author_name: Some(req.author_name.clone()),
+            language: Some(language.as_str().to_string()),
+            series_name: None,
+            year: req.year,
+            user_confirmed: true,
+        })
         .map_err(|e| ApiError::Internal(format!("identity resolve: {e}")))?;
-    if let Some(conflict) = resolved.conflict {
-        let work = state
-            .work_service()
-            .get(ctx.user.id, conflict.existing_work_id)
-            .await?;
-        let detail = crate::types::work::work_to_detail_with_cover_mtime(&work, None, None);
-        return Ok(Json(AddWorkResponse {
-            work: detail,
-            author_created: false,
-            messages: vec!["identity conflict: existing work has a different anchor".into()],
-        }));
-    }
     let identity = resolved.identity;
+    let candidate_id_for_completion = req.candidate_id.clone();
 
     // Funnel through the one road: enrichment + cover/tag materialization run
     // synchronously via the pipeline, reusing the candidate's cached discovery
@@ -256,15 +242,29 @@ pub async fn add<
         cover_is_manual,
     );
 
-    let result = state.work_service().add(ctx.user.id, candidate).await?;
+    let result = state
+        .work_service()
+        .add_fast(ctx.user.id, candidate)
+        .await?;
 
-    // Background refresh: fill in anchors (GR/HC/ASIN) that initial enrichment
-    // misses because they require the identity road to run first.
+    // Background completion (REQ-004): identity fan-out + enrichment + covers
+    // run off the response path; the +5s anchor top-up refresh chains AFTER
+    // completion so two enrichment runs never race on one work.
     if result.created {
         let s = state.clone();
         let uid = ctx.user.id;
         let wid = result.work.id;
         tokio::spawn(async move {
+            s.work_service()
+                .complete_add(
+                    uid,
+                    wid,
+                    None,
+                    candidate_id_for_completion,
+                    livrarr_domain::identity::IdentityMode::Interactive,
+                    livrarr_domain::identity::ConflictSource::ManualAdd,
+                )
+                .await;
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             let _ = s
                 .work_service()
@@ -336,13 +336,17 @@ pub async fn add<
         }
     }
 
-    let detail = crate::types::work::work_to_detail_with_cover_mtime(
+    let mut detail = crate::types::work::work_to_detail_with_cover_mtime(
         &result.work,
         result.cover_mtime,
         result.audiobook_cover_mtime,
     );
+    // A created work has its completion running right now (spawned above) —
+    // report it directly rather than racing the registry's first insert.
+    detail.enriching = result.created;
     Ok(Json(AddWorkResponse {
         work: detail,
+        created: result.created,
         author_created: result.author_created,
         messages: result.messages,
     }))
@@ -448,6 +452,7 @@ pub async fn get<S: HasWorkService + HasFileService>(
         view.cover_mtime,
         view.audiobook_cover_mtime,
     );
+    detail.enriching = state.work_service().is_enriching(ctx.user.id, id);
     detail.library_items = view
         .library_items
         .iter()
@@ -658,6 +663,41 @@ pub async fn refresh<S: HasWorkService>(
     }))
 }
 
+/// The Refresh-All sweep body (REQ-013): every work refreshes through the
+/// Bulk surface; a per-work failure is counted and never aborts the sweep.
+/// Concurrency is bounded at 3 in-flight refreshes (AC-019) — the win is
+/// overlapping different providers across works; per-provider pacing stays
+/// governed by the outbound queue (ST-012). refresh() funnels through
+/// run_unified, which materializes covers and tags itself — the sweep does
+/// not re-download or re-tag (REQ-001).
+pub async fn bulk_refresh_sweep<W: livrarr_domain::services::WorkService>(
+    work_service: &W,
+    user_id: livrarr_domain::UserId,
+    works: Vec<livrarr_domain::Work>,
+) -> (usize, usize) {
+    use futures::StreamExt;
+
+    let results: Vec<bool> = futures::stream::iter(works)
+        .map(|work| async move {
+            match work_service
+                .refresh(user_id, work.id, RefreshSurface::Bulk)
+                .await
+            {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!(work_id = work.id, "refresh_all: refresh failed: {e}");
+                    false
+                }
+            }
+        })
+        .buffer_unordered(3)
+        .collect()
+        .await;
+
+    let enriched = results.iter().filter(|ok| **ok).count();
+    (enriched, results.len() - enriched)
+}
+
 /// Active library filters carried into Refresh All (REQ-015): the sweep
 /// refreshes what the user sees. No params = all works (AC-017).
 #[derive(serde::Deserialize)]
@@ -708,27 +748,7 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
         // Owns the slot: completion, error, panic unwind, and abort all
         // release via Drop (REQ-016).
         let _bulk_guard = bulk_guard;
-        let mut enriched = 0usize;
-        let mut failed = 0usize;
-
-        for work in &works {
-            // refresh() funnels through run_unified, which materializes covers and
-            // tags itself — the handler does not re-download or re-tag (REQ-001).
-            // Low: unattended refresh-all sweep (B4 table).
-            match s
-                .work_service()
-                .refresh(user_id, work.id, RefreshSurface::Bulk)
-                .await
-            {
-                Ok(_) => {
-                    enriched += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(work_id = work.id, "refresh_all: refresh failed: {e}");
-                    failed += 1;
-                }
-            }
-        }
+        let (enriched, failed) = bulk_refresh_sweep(s.work_service(), user_id, works).await;
 
         if let Err(e) = s
             .notification_service()

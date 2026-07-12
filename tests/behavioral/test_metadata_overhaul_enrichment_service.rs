@@ -495,6 +495,17 @@ impl WorkDb for SequencedApplyDb {
             .await
     }
 
+    async fn find_works_by_bridge(
+        &self,
+        user_id: UserId,
+        isbn_13: Option<&str>,
+        asin: Option<&str>,
+    ) -> Result<Vec<Work>, DbError> {
+        self.inner
+            .find_works_by_bridge(user_id, isbn_13, asin)
+            .await
+    }
+
     async fn list_identity_pending_works(&self) -> Result<Vec<Work>, DbError> {
         self.inner.list_identity_pending_works().await
     }
@@ -1188,6 +1199,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -1293,6 +1305,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -1403,6 +1416,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -1470,6 +1484,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -1534,6 +1549,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -1600,6 +1616,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap_err();
@@ -1672,6 +1689,7 @@ macro_rules! enrichment_service_tests {
                         EnrichmentMode::Background,
                         None,
                         RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                     )
                     .await
                     .unwrap()
@@ -1691,6 +1709,7 @@ macro_rules! enrichment_service_tests {
                         EnrichmentMode::Background,
                         None,
                         RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                     )
                     .await
                     .unwrap()
@@ -1759,6 +1778,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -1852,6 +1872,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap_err();
@@ -1910,6 +1931,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -1938,6 +1960,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Manual,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2002,6 +2025,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2061,6 +2085,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2122,6 +2147,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2183,6 +2209,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2276,6 +2303,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2327,6 +2355,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::HardRefresh,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2375,6 +2404,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2458,6 +2488,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2732,6 +2763,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Background,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                     .await
                     .unwrap()
@@ -2850,6 +2882,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Manual,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();
@@ -2959,6 +2992,7 @@ macro_rules! enrichment_service_tests {
                     EnrichmentMode::Manual,
                     None,
                     RequestPriority::Normal,
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await
                 .unwrap();

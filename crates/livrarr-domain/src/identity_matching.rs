@@ -285,6 +285,31 @@ pub fn author_verdict(a: &[String], b: &[String]) -> AuthorVerdict {
     }
 }
 
+/// Exactly-one-unambiguous-match author adoption gate (author-dedup).
+///
+/// `Some(i)` iff `candidate` adoption-matches `stored[i]` and nothing else.
+/// Adoption matching is deliberately TIGHTER than [`full_name_match`]: given
+/// equal canonical surnames, it matches on (1) equal given-token counts with
+/// pairwise initial/word compatibility, (2) a symmetric glued-initials
+/// reading ("jk" ⇄ "j k") that equalizes counts with first-char-equal pairs,
+/// or (3) unequal counts only when every zipped pair is an exact multi-char
+/// word — a lone initial never spans unchecked surplus given names. Ambiguity
+/// (two or more compatible stored names) refuses: grey never absorbs; the
+/// merge action is the recovery for a wrong split.
+pub fn unambiguous_author_match(candidate: &str, stored: &[String]) -> Option<usize> {
+    let candidate_name = canonical_author_name(candidate)?;
+    let mut matches = stored.iter().enumerate().filter_map(|(i, name)| {
+        canonical_author_name(name)
+            .filter(|stored_name| adoption_match(&candidate_name, stored_name))
+            .map(|_| i)
+    });
+    let first = matches.next()?;
+    match matches.next() {
+        Some(_) => None,
+        None => Some(first),
+    }
+}
+
 /// Compare a work's language against an incoming payload's declared
 /// language, in the context of the user's default language.
 pub fn language_verdict(
@@ -798,6 +823,75 @@ fn full_name_match(a: &CanonicalName, b: &CanonicalName) -> bool {
     }
 }
 
+/// Adoption match between two canonical names — the rule set behind
+/// [`unambiguous_author_match`], deliberately tighter than [`full_name_match`].
+fn adoption_match(x: &CanonicalName, y: &CanonicalName) -> bool {
+    if x.surname != y.surname {
+        return false;
+    }
+    match (x.given.is_empty(), y.given.is_empty()) {
+        (true, true) => return true,
+        (true, false) | (false, true) => return false,
+        (false, false) => {}
+    }
+    if x.given.len() == y.given.len() {
+        return x
+            .given
+            .iter()
+            .zip(y.given.iter())
+            .all(|(a, b)| given_token_compatible(a, b));
+    }
+    if let Some(matched) = glued_initials_match(&x.given, &y.given) {
+        return matched;
+    }
+    exact_prefix_match(&x.given, &y.given)
+}
+
+/// Symmetric glued-initials reading: a single 2-4 char all-alphabetic given
+/// token on either side may be read as a run of single-char initials when
+/// that reading equalizes the given-token counts. `None` when neither side
+/// qualifies — the rule is inapplicable, not a verdict, and the caller falls
+/// through to [`exact_prefix_match`].
+fn glued_initials_match(a: &[String], b: &[String]) -> Option<bool> {
+    try_glued_side(a, b).or_else(|| try_glued_side(b, a))
+}
+
+/// `glued`'s lone token, when 2-4 alphabetic chars, exploded into initials
+/// and compared pairwise against `other`. `None` if `glued` isn't a single
+/// eligible token or the explosion doesn't equalize the counts.
+fn try_glued_side(glued: &[String], other: &[String]) -> Option<bool> {
+    if glued.len() != 1 {
+        return None;
+    }
+    let token = &glued[0];
+    let chars: Vec<char> = token.chars().collect();
+    if !(2..=4).contains(&chars.len()) || !token.chars().all(|c| c.is_alphabetic()) {
+        return None;
+    }
+    if chars.len() != other.len() {
+        return None;
+    }
+    Some(
+        chars
+            .iter()
+            .map(|c| c.to_string())
+            .zip(other.iter())
+            .all(|(initial, name)| given_token_compatible(&initial, name)),
+    )
+}
+
+/// Unequal given-token counts, non-glued: the shorter side's tokens must be
+/// an exact multi-char word-for-word prefix of the longer side's; surplus
+/// given names beyond that prefix are tolerated unchecked. A lone initial
+/// can never occupy a prefix position — it is not a multi-char word.
+fn exact_prefix_match(a: &[String], b: &[String]) -> bool {
+    let (shorter, longer) = if a.len() < b.len() { (a, b) } else { (b, a) };
+    shorter
+        .iter()
+        .zip(longer.iter())
+        .all(|(x, y)| x.chars().count() > 1 && x == y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,6 +1141,93 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unambiguous_author_match_adopts_po_pairs_in_both_directions() {
+        let cases = [
+            ("W.E.B. Griffin", "W. E. B. Griffin"),
+            ("JK Rowling", "J.K. Rowling"),
+            ("Robert Anson Heinlein", "Robert A. Heinlein"),
+        ];
+
+        for (candidate, stored) in cases {
+            assert_eq!(
+                unambiguous_author_match(candidate, &names(&["Other Author", stored])),
+                Some(1),
+                "{candidate:?} should adopt stored {stored:?}"
+            );
+            assert_eq!(
+                unambiguous_author_match(stored, &names(&["Other Author", candidate])),
+                Some(1),
+                "{stored:?} should adopt stored {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unambiguous_author_match_adopts_exact_full_word_prefix_in_both_directions() {
+        assert_eq!(
+            unambiguous_author_match("Robert Heinlein", &names(&["Robert A. Heinlein"])),
+            Some(0)
+        );
+        assert_eq!(
+            unambiguous_author_match("Robert A. Heinlein", &names(&["Robert Heinlein"])),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn unambiguous_author_match_refuses_lone_initial_spanning_surplus_names() {
+        assert_eq!(
+            unambiguous_author_match("J. Rowling", &names(&["Jane Joanne Rowling"])),
+            None
+        );
+        assert_eq!(
+            unambiguous_author_match("Jane Joanne Rowling", &names(&["J. Rowling"])),
+            None
+        );
+    }
+
+    #[test]
+    fn unambiguous_author_match_requires_exactly_one_compatible_stored_author() {
+        assert_eq!(
+            unambiguous_author_match("J. Smith", &names(&["John Smith", "Jane Smith"])),
+            None
+        );
+    }
+
+    #[test]
+    fn unambiguous_author_match_refuses_glued_initials_against_single_given_name() {
+        assert_eq!(
+            unambiguous_author_match("JK Rowling", &names(&["Joanne Rowling"])),
+            None
+        );
+    }
+
+    #[test]
+    fn unambiguous_author_match_refuses_surname_only_against_given_named_stored() {
+        assert_eq!(
+            unambiguous_author_match("Rowling", &names(&["J.K. Rowling"])),
+            None
+        );
+    }
+
+    #[test]
+    fn unambiguous_author_match_refuses_empty_or_garbage_candidate() {
+        assert_eq!(unambiguous_author_match("", &names(&["John Smith"])), None);
+        assert_eq!(
+            unambiguous_author_match("!!! ...", &names(&["John Smith"])),
+            None
+        );
+    }
+
+    #[test]
+    fn unambiguous_author_match_accepts_documented_single_initial_residual() {
+        assert_eq!(
+            unambiguous_author_match("J. Smith", &names(&["John Smith"])),
+            Some(0)
+        );
     }
 
     #[test]

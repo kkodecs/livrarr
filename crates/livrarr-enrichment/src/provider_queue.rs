@@ -24,10 +24,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
-use livrarr_db::{DbError, ProviderRetryStateDb};
+use livrarr_db::{DbError, ProviderCacheEntry, ProviderResponseCacheDb, ProviderRetryStateDb};
 use livrarr_domain::services::{CallOperation, CallOutcomeClass, ProviderCallRecord};
 use livrarr_domain::{
-    AnchorQuery, MetadataProvider, OutcomeClass, PermanentFailureReason, Work, WorkId,
+    AnchorQuery, Freshness, MetadataProvider, OutcomeClass, PermanentFailureReason, Work, WorkId,
 };
 use tokio::task::JoinSet;
 use tracing::warn;
@@ -63,6 +63,19 @@ fn derive_anchor_query(provider: MetadataProvider, work: &Work) -> Option<Anchor
         }
         // Never scatter providers; no anchor surface exists for them.
         MetadataProvider::Llm | MetadataProvider::Readarr => None,
+    }
+}
+
+/// REQ-009 provider-response cache key vocabulary: the `anchor_type` string
+/// paired with the anchor value at the (provider, anchor_type, anchor) cache
+/// key. Pinned by the behavioral suite.
+fn anchor_cache_key(anchor: &AnchorQuery) -> (&'static str, &str) {
+    match anchor {
+        AnchorQuery::Isbn13(v) => ("isbn13", v.as_str()),
+        AnchorQuery::GrKey(v) => ("gr_key", v.as_str()),
+        AnchorQuery::HcKey(v) => ("hc_key", v.as_str()),
+        AnchorQuery::OlKey(v) => ("ol_key", v.as_str()),
+        AnchorQuery::Asin(v) => ("asin", v.as_str()),
     }
 }
 
@@ -107,6 +120,8 @@ pub struct DefaultProviderQueueBuilder {
     providers: HashMap<MetadataProvider, ProviderEntry>,
     applicability: Option<ApplicabilityRule>,
     call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
+    cache_ttl: chrono::Duration,
+    cache_max_rows: i64,
 }
 
 impl Default for DefaultProviderQueueBuilder {
@@ -121,7 +136,18 @@ impl DefaultProviderQueueBuilder {
             providers: HashMap::new(),
             applicability: None,
             call_sink: None,
+            cache_ttl: chrono::Duration::days(7),
+            cache_max_rows: 100_000,
         }
+    }
+
+    /// Configure the persistent provider-response cache (REQ-009): entries
+    /// older than `ttl` are stale for `Freshness::PreferCache` dispatches;
+    /// the store is evicted oldest-first down to `max_rows` after writes.
+    pub fn with_provider_cache(mut self, ttl: chrono::Duration, max_rows: i64) -> Self {
+        self.cache_ttl = ttl;
+        self.cache_max_rows = max_rows;
+        self
     }
 
     /// Inject the call-record sink (REQ-001): the queue records pipeline-level
@@ -152,7 +178,7 @@ impl DefaultProviderQueueBuilder {
 
     pub fn build<DB>(self, retry_db: Arc<DB>) -> DefaultProviderQueue<DB>
     where
-        DB: ProviderRetryStateDb + Send + Sync + 'static,
+        DB: ProviderRetryStateDb + ProviderResponseCacheDb + Send + Sync + 'static,
     {
         let applicability = self
             .applicability
@@ -162,6 +188,8 @@ impl DefaultProviderQueueBuilder {
             applicability,
             retry_db,
             call_sink: self.call_sink,
+            cache_ttl: self.cache_ttl,
+            cache_max_rows: self.cache_max_rows,
         }
     }
 }
@@ -169,13 +197,18 @@ impl DefaultProviderQueueBuilder {
 /// Centralized scatter-gather provider request queue. See module-level docs.
 pub struct DefaultProviderQueue<DB>
 where
-    DB: ProviderRetryStateDb + Send + Sync + 'static,
+    DB: ProviderRetryStateDb + ProviderResponseCacheDb + Send + Sync + 'static,
 {
     providers: Arc<HashMap<MetadataProvider, ProviderEntry>>,
     applicability: ApplicabilityRule,
     retry_db: Arc<DB>,
     #[allow(dead_code)] // read at green: REQ-006 skip records via REQ-001 sink
     call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
+    /// REQ-009: entries older than this are stale for `Freshness::PreferCache`.
+    cache_ttl: chrono::Duration,
+    /// REQ-009: the store is evicted oldest-first down to this cap after a
+    /// batch of real-fetch cache writes.
+    cache_max_rows: i64,
 }
 
 /// Outcome of one provider's phase-1 dispatch, before terminal-budget conversion
@@ -185,6 +218,9 @@ enum DispatchedOutcome {
     Returned(ProviderOutcome<NormalizedWorkDetail>),
     /// Provider client task panicked.
     Panicked,
+    /// REQ-009: served from the persistent provider-response cache — no
+    /// client fetch happened for this provider this pass.
+    CachedSuccess(Box<NormalizedWorkDetail>),
 }
 
 /// Read existing terminal state for restart safety. None = no row, or row is non-terminal.
@@ -202,7 +238,7 @@ async fn existing_terminal_outcome<DB: ProviderRetryStateDb + Send + Sync>(
 
 impl<DB> ProviderQueue for DefaultProviderQueue<DB>
 where
-    DB: ProviderRetryStateDb + Send + Sync + 'static,
+    DB: ProviderRetryStateDb + ProviderResponseCacheDb + Send + Sync + 'static,
 {
     async fn dispatch_enrichment(
         &self,
@@ -222,6 +258,11 @@ where
             anchor: AnchorQuery,
         }
         let mut to_dispatch: Vec<DispatchEntry> = Vec::new();
+        // REQ-009: pre-populated with cache hits before the scatter phase —
+        // a hit occupies its provider's slot here so the spawn loop below
+        // never fetches it, yet it still reaches the same finalization
+        // (budget rules + durable persistence) as a real fetch.
+        let mut dispatched: HashMap<MetadataProvider, DispatchedOutcome> = HashMap::new();
 
         for (provider, entry) in self.providers.iter() {
             let provider = *provider;
@@ -262,6 +303,15 @@ where
                 continue;
             }
 
+            // REQ-009: a fresh cache hit satisfies this provider without a
+            // client fetch. Bypass, a stale row, a missing row, or damaged
+            // payload all fall through to the normal fetch below.
+            if context.freshness == Freshness::PreferCache {
+                if let Some(detail) = self.cached_success(provider, &anchor).await {
+                    dispatched.insert(provider, DispatchedOutcome::CachedSuccess(Box::new(detail)));
+                }
+            }
+
             to_dispatch.push(DispatchEntry {
                 provider,
                 client: entry.client.clone(),
@@ -270,13 +320,17 @@ where
             });
         }
 
-        // Phase 1: scatter — spawn each provider call. Panic isolation via JoinSet.
-        // Pacing, concurrency capping, and circuit breaking happen at the outbound
-        // queue (every HTTP call routes through it); this layer only dispatches.
+        // Phase 1: scatter — spawn each provider call not already served from
+        // cache. Panic isolation via JoinSet. Pacing, concurrency capping, and
+        // circuit breaking happen at the outbound queue (every HTTP call
+        // routes through it); this layer only dispatches.
         let mut set: JoinSet<(MetadataProvider, DispatchedOutcome)> = JoinSet::new();
         let language = work.language.clone();
         let priority = context.priority;
         for d in &to_dispatch {
+            if dispatched.contains_key(&d.provider) {
+                continue; // REQ-009 cache hit — no client fetch, no call record.
+            }
             let provider = d.provider;
             let client = d.client.clone();
             let anchor = d.anchor.clone();
@@ -290,7 +344,6 @@ where
         }
 
         // Phase 1: gather — collect outcomes, mapping panics to ProviderPanic.
-        let mut dispatched: HashMap<MetadataProvider, DispatchedOutcome> = HashMap::new();
         while let Some(joined) = set.join_next().await {
             match joined {
                 Ok((provider, outcome)) => {
@@ -321,27 +374,63 @@ where
 
         // For each dispatched outcome, apply budget rules and persist phase-1
         // state durably ([I-11]). Then build the in-memory result outcome.
+        let mut wrote_to_cache = false;
         for d in &to_dispatch {
             let provider = d.provider;
             let raw = dispatched
                 .remove(&provider)
                 .expect("dispatched entry must exist after reconciliation");
 
-            let final_outcome = match raw {
-                DispatchedOutcome::Panicked => ProviderOutcome::PermanentFailure {
-                    reason: PermanentFailureReason::ProviderPanic,
-                },
-                DispatchedOutcome::Returned(outcome) => {
+            let (final_outcome, cache_served) = match raw {
+                DispatchedOutcome::Panicked => (
+                    ProviderOutcome::PermanentFailure {
+                        reason: PermanentFailureReason::ProviderPanic,
+                    },
+                    false,
+                ),
+                DispatchedOutcome::Returned(outcome) => (
                     self.apply_budget_rules(work, provider, &d.config, outcome)
-                        .await?
-                }
+                        .await?,
+                    false,
+                ),
+                DispatchedOutcome::CachedSuccess(detail) => (
+                    self.apply_budget_rules(
+                        work,
+                        provider,
+                        &d.config,
+                        ProviderOutcome::Success(detail),
+                    )
+                    .await?,
+                    true,
+                ),
             };
 
             // Durable persistence.
             self.persist_phase1_outcome(work, provider, &final_outcome)
                 .await?;
 
+            // REQ-009 / D-003: only a REAL fetch success is cache-worthy — a
+            // cache-served success must never re-stamp its own row, and
+            // non-Success outcomes are never cached.
+            if !cache_served {
+                if let ProviderOutcome::Success(payload) = &final_outcome {
+                    self.cache_write(provider, &d.anchor, payload.as_ref())
+                        .await;
+                    wrote_to_cache = true;
+                }
+            }
+
             outcomes.insert(provider, final_outcome);
+        }
+
+        if wrote_to_cache {
+            if let Err(e) = self
+                .retry_db
+                .evict_provider_cache_to_cap(self.cache_max_rows)
+                .await
+            {
+                warn!("provider-response cache eviction failed: {e}");
+            }
         }
 
         let conflict_present = outcomes
@@ -368,8 +457,75 @@ where
 
 impl<DB> DefaultProviderQueue<DB>
 where
-    DB: ProviderRetryStateDb + Send + Sync + 'static,
+    DB: ProviderRetryStateDb + ProviderResponseCacheDb + Send + Sync + 'static,
 {
+    /// REQ-009: consult the persistent provider-response cache for a fresh
+    /// (age < `cache_ttl`) success payload. `None` on any miss — no row, a
+    /// stale row, a DB read error, or a payload that fails to deserialize.
+    /// Cache damage is never the dispatch's problem: warn-log and let the
+    /// caller fall through to a normal fetch.
+    async fn cached_success(
+        &self,
+        provider: MetadataProvider,
+        anchor: &AnchorQuery,
+    ) -> Option<NormalizedWorkDetail> {
+        let (anchor_type, anchor_value) = anchor_cache_key(anchor);
+        let entry = match self
+            .retry_db
+            .get_provider_cache_entry(provider, anchor_type, anchor_value)
+            .await
+        {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!("provider-response cache read failed for {provider:?}: {e}");
+                return None;
+            }
+        };
+        if Utc::now() - entry.fetched_at >= self.cache_ttl {
+            return None;
+        }
+        match serde_json::from_str::<NormalizedWorkDetail>(&entry.payload_json) {
+            Ok(detail) => Some(detail),
+            Err(e) => {
+                warn!(
+                    "provider-response cache payload for {provider:?} failed to deserialize: {e}"
+                );
+                None
+            }
+        }
+    }
+
+    /// REQ-009: write a real fetch's success payload into the persistent
+    /// provider-response cache, stamping `fetched_at` at write time. Never
+    /// fails the dispatch — a write error is logged and the pass proceeds
+    /// with the outcome it already has.
+    async fn cache_write(
+        &self,
+        provider: MetadataProvider,
+        anchor: &AnchorQuery,
+        payload: &NormalizedWorkDetail,
+    ) {
+        let (anchor_type, anchor_value) = anchor_cache_key(anchor);
+        let payload_json = match serde_json::to_string(payload) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!("provider-response cache payload for {provider:?} failed to serialize: {e}");
+                return;
+            }
+        };
+        let entry = ProviderCacheEntry {
+            provider,
+            anchor_type: anchor_type.to_string(),
+            anchor: anchor_value.to_string(),
+            payload_json,
+            fetched_at: Utc::now(),
+        };
+        if let Err(e) = self.retry_db.upsert_provider_cache_entry(entry).await {
+            warn!("provider-response cache write failed for {provider:?}: {e}");
+        }
+    }
+
     /// Apply retry/suppression budget conversion. Reads existing retry-state row
     /// to know prior `attempts` / `suppressed_passes` / `first_suppressed_at`.
     async fn apply_budget_rules(
@@ -547,7 +703,7 @@ mod circuit_open_budget_tests {
     use livrarr_db::{
         CreateUserDbRequest, CreateWorkDbRequest, ProviderRetryStateDb, UserDb, WorkDbCreate,
     };
-    use livrarr_domain::{MetadataProvider, RequestPriority, UserRole, WillRetryReason};
+    use livrarr_domain::{Freshness, MetadataProvider, RequestPriority, UserRole, WillRetryReason};
     use livrarr_external_data::{ProviderClient, ProviderOutcome, StubProviderClient};
 
     use crate::provider_queue::DefaultProviderQueueBuilder;
@@ -629,6 +785,7 @@ mod circuit_open_budget_tests {
         let ctx = EnrichmentContext {
             priority: RequestPriority::Normal,
             mode: EnrichmentMode::Background,
+            freshness: Freshness::PreferCache,
         };
         let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
         let outcome = result.outcomes.get(&MetadataProvider::OpenLibrary).unwrap();

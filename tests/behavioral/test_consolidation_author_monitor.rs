@@ -127,6 +127,37 @@ impl WorkService for StubWorkService {
         })
     }
 
+    fn resolve_identity_local(
+        &self,
+        _harvest: livrarr_domain::identity::RawHarvest,
+    ) -> Result<livrarr_domain::identity::ResolvedIdentity, WorkServiceError> {
+        todo!("stub: not exercised by author-monitor tests")
+    }
+
+    async fn add_fast(
+        &self,
+        _user_id: UserId,
+        _candidate: WorkCandidate,
+    ) -> Result<AddWorkResult, WorkServiceError> {
+        todo!("stub: not exercised by author-monitor tests")
+    }
+
+    async fn complete_add(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _source_provider_data: Option<livrarr_domain::services::SourceProviderData>,
+        _candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        _mode: livrarr_domain::identity::IdentityMode,
+        _source: livrarr_domain::identity::ConflictSource,
+    ) {
+        todo!("stub: not exercised by author-monitor tests")
+    }
+
+    fn is_enriching(&self, _user_id: UserId, _work_id: WorkId) -> bool {
+        todo!("stub: not exercised by author-monitor tests")
+    }
+
     async fn get(&self, _user_id: UserId, _work_id: WorkId) -> Result<Work, WorkServiceError> {
         Ok(Work::default())
     }

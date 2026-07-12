@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { BookOpen } from "lucide-react";
 import { cn } from "@/utils/cn";
-import { getCoverUrl } from "@/utils/format";
+import { getCoverUrl, getCoverThumbUrl } from "@/utils/format";
 
 interface BookCoverProps {
   workId: number;
@@ -11,6 +11,7 @@ interface BookCoverProps {
   iconSize?: number;
   coverVersion?: number;
   mediaType?: "ebook" | "audiobook";
+  variant?: "thumb" | "full";
 }
 
 const FAUX_COLORS = [
@@ -32,9 +33,16 @@ export function BookCover({
   iconSize = 16,
   coverVersion,
   mediaType,
+  variant = "thumb",
 }: BookCoverProps) {
   const [failed, setFailed] = useState(false);
-  const src = getCoverUrl(workId, coverVersion, mediaType);
+  const src =
+    variant === "full"
+      ? getCoverUrl(workId, coverVersion, mediaType)
+      : getCoverThumbUrl(workId, coverVersion, mediaType);
+  const loading: "lazy" | "eager" = variant === "thumb" ? "lazy" : "eager";
+  const decoding: "async" | undefined = variant === "thumb" ? "async" : undefined;
+  const fetchPriority: "high" | undefined = variant === "full" ? "high" : undefined;
 
   if (!failed) {
     return (
@@ -49,12 +57,17 @@ export function BookCover({
           alt=""
           aria-hidden
           className="absolute inset-0 h-full w-full object-cover blur-xl scale-125"
+          loading={loading}
+          decoding={decoding}
         />
         <img
           src={src}
           alt={title ?? ""}
           className="relative h-full w-full object-contain"
           onError={() => setFailed(true)}
+          loading={loading}
+          decoding={decoding}
+          fetchPriority={fetchPriority}
         />
       </div>
     );

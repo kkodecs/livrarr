@@ -93,6 +93,15 @@ pub enum AuthorServiceError {
     Db(#[from] DbError),
 }
 
+/// Outcome of merging two author rows (author-dedup): what moved where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorMergeReport {
+    pub works_moved: u64,
+    pub series_moved: u64,
+    pub series_folded: u64,
+}
+
 #[trait_variant::make(Send)]
 pub trait AuthorService: Send + Sync {
     async fn add(
@@ -100,6 +109,16 @@ pub trait AuthorService: Send + Sync {
         user_id: UserId,
         req: AddAuthorRequest,
     ) -> Result<AddAuthorResult, AuthorServiceError>;
+    /// Merge `loser_id` into `survivor_id` (author-dedup): works and series
+    /// repoint to the survivor, monitoring intent is preserved monotonically,
+    /// external keys fill survivor-first, and the loser row is deleted — one
+    /// transaction, delegated to the DB layer.
+    async fn merge(
+        &self,
+        user_id: UserId,
+        survivor_id: AuthorId,
+        loser_id: AuthorId,
+    ) -> Result<AuthorMergeReport, AuthorServiceError>;
     async fn get(&self, user_id: UserId, author_id: AuthorId)
         -> Result<Author, AuthorServiceError>;
     async fn list(&self, user_id: UserId) -> Result<Vec<Author>, AuthorServiceError>;

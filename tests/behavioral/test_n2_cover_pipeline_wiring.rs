@@ -38,6 +38,7 @@ impl EnrichmentWorkflow for CoverResolvingWorkflow {
         _mode: EnrichmentMode,
         _candidate_id: Option<CandidateId>,
         _priority: RequestPriority,
+        _freshness: livrarr_domain::Freshness,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         Ok(EnrichmentResult {
             enrichment_status: EnrichmentStatus::Enriched,

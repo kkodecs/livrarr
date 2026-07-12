@@ -1,7 +1,8 @@
 use livrarr_db::{
     AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, EnrichmentRetryDb, GrabDb,
     LibraryItemDb, MergeWorksDbRequest, ProvenanceDb, SetFieldProvenanceRequest,
-    UpdateWorkUserFieldsDbRequest, WorkDb, WorkDbCreate,
+    UpdateAuthorDbRequest, UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
+    WorkDbCreate,
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::*;
@@ -21,6 +22,46 @@ pub struct WorkServiceImpl<D, E, H> {
     /// mid-enrichment identity leg (`settle_identity`, REQ-010). `None` skips
     /// that leg (back-compat until the resolver is composed in the server).
     pub(crate) resolver: Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
+    /// REQ-005 (responsiveness): in-memory signal read by `is_enriching` —
+    /// true exactly while a `complete_add`/background enrichment run
+    /// executes for (user, work). Never persisted: empty after a restart
+    /// (D-001), same shape as `refresh_locks` but a signal, not a lock.
+    enriching: Arc<std::sync::Mutex<std::collections::HashSet<(UserId, WorkId)>>>,
+}
+
+/// RAII membership in the `enriching` registry (REQ-005, design §2.5): insert
+/// on entry, remove on every exit including a panic unwind — same pattern
+/// family as `BulkRefreshGuard`, but a signal (multiple runs may be members
+/// at once) rather than mutual exclusion.
+struct EnrichingGuard {
+    registry: Arc<std::sync::Mutex<std::collections::HashSet<(UserId, WorkId)>>>,
+    key: (UserId, WorkId),
+}
+
+impl EnrichingGuard {
+    fn enter(
+        registry: Arc<std::sync::Mutex<std::collections::HashSet<(UserId, WorkId)>>>,
+        key: (UserId, WorkId),
+    ) -> Self {
+        {
+            let mut set = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            set.insert(key);
+        }
+        Self { registry, key }
+    }
+}
+
+impl Drop for EnrichingGuard {
+    fn drop(&mut self) {
+        // A panicked peer must not wedge release: take the lock through poison.
+        let mut set = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set.remove(&self.key);
+    }
 }
 
 impl<D, E, H> WorkServiceImpl<D, E, H> {
@@ -33,6 +74,7 @@ impl<D, E, H> WorkServiceImpl<D, E, H> {
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             resolver: None,
+            enriching: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 }
@@ -63,6 +105,7 @@ impl<D, H> WorkServiceImpl<D, (), H> {
             refresh_locks: KeyedMutex::new(),
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             resolver: None,
+            enriching: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 }
@@ -77,6 +120,7 @@ impl EnrichmentWorkflow for StubNoEnrichment {
         _mode: EnrichmentMode,
         _candidate_id: Option<livrarr_domain::identity::CandidateId>,
         _priority: RequestPriority,
+        _freshness: livrarr_domain::Freshness,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
         Ok(EnrichmentResult {
             identity_not_found: false,
@@ -161,6 +205,42 @@ fn conflict_source_for(setter: ProvenanceSetter) -> livrarr_domain::identity::Co
     }
 }
 
+/// Sanitize a raw harvest into a usable seed and keep it only when at least
+/// one identifier (work anchor or edition bridge) survives — the shared zero-
+/// network prefix of `resolve_identity` and `resolve_identity_local` (design
+/// §2.3). A malformed-only or title/author-only harvest returns `None`.
+fn sanitize_seed_with_anchor(
+    harvest: livrarr_domain::identity::RawHarvest,
+) -> Option<livrarr_domain::identity::WorkSeed> {
+    livrarr_domain::identity::WorkSeed::sanitized(harvest)
+        .ok()
+        .filter(|s| {
+            s.ol_key.is_some()
+                || s.gr_key.is_some()
+                || s.hc_key.is_some()
+                || s.isbn_13.is_some()
+                || s.asin.is_some()
+        })
+}
+
+/// Capture a sanitized seed's identifiers into a [`CapturedIdentity`] —
+/// shared by `resolve_identity`'s no-resolver Pending arm and
+/// `resolve_identity_local` (design §2.3).
+fn captured_from_seed(
+    seed: &livrarr_domain::identity::WorkSeed,
+) -> livrarr_domain::identity::CapturedIdentity {
+    livrarr_domain::identity::CapturedIdentity {
+        ol_key: seed.ol_key.clone(),
+        gr_key: seed.gr_key.clone(),
+        hc_key: seed.hc_key.clone(),
+        isbn_13: seed.isbn_13.clone(),
+        asin: seed.asin.clone(),
+        title: seed.title.clone().unwrap_or_default(),
+        author_name: seed.author_name.clone().unwrap_or_default(),
+        language: seed.language.clone(),
+    }
+}
+
 impl<D, E, H> WorkServiceImpl<D, E, H>
 where
     D: livrarr_domain::services::WorkIdentityRepository + Send + Sync,
@@ -218,7 +298,246 @@ where
         user_id: UserId,
         candidate: livrarr_domain::identity::WorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError> {
+        // add() keeps its name, signature, and synchronous semantics for
+        // every existing caller (batch doors, list import, Readarr, monitors)
+        // — the implementation is now add_fast plus an awaited complete_add
+        // over the work it just created: one pipeline, two entry shapes
+        // (design §2.8). Capture what complete_add needs before add_fast
+        // consumes the candidate.
+        let source_provider_data = candidate.source_provider_data.clone();
+        let candidate_id = candidate.candidate_id.clone();
+        let identity_setter = candidate
+            .provenance_setter
+            .unwrap_or(ProvenanceSetter::User);
+        let identity_source = conflict_source_for(identity_setter);
+        let identity_mode = match identity_setter {
+            ProvenanceSetter::Import | ProvenanceSetter::Imported => {
+                livrarr_domain::identity::IdentityMode::Background
+            }
+            _ => livrarr_domain::identity::IdentityMode::Interactive,
+        };
+
+        let result = self.add_fast(user_id, candidate).await?;
+        if !result.created {
+            return Ok(result);
+        }
+
+        let work_id = result.work.id;
+        self.complete_add(
+            user_id,
+            work_id,
+            source_provider_data,
+            candidate_id,
+            identity_mode,
+            identity_source,
+        )
+        .await;
+
+        // Re-read + rebuild the result the way finish_created_work did: a
+        // synchronous caller's enrichment_status must reflect post-enrichment
+        // state, and the cover may have moved if the cover write gate
+        // accepted a better image during complete_add.
+        let work = self
+            .db
+            .get_work(user_id, work_id)
+            .await
+            .unwrap_or(result.work);
+        let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
+        let cover_mtime = crate::cover::cover_file_mtime(&covers_dir, work.id);
+        let audiobook_cover_mtime = crate::cover::audiobook_cover_file_mtime(&covers_dir, work.id);
+        let enrichment_status = work.enrichment_status;
+        Ok(AddWorkResult {
+            work,
+            created: true,
+            author_created: result.author_created,
+            author_id: result.author_id,
+            messages: result.messages,
+            cover_mtime,
+            audiobook_cover_mtime,
+            enrichment_status,
+        })
+    }
+
+    async fn resolve_identity(
+        &self,
+        user_id: UserId,
+        harvest: livrarr_domain::identity::RawHarvest,
+        tier: livrarr_domain::identity::LatencyTier,
+    ) -> Result<livrarr_domain::identity::ResolvedIdentity, WorkServiceError> {
+        use livrarr_domain::identity::{
+            IdentityState, PendingReason, Resolution, ResolvedIdentity,
+        };
+
+        // Preserve any language the door already knew, before sanitizing
+        // consumes the harvest.
+        let harvest_language = harvest.language.clone();
+
+        // Sanitize at the boundary: normalize keys, drop malformed ones, and only
+        // resolve when a real anchor survives — identical to the Add-Work handler,
+        // now the shared path for every door (P1 convergence).
+        let Some(seed) = sanitize_seed_with_anchor(harvest) else {
+            // No usable anchor — a fuzzy title/author seed. Pending; enrichment or a
+            // later pass converges it.
+            return Ok(ResolvedIdentity {
+                identity: IdentityState::Pending {
+                    reason: PendingReason::NoCandidates,
+                    seed_anchors: None,
+                    top_candidates: vec![],
+                },
+                candidate_id: None,
+                language: harvest_language,
+                conflict: None,
+            });
+        };
+
+        let Some(resolver) = self.resolver.clone() else {
+            // No resolver wired (some headless/test configs): keep the anchors as a
+            // Pending seed so a background pass can converge — never fabricate a
+            // Confirmed badge from un-corroborated keys.
+            let language = seed.language.clone();
+            return Ok(ResolvedIdentity {
+                identity: IdentityState::Pending {
+                    reason: PendingReason::NoCandidates,
+                    seed_anchors: Some(captured_from_seed(&seed)),
+                    top_candidates: vec![],
+                },
+                candidate_id: None,
+                language,
+                conflict: None,
+            });
+        };
+
+        use livrarr_domain::services::IdentityResolver;
+        let resolution = resolver
+            .resolve(user_id, &seed, tier)
+            .await
+            .map_err(|e| WorkServiceError::Validation(format!("identity resolve: {e}")))?;
+
+        Ok(match resolution {
+            Resolution::Resolved {
+                identity,
+                method,
+                candidate_id,
+                ..
+            } => ResolvedIdentity {
+                language: identity.language.clone(),
+                identity: IdentityState::Confirmed {
+                    anchors: identity,
+                    method,
+                    score: None,
+                },
+                candidate_id: Some(candidate_id),
+                conflict: None,
+            },
+            Resolution::NeedsConfirmation { candidates } => ResolvedIdentity {
+                identity: IdentityState::Pending {
+                    reason: PendingReason::LowConfidence,
+                    seed_anchors: None,
+                    top_candidates: candidates,
+                },
+                candidate_id: None,
+                language: None,
+                conflict: None,
+            },
+            Resolution::Unresolved {
+                captured,
+                reason,
+                candidate_id,
+                ..
+            } => ResolvedIdentity {
+                language: captured.language.clone(),
+                identity: IdentityState::Pending {
+                    reason,
+                    seed_anchors: Some(captured),
+                    top_candidates: vec![],
+                },
+                candidate_id,
+                conflict: None,
+            },
+            Resolution::Conflict {
+                conflict, captured, ..
+            } => ResolvedIdentity {
+                language: captured.language.clone(),
+                identity: IdentityState::Pending {
+                    reason: PendingReason::LowConfidence,
+                    seed_anchors: Some(captured),
+                    top_candidates: vec![],
+                },
+                candidate_id: None,
+                conflict: Some(conflict),
+            },
+        })
+    }
+
+    fn resolve_identity_local(
+        &self,
+        harvest: livrarr_domain::identity::RawHarvest,
+    ) -> Result<livrarr_domain::identity::ResolvedIdentity, WorkServiceError> {
+        use livrarr_domain::identity::{
+            IdentityMethod, IdentityState, PendingReason, ResolvedIdentity,
+        };
+
+        // Preserve any language the door already knew, before sanitizing
+        // consumes the harvest — mirrors resolve_identity's anchorless arm.
+        let harvest_language = harvest.language.clone();
+
+        let Some(seed) = sanitize_seed_with_anchor(harvest) else {
+            return Ok(ResolvedIdentity {
+                identity: IdentityState::Pending {
+                    reason: PendingReason::NoCandidates,
+                    seed_anchors: None,
+                    top_candidates: vec![],
+                },
+                candidate_id: None,
+                language: harvest_language,
+                conflict: None,
+            });
+        };
+
+        let language = seed.language.clone();
+        let has_work_anchor =
+            seed.ol_key.is_some() || seed.gr_key.is_some() || seed.hc_key.is_some();
+        let captured = captured_from_seed(&seed);
+
+        // D-013 derivation, done locally instead of over the network: a work
+        // anchor (ol/gr/hc key) already on the seed is a user-confirmed pick
+        // (search result, GR link) — Confirmed. Bridge-only (isbn/asin) is
+        // Pending with the seed captured; the Provisional badge derives at
+        // create from these anchors exactly as today's derived_identity
+        // write. `conflict` and a resolved `candidate_id` are never produced
+        // here (D-002) — only the network-capable resolve_identity raises
+        // those.
+        let identity = if has_work_anchor {
+            IdentityState::Confirmed {
+                anchors: captured,
+                method: IdentityMethod::UserSelected,
+                score: None,
+            }
+        } else {
+            IdentityState::Pending {
+                reason: PendingReason::NoCandidates,
+                seed_anchors: Some(captured),
+                top_candidates: vec![],
+            }
+        };
+
+        Ok(ResolvedIdentity {
+            identity,
+            candidate_id: None,
+            language,
+            conflict: None,
+        })
+    }
+
+    async fn add_fast(
+        &self,
+        user_id: UserId,
+        candidate: livrarr_domain::identity::WorkCandidate,
+    ) -> Result<AddWorkResult, WorkServiceError> {
         use livrarr_domain::identity::{AnchorSetter, AnchorType, IdentityState};
+        use livrarr_domain::identity_matching::{
+            author_verdict, parse_title, title_verdict, AuthorVerdict, TitleVerdict,
+        };
 
         let cleaned_title = crate::title_cleanup::clean_title(&candidate.fields.title);
         if cleaned_title.is_empty() {
@@ -448,6 +767,7 @@ where
                     _ => AnchorSetter::AutoSearch,
                 };
 
+                let is_user_initiated = candidate.source_provider_data.is_none();
                 let (work, actually_created) = self
                     .db
                     .create_work(CreateWorkDbRequest {
@@ -537,20 +857,85 @@ where
                     .map_err(WorkServiceError::Db)?;
                 write_addtime_provenance(&self.db, user_id, &work, setter).await;
 
-                self.finish_created_work(
+                self.finish_created_work_fast(
                     user_id,
                     work,
                     author_created,
                     author_id,
-                    candidate.source_provider_data,
                     derived_identity,
-                    candidate.candidate_id.as_ref(),
-                    identity_mode,
-                    identity_source,
+                    is_user_initiated,
                 )
                 .await
             }
             IdentityState::Pending { .. } => {
+                // NEW — verdict-gated local bridge dedup (design §2.4/D-007):
+                // a bridge-only candidate (isbn/asin, no work anchor) is
+                // checked against the user's works sharing that bridge BEFORE
+                // the normalized-title dedup below. Zero network — a local DB
+                // lookup gated by the one matching authority
+                // (identity_matching); the bridge key is a lookup hint, never
+                // merge evidence on its own (bridge-anchor policy stands).
+                if let IdentityState::Pending {
+                    seed_anchors: Some(anchors),
+                    ..
+                } = &candidate.identity
+                {
+                    let bridge_only = anchors.ol_key.is_none()
+                        && anchors.gr_key.is_none()
+                        && anchors.hc_key.is_none()
+                        && (anchors.isbn_13.is_some() || anchors.asin.is_some());
+                    if bridge_only {
+                        let hits = self
+                            .db
+                            .find_works_by_bridge(
+                                user_id,
+                                anchors.isbn_13.as_deref(),
+                                anchors.asin.as_deref(),
+                            )
+                            .await
+                            .map_err(WorkServiceError::Db)?;
+                        let candidate_title = parse_title(&cleaned_title);
+                        for hit in hits {
+                            let hit_title = parse_title(&hit.title);
+                            let title = title_verdict(&candidate_title, &hit_title);
+                            let author = author_verdict(
+                                std::slice::from_ref(&cleaned_author),
+                                std::slice::from_ref(&hit.author_name),
+                            );
+                            let title_ok =
+                                matches!(title, TitleVerdict::Same | TitleVerdict::Grey { .. });
+                            let author_ok = !matches!(author, AuthorVerdict::Disagree);
+                            if title_ok && author_ok {
+                                let setter = candidate
+                                    .provenance_setter
+                                    .unwrap_or(ProvenanceSetter::User);
+                                self.preflight_and_merge_anchors(
+                                    hit.id,
+                                    anchors,
+                                    conflict_source_for(setter),
+                                )
+                                .await?;
+                                let work = self
+                                    .db
+                                    .get_work(user_id, hit.id)
+                                    .await
+                                    .map_err(WorkServiceError::Db)?;
+                                let enrichment_status = work.enrichment_status;
+                                return Ok(AddWorkResult {
+                                    work,
+                                    created: false,
+                                    author_created: false,
+                                    author_id: None,
+                                    messages: vec![],
+                                    cover_mtime: None,
+                                    audiobook_cover_mtime: None,
+                                    enrichment_status,
+                                });
+                            }
+                        }
+                    }
+                }
+
                 if let Some((work, enrichment_status)) = self
                     .try_dedup_by_normalized(
                         user_id,
@@ -580,6 +965,7 @@ where
                     )
                     .await?;
 
+                let is_user_initiated = candidate.source_provider_data.is_none();
                 let (work, actually_created) = self
                     .db
                     .create_work(CreateWorkDbRequest {
@@ -656,153 +1042,153 @@ where
                 }
 
                 // A Pending identity reaches ensure_identity_and_enrichment via
-                // finish_created_work: the add-time identity leg may resolve it
+                // complete_add: the add-time identity leg may resolve it
                 // (REQ-010); a still-held identity skips the fan-out there.
                 // Display/cover (best-in-hand) is materialized either way.
-                self.finish_created_work(
+                self.finish_created_work_fast(
                     user_id,
                     work,
                     author_created,
                     author_id,
-                    candidate.source_provider_data,
                     derived_identity,
-                    candidate.candidate_id.as_ref(),
-                    identity_mode,
-                    identity_source,
+                    is_user_initiated,
                 )
                 .await
             }
         }
     }
 
-    async fn resolve_identity(
+    async fn complete_add(
         &self,
         user_id: UserId,
-        harvest: livrarr_domain::identity::RawHarvest,
-        tier: livrarr_domain::identity::LatencyTier,
-    ) -> Result<livrarr_domain::identity::ResolvedIdentity, WorkServiceError> {
-        use livrarr_domain::identity::{
-            CapturedIdentity, IdentityState, PendingReason, Resolution, ResolvedIdentity, WorkSeed,
-        };
+        work_id: WorkId,
+        source_provider_data: Option<SourceProviderData>,
+        candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        mode: livrarr_domain::identity::IdentityMode,
+        source: livrarr_domain::identity::ConflictSource,
+    ) {
+        use livrarr_domain::IdentityStatus;
 
-        // Preserve any language the door already knew, before `sanitized` consumes
-        // the harvest.
-        let harvest_language = harvest.language.clone();
+        // RAII: visible in the registry for the whole call, including a
+        // panic unwind (Drop always runs) — is_enriching reads true for the
+        // duration (REQ-005).
+        let _guard = EnrichingGuard::enter(self.enriching.clone(), (user_id, work_id));
 
-        // Sanitize at the boundary: normalize keys, drop malformed ones, and only
-        // resolve when a real anchor survives — identical to the Add-Work handler,
-        // now the shared path for every door (P1 convergence).
-        let seed = WorkSeed::sanitized(harvest).ok().filter(|s| {
-            s.ol_key.is_some()
-                || s.gr_key.is_some()
-                || s.hc_key.is_some()
-                || s.isbn_13.is_some()
-                || s.asin.is_some()
-        });
+        // Bridge-only completion (REQ-004): a Pending work that CARRIES
+        // anchors (e.g. an isbn-only Google Books pick) gets the same
+        // identity chase the refresh door runs — settle via the one identity
+        // road, gated by chaseable_anchor_types, so identity resolves inside
+        // the enriching-signal window instead of waiting for the top-up
+        // refresh. Anchorless works are deliberately excluded here:
+        // ensure_identity_and_enrichment runs its own settle leg for those,
+        // and chasing both places would fan out twice.
+        if let Ok(work) = self.db.get_work(user_id, work_id).await {
+            let anchorless = work.ol_key.is_none()
+                && work.gr_key.is_none()
+                && work.hc_key.is_none()
+                && work.isbn_13.is_none()
+                && work.asin.is_none();
+            if work.identity_status == IdentityStatus::Pending && !anchorless {
+                if let Some(resolver) = self.resolver.as_ref() {
+                    let anchors = self.db.list_anchors(work.id).await.unwrap_or_default();
+                    let dead_ends = self
+                        .db
+                        .list_anchor_dead_ends(work.id)
+                        .await
+                        .unwrap_or_default();
+                    if !chaseable_anchor_types(&work, &anchors, &dead_ends, DEAD_END_THRESHOLD)
+                        .is_empty()
+                    {
+                        if let Err(e) = crate::async_resolver::settle_identity(
+                            resolver.as_ref(),
+                            &self.db,
+                            user_id,
+                            &work,
+                            mode,
+                            source,
+                        )
+                        .await
+                        {
+                            tracing::warn!(work_id, "complete_add identity settle failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
 
-        let Some(seed) = seed else {
-            // No usable anchor — a fuzzy title/author seed. Pending; enrichment or a
-            // later pass converges it.
-            return Ok(ResolvedIdentity {
-                identity: IdentityState::Pending {
-                    reason: PendingReason::NoCandidates,
-                    seed_anchors: None,
-                    top_candidates: vec![],
-                },
-                candidate_id: None,
-                language: harvest_language,
-                conflict: None,
-            });
-        };
-
-        let captured_from_seed = |s: &WorkSeed| CapturedIdentity {
-            ol_key: s.ol_key.clone(),
-            gr_key: s.gr_key.clone(),
-            hc_key: s.hc_key.clone(),
-            isbn_13: s.isbn_13.clone(),
-            asin: s.asin.clone(),
-            title: s.title.clone().unwrap_or_default(),
-            author_name: s.author_name.clone().unwrap_or_default(),
-            language: s.language.clone(),
-        };
-
-        let Some(resolver) = self.resolver.clone() else {
-            // No resolver wired (some headless/test configs): keep the anchors as a
-            // Pending seed so a background pass can converge — never fabricate a
-            // Confirmed badge from un-corroborated keys.
-            let language = seed.language.clone();
-            return Ok(ResolvedIdentity {
-                identity: IdentityState::Pending {
-                    reason: PendingReason::NoCandidates,
-                    seed_anchors: Some(captured_from_seed(&seed)),
-                    top_candidates: vec![],
-                },
-                candidate_id: None,
-                language,
-                conflict: None,
-            });
-        };
-
-        use livrarr_domain::services::IdentityResolver;
-        let resolution = resolver
-            .resolve(user_id, &seed, tier)
-            .await
-            .map_err(|e| WorkServiceError::Validation(format!("identity resolve: {e}")))?;
-
-        Ok(match resolution {
-            Resolution::Resolved {
-                identity,
-                method,
+        let (enrichment_status, identity_not_found) = self
+            .ensure_identity_and_enrichment(
+                user_id,
+                work_id,
+                source_provider_data,
                 candidate_id,
-                ..
-            } => ResolvedIdentity {
-                language: identity.language.clone(),
-                identity: IdentityState::Confirmed {
-                    anchors: identity,
-                    method,
-                    score: None,
-                },
-                candidate_id: Some(candidate_id),
-                conflict: None,
-            },
-            Resolution::NeedsConfirmation { candidates } => ResolvedIdentity {
-                identity: IdentityState::Pending {
-                    reason: PendingReason::LowConfidence,
-                    seed_anchors: None,
-                    top_candidates: candidates,
-                },
-                candidate_id: None,
-                language: None,
-                conflict: None,
-            },
-            Resolution::Unresolved {
-                captured,
-                reason,
-                candidate_id,
-                ..
-            } => ResolvedIdentity {
-                language: captured.language.clone(),
-                identity: IdentityState::Pending {
-                    reason,
-                    seed_anchors: Some(captured),
-                    top_candidates: vec![],
-                },
-                candidate_id,
-                conflict: None,
-            },
-            Resolution::Conflict {
-                conflict, captured, ..
-            } => ResolvedIdentity {
-                language: captured.language.clone(),
-                identity: IdentityState::Pending {
-                    reason: PendingReason::LowConfidence,
-                    seed_anchors: Some(captured),
-                    top_candidates: vec![],
-                },
-                candidate_id: None,
-                conflict: Some(conflict),
-            },
-        })
+                mode,
+                source,
+            )
+            .await;
+
+        // Seam-2 (REQ-002/D-013): enrichment SIGNALS that it could not verify
+        // the work's identity — the caller writes the badge, mirroring the
+        // synchronous add path's write. The fresh read is defense-in-depth:
+        // the enrichment gate already refuses to run for a parked
+        // (Conflict/NeedsReview) work, so identity_not_found should never
+        // coincide with a parked status — this guarantees the invariant
+        // structurally rather than relying on the gate alone.
+        if identity_not_found {
+            let already_parked = matches!(
+                self.db
+                    .get_work(user_id, work_id)
+                    .await
+                    .map(|w| w.identity_status),
+                Ok(IdentityStatus::Conflict) | Ok(IdentityStatus::NeedsReview)
+            );
+            if !already_parked {
+                if let Err(e) = self
+                    .db
+                    .set_identity_status(user_id, work_id, IdentityStatus::NotFound)
+                    .await
+                {
+                    tracing::warn!(
+                        work_id,
+                        "complete_add: set_identity_status(NotFound) failed: {e}"
+                    );
+                }
+            }
+        }
+
+        // ensure_identity_and_enrichment's Err arms (get_work failure, or the
+        // enrichment workflow itself erroring) report Failed in their return
+        // value but do not persist it — persist it here so a work's stored
+        // status never disagrees with what the caller was just told.
+        if enrichment_status == EnrichmentStatus::Failed {
+            if let Err(e) = self
+                .db
+                .update_work_enrichment(
+                    user_id,
+                    work_id,
+                    UpdateWorkEnrichmentDbRequest {
+                        enrichment_status: EnrichmentStatus::Failed,
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    work_id,
+                    "complete_add: persisting Failed status failed: {e}"
+                );
+            }
+        }
+    }
+
+    fn is_enriching(&self, user_id: UserId, work_id: WorkId) -> bool {
+        // Poison-proof: a panicked peer must not wedge this read (same
+        // pattern as try_start_bulk_refresh / BulkRefreshGuard).
+        let set = self
+            .enriching
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set.contains(&(user_id, work_id))
     }
 
     async fn get(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError> {
@@ -1145,6 +1531,9 @@ where
         let _refresh_span = livrarr_domain::perf::StageTimer::start("refresh_total", work_id);
 
         let _guard = self.refresh_locks.lock((user_id, work_id)).await;
+        // Signal membership (REQ-005): a refresh-driven run reads as
+        // "fetching" too — Retry and the post-add top-up show the pill.
+        let _enriching = EnrichingGuard::enter(self.enriching.clone(), (user_id, work_id));
 
         if let Err(e) = self.db.reset_enrichment_for_refresh(user_id, work_id).await {
             tracing::warn!("reset_enrichment_for_refresh failed: {e}");
@@ -1238,6 +1627,9 @@ where
                         RefreshSurface::Interactive => RequestPriority::Normal,
                         RefreshSurface::Bulk => RequestPriority::Low,
                     },
+                    // Bypass: both RefreshSurface variants are user-triggered —
+                    // a user asking for fresh data gets real fetches (REQ-009).
+                    livrarr_domain::Freshness::Bypass,
                 )
                 .await;
         }
@@ -1618,6 +2010,7 @@ where
                         EnrichmentMode::Background,
                         None,
                         RequestPriority::High,
+                        livrarr_domain::Freshness::PreferCache,
                     )
                     .await;
                 let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
@@ -1650,6 +2043,41 @@ where
         {
             Some(existing) => Ok((false, Some(existing.id))),
             None => {
+                let authors = self
+                    .db
+                    .list_authors(user_id)
+                    .await
+                    .map_err(WorkServiceError::Db)?;
+                let names: Vec<String> = authors.iter().map(|a| a.name.clone()).collect();
+                if let Some(i) = livrarr_domain::identity_matching::unambiguous_author_match(
+                    cleaned_author,
+                    &names,
+                ) {
+                    let adopted = &authors[i];
+                    if adopted.ol_key.is_none() {
+                        if let Some(key) = author_ol_key {
+                            self.db
+                                .update_author(
+                                    user_id,
+                                    adopted.id,
+                                    UpdateAuthorDbRequest {
+                                        name: None,
+                                        sort_name: None,
+                                        ol_key: Some(Some(key.to_string())),
+                                        gr_key: None,
+                                        monitored: None,
+                                        monitor_new_items: None,
+                                        monitor_since: None,
+                                        monitor_language: None,
+                                    },
+                                )
+                                .await
+                                .map_err(WorkServiceError::Db)?;
+                        }
+                    }
+                    return Ok((false, Some(adopted.id)));
+                }
+
                 let author = self
                     .db
                     .create_author(CreateAuthorDbRequest {
@@ -1669,13 +2097,17 @@ where
     }
 
     /// REQ-010 (#144): the single identity+enrichment decision EVERY add
-    /// outcome takes (created, anchor-matched, adopted, deduped, race-loser).
-    /// An anchor-less work first runs the add-time identity leg via the one
-    /// identity road (`settle_identity`) — the engine resolves the seed,
-    /// partitions hard vs fuzzy anchors (REQ-004), and raises the badge itself.
-    /// Enrichment then runs only when the identity permits and the work needs it
-    /// — an already-Enriched dedup re-add is never re-enriched. `(mode, source)`
-    /// are threaded from the originating door (REQ-001/005).
+    /// outcome takes (created, anchor-matched, adopted, deduped, race-loser,
+    /// and `complete_add`'s background completion). An anchor-less work first
+    /// runs the add-time identity leg via the one identity road
+    /// (`settle_identity`) — the engine resolves the seed, partitions hard vs
+    /// fuzzy anchors (REQ-004), and raises the badge itself. Enrichment then
+    /// runs only when the identity permits and the work needs it — an
+    /// already-Enriched dedup re-add is never re-enriched, and a held identity
+    /// (Pending/Conflict/NeedsReview) blocks enrichment unconditionally: a
+    /// disputed identity must settle before any provider fetch, whichever
+    /// door reached it. `(mode, source)` are threaded from the originating
+    /// door (REQ-001/005).
     async fn ensure_identity_and_enrichment(
         &self,
         user_id: UserId,
@@ -1765,6 +2197,7 @@ where
             EnrichmentMode::Background,
             candidate_id,
             RequestPriority::High,
+            livrarr_domain::Freshness::PreferCache,
         )
         .await
     }
@@ -1803,21 +2236,22 @@ where
         })
     }
 
+    /// REQ-004 (responsiveness): the response-path portion of work creation —
+    /// everything `finish_created_work` used to do up through the phase-1
+    /// cover (`:1836-1900` at the time of the split), MINUS
+    /// `ensure_identity_and_enrichment`. `add_fast` calls this and returns;
+    /// `complete_add` runs the identity+enrichment remainder separately over
+    /// the work this persists.
     #[allow(clippy::too_many_arguments)]
-    async fn finish_created_work(
+    async fn finish_created_work_fast(
         &self,
         user_id: UserId,
         work: Work,
         author_created: bool,
         author_id: Option<i64>,
-        source_provider_data: Option<SourceProviderData>,
         derived_identity: livrarr_domain::IdentityStatus,
-        candidate_id: Option<&livrarr_domain::identity::CandidateId>,
-        mode: livrarr_domain::identity::IdentityMode,
-        source: livrarr_domain::identity::ConflictSource,
+        is_user_initiated: bool,
     ) -> Result<AddWorkResult, WorkServiceError> {
-        use livrarr_domain::IdentityStatus;
-
         // Persist the identity-confidence badge derived at resolution time
         // (REQ-014/D-013) — independent of enrichment, written once at create.
         self.db
@@ -1844,7 +2278,6 @@ where
         }
 
         // Phase 1: synchronous cover download within 3s budget (REQ-010).
-        let is_user_initiated = source_provider_data.is_none();
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
         let phase1_mtime = crate::cover::fetch_phase1_cover(
             &self.http,
@@ -1899,42 +2332,16 @@ where
                 .await;
         }
 
-        let (enrichment_status, identity_not_found) = self
-            .ensure_identity_and_enrichment(
-                user_id,
-                work.id,
-                source_provider_data,
-                candidate_id.cloned(),
-                mode,
-                source,
-            )
-            .await;
-
-        // Seam-2 (REQ-002/D-013): enrichment SIGNALS that it could not verify the
-        // work's identity — the LLM rejected every provider payload as not-this-book.
-        // The caller — not enrichment — writes the identity badge (the one-way
-        // identity←enrichment seam; no EstablishedIdentity contract yet). This is an
-        // identity-not-found, distinct from an open anchor `Conflict`.
-        if identity_not_found {
-            self.db
-                .set_identity_status(user_id, work.id, IdentityStatus::NotFound)
-                .await
-                .map_err(WorkServiceError::Db)?;
-        }
-
         let updated_work = self
             .db
             .get_work(user_id, work.id)
             .await
             .map_err(WorkServiceError::Db)?;
-        // S4: single-path — the startup layout migration adopts every
-        // legacy root-level cover into its owning user's directory before
-        // any request reaches this code, so the flat-root fallback this
-        // used to carry is no longer needed.
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
         let cover_mtime = crate::cover::cover_file_mtime(&covers_dir, updated_work.id);
         let audiobook_cover_mtime =
             crate::cover::audiobook_cover_file_mtime(&covers_dir, updated_work.id);
+        let enrichment_status = updated_work.enrichment_status;
         Ok(AddWorkResult {
             work: updated_work,
             created: true,
@@ -1981,6 +2388,10 @@ where
     /// independent of `mode`, so a door can request Background mode
     /// (suppression/budget semantics) while still queuing ahead of a
     /// background scan.
+    /// `freshness` (REQ-009) decides whether the scatter's provider fetches
+    /// may be served from the persistent provider-response cache — Bypass for
+    /// user-triggered refresh, PreferCache for background/add flows (D-004).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_unified_enrichment(
         &self,
         user_id: UserId,
@@ -1989,6 +2400,7 @@ where
         mode: EnrichmentMode,
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
         priority: RequestPriority,
+        freshness: livrarr_domain::Freshness,
     ) -> (EnrichmentStatus, bool) {
         let work_id = work.id;
 
@@ -2036,7 +2448,7 @@ where
         // candidate during discovery (AC-001).
         let enrich_result = match self
             .enrichment
-            .enrich_work(user_id, work_id, mode, candidate_id, priority)
+            .enrich_work(user_id, work_id, mode, candidate_id, priority, freshness)
             .await
         {
             Ok(r) => r,

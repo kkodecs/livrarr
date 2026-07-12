@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    AuthorId, DbError, EnrichmentStatus, LibraryItem, MediaType, ProvenanceSetter, UserId, Work,
-    WorkId,
-};
+use crate::{AuthorId, DbError, EnrichmentStatus, LibraryItem, MediaType, UserId, Work, WorkId};
 
 /// Domain-owned source metadata from external systems (e.g., Readarr import).
 /// Enters the enrichment pipeline as a provider input via MetadataProvider::Readarr.
@@ -21,42 +18,6 @@ pub struct SourceProviderData {
     pub cover_url: Option<String>,
     pub series_name: Option<String>,
     pub series_position: Option<String>,
-}
-
-#[derive(Debug, Default)]
-pub struct AddWorkRequest {
-    // Core identity
-    pub title: String,
-    pub author_name: String,
-    pub year: Option<i32>,
-    pub language: Option<String>,
-
-    // Provider keys
-    pub ol_key: Option<String>,
-    pub gr_key: Option<String>,
-    pub author_ol_key: Option<String>,
-    pub cover_url: Option<String>,
-    pub detail_url: Option<String>,
-
-    // Series
-    pub series_id: Option<i64>,
-    pub series_name: Option<String>,
-    pub series_position: Option<f64>,
-
-    // Monitoring — defaults to both true if None
-    pub monitor_ebook: Option<bool>,
-    pub monitor_audiobook: Option<bool>,
-
-    // Provenance
-    pub provenance_setter: Option<ProvenanceSetter>,
-
-    // Import context
-    pub import_id: Option<String>,
-
-    // Source provider data (e.g., from Readarr import)
-    // Passed into enrichment pipeline as MetadataProvider::Readarr input.
-    // Not written to the work directly — the merge engine arbitrates.
-    pub source_provider_data: Option<SourceProviderData>,
 }
 
 #[derive(Debug)]
@@ -366,6 +327,45 @@ pub trait WorkService: Send + Sync {
         harvest: crate::identity::RawHarvest,
         tier: crate::identity::LatencyTier,
     ) -> Result<crate::identity::ResolvedIdentity, WorkServiceError>;
+
+    /// REQ-004 (responsiveness): zero-network, zero-DB identity derivation for
+    /// the interactive add door. Sanitizes the harvest and derives the badge
+    /// from what the seed already carries — work anchor (ol/gr/hc) present →
+    /// `Confirmed` (method: seed anchors); bridge-only or anchorless → `Pending`
+    /// with the captured seed. Never resolves against providers, never returns
+    /// a conflict; background completion (`complete_add`) owns those.
+    fn resolve_identity_local(
+        &self,
+        harvest: crate::identity::RawHarvest,
+    ) -> Result<crate::identity::ResolvedIdentity, WorkServiceError>;
+    /// REQ-004 (responsiveness): the response-path half of [`Self::add`] —
+    /// dedup (work-anchor, verdict-gated bridge, normalized), create, badge
+    /// persist, and the phase-1 cover. Nothing provider-bound: returns before
+    /// any identity fan-out, enrichment scatter, or cover-gate work.
+    async fn add_fast(
+        &self,
+        user_id: UserId,
+        candidate: crate::identity::WorkCandidate,
+    ) -> Result<AddWorkResult, WorkServiceError>;
+    /// REQ-004/005 (responsiveness): the background half of [`Self::add`] —
+    /// identity completion + enrichment + cover gates + materialize, wrapped in
+    /// the enriching-registry guard so [`Self::is_enriching`] reads true for
+    /// the duration. Absorbs its own failures (logged, never panics the
+    /// spawner); callers spawn-and-forget.
+    async fn complete_add(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        source_provider_data: Option<SourceProviderData>,
+        candidate_id: Option<crate::identity::CandidateId>,
+        mode: crate::identity::IdentityMode,
+        source: crate::identity::ConflictSource,
+    );
+    /// REQ-005 (responsiveness): true exactly while an enrichment run is
+    /// executing for this work. In-memory signal — reads false after a server
+    /// restart BY DESIGN (never stale-true; the convergence lane owns durable
+    /// completion of interrupted runs).
+    fn is_enriching(&self, user_id: UserId, work_id: WorkId) -> bool;
     async fn get(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError>;
     async fn get_detail(
         &self,

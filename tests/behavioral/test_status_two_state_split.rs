@@ -242,6 +242,7 @@ impl EnrichmentWorkflow for SpyEnrichmentWorkflow {
         _mode: WorkflowMode,
         _candidate_id: Option<livrarr_domain::identity::CandidateId>,
         _priority: livrarr_domain::RequestPriority,
+        _freshness: livrarr_domain::Freshness,
     ) -> Result<WorkflowResult, EnrichmentWorkflowError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         Ok(WorkflowResult {

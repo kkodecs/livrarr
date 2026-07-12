@@ -15,14 +15,6 @@ pub enum EnrichmentMode {
     HardRefresh,
 }
 
-impl EnrichmentMode {
-    /// A HardRefresh bypasses the 24h (work,provider) cache and re-fetches
-    /// (REQ-009); Manual and Background consult the cache.
-    pub fn bypasses_cache(&self) -> bool {
-        matches!(self, EnrichmentMode::HardRefresh)
-    }
-}
-
 #[derive(Debug)]
 pub struct EnrichmentResult {
     pub enrichment_status: EnrichmentStatus,
@@ -71,6 +63,9 @@ pub trait EnrichmentWorkflow: Send + Sync {
     /// (suppression/budget semantics) while still wanting its scatter to
     /// queue ahead of a background scan (e.g. the add door: Background mode,
     /// High priority).
+    /// `freshness` decides whether provider fetches may be satisfied from the
+    /// persistent provider-response cache (REQ-009) — orthogonal to
+    /// `priority` (D-004).
     async fn enrich_work(
         &self,
         user_id: crate::UserId,
@@ -78,6 +73,7 @@ pub trait EnrichmentWorkflow: Send + Sync {
         mode: EnrichmentMode,
         candidate_id: Option<crate::identity::CandidateId>,
         priority: RequestPriority,
+        freshness: crate::Freshness,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError>;
     async fn reset_for_manual_refresh(
         &self,

@@ -8,12 +8,14 @@ use tracing::{debug, error, info, warn};
 
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::{ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest};
-use livrarr_domain::identity_matching::identity_key;
+use livrarr_domain::identity_matching::{identity_key, unambiguous_author_match};
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::{
     ReadarrImportWorkflow, ServiceError, SourceProviderData, WorkService,
 };
-use livrarr_domain::{derive_sort_name, sanitize_path_component, Import, MediaType};
+use livrarr_domain::{
+    derive_sort_name, sanitize_path_component, Author, AuthorId, Import, MediaType,
+};
 
 use livrarr_http::HttpClient;
 
@@ -860,6 +862,31 @@ struct ImportRunner {
     files_skipped: i64,
 }
 
+/// `process_authors`' batch-local resolution for one Readarr row
+/// (author-dedup U-2, `[REV codex R-7/R-9]`): adopt an existing entry in
+/// `batch_authors` or signal that a new author row is needed. `batch_authors`
+/// starts as the pre-batch DB snapshot and grows by exactly one entry per
+/// newly-created author — adopted authors are never re-appended — so every
+/// entry maps to a distinct author id and the exactly-one-match rule inside
+/// `unambiguous_author_match` is already exactly-one-distinct-author-id.
+/// Pure and DB-free: extracted so the in-batch dedup behavior is
+/// unit-testable without the full production `ImportRunner` construction
+/// chain (`LiveWorkService`/`LiveImportWorkflow` pull in live provider
+/// wiring that cannot be assembled offline — see `batch_author_resolution_tests`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchAuthorDecision {
+    Adopt(AuthorId),
+    Create,
+}
+
+fn resolve_batch_author(name: &str, batch_authors: &[Author]) -> BatchAuthorDecision {
+    let names: Vec<String> = batch_authors.iter().map(|a| a.name.clone()).collect();
+    match unambiguous_author_match(name, &names) {
+        Some(i) => BatchAuthorDecision::Adopt(batch_authors[i].id),
+        None => BatchAuthorDecision::Create,
+    }
+}
+
 impl ImportRunner {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1008,7 +1035,7 @@ impl ImportRunner {
         rd_books: &[RdBook],
         active_book_ids: &HashSet<i64>,
     ) -> Result<(), String> {
-        let existing_authors = self
+        let mut existing_authors = self
             .readarr_import_service
             .list_authors(self.user_id)
             .await
@@ -1032,43 +1059,46 @@ impl ImportRunner {
                 }
             }
 
-            let norm = identity_key("", name).1;
-            let matches: Vec<_> = existing_authors
-                .iter()
-                .filter(|a| identity_key("", &a.name).1 == norm)
-                .collect();
+            let livrarr_author_id = match resolve_batch_author(name, &existing_authors) {
+                BatchAuthorDecision::Adopt(id) => id,
+                BatchAuthorDecision::Create => {
+                    let sort_name = rd_author
+                        .sort_name
+                        .as_deref()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| derive_sort_name(name));
 
-            let livrarr_author_id = if matches.len() == 1 {
-                matches[0].id
-            } else {
-                let sort_name = rd_author
-                    .sort_name
-                    .as_deref()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| derive_sort_name(name));
-
-                match self
-                    .readarr_import_service
-                    .create_author(CreateAuthorDbRequest {
-                        user_id: self.user_id,
-                        name: name.to_string(),
-                        sort_name: Some(sort_name),
-                        ol_key: None,
-                        gr_key: None,
-                        hc_key: None,
-                        import_id: Some(self.import_id.clone()),
-                    })
-                    .await
-                {
-                    Ok(a) => {
-                        self.authors_created += 1;
-                        a.id
-                    }
-                    Err(e) => {
-                        warn!(name = %name, "Failed to create author: {e}");
-                        let mut prog = self.progress().lock().await;
-                        prog.errors.push(format!("Author '{name}': {e}"));
-                        continue;
+                    match self
+                        .readarr_import_service
+                        .create_author(CreateAuthorDbRequest {
+                            user_id: self.user_id,
+                            name: name.to_string(),
+                            sort_name: Some(sort_name),
+                            ol_key: None,
+                            gr_key: None,
+                            hc_key: None,
+                            import_id: Some(self.import_id.clone()),
+                        })
+                        .await
+                    {
+                        Ok(a) => {
+                            self.authors_created += 1;
+                            let id = a.id;
+                            // Newly-created authors join the batch-local list
+                            // so a later in-batch spelling variant adopts
+                            // instead of double-creating [REV codex R-7].
+                            // Adopted authors are never re-appended here —
+                            // they are already in the snapshot or an earlier
+                            // append [REV codex R-9].
+                            existing_authors.push(a);
+                            id
+                        }
+                        Err(e) => {
+                            warn!(name = %name, "Failed to create author: {e}");
+                            let mut prog = self.progress().lock().await;
+                            prog.errors.push(format!("Author '{name}': {e}"));
+                            continue;
+                        }
                     }
                 }
             };
@@ -1735,6 +1765,97 @@ mod process_works_progress_tests {
             progress.lock().await.errors.len(),
             1,
             "the one erroring item's message must still be recorded"
+        );
+    }
+}
+
+// =============================================================================
+// Author-dedup DEFERRED-PIN: process_authors' batch-local decision
+// =============================================================================
+//
+// `ImportRunner` cannot be constructed here the way `process_authors` runs in
+// production: `Arc<LiveWorkService>` and `Arc<LiveImportWorkflow>` are
+// concrete production aliases (`crate::state`) that bottom out in the live
+// provider/enrichment queue wiring — the same constraint
+// `process_works_progress_tests` above already documents for `process_works`.
+// `process_authors` itself never touches either field, so the fix extracts
+// its batch-local adopt-or-create decision into the pure, DB-free
+// `resolve_batch_author` (defined above, beside `ImportRunner`) and pins
+// that directly — the sanctioned fallback for this exact situation, same
+// spirit as the `provider_queue` tracer tests reaching a private seam.
+#[cfg(test)]
+mod batch_author_resolution_tests {
+    use super::*;
+
+    fn fake_author(id: i64, name: &str) -> Author {
+        Author {
+            id,
+            user_id: 1,
+            name: name.to_string(),
+            sort_name: None,
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            import_id: None,
+            monitored: false,
+            monitor_new_items: false,
+            monitor_since: None,
+            monitor_language: None,
+            added_at: chrono::Utc::now(),
+        }
+    }
+
+    /// [REV codex R-7]: two spelling variants arriving in the same import
+    /// batch, both absent from the DB — the first creates, the second must
+    /// adopt the first's freshly-created row rather than double-creating.
+    #[test]
+    fn two_in_batch_spelling_variants_collapse_to_one_author_both_ids_mapped() {
+        let mut batch_authors: Vec<Author> = Vec::new();
+        let mut author_map_rd: HashMap<i64, i64> = HashMap::new();
+        let mut next_id = 1i64;
+
+        let mut resolve = |rd_id: i64, name: &str| {
+            let livrarr_id = match resolve_batch_author(name, &batch_authors) {
+                BatchAuthorDecision::Adopt(id) => id,
+                BatchAuthorDecision::Create => {
+                    let id = next_id;
+                    next_id += 1;
+                    batch_authors.push(fake_author(id, name));
+                    id
+                }
+            };
+            author_map_rd.insert(rd_id, livrarr_id);
+        };
+
+        resolve(501, "W.E.B. Griffin");
+        resolve(502, "W. E. B. Griffin");
+
+        assert_eq!(
+            batch_authors.len(),
+            1,
+            "only one author should have been created for two in-batch variants"
+        );
+        assert_eq!(author_map_rd[&501], author_map_rd[&502]);
+    }
+
+    /// [REV codex R-9]: the first row of the batch adopts a pre-existing
+    /// (already-in-DB) author; a later row in the same batch is another
+    /// spelling variant and must also adopt — never create, and never trip
+    /// the exactly-one rule into ambiguity from a re-appended duplicate.
+    #[test]
+    fn later_in_batch_variant_of_first_row_adopted_author_also_adopts_never_creates() {
+        let batch_authors = vec![fake_author(42, "Robert A. Heinlein")];
+
+        let first = resolve_batch_author("Robert Heinlein", &batch_authors);
+        assert_eq!(first, BatchAuthorDecision::Adopt(42));
+        // An adopted author is never re-appended to the batch-local list.
+        assert_eq!(batch_authors.len(), 1);
+
+        let second = resolve_batch_author("Robert Anson Heinlein", &batch_authors);
+        assert_eq!(
+            second,
+            BatchAuthorDecision::Adopt(42),
+            "a later in-batch variant of an already-adopted author must adopt, not create"
         );
     }
 }

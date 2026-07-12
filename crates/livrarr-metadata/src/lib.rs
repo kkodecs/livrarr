@@ -270,6 +270,7 @@ pub mod tests {
             _mode: EnrichmentMode,
             _candidate_id: Option<livrarr_domain::identity::CandidateId>,
             _priority: livrarr_domain::RequestPriority,
+            _freshness: livrarr_domain::Freshness,
         ) -> Result<EnrichmentResult, EnrichmentError> {
             // TEMP(pk-tdd): stub uses internal scenario mode; real work_id lookup not needed here.
             let work = Work::default();

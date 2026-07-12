@@ -138,6 +138,10 @@ pub struct AddWorkRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AddWorkResponse {
     pub work: WorkDetailResponse,
+    /// REQ-004: explicit created-vs-existing outcome — `false` = dedup/conflict
+    /// returned an existing work.
+    #[serde(default)]
+    pub created: bool,
     pub author_created: bool,
     pub messages: Vec<String>,
 }
@@ -219,6 +223,10 @@ pub struct WorkDetailResponse {
     pub cover_mtime: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audiobook_cover_mtime: Option<i64>,
+    /// REQ-005: true exactly while an enrichment run is executing for this
+    /// work (in-memory signal; false after restart by design).
+    #[serde(default)]
+    pub enriching: bool,
 }
 
 /// Convert a domain `Work` into a `WorkDetailResponse` (with empty `library_items`).
@@ -304,6 +312,7 @@ pub fn work_to_detail_with_cover_mtime(
         library_items: vec![],
         cover_mtime,
         audiobook_cover_mtime,
+        enriching: false,
     }
 }
 

@@ -1,12 +1,21 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use crate::context::HasDataDir;
 
+/// Version token on cover/thumb URLs (REQ-003). Presence alone selects the
+/// immutable cache policy — the value is cache identity only and is never
+/// interpreted (the endpoint stays public-by-design).
+#[derive(serde::Deserialize)]
+pub struct CoverQuery {
+    pub v: Option<String>,
+}
+
 pub async fn get_cover<S: HasDataDir>(
     State(state): State<S>,
     Path(id): Path<i64>,
+    Query(q): Query<CoverQuery>,
     req_headers: HeaderMap,
 ) -> Response {
     let data_dir = state.data_dir().to_path_buf();
@@ -15,7 +24,7 @@ pub async fn get_cover<S: HasDataDir>(
         .ok()
         .flatten();
     match cover_path {
-        Some(path) => serve_image(&path, id, &req_headers).await,
+        Some(path) => serve_image(&path, id, &req_headers, q.v.is_some()).await,
         None => placeholder_response(),
     }
 }
@@ -23,6 +32,7 @@ pub async fn get_cover<S: HasDataDir>(
 pub async fn get_thumb<S: HasDataDir>(
     State(state): State<S>,
     Path(id): Path<i64>,
+    Query(q): Query<CoverQuery>,
     req_headers: HeaderMap,
 ) -> Response {
     let data_dir = state.data_dir().to_path_buf();
@@ -61,10 +71,10 @@ pub async fn get_thumb<S: HasDataDir>(
     }
 
     if !thumb_path.exists() {
-        return serve_image(&full_path, id, &req_headers).await;
+        return serve_image(&full_path, id, &req_headers, q.v.is_some()).await;
     }
 
-    serve_image(&thumb_path, id, &req_headers).await
+    serve_image(&thumb_path, id, &req_headers, q.v.is_some()).await
 }
 
 /// Resolve the on-disk path for a cover image in the tenant-aware layout,
@@ -122,7 +132,24 @@ pub fn placeholder_response() -> Response {
         .into_response()
 }
 
-pub async fn serve_image(path: &std::path::Path, id: i64, req_headers: &HeaderMap) -> Response {
+/// Cache policy per REQ-003: a versioned request (`?v=` present) is immutable
+/// for a year — the URL changes whenever the image changes (mtime token), so
+/// revalidation is unnecessary. Unversioned requests keep per-request
+/// revalidation. Missing covers never long-cache (`placeholder_response`).
+fn cache_control(versioned: bool) -> HeaderValue {
+    if versioned {
+        HeaderValue::from_static("public, max-age=31536000, immutable")
+    } else {
+        HeaderValue::from_static("public, no-cache")
+    }
+}
+
+pub async fn serve_image(
+    path: &std::path::Path,
+    id: i64,
+    req_headers: &HeaderMap,
+    versioned: bool,
+) -> Response {
     if !path.exists() {
         return placeholder_response();
     }
@@ -142,10 +169,7 @@ pub async fn serve_image(path: &std::path::Path, id: i64, req_headers: &HeaderMa
     if let (Some(ref etag_val), Some(inm)) = (&etag, req_headers.get(header::IF_NONE_MATCH)) {
         if inm.as_bytes() == etag_val.as_bytes() {
             let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, no-cache"),
-            );
+            headers.insert(header::CACHE_CONTROL, cache_control(versioned));
             if let Ok(val) = HeaderValue::from_str(etag_val) {
                 headers.insert(header::ETAG, val);
             }
@@ -157,10 +181,7 @@ pub async fn serve_image(path: &std::path::Path, id: i64, req_headers: &HeaderMa
         Ok(bytes) => {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
-            headers.insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, no-cache"),
-            );
+            headers.insert(header::CACHE_CONTROL, cache_control(versioned));
             if let Some(etag_val) = etag {
                 if let Ok(val) = HeaderValue::from_str(&etag_val) {
                     headers.insert(header::ETAG, val);
@@ -169,6 +190,57 @@ pub async fn serve_image(path: &std::path::Path, id: i64, req_headers: &HeaderMa
             (StatusCode::OK, headers, bytes).into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod cache_policy_tests {
+    use super::*;
+
+    fn cache_header(resp: &Response) -> &str {
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .expect("cache-control present")
+            .to_str()
+            .expect("ascii header")
+    }
+
+    #[tokio::test]
+    async fn versioned_request_is_immutable_unversioned_revalidates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("42.jpg");
+        std::fs::write(&path, b"jpeg-bytes").expect("write cover");
+
+        let versioned = serve_image(&path, 42, &HeaderMap::new(), true).await;
+        assert_eq!(
+            cache_header(&versioned),
+            "public, max-age=31536000, immutable",
+            "AC-003: a versioned cover response is browser-cacheable forever"
+        );
+        assert!(
+            versioned.headers().get(header::ETAG).is_some(),
+            "AC-003: ETag is kept harmlessly on versioned responses"
+        );
+
+        let unversioned = serve_image(&path, 42, &HeaderMap::new(), false).await;
+        assert_eq!(
+            cache_header(&unversioned),
+            "public, no-cache",
+            "REQ-003: unversioned requests keep today's revalidation behavior"
+        );
+        assert!(unversioned.headers().get(header::ETAG).is_some());
+    }
+
+    #[tokio::test]
+    async fn missing_cover_never_long_caches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resp = serve_image(&dir.path().join("nope.jpg"), 7, &HeaderMap::new(), true).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            cache_header(&resp),
+            "no-store",
+            "AC-005: missing-cover responses are never cacheable, versioned or not"
+        );
     }
 }
 

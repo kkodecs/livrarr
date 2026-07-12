@@ -139,6 +139,7 @@ where
                 EnrichmentMode::Background,
                 None,
                 livrarr_domain::RequestPriority::Low,
+                livrarr_domain::Freshness::PreferCache,
             )
             .await;
         work = svc.get(user_id, work_id).await?;

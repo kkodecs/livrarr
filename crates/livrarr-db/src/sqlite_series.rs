@@ -7,7 +7,7 @@ use crate::{
     AuthorId, CreateSeriesDbRequest, DbError, LinkWorkToSeriesRequest, Series, SeriesDb, UserId,
 };
 
-fn row_to_series(row: sqlx::sqlite::SqliteRow) -> Result<Series, DbError> {
+pub(crate) fn row_to_series(row: sqlx::sqlite::SqliteRow) -> Result<Series, DbError> {
     let added_at_str: String = row
         .try_get("added_at")
         .map_err(|e| DbError::Io(Box::new(e)))?;

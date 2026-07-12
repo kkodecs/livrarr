@@ -1489,6 +1489,33 @@ impl WorkService for StubWorkService {
     ) -> Result<livrarr_domain::identity::ResolvedIdentity, WorkServiceError> {
         unreachable!("not used by scan")
     }
+    fn resolve_identity_local(
+        &self,
+        _: livrarr_domain::identity::RawHarvest,
+    ) -> Result<livrarr_domain::identity::ResolvedIdentity, WorkServiceError> {
+        unreachable!("not used by scan")
+    }
+    async fn add_fast(
+        &self,
+        _: UserId,
+        _: livrarr_domain::identity::WorkCandidate,
+    ) -> Result<AddWorkResult, WorkServiceError> {
+        unreachable!("not used by scan")
+    }
+    async fn complete_add(
+        &self,
+        _: UserId,
+        _: WorkId,
+        _: Option<livrarr_domain::services::SourceProviderData>,
+        _: Option<livrarr_domain::identity::CandidateId>,
+        _: livrarr_domain::identity::IdentityMode,
+        _: livrarr_domain::identity::ConflictSource,
+    ) {
+        unreachable!("not used by scan")
+    }
+    fn is_enriching(&self, _: UserId, _: WorkId) -> bool {
+        unreachable!("not used by scan")
+    }
     async fn get(&self, _: UserId, _: WorkId) -> Result<Work, WorkServiceError> {
         unreachable!("not used by scan")
     }
