@@ -124,6 +124,18 @@ kk-build state files remain authoritative for gates; this section is the narrati
 
 ---
 
+- **PO RATIFICATIONS (2026-07-13 morning, in-session):** D1 RATIFIED as folded (the truth
+    table in docs/d1-qbit-state-truth-table-2026-07-13.md is now the binding contract — group
+    2a implements the single shared classifier next session). D2 RATIFIED as proposed (the
+    one-line policy above binds — group 2d sweeps #19-#22 under it, red-test-first). Wave 3:
+    items 1-5 (the cheap pure-move splits: #28, #24, #25, #27, #29) are GO, one at a time on
+    a quiet tree per the plan; #37 (ID newtypes) PARKED; items 6-10 remain approve-piecemeal.
+  - Post-wave wiki fix-up (same morning): enrichment-pipeline.md purged of the deleted LLM
+    Validator + false OL cover_url claim + stale GR-LLM claim; handlers.md gained the missing
+    cover.rs section. The BIG metadata-pathway.md pre-Phase-5 rewrite remains open (own pass).
+
+---
+
 ## Sequencing precondition [CC 2026-07-12]
 
 The pipeline-hygiene unit (suppression deletion — done, reviewed; door-gate suite — in

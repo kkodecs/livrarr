@@ -4,16 +4,15 @@ The metadata enrichment system resolves book identity and populates work metadat
 
 ## Provider Stack
 
-Six **network providers** dispatched through the `ProviderClient` enum by `DefaultProviderQueue` (all registered in `livrarr-server/src/main.rs`), plus one synthetic source provider and an optional validator. (Note: only `OpenLibraryProvider` and `LlmScraperProvider` implement the legacy `MetadataProvider` trait — the queue dispatches via `ProviderClient::fetch`, not that trait.)
+Six **network providers** dispatched through the `ProviderClient` enum by `DefaultProviderQueue` (all registered in `livrarr-server/src/main.rs`), plus one synthetic source provider.
 
 1. **Hardcover** — primary English metadata. GraphQL API. Deterministic + fuzzy queries. **Excluded for foreign-language works** (applicability rule below).
-2. **Open Library** — secondary. REST API. English only — **excluded for foreign-language works**. Does not emit a `cover_url` in normalized output.
-3. **Goodreads** — supplementary. HTML scraping (no public API). LLM-disambiguated; returns `NotFound` without an LLM. Runs for English **and** foreign.
+2. **Open Library** — secondary. REST API. English only — **excluded for foreign-language works**. Emits a `cover_url` built from OL cover IDs in normalized output.
+3. **Goodreads** — supplementary. HTML scraping (no public API). Fully deterministic matching (shared 0.75 picker + junk-edition filter, Phase 5); the only LLM use anywhere on its path is HTML-parse repair. Runs for English **and** foreign.
 4. **Audnexus** — audiobook enrichment. REST API. Narration/duration, keyed on ASIN.
 5. **Google Books** — **foreign-language metadata provider**. REST API, **requires an API key** (keyless quota is zero). **Excluded for English works; included for foreign** — it is the primary foreign-language metadata source (insights #12).
 6. **Audible** — audiobook-axis provider. Catalog search + ASIN lookup (unauthenticated).
 7. **Readarr** — *synthetic* provider, not a network client: built from injected `SourceProviderData` and arbitrated by the merge engine like any other provider.
-8. **LLM Validator** — identity validation (rejects mismatched payloads). OpenAI-compatible chat completions. Fully optional — merge is deterministic without it.
 
 ### Language applicability rule
 

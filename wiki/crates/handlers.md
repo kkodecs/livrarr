@@ -130,6 +130,13 @@ Thin accessor interfaces consumed by handlers for shared mutable state (not serv
 - `get_progress` — get read progress for a file
 - `update_progress` — update read progress for a file
 
+### cover.rs
+- `get_cover_alternatives` — fetch provider cover candidates for a work (`HasCoverService`)
+- `select_cover_handler` — apply a chosen cover candidate (`HasCoverService`)
+- `upload_cover_handler` — multipart user cover upload (`HasCoverService`)
+- `get_audiobook_cover` / `get_audiobook_thumb` — serve the audiobook cover/thumb with ebook fallback (`HasDataDir`)
+- Errors ride the standard `ApiError` JSON envelope (quality-waves Wave 2, 2026-07-13)
+
 ### indexer.rs
 - `list` — list configured indexers
 - `get` — get a single indexer by ID
