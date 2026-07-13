@@ -119,6 +119,56 @@ async fn qw2_work_create_with_anchor_persists_work_and_anchor_rows() {
     }));
 }
 
+#[tokio::test]
+async fn qw2d_create_work_with_anchor_invalid_anchor_rolls_back_work_row() {
+    let (db, user_id) = seeded_db().await;
+    let title = "Invalid Anchor Work";
+    let author = "Invalid Anchor Author";
+
+    let result = db
+        .create_work_with_anchor(work_req(user_id, title, author), "", AnchorSetter::Import)
+        .await;
+
+    assert!(result.is_err(), "empty anchor value should be rejected");
+
+    let works = db
+        .list_works(user_id)
+        .await
+        .expect("works should be readable after failed anchored create");
+    let leaked_work = works
+        .iter()
+        .find(|work| work.title == title && work.author_name == author);
+    assert!(
+        leaked_work.is_none(),
+        "invalid anchor failure must roll back the just-created work row"
+    );
+}
+
+#[tokio::test]
+async fn qw2d_create_work_with_anchor_conflict_path_returns_existing_without_anchor_write() {
+    let (db, user_id) = seeded_db().await;
+    let title = "Preexisting Work";
+    let author = "Preexisting Author";
+    let (existing, created) = db
+        .create_work(work_req(user_id, title, author))
+        .await
+        .expect("seed work should be created");
+    assert!(created);
+
+    let (work, created_again) = db
+        .create_work_with_anchor(work_req(user_id, title, author), "", AnchorSetter::Import)
+        .await
+        .expect("conflict path returns the existing work regardless of anchor value");
+    assert!(!created_again);
+    assert_eq!(work.id, existing.id);
+
+    let anchors = db
+        .list_anchors(existing.id)
+        .await
+        .expect("anchor rows should be readable");
+    assert!(anchors.is_empty(), "conflict path must not write anchors");
+}
+
 #[test]
 fn qw2a_classify_qbit_state_pins_ratified_truth_table_rows() {
     let rows = [

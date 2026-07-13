@@ -325,12 +325,23 @@ where
                     "silent resolution: collided row roster fetch parsed empty — degrading");
                 return None;
             }
-            let _ = self.db.save_series_roster(other.id, &entries).await;
+            if let Err(e) = self.db.save_series_roster(other.id, &entries).await {
+                tracing::warn!(
+                    series_id = other.id,
+                    "silent resolution: roster save failed: {e}"
+                );
+            }
             // Same pairing rule as every roster save: the count follows.
-            let _ = self
+            if let Err(e) = self
                 .db
                 .update_series_work_count(user_id, other.id, entries.len() as i32)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    series_id = other.id,
+                    "silent resolution: work-count update failed: {e}"
+                );
+            }
             return Some(entries);
         }
 
@@ -890,10 +901,17 @@ where
         // Same drift guard: an empty fetch must not zero the work count
         // (`work_count = 0` would also win ST-007's most-specific arbitration).
         if !all_books.is_empty() {
-            let _ = self
+            if let Err(e) = self
                 .db
                 .update_series_work_count(user_id, series_id, all_books.len() as i32)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    series_id = series_id,
+                    count = all_books.len(),
+                    "series worker: failed to persist work count: {e}"
+                );
+            }
         }
 
         let existing_works = self
@@ -944,7 +962,7 @@ where
             );
 
             if let Some(existing) = matched {
-                let _ = self
+                match self
                     .db
                     .link_work_to_series(
                         user_id,
@@ -958,8 +976,15 @@ where
                             monitor_audiobook,
                         },
                     )
-                    .await;
-                linked += 1;
+                    .await
+                {
+                    Ok(_) => linked += 1,
+                    Err(e) => tracing::warn!(
+                        work_id = existing.id,
+                        series_id = series_id,
+                        "series worker: failed to link existing work to series: {e}"
+                    ),
+                }
                 continue;
             }
 
@@ -1266,10 +1291,16 @@ where
                 // save pairs with a count update, or a healed roster would
                 // sit beside a stale count (the broken-window rows carry 0,
                 // which wins most-specific arbitration).
-                let _ = self
+                if let Err(e) = self
                     .db
                     .update_series_work_count(user_id, series_id, entries.len() as i32)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        series_id = series_id,
+                        "series books: work-count update failed after roster heal: {e}"
+                    );
+                }
                 entries
             }
         };

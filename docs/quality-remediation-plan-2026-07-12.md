@@ -162,6 +162,34 @@ kk-build state files remain authoritative for gates; this section is the narrati
     #36 placement decided: rides 2d — red pin identified during trace (today an
     invalid-anchor error in `create_work_with_anchor` leaves the work row committed;
     after the one-transaction fix it rolls back — black-box pinnable).
+  - **Group 2d + #36 EXECUTED + COMMITTED (2026-07-13 ~19:50 UTC, same session):** the D2
+    swallowed-writes sweep — 20 sites total, not the probe's 8: the four cited functions
+    (#19 import grab-status ×2 + the FINAL status write + the history event; #20
+    resolve_ol_key success-log-under-result; #21 series worker link/count + the
+    silent-resolution roster/count pair + the series-books heal count, with `linked += 1`
+    now counting only Ok links; #22 CWA/email block: media-mgmt config, root-folder list,
+    work read, spawn_blocking JoinError, email config) PLUS codex's review catch (five
+    `let _ = update_chapter_scan_result` in try_extract_chapters — folded). ALL warn-arm
+    with entity context; zero propagation candidates (each grounded in the disposition).
+    **#36 CLOSED** (the 8885464e "incomplete" record is superseded): `create_work_with_anchor`
+    = ONE transaction (shared `insert_work_row` helper — one authority for the works
+    INSERT — then `confirm_anchor_in_tx`, commit; conflict arm delegates to `create_work`,
+    no anchor write, semantics preserved). Red-first: codex-authored rollback pin
+    (empty-anchor error must leave NO work row) verified RED at my run, GREEN after;
+    orchestrator fold from gemini's test review adds the conflict-path green guard.
+    Reviews: gemini tests PASS (free-form r4 — schema failed again), code gemini PASS /
+    codex FAIL→resolved (R-5 folded as above; R-4 "propagate resolve_ol_key persist
+    failure" REFUTED at the single caller fetch_bibliography_entries:531-533, which
+    consumes the returned key immediately — full dispositions in
+    build/reviews/quality-waves/review-code-qw2d-disposition.md). Gates: fmt clean ·
+    clippy 0 · workspace 1532/0/299 expected (1531 pre-fold snapshot + conflict guard;
+    final number in the session log). Smoke: snapshot livrarr.db.pre-2d-smoke-20260713,
+    dev-restart green, poller + RSS ticks end-to-end, zero errors. Wiki: no content-page
+    falsifications (API-listing lines only — audit entry in wiki/log.md); no new insight
+    (error-handling below wiki granularity).
+  - **Remaining in the ratified quality lane after 2d:** Wave 3 items 1-5 (pure moves:
+    #28, #24, #25, #27, #29), one at a time on a quiet tree. New follow-on awaiting PO
+    prioritization: tests/implementation/ orphan triage (see the 2a entry).
 
 ---
 

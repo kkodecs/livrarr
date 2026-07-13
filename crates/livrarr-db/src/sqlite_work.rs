@@ -174,6 +174,53 @@ pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError>
     })
 }
 
+/// The single works INSERT (ON CONFLICT DO NOTHING) — shared by `create_work`
+/// and `create_work_with_anchor` so the row shape has one authority. Returns
+/// the new row id, or None when the (user_id, normalized_title,
+/// normalized_author) row already exists. Runs on the caller's connection so
+/// the caller controls transaction scope.
+async fn insert_work_row(
+    conn: &mut sqlx::SqliteConnection,
+    req: &CreateWorkDbRequest,
+    now: &str,
+) -> Result<Option<i64>, DbError> {
+    let result = sqlx::query(
+        "INSERT INTO works (user_id, title, author_name, normalized_title, normalized_author, \
+         author_id, ol_key, gr_key, year, cover_url, enrichment_status, added_at, \
+         language, import_id, series_id, series_name, series_position, \
+         monitor_ebook, monitor_audiobook, isbn_13, asin, description, cover_manual) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(user_id, normalized_title, normalized_author) DO NOTHING",
+    )
+    .bind(req.user_id)
+    .bind(&req.title)
+    .bind(&req.author_name)
+    .bind(&req.normalized_title)
+    .bind(&req.normalized_author)
+    .bind(req.author_id)
+    .bind(&req.ol_key)
+    .bind(&req.gr_key)
+    .bind(req.year)
+    .bind(absolute_http_cover_url(req.cover_url.as_deref()))
+    .bind(now)
+    .bind(req.language.as_deref())
+    .bind(&req.import_id)
+    .bind(req.series_id)
+    .bind(&req.series_name)
+    .bind(req.series_position)
+    .bind(req.monitor_ebook)
+    .bind(req.monitor_audiobook)
+    .bind(&req.isbn_13)
+    .bind(&req.asin)
+    .bind(&req.description)
+    .bind(req.cover_manual)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_db_err)?;
+
+    Ok((result.rows_affected() == 1).then_some(result.last_insert_rowid()))
+}
+
 fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
     match s {
         "unenriched" => Ok(EnrichmentStatus::Unenriched),
@@ -1458,57 +1505,27 @@ impl WorkDb for SqliteDb {
 impl crate::WorkDbCreate for SqliteDb {
     async fn create_work(&self, req: CreateWorkDbRequest) -> Result<(Work, bool), DbError> {
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "INSERT INTO works (user_id, title, author_name, normalized_title, normalized_author, \
-             author_id, ol_key, gr_key, year, cover_url, enrichment_status, added_at, \
-             language, import_id, series_id, series_name, series_position, \
-             monitor_ebook, monitor_audiobook, isbn_13, asin, description, cover_manual) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(user_id, normalized_title, normalized_author) DO NOTHING",
-        )
-        .bind(req.user_id)
-        .bind(&req.title)
-        .bind(&req.author_name)
-        .bind(&req.normalized_title)
-        .bind(&req.normalized_author)
-        .bind(req.author_id)
-        .bind(&req.ol_key)
-        .bind(&req.gr_key)
-        .bind(req.year)
-        .bind(absolute_http_cover_url(req.cover_url.as_deref()))
-        .bind(&now)
-        .bind(req.language.as_deref())
-        .bind(&req.import_id)
-        .bind(req.series_id)
-        .bind(&req.series_name)
-        .bind(req.series_position)
-        .bind(req.monitor_ebook)
-        .bind(req.monitor_audiobook)
-        .bind(&req.isbn_13)
-        .bind(&req.asin)
-        .bind(&req.description)
-        .bind(req.cover_manual)
-        .execute(self.pool())
-        .await
-        .map_err(map_db_err)?;
+        let mut conn = self.pool().acquire().await.map_err(map_db_err)?;
+        let inserted = insert_work_row(&mut conn, &req, &now).await?;
+        drop(conn);
 
-        if result.rows_affected() == 1 {
-            // Newly inserted — last_insert_rowid is the new ID.
-            let id = result.last_insert_rowid();
-            let work = self.get_work(req.user_id, id).await?;
-            Ok((work, true))
-        } else {
-            // Conflict — fetch the existing row.
-            let row = sqlx::query(
-                "SELECT * FROM works WHERE user_id = ? AND normalized_title = ? AND normalized_author = ?",
-            )
-            .bind(req.user_id)
-            .bind(&req.normalized_title)
-            .bind(&req.normalized_author)
-            .fetch_one(self.pool())
-            .await
-            .map_err(map_db_err)?;
-            Ok((row_to_work(row)?, false))
+        match inserted {
+            Some(id) => {
+                let work = self.get_work(req.user_id, id).await?;
+                Ok((work, true))
+            }
+            None => {
+                let row = sqlx::query(
+                    "SELECT * FROM works WHERE user_id = ? AND normalized_title = ? AND normalized_author = ?",
+                )
+                .bind(req.user_id)
+                .bind(&req.normalized_title)
+                .bind(&req.normalized_author)
+                .fetch_one(self.pool())
+                .await
+                .map_err(map_db_err)?;
+                Ok((row_to_work(row)?, false))
+            }
         }
     }
 
@@ -1518,26 +1535,33 @@ impl crate::WorkDbCreate for SqliteDb {
         ol_key: &str,
         anchor_setter: livrarr_domain::identity::AnchorSetter,
     ) -> Result<(Work, bool), DbError> {
-        use livrarr_domain::services::WorkIdentityRepository;
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let inserted = insert_work_row(&mut tx, &req, &now).await?;
 
-        let (work, created) = self.create_work(req).await?;
-        if created {
-            self.confirm_anchor(
-                work.id,
-                livrarr_domain::identity::AnchorType::new(
-                    livrarr_domain::identity::AnchorType::OL_WORK,
-                ),
-                ol_key,
-                anchor_setter,
-            )
-            .await
-            .map_err(|e| DbError::Constraint {
-                message: format!("anchor write failed: {e}"),
-            })?;
-            let work = self.get_work(work.user_id, work.id).await?;
-            Ok((work, true))
-        } else {
-            Ok((work, false))
+        match inserted {
+            Some(id) => {
+                crate::sqlite_work_identity::confirm_anchor_in_tx(
+                    &mut tx,
+                    id,
+                    livrarr_domain::identity::AnchorType::new(
+                        livrarr_domain::identity::AnchorType::OL_WORK,
+                    ),
+                    ol_key,
+                    anchor_setter,
+                )
+                .await
+                .map_err(|e| DbError::Constraint {
+                    message: format!("anchor write failed: {e}"),
+                })?;
+                tx.commit().await.map_err(map_db_err)?;
+                let work = self.get_work(req.user_id, id).await?;
+                Ok((work, true))
+            }
+            None => {
+                drop(tx);
+                self.create_work(req).await
+            }
         }
     }
 }

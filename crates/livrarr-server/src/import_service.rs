@@ -293,12 +293,24 @@ impl ImportService for LiveImportService {
             }
 
             // CWA copy + email — fire-and-forget for ebooks.
-            let media_mgmt = self
-                .settings_service
-                .get_media_management_config()
-                .await
-                .ok();
-            let root_folders = self.import_io.list_root_folders().await.unwrap_or_default();
+            let media_mgmt = match self.settings_service.get_media_management_config().await {
+                Ok(cfg) => Some(cfg),
+                Err(e) => {
+                    tracing::warn!(
+                        "media management config read failed — CWA ingest skipped this import: {e}"
+                    );
+                    None
+                }
+            };
+            let root_folders = match self.import_io.list_root_folders().await {
+                Ok(rf) => rf,
+                Err(e) => {
+                    tracing::warn!(
+                        "root folder list read failed — CWA/email skipped this import: {e}"
+                    );
+                    Vec::new()
+                }
+            };
             for imp in &result.imported_files {
                 if imp.media_type != MediaType::Ebook {
                     continue;
@@ -320,18 +332,32 @@ impl ImportService for LiveImportService {
                             .and_then(|e| e.to_str())
                             .unwrap_or("epub")
                             .to_string();
-                        let work = self.import_io.get_work(user_id, grab.work_id).await.ok();
+                        let work = match self.import_io.get_work(user_id, grab.work_id).await {
+                            Ok(w) => Some(w),
+                            Err(e) => {
+                                tracing::warn!(
+                                    work_id = grab.work_id,
+                                    "CWA copy skipped: work read failed: {e}"
+                                );
+                                None
+                            }
+                        };
                         if let Some(work) = work {
                             let tp = abs_path.clone();
                             let cwa = cwa_path.clone();
                             let auth = work.author_name.clone();
                             let t = work.title.clone();
-                            let cwa_result = tokio::task::spawn_blocking(move || {
+                            let cwa_result = match tokio::task::spawn_blocking(move || {
                                 import_pipeline::cwa_copy(&tp, &cwa, user_id, &auth, &t, &ext)
                             })
                             .await
-                            .ok()
-                            .flatten();
+                            {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!("CWA copy task failed to run: {e}");
+                                    None
+                                }
+                            };
                             if let Some(warn) = cwa_result {
                                 warnings.push(warn);
                             }
@@ -340,7 +366,16 @@ impl ImportService for LiveImportService {
                 }
 
                 // Auto-send to email/Kindle
-                if let Ok(email_cfg) = self.settings_service.get_email_config().await {
+                let email_cfg = match self.settings_service.get_email_config().await {
+                    Ok(cfg) => Some(cfg),
+                    Err(e) => {
+                        tracing::warn!(
+                            "email config read failed — auto-send skipped this import: {e}"
+                        );
+                        None
+                    }
+                };
+                if let Some(email_cfg) = email_cfg {
                     if email_cfg.send_on_import && email_cfg.enabled {
                         let ext = Path::new(&imp.target_relative_path)
                             .extension()

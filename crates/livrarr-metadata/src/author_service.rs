@@ -477,7 +477,7 @@ where
             ))
         })?;
         let ol_key = best.ol_key.clone();
-        let _ = self
+        match self
             .db
             .update_author(
                 user_id,
@@ -493,12 +493,19 @@ where
                     monitor_language: None,
                 },
             )
-            .await;
-        tracing::info!(
-            author_id = author.id,
-            %ol_key,
-            "auto-resolved OL key for '{}'", author.name
-        );
+            .await
+        {
+            Ok(_) => tracing::info!(
+                author_id = author.id,
+                %ol_key,
+                "auto-resolved OL key for '{}'", author.name
+            ),
+            Err(e) => tracing::warn!(
+                author_id = author.id,
+                %ol_key,
+                "auto-resolved OL key for '{}' but failed to persist it: {e}", author.name
+            ),
+        }
         Ok(ol_key)
     }
 

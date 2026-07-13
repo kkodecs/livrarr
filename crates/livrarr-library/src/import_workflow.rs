@@ -579,9 +579,15 @@ async fn try_extract_chapters<D: ChapterDb>(
                 let dur = extraction.duration_secs;
                 container_duration = dur;
                 if extraction.chapters.is_empty() {
-                    let _ = db
+                    if let Err(e) = db
                         .update_chapter_scan_result(item_id, "no_chapters", dur)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            item_id,
+                            "chapter scan: failed to persist no_chapters status: {e}"
+                        );
+                    }
                 } else {
                     let mut chapters = Vec::new();
                     let extracted = &extraction.chapters;
@@ -615,14 +621,26 @@ async fn try_extract_chapters<D: ChapterDb>(
                         });
                     }
                     if chapters.is_empty() {
-                        let _ = db
+                        if let Err(e) = db
                             .update_chapter_scan_result(item_id, "no_chapters", dur)
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(
+                                item_id,
+                                "chapter scan: failed to persist no_chapters status: {e}"
+                            );
+                        }
                     } else {
                         match db.replace_chapters(item_id, &chapters).await {
                             Ok(()) => {
-                                let _ =
-                                    db.update_chapter_scan_result(item_id, "scanned", dur).await;
+                                if let Err(e) =
+                                    db.update_chapter_scan_result(item_id, "scanned", dur).await
+                                {
+                                    tracing::warn!(
+                                        item_id,
+                                        "chapter scan: chapters saved but failed to persist scanned status (will rescan): {e}"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -637,9 +655,15 @@ async fn try_extract_chapters<D: ChapterDb>(
             }
             Ok(Err(ChapterExtractionError::ParseError(_))) => {
                 tracing::warn!(item_id, "corrupt M4B — marking parse_error");
-                let _ = db
+                if let Err(e) = db
                     .update_chapter_scan_result(item_id, "parse_error", None)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        item_id,
+                        "chapter scan: failed to persist parse_error status: {e}"
+                    );
+                }
             }
             Ok(Err(ChapterExtractionError::IoError(e))) => {
                 tracing::warn!(item_id, error = %e, "chapter extraction I/O error — will retry");
@@ -649,9 +673,15 @@ async fn try_extract_chapters<D: ChapterDb>(
             }
         }
     } else if media_type == MediaType::Audiobook {
-        let _ = db
+        if let Err(e) = db
             .update_chapter_scan_result(item_id, "no_chapters", None)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                item_id,
+                "chapter scan: failed to persist no_chapters status: {e}"
+            );
+        }
     }
     container_duration
 }
@@ -972,7 +1002,8 @@ where
         );
 
         if source_files.is_empty() {
-            self.db
+            if let Err(e) = self
+                .db
                 .update_grab_status(
                     user_id,
                     grab_id,
@@ -980,7 +1011,12 @@ where
                     Some("no recognized media files"),
                 )
                 .await
-                .ok();
+            {
+                tracing::warn!(
+                    grab_id = grab_id,
+                    "import: failed to persist ImportFailed status (no recognized media files): {e}"
+                );
+            }
             return Ok(ImportResult {
                 grab_id,
                 final_status: GrabStatus::ImportFailed,
@@ -1012,7 +1048,8 @@ where
                         local_total as f64 / 1_048_576.0,
                         expected_size as f64 / 1_048_576.0,
                     );
-                    self.db
+                    if let Err(e) = self
+                        .db
                         .update_grab_status(
                             user_id,
                             grab_id,
@@ -1020,7 +1057,12 @@ where
                             Some(&error),
                         )
                         .await
-                        .ok();
+                    {
+                        tracing::warn!(
+                            grab_id = grab_id,
+                            "import: failed to persist ImportFailed status (size mismatch): {e}"
+                        );
+                    }
                     return Ok(ImportResult {
                         grab_id,
                         final_status: GrabStatus::ImportFailed,
@@ -1186,10 +1228,17 @@ where
             let errors: Vec<&str> = failed_files.iter().map(|f| f.error.as_str()).collect();
             Some(errors.join("; "))
         };
-        self.db
+        if let Err(e) = self
+            .db
             .update_grab_status(user_id, grab_id, final_status, error_msg.as_deref())
             .await
-            .ok();
+        {
+            tracing::warn!(
+                grab_id = grab_id,
+                final_status = ?final_status,
+                "import: failed to persist final grab status: {e}"
+            );
+        }
 
         // Record history event
         let event_type = if final_status == GrabStatus::Imported {
@@ -1197,7 +1246,7 @@ where
         } else {
             EventType::ImportFailed
         };
-        let _ = self
+        if let Err(e) = self
             .db
             .create_history_event(CreateHistoryEventDbRequest {
                 user_id,
@@ -1210,7 +1259,14 @@ where
                     "skipped": skipped_files.len(),
                 }),
             })
-            .await;
+            .await
+        {
+            tracing::warn!(
+                grab_id = grab_id,
+                work_id = work_id,
+                "import: failed to record history event: {e}"
+            );
+        }
 
         Ok(ImportResult {
             grab_id,
