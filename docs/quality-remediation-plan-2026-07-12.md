@@ -138,6 +138,30 @@ kk-build state files remain authoritative for gates; this section is the narrati
   - Post-wave wiki fix-up (same morning): enrichment-pipeline.md purged of the deleted LLM
     Validator + false OL cover_url claim + stale GR-LLM claim; handlers.md gained the missing
     cover.rs section. The BIG metadata-pathway.md pre-Phase-5 rewrite remains open (own pass).
+  - **Group 2a EXECUTED + COMMITTED (2026-07-13 ~18:00 UTC, fresh session):** ONE shared
+    qBittorrent classifier per the ratified D1 table — `classify_qbit_state` in
+    livrarr-download (`QbitStateClassification { ui_status, import_safe }`, both projections
+    from one table row); consumers: the poller import gate (`.import_safe` — checkingResumeData
+    no longer triggers import, the live bug) and `queue_service::fetch_qbit_progress`
+    (`.ui_status.as_str()` into `download_status` — canonical vocabulary replaces the raw
+    passthrough; SAB arm untouched, no ratified SAB table). `map_qbit_state` +
+    `is_completed_state` DELETED. Red-first held: codex authored the 26-row × 2-projection
+    pins (test_qw2_class_a_pins.rs `qw2a_*`), my red run pre-fix, all green after; gemini
+    tests PASS. Gates: fmt clean · clippy 0 · workspace 1530/0/299, 150 suites (Δ+2 = the
+    pins, no flake this run). Smoke: snapshot livrarr.db.pre-2a-smoke-20260713 → dev-restart
+    green → poller tick end-to-end, zero errors. Code review: gemini PASS + codex PASS
+    (gemini's one listed item = stale echo of the resolved Wave-2 OL finding, dispositioned
+    noise — build/reviews/quality-waves/review-code-qw2a-disposition.md). TRACE CORRECTIONS:
+    `map_qbit_state` had ZERO production callers — the queue UI received the raw qBit state
+    string (frontend never read it), so the UI projection got its FIRST live consumer here;
+    D1 doc annotated (header → RATIFIED+IMPLEMENTED + correction block). NEW DISCOVERY
+    (follow-on queued): `tests/implementation/` (6 files) is entirely unregistered and has
+    never compiled — insight 65 amended, `create_test_notification`'s Wave-1 KEEP was based
+    on a phantom caller (roads.md row re-opened), triage pass mirroring
+    docs/orphan-test-triage-2026-07-11.md is a new follow-on for PO prioritization.
+    #36 placement decided: rides 2d — red pin identified during trace (today an
+    invalid-anchor error in `create_work_with_anchor` leaves the work row committed;
+    after the one-transaction fix it rolls back — black-box pinnable).
 
 ---
 

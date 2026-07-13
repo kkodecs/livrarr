@@ -3,6 +3,7 @@ use livrarr_domain::services::{QueueService, QueueServiceError};
 use livrarr_domain::{
     DownloadClient, Grab, GrabId, GrabStatus, QueueProgress, QueueSummary, UserId,
 };
+use livrarr_download::classify_qbit_state;
 use livrarr_http::HttpClient;
 
 pub struct QueueServiceImpl<D> {
@@ -140,7 +141,7 @@ async fn fetch_qbit_progress(
     Some(QueueProgress {
         percent: (progress * 100.0).round(),
         eta,
-        download_status: qstate.to_string(),
+        download_status: classify_qbit_state(qstate).ui_status.as_str().to_string(),
     })
 }
 

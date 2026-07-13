@@ -280,6 +280,7 @@ A second door onto any of these promotes it to a road row in this file.
 | `create_test_library_item` + sibling test helpers | `crates/livrarr-server/src/api_secondary_impl.rs` | DONE — quality-waves Wave 1 (2026-07-13) |
 | `build_tag_metadata` / `read_cover_bytes` | `crates/livrarr-server/src/infra/import_pipeline.rs` | DONE — quality-waves Wave 1 (2026-07-13) |
 | `QueueItem` + `QueueResponse` (+ member `QBitTorrent`) | `crates/livrarr-download/src/lib.rs` | NEW candidate — zero references to livrarr-download's own `QueueItem` found 2026-07-13 (`grab_service.rs` uses `livrarr_domain::services::grab::QueueItem` — same-name different type); `QueueResponse` holds `Vec<QBitTorrent>`; verify all three together next sweep |
+| `create_test_notification` | `crates/livrarr-server/src/api_secondary_impl.rs` | NEW candidate (re-opened 2026-07-13, 2a session) — Wave 1 KEPT it citing a live caller at `tests/implementation/test_impl_secondary.rs:377`, but the whole `tests/implementation/` directory is unregistered and never compiles (insight 65); the "caller" is phantom. Resolve with the implementation-orphan triage: if the file registers, the helper lives; if the file dies, the helper dies with it |
 
 ## Wiki corrections queued (stale statements this mapping falsified)
 

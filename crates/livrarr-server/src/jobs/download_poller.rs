@@ -8,6 +8,7 @@ use livrarr_db::{
 };
 use livrarr_domain::services::{ImportIoService, ImportService};
 use livrarr_domain::{EventType, GrabStatus, NotificationType};
+use livrarr_download::classify_qbit_state;
 
 // ---------------------------------------------------------------------------
 // Download Poller Tick (JOBS-POLL-001)
@@ -154,7 +155,7 @@ async fn poll_qbittorrent(
             .and_then(|s| s.as_str())
             .unwrap_or("unknown");
 
-        if !is_completed_state(qbit_state) {
+        if !classify_qbit_state(qbit_state).import_safe {
             continue;
         }
 
@@ -829,17 +830,4 @@ fn spawn_import(state: &AppState, user_id: i64, grab_id: i64) {
             }
         }
     });
-}
-
-fn is_completed_state(state: &str) -> bool {
-    matches!(
-        state,
-        "pausedUP"
-            | "stoppedUP"
-            | "uploading"
-            | "stalledUP"
-            | "forcedUP"
-            | "queuedUP"
-            | "checkingResumeData"
-    )
 }

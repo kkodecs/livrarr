@@ -1,12 +1,24 @@
-# D1 — qBittorrent state truth table (DRAFT for PO ratification)
+# D1 — qBittorrent state truth table (RATIFIED)
 
-Status: DRAFT authored 2026-07-13 (quality-waves overnight run). Sources: qBittorrent 5.0
-WebUI API documentation (state table, fetched 2026-07-13), `map_qbit_state`
-(`crates/livrarr-download/src/lib.rs:334-348`), `is_completed_state`
-(`crates/livrarr-server/src/jobs/download_poller.rs:828-839`). Cross-family verification:
-see the review record referenced in the journey doc. **Not ratified — Wave 2 group 2a
-(one shared classifier consumed by both the queue UI and the import trigger) implements
-only after PO sign-off.**
+Status: RATIFIED by the PO 2026-07-13 (morning session), as folded. IMPLEMENTED by
+quality-waves group 2a (same day): `classify_qbit_state`
+(`crates/livrarr-download/src/lib.rs`) is the ONE classifier producing both projections
+(`QbitStateClassification { ui_status, import_safe }`); consumers are the download
+poller's import gate (`poll_qbittorrent`) and `queue_service::fetch_qbit_progress`
+(which now serves the canonical `ui_status` vocabulary in `download_status` instead of
+the raw qBit state string). Both legacy classifiers are deleted. Table-driven pins:
+`tests/behavioral/test_qw2_class_a_pins.rs` (`qw2a_*`).
+
+Sources at authoring: qBittorrent 5.0 WebUI API documentation (state table, fetched
+2026-07-13), `map_qbit_state`, `is_completed_state`. Cross-family verification: see the
+review record referenced in the journey doc.
+
+> **Implementation-time correction (2026-07-13):** `map_qbit_state` turned out to have
+> ZERO production callers — the queue UI never consumed any state classification; it
+> received the raw state string via `QueueProgress.download_status`, which the frontend
+> declares but does not read. The table below remains accurate about the two *functions*;
+> the live wrong-behavior exposure was `is_completed_state`'s `checkingResumeData` row
+> (import trigger). 2a gave the UI projection its first live consumer.
 
 ## The two live classifiers disagree today
 
@@ -66,9 +78,8 @@ in all UP states means the SELECTED files are complete — a torrent with desele
 reads complete while unselected pieces are absent. The import path already operates on
 what exists at content_path; the table does not change that exposure.
 
-## Remaining PO decision
+## PO decision — resolved
 
-Ratify the table as folded (the two former open picks — checkingUP and moving — now carry
-cross-family-agreed values). On ratification, Wave 2 group 2a implements: ONE shared
-classifier producing (UI status, import-safe) consumed by both the queue endpoint and the
-download poller.
+Ratified as folded 2026-07-13 (the two former open picks — checkingUP and moving — carry
+the cross-family-agreed values). Group 2a implemented the single shared classifier the
+same day; see the Status block at the top for the as-built shape.

@@ -244,6 +244,21 @@ pub enum QueueStatus {
     Error,
 }
 
+impl QueueStatus {
+    /// Canonical lowercase string form — matches this enum's serde serialization
+    /// and the frontend `QueueStatus` union type.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            QueueStatus::Downloading => "downloading",
+            QueueStatus::Queued => "queued",
+            QueueStatus::Paused => "paused",
+            QueueStatus::Completed => "completed",
+            QueueStatus::Warning => "warning",
+            QueueStatus::Error => "error",
+        }
+    }
+}
+
 /// Download client implementation type.
 ///
 /// Satisfies: DLC-002, USE-DLC-001

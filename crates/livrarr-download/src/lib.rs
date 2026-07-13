@@ -328,22 +328,49 @@ pub fn resolve_remote_path(
     }
 }
 
-/// Map qBit state string to QueueStatus.
+/// One classification for one qBittorrent state: the queue-UI projection and
+/// the import-safety projection, derived from the same truth-table row so the
+/// two surfaces can never disagree about the same torrent.
+///
+/// The governing table is `docs/d1-qbit-state-truth-table-2026-07-13.md`
+/// (ratified 2026-07-13). "Import-safe" = data fully downloaded AND files at
+/// their final, stable path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QbitStateClassification {
+    pub ui_status: QueueStatus,
+    pub import_safe: bool,
+}
+
+/// Classify a qBittorrent state string into both projections.
+///
+/// Unknown/unmatched states are (Warning, not import-safe).
 ///
 /// Satisfies: DLC-011
-pub fn map_qbit_state(state: &str) -> QueueStatus {
-    match state {
-        "downloading" | "stalledDL" | "forcedDL" => QueueStatus::Downloading,
-        "metaDL" | "allocating" | "queuedDL" | "checkingDL" | "checkingResumeData" => {
-            QueueStatus::Queued
+pub fn classify_qbit_state(state: &str) -> QbitStateClassification {
+    let (ui_status, import_safe) = match state {
+        "downloading" | "stalledDL" | "forcedDL" => (QueueStatus::Downloading, false),
+        // moving: data complete but files not yet at their final path — import next tick.
+        "moving" => (QueueStatus::Downloading, false),
+        "metaDL" | "forcedMetaDL" | "allocating" | "queuedDL" | "checkingDL" => {
+            (QueueStatus::Queued, false)
         }
-        "pausedDL" => QueueStatus::Paused,
-        "pausedUP" | "uploading" | "stalledUP" | "forcedUP" | "queuedUP" | "checkingUP" => {
-            QueueStatus::Completed
+        // checkingResumeData: qBt-startup transient over ANY completion state — never
+        // import on it (a half-downloaded torrent reads the same as a finished one).
+        "checkingResumeData" => (QueueStatus::Queued, false),
+        // checkingUP: finished downloading but still being verified — a failing check
+        // must not read as import-safe.
+        "checkingUP" => (QueueStatus::Queued, false),
+        "pausedDL" | "stoppedDL" => (QueueStatus::Paused, false),
+        "uploading" | "stalledUP" | "forcedUP" | "queuedUP" | "pausedUP" | "stoppedUP" => {
+            (QueueStatus::Completed, true)
         }
-        "missingFiles" | "moving" | "unknown" => QueueStatus::Warning,
-        "error" => QueueStatus::Error,
-        _ => QueueStatus::Warning,
+        "missingFiles" => (QueueStatus::Warning, false),
+        "error" => (QueueStatus::Error, false),
+        _ => (QueueStatus::Warning, false),
+    };
+    QbitStateClassification {
+        ui_status,
+        import_safe,
     }
 }
 

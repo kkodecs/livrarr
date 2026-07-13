@@ -4,7 +4,8 @@ use livrarr_db::{
 };
 use livrarr_domain::identity::{AnchorConfidence, AnchorSetter, AnchorType};
 use livrarr_domain::services::WorkIdentityRepository;
-use livrarr_domain::{MediaType, TagStatus, UserRole};
+use livrarr_domain::{MediaType, QueueStatus, TagStatus, UserRole};
+use livrarr_download::classify_qbit_state;
 
 async fn seeded_db() -> (livrarr_db::sqlite::SqliteDb, i64) {
     let db = create_test_db().await;
@@ -116,4 +117,66 @@ async fn qw2_work_create_with_anchor_persists_work_and_anchor_rows() {
             && anchor.anchor_value == "OL999W"
             && anchor.confidence == AnchorConfidence::Confirmed
     }));
+}
+
+#[test]
+fn qw2a_classify_qbit_state_pins_ratified_truth_table_rows() {
+    let rows = [
+        ("downloading", QueueStatus::Downloading, false),
+        ("stalledDL", QueueStatus::Downloading, false),
+        ("forcedDL", QueueStatus::Downloading, false),
+        ("metaDL", QueueStatus::Queued, false),
+        ("forcedMetaDL", QueueStatus::Queued, false),
+        ("allocating", QueueStatus::Queued, false),
+        ("queuedDL", QueueStatus::Queued, false),
+        ("checkingDL", QueueStatus::Queued, false),
+        ("checkingResumeData", QueueStatus::Queued, false),
+        ("pausedDL", QueueStatus::Paused, false),
+        ("stoppedDL", QueueStatus::Paused, false),
+        ("uploading", QueueStatus::Completed, true),
+        ("stalledUP", QueueStatus::Completed, true),
+        ("forcedUP", QueueStatus::Completed, true),
+        ("queuedUP", QueueStatus::Completed, true),
+        ("pausedUP", QueueStatus::Completed, true),
+        ("stoppedUP", QueueStatus::Completed, true),
+        ("checkingUP", QueueStatus::Queued, false),
+        ("moving", QueueStatus::Downloading, false),
+        ("missingFiles", QueueStatus::Warning, false),
+        ("error", QueueStatus::Error, false),
+    ];
+
+    for (state, expected_ui, expected_import_safe) in rows {
+        let classification = classify_qbit_state(state);
+        assert_eq!(
+            classification.ui_status, expected_ui,
+            "state {state}: ui projection"
+        );
+        assert_eq!(
+            classification.import_safe, expected_import_safe,
+            "state {state}: import_safe projection"
+        );
+    }
+}
+
+#[test]
+fn qw2a_classify_qbit_state_pins_fallback_and_case_sensitive_rows() {
+    let rows = [
+        ("unknown", QueueStatus::Warning, false),
+        ("some-new-state", QueueStatus::Warning, false),
+        ("", QueueStatus::Warning, false),
+        ("DOWNLOADING", QueueStatus::Warning, false),
+        ("Error", QueueStatus::Warning, false),
+    ];
+
+    for (state, expected_ui, expected_import_safe) in rows {
+        let classification = classify_qbit_state(state);
+        assert_eq!(
+            classification.ui_status, expected_ui,
+            "state {state}: ui projection"
+        );
+        assert_eq!(
+            classification.import_safe, expected_import_safe,
+            "state {state}: import_safe projection"
+        );
+    }
 }
