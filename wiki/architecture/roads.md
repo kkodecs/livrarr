@@ -51,6 +51,7 @@ universe: 1 site (`ImportWorkflow`).**
 - **Invariant:** every door funnels into the single enrichment pipeline with a seed; no path writes
   enrichable metadata, covers, or tags by any other route (canonical-model invariant #1).
   Batch doors MAY seed identity-Pending; those works must converge later via R2 — never silent limbo (M9).
+  A new R1/R2 door is not done until its row exists in `test_door_gate.rs`.
 - **Forbidden:** creating a Work row outside the seed factory; enriching outside R2.
 - **Deep docs:** [work-creation-pipeline](work-creation-pipeline.md), [metadata-pathway](metadata-pathway.md).
 - **Status:** CLEAN.
@@ -74,6 +75,7 @@ universe: 1 site (`ImportWorkflow`).**
   | Background convergence sweep | `crates/livrarr-server/src/jobs/convergence.rs::convergence_tick` → `WorkService::converge_work` | yes — enabled by default since 2026-07-04 (`1697bc7`; `[convergence] enabled = false` opts out) |
 - **Invariant:** all provider HTTP rides the one outbound queue (`livrarr-http/src/outbound_queue.rs`);
   merge respects provenance order User > Provider > System; null never overwrites populated.
+  A new R1/R2 door is not done until its row exists in `test_door_gate.rs`.
 - **Forbidden:** calling `enrich_work` / the provider queue / `apply_enrichment_merge` from anywhere
   but this chain; direct UPDATEs to enrichable columns.
 - **Deep docs:** [metadata-pathway](metadata-pathway.md), [enrichment-pipeline](enrichment-pipeline.md).

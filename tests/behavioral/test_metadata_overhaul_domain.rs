@@ -79,22 +79,15 @@ fn provider_conflict() -> ProviderOutcome<String> {
     }
 }
 
-fn provider_suppressed() -> ProviderOutcome<String> {
-    ProviderOutcome::Suppressed {
-        until: fixed_timestamp(),
-    }
-}
-
 #[test]
 fn test_domain_outcome_class_is_phase2_terminal_matches_contract_matrix() {
-    // REQ-ID: R-22 | Contract: OutcomeClass::is_phase2_terminal | Behavior: terminality matches the documented matrix for all six outcome classes
+    // REQ-ID: R-22 | Contract: OutcomeClass::is_phase2_terminal | Behavior: terminality matches the documented matrix for all five outcome classes
     let cases = [
         (OutcomeClass::Success, true),
         (OutcomeClass::NotFound, true),
         (OutcomeClass::WillRetry, false),
         (OutcomeClass::PermanentFailure, true),
         (OutcomeClass::Conflict, true),
-        (OutcomeClass::Suppressed, false),
     ];
 
     for (class, expected) in cases {
@@ -109,14 +102,13 @@ fn test_domain_outcome_class_is_phase2_terminal_matches_contract_matrix() {
 
 #[test]
 fn test_domain_outcome_class_can_merge_matches_contract_matrix() {
-    // REQ-ID: R-22 | Contract: OutcomeClass::can_merge | Behavior: merge eligibility matches the documented matrix for all six outcome classes
+    // REQ-ID: R-22 | Contract: OutcomeClass::can_merge | Behavior: merge eligibility matches the documented matrix for all five outcome classes
     let cases = [
         (OutcomeClass::Success, true),
         (OutcomeClass::NotFound, true),
         (OutcomeClass::WillRetry, false),
         (OutcomeClass::PermanentFailure, true),
         (OutcomeClass::Conflict, false),
-        (OutcomeClass::Suppressed, false),
     ];
 
     for (class, expected) in cases {
@@ -153,14 +145,6 @@ fn test_domain_outcome_class_all_can_merge_returns_false_when_will_retry_is_pres
 fn test_domain_outcome_class_all_can_merge_returns_false_when_conflict_is_present() {
     // REQ-ID: R-22 | Contract: OutcomeClass::all_can_merge | Behavior: returns false when a Conflict outcome is present
     let outcomes = [OutcomeClass::NotFound, OutcomeClass::Conflict];
-
-    assert!(!OutcomeClass::all_can_merge(&outcomes));
-}
-
-#[test]
-fn test_domain_outcome_class_all_can_merge_returns_false_when_suppressed_is_present() {
-    // REQ-ID: R-22 | Contract: OutcomeClass::all_can_merge | Behavior: returns false when a Suppressed outcome is present
-    let outcomes = [OutcomeClass::PermanentFailure, OutcomeClass::Suppressed];
 
     assert!(!OutcomeClass::all_can_merge(&outcomes));
 }
@@ -221,13 +205,12 @@ fn test_domain_permanent_failure_reason_declares_all_documented_variants() {
         PermanentFailureReason::InvalidResponse,
         PermanentFailureReason::Unsupported,
         PermanentFailureReason::IdentityMismatch,
-        PermanentFailureReason::SuppressionExhausted,
     ];
 
     let unique: HashSet<_> = reasons.iter().map(discriminant).collect();
 
-    assert_eq!(reasons.len(), 6);
-    assert_eq!(unique.len(), 6);
+    assert_eq!(reasons.len(), 5);
+    assert_eq!(unique.len(), 5);
 }
 
 #[test]
@@ -255,7 +238,6 @@ fn test_domain_provider_outcome_class_maps_each_variant_to_its_outcome_class() {
         (provider_will_retry(), OutcomeClass::WillRetry),
         (provider_permanent_failure(), OutcomeClass::PermanentFailure),
         (provider_conflict(), OutcomeClass::Conflict),
-        (provider_suppressed(), OutcomeClass::Suppressed),
     ];
 
     for (outcome, expected) in cases {
@@ -272,7 +254,6 @@ fn test_domain_provider_outcome_can_merge_matches_outcome_contract_matrix() {
         (provider_will_retry(), false),
         (provider_permanent_failure(), true),
         (provider_conflict(), false),
-        (provider_suppressed(), false),
     ];
 
     for (outcome, expected) in cases {
@@ -282,14 +263,13 @@ fn test_domain_provider_outcome_can_merge_matches_outcome_contract_matrix() {
 
 #[test]
 fn test_domain_provider_outcome_can_merge_manual_matches_manual_mode_contract_matrix() {
-    // REQ-ID: R-22 | Contract: ProviderOutcome::can_merge_manual | Behavior: manual-mode merge eligibility coerces WillRetry and Suppressed but still blocks Conflict
+    // REQ-ID: R-22 | Contract: ProviderOutcome::can_merge_manual | Behavior: manual-mode merge eligibility coerces WillRetry but still blocks Conflict
     let cases = [
         (provider_success(), true),
         (provider_not_found(), true),
         (provider_will_retry(), true),
         (provider_permanent_failure(), true),
         (provider_conflict(), false),
-        (provider_suppressed(), true),
     ];
 
     for (outcome, expected) in cases {
@@ -387,7 +367,6 @@ fn test_domain_outcome_class_serializes_each_variant_in_snake_case() {
         (OutcomeClass::WillRetry, "\"will_retry\""),
         (OutcomeClass::PermanentFailure, "\"permanent_failure\""),
         (OutcomeClass::Conflict, "\"conflict\""),
-        (OutcomeClass::Suppressed, "\"suppressed\""),
     ];
 
     for (class, expected_json) in cases {
@@ -427,10 +406,6 @@ fn test_domain_permanent_failure_reason_serializes_each_variant_in_snake_case() 
         (
             PermanentFailureReason::IdentityMismatch,
             "\"identity_mismatch\"",
-        ),
-        (
-            PermanentFailureReason::SuppressionExhausted,
-            "\"suppression_exhausted\"",
         ),
     ];
 

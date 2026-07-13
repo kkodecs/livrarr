@@ -392,37 +392,38 @@ Pseudocode:
 ```rust
 fn dispatch_enrichment(work, context):
     to_dispatch = []
-    suppressed_open = []
 
     for provider in registered providers:
         if provider is not applicable to work:
             continue
 
+        derive per-provider AnchorQuery:
+            no usable anchor -> SkippedNoAnchor call record + NotFound outcome, no spawn
+
         if provider already has terminal retry state:
             continue
 
-        if provider circuit breaker is Open:
-            suppressed_open.push(provider)
-            continue
+        if context.freshness == PreferCache and provider_response_cache has a fresh row:
+            use cached payload as a Success outcome, zero HTTP
 
         to_dispatch.push(provider)
 
-    spawn one task per provider:
-        acquire provider concurrency permit
-        acquire provider rate-limit token
-        call provider_client.fetch(work, context)
+    spawn one task per provider (JoinSet):
+        call provider_client.fetch_by_anchor(anchor_query)
+        // pacing, in-flight caps, and the circuit breaker all live at the
+        // process-global outbound HTTP queue (livrarr-http), not here;
+        // a breaker-open bucket surfaces as WillRetry{CircuitOpen}
 
     gather all tasks:
         missing or panicked provider task -> PermanentFailure(ProviderPanic)
 
     for each provider outcome:
         apply retry budget rules
+            // WillRetry at the attempt cap -> PermanentFailure(RetryBudgetExhausted);
+            // WillRetry{CircuitOpen} passes through, spending no budget
         persist provider_retry_state
-        update circuit breaker
+        cache Success payloads in provider_response_cache
         add to outcome map
-
-    for open-circuit providers:
-        persist Suppressed outcome
 
     conflict_present = any outcome is Conflict
 
@@ -444,19 +445,18 @@ Provider outcome classes:
 - `WillRetry`
 - `PermanentFailure`
 - `Conflict`
-- `Suppressed`
 
 Speed controls:
 
-- per-provider concurrency semaphore
-- GCRA token bucket rate limiter
-- circuit breaker
+- pacing, per-bucket in-flight caps, and circuit breaking at the process-global
+  outbound HTTP queue (`livrarr-http/src/outbound_queue.rs`)
 - retry budget
+- provider response cache (background flows; user refresh bypasses)
 - background deferral when a provider outcome is not merge-safe
 
 ## Provider Clients
 
-Provider clients live in `crates/livrarr-metadata/src/provider_client.rs` and
+Provider clients live in `crates/livrarr-external-data/src/provider_client.rs` and
 normalize source-specific results into `NormalizedWorkDetail`.
 
 Current providers:
@@ -464,8 +464,9 @@ Current providers:
 - `Hardcover`: GraphQL metadata provider. Uses result selection and edition
   fetching for richer identifiers and covers.
 - `Goodreads`: HTML search/detail path. Direct detail is preferred when
-  `work.gr_key` exists. Search requires LLM disambiguation for candidate choice;
-  if the LLM cannot select a candidate, Goodreads returns no payload.
+  `work.gr_key` exists. Search picks deterministically (autocomplete-first, the
+  shared 0.75 picker, explicit abstain — Phase 5 removed LLM selection); the
+  only LLM on the GR path is `llm_extract_payload` (HTML-parse repair).
 - `OpenLibrary`: REST metadata provider. Useful for OL keys, descriptions, and
   ISBNs. Emits a cover URL in the normalized detail when the OL record carries
   a cover id (`covers.openlibrary.org/b/id/{id}-L.jpg?default=false`) — an
@@ -552,7 +553,7 @@ Important tables and files:
 
 - `works`: canonical metadata, status, cover URL, language, provider keys,
   merge generation.
-- `provider_retry_state`: per-provider outcome state, next retry, suppression,
+- `provider_retry_state`: per-provider outcome state, next retry,
   and normalized success payload JSON.
 - `work_metadata_provenance`: field-level ownership and provider provenance.
 - external ID tables: additional ISBNs, ASINs, and provider identifiers.
@@ -695,7 +696,7 @@ measures, compares against the incumbent, and commits file + DB atomically.
 If no provider offers a cover URL, no download starts — resolving covers from
 a bare ISBN/key when every payload lacks one remains future work.
 
-Provider retry state is durable and intentionally suppresses repeated work. That
+Provider retry state is durable and intentionally skips repeated work. That
 means pipeline changes should have a way to invalidate stale terminal outcomes.
 
 Goodreads direct lookup depends on `gr_key`. If the entry path drops a selected

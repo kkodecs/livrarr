@@ -34,14 +34,10 @@ pub enum ProviderQueueScenario {
     ProviderPanicIsolation,
     RestartSkipsTerminal,
     ManualCoercesWillRetry,
-    ManualCoercesSuppressed,
     RetryBudgetExhausted,
-    SuppressionExhausted,
-    SuppressionPreservesFirstTimestamp,
     ProviderNotApplicableSkipped,
     NonSuccessTerminalClearsPayload,
     HardRefreshCoercesWillRetry,
-    HardRefreshCoercesSuppressed,
 }
 
 // DEFERRED: normalization pipeline tests require NormalizedWorkDetail type.
@@ -200,15 +196,6 @@ macro_rules! provider_queue_contract_tests {
                 let state = retry_state_for(h.retry_db(), h.work(), provider).await;
                 assert_eq!(state.last_outcome, Some(OutcomeClass::WillRetry));
                 assert_eq!(state.attempts, 1);
-                assert_eq!(state.suppressed_passes, 0);
-            }
-
-            if has_outcome_class(&result, OutcomeClass::Suppressed) {
-                let provider = provider_with_outcome_class(&result, OutcomeClass::Suppressed);
-                let state = retry_state_for(h.retry_db(), h.work(), provider).await;
-                assert_eq!(state.last_outcome, Some(OutcomeClass::Suppressed));
-                assert_eq!(state.attempts, 0);
-                assert_eq!(state.suppressed_passes, 1);
             }
         }
 
@@ -424,26 +411,6 @@ macro_rules! provider_queue_contract_tests {
 
         #[tokio::test]
 
-        async fn test_provider_queue_dispatch_manual_coerces_suppressed_to_merge_eligible() {
-            // REQ-ID: R-22 | Contract: ProviderQueue::dispatch_enrichment | Behavior: Manual mode coerces Suppressed to merge-eligible for that request
-            let h = <$harness as ProviderQueueTestHarness>::setup(
-                ProviderQueueScenario::ManualCoercesSuppressed,
-            )
-            .await;
-
-            let result = h
-                .queue()
-                .dispatch_enrichment(h.work(), manual_context())
-                .await
-                .unwrap();
-
-            assert!(has_outcome_class(&result, OutcomeClass::Suppressed));
-            assert!(result.merge_eligible);
-            assert!(!result.deferred);
-        }
-
-        #[tokio::test]
-
         async fn test_provider_queue_dispatch_manual_mode_does_not_coerce_conflict() {
             // REQ-ID: R-22 | Contract: ProviderQueue::dispatch_enrichment | Behavior: Manual mode does not coerce Conflict; Conflict always blocks merge
             let h =
@@ -476,26 +443,6 @@ macro_rules! provider_queue_contract_tests {
                 .unwrap();
 
             assert!(has_outcome_class(&result, OutcomeClass::WillRetry));
-            assert!(result.merge_eligible);
-            assert!(!result.deferred);
-        }
-
-        #[tokio::test]
-
-        async fn test_provider_queue_dispatch_hard_refresh_coerces_suppressed_to_merge_eligible() {
-            // REQ-ID: R-22 | Contract: ProviderQueue::dispatch_enrichment | Behavior: HardRefresh mode coerces Suppressed to merge-eligible for that request
-            let h = <$harness as ProviderQueueTestHarness>::setup(
-                ProviderQueueScenario::HardRefreshCoercesSuppressed,
-            )
-            .await;
-
-            let result = h
-                .queue()
-                .dispatch_enrichment(h.work(), hard_refresh_context())
-                .await
-                .unwrap();
-
-            assert!(has_outcome_class(&result, OutcomeClass::Suppressed));
             assert!(result.merge_eligible);
             assert!(!result.deferred);
         }
@@ -567,118 +514,6 @@ macro_rules! provider_queue_contract_tests {
 
         #[tokio::test]
 
-        async fn test_provider_queue_dispatch_records_permanent_failure_when_suppression_budget_exhausted() {
-            // REQ-ID: R-22 | Contract: ProviderQueue::dispatch_enrichment | Behavior: only the dispatch from a preexisting suppressed_passes=max_suppressed_passes-1 state converts the provider to PermanentFailure{SuppressionExhausted}, preserving the original suppression-window start until terminalization
-            let h = <$harness as ProviderQueueTestHarness>::setup(
-                ProviderQueueScenario::SuppressionExhausted,
-            )
-            .await;
-
-            let pre_states = h
-                .retry_db()
-                .list_retry_states(h.work().user_id, h.work().id)
-                .await
-                .unwrap();
-
-            let pre_exhausted_provider = pre_states
-                .iter()
-                .find_map(|state| {
-                    (state.last_outcome == Some(OutcomeClass::Suppressed)
-                        && state.suppressed_passes > 0
-                        && state.first_suppressed_at.is_some())
-                    .then_some(state.provider)
-                })
-                .expect("scenario must pre-seed a provider one suppressed pass away from exhaustion");
-
-            let config = h.provider_config(pre_exhausted_provider);
-            let pre_state = retry_state_for(h.retry_db(), h.work(), pre_exhausted_provider).await;
-            let original_first_suppressed_at = pre_state
-                .first_suppressed_at
-                .expect("suppression window must already be in progress before final dispatch");
-
-            assert_eq!(pre_state.last_outcome, Some(OutcomeClass::Suppressed));
-            assert_eq!(
-                pre_state.suppressed_passes,
-                config.max_suppressed_passes - 1
-            );
-            let window_check = pre_state.first_suppressed_at.unwrap();
-            let elapsed = chrono::Utc::now() - window_check;
-            assert!(
-                elapsed.num_seconds() < config.max_suppression_window_secs as i64,
-                "first_suppressed_at must be within window to test budget exhaustion, not window expiry"
-            );
-            assert_ne!(pre_state.last_outcome, Some(OutcomeClass::PermanentFailure));
-
-            let result = h
-                .queue()
-                .dispatch_enrichment(h.work(), background_context())
-                .await
-                .unwrap();
-
-            assert!(matches!(
-                result.outcomes.get(&pre_exhausted_provider),
-                Some(ProviderOutcome::PermanentFailure {
-                    reason: PermanentFailureReason::SuppressionExhausted
-                })
-            ));
-
-            let state = retry_state_for(h.retry_db(), h.work(), pre_exhausted_provider).await;
-            assert_eq!(state.last_outcome, Some(OutcomeClass::PermanentFailure));
-            assert!(state.normalized_payload_json.is_none());
-            assert!(state.first_suppressed_at.is_none());
-            assert!(original_first_suppressed_at <= chrono::Utc::now());
-        }
-
-        #[tokio::test]
-
-        async fn test_provider_queue_dispatch_preserves_first_suppressed_at_on_subsequent_suppressions() {
-            // REQ-ID: R-22 | Contract: ProviderQueue::dispatch_enrichment | Behavior: subsequent Suppressed outcomes increment suppressed_passes without resetting first_suppressed_at
-            let h = <$harness as ProviderQueueTestHarness>::setup(
-                ProviderQueueScenario::SuppressionPreservesFirstTimestamp,
-            )
-            .await;
-
-            let pre_states = h
-                .retry_db()
-                .list_retry_states(h.work().user_id, h.work().id)
-                .await
-                .unwrap();
-
-            let provider = pre_states
-                .iter()
-                .find_map(|state| {
-                    (state.last_outcome == Some(OutcomeClass::Suppressed)
-                        && state.suppressed_passes == 1
-                        && state.first_suppressed_at.is_some())
-                    .then_some(state.provider)
-                })
-                .expect("scenario must pre-seed a suppressed provider with an existing first_suppressed_at");
-
-            let pre_state = retry_state_for(h.retry_db(), h.work(), provider).await;
-            let known_past_timestamp = pre_state
-                .first_suppressed_at
-                .expect("scenario must include known past first_suppressed_at");
-            assert_eq!(pre_state.suppressed_passes, 1);
-
-            let result = h
-                .queue()
-                .dispatch_enrichment(h.work(), background_context())
-                .await
-                .unwrap();
-
-            assert!(matches!(
-                result.outcomes.get(&provider),
-                Some(ProviderOutcome::Suppressed { .. })
-            ));
-
-            let state = retry_state_for(h.retry_db(), h.work(), provider).await;
-            assert_eq!(state.last_outcome, Some(OutcomeClass::Suppressed));
-            assert_eq!(state.suppressed_passes, 2);
-            assert_eq!(state.first_suppressed_at, Some(known_past_timestamp));
-        }
-
-        #[tokio::test]
-
         async fn test_provider_queue_dispatch_skips_not_applicable_provider() {
             // REQ-ID: R-22 | Contract: ProviderQueue::dispatch_enrichment | Behavior: a provider that is not applicable to the work is skipped without being called, and is absent from outcomes entirely
             let h = <$harness as ProviderQueueTestHarness>::setup(
@@ -698,7 +533,7 @@ macro_rules! provider_queue_contract_tests {
             assert!(!result.outcomes.contains_key(&skipped_provider));
             assert!(!matches!(
                 result.outcomes.get(&skipped_provider),
-                Some(ProviderOutcome::Suppressed { .. } | ProviderOutcome::WillRetry { .. })
+                Some(ProviderOutcome::WillRetry { .. })
             ));
             assert!(!matches!(
                 result.outcomes.get(&skipped_provider),
@@ -722,8 +557,6 @@ fn default_config(provider: MetadataProvider) -> ProviderQueueConfig {
     ProviderQueueConfig {
         provider,
         max_attempts: 3,
-        max_suppressed_passes: 3,
-        max_suppression_window_secs: 3600,
     }
 }
 
@@ -891,9 +724,7 @@ impl ProviderQueueTestHarness for StubProviderQueueHarness {
                     &mut configs,
                     &mut clients,
                     MetadataProvider::Goodreads,
-                    ProviderOutcome::Suppressed {
-                        until: future_ts(600),
-                    },
+                    ProviderOutcome::NotFound,
                 );
             }
             ProviderQueueScenario::SuccessPayloadDurability => {
@@ -1007,17 +838,6 @@ impl ProviderQueueTestHarness for StubProviderQueueHarness {
                     },
                 );
             }
-            ProviderQueueScenario::ManualCoercesSuppressed => {
-                builder = Self::add_stub(
-                    builder,
-                    &mut configs,
-                    &mut clients,
-                    MetadataProvider::Hardcover,
-                    ProviderOutcome::Suppressed {
-                        until: future_ts(600),
-                    },
-                );
-            }
             ProviderQueueScenario::RetryBudgetExhausted => {
                 // Pre-seed HC at attempts=max-1 with last_outcome=WillRetry. A
                 // fresh WillRetry from the client this dispatch must convert to
@@ -1043,48 +863,6 @@ impl ProviderQueueTestHarness for StubProviderQueueHarness {
                     .await
                     .unwrap();
                 }
-            }
-            ProviderQueueScenario::SuppressionExhausted => {
-                builder = Self::add_stub(
-                    builder,
-                    &mut configs,
-                    &mut clients,
-                    MetadataProvider::Hardcover,
-                    ProviderOutcome::Suppressed {
-                        until: future_ts(600),
-                    },
-                );
-                let cfg = configs.get(&MetadataProvider::Hardcover).unwrap().clone();
-                for _ in 0..(cfg.max_suppressed_passes - 1) {
-                    db.record_suppressed(
-                        work.user_id,
-                        work.id,
-                        MetadataProvider::Hardcover,
-                        future_ts(600),
-                    )
-                    .await
-                    .unwrap();
-                }
-            }
-            ProviderQueueScenario::SuppressionPreservesFirstTimestamp => {
-                builder = Self::add_stub(
-                    builder,
-                    &mut configs,
-                    &mut clients,
-                    MetadataProvider::Hardcover,
-                    ProviderOutcome::Suppressed {
-                        until: future_ts(600),
-                    },
-                );
-                // One prior suppression seeds first_suppressed_at.
-                db.record_suppressed(
-                    work.user_id,
-                    work.id,
-                    MetadataProvider::Hardcover,
-                    future_ts(600),
-                )
-                .await
-                .unwrap();
             }
             ProviderQueueScenario::ProviderNotApplicableSkipped => {
                 builder = Self::add_stub(
@@ -1125,17 +903,6 @@ impl ProviderQueueTestHarness for StubProviderQueueHarness {
                     ProviderOutcome::WillRetry {
                         reason: livrarr_domain::WillRetryReason::Timeout,
                         next_attempt_at: future_ts(600),
-                    },
-                );
-            }
-            ProviderQueueScenario::HardRefreshCoercesSuppressed => {
-                builder = Self::add_stub(
-                    builder,
-                    &mut configs,
-                    &mut clients,
-                    MetadataProvider::Hardcover,
-                    ProviderOutcome::Suppressed {
-                        until: future_ts(600),
                     },
                 );
             }

@@ -253,8 +253,6 @@ async fn main() {
         let queue_cfg = |provider| m::ProviderQueueConfig {
             provider,
             max_attempts: 5,
-            max_suppressed_passes: 3,
-            max_suppression_window_secs: 3600,
         };
 
         let mut builder = m::DefaultProviderQueueBuilder::new();

@@ -59,8 +59,6 @@ fn queue_config(provider: MetadataProvider) -> ProviderQueueConfig {
     ProviderQueueConfig {
         provider,
         max_attempts: 10,
-        max_suppressed_passes: 3,
-        max_suppression_window_secs: 3600,
     }
 }
 

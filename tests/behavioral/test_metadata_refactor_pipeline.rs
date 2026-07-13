@@ -131,10 +131,6 @@ async fn persist_scatter_result(
                 db.record_will_retry(user_id, result.work_id, *provider, *next_attempt_at)
                     .await?;
             }
-            ProviderOutcome::Suppressed { until } => {
-                db.record_suppressed(user_id, result.work_id, *provider, *until)
-                    .await?;
-            }
         }
     }
     Ok(())

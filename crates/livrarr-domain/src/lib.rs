@@ -1314,8 +1314,6 @@ pub enum OutcomeClass {
     PermanentFailure,
     /// Provider returned data that conflicts with existing confirmed data.
     Conflict,
-    /// Provider was suppressed (circuit open, rate-limit window, etc.).
-    Suppressed,
 }
 
 /// Per-field / per-provider merge dissent (REQ-013/014): an excluded
@@ -1404,7 +1402,7 @@ pub enum WillRetryReason {
     AntiBotBlock,
     /// The outbound queue's breaker was Open for this provider's bucket
     /// (R-11): a pause, not a step toward a retry-budget dead-end — must
-    /// never consume the attempt or suppression budget.
+    /// never consume the attempt budget.
     CircuitOpen,
 }
 
@@ -1417,7 +1415,6 @@ pub enum PermanentFailureReason {
     InvalidResponse,
     Unsupported,
     IdentityMismatch,
-    SuppressionExhausted,
 }
 
 /// Result of applying an enrichment merge to the work record.

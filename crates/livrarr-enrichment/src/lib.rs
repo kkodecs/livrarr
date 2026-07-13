@@ -173,8 +173,6 @@ pub struct EnrichmentContext {
 pub struct ProviderQueueConfig {
     pub provider: livrarr_domain::MetadataProvider,
     pub max_attempts: u32,
-    pub max_suppressed_passes: u32,
-    pub max_suppression_window_secs: u64,
 }
 
 /// Queue infrastructure error. Provider-level failures and panics become per-provider
@@ -1107,7 +1105,7 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
 /// - `Thin` when ≥1 provider responded with a Success outcome (including empty
 ///   payloads) but the merge produced no usable text.
 /// - `Failed` when NO provider returned a Success outcome — all were
-///   NotConfigured, WillRetry, PermanentFailure, Suppressed, or NotFound. This
+///   NotConfigured, WillRetry, PermanentFailure, or NotFound. This
 ///   is the transient "try later" state; the background job will retry.
 ///
 /// The merge engine's own `enrichment_status` already handles Enriched/Thin
@@ -1615,15 +1613,6 @@ where
                         *provider,
                         ReconstructedOutcome {
                             class: livrarr_domain::OutcomeClass::Conflict,
-                            payload: None,
-                        },
-                    );
-                }
-                ProviderOutcome::Suppressed { .. } => {
-                    reconstructed.insert(
-                        *provider,
-                        ReconstructedOutcome {
-                            class: livrarr_domain::OutcomeClass::Suppressed,
                             payload: None,
                         },
                     );

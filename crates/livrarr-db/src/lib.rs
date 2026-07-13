@@ -2195,10 +2195,8 @@ pub struct ProviderRetryState {
     pub work_id: WorkId,
     pub provider: MetadataProvider,
     pub attempts: u32,
-    pub suppressed_passes: u32,
     pub last_outcome: Option<OutcomeClass>,
     pub next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub first_suppressed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub normalized_payload_json: Option<String>,
 }
 
@@ -2279,14 +2277,6 @@ pub trait ProviderRetryStateDb: Send + Sync {
         work_id: WorkId,
         provider: MetadataProvider,
         next_attempt_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<ProviderRetryState, DbError>;
-
-    async fn record_suppressed(
-        &self,
-        user_id: UserId,
-        work_id: WorkId,
-        provider: MetadataProvider,
-        until: chrono::DateTime<chrono::Utc>,
     ) -> Result<ProviderRetryState, DbError>;
 
     async fn record_terminal_outcome(

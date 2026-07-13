@@ -39,9 +39,6 @@ fn row_to_retry_state(row: sqlx::sqlite::SqliteRow) -> Result<ProviderRetryState
     let next_attempt_str: Option<String> = row
         .try_get("next_attempt_at")
         .map_err(|e| DbError::Io(Box::new(e)))?;
-    let first_suppressed_str: Option<String> = row
-        .try_get("first_suppressed_at")
-        .map_err(|e| DbError::Io(Box::new(e)))?;
 
     Ok(ProviderRetryState {
         user_id: row
@@ -54,12 +51,8 @@ fn row_to_retry_state(row: sqlx::sqlite::SqliteRow) -> Result<ProviderRetryState
         attempts: row
             .try_get::<i64, _>("attempts")
             .map_err(|e| DbError::Io(Box::new(e)))? as u32,
-        suppressed_passes: row
-            .try_get::<i64, _>("suppressed_passes")
-            .map_err(|e| DbError::Io(Box::new(e)))? as u32,
         last_outcome: last_outcome_str.as_deref().map(from_str).transpose()?,
         next_attempt_at: next_attempt_str.as_deref().map(parse_dt).transpose()?,
-        first_suppressed_at: first_suppressed_str.as_deref().map(parse_dt).transpose()?,
         normalized_payload_json: row
             .try_get("normalized_payload_json")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -80,8 +73,8 @@ impl crate::ProviderRetryStateDb for SqliteDb {
         let provider_str = to_str(provider);
         let row = sqlx::query(
             "SELECT prs.user_id, prs.work_id, prs.provider, prs.attempts, \
-             prs.suppressed_passes, prs.last_outcome, prs.last_attempt_at, \
-             prs.next_attempt_at, prs.normalized_payload_json, prs.first_suppressed_at \
+             prs.last_outcome, prs.last_attempt_at, \
+             prs.next_attempt_at, prs.normalized_payload_json \
              FROM provider_retry_state prs \
              JOIN works w ON prs.work_id = w.id \
              WHERE prs.work_id = ? AND prs.provider = ? AND w.user_id = ?",
@@ -103,8 +96,8 @@ impl crate::ProviderRetryStateDb for SqliteDb {
     ) -> Result<Vec<ProviderRetryState>, DbError> {
         let rows = sqlx::query(
             "SELECT prs.user_id, prs.work_id, prs.provider, prs.attempts, \
-             prs.suppressed_passes, prs.last_outcome, prs.last_attempt_at, \
-             prs.next_attempt_at, prs.normalized_payload_json, prs.first_suppressed_at \
+             prs.last_outcome, prs.last_attempt_at, \
+             prs.next_attempt_at, prs.normalized_payload_json \
              FROM provider_retry_state prs \
              JOIN works w ON prs.work_id = w.id \
              WHERE prs.work_id = ? AND w.user_id = ?",
@@ -132,13 +125,12 @@ impl crate::ProviderRetryStateDb for SqliteDb {
         sqlx::query(
             "INSERT INTO provider_retry_state \
              (user_id, work_id, provider, attempts, next_attempt_at, \
-             normalized_payload_json, first_suppressed_at, last_attempt_at, last_outcome) \
-             VALUES (?, ?, ?, 1, ?, NULL, NULL, ?, 'will_retry') \
+             normalized_payload_json, last_attempt_at, last_outcome) \
+             VALUES (?, ?, ?, 1, ?, NULL, ?, 'will_retry') \
              ON CONFLICT(work_id, provider) DO UPDATE SET \
              attempts = provider_retry_state.attempts + 1, \
              next_attempt_at = excluded.next_attempt_at, \
              normalized_payload_json = NULL, \
-             first_suppressed_at = NULL, \
              last_attempt_at = excluded.last_attempt_at, \
              last_outcome = 'will_retry'",
         )
@@ -172,12 +164,11 @@ impl crate::ProviderRetryStateDb for SqliteDb {
         sqlx::query(
             "INSERT INTO provider_retry_state \
              (user_id, work_id, provider, attempts, next_attempt_at, \
-             normalized_payload_json, first_suppressed_at, last_attempt_at, last_outcome) \
-             VALUES (?, ?, ?, 0, ?, NULL, NULL, ?, 'will_retry') \
+             normalized_payload_json, last_attempt_at, last_outcome) \
+             VALUES (?, ?, ?, 0, ?, NULL, ?, 'will_retry') \
              ON CONFLICT(work_id, provider) DO UPDATE SET \
              next_attempt_at = excluded.next_attempt_at, \
              normalized_payload_json = NULL, \
-             first_suppressed_at = NULL, \
              last_attempt_at = excluded.last_attempt_at, \
              last_outcome = 'will_retry'",
         )
@@ -185,47 +176,6 @@ impl crate::ProviderRetryStateDb for SqliteDb {
         .bind(work_id)
         .bind(&provider_str)
         .bind(&next_str)
-        .bind(&now)
-        .execute(self.pool())
-        .await
-        .map_err(map_db_err)?;
-
-        self.get_retry_state(user_id, work_id, provider)
-            .await?
-            .ok_or(DbError::NotFound {
-                entity: "provider_retry_state",
-            })
-    }
-
-    async fn record_suppressed(
-        &self,
-        user_id: UserId,
-        work_id: WorkId,
-        provider: MetadataProvider,
-        until: chrono::DateTime<chrono::Utc>,
-    ) -> Result<ProviderRetryState, DbError> {
-        let provider_str = to_str(provider);
-        let until_str = until.to_rfc3339();
-        let now = Utc::now().to_rfc3339();
-
-        sqlx::query(
-            "INSERT INTO provider_retry_state \
-             (user_id, work_id, provider, suppressed_passes, next_attempt_at, \
-             first_suppressed_at, last_attempt_at, last_outcome) \
-             VALUES (?, ?, ?, 1, ?, ?, ?, 'suppressed') \
-             ON CONFLICT(work_id, provider) DO UPDATE SET \
-             suppressed_passes = provider_retry_state.suppressed_passes + 1, \
-             next_attempt_at = excluded.next_attempt_at, \
-             first_suppressed_at = COALESCE(provider_retry_state.first_suppressed_at, \
-                                            excluded.first_suppressed_at), \
-             last_attempt_at = excluded.last_attempt_at, \
-             last_outcome = 'suppressed'",
-        )
-        .bind(user_id)
-        .bind(work_id)
-        .bind(&provider_str)
-        .bind(&until_str)
-        .bind(&now) // first_suppressed_at = now on initial insert
         .bind(&now)
         .execute(self.pool())
         .await
@@ -249,7 +199,7 @@ impl crate::ProviderRetryStateDb for SqliteDb {
         // Validate: only terminal outcomes allowed.
         if !outcome.is_phase2_terminal() {
             return Err(DbError::Constraint {
-                message: format!("outcome {outcome:?} is not terminal — use record_will_retry or record_suppressed"),
+                message: format!("outcome {outcome:?} is not terminal — use record_will_retry"),
             });
         }
 
@@ -280,13 +230,12 @@ impl crate::ProviderRetryStateDb for SqliteDb {
         sqlx::query(
             "INSERT INTO provider_retry_state \
              (user_id, work_id, provider, last_outcome, normalized_payload_json, \
-             next_attempt_at, first_suppressed_at, last_attempt_at) \
-             VALUES (?, ?, ?, ?, ?, NULL, NULL, ?) \
+             next_attempt_at, last_attempt_at) \
+             VALUES (?, ?, ?, ?, ?, NULL, ?) \
              ON CONFLICT(work_id, provider) DO UPDATE SET \
              last_outcome = excluded.last_outcome, \
              normalized_payload_json = excluded.normalized_payload_json, \
              next_attempt_at = NULL, \
-             first_suppressed_at = NULL, \
              last_attempt_at = excluded.last_attempt_at",
         )
         .bind(user_id)

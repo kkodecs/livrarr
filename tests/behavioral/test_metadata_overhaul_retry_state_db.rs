@@ -1,6 +1,6 @@
 #![doc = "Behavioral tests for ProviderRetryStateDb using real SQLite `:memory:` with full migrations."]
-#![doc = "Covers R-20 and R-22 retry-state transitions, normalized payload persistence, suppression-window"]
-#![doc = "semantics, due-retry listing, terminal-provider-row listing, reset behavior, and user isolation."]
+#![doc = "Covers R-20 and R-22 retry-state transitions, normalized payload persistence,"]
+#![doc = "due-retry listing, terminal-provider-row listing, reset behavior, and user isolation."]
 #![allow(dead_code)]
 
 use std::collections::HashSet;
@@ -127,11 +127,6 @@ async fn record_provider_state<DB: ProviderRetryStateDb>(
         }
         OutcomeClass::WillRetry => {
             db.record_will_retry(user_id, work_id, provider, at)
-                .await
-                .unwrap();
-        }
-        OutcomeClass::Suppressed => {
-            db.record_suppressed(user_id, work_id, provider, at)
                 .await
                 .unwrap();
         }
@@ -273,129 +268,6 @@ async fn assert_record_will_retry_clears_normalized_payload_json<
         .unwrap();
 
     assert_eq!(stored.normalized_payload_json, None);
-}
-
-async fn assert_record_will_retry_clears_first_suppressed_at<
-    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
->(
-    db: &DB,
-    user_id: UserId,
-) {
-    let work_id = make_work(db, user_id, "will-retry-clears-first-suppressed-at").await;
-
-    let suppressed = db
-        .record_suppressed(
-            user_id,
-            work_id,
-            MetadataProvider::OpenLibrary,
-            Utc::now() + Duration::minutes(10),
-        )
-        .await
-        .unwrap();
-
-    assert!(suppressed.first_suppressed_at.is_some());
-
-    let retry = db
-        .record_will_retry(
-            user_id,
-            work_id,
-            MetadataProvider::OpenLibrary,
-            Utc::now() + Duration::minutes(20),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(retry.first_suppressed_at, None);
-}
-
-async fn assert_record_suppressed_increments_suppressed_passes_without_incrementing_attempts<
-    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
->(
-    db: &DB,
-    user_id: UserId,
-) {
-    let work_id = make_work(db, user_id, "suppressed-does-not-increment-attempts").await;
-
-    db.record_will_retry(
-        user_id,
-        work_id,
-        MetadataProvider::Goodreads,
-        Utc::now() + Duration::minutes(5),
-    )
-    .await
-    .unwrap();
-
-    let until = Utc::now() + Duration::minutes(15);
-    let suppressed = db
-        .record_suppressed(user_id, work_id, MetadataProvider::Goodreads, until)
-        .await
-        .unwrap();
-
-    assert_eq!(suppressed.attempts, 1);
-    assert_eq!(suppressed.suppressed_passes, 1);
-    assert_eq!(suppressed.last_outcome, Some(OutcomeClass::Suppressed));
-    assert_eq!(suppressed.next_attempt_at, Some(until));
-}
-
-async fn assert_record_suppressed_sets_first_suppressed_at_when_none<
-    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
->(
-    db: &DB,
-    user_id: UserId,
-) {
-    let work_id = make_work(db, user_id, "suppressed-sets-first-window").await;
-    let before = Utc::now();
-    let state = db
-        .record_suppressed(
-            user_id,
-            work_id,
-            MetadataProvider::Audnexus,
-            Utc::now() + Duration::minutes(10),
-        )
-        .await
-        .unwrap();
-    let after = Utc::now();
-
-    let first = state
-        .first_suppressed_at
-        .expect("first_suppressed_at should be set on first suppression");
-
-    assert!(first >= before - Duration::seconds(1));
-    assert!(first <= after + Duration::seconds(1));
-}
-
-async fn assert_record_suppressed_preserves_existing_first_suppressed_at<
-    DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
->(
-    db: &DB,
-    user_id: UserId,
-) {
-    let work_id = make_work(db, user_id, "suppressed-preserves-first-window").await;
-
-    let first = db
-        .record_suppressed(
-            user_id,
-            work_id,
-            MetadataProvider::Audnexus,
-            Utc::now() + Duration::minutes(10),
-        )
-        .await
-        .unwrap()
-        .first_suppressed_at
-        .expect("first_suppressed_at should be set on first suppression");
-
-    let second = db
-        .record_suppressed(
-            user_id,
-            work_id,
-            MetadataProvider::Audnexus,
-            Utc::now() + Duration::minutes(20),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(second.first_suppressed_at, Some(first));
-    assert_eq!(second.suppressed_passes, 2);
 }
 
 async fn assert_record_terminal_outcome_success_persists_normalized_payload_json<
@@ -542,7 +414,7 @@ async fn assert_record_terminal_outcome_rejects_non_terminal_outcome_classes<
     db: &DB,
     user_id: UserId,
 ) {
-    for outcome in [OutcomeClass::WillRetry, OutcomeClass::Suppressed] {
+    for outcome in [OutcomeClass::WillRetry] {
         let work_id = make_work(
             db,
             user_id,
@@ -565,7 +437,7 @@ async fn assert_record_terminal_outcome_rejects_non_terminal_outcome_classes<
     }
 }
 
-async fn assert_record_terminal_outcome_clears_next_attempt_at_and_first_suppressed_at<
+async fn assert_record_terminal_outcome_clears_next_attempt_at<
     DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
@@ -573,8 +445,8 @@ async fn assert_record_terminal_outcome_clears_next_attempt_at_and_first_suppres
 ) {
     let work_id = make_work(db, user_id, "terminal-clears-scheduling-window").await;
 
-    let suppressed = db
-        .record_suppressed(
+    let will_retry = db
+        .record_will_retry(
             user_id,
             work_id,
             MetadataProvider::OpenLibrary,
@@ -583,8 +455,7 @@ async fn assert_record_terminal_outcome_clears_next_attempt_at_and_first_suppres
         .await
         .unwrap();
 
-    assert!(suppressed.next_attempt_at.is_some());
-    assert!(suppressed.first_suppressed_at.is_some());
+    assert!(will_retry.next_attempt_at.is_some());
 
     db.record_terminal_outcome(
         user_id,
@@ -604,7 +475,6 @@ async fn assert_record_terminal_outcome_clears_next_attempt_at_and_first_suppres
 
     assert_eq!(state.last_outcome, Some(OutcomeClass::PermanentFailure));
     assert_eq!(state.next_attempt_at, None);
-    assert_eq!(state.first_suppressed_at, None);
 }
 
 async fn assert_not_configured_reset_flow<DB: ProviderRetryStateDb + WorkDb + WorkDbCreate>(
@@ -682,7 +552,7 @@ async fn assert_reset_all_retry_states_deletes_all_rows_for_work<
     )
     .await
     .unwrap();
-    db.record_suppressed(
+    db.record_will_retry(
         user_id,
         work_a,
         MetadataProvider::Goodreads,
@@ -717,14 +587,13 @@ async fn assert_reset_all_retry_states_deletes_all_rows_for_work<
     );
 }
 
-async fn assert_list_works_due_for_retry_returns_due_will_retry_and_suppressed_only<
+async fn assert_list_works_due_for_retry_returns_due_will_retry_only<
     DB: ProviderRetryStateDb + WorkDb + WorkDbCreate,
 >(
     db: &DB,
     user_id: UserId,
 ) {
     let due_will_retry = make_work(db, user_id, "due-will-retry").await;
-    let due_suppressed = make_work(db, user_id, "due-suppressed").await;
     let future_will_retry = make_work(db, user_id, "future-will-retry").await;
     let terminal_success = make_work(db, user_id, "terminal-success").await;
 
@@ -736,14 +605,6 @@ async fn assert_list_works_due_for_retry_returns_due_will_retry_and_suppressed_o
     db.record_will_retry(user_id, due_will_retry, MetadataProvider::Hardcover, due_at)
         .await
         .unwrap();
-    db.record_suppressed(
-        user_id,
-        due_suppressed,
-        MetadataProvider::OpenLibrary,
-        due_at,
-    )
-    .await
-    .unwrap();
     db.record_will_retry(
         user_id,
         future_will_retry,
@@ -769,12 +630,9 @@ async fn assert_list_works_due_for_retry_returns_due_will_retry_and_suppressed_o
         .into_iter()
         .collect();
 
-    let expected: HashSet<_> = [
-        (due_will_retry, MetadataProvider::Hardcover),
-        (due_suppressed, MetadataProvider::OpenLibrary),
-    ]
-    .into_iter()
-    .collect();
+    let expected: HashSet<_> = [(due_will_retry, MetadataProvider::Hardcover)]
+        .into_iter()
+        .collect();
 
     assert_eq!(got, expected);
 }
@@ -786,7 +644,6 @@ async fn assert_list_works_due_for_retry_includes_rows_when_query_now_equals_nex
     user_id: UserId,
 ) {
     let due_will_retry = make_work(db, user_id, "due-boundary-will-retry").await;
-    let due_suppressed = make_work(db, user_id, "due-boundary-suppressed").await;
     let next_attempt_at = Utc::now() + Duration::minutes(10);
     let query_now = next_attempt_at;
 
@@ -794,14 +651,6 @@ async fn assert_list_works_due_for_retry_includes_rows_when_query_now_equals_nex
         user_id,
         due_will_retry,
         MetadataProvider::Hardcover,
-        next_attempt_at,
-    )
-    .await
-    .unwrap();
-    db.record_suppressed(
-        user_id,
-        due_suppressed,
-        MetadataProvider::OpenLibrary,
         next_attempt_at,
     )
     .await
@@ -814,12 +663,9 @@ async fn assert_list_works_due_for_retry_includes_rows_when_query_now_equals_nex
         .into_iter()
         .collect();
 
-    let expected: HashSet<_> = [
-        (due_will_retry, MetadataProvider::Hardcover),
-        (due_suppressed, MetadataProvider::OpenLibrary),
-    ]
-    .into_iter()
-    .collect();
+    let expected: HashSet<_> = [(due_will_retry, MetadataProvider::Hardcover)]
+        .into_iter()
+        .collect();
 
     assert_eq!(got, expected);
 }
@@ -838,7 +684,7 @@ async fn assert_list_retry_states_returns_all_rows_for_work<
         (MetadataProvider::OpenLibrary, OutcomeClass::NotFound),
         (MetadataProvider::Goodreads, OutcomeClass::PermanentFailure),
         (MetadataProvider::Audnexus, OutcomeClass::WillRetry),
-        (MetadataProvider::Llm, OutcomeClass::Suppressed),
+        (MetadataProvider::Llm, OutcomeClass::Conflict),
     ];
 
     for (provider, outcome) in seeded {
@@ -905,7 +751,7 @@ async fn assert_list_retry_states_isolates_by_user_id<
         user2,
         user2_work,
         MetadataProvider::Audnexus,
-        OutcomeClass::Suppressed,
+        OutcomeClass::NotConfigured,
         at,
     )
     .await;
@@ -948,7 +794,7 @@ async fn assert_list_retry_states_isolates_by_user_id<
         (
             user2_work,
             MetadataProvider::Audnexus,
-            Some(OutcomeClass::Suppressed),
+            Some(OutcomeClass::NotConfigured),
         ),
     ]
     .into_iter()
@@ -1407,7 +1253,6 @@ async fn assert_list_works_with_terminal_provider_rows_excludes_in_flight_rows<
 ) {
     let included = make_work(db, user_id, "terminal-included-all-terminal").await;
     let retrying = make_work(db, user_id, "terminal-excluded-will-retry").await;
-    let suppressed = make_work(db, user_id, "terminal-excluded-suppressed").await;
     let at = Utc::now() + Duration::minutes(30);
 
     seed_all_non_conflict_terminal_rows(db, user_id, included).await;
@@ -1421,15 +1266,6 @@ async fn assert_list_works_with_terminal_provider_rows_excludes_in_flight_rows<
         record_provider_state(db, user_id, retrying, provider, outcome, at).await;
     }
 
-    for provider in all_providers() {
-        let outcome = if provider == MetadataProvider::Audnexus {
-            OutcomeClass::Suppressed
-        } else {
-            OutcomeClass::Success
-        };
-        record_provider_state(db, user_id, suppressed, provider, outcome, at).await;
-    }
-
     let got = db
         .list_works_with_terminal_provider_rows(user_id)
         .await
@@ -1439,7 +1275,6 @@ async fn assert_list_works_with_terminal_provider_rows_excludes_in_flight_rows<
 
     assert!(got.iter().any(|(wid, _)| *wid == included));
     assert!(!got.iter().any(|(wid, _)| *wid == retrying));
-    assert!(!got.iter().any(|(wid, _)| *wid == suppressed));
 
     let expected_included: HashSet<_> = all_providers().into_iter().collect();
     for (work_id, providers) in &got {
@@ -1465,7 +1300,7 @@ async fn assert_retry_state_is_isolated_by_user_id<
     db.record_will_retry(user1, work1, MetadataProvider::Hardcover, due_at)
         .await
         .unwrap();
-    db.record_suppressed(user2, work2, MetadataProvider::OpenLibrary, due_at)
+    db.record_will_retry(user2, work2, MetadataProvider::OpenLibrary, due_at)
         .await
         .unwrap();
 
@@ -1541,49 +1376,6 @@ macro_rules! retry_state_db_tests {
         }
 
         #[tokio::test]
-        async fn test_retry_state_db_record_will_retry_clears_first_suppressed_at() {
-            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::record_will_retry | Behavior: clears first_suppressed_at when transitioning from Suppressed to WillRetry
-            let h = <$harness as DbTestHarness>::setup().await;
-            let db = h.db();
-            let (u1, _) = h.user_ids();
-
-            assert_record_will_retry_clears_first_suppressed_at(db, u1).await;
-        }
-
-        #[tokio::test]
-        async fn test_retry_state_db_record_suppressed_increments_suppressed_passes_without_incrementing_attempts() {
-            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::record_suppressed | Behavior: increments suppressed_passes while leaving attempts unchanged
-            let h = <$harness as DbTestHarness>::setup().await;
-            let db = h.db();
-            let (u1, _) = h.user_ids();
-
-            assert_record_suppressed_increments_suppressed_passes_without_incrementing_attempts(
-                db, u1,
-            )
-            .await;
-        }
-
-        #[tokio::test]
-        async fn test_retry_state_db_record_suppressed_sets_first_suppressed_at_when_none() {
-            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::record_suppressed | Behavior: sets first_suppressed_at on the first suppression in a window
-            let h = <$harness as DbTestHarness>::setup().await;
-            let db = h.db();
-            let (u1, _) = h.user_ids();
-
-            assert_record_suppressed_sets_first_suppressed_at_when_none(db, u1).await;
-        }
-
-        #[tokio::test]
-        async fn test_retry_state_db_record_suppressed_preserves_existing_first_suppressed_at() {
-            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::record_suppressed | Behavior: preserves the original first_suppressed_at on subsequent suppressions
-            let h = <$harness as DbTestHarness>::setup().await;
-            let db = h.db();
-            let (u1, _) = h.user_ids();
-
-            assert_record_suppressed_preserves_existing_first_suppressed_at(db, u1).await;
-        }
-
-        #[tokio::test]
         async fn test_retry_state_db_record_terminal_outcome_success_persists_normalized_payload_json() {
             // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::record_terminal_outcome | Behavior: Success persists normalized_payload_json for deferred merge reconstruction
             let h = <$harness as DbTestHarness>::setup().await;
@@ -1626,7 +1418,7 @@ macro_rules! retry_state_db_tests {
 
         #[tokio::test]
         async fn test_retry_state_db_record_terminal_outcome_rejects_non_terminal_outcome_classes() {
-            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::record_terminal_outcome | Behavior: WillRetry and Suppressed are non-terminal classes and must be rejected
+            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::record_terminal_outcome | Behavior: WillRetry is a non-terminal class and must be rejected
             let h = <$harness as DbTestHarness>::setup().await;
             let db = h.db();
             let (u1, _) = h.user_ids();
@@ -1635,14 +1427,13 @@ macro_rules! retry_state_db_tests {
         }
 
         #[tokio::test]
-        async fn test_retry_state_db_record_terminal_outcome_clears_next_attempt_at_and_first_suppressed_at() {
-            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::record_terminal_outcome | Behavior: terminal outcomes clear retry scheduling and the suppression window start
+        async fn test_retry_state_db_record_terminal_outcome_clears_next_attempt_at() {
+            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::record_terminal_outcome | Behavior: terminal outcomes clear retry scheduling
             let h = <$harness as DbTestHarness>::setup().await;
             let db = h.db();
             let (u1, _) = h.user_ids();
 
-            assert_record_terminal_outcome_clears_next_attempt_at_and_first_suppressed_at(db, u1)
-                .await;
+            assert_record_terminal_outcome_clears_next_attempt_at(db, u1).await;
         }
 
         #[tokio::test]
@@ -1656,14 +1447,13 @@ macro_rules! retry_state_db_tests {
         }
 
         #[tokio::test]
-        async fn test_retry_state_db_list_works_due_for_retry_returns_due_will_retry_and_suppressed_only() {
-            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::list_works_due_for_retry | Behavior: returns only pairs due at or before now whose last outcome is WillRetry or Suppressed
+        async fn test_retry_state_db_list_works_due_for_retry_returns_due_will_retry_only() {
+            // REQ-ID: R-20, R-22 | Contract: ProviderRetryStateDb::list_works_due_for_retry | Behavior: returns only pairs due at or before now whose last outcome is WillRetry
             let h = <$harness as DbTestHarness>::setup().await;
             let db = h.db();
             let (u1, _) = h.user_ids();
 
-            assert_list_works_due_for_retry_returns_due_will_retry_and_suppressed_only(db, u1)
-                .await;
+            assert_list_works_due_for_retry_returns_due_will_retry_only(db, u1).await;
         }
 
         #[tokio::test]
@@ -1794,7 +1584,7 @@ macro_rules! retry_state_db_tests {
 
         #[tokio::test]
         async fn test_retry_state_db_list_works_with_terminal_provider_rows_excludes_in_flight_rows() {
-            // REQ-ID: R-20 | Contract: ProviderRetryStateDb::list_works_with_terminal_provider_rows | Behavior: excludes works with any WillRetry or Suppressed provider row and returned provider vecs for included works contain only terminal non-Conflict providers
+            // REQ-ID: R-20 | Contract: ProviderRetryStateDb::list_works_with_terminal_provider_rows | Behavior: excludes works with any WillRetry provider row and returned provider vecs for included works contain only terminal non-Conflict providers
             let h = <$harness as DbTestHarness>::setup().await;
             let db = h.db();
             let (u1, _) = h.user_ids();

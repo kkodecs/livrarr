@@ -268,9 +268,9 @@ Per-provider enrichment retry state machine.
 
 - `get_retry_state(user_id, work_id, provider)` — fetch retry state for a specific provider
 - `list_retry_states(user_id, work_id)` — list all provider retry states for a Work
-- `record_will_retry(user_id, work_id, provider, reason, next_attempt_at)` — record a scheduled retry
-- `record_suppressed(user_id, work_id, provider)` — record a suppressed (rate-limited) attempt
-- `record_terminal_outcome(user_id, work_id, provider, reason)` — record a permanent failure
+- `record_will_retry(user_id, work_id, provider, next_attempt_at)` — record a scheduled retry (attempts +1)
+- `record_will_retry_paused(user_id, work_id, provider, next_attempt_at)` — breaker-open pause, no attempt spent (R-11)
+- `record_terminal_outcome(user_id, work_id, provider, outcome, normalized_payload_json)` — record a phase-2 terminal outcome (Success carries the payload)
 - `reset_all_retry_states(user_id, work_id)` — clear all retry states for a Work
 - `list_works_due_for_retry()` — list Works with at least one provider due for retry
 - `list_works_with_terminal_provider_rows()` — list Works with permanently failed providers

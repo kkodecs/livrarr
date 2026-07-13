@@ -86,9 +86,6 @@ pub enum ProviderOutcome<T> {
     Conflict {
         detail: String,
     },
-    Suppressed {
-        until: DateTime<Utc>,
-    },
 }
 
 impl<T> ProviderOutcome<T> {
@@ -100,7 +97,6 @@ impl<T> ProviderOutcome<T> {
             Self::WillRetry { .. } => livrarr_domain::OutcomeClass::WillRetry,
             Self::PermanentFailure { .. } => livrarr_domain::OutcomeClass::PermanentFailure,
             Self::Conflict { .. } => livrarr_domain::OutcomeClass::Conflict,
-            Self::Suppressed { .. } => livrarr_domain::OutcomeClass::Suppressed,
         }
     }
 
@@ -110,7 +106,7 @@ impl<T> ProviderOutcome<T> {
     }
 
     /// TEMP(pk-tdd): returns true if this outcome is eligible for merge in manual/hard-refresh mode.
-    /// Manual mode coerces WillRetry and Suppressed; only Conflict still blocks.
+    /// Manual mode coerces WillRetry; only Conflict still blocks.
     pub fn can_merge_manual(&self) -> bool {
         !matches!(self, Self::Conflict { .. })
     }

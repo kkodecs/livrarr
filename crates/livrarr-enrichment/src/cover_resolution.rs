@@ -230,10 +230,6 @@ mod tests {
             derive_cover_trust(&OutcomeClass::Conflict),
             CoverTrust::Unvalidated
         );
-        assert_eq!(
-            derive_cover_trust(&OutcomeClass::Suppressed),
-            CoverTrust::Unvalidated
-        );
     }
 
     #[test]

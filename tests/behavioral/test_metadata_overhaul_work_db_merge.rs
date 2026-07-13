@@ -280,7 +280,7 @@ async fn seed_retry_rows<DB: ProviderRetryStateDb>(db: &DB, user_id: UserId, wor
     .await
     .unwrap();
 
-    db.record_suppressed(
+    db.record_will_retry(
         user_id,
         work_id,
         MetadataProvider::OpenLibrary,

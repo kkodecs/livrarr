@@ -48,8 +48,6 @@ mod audnexus_tracer_tests {
         ProviderQueueConfig {
             provider: MetadataProvider::Audnexus,
             max_attempts: 3,
-            max_suppressed_passes: 3,
-            max_suppression_window_secs: 3600,
         }
     }
 
@@ -211,8 +209,6 @@ mod goodreads_tracer_tests {
         ProviderQueueConfig {
             provider: MetadataProvider::Goodreads,
             max_attempts: 3,
-            max_suppressed_passes: 3,
-            max_suppression_window_secs: 3600,
         }
     }
 

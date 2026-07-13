@@ -731,34 +731,6 @@ async fn test_merge_engine_manual_mode_preserves_last_known_good_for_will_retry(
 }
 
 #[tokio::test]
-async fn test_merge_engine_manual_mode_preserves_last_known_good_for_suppressed() {
-    // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: manual mode coerces Suppressed to merge-eligible while preserving last-known-good
-    let engine = make_engine();
-
-    let input = MergeInput {
-        current_work: work_with(None, Some("current description"), Some("current cover")),
-        current_provenance: vec![],
-        provider_results: HashMap::from([(
-            MetadataSource::Goodreads,
-            outcome(OutcomeClass::Suppressed),
-        )]),
-        mode: EnrichmentMode::Manual,
-        priority_model: custom_priority(
-            vec![MetadataSource::Hardcover],
-            vec![MetadataSource::Hardcover],
-            vec![MetadataSource::Goodreads],
-        ),
-    };
-
-    let output = merge(&engine, input).await;
-
-    assert_eq!(
-        resolved(&output).cover_url.as_deref(),
-        Some("current cover")
-    );
-}
-
-#[tokio::test]
 async fn test_merge_engine_hard_refresh_preserves_last_known_good_for_will_retry() {
     // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: hard refresh coerces WillRetry to merge-eligible while preserving the current last-known-good field value
     let engine = make_engine();
@@ -791,75 +763,6 @@ async fn test_merge_engine_hard_refresh_preserves_last_known_good_for_will_retry
         resolved(&output).description.as_deref(),
         Some("current description")
     );
-}
-
-#[tokio::test]
-async fn test_merge_engine_hard_refresh_suppressed_coercion_is_observable() {
-    // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: hard refresh coerces Suppressed to merge-eligible. HardRefresh coercion: Suppressed→merge_eligible=true. Observable via work_update.is_some()
-    let engine = make_engine();
-
-    let input = MergeInput {
-        current_work: work_with(
-            Some("current subtitle"),
-            Some("current description"),
-            Some("current cover"),
-        ),
-        current_provenance: vec![provider_owned(
-            WorkField::Description,
-            MetadataSource::Hardcover,
-        )],
-        provider_results: HashMap::from([(
-            MetadataSource::Hardcover,
-            outcome(OutcomeClass::Suppressed),
-        )]),
-        mode: EnrichmentMode::HardRefresh,
-        priority_model: custom_priority(
-            vec![MetadataSource::Hardcover],
-            vec![MetadataSource::Hardcover],
-            vec![MetadataSource::Goodreads],
-        ),
-    };
-
-    let output = merge(&engine, input).await;
-
-    assert!(
-        output.work_update.is_some(),
-        "Suppressed must be coerced in HardRefresh mode"
-    );
-}
-
-#[tokio::test]
-async fn test_merge_engine_hard_refresh_suppressed_preserves_last_known_good_value() {
-    // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: hard refresh preserves the last-known-good populated field value for a coerced Suppressed outcome
-    let engine = make_engine();
-
-    let input = MergeInput {
-        current_work: Work {
-            identity_status: Default::default(),
-            id: WORK_ID,
-            user_id: USER_ID,
-            title: "current title".to_string(),
-            subtitle: Some("current subtitle".to_string()),
-            description: Some("current description".to_string()),
-            cover_url: Some("current cover".to_string()),
-            ..Default::default()
-        },
-        current_provenance: vec![provider_owned(WorkField::Title, MetadataSource::Hardcover)],
-        provider_results: HashMap::from([(
-            MetadataSource::Hardcover,
-            outcome(OutcomeClass::Suppressed),
-        )]),
-        mode: EnrichmentMode::HardRefresh,
-        priority_model: custom_priority(
-            vec![MetadataSource::Hardcover],
-            vec![MetadataSource::Hardcover],
-            vec![MetadataSource::Goodreads],
-        ),
-    };
-
-    let output = merge(&engine, input).await;
-
-    assert_eq!(resolved(&output).title.as_deref(), Some("current title"));
 }
 
 #[tokio::test]

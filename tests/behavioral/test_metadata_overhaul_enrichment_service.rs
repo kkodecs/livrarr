@@ -670,18 +670,6 @@ impl ProviderRetryStateDb for SequencedApplyDb {
             .await
     }
 
-    async fn record_suppressed(
-        &self,
-        user_id: UserId,
-        work_id: WorkId,
-        provider: MetadataProvider,
-        until: chrono::DateTime<chrono::Utc>,
-    ) -> Result<livrarr_db::ProviderRetryState, DbError> {
-        self.inner
-            .record_suppressed(user_id, work_id, provider, until)
-            .await
-    }
-
     async fn record_terminal_outcome(
         &self,
         user_id: UserId,
@@ -997,11 +985,6 @@ where
                             .await
                             .unwrap();
                     }
-                    ProviderOutcome::Suppressed { until } => {
-                        db.record_suppressed(user_id, result.work_id, provider, until)
-                            .await
-                            .unwrap();
-                    }
                     ProviderOutcome::NotConfigured => {
                         db.record_terminal_outcome(
                             user_id,
@@ -1023,10 +1006,6 @@ fn coercion_test_will_retry_at() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2030, 1, 2, 3, 4, 5).unwrap()
 }
 
-fn coercion_test_suppressed_until() -> chrono::DateTime<Utc> {
-    Utc.with_ymd_and_hms(2030, 1, 2, 3, 14, 5).unwrap()
-}
-
 fn make_coercion_test_queue<DB>(db: Arc<DB>, user_id: UserId, work_id: WorkId) -> MockProviderQueue
 where
     DB: ProviderRetryStateDb + Send + Sync + 'static,
@@ -1040,12 +1019,6 @@ where
                     ProviderOutcome::WillRetry {
                         reason: livrarr_domain::WillRetryReason::ServerError,
                         next_attempt_at: coercion_test_will_retry_at(),
-                    },
-                ),
-                (
-                    MetadataProvider::OpenLibrary,
-                    ProviderOutcome::Suppressed {
-                        until: coercion_test_suppressed_until(),
                     },
                 ),
                 (
@@ -1260,7 +1233,6 @@ macro_rules! enrichment_service_tests {
             let work = seed_work(h.db(), user_id).await;
 
             let will_retry_at = Utc::now() + ChronoDuration::minutes(10);
-            let suppressed_until = Utc::now() + ChronoDuration::minutes(20);
 
             let queue = StubProviderQueue::with_plan(DispatchPlan {
                 result: scatter_result(
@@ -1271,12 +1243,6 @@ macro_rules! enrichment_service_tests {
                             ProviderOutcome::WillRetry {
                                 reason: livrarr_domain::WillRetryReason::Timeout,
                                 next_attempt_at: will_retry_at,
-                            },
-                        ),
-                        (
-                            MetadataProvider::OpenLibrary,
-                            ProviderOutcome::Suppressed {
-                                until: suppressed_until,
                             },
                         ),
                         (
@@ -1315,7 +1281,6 @@ macro_rules! enrichment_service_tests {
                 result.provider_outcomes,
                 outcome_classes(&[
                     (MetadataProvider::Goodreads, OutcomeClass::WillRetry),
-                    (MetadataProvider::OpenLibrary, OutcomeClass::Suppressed),
                     (MetadataProvider::Hardcover, OutcomeClass::Success),
                 ])
             );
@@ -1328,15 +1293,6 @@ macro_rules! enrichment_service_tests {
                 .expect("goodreads retry state must exist");
             assert_eq!(gr.last_outcome, Some(OutcomeClass::WillRetry));
             assert_eq!(gr.next_attempt_at, Some(will_retry_at));
-
-            let ol = h
-                .db()
-                .get_retry_state(user_id, work.id, MetadataProvider::OpenLibrary)
-                .await
-                .unwrap()
-                .expect("openlibrary retry state must exist");
-            assert_eq!(ol.last_outcome, Some(OutcomeClass::Suppressed));
-            assert_eq!(ol.next_attempt_at, Some(suppressed_until));
 
             let hc = h
                 .db()
@@ -1887,29 +1843,21 @@ macro_rules! enrichment_service_tests {
         }
 
         #[tokio::test]
-        async fn test_enrichment_service_enrich_work_background_will_retry_and_suppressed_defer_merge() {
-            // REQ-ID: R-22 | Contract: EnrichmentService::enrich_work | Behavior: background mode defers merge when any provider outcome is WillRetry or Suppressed
+        async fn test_enrichment_service_enrich_work_background_will_retry_defers_merge() {
+            // REQ-ID: R-22 | Contract: EnrichmentService::enrich_work | Behavior: background mode defers merge when any provider outcome is WillRetry
             let h = <$harness as DbTestHarness>::setup().await;
             let work = seed_work(h.db(), h.user_id()).await;
 
             let queue = StubProviderQueue::with_plan(DispatchPlan {
                 result: scatter_result(
                     work.id,
-                    provider_outcomes_map(&[
-                        (
-                            MetadataProvider::Goodreads,
-                            ProviderOutcome::WillRetry {
-                                reason: livrarr_domain::WillRetryReason::RateLimit,
-                                next_attempt_at: Utc::now() + ChronoDuration::minutes(5),
-                            },
-                        ),
-                        (
-                            MetadataProvider::OpenLibrary,
-                            ProviderOutcome::Suppressed {
-                                until: Utc::now() + ChronoDuration::minutes(10),
-                            },
-                        ),
-                    ]),
+                    provider_outcomes_map(&[(
+                        MetadataProvider::Goodreads,
+                        ProviderOutcome::WillRetry {
+                            reason: livrarr_domain::WillRetryReason::RateLimit,
+                            next_attempt_at: Utc::now() + ChronoDuration::minutes(5),
+                        },
+                    )]),
                     false,
                     true,
                 ),
@@ -1940,7 +1888,7 @@ macro_rules! enrichment_service_tests {
         }
 
         #[tokio::test]
-        async fn test_enrichment_service_enrich_work_manual_coerces_will_retry_and_suppressed_to_immediate_merge() {
+        async fn test_enrichment_service_enrich_work_manual_coerces_will_retry_to_immediate_merge() {
             // REQ-ID: R-22 | Contract: EnrichmentService::enrich_work | Behavior: with the same queue outcomes that would defer in background mode, manual mode still returns non-deferred and merges immediately, proving service-level coercion
             let h = <$harness as DbTestHarness>::setup().await;
             let user_id = h.user_id();
@@ -1974,7 +1922,6 @@ macro_rules! enrichment_service_tests {
                 result.provider_outcomes,
                 outcome_classes(&[
                     (MetadataProvider::Hardcover, OutcomeClass::WillRetry),
-                    (MetadataProvider::OpenLibrary, OutcomeClass::Suppressed),
                     (MetadataProvider::Goodreads, OutcomeClass::Success),
                 ])
             );
@@ -1995,18 +1942,10 @@ macro_rules! enrichment_service_tests {
                     .class,
                 OutcomeClass::WillRetry
             );
-            assert_eq!(
-                seen_inputs[0]
-                    .provider_results
-                    .get(&MetadataProvider::OpenLibrary)
-                    .unwrap()
-                    .class,
-                OutcomeClass::Suppressed
-            );
         }
 
         #[tokio::test]
-        async fn test_enrichment_service_enrich_work_background_does_not_coerce_non_merge_eligible_will_retry_and_suppressed() {
+        async fn test_enrichment_service_enrich_work_background_does_not_coerce_non_merge_eligible_will_retry() {
             // REQ-ID: R-22 | Contract: EnrichmentService::enrich_work | Behavior: with identical queue outcomes to the manual coercion case, background mode preserves deferred=true and does not merge
             let h = <$harness as DbTestHarness>::setup().await;
             let user_id = h.user_id();
@@ -2039,7 +1978,6 @@ macro_rules! enrichment_service_tests {
                 result.provider_outcomes,
                 outcome_classes(&[
                     (MetadataProvider::Hardcover, OutcomeClass::WillRetry),
-                    (MetadataProvider::OpenLibrary, OutcomeClass::Suppressed),
                     (MetadataProvider::Goodreads, OutcomeClass::Success),
                 ])
             );
@@ -2120,12 +2058,6 @@ macro_rules! enrichment_service_tests {
                                 reason: PermanentFailureReason::InvalidResponse,
                             },
                         ),
-                        (
-                            MetadataProvider::Audnexus,
-                            ProviderOutcome::Suppressed {
-                                until: Utc::now() + ChronoDuration::minutes(10),
-                            },
-                        ),
                     ]),
                     false,
                     true,
@@ -2158,7 +2090,6 @@ macro_rules! enrichment_service_tests {
                     (MetadataProvider::Goodreads, OutcomeClass::Success),
                     (MetadataProvider::OpenLibrary, OutcomeClass::NotFound),
                     (MetadataProvider::Hardcover, OutcomeClass::PermanentFailure),
-                    (MetadataProvider::Audnexus, OutcomeClass::Suppressed),
                 ])
             );
         }
@@ -2172,26 +2103,17 @@ macro_rules! enrichment_service_tests {
             let work = seed_work(h.db(), user_id).await;
 
             let will_retry_at = Utc::now() + ChronoDuration::minutes(7);
-            let suppressed_until = Utc::now() + ChronoDuration::minutes(13);
 
             let queue = StubProviderQueue::with_plan(DispatchPlan {
                 result: scatter_result(
                     work.id,
-                    provider_outcomes_map(&[
-                        (
-                            MetadataProvider::Goodreads,
-                            ProviderOutcome::WillRetry {
-                                reason: livrarr_domain::WillRetryReason::Timeout,
-                                next_attempt_at: will_retry_at,
-                            },
-                        ),
-                        (
-                            MetadataProvider::OpenLibrary,
-                            ProviderOutcome::Suppressed {
-                                until: suppressed_until,
-                            },
-                        ),
-                    ]),
+                    provider_outcomes_map(&[(
+                        MetadataProvider::Goodreads,
+                        ProviderOutcome::WillRetry {
+                            reason: livrarr_domain::WillRetryReason::Timeout,
+                            next_attempt_at: will_retry_at,
+                        },
+                    )]),
                     false,
                     true,
                 ),
@@ -2222,15 +2144,6 @@ macro_rules! enrichment_service_tests {
                 .unwrap();
             assert_eq!(gr.last_outcome, Some(OutcomeClass::WillRetry));
             assert_eq!(gr.next_attempt_at, Some(will_retry_at));
-
-            let ol = h
-                .db()
-                .get_retry_state(user_id, work.id, MetadataProvider::OpenLibrary)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(ol.last_outcome, Some(OutcomeClass::Suppressed));
-            assert_eq!(ol.next_attempt_at, Some(suppressed_until));
         }
 
         #[tokio::test]
@@ -2566,7 +2479,7 @@ macro_rules! enrichment_service_tests {
                 .await
                 .unwrap();
             h.db()
-                .record_suppressed(
+                .record_will_retry(
                     user_id,
                     work.id,
                     MetadataProvider::OpenLibrary,
@@ -2654,11 +2567,6 @@ macro_rules! enrichment_service_tests {
                                     .await
                                     .unwrap();
                                 }
-                                ProviderOutcome::Suppressed { until } => {
-                                    db.record_suppressed(user_id, result.work_id, provider, until)
-                                        .await
-                                        .unwrap();
-                                }
                                 ProviderOutcome::Success(payload) => {
                                     db.record_terminal_outcome(
                                         user_id,
@@ -2734,8 +2642,9 @@ macro_rules! enrichment_service_tests {
                         ),
                         (
                             MetadataProvider::OpenLibrary,
-                            ProviderOutcome::Suppressed {
-                                until: Utc::now() + ChronoDuration::minutes(10),
+                            ProviderOutcome::WillRetry {
+                                reason: livrarr_domain::WillRetryReason::Timeout,
+                                next_attempt_at: Utc::now() + ChronoDuration::minutes(10),
                             },
                         ),
                     ]),

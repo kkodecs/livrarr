@@ -7,11 +7,9 @@
 //!   - Durable phase-1 outcome persistence in `provider_retry_state` ([I-11]).
 //!   - Retry budget — `attempts == max_attempts - 1` plus a fresh `WillRetry`
 //!     dispatch converts to `PermanentFailure { RetryBudgetExhausted }`.
-//!   - Suppression budget — same idea for `Suppressed` against
-//!     `max_suppressed_passes` and `max_suppression_window_secs`.
 //!   - Restart safety — providers with an existing phase-2 terminal retry-state
 //!     row are skipped without being called.
-//!   - Mode coercion — `Manual` and `HardRefresh` flip `WillRetry` and `Suppressed`
+//!   - Mode coercion — `Manual` and `HardRefresh` flip `WillRetry`
 //!     to merge-eligible (`Conflict` always blocks).
 //!   - Applicability — non-applicable providers are absent from outcomes entirely.
 //!
@@ -526,8 +524,8 @@ where
         }
     }
 
-    /// Apply retry/suppression budget conversion. Reads existing retry-state row
-    /// to know prior `attempts` / `suppressed_passes` / `first_suppressed_at`.
+    /// Apply retry budget conversion. Reads the existing retry-state row
+    /// to know prior `attempts`.
     async fn apply_budget_rules(
         &self,
         work: &Work,
@@ -564,31 +562,6 @@ where
                         reason,
                         next_attempt_at,
                     })
-                }
-            }
-            ProviderOutcome::Suppressed { until } => {
-                let prior = self
-                    .retry_db
-                    .get_retry_state(work.user_id, work.id, provider)
-                    .await?;
-                let prior_suppressed = prior.as_ref().map(|s| s.suppressed_passes).unwrap_or(0);
-                let prior_window_start = prior.as_ref().and_then(|s| s.first_suppressed_at);
-
-                let budget_exhausted =
-                    prior_suppressed.saturating_add(1) >= config.max_suppressed_passes;
-                let window_elapsed = prior_window_start
-                    .map(|start| {
-                        Utc::now() - start
-                            >= chrono::Duration::seconds(config.max_suppression_window_secs as i64)
-                    })
-                    .unwrap_or(false);
-
-                if budget_exhausted || window_elapsed {
-                    Ok(ProviderOutcome::PermanentFailure {
-                        reason: PermanentFailureReason::SuppressionExhausted,
-                    })
-                } else {
-                    Ok(ProviderOutcome::Suppressed { until })
                 }
             }
             other => Ok(other),
@@ -679,11 +652,6 @@ where
                         .await?;
                 }
             }
-            ProviderOutcome::Suppressed { until } => {
-                self.retry_db
-                    .record_suppressed(work.user_id, work.id, provider, *until)
-                    .await?;
-            }
         }
         Ok(())
     }
@@ -713,8 +681,6 @@ mod circuit_open_budget_tests {
         ProviderQueueConfig {
             provider: MetadataProvider::OpenLibrary,
             max_attempts,
-            max_suppressed_passes: 3,
-            max_suppression_window_secs: 3600,
         }
     }
 

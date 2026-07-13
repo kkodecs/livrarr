@@ -207,8 +207,7 @@ fn anchor_kind_accepted(provider: MetadataProvider, query: &AnchorQuery) -> bool
 /// Common `WillRetry { CircuitOpen }` mapping (R-11 / Step 4): every provider
 /// client that detects `ProviderFetchError::CircuitOpen` /
 /// `FetchError::CircuitOpen` maps it through this one helper, never to
-/// `RateLimit` (corrupts retry accounting) and never to `Suppressed` (burns
-/// suppression budget).
+/// `RateLimit` (corrupts retry accounting).
 fn circuit_open_outcome(retry_after: Duration) -> ProviderOutcome<NormalizedWorkDetail> {
     ProviderOutcome::WillRetry {
         reason: WillRetryReason::CircuitOpen,
@@ -220,7 +219,7 @@ fn circuit_open_outcome(retry_after: Duration) -> ProviderOutcome<NormalizedWork
 
 /// REQ-001 outcome mapping: ProviderOutcome (the control-flow vocabulary) →
 /// CallOutcomeClass (the reporting vocabulary), explicit per variant.
-/// Conflict/Suppressed never originate from a client fetch; they map to Error
+/// Conflict never originates from a client fetch; it maps to Error
 /// with a detail tag rather than a catch-all.
 fn outcome_record_class(
     outcome: &ProviderOutcome<NormalizedWorkDetail>,
@@ -254,9 +253,6 @@ fn outcome_record_class(
             (CallOutcomeClass::Error, Some(format!("{reason:?}")))
         }
         ProviderOutcome::Conflict { .. } => (CallOutcomeClass::Error, Some("conflict".to_string())),
-        ProviderOutcome::Suppressed { .. } => {
-            (CallOutcomeClass::Error, Some("suppressed".to_string()))
-        }
     }
 }
 

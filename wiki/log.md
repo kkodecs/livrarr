@@ -347,3 +347,9 @@ PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
 - Added insight 64 (DiscoveryService split: new domain trait + DiscoveryServiceImpl; WorkServiceImpl<D,E,H> lifecycle-only) and 65 (30/129 tests/behavioral files are unregistered orphans — check Cargo.toml registration before trusting/editing).
 - handlers.md capability table: +HasDiscoveryService row; HasWorkService row now notes the 17-method trait.
 - Source: work-service-split series 2734fd02, 7c1de013, 3521c940, 0094e805 + cross-family review (Codex PASS; Gemini fact-checked — orphan discovery real & pre-existing, attribution refuted).
+
+## 2026-07-12 — suppression machinery deleted (pipeline-hygiene item 1)
+
+- insights.md 30: tail rewritten — suppression machinery DELETED (variants, config fields, record_suppressed, SuppressionExhausted; migration 073 drops the columns); breaker-pause wording trimmed to "no retry budget". Insight 65 amended earlier same day: manifest guard does NOT cover registered-but-untracked test files (2 uip files were missing from origin until 8c9c4ab5).
+- architecture/metadata-pathway.md: dispatch_enrichment pseudocode rewritten to the live seam order (applicability → anchor derivation → terminal-skip → U-B1 cache consult → JoinSet; pacing/breaker at the outbound queue, not in-queue — the old block still showed pre-Phase-3 breaker-at-dispatch + persist-Suppressed). Outcome-class list and speed-controls list updated. Fixed on sight: provider_client.rs path (external-data, not metadata) and the pre-Phase-5 "GR search requires LLM disambiguation" claim (deterministic picker per insight 13). Page not otherwise re-verified — other sections may carry similar era-drift.
+- crates/db.md: ProviderRetryStateDb API list corrected — record_suppressed removed, record_will_retry_paused added, record_terminal_outcome signature fixed.
