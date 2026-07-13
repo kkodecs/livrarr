@@ -117,6 +117,11 @@ kk-build state files remain authoritative for gates; this section is the narrati
     FOLLOW-ON DEBT (recorded, not done): tokens still don't reach INSIDE rss_sync_run's per-user
     loop or give handler-spawned workers shutdown-linked lifetimes (fresh tokens are
     uncancellable) — same class as the pre-existing handler-spawn gap; candidate future unit.
+    **#36 INCOMPLETE (caught at the PO's plan audit, 2026-07-13 morning):** Wave 2 shipped only
+    its green structural pin (work+anchor both present after create) — the actual one-transaction
+    change (route creation through the confirm_anchor_in_tx path, sqlite_work_identity.rs:20) was
+    NOT implemented; the pin passes without it absent a crash. Goes to the next session alongside
+    2a/2d (small; the tx helper already exists).
   - **D2 PROPOSED (one line, 2026-07-13):** a failed best-effort DB write is warn!-logged with
     entity context and never counted as success (no `.ok()`-swallow, no `let _ =`, no
     success-log-before-result); where the caller can act on the failure (retryable step,
