@@ -20,7 +20,6 @@ use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 pub mod cover_gate;
 pub mod cover_rank;
 pub mod cover_resolution;
-pub mod llm_validator;
 pub mod provider_queue;
 
 #[cfg(test)]

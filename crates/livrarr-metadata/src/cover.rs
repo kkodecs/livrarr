@@ -487,7 +487,7 @@ fn cover_file_mtime_with_suffix(
     work_id: i64,
     suffix: &str,
 ) -> Option<i64> {
-    let path = covers_dir.join(format!("{work_id}{suffix}.jpg"));
+    let path = crate::cover_write_gate::final_cover_path(covers_dir, work_id, suffix);
     std::fs::metadata(&path)
         .ok()
         .and_then(|m| m.modified().ok())

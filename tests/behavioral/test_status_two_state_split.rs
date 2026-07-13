@@ -325,7 +325,6 @@ fn real_textless_workflow(
     user_id: UserId,
 ) -> EnrichmentWorkflowImpl<
     EnrichmentServiceImpl<livrarr_db::sqlite::SqliteDb, TextlessProviderQueue, DefaultMergeEngine>,
-    livrarr_db::sqlite::SqliteDb,
 > {
     let enrichment = EnrichmentServiceImpl::new(
         Arc::new(db.clone()),
@@ -334,7 +333,7 @@ fn real_textless_workflow(
         false,
     );
 
-    EnrichmentWorkflowImpl::new(Arc::new(enrichment), db)
+    EnrichmentWorkflowImpl::new(Arc::new(enrichment))
 }
 
 // =============================================================================

@@ -1,7 +1,7 @@
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
-use crate::sqlite_common::map_db_err;
+use crate::sqlite_common::{map_db_err, parse_media_type};
 use crate::{DbError, MediaType, RootFolder, RootFolderDb, RootFolderId};
 
 fn row_to_root_folder(row: sqlx::sqlite::SqliteRow) -> Result<RootFolder, DbError> {
@@ -15,19 +15,6 @@ fn row_to_root_folder(row: sqlx::sqlite::SqliteRow) -> Result<RootFolder, DbErro
                 .map_err(|e| DbError::Io(Box::new(e)))?,
         )?,
     })
-}
-
-fn parse_media_type(s: &str) -> Result<MediaType, DbError> {
-    match s {
-        "ebook" => Ok(MediaType::Ebook),
-        "audiobook" => Ok(MediaType::Audiobook),
-        other => Err(DbError::DataCorruption {
-            table: "root_folders",
-            column: "media_type",
-            row_id: 0,
-            detail: format!("unknown value: {other:?}"),
-        }),
-    }
 }
 
 fn media_type_str(mt: MediaType) -> &'static str {

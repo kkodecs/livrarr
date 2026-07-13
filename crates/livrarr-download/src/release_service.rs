@@ -111,9 +111,12 @@ where
                 // Build Torznab search URL
                 let base_url = indexer.url.trim_end_matches('/');
                 let api_path = indexer.api_path.trim_start_matches('/');
-                let mut url = format!("{base_url}/{api_path}?t=search&q={}", urlencoded(&query));
+                let mut url = format!(
+                    "{base_url}/{api_path}?t=search&q={}",
+                    urlencoding::encode(&query)
+                );
                 if let Some(ref api_key) = indexer.api_key {
-                    url.push_str(&format!("&apikey={}", urlencoded(api_key)));
+                    url.push_str(&format!("&apikey={}", urlencoding::encode(api_key)));
                 }
                 // Add categories
                 if !indexer.categories.is_empty() {
@@ -518,8 +521,8 @@ async fn dispatch_torrent<H: HttpFetcher>(
     let auth_url = format!("{base}/api/v2/auth/login");
     let auth_body = format!(
         "username={}&password={}",
-        urlencoded(client.username.as_deref().unwrap_or("")),
-        urlencoded(client.password.as_deref().unwrap_or("")),
+        urlencoding::encode(client.username.as_deref().unwrap_or("")),
+        urlencoding::encode(client.password.as_deref().unwrap_or("")),
     );
 
     let auth_resp = http
@@ -913,25 +916,6 @@ fn build_multipart_addfile(
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
 
     (format!("multipart/form-data; boundary={boundary}"), body)
-}
-
-/// Minimal URL encoding for query parameters.
-fn urlencoded(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            b' ' => result.push('+'),
-            _ => {
-                result.push('%');
-                result.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
-                result.push(char::from(b"0123456789ABCDEF"[(b & 0x0f) as usize]));
-            }
-        }
-    }
-    result
 }
 
 fn protocol_str(p: &DownloadProtocol) -> &'static str {

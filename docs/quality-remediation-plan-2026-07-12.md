@@ -14,8 +14,13 @@ plus the newest `~/Projects/kk-build/build/state/handoff-*.md` before touching a
 kk-build state files remain authoritative for gates; this section is the narrative index.
 
 - **As of 2026-07-13 ~01:00 UTC (session: pipeline-hygiene item-2 verification):**
-  - Quality waves: NOT started. Precondition (pipeline-hygiene committed) still pending —
-    the unit is now COMPLETE and verified, awaiting PO sign-off → commit.
+  - Quality waves: NOT started, but the sequencing precondition is now MET — the
+    pipeline-hygiene unit is COMMITTED AND PUSHED as `0eac1e39` (PO signed off 2026-07-13;
+    31 files, +2456/−894). Wave 1 is unblocked, needs only PO go. Before dispatching:
+    the "#39" numbering reconciliation pass + `/kk-reindex` (snapshot indexes predate
+    the suppression deletion and the new suite). Note: this plan references
+    `code-quality-probe-2026-07-12.md` (repo root), which remains LOCAL-only/untracked —
+    fine for same-machine waves; ship it separately (own PII pass) if it should travel.
   - Item 1 (suppression deletion): DONE + reviewed (unchanged from 2026-07-12; see that
     session's log entries).
   - Item 2 (door-gate suite): VERIFIED 2026-07-13. Per-row conformance read vs
@@ -40,13 +45,47 @@ kk-build state files remain authoritative for gates; this section is the narrati
   - CC adjustments folded into the waves below (marked `[CC 2026-07-12]`): #23 moved to
     Wave 2 · roads-map dead-code candidates added to Wave 1 · #38 pinned to zero-upgrades ·
     #15 also drops the `content_type.parse().unwrap()` · #37 recommended PARK.
-  - Known editorial debt: "#39" refers to three different items across sections — run one
-    numbering reconciliation pass against the probe doc before Wave 1 dispatches.
-  - Next move: PO sign-off → commit the whole pipeline-hygiene unit (items 1+2: suppression
-    deletion + migration 073, the suite + stubs + Cargo.toml, design-door-gate.md, wiki
-    edits, stale-marked script/brief, this plan doc) → push (linear; a "Bypassed rule
-    violations" line on push is expected) → then Wave 1 on PO go. Item 3 (N4 identity-edit
-    check, ~10 min hands-on with PO) can slot anywhere.
+  - Known editorial debt RESOLVED 2026-07-13 (pre-Wave-1 reconciliation): probe #39's three
+    bundled sub-items are now #39a (per-book regex — Wave 1 agent 1b), #39b (anchor-redirect
+    TODO — out of scope), #39c (ignored dedup bug — out of scope); probe doc annotated to
+    match. All other plan #N references verified one-to-one against the probe. Note: #8
+    legitimately appears twice (probe #8 bundles the call_sink allows [solo pass] and the
+    EnrichmentWorkflowImpl db field [agent 1e]).
+  - Item 3 (N4 identity-edit validation): RUN 2026-07-13 with the PO — split verdict.
+    N4 picker fix PROVEN live (GR leg now returns the correct subtitled record for
+    work 71 World War Z; pre-N4 it returned nothing). But the quorum adopted neither
+    offered key (gr AND asin dropped; mechanism unverified — needs a run_quorum trace)
+    so the work still lacks gr_key. Both designed resume doors are dead: the "try again"
+    refresh caller of clear_anchor_dead_ends was never wired (its trait doc mandates it),
+    and the UI identity-edit promised by the Unverified badge tip does not exist.
+    PO-decided 2026-07-13: fix = its own small unit (wire try-again + quorum adoption
+    trace/fix + tooltip). Evidence: session log 01:30 entry; snapshot
+    livrarr.db.pre-n4-validation-20260713; log lines livrarr.log.2026-07-13 @01:21:13.
+  - **Wave 1 GO given (PO, 2026-07-13 ~01:45 UTC, overnight autonomous mandate):** run
+    Wave 1 to completion, continue into Wave 2's D1/D2-independent groups (2b/2c/2e/2f/2g/2h),
+    PREPARE D1/D2 for morning ratification (do not ratify), no Wave 3. Stop only for the
+    handoff's Stop Conditions. Full operating instructions:
+    `~/Projects/kk-build/build/state/handoff-quality-waves.md` — the next session starts there.
+  - **Wave 1 EXECUTED + COMMITTED (2026-07-13 ~08:20 UTC, overnight run):** 7 agents (6 worktree
+    + frontend in main tree) + 3 solo passes; gates fmt-clean · clippy-0 · tests 1513/0/299
+    (Δ from 1522 fully reconciled: −2 rate_limiter tests, −7 llm_validator in-file tests);
+    cross-family review r1 gemini PASS / codex FAIL×2 both dispositioned on evidence, no code
+    change (qBit form-body %20 refuted against qBittorrent's own requestparser.cpp; lock-wording
+    corrected — 1 dependency-edge line, zero version changes); docs-sync applied (12 wiki edits,
+    claim-listed + spot-verified). Item outcomes vs plan: DONE #4(re-scoped: + metadata shim
+    re-export), #5, #6(QBitTorrent KEPT — live via QueueResponse; QueueItemResponse deleted),
+    #8(6 allows not 7 — enumeration authoritative; + db-field drop), #10(FOUR copies not 3),
+    #11, #12(+10 extra byte-identical sites routed), #13, #14, #15, #16, #17, #18, #38(26 deps
+    hoisted, 109 decls; data-encoding SKIPPED — real version split "2"/"2.10.0"), #39a.
+    DROPPED-REFUTED: #7 (PriorityModel.cover is the LIVE REQ-006 picker input — probe annotated).
+    Also: untracked compile-load-bearing fixture force-added (tests/behavioral/fixtures/
+    test_cover_100x150.png — third instance of the register-without-add class, now incl. fixtures).
+    New dead-code candidates queued in roads.md: download-crate QueueItem/QueueResponse/QBitTorrent.
+    FLAGGED DEBT (needs own pass, predates wave): wiki/architecture/metadata-pathway.md still
+    describes the pre-Phase-5 LLM-validator flow across multiple sections.
+  - Awaiting PO (morning): D1 (qBit truth table) + D2 (swallowed-writes policy) ratification ·
+    Wave 3 go/park calls · the identity-fix unit (try-again wiring + quorum adoption + tooltip)
+    scheduling.
 
 ---
 
@@ -95,8 +134,8 @@ Deletions and dedups where the compiler and existing tests are the safety net. *
 
 | Agent | Crate scope | Probe items |
 |---|---|---|
-| 1a | livrarr-enrichment | #4 delete llm_validator.rs (+ mod decl); #7 remove unreachable cover-priority field |
-| 1b | livrarr-server | #5 delete infra/rate_limiter.rs + its tests in state.rs + fix stale `wiki/crates/server.md:40-41`; #39 hoist per-book regex (`readarr_import_workflow.rs:419`); [CC 2026-07-12] close the roads.md dead-code queue: `create_test_library_item` + sibling helpers (api_secondary_impl.rs) and `build_tag_metadata`/`read_cover_bytes` (infra/import_pipeline.rs) — both queued as NEW candidates in wiki/architecture/roads.md since 2026-07-04; update the roads table rows to DONE in the same change |
+| 1a | livrarr-enrichment | #4 delete llm_validator.rs (+ mod decl); #7 remove unreachable cover-priority field — _outcome 2026-07-13: agent's source check refuted both as-specified; #7 DROPPED (`PriorityModel.cover` is the live REQ-006 picker input, `lib.rs:984` + `:734`), #4 re-scoped to the solo passes (needs the metadata shim re-export edit, `livrarr-metadata/src/lib.rs:47`)_ |
+| 1b | livrarr-server | #5 delete infra/rate_limiter.rs + its tests in state.rs + fix stale `wiki/crates/server.md:40-41`; #39a hoist per-book regex (`readarr_import_workflow.rs:419`); [CC 2026-07-12] close the roads.md dead-code queue: `create_test_library_item` + sibling helpers (api_secondary_impl.rs) and `build_tag_metadata`/`read_cover_bytes` (infra/import_pipeline.rs) — both queued as NEW candidates in wiki/architecture/roads.md since 2026-07-04; update the roads table rows to DONE in the same change |
 | 1c | livrarr-download | #6 delete dead traits/structs (ProwlarrClient, QBitClient, QueueItem*); #16 replace hand-rolled `urlencoded()` with `urlencoding::encode` |
 | 1d | livrarr-db | #10 one `parse_media_type` in sqlite_common (pick ONE error variant); #11 one `to_str`/`from_str` in sqlite_common |
 | 1e | livrarr-metadata | #13 fence-strip helper ×3→1; #12 route cover-path formatting through cover_write_gate builders; #14 dimension-backfill twin blocks → one helper; #8 drop reserved `db` field/param on EnrichmentWorkflowImpl |
@@ -146,8 +185,8 @@ Order (cheapest/safest first):
 
 ## Out of scope (tracked, not fixed here)
 
-- #39 anchor-redirect TODO (`sqlite_work_identity.rs:330-340`) — needs redirect-detection machinery that doesn't exist; future feature.
-- #39 ignored dedup bug (`test_verify_d2.rs:187`) — functional bug with its own pending fix constraint, not a quality item; keep on the bug backlog.
+- #39b anchor-redirect TODO (`sqlite_work_identity.rs:330-340`) — needs redirect-detection machinery that doesn't exist; future feature.
+- #39c ignored dedup bug (`test_verify_d2.rs:187`) — functional bug with its own pending fix constraint, not a quality item; keep on the bug backlog.
 - Everything in the probe's "deliberately not listed" section (decided/tracked elsewhere).
 
 ## Open PO decisions

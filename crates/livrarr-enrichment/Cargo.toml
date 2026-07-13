@@ -15,10 +15,10 @@ livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true }
 livrarr-external-data = { workspace = true }
 livrarr-http = { workspace = true }
-tracing = "0.1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+tracing = { workspace = true }
+image = { workspace = true, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]
 livrarr-db = { workspace = true, features = ["test-helpers"] }
 livrarr-http = { workspace = true, features = ["test-helpers"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }

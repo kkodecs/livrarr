@@ -1741,15 +1741,7 @@ async fn llm_clean_series_list<L: LlmCaller + Send + Sync>(
 
     let resp = llm.call(req).await.ok()?;
 
-    let json_str = resp
-        .content
-        .trim()
-        .strip_prefix("```json")
-        .or_else(|| resp.content.trim().strip_prefix("```"))
-        .unwrap_or(resp.content.trim())
-        .strip_suffix("```")
-        .unwrap_or(resp.content.trim())
-        .trim();
+    let json_str = crate::strip_llm_fences(&resp.content);
 
     #[derive(serde::Deserialize)]
     struct KeepEntry {

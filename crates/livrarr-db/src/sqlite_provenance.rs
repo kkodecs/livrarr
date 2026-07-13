@@ -2,31 +2,11 @@ use chrono::Utc;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
-use crate::sqlite_common::{map_db_err, parse_dt};
+use crate::sqlite_common::{from_str, map_db_err, parse_dt, to_str};
 use crate::{
     DbError, FieldProvenance, MetadataProvider, ProvenanceSetter, SetFieldProvenanceRequest,
     UserId, WorkField, WorkId,
 };
-
-// ---------------------------------------------------------------------------
-// Enum ↔ string helpers (leverages serde rename_all = "snake_case")
-// ---------------------------------------------------------------------------
-
-fn to_str<T: serde::Serialize>(v: T) -> String {
-    serde_json::to_value(v)
-        .expect("enum serialization is infallible")
-        .as_str()
-        .expect("enum serializes to string")
-        .to_string()
-}
-
-fn from_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, DbError> {
-    serde_json::from_value(serde_json::Value::String(s.to_string())).map_err(|e| {
-        DbError::IncompatibleData {
-            detail: e.to_string(),
-        }
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Invariant validation

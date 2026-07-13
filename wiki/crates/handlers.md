@@ -45,7 +45,6 @@ Each `Has*` trait exposes one service to handlers via an accessor method. `AppCo
 | `HasHttpClient` | Outbound HTTP client |
 | `HasDataDir` | Data directory path |
 | `HasStartupTime` | Server startup timestamp |
-| `HasProviderHealth` | Metadata provider health state |
 | `HasLiveConfig` | Live metadata config snapshot |
 | `HasRssSync` | RSS sync running/last-run state |
 | `HasSystem` | System info accessor |
@@ -60,7 +59,6 @@ Each `Has*` trait exposes one service to handlers via an accessor method. `AppCo
 
 Thin accessor interfaces consumed by handlers for shared mutable state (not services).
 
-- `ProviderHealthAccessor` — read provider health snapshots
 - `LiveMetadataConfigAccessor` — read the live metadata config snapshot
 - `RssSyncAccessor` — check/set RSS sync running state and last-run timestamp
 - `SystemAccessor` — expose system info (uptime, hostname, etc.)

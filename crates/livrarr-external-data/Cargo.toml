@@ -14,15 +14,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-http = { workspace = true }
-unicode-normalization = "0.1"
-tracing = "0.1"
-url = "2"
-urlencoding = "2"
-regex = "1"
-csv = "1"
-uuid = { version = "1", features = ["v4"] }
-lru = "0.12"
-futures = "0.3"
+unicode-normalization = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }
+regex = { workspace = true }
+csv = { workspace = true }
+uuid = { workspace = true }
+lru = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }

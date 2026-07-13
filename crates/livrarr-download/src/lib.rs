@@ -1,13 +1,8 @@
 pub mod grab_service;
 pub mod release_service;
 
-use livrarr_domain::{
-    DbError, DownloadClient, DownloadClientId, GrabId, QueueStatus, RemotePathMapping, WorkId,
-};
+use livrarr_domain::{DbError, DownloadClientId, GrabId, QueueStatus, RemotePathMapping, WorkId};
 use serde::{Deserialize, Serialize};
-
-// Re-export ProwlarrConfig from livrarr-db for use in trait signatures.
-pub use livrarr_db::ProwlarrConfig;
 
 // =============================================================================
 // CRATE: livrarr-download
@@ -15,81 +10,8 @@ pub use livrarr_db::ProwlarrConfig;
 // Prowlarr search + qBit client.
 
 // ---------------------------------------------------------------------------
-// Prowlarr Client
-// ---------------------------------------------------------------------------
-
-/// Prowlarr Torznab search.
-#[trait_variant::make(Send)]
-pub trait ProwlarrClient: Send + Sync {
-    /// Search Prowlarr for releases. Categories 7020 (ebooks) + 3030 (audiobooks).
-    async fn search_releases(
-        &self,
-        query: &str,
-        config: &ProwlarrConfig,
-    ) -> Result<Vec<ProwlarrRelease>, DownloadError>;
-
-    /// Test Prowlarr connection.
-    async fn test_connection(&self, config: &ProwlarrConfig) -> Result<(), DownloadError>;
-}
-
-/// Release from Prowlarr (pass-through, not persisted).
-#[derive(Debug, Clone)]
-pub struct ProwlarrRelease {
-    pub title: String,
-    pub indexer: String,
-    pub size: i64,
-    pub guid: String,
-    pub download_url: String,
-    pub seeders: Option<i32>,
-    pub leechers: Option<i32>,
-    pub publish_date: Option<String>,
-    pub categories: Vec<i32>,
-}
-
-// ---------------------------------------------------------------------------
 // qBittorrent Client
 // ---------------------------------------------------------------------------
-
-/// qBittorrent API v2 client.
-#[trait_variant::make(Send)]
-pub trait QBitClient: Send + Sync {
-    /// Authenticate to qBit. Caches session cookie.
-    async fn authenticate(&self, config: &DownloadClient) -> Result<(), DownloadError>;
-
-    /// Add torrent via magnet URL.
-    async fn add_torrent_magnet(
-        &self,
-        config: &DownloadClient,
-        magnet: &str,
-        category: &str,
-    ) -> Result<(), DownloadError>;
-
-    /// Add torrent via .torrent file upload (multipart).
-    async fn add_torrent_file(
-        &self,
-        config: &DownloadClient,
-        filename: &str,
-        data: &[u8],
-        category: &str,
-    ) -> Result<(), DownloadError>;
-
-    /// List torrents in a category.
-    async fn list_torrents(
-        &self,
-        config: &DownloadClient,
-        category: &str,
-    ) -> Result<Vec<QBitTorrent>, DownloadError>;
-
-    /// Get a specific torrent by hash.
-    async fn get_torrent(
-        &self,
-        config: &DownloadClient,
-        hash: &str,
-    ) -> Result<Option<QBitTorrent>, DownloadError>;
-
-    /// Test connection: auth + API version + category check + torrent list access.
-    async fn test_connection(&self, config: &DownloadClient) -> Result<(), DownloadError>;
-}
 
 /// Torrent info from qBit API.
 #[derive(Debug, Clone, Default)]
@@ -141,21 +63,6 @@ pub struct QueueResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueItem {
-    pub id: GrabId,
-    pub download_id: String,
-    pub title: String,
-    pub status: QueueStatus,
-    pub size: i64,
-    pub sizeleft: i64,
-    pub eta: Option<i64>,
-    pub indexer: String,
-    pub download_client: String,
-    pub work_id: WorkId,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueItemResponse {
     pub id: GrabId,
     pub download_id: String,
     pub title: String,

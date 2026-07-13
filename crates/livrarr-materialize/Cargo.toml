@@ -8,12 +8,12 @@ license = "GPL-3.0-only"
 tokio = { workspace = true }
 trait-variant = { workspace = true }
 thiserror = { workspace = true }
-tracing = "0.1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+tracing = { workspace = true }
+image = { workspace = true, features = ["jpeg", "png", "webp"] }
 livrarr-domain = { workspace = true }
 livrarr-http = { workspace = true }
 livrarr-tagwrite = { workspace = true }
-url = "2"
+url = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

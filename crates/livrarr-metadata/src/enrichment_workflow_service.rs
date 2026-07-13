@@ -11,15 +11,13 @@ use std::sync::Arc;
 /// Adapter that implements the domain's EnrichmentWorkflow trait by delegating
 /// to the existing EnrichmentServiceImpl. Converts between metadata-crate types
 /// and domain-crate types.
-pub struct EnrichmentWorkflowImpl<S, D> {
+pub struct EnrichmentWorkflowImpl<S> {
     inner: Arc<S>,
-    #[allow(dead_code)] // reserved for direct DB access in future enrichment phases
-    db: D,
 }
 
-impl<S, D> EnrichmentWorkflowImpl<S, D> {
-    pub fn new(inner: Arc<S>, db: D) -> Self {
-        Self { inner, db }
+impl<S> EnrichmentWorkflowImpl<S> {
+    pub fn new(inner: Arc<S>) -> Self {
+        Self { inner }
     }
 }
 
@@ -47,10 +45,9 @@ fn convert_error(e: EnrichmentError) -> EnrichmentWorkflowError {
     }
 }
 
-impl<S, D> EnrichmentWorkflow for EnrichmentWorkflowImpl<S, D>
+impl<S> EnrichmentWorkflow for EnrichmentWorkflowImpl<S>
 where
     S: EnrichmentService + Send + Sync,
-    D: WorkDb + EnrichmentRetryDb + Send + Sync,
 {
     async fn enrich_work(
         &self,

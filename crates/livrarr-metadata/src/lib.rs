@@ -44,7 +44,7 @@ pub use livrarr_enrichment::provider_queue::{
     ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder,
 };
 pub use livrarr_enrichment::{
-    cover_gate, cover_rank, cover_resolution, llm_validator, provider_queue, DefaultMergeEngine,
+    cover_gate, cover_rank, cover_resolution, provider_queue, DefaultMergeEngine,
     EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentResult, EnrichmentService,
     EnrichmentServiceImpl, MergeEngine, MergeError, MergeInput, MergeOutput, PriorityModel,
     ProviderQueue, ProviderQueueConfig, ProviderQueueError, ReconstructedOutcome,
@@ -133,6 +133,17 @@ pub enum LlmError {
     RateLimited,
     #[error("LLM returned invalid response: {0}")]
     InvalidResponse(String),
+}
+
+pub(crate) fn strip_llm_fences(content: &str) -> &str {
+    let trimmed = content.trim();
+    trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .strip_suffix("```")
+        .unwrap_or(trimmed)
+        .trim()
 }
 
 // =============================================================================

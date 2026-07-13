@@ -363,7 +363,6 @@ pub struct AudnexusClient {
     base_url: String,
     retry_backoff_secs: i64,
     cache: AudnexusCache,
-    #[allow(dead_code)] // read at green: REQ-001 record emission
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
@@ -509,7 +508,6 @@ pub struct HardcoverClient {
     /// changes via UI take effect on the next enrichment without restart.
     live_config: crate::live_config::LiveMetadataConfig,
     retry_backoff_secs: i64,
-    #[allow(dead_code)] // read at green: REQ-001 record emission
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
@@ -565,7 +563,7 @@ impl HardcoverClient {
         };
         match query {
             AnchorQuery::Isbn13(isbn) => {
-                let normalized = livrarr_domain::normalize_isbn(isbn);
+                let normalized = livrarr_domain::strip_isbn_punctuation(isbn);
                 match crate::hardcover::query_hardcover_by_isbn(
                     &self.fetcher,
                     &normalized,
@@ -643,7 +641,7 @@ impl HardcoverClient {
 
         // ISBN-first path: query by ISBN, verify ISBN in hit's isbns array
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
-            let normalized = livrarr_domain::normalize_isbn(isbn);
+            let normalized = livrarr_domain::strip_isbn_punctuation(isbn);
             match crate::hardcover::query_hardcover_by_isbn(
                 &self.fetcher,
                 &normalized,
@@ -776,7 +774,6 @@ impl HardcoverClient {
 pub struct OpenLibraryClient {
     fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     retry_backoff_secs: i64,
-    #[allow(dead_code)] // read at green: REQ-001 record emission
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
@@ -810,7 +807,7 @@ impl OpenLibraryClient {
         match query {
             AnchorQuery::OlKey(key) => self.detail_by_key(key, priority).await,
             AnchorQuery::Isbn13(isbn) => {
-                let normalized = livrarr_domain::normalize_isbn(isbn);
+                let normalized = livrarr_domain::strip_isbn_punctuation(isbn);
                 match self.isbn_lookup(&normalized, priority).await {
                     Ok(Some(ol_work_key)) => self.detail_by_key(&ol_work_key, priority).await,
                     Ok(None) => ProviderOutcome::NotFound,
@@ -858,7 +855,7 @@ impl OpenLibraryClient {
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         // Tier 1: ISBN lookup
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
-            let normalized = livrarr_domain::normalize_isbn(isbn);
+            let normalized = livrarr_domain::strip_isbn_punctuation(isbn);
             match self.isbn_lookup(&normalized, priority).await {
                 Ok(Some(ol_work_key)) => {
                     match query_ol_detail(&self.fetcher, &ol_work_key, priority).await {
@@ -1120,7 +1117,6 @@ pub struct GoodreadsClient {
     /// configured. None means the client wasn't given a live-config handle
     /// (test / smoke-test path); LLM fallback disabled.
     live_config: Option<crate::live_config::LiveMetadataConfig>,
-    #[allow(dead_code)] // read at green: REQ-001 record emission
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 

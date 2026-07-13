@@ -164,8 +164,9 @@ universe: 1 site (`ImportWorkflow`).**
 - **Invariant:** copy-for-import on grab/manual, hardlink-first on Readarr, adopt-in-place on scan;
   tags written to the library copy only, via retag/R10 — never inline during materialization.
 - **Forbidden:** creating LibraryItem rows or materializing library files outside `ImportWorkflow`
-  — now true at exactly 1 site. (Exempt, documented: `api_secondary_impl.rs::create_test_library_item`
-  — test scaffolding with zero callers anywhere (LSP + text scan, 2026-07-04); deletion candidate.)
+  — true at exactly 1 site, no exemptions. (The former exemption, `api_secondary_impl.rs::
+  create_test_library_item` — test scaffolding with zero callers anywhere — was itself deleted,
+  quality-waves Wave 1, 2026-07-13; see the dead-code table below.)
 - **Deep docs:** [import-pipeline](import-pipeline.md), [library-management](library-management.md)
   (both describe the pre-consolidation shape — correction queued below).
 - **Status:** CLEAN.
@@ -276,8 +277,9 @@ A second door onto any of these promotes it to a road row in this file.
 | `ImportIoService::create_library_item` + `CreateLibraryItemRequest` | `livrarr-domain/src/services/import_io.rs` (+ impl/stub) | DONE — import-consolidation 2026-07-04, dead after the R7/R9 rewires |
 | `ReadarrImportService::create_library_item` | `crates/livrarr-server/src/readarr_import_service.rs` | DONE — import-consolidation 2026-07-04, dead after the R8 rewire |
 | `materialize_file` | `crates/livrarr-server/src/readarr_import_workflow.rs` | DONE — logic lives in the core as `materialize_hardlink_first` (livrarr-library) |
-| `create_test_library_item` + sibling test helpers | `crates/livrarr-server/src/api_secondary_impl.rs` | NEW candidate — zero callers (LSP + text scan, 2026-07-04); test scaffolding, exempt from R6's forbidden clause, delete next sweep |
-| `build_tag_metadata` / `read_cover_bytes` | `crates/livrarr-server/src/infra/import_pipeline.rs` | NEW candidates — dead after the R7 rewire; near-duplicate private fns already live in `tag_service.rs` |
+| `create_test_library_item` + sibling test helpers | `crates/livrarr-server/src/api_secondary_impl.rs` | DONE — quality-waves Wave 1 (2026-07-13) |
+| `build_tag_metadata` / `read_cover_bytes` | `crates/livrarr-server/src/infra/import_pipeline.rs` | DONE — quality-waves Wave 1 (2026-07-13) |
+| `QueueItem` + `QueueResponse` (+ member `QBitTorrent`) | `crates/livrarr-download/src/lib.rs` | NEW candidate — zero references to livrarr-download's own `QueueItem` found 2026-07-13 (`grab_service.rs` uses `livrarr_domain::services::grab::QueueItem` — same-name different type); `QueueResponse` holds `Vec<QBitTorrent>`; verify all three together next sweep |
 
 ## Wiki corrections queued (stale statements this mapping falsified)
 

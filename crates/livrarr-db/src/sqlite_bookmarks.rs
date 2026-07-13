@@ -1,23 +1,13 @@
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
-use crate::sqlite_common::{map_db_err, parse_dt};
+use crate::sqlite_common::{map_db_err, parse_dt, parse_media_type};
 use crate::{Bookmark, BookmarkDb, DbError, LibraryItemId, MediaType, UserId};
 
 fn media_type_str(mt: MediaType) -> &'static str {
     match mt {
         MediaType::Ebook => "ebook",
         MediaType::Audiobook => "audiobook",
-    }
-}
-
-fn parse_media_type(s: &str) -> Result<MediaType, DbError> {
-    match s {
-        "ebook" => Ok(MediaType::Ebook),
-        "audiobook" => Ok(MediaType::Audiobook),
-        other => Err(DbError::Constraint {
-            message: format!("unknown media_type: {other}"),
-        }),
     }
 }
 

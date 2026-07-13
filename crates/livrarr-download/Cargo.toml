@@ -14,9 +14,10 @@ livrarr-db = { workspace = true }
 livrarr-http = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { workspace = true, features = ["rustls-tls"] }
 sha1 = "0.10"
 data-encoding = "2"
 bendy = { version = "0.6", features = ["std"] }
-tracing = "0.1"
-url = "2"
+tracing = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }

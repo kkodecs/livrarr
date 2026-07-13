@@ -1,4 +1,4 @@
-import { apiFetch, apiUpload, ApiError } from "./client";
+import { apiFetch, apiUpload } from "./client";
 import type {
   SetupStatusResponse,
   SetupRequest,
@@ -672,40 +672,13 @@ export const readarrUndo = (importId: string) =>
   apiFetch<void>(`/import/readarr/${importId}`, { method: "DELETE" });
 
 // List imports (CSV: Goodreads, Hardcover)
-export const listImportPreview = async (file: File): Promise<ListImportPreviewResponse> => {
-  const token = (await import("./client")).getToken();
+export const listImportPreview = (file: File) => {
   const formData = new FormData();
   formData.append("file", file);
-  const headers = new Headers();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  let res: Response;
-  try {
-    res = await fetch("/api/v1/listimport/preview", {
-      method: "POST",
-      headers,
-      body: formData,
-    });
-  } catch {
-    throw new ApiError({
-      status: 0,
-      error: "network_error",
-      message: "Unable to reach Livrarr",
-    });
-  }
-  if (res.status === 401) {
-    const { clearToken } = await import("./client");
-    clearToken();
-    throw new ApiError({ status: 401, error: "unauthorized", message: "Session expired" });
-  }
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ message: res.statusText }));
-    throw new ApiError({
-      status: res.status,
-      error: body.error || "error",
-      message: body.message || res.statusText,
-    });
-  }
-  return res.json();
+  return apiFetch<ListImportPreviewResponse>("/listimport/preview", {
+    method: "POST",
+    body: formData,
+  });
 };
 export const listImportConfirm = (req: ListImportConfirmRequest) =>
   apiFetch<ListImportConfirmResponse>("/listimport/confirm", {

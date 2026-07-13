@@ -34,18 +34,14 @@ Composition root. Depends on all other crates. Nothing depends on it.
 | `log_level_handle` | `Arc<LogLevelHandle>` | Runtime log level control |
 | `import_semaphore` | `Arc<Semaphore>` | Limits concurrent import I/O |
 | `grab_search_cache` | `Arc<GrabSearchCache>` | TTL cache for release search results |
-| `provider_health` | `Arc<ProviderHealthState>` | Metadata provider health snapshots |
 | `cover_proxy_cache` | `Arc<CoverProxyCache>` | LRU cache for proxied cover images |
 | `live_metadata_config` | `LiveMetadataConfig` | Mutable snapshot of `MetadataConfig`; updated on config save, read by enrichment |
-| `goodreads_rate_limiter` | `Arc<GoodreadsRateLimiter>` | Token bucket for Goodreads requests |
-| `ol_rate_limiter` | `Arc<OlRateLimiter>` | Token bucket for OpenLibrary requests |
 | `manual_import_scans` | `Arc<ManualImportScanMap>` | In-progress scan state keyed by scan ID |
 | `readarr_import_progress` | `Arc<Mutex<ReadarrImportProgress>>` | Polled by frontend during Readarr import |
-| `refresh_in_progress` | `Arc<Mutex<HashSet<UserId>>>` | Prevents concurrent refreshes for the same user |
 | `rss_last_run` | `Arc<AtomicI64>` | Unix timestamp of last RSS sync |
 | `rss_sync_running` | `Arc<AtomicBool>` | Guard against concurrent RSS sync |
-| `provider_queue` | `Arc<LiveProviderQueue>` | Phase 1.5 plumbing: provider queue (not yet on live enrichment path) |
-| `enrichment_service` | `Arc<LiveEnrichmentService>` | Phase 1.5 plumbing: enrichment service (not yet on live enrichment path) |
+| `provider_queue` | `Arc<LiveProviderQueue>` | Provider dispatch layer — on the live enrichment path (work service / unified enrichment) |
+| `enrichment_service` | `Arc<LiveEnrichmentService>` | Wraps `provider_queue` + the merge engine — drives live enrichment through the work service |
 
 ### Service layer fields (Phase 4)
 | Field | Service |
@@ -75,7 +71,6 @@ Composition root. Depends on all other crates. Nothing depends on it.
 |---|---|
 | `rss_sync_state` | `RssSyncAccessor` |
 | `system_state` | `SystemAccessor` |
-| `provider_health_accessor` | `ProviderHealthAccessor` |
 | `live_metadata_config_accessor` | `LiveMetadataConfigAccessor` |
 | `cover_proxy_cache_accessor` | `CoverProxyCacheAccessor` |
 | `tag_service` | `Arc<LiveTagService<LiveImportIoService>>` |
@@ -196,8 +191,6 @@ Free helper functions for the import pipeline — no DB or service-layer access;
 - `fetch_sabnzbd_storage_path` — resolve the final storage path from a SABnzbd job
 - `apply_remote_path_mapping` — translate a remote path to a local path via configured mappings
 - `cwa_copy` — CWA-style copy (hardlink-first, fall back to copy) for import
-- `build_tag_metadata` — construct `TagMetadata` from a `Work` and `Author` for tag writing
-- `read_cover_bytes` — read cover image bytes from disk for embedding in tags
 
 ### cache.rs
 - `GrabSearchCache` — TTL-based in-memory cache for release search results (keyed by work + query)
@@ -213,10 +206,6 @@ Free helper functions for the import pipeline — no DB or service-layer access;
 - `clean_search_term` — normalize a search string for indexer queries
 - `fetch_and_parse` — fetch and parse a Torznab XML response
 - `qbit_base_url` / `qbit_login` — qBittorrent connection helpers used by download client test
-
-### rate_limiter.rs
-- `OlRateLimiter` — token bucket rate limiter for OpenLibrary API (3 req/s, burst 10)
-- `GoodreadsRateLimiter` — token bucket rate limiter for Goodreads (configurable)
 
 ### log_buffer.rs
 - `LogBuffer` — fixed-size ring buffer of recent log lines, fed by `LogBufferLayer`

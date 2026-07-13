@@ -1693,7 +1693,7 @@ where
             .await
             .map_err(|e| WorkServiceError::Enrichment(format!("create covers dir: {e}")))?;
 
-        let cover_path = covers_dir.join(format!("{work_id}.jpg"));
+        let cover_path = crate::cover_write_gate::final_cover_path(&covers_dir, work_id, "");
         let tmp_path = cover_path.with_extension("jpg.tmp");
         let tmp_clone = tmp_path.clone();
         let target = cover_path.clone();
@@ -1714,7 +1714,7 @@ where
             return Err(WorkServiceError::Enrichment(format!("write cover: {e}")));
         }
 
-        let thumb_path = covers_dir.join(format!("{work_id}_thumb.jpg"));
+        let thumb_path = crate::cover_write_gate::final_cover_path(&covers_dir, work_id, "_thumb");
         let _ = tokio::fs::remove_file(&thumb_path).await;
 
         self.db
@@ -1733,15 +1733,15 @@ where
         let _work = self.get(user_id, work_id).await?;
 
         // Try new tenant-aware path first, fall back to old flat layout.
-        let new_path = self
-            .data_dir
-            .join("covers")
-            .join(user_id.to_string())
-            .join(format!("{work_id}.jpg"));
+        let new_path = crate::cover_write_gate::final_cover_path(
+            &self.data_dir.join("covers").join(user_id.to_string()),
+            work_id,
+            "",
+        );
         let cover_path = if new_path.exists() {
             new_path
         } else {
-            self.data_dir.join("covers").join(format!("{work_id}.jpg"))
+            crate::cover_write_gate::final_cover_path(&self.data_dir.join("covers"), work_id, "")
         };
         let bytes = tokio::fs::read(&cover_path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -2311,7 +2311,7 @@ where
             // the "row describes what's on disk" invariant.
             let (width, height) = if phase1_mtime.is_some() {
                 crate::cover_resolution::measure_dimensions(
-                    &covers_dir.join(format!("{}.jpg", work.id)),
+                    &crate::cover_write_gate::final_cover_path(&covers_dir, work.id, ""),
                 )
                 .map(|(w, h)| (w as i32, h as i32))
                 .unwrap_or((0, 0))
@@ -2599,54 +2599,49 @@ where
         // dims columns of an already-provenanced row — not a cover write, so
         // it does not reopen AC-10 (no fourth road).
         if post_enrich_work.cover_width == 0 && post_enrich_work.cover_url.is_some() {
-            let path = covers_dir.join(format!("{work_id}.jpg"));
-            if let Ok(bytes) = tokio::fs::read(&path).await {
-                let dims = tokio::task::spawn_blocking(move || {
-                    image::load_from_memory(&bytes)
-                        .map(|img| (img.width() as i32, img.height() as i32))
-                        .ok()
-                })
-                .await
-                .ok()
-                .flatten();
-                if let Some((w, h)) = dims {
-                    if let Err(e) = self
-                        .db
-                        .update_cover_dimensions(user_id, work_id, w, h)
-                        .await
-                    {
-                        tracing::warn!(work_id, "cover dimension backfill failed: {e}");
-                    }
+            if let Some((w, h)) = measure_cover_file_dims(&covers_dir, work_id, "").await {
+                if let Err(e) = self
+                    .db
+                    .update_cover_dimensions(user_id, work_id, w, h)
+                    .await
+                {
+                    tracing::warn!(work_id, "cover dimension backfill failed: {e}");
                 }
             }
         }
         if post_enrich_work.audiobook_cover_width == 0
             && post_enrich_work.audiobook_cover_url.is_some()
         {
-            let path = covers_dir.join(format!("{work_id}_audio.jpg"));
-            if let Ok(bytes) = tokio::fs::read(&path).await {
-                let dims = tokio::task::spawn_blocking(move || {
-                    image::load_from_memory(&bytes)
-                        .map(|img| (img.width() as i32, img.height() as i32))
-                        .ok()
-                })
-                .await
-                .ok()
-                .flatten();
-                if let Some((w, h)) = dims {
-                    if let Err(e) = self
-                        .db
-                        .update_audiobook_cover_dimensions(user_id, work_id, w, h)
-                        .await
-                    {
-                        tracing::warn!(work_id, "audiobook cover dimension backfill failed: {e}");
-                    }
+            if let Some((w, h)) = measure_cover_file_dims(&covers_dir, work_id, "_audio").await {
+                if let Err(e) = self
+                    .db
+                    .update_audiobook_cover_dimensions(user_id, work_id, w, h)
+                    .await
+                {
+                    tracing::warn!(work_id, "audiobook cover dimension backfill failed: {e}");
                 }
             }
         }
 
         (final_status, identity_not_found)
     }
+}
+
+async fn measure_cover_file_dims(
+    covers_dir: &std::path::Path,
+    work_id: WorkId,
+    suffix: &str,
+) -> Option<(i32, i32)> {
+    let path = crate::cover_write_gate::final_cover_path(covers_dir, work_id, suffix);
+    let bytes = tokio::fs::read(&path).await.ok()?;
+    tokio::task::spawn_blocking(move || {
+        image::load_from_memory(&bytes)
+            .map(|img| (img.width() as i32, img.height() as i32))
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn write_addtime_provenance<D: ProvenanceDb>(
@@ -2663,10 +2658,23 @@ pub async fn delete_cover_files(data_dir: &std::path::Path, user_id: i64, work_i
         data_dir.join("covers").join(user_id.to_string()),
         data_dir.join("covers"),
     ] {
-        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}.jpg"))).await;
-        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_thumb.jpg"))).await;
-        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_audio.jpg"))).await;
-        let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_audio_thumb.jpg"))).await;
+        let _ =
+            tokio::fs::remove_file(crate::cover_write_gate::final_cover_path(&dir, work_id, ""))
+                .await;
+        let _ = tokio::fs::remove_file(crate::cover_write_gate::final_cover_path(
+            &dir, work_id, "_thumb",
+        ))
+        .await;
+        let _ = tokio::fs::remove_file(crate::cover_write_gate::final_cover_path(
+            &dir, work_id, "_audio",
+        ))
+        .await;
+        let _ = tokio::fs::remove_file(crate::cover_write_gate::final_cover_path(
+            &dir,
+            work_id,
+            "_audio_thumb",
+        ))
+        .await;
         let _ = tokio::fs::remove_file(dir.join(format!("{work_id}.candidate.tmp"))).await;
         let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_audio.candidate.tmp"))).await;
     }

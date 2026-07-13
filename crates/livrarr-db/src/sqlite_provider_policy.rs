@@ -8,15 +8,7 @@ use livrarr_domain::services::{
 };
 use livrarr_domain::MetadataProvider;
 
-use crate::sqlite_common::map_db_err;
-
-fn from_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, DbError> {
-    serde_json::from_value(serde_json::Value::String(s.to_string())).map_err(|e| {
-        DbError::IncompatibleData {
-            detail: e.to_string(),
-        }
-    })
-}
+use crate::sqlite_common::{from_str, map_db_err};
 
 impl ProviderPolicyDb for SqliteDb {
     async fn load_provider_policy_snapshot(

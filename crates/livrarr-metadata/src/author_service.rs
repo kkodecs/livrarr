@@ -928,15 +928,7 @@ where
 
         let resp = self.llm.call(req).await.ok()?;
 
-        let json_str = resp
-            .content
-            .trim()
-            .strip_prefix("```json")
-            .or_else(|| resp.content.trim().strip_prefix("```"))
-            .unwrap_or(resp.content.trim())
-            .strip_suffix("```")
-            .unwrap_or(resp.content.trim())
-            .trim();
+        let json_str = crate::strip_llm_fences(&resp.content);
 
         let llm_entries: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
 

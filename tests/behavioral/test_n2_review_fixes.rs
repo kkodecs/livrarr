@@ -1034,7 +1034,6 @@ async fn t_e_cover_only_change_through_real_enrichment_retags_with_the_accepted_
     );
     let workflow = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
         Arc::new(enrichment),
-        db.clone(),
     );
     let svc = livrarr_metadata::work_service::WorkServiceImpl::new(
         db.clone(),

@@ -385,7 +385,7 @@ async fn test_wcc_add_reqs_014_015_add_reuses_cached_payloads_in_process_without
         false,
     )
     .with_transport_cache(cache.clone());
-    let workflow = EnrichmentWorkflowImpl::new(Arc::new(enrichment), db.clone());
+    let workflow = EnrichmentWorkflowImpl::new(Arc::new(enrichment));
     let service = WorkServiceImpl::new(
         db,
         workflow,

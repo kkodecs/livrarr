@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::DbError;
+use crate::{DbError, MediaType};
 
 /// Map sqlx errors to DbError.
 ///
@@ -66,6 +66,35 @@ pub fn parse_dt(s: &str) -> Result<DateTime<Utc>, DbError> {
         return Ok(naive.and_utc());
     }
     Err(DbError::Io(format!("invalid datetime: {s}").into()))
+}
+
+/// Parse a stored media_type column value.
+pub(crate) fn parse_media_type(s: &str) -> Result<MediaType, DbError> {
+    match s {
+        "ebook" => Ok(MediaType::Ebook),
+        "audiobook" => Ok(MediaType::Audiobook),
+        _ => Err(DbError::IncompatibleData {
+            detail: format!("unknown media type: {s}"),
+        }),
+    }
+}
+
+/// Serialize an enum to its serde string representation.
+pub(crate) fn to_str<T: serde::Serialize>(v: T) -> String {
+    serde_json::to_value(v)
+        .expect("enum serialization is infallible")
+        .as_str()
+        .expect("enum serializes to string")
+        .to_string()
+}
+
+/// Deserialize an enum from its serde string representation.
+pub(crate) fn from_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, DbError> {
+    serde_json::from_value(serde_json::Value::String(s.to_string())).map_err(|e| {
+        DbError::IncompatibleData {
+            detail: e.to_string(),
+        }
+    })
 }
 
 #[cfg(test)]

@@ -849,14 +849,10 @@ pub async fn send_email<S: HasFileService + HasEmailService>(
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
-pub async fn download<S: HasFileService>(
-    State(state): State<S>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
+async fn serve_library_file(
+    path: std::path::PathBuf,
     req: axum::http::Request<axum::body::Body>,
 ) -> Result<Response, ApiError> {
-    let path = state.file_service().resolve_path(ctx.user.id, id).await?;
-
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -875,9 +871,19 @@ pub async fn download<S: HasFileService>(
     let (mut parts, body) = resp.into_response().into_parts();
     parts.headers.insert(
         axum::http::header::CONTENT_TYPE,
-        content_type.parse().unwrap(),
+        axum::http::HeaderValue::from_static(content_type),
     );
     Ok(Response::from_parts(parts, body))
+}
+
+pub async fn download<S: HasFileService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    req: axum::http::Request<axum::body::Body>,
+) -> Result<Response, ApiError> {
+    let path = state.file_service().resolve_path(ctx.user.id, id).await?;
+    serve_library_file(path, req).await
 }
 
 pub async fn stream<S: HasAuthService + HasFileService>(
@@ -896,28 +902,7 @@ pub async fn stream<S: HasAuthService + HasFileService>(
         .map_err(|_| ApiError::Unauthorized)?;
 
     let path = state.file_service().resolve_path(user_id, id).await?;
-
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let content_type = mime_for_ext(&ext);
-
-    use tower::Service;
-    use tower_http::services::ServeFile;
-    let mut svc = ServeFile::new(&path);
-    let resp = svc
-        .call(req)
-        .await
-        .map_err(|e| ApiError::Internal(format!("File serve error: {e}")))?;
-
-    let (mut parts, body) = resp.into_response().into_parts();
-    parts.headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        content_type.parse().unwrap(),
-    );
-    Ok(Response::from_parts(parts, body))
+    serve_library_file(path, req).await
 }
 
 pub async fn author_search<S: HasAuthorMonitorWorkflow>(

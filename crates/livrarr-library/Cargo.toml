@@ -11,9 +11,9 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true }
-sha2 = "0.10"
-tempfile = "3"
-tracing = "0.1"
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 livrarr-db = { workspace = true, features = ["test-helpers"] }

@@ -272,7 +272,7 @@ async fn test_enrich_happy_path_merges_provider_data() {
     let db = create_test_db().await;
     let (user_id, work_id) = setup(&db).await;
 
-    let workflow = EnrichmentWorkflowImpl::new(Arc::new(SuccessEnrichment), db);
+    let workflow = EnrichmentWorkflowImpl::new(Arc::new(SuccessEnrichment));
     let r = workflow
         .enrich_work(
             user_id,
@@ -297,7 +297,7 @@ async fn test_enrich_background_defers_merge_when_not_terminal() {
     let db = create_test_db().await;
     let (user_id, work_id) = setup(&db).await;
 
-    let workflow = EnrichmentWorkflowImpl::new(Arc::new(DeferredEnrichment), db);
+    let workflow = EnrichmentWorkflowImpl::new(Arc::new(DeferredEnrichment));
     let r = workflow
         .enrich_work(
             user_id,
@@ -323,7 +323,7 @@ async fn test_enrich_llm_rejects_all_sets_conflict() {
     let db = create_test_db().await;
     let (user_id, work_id) = setup(&db).await;
 
-    let workflow = EnrichmentWorkflowImpl::new(Arc::new(FailedEnrichment), db);
+    let workflow = EnrichmentWorkflowImpl::new(Arc::new(FailedEnrichment));
     let r = workflow
         .enrich_work(
             user_id,
@@ -345,7 +345,7 @@ async fn test_enrich_llm_failure_passes_through() {
     let db = create_test_db().await;
     let (user_id, work_id) = setup(&db).await;
 
-    let workflow = EnrichmentWorkflowImpl::new(Arc::new(SuccessEnrichment), db);
+    let workflow = EnrichmentWorkflowImpl::new(Arc::new(SuccessEnrichment));
     let r = workflow
         .enrich_work(
             user_id,
@@ -367,7 +367,7 @@ async fn test_enrich_cas_exhausted_returns_error() {
     let db = create_test_db().await;
     let (user_id, work_id) = setup(&db).await;
 
-    let workflow = EnrichmentWorkflowImpl::new(Arc::new(MergeSupersededEnrichment), db);
+    let workflow = EnrichmentWorkflowImpl::new(Arc::new(MergeSupersededEnrichment));
     let result = workflow
         .enrich_work(
             user_id,
@@ -391,7 +391,7 @@ async fn test_enrich_corrupt_retry_payload_returns_error() {
     let db = create_test_db().await;
     let (user_id, work_id) = setup(&db).await;
 
-    let workflow = EnrichmentWorkflowImpl::new(Arc::new(CorruptPayloadEnrichment), db);
+    let workflow = EnrichmentWorkflowImpl::new(Arc::new(CorruptPayloadEnrichment));
     let result = workflow
         .enrich_work(
             user_id,
@@ -421,7 +421,7 @@ async fn test_enrich_user_provenance_never_overwritten() {
     let db = create_test_db().await;
     let (user_id, work_id) = setup(&db).await;
 
-    let workflow = EnrichmentWorkflowImpl::new(Arc::new(SuccessEnrichment), db);
+    let workflow = EnrichmentWorkflowImpl::new(Arc::new(SuccessEnrichment));
     let r = workflow
         .enrich_work(
             user_id,

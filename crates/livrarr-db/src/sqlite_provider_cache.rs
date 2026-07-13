@@ -1,24 +1,8 @@
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
-use crate::sqlite_common::{map_db_err, parse_dt};
+use crate::sqlite_common::{from_str, map_db_err, parse_dt, to_str};
 use crate::{DbError, MetadataProvider, ProviderCacheEntry};
-
-fn to_str<T: serde::Serialize>(v: T) -> String {
-    serde_json::to_value(v)
-        .expect("enum serialization is infallible")
-        .as_str()
-        .expect("enum serializes to string")
-        .to_string()
-}
-
-fn from_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, DbError> {
-    serde_json::from_value(serde_json::Value::String(s.to_string())).map_err(|e| {
-        DbError::IncompatibleData {
-            detail: e.to_string(),
-        }
-    })
-}
 
 fn row_to_cache_entry(row: sqlx::sqlite::SqliteRow) -> Result<ProviderCacheEntry, DbError> {
     let provider_str: String = row

@@ -538,7 +538,6 @@ async fn main() {
     let work_service_arc: Arc<livrarr_server::state::LiveWorkService> = {
         let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
             svc_enrichment.clone(),
-            svc_db.clone(),
         );
         Arc::new(
             livrarr_metadata::work_service::WorkServiceImpl::new(
@@ -662,7 +661,6 @@ async fn main() {
         list_service: {
             let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
                 svc_enrichment.clone(),
-                svc_db.clone(),
             );
             let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
                 svc_db.clone(),
@@ -686,13 +684,11 @@ async fn main() {
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
                 svc_enrichment.clone(),
-                svc_db.clone(),
             ),
         ),
         author_monitor_workflow: {
             let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
                 svc_enrichment.clone(),
-                svc_db.clone(),
             );
             let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
                 svc_db.clone(),

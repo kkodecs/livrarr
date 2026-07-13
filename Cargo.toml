@@ -29,6 +29,32 @@ tokio = { version = "1", features = ["full", "test-util"] }
 async-trait = "0.1"
 trait-variant = "0.1"
 tokio-util = "0.7"
+axum = "0.8"
+csv = "1"
+futures = "0.3"
+hmac = "0.12"
+id3 = "1.16"
+image = { version = "0.25", default-features = false }
+libc = "0.2"
+lru = "0.12"
+mp4ameta = "0.13"
+quick-xml = "0.37"
+rapidfuzz = "0.5"
+regex = "1"
+reqwest = { version = "0.12", default-features = false }
+sha2 = "0.10"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+subtle = "2"
+tempfile = "3"
+toml = "1.1"
+tower = "0.5"
+tower-http = "0.6"
+tracing = "0.1"
+unicode-normalization = "0.1"
+url = "2"
+urlencoding = "2"
+uuid = { version = "1", features = ["v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Internal crates
 livrarr-domain = { path = "crates/livrarr-domain" }

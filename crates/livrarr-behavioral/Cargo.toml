@@ -16,12 +16,12 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
-toml = "1.1"
+sha2 = { workspace = true }
+toml = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 trait-variant = { workspace = true }
-urlencoding = "2"
+urlencoding = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true, features = ["test-helpers"] }
 livrarr-metadata = { workspace = true }
@@ -33,17 +33,17 @@ livrarr-http = { workspace = true }
 livrarr-external-data = { workspace = true }
 livrarr-materialize = { workspace = true }
 livrarr-server = { workspace = true }
-axum = "0.8"
+axum = { workspace = true }
 assert_matches = "1"
-futures = "0.3"
-rapidfuzz = "0.5"
-tempfile = "3"
-tower = "0.5"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
-unicode-normalization = "0.1"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+futures = { workspace = true }
+rapidfuzz = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true }
+sqlx = { workspace = true }
+unicode-normalization = { workspace = true }
+image = { workspace = true, features = ["jpeg"] }
 livrarr-enrichment = { workspace = true }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { workspace = true }
 
 [[test]]
 name = "test_metadata_overhaul_domain"

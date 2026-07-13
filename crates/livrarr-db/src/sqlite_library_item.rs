@@ -2,7 +2,7 @@ use chrono::Utc;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
-use crate::sqlite_common::{map_db_err, parse_dt};
+use crate::sqlite_common::{map_db_err, parse_dt, parse_media_type};
 use crate::{
     CreateLibraryItemDbRequest, DbError, LibraryItem, LibraryItemDb, LibraryItemId, MediaType,
     RootFolderId, TagStatus, UserId, WorkId,
@@ -68,16 +68,6 @@ fn parse_tag_status(s: &str) -> livrarr_domain::TagStatus {
         "synced" => livrarr_domain::TagStatus::Synced,
         "failed" => livrarr_domain::TagStatus::Failed,
         _ => livrarr_domain::TagStatus::Pending,
-    }
-}
-
-fn parse_media_type(s: &str) -> Result<MediaType, DbError> {
-    match s {
-        "ebook" => Ok(MediaType::Ebook),
-        "audiobook" => Ok(MediaType::Audiobook),
-        _ => Err(DbError::IncompatibleData {
-            detail: format!("unknown media type: {s}"),
-        }),
     }
 }
 

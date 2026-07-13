@@ -683,15 +683,7 @@ where
 
     let resp = ctx.llm.call(req).await.ok()?;
 
-    let json_str = resp
-        .content
-        .trim()
-        .strip_prefix("```json")
-        .or_else(|| resp.content.trim().strip_prefix("```"))
-        .unwrap_or(resp.content.trim())
-        .strip_suffix("```")
-        .unwrap_or(resp.content.trim())
-        .trim();
+    let json_str = crate::strip_llm_fences(&resp.content);
 
     let indices: Vec<usize> = serde_json::from_str(json_str).ok()?;
     let max_idx = results.len();

@@ -9,9 +9,9 @@ livrarr-domain = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
-regex = "1"
-rapidfuzz = "0.5"
-unicode-normalization = "0.1"
-id3 = "1.16"
+regex = { workspace = true }
+rapidfuzz = { workspace = true }
+unicode-normalization = { workspace = true }
+id3 = { workspace = true }
 rbook = "0.7"
-mp4ameta = "0.13"
+mp4ameta = { workspace = true }

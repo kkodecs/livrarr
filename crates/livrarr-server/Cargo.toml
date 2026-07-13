@@ -26,33 +26,33 @@ livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
 livrarr-tagwrite = { workspace = true }
 livrarr-materialize = { workspace = true }
-futures = "0.3"
-libc = "0.2"
-toml = "1.1"
-tracing = "0.1"
+futures = { workspace = true }
+libc = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
 argon2 = { version = "0.5", features = ["std"] }
 getrandom = { version = "0.2", features = ["std"] }
-hmac = "0.12"
-sha2 = "0.10"
-subtle = "2"
-axum = { version = "0.8", features = ["macros", "multipart"] }
-csv = "1"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "cors", "limit", "trace", "set-header"] }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+axum = { workspace = true, features = ["macros", "multipart"] }
+csv = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["fs", "cors", "limit", "trace", "set-header"] }
 clap = { version = "4", features = ["derive"] }
-tokio-util = "0.7"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
-urlencoding = "2"
-reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+tokio-util = { workspace = true }
+sqlx = { workspace = true }
+urlencoding = { workspace = true }
+reqwest = { workspace = true, features = ["multipart", "rustls-tls"] }
+image = { workspace = true, features = ["jpeg"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "pool", "hostname", "tracing"] }
-uuid = { version = "1", features = ["v4"] }
-tempfile = "3"
+uuid = { workspace = true }
+tempfile = { workspace = true }
 tower_governor = "0.8.0"
 dashmap = "6.1.0"
-regex = "1"
+regex = { workspace = true }
 data-encoding = "2.10.0"
 dhat = { version = "0.3", optional = true }
 

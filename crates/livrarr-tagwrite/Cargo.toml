@@ -7,12 +7,12 @@ license = "GPL-3.0-only"
 [dependencies]
 thiserror = { workspace = true }
 tokio = { workspace = true }
-futures = "0.3"
-tracing = "0.1"
-tempfile = "3"
+futures = { workspace = true }
+tracing = { workspace = true }
+tempfile = { workspace = true }
 livrarr-domain = { workspace = true }
-zip = { version = "2", default-features = false, features = ["deflate"] }
-quick-xml = "0.37"
+zip = { workspace = true }
+quick-xml = { workspace = true }
 repub = { git = "https://github.com/kkodecs/repub", tag = "v0.1.0-alpha" }
-mp4ameta = "0.13"
-id3 = "1.16"
+mp4ameta = { workspace = true }
+id3 = { workspace = true }

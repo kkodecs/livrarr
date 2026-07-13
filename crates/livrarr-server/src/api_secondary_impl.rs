@@ -7,11 +7,10 @@ use chrono::Utc;
 use crate::*;
 use livrarr_db::{
     sqlite::SqliteDb, AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateDownloadClientDbRequest,
-    CreateLibraryItemDbRequest, CreateNotificationDbRequest, CreateUserDbRequest,
-    CreateWorkDbRequest, DownloadClientDb, HistoryDb, HistoryFilter, LibraryItemDb, NotificationDb,
-    RemotePathMappingDb, RootFolderDb, UpdateAuthorDbRequest, UpdateDownloadClientDbRequest,
-    UpdateEmailConfigRequest, UpdateMediaManagementConfigRequest, UpdateMetadataConfigRequest,
-    UpdateProwlarrConfigRequest, UserDb, WorkDb, WorkDbCreate,
+    CreateNotificationDbRequest, CreateUserDbRequest, DownloadClientDb, HistoryDb, HistoryFilter,
+    LibraryItemDb, NotificationDb, RemotePathMappingDb, RootFolderDb, UpdateAuthorDbRequest,
+    UpdateDownloadClientDbRequest, UpdateEmailConfigRequest, UpdateMediaManagementConfigRequest,
+    UpdateMetadataConfigRequest, UpdateProwlarrConfigRequest, UserDb, WorkDb,
 };
 use livrarr_handlers::types::work::work_to_detail;
 
@@ -845,26 +844,6 @@ fn get_disk_space(path: &str) -> (Option<i64>, Option<i64>) {
 
 #[cfg(test)]
 impl SecondaryApiImpl {
-    pub async fn create_author_without_ol_key(&self, user_id: UserId) -> AuthorId {
-        let author = self
-            .db
-            .create_author(CreateAuthorDbRequest {
-                user_id,
-                name: format!(
-                    "NoOL-Author-{}",
-                    Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                ),
-                sort_name: None,
-                ol_key: None,
-                gr_key: None,
-                hc_key: None,
-                import_id: None,
-            })
-            .await
-            .unwrap();
-        author.id
-    }
-
     pub async fn create_test_notification(&self, user_id: UserId, ref_key: &str) -> NotificationId {
         let n = self
             .db
@@ -878,129 +857,6 @@ impl SecondaryApiImpl {
             .await
             .unwrap();
         n.id
-    }
-
-    pub async fn create_test_library_item(
-        &self,
-        user_id: UserId,
-        root_folder_id: RootFolderId,
-    ) -> LibraryItemId {
-        // Ensure a work exists
-        let (work, _) = self
-            .db
-            .create_work(CreateWorkDbRequest {
-                user_id,
-                title: format!("Work-{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)),
-                author_name: "Test Author".into(),
-                normalized_title: String::new(),
-                normalized_author: String::new(),
-                author_id: None,
-                ol_key: None,
-                gr_key: None,
-                year: None,
-                cover_url: None,
-                language: None,
-                import_id: None,
-                series_id: None,
-                series_name: None,
-                series_position: None,
-                monitor_ebook: false,
-                monitor_audiobook: false,
-                source_provider_json: None,
-                isbn_13: None,
-                asin: None,
-                description: None,
-                cover_manual: false,
-            })
-            .await
-            .unwrap();
-        let item = self
-            .db
-            .create_library_item(CreateLibraryItemDbRequest {
-                user_id,
-                work_id: work.id,
-                root_folder_id,
-                path: format!(
-                    "test-{}.epub",
-                    Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                ),
-                media_type: MediaType::Ebook,
-                file_size: 1234,
-                import_id: None,
-                tag_status: livrarr_db::TagStatus::Pending,
-                tagged_at_generation: 0,
-            })
-            .await
-            .unwrap();
-        item.id
-    }
-
-    pub async fn create_test_library_file(&self, user_id: UserId) -> (LibraryItemId, String) {
-        // Create a temp file
-        let tmp = std::env::temp_dir().join(format!(
-            "livrarr-test-{}.epub",
-            Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
-        std::fs::write(&tmp, b"test content").unwrap();
-        let path_str = tmp.to_str().unwrap().to_string();
-        // Create root folder if needed
-        let rf = match self
-            .db
-            .get_root_folder_by_media_type(MediaType::Ebook)
-            .await
-            .unwrap()
-        {
-            Some(rf) => rf,
-            None => self
-                .db
-                .create_root_folder("/tmp", MediaType::Ebook)
-                .await
-                .unwrap(),
-        };
-        let (work, _) = self
-            .db
-            .create_work(CreateWorkDbRequest {
-                user_id,
-                title: "File Test Work".into(),
-                author_name: "File Author".into(),
-                normalized_title: String::new(),
-                normalized_author: String::new(),
-                author_id: None,
-                ol_key: None,
-                gr_key: None,
-                year: None,
-                cover_url: None,
-                language: None,
-                import_id: None,
-                series_id: None,
-                series_name: None,
-                series_position: None,
-                monitor_ebook: false,
-                monitor_audiobook: false,
-                source_provider_json: None,
-                isbn_13: None,
-                asin: None,
-                description: None,
-                cover_manual: false,
-            })
-            .await
-            .unwrap();
-        let item = self
-            .db
-            .create_library_item(CreateLibraryItemDbRequest {
-                user_id,
-                work_id: work.id,
-                root_folder_id: rf.id,
-                path: path_str.clone(),
-                media_type: MediaType::Ebook,
-                file_size: 12,
-                import_id: None,
-                tag_status: livrarr_db::TagStatus::Pending,
-                tagged_at_generation: 0,
-            })
-            .await
-            .unwrap();
-        (item.id, path_str)
     }
 }
 

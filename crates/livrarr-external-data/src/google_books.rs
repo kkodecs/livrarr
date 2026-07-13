@@ -263,7 +263,6 @@ pub struct GoogleBooksClient {
     fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     live_config: LiveMetadataConfig,
     base_url: String,
-    #[allow(dead_code)] // read at green: REQ-001 record emission
     call_sink: Option<std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 

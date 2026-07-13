@@ -75,7 +75,6 @@ struct AudibleSearchResponse {
 pub struct AudibleCatalogClient {
     pub fetcher: livrarr_http::fetcher::HttpFetcherImpl,
     pub retry_backoff_secs: i64,
-    #[allow(dead_code)] // read at green: REQ-001 record emission
     call_sink: Option<std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 

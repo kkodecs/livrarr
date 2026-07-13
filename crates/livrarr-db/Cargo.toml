@@ -15,8 +15,8 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 trait-variant = { workspace = true }
 livrarr-domain = { workspace = true }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { workspace = true }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
-tempfile = "3"
+tempfile = { workspace = true }
 thiserror = { workspace = true }
-tracing = "0.1"
+tracing = { workspace = true }

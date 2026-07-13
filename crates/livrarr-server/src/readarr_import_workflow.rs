@@ -407,6 +407,9 @@ fn extract_quality_id(bf: &RdBookFile) -> Option<i32> {
     bf.quality.as_ref()?.quality.as_ref().map(|q| q.id)
 }
 
+static SERIES_TITLE_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^(.*?)(?:\s+#([\d.]+))?$").unwrap());
+
 fn parse_series_title(series_title: &str) -> (Option<String>, Option<f64>) {
     let segment = series_title
         .split(';')
@@ -416,8 +419,7 @@ fn parse_series_title(series_title: &str) -> (Option<String>, Option<f64>) {
     if segment.is_empty() {
         return (None, None);
     }
-    let re = regex::Regex::new(r"^(.*?)(?:\s+#([\d.]+))?$").unwrap();
-    if let Some(caps) = re.captures(segment) {
+    if let Some(caps) = SERIES_TITLE_RE.captures(segment) {
         let name = caps.get(1).map(|m| m.as_str().trim().to_string());
         let pos = caps.get(2).and_then(|m| m.as_str().parse::<f64>().ok());
         let name = name.filter(|n| !n.is_empty());

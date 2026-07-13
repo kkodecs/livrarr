@@ -226,39 +226,3 @@ pub(crate) fn cwa_copy(
 
     result
 }
-
-/// Build TagMetadata from a Work record for tag writing.
-pub fn build_tag_metadata(work: &livrarr_domain::Work) -> livrarr_tagwrite::TagMetadata {
-    livrarr_tagwrite::TagMetadata {
-        title: work.title.clone(),
-        subtitle: work.subtitle.clone(),
-        author: work.author_name.clone(),
-        narrator: work.narrator.clone(),
-        year: work.year,
-        genre: work.genres.clone(),
-        description: work.description.clone(),
-        publisher: work.publisher.clone(),
-        isbn: work.isbn_13.clone(),
-        language: work.language.clone(),
-        series_name: work.series_name.clone(),
-        series_position: work.series_position,
-    }
-}
-
-/// Read cover image bytes for tag embedding from the tenant-aware layout,
-/// `covers/{user_id}/{work_id}.jpg` — the only layout a cover can live in
-/// (the startup migration adopts legacy root-level files before any import
-/// runs). A root-level file that still exists is an unowned orphan and must
-/// never be embedded. Returns None if the file doesn't exist (not an error
-/// per TAG-V21-003).
-pub async fn read_cover_bytes(
-    data_dir: &std::path::Path,
-    user_id: i64,
-    work_id: i64,
-) -> Option<Vec<u8>> {
-    let path = data_dir
-        .join("covers")
-        .join(user_id.to_string())
-        .join(format!("{work_id}.jpg"));
-    tokio::fs::read(&path).await.ok()
-}

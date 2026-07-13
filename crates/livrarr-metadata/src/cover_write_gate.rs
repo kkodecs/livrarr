@@ -608,7 +608,7 @@ pub(crate) async fn invalidate_thumbnails(
     let _ = tokio::fs::remove_file(&thumb_path).await;
 
     if media_type == CoverMediaType::Ebook && sibling_cover_url.is_none() {
-        let audio_thumb = covers_dir.join(format!("{work_id}_audio_thumb.jpg"));
+        let audio_thumb = final_cover_path(covers_dir, work_id, "_audio_thumb");
         let _ = tokio::fs::remove_file(&audio_thumb).await;
     }
 }

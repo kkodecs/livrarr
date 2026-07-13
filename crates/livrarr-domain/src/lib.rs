@@ -1048,7 +1048,7 @@ pub fn unproxy_cover_url(url: &str) -> String {
 }
 
 /// Strip all non-alphanumeric characters from an ISBN (hyphens, spaces, etc.).
-pub fn normalize_isbn(isbn: &str) -> String {
+pub fn strip_isbn_punctuation(isbn: &str) -> String {
     isbn.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 

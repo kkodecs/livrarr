@@ -5,9 +5,6 @@ pub use crate::infra::cache::{
     GRAB_CACHE_CLEANUP_INTERVAL_SECS, GRAB_CACHE_TTL_SECS, STATE_MAP_TTL,
 };
 pub use crate::infra::log_buffer::{LogBuffer, LogLevelHandle, MAX_LOG_LINES};
-pub use crate::infra::rate_limiter::{
-    GoodreadsRateLimiter, OlRateLimiter, GR_BURST, GR_RATE, OL_BURST, OL_RATE,
-};
 
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_http::HttpClient;
@@ -33,10 +30,7 @@ pub type LiveEnrichmentService = livrarr_metadata::EnrichmentServiceImpl<
 // =============================================================================
 
 pub type LiveEnrichmentWorkflow =
-    livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl<
-        LiveEnrichmentService,
-        SqliteDb,
-    >;
+    livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl<LiveEnrichmentService>;
 
 pub type LiveAuthorService = livrarr_metadata::author_service::AuthorServiceImpl<
     SqliteDb,
@@ -712,44 +706,5 @@ impl HasTrustedOrigins for AppState {
     type TrustedOrigins = TrustedOriginsRebuilderImpl;
     fn trusted_origins(&self) -> &Self::TrustedOrigins {
         &self.trusted_origins_rebuilder
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn rate_limiter_allows_burst() {
-        let limiter = GoodreadsRateLimiter::new();
-
-        let start = std::time::Instant::now();
-        for _ in 0..5 {
-            limiter.acquire().await;
-        }
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed.as_millis() < 100,
-            "Burst of 5 took {}ms, expected <100ms",
-            elapsed.as_millis()
-        );
-    }
-
-    #[tokio::test]
-    async fn rate_limiter_throttles_after_burst() {
-        let limiter = GoodreadsRateLimiter::new();
-
-        for _ in 0..5 {
-            limiter.acquire().await;
-        }
-
-        let start = std::time::Instant::now();
-        limiter.acquire().await;
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed.as_millis() >= 800,
-            "6th acquire took only {}ms, expected >=800ms",
-            elapsed.as_millis()
-        );
     }
 }

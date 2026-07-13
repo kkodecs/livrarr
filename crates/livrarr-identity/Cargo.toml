@@ -11,6 +11,6 @@ serde_json = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-external-data = { workspace = true }
 livrarr-http = { workspace = true }
-tracing = "0.1"
-uuid = { version = "1", features = ["v4"] }
-futures = "0.3"
+tracing = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
