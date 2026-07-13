@@ -47,7 +47,7 @@ This page is also a deprecation-tracking page. We should be actively reducing GR
   gone (the author series LIST page `/series/list?id=` still uses the old
   layout + `RE_NEXT_PAGE` — unverified since the redesign; candidate for the
   N5 drift probes).
-- Parser: `parse_series_detail_html` (livrarr-external-data `goodreads.rs`) —
+- Parser: `parse_series_detail_html` (livrarr-external-data `goodreads/parsers.rs`) —
   per-entry tolerant JSON parsing, WARN on every unreadable shape (insight
   #62). Real captured pages live at
   `crates/livrarr-external-data/fixtures/gr-series-{108562,43318}.html`.
@@ -79,7 +79,7 @@ This is a critical distinction that runs counter to the OL lesson we just learne
 
 **Specifically: never identify as `Livrarr/`, `LivrarrBot/`, or `KkodecsBookBot/` on GR.** Both are burned at OL and the substring-blocklist pattern could propagate. Keep the browser UA on GR.
 
-**Production already does the right thing.** Our production GR client uses `GOODREADS_USER_AGENT` (defined at `crates/livrarr-metadata/src/goodreads.rs:398`):
+**Production already does the right thing.** Our production GR client uses `GOODREADS_USER_AGENT` (defined at `crates/livrarr-external-data/src/goodreads/client.rs:26`):
 
 ```
 Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
@@ -87,7 +87,7 @@ Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/12
 
 Pure browser UA. No "Livrarr" substring. No self-identification. Exactly what the polite-scraper convention recommends for GR.
 
-The string `Mozilla/5.0 (compatible; Livrarr/0.1 test)` exists at `goodreads.rs:977` but is **inside a `#[cfg(test)] mod tests` block** — a test fixture that never reaches production. Cosmetically ugly but operationally harmless. Earlier wiki drafts incorrectly flagged this as a production issue.
+The string `Mozilla/5.0 (compatible; Livrarr/0.1 test)` exists at `goodreads/parsers.rs:934` but is **inside a `#[cfg(test)] mod tests` block** — a test fixture that never reaches production. Cosmetically ugly but operationally harmless. Earlier wiki drafts incorrectly flagged this as a production issue.
 
 ## robots.txt — what GR allows
 
@@ -107,7 +107,7 @@ Allows with restrictions:
 - RSS feeds
 - `/review/*`
 
-**Implication:** we should not be hitting `/search` from automated flows. If we do (and we may — need to audit `goodreads.rs`), that's a policy violation that could explain past 403s.
+**Implication:** we should not be hitting `/search` from automated flows. If we do (and we may — need to audit `goodreads/`), that's a policy violation that could explain past 403s.
 
 ## Backoff and failure modes
 
@@ -213,5 +213,5 @@ This is part of why GR shouldn't remain our primary source — there's no symmet
 - `wiki/integrations/hardcover.md` (the replacement target)
 - `project_gr_llm_required.md` (memory)
 - `project_gr_202_antibot.md` (memory — historical GR anti-bot incident)
-- Existing client: `crates/livrarr-metadata/src/goodreads.rs`
+- Existing client: `crates/livrarr-external-data/src/goodreads/`
 - rreading-glasses (proxy): <https://github.com/blampe/rreading-glasses>

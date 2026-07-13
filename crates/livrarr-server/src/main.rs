@@ -56,327 +56,25 @@ async fn main() {
     let data_dir = cli.data;
     let ui_dir = cli.ui_dir.unwrap_or_else(|| data_dir.join("ui"));
 
-    // Step 1: Ensure data directory exists.
-    if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        eprintln!(
-            "Failed to create data directory {}: {e}",
-            data_dir.display()
-        );
-        std::process::exit(1);
-    }
-
-    // Step 2: Read config.toml.
-    let config = match load_config(&data_dir) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Configuration error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    // Step 3: Initialize tracing.
-    let log_buffer = Arc::new(livrarr_server::state::LogBuffer::new());
-    let (log_level_handle, log_surface) = init_tracing(&config.log, log_buffer.clone(), &data_dir);
-
-    info!("Livrarr starting — data directory: {}", data_dir.display());
-
-    // Step 4: Permission check — verify data dir is writable.
-    if let Err(e) = livrarr_db::pool::check_data_dir_permissions(&data_dir) {
-        error!("{e}");
-        std::process::exit(1);
-    }
-
-    // Step 5: PID lock — ensure single instance.
-    if let Err(e) = livrarr_db::pool::acquire_pid_lock(&data_dir) {
-        error!("{e}");
-        std::process::exit(1);
-    }
-
-    // Step 6: Connect to SQLite.
-    let pool = match livrarr_db::pool::create_sqlite_pool(&data_dir).await {
-        Ok(p) => p,
-        Err(e) => {
-            error!("Failed to connect to SQLite: {e}");
-            livrarr_db::pool::release_pid_lock(&data_dir);
-            std::process::exit(1);
-        }
-    };
-
-    // Step 7: Pre-migration backup (only if DB file already exists).
-    let db_path = data_dir.join("livrarr.db");
-    let db_exists = tokio::fs::try_exists(&db_path).await.unwrap_or(false);
-    if db_exists {
-        match livrarr_db::pool::create_backup(&pool, &data_dir).await {
-            Ok(_) => {}
-            Err(e) => {
-                error!("Pre-migration backup failed: {e}");
-                livrarr_db::pool::release_pid_lock(&data_dir);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // Step 8: Run migrations.
-    if let Err(e) = livrarr_db::pool::run_migrations(&pool).await {
-        error!("Migration failed: {e}");
-        livrarr_db::pool::release_pid_lock(&data_dir);
-        std::process::exit(1);
-    }
-    info!("Database migrations complete");
-
-    // Step 9: Version gate — verify DB compatibility.
-    if let Err(e) = livrarr_db::pool::check_version_gate(&pool).await {
-        error!("{e}");
-        livrarr_db::pool::release_pid_lock(&data_dir);
-        std::process::exit(1);
-    }
-
-    // Step 9b: Backfill normalized identity columns and create UNIQUE index.
-    // Migration 038 adds columns with `__UNMIGRATED__` defaults; this hook
-    // computes real values, resolves duplicates, and creates the index.
-    if let Err(e) = livrarr_db::pool::backfill_normalized_identity(&pool).await {
-        error!("normalized identity backfill failed: {e}");
-        livrarr_db::pool::release_pid_lock(&data_dir);
-        std::process::exit(1);
-    }
-
-    // Step 9c: Recompute works.normalized_title/normalized_author via the
-    // identity_matching authority's identity_key recipe (REQ-014),
-    // superseding the retired normalize_for_matching. Idempotent — migration
-    // 069 seeds the generation marker this checks.
-    if let Err(e) = livrarr_db::pool::backfill_identity_key_recompute(&pool).await {
-        error!("identity-key recompute failed: {e}");
-        livrarr_db::pool::release_pid_lock(&data_dir);
-        std::process::exit(1);
-    }
-
-    // Step 10: Clean up old backups (keep 3).
-    {
-        let data_dir_clone = data_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            livrarr_db::pool::cleanup_old_backups(&data_dir_clone, 3);
-        })
-        .await
-        .ok();
-    }
+    ensure_data_dir(&data_dir);
+    let (config, log_buffer, log_level_handle, log_surface) = init_tracing_and_config(&data_dir);
+    let pool = init_database(&data_dir).await;
 
     // Construct AppState.
-    let db = livrarr_db::sqlite::SqliteDb::new(pool);
-    let auth_service = Arc::new(livrarr_server::auth_service::ServerAuthService::new(
-        db.clone(),
-        livrarr_server::auth_crypto::RealAuthCrypto,
-    ));
-    let ua = livrarr_http::livrarr_user_agent();
-    let http_client = livrarr_http::HttpClient::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(&ua)
-        .build()
-        .expect("failed to build HTTP client");
-    let http_client_safe = livrarr_http::HttpClient::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(&ua)
-        .ssrf_safe(true)
-        .build()
-        .expect("failed to build SSRF-safe HTTP client");
-    let http_fetcher =
-        livrarr_http::fetcher::HttpFetcherImpl::new().expect("failed to build HTTP fetcher");
-    // Shared LLM-endpoint client: unrestricted trust class (admin-configured
-    // infrastructure, same as http_client), 60s budget for slow local instances.
-    let llm_http_client = livrarr_http::HttpClient::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .user_agent(&ua)
-        .build()
-        .expect("failed to build LLM HTTP client");
+    let (db, auth_service) = build_db_and_auth(pool);
+    let (http_client, http_client_safe, http_fetcher, llm_http_client) = build_http_clients();
     let job_runner = livrarr_server::jobs::JobRunner::new();
-
-    // Provider call-record sink (REQ-001): bounded fire-and-forget channel +
-    // batching writer. Shares the job cancellation token; the handle is
-    // awaited after job shutdown so the final drain completes.
-    let (call_sink, call_sink_handle) =
-        livrarr_server::call_sink::spawn_call_sink(db.clone(), job_runner.cancel_token());
-    let call_sink: Arc<dyn livrarr_domain::services::ProviderCallSink> = Arc::new(call_sink);
-
-    // Phase 1.5 plumbing: build the live DefaultProviderQueue + EnrichmentServiceImpl
-    // from a startup-time snapshot of MetadataConfig. Live config changes (token
-    // added, URL changed) require a server restart for now — runtime reload comes
-    // alongside the orchestration cutover.
-    // LiveMetadataConfig — all credential-dependent components hold a clone
-    // of this and read fresh per call. The update_metadata_config handler
-    // calls .replace() after a DB write so the new credentials are live on
-    // the next enrichment without restart.
-    let live_metadata_config = {
-        use livrarr_db::ConfigDb;
-        let initial = db.get_metadata_config().await.unwrap_or_else(|e| {
-            warn!("Failed to read metadata config at startup ({e}); using defaults");
-            livrarr_db::MetadataConfig {
-                hardcover_enabled: false,
-                hardcover_api_token: None,
-                llm_enabled: false,
-                llm_provider: None,
-                llm_endpoint: None,
-                llm_api_key: None,
-                llm_model: None,
-                audnexus_url: "https://api.audnex.us".to_string(),
-                languages: vec!["en".to_string()],
-                google_books_api_key: None,
-            }
-        });
-        livrarr_external_data::live_config::LiveMetadataConfig::new(initial)
-    };
-
-    // Warn at startup if the configured LLM endpoint is invalid (but don't fail).
-    {
-        let cfg = live_metadata_config.snapshot();
-        if let Some(ref endpoint) = cfg.llm_endpoint {
-            if !endpoint.is_empty() {
-                if let Err(reason) = validate_llm_endpoint_startup(endpoint) {
-                    warn!("LLM endpoint validation: {reason} — LLM features may not work");
-                }
-            }
-        }
-    }
-
-    // Shared payload transport cache (REQ-014/015): the identity resolver seeds it
-    // during discovery; EnrichmentServiceImpl::enrich_work consumes it for a
-    // candidate_id hit (zero-network reuse through the one road). The SAME Arc is
-    // wired into both the enrichment service (below) and the identity resolver.
-    let transport_cache = Arc::new(livrarr_external_data::transport_cache::TransportCache::new(
-        std::time::Duration::from_secs(300),
-    ));
-
-    let (provider_queue, enrichment_service) = {
-        use livrarr_domain::MetadataProvider as P;
-        use livrarr_metadata as m;
-
-        let cfg_snapshot = live_metadata_config.snapshot();
-
-        let queue_cfg = |provider| m::ProviderQueueConfig {
-            provider,
-            max_attempts: 5,
-        };
-
-        let mut builder = m::DefaultProviderQueueBuilder::new();
-
-        // Audnexus — always available. URL is captured at startup; if you
-        // want a custom audnexus_url to take effect live too, that's a
-        // small follow-up (same LiveMetadataConfig pattern).
-        builder = builder.add_provider(
-            P::Audnexus,
-            livrarr_external_data::ProviderClient::Audnexus(
-                livrarr_external_data::AudnexusClient::new(
-                    http_fetcher.clone(),
-                    cfg_snapshot.audnexus_url.clone(),
-                ),
-            )
-            .with_call_sink(call_sink.clone()),
-            queue_cfg(P::Audnexus),
-        );
-
-        // OpenLibrary — always available, no credentials needed.
-        builder = builder.add_provider(
-            P::OpenLibrary,
-            livrarr_external_data::ProviderClient::OpenLibrary(
-                livrarr_external_data::OpenLibraryClient::new(http_fetcher.clone()),
-            )
-            .with_call_sink(call_sink.clone()),
-            queue_cfg(P::OpenLibrary),
-        );
-
-        // Hardcover — always registered. The client itself reads the live
-        // config per-fetch; if `hardcover_enabled=false` or the token is
-        // empty, it returns NotFound without a network call. Enabling HC
-        // via the UI takes effect on the next enrichment.
-        builder = builder.add_provider(
-            P::Hardcover,
-            livrarr_external_data::ProviderClient::Hardcover(
-                livrarr_external_data::HardcoverClient::new(
-                    http_fetcher.clone(),
-                    live_metadata_config.clone(),
-                ),
-            )
-            .with_call_sink(call_sink.clone()),
-            queue_cfg(P::Hardcover),
-        );
-
-        // Goodreads — always registered. The LLM extraction fallback for
-        // foreign-language pages reads live config per-fetch.
-        let gr_client = livrarr_external_data::GoodreadsClient::production(
-            http_fetcher.clone(),
-            http_client.clone(),
-        )
-        .with_live_config(live_metadata_config.clone());
-        builder = builder.add_provider(
-            P::Goodreads,
-            livrarr_external_data::ProviderClient::Goodreads(gr_client)
-                .with_call_sink(call_sink.clone()),
-            queue_cfg(P::Goodreads),
-        );
-
-        // Google Books — always registered. Reads API key from live config per-fetch.
-        builder = builder.add_provider(
-            P::GoogleBooks,
-            livrarr_external_data::ProviderClient::GoogleBooks(
-                livrarr_external_data::GoogleBooksClient::new(
-                    http_fetcher.clone(),
-                    live_metadata_config.clone(),
-                ),
-            )
-            .with_call_sink(call_sink.clone()),
-            queue_cfg(P::GoogleBooks),
-        );
-
-        // Audible — always registered. Unauthenticated API, no config needed.
-        builder = builder.add_provider(
-            P::Audible,
-            livrarr_external_data::ProviderClient::Audible(
-                livrarr_external_data::audible::AudibleCatalogClient::new(
-                    http_fetcher.clone(),
-                    5 * 60,
-                ),
-            )
-            .with_call_sink(call_sink.clone()),
-            queue_cfg(P::Audible),
-        );
-
-        builder = builder.with_applicability_rule(Arc::new(|provider, work| {
-            if matches!(
-                livrarr_external_data::language::provider_priority(work.language.as_deref()),
-                livrarr_external_data::language::ProviderPriority::English
-            ) {
-                return !matches!(provider, P::GoogleBooks);
-            }
-            matches!(
-                provider,
-                P::Goodreads | P::Audnexus | P::GoogleBooks | P::Audible
-            )
-        }));
-
-        // Pipeline-level skip records (no anchor / policy) flow through the
-        // queue's own sink seam (REQ-001).
-        builder = builder.with_call_sink(call_sink.clone());
-
-        // Persistent provider-response cache (REQ-009): TOML-configured TTL
-        // and row cap, no env-var override (Servarr convention).
-        builder = builder.with_provider_cache(
-            chrono::Duration::days(config.metadata_cache.ttl_days as i64),
-            config.metadata_cache.max_rows,
-        );
-
-        let db_arc = Arc::new(db.clone());
-        let queue = Arc::new(builder.build(db_arc.clone()));
-
-        // Merge engine: purely deterministic (REQ-005) — the per-merge priority
-        // model comes from `MergeInput`; no LLM is consulted anywhere in merge.
-        let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
-
-        let llm_configured = live_metadata_config.snapshot().llm_enabled;
-        let service = Arc::new(
-            m::EnrichmentServiceImpl::new(db_arc, queue.clone(), merge_engine, llm_configured)
-                .with_transport_cache(transport_cache.clone())
-                .with_call_sink(call_sink.clone()),
-        );
-        (queue, service)
-    };
+    let (call_sink, call_sink_handle) = spawn_call_sink_service(&db, &job_runner);
+    let (live_metadata_config, transport_cache) = build_metadata_config_and_cache(&db).await;
+    let (provider_queue, enrichment_service) = build_enrichment_pipeline(
+        &db,
+        &http_fetcher,
+        &http_client,
+        &live_metadata_config,
+        &call_sink,
+        &transport_cache,
+        &config.metadata_cache,
+    );
 
     let svc_db = db.clone();
     let svc_enrichment = enrichment_service.clone();
@@ -830,15 +528,7 @@ async fn main() {
     // Step 11: Startup recovery — reset stale state from unclean shutdown (JOBS-003).
     livrarr_server::jobs::recover_interrupted_state(&state).await;
 
-    // Pre-warm SQLite page cache so first request isn't slow.
-    // Exception to "no SQL outside livrarr-db": these are throwaway startup
-    // queries that touch hot pages. Not worth a trait method.
-    let _ = sqlx::query("SELECT COUNT(*) FROM works")
-        .fetch_one(state.db.pool())
-        .await;
-    let _ = sqlx::query("SELECT COUNT(*) FROM library_items")
-        .fetch_one(state.db.pool())
-        .await;
+    prewarm_sqlite_cache(&state).await;
 
     // Step 12: Start background jobs (JOBS-001).
     job_runner.start(state.clone()).await;
@@ -846,7 +536,430 @@ async fn main() {
     // Step 13: Build router.
     let app = build_router(state, ui_dir);
 
-    // Step 14: Bind HTTP server.
+    let (listener, addr) = bind_listener(&config).await;
+
+    run_startup_passes(&job_runner, &svc_db, &data_dir).await;
+
+    info!("Listening on {addr}");
+
+    serve_until_shutdown(listener, app, &job_runner, call_sink_handle, &data_dir).await;
+}
+
+/// Step 1: Ensure the data directory exists (config, database, covers).
+fn ensure_data_dir(data_dir: &std::path::Path) {
+    if let Err(e) = std::fs::create_dir_all(data_dir) {
+        eprintln!(
+            "Failed to create data directory {}: {e}",
+            data_dir.display()
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Steps 2-3: load `config.toml` (Step 2) and initialize tracing (Step 3).
+/// Exits the process on a config error, before tracing is available (hence
+/// `eprintln!` rather than `error!`).
+fn init_tracing_and_config(
+    data_dir: &std::path::Path,
+) -> (
+    AppConfig,
+    Arc<livrarr_server::state::LogBuffer>,
+    Arc<livrarr_server::state::LogLevelHandle>,
+    livrarr_domain::LogSurfaceStatus,
+) {
+    let config = match load_config(data_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Configuration error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let log_buffer = Arc::new(livrarr_server::state::LogBuffer::new());
+    let (log_level_handle, log_surface) = init_tracing(&config.log, log_buffer.clone(), data_dir);
+
+    info!("Livrarr starting — data directory: {}", data_dir.display());
+
+    (config, log_buffer, log_level_handle, log_surface)
+}
+
+/// Steps 4-10: verify the data directory is writable, acquire the
+/// single-instance PID lock, connect to SQLite, take a pre-migration
+/// backup, run migrations, check the version gate, backfill the two
+/// normalized-identity columns, and prune old backups. Exits the process
+/// (releasing the PID lock first, once acquired) on any failure.
+async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
+    // Step 4: Permission check — verify data dir is writable.
+    if let Err(e) = livrarr_db::pool::check_data_dir_permissions(data_dir) {
+        error!("{e}");
+        std::process::exit(1);
+    }
+
+    // Step 5: PID lock — ensure single instance.
+    if let Err(e) = livrarr_db::pool::acquire_pid_lock(data_dir) {
+        error!("{e}");
+        std::process::exit(1);
+    }
+
+    // Step 6: Connect to SQLite.
+    let pool = match livrarr_db::pool::create_sqlite_pool(data_dir).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Failed to connect to SQLite: {e}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
+    };
+
+    // Step 7: Pre-migration backup (only if DB file already exists).
+    let db_path = data_dir.join("livrarr.db");
+    let db_exists = tokio::fs::try_exists(&db_path).await.unwrap_or(false);
+    if db_exists {
+        match livrarr_db::pool::create_backup(&pool, data_dir).await {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Pre-migration backup failed: {e}");
+                livrarr_db::pool::release_pid_lock(data_dir);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Step 8: Run migrations.
+    if let Err(e) = livrarr_db::pool::run_migrations(&pool).await {
+        error!("Migration failed: {e}");
+        livrarr_db::pool::release_pid_lock(data_dir);
+        std::process::exit(1);
+    }
+    info!("Database migrations complete");
+
+    // Step 9: Version gate — verify DB compatibility.
+    if let Err(e) = livrarr_db::pool::check_version_gate(&pool).await {
+        error!("{e}");
+        livrarr_db::pool::release_pid_lock(data_dir);
+        std::process::exit(1);
+    }
+
+    // Step 9b: Backfill normalized identity columns and create UNIQUE index.
+    // Migration 038 adds columns with `__UNMIGRATED__` defaults; this hook
+    // computes real values, resolves duplicates, and creates the index.
+    if let Err(e) = livrarr_db::pool::backfill_normalized_identity(&pool).await {
+        error!("normalized identity backfill failed: {e}");
+        livrarr_db::pool::release_pid_lock(data_dir);
+        std::process::exit(1);
+    }
+
+    // Step 9c: Recompute works.normalized_title/normalized_author via the
+    // identity_matching authority's identity_key recipe (REQ-014),
+    // superseding the retired normalize_for_matching. Idempotent — migration
+    // 069 seeds the generation marker this checks.
+    if let Err(e) = livrarr_db::pool::backfill_identity_key_recompute(&pool).await {
+        error!("identity-key recompute failed: {e}");
+        livrarr_db::pool::release_pid_lock(data_dir);
+        std::process::exit(1);
+    }
+
+    // Step 10: Clean up old backups (keep 3).
+    {
+        let data_dir_clone = data_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            livrarr_db::pool::cleanup_old_backups(&data_dir_clone, 3);
+        })
+        .await
+        .ok();
+    }
+
+    pool
+}
+
+/// Construct the DB handle and the auth service that wraps it.
+fn build_db_and_auth(
+    pool: sqlx::SqlitePool,
+) -> (
+    livrarr_db::sqlite::SqliteDb,
+    Arc<
+        livrarr_server::auth_service::ServerAuthService<
+            livrarr_server::auth_crypto::RealAuthCrypto,
+        >,
+    >,
+) {
+    let db = livrarr_db::sqlite::SqliteDb::new(pool);
+    let auth_service = Arc::new(livrarr_server::auth_service::ServerAuthService::new(
+        db.clone(),
+        livrarr_server::auth_crypto::RealAuthCrypto,
+    ));
+    (db, auth_service)
+}
+
+/// Build the shared HTTP clients: unrestricted (admin-configured
+/// infrastructure), SSRF-safe (runtime-derived URLs), the rate-limited
+/// fetcher, and the LLM-endpoint client (60s budget for slow local
+/// instances).
+fn build_http_clients() -> (
+    livrarr_http::HttpClient,
+    livrarr_http::HttpClient,
+    livrarr_http::fetcher::HttpFetcherImpl,
+    livrarr_http::HttpClient,
+) {
+    let ua = livrarr_http::livrarr_user_agent();
+    let http_client = livrarr_http::HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(&ua)
+        .build()
+        .expect("failed to build HTTP client");
+    let http_client_safe = livrarr_http::HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(&ua)
+        .ssrf_safe(true)
+        .build()
+        .expect("failed to build SSRF-safe HTTP client");
+    let http_fetcher =
+        livrarr_http::fetcher::HttpFetcherImpl::new().expect("failed to build HTTP fetcher");
+    // Shared LLM-endpoint client: unrestricted trust class (admin-configured
+    // infrastructure, same as http_client), 60s budget for slow local instances.
+    let llm_http_client = livrarr_http::HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent(&ua)
+        .build()
+        .expect("failed to build LLM HTTP client");
+
+    (http_client, http_client_safe, http_fetcher, llm_http_client)
+}
+
+/// Provider call-record sink (REQ-001): bounded fire-and-forget channel +
+/// batching writer. Shares the job cancellation token; the returned handle
+/// is awaited after job shutdown so the final drain completes.
+fn spawn_call_sink_service(
+    db: &livrarr_db::sqlite::SqliteDb,
+    job_runner: &livrarr_server::jobs::JobRunner,
+) -> (
+    Arc<dyn livrarr_domain::services::ProviderCallSink>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (call_sink, call_sink_handle) =
+        livrarr_server::call_sink::spawn_call_sink(db.clone(), job_runner.cancel_token());
+    let call_sink: Arc<dyn livrarr_domain::services::ProviderCallSink> = Arc::new(call_sink);
+    (call_sink, call_sink_handle)
+}
+
+/// Phase 1.5 plumbing: the live-reloadable `MetadataConfig` snapshot (all
+/// credential-dependent components hold a clone and read fresh per call —
+/// `update_metadata_config` calls `.replace()` after a DB write so new
+/// credentials are live on the next enrichment without a restart), plus a
+/// startup-only LLM endpoint validation warning and the shared payload
+/// transport cache (REQ-014/015, seeded by the identity resolver during
+/// discovery and consumed by `EnrichmentServiceImpl::enrich_work` for a
+/// candidate_id hit).
+async fn build_metadata_config_and_cache(
+    db: &livrarr_db::sqlite::SqliteDb,
+) -> (
+    livrarr_external_data::live_config::LiveMetadataConfig,
+    Arc<livrarr_external_data::transport_cache::TransportCache>,
+) {
+    let live_metadata_config = {
+        use livrarr_db::ConfigDb;
+        let initial = db.get_metadata_config().await.unwrap_or_else(|e| {
+            warn!("Failed to read metadata config at startup ({e}); using defaults");
+            livrarr_db::MetadataConfig {
+                hardcover_enabled: false,
+                hardcover_api_token: None,
+                llm_enabled: false,
+                llm_provider: None,
+                llm_endpoint: None,
+                llm_api_key: None,
+                llm_model: None,
+                audnexus_url: "https://api.audnex.us".to_string(),
+                languages: vec!["en".to_string()],
+                google_books_api_key: None,
+            }
+        });
+        livrarr_external_data::live_config::LiveMetadataConfig::new(initial)
+    };
+
+    // Warn at startup if the configured LLM endpoint is invalid (but don't fail).
+    {
+        let cfg = live_metadata_config.snapshot();
+        if let Some(ref endpoint) = cfg.llm_endpoint {
+            if !endpoint.is_empty() {
+                if let Err(reason) = validate_llm_endpoint_startup(endpoint) {
+                    warn!("LLM endpoint validation: {reason} — LLM features may not work");
+                }
+            }
+        }
+    }
+
+    // Shared payload transport cache (REQ-014/015): the identity resolver seeds it
+    // during discovery; EnrichmentServiceImpl::enrich_work consumes it for a
+    // candidate_id hit (zero-network reuse through the one road). The SAME Arc is
+    // wired into both the enrichment service (below) and the identity resolver.
+    let transport_cache = Arc::new(livrarr_external_data::transport_cache::TransportCache::new(
+        std::time::Duration::from_secs(300),
+    ));
+
+    (live_metadata_config, transport_cache)
+}
+
+/// Build the live `DefaultProviderQueue` + `EnrichmentServiceImpl` from a
+/// startup-time snapshot of `MetadataConfig`. Live config changes (token
+/// added, URL changed) require a server restart for now — runtime reload
+/// comes alongside the orchestration cutover.
+fn build_enrichment_pipeline(
+    db: &livrarr_db::sqlite::SqliteDb,
+    http_fetcher: &livrarr_http::fetcher::HttpFetcherImpl,
+    http_client: &livrarr_http::HttpClient,
+    live_metadata_config: &livrarr_external_data::live_config::LiveMetadataConfig,
+    call_sink: &Arc<dyn livrarr_domain::services::ProviderCallSink>,
+    transport_cache: &Arc<livrarr_external_data::transport_cache::TransportCache>,
+    metadata_cache: &livrarr_server::config::MetadataCacheConfig,
+) -> (
+    Arc<livrarr_server::state::LiveProviderQueue>,
+    Arc<livrarr_server::state::LiveEnrichmentService>,
+) {
+    use livrarr_domain::MetadataProvider as P;
+    use livrarr_metadata as m;
+
+    let cfg_snapshot = live_metadata_config.snapshot();
+
+    let queue_cfg = |provider| m::ProviderQueueConfig {
+        provider,
+        max_attempts: 5,
+    };
+
+    let mut builder = m::DefaultProviderQueueBuilder::new();
+
+    // Audnexus — always available. URL is captured at startup; if you
+    // want a custom audnexus_url to take effect live too, that's a
+    // small follow-up (same LiveMetadataConfig pattern).
+    builder = builder.add_provider(
+        P::Audnexus,
+        livrarr_external_data::ProviderClient::Audnexus(
+            livrarr_external_data::AudnexusClient::new(
+                http_fetcher.clone(),
+                cfg_snapshot.audnexus_url.clone(),
+            ),
+        )
+        .with_call_sink(call_sink.clone()),
+        queue_cfg(P::Audnexus),
+    );
+
+    // OpenLibrary — always available, no credentials needed.
+    builder = builder.add_provider(
+        P::OpenLibrary,
+        livrarr_external_data::ProviderClient::OpenLibrary(
+            livrarr_external_data::OpenLibraryClient::new(http_fetcher.clone()),
+        )
+        .with_call_sink(call_sink.clone()),
+        queue_cfg(P::OpenLibrary),
+    );
+
+    // Hardcover — always registered. The client itself reads the live
+    // config per-fetch; if `hardcover_enabled=false` or the token is
+    // empty, it returns NotFound without a network call. Enabling HC
+    // via the UI takes effect on the next enrichment.
+    builder = builder.add_provider(
+        P::Hardcover,
+        livrarr_external_data::ProviderClient::Hardcover(
+            livrarr_external_data::HardcoverClient::new(
+                http_fetcher.clone(),
+                live_metadata_config.clone(),
+            ),
+        )
+        .with_call_sink(call_sink.clone()),
+        queue_cfg(P::Hardcover),
+    );
+
+    // Goodreads — always registered. The LLM extraction fallback for
+    // foreign-language pages reads live config per-fetch.
+    let gr_client = livrarr_external_data::GoodreadsClient::production(
+        http_fetcher.clone(),
+        http_client.clone(),
+    )
+    .with_live_config(live_metadata_config.clone());
+    builder = builder.add_provider(
+        P::Goodreads,
+        livrarr_external_data::ProviderClient::Goodreads(gr_client)
+            .with_call_sink(call_sink.clone()),
+        queue_cfg(P::Goodreads),
+    );
+
+    // Google Books — always registered. Reads API key from live config per-fetch.
+    builder = builder.add_provider(
+        P::GoogleBooks,
+        livrarr_external_data::ProviderClient::GoogleBooks(
+            livrarr_external_data::GoogleBooksClient::new(
+                http_fetcher.clone(),
+                live_metadata_config.clone(),
+            ),
+        )
+        .with_call_sink(call_sink.clone()),
+        queue_cfg(P::GoogleBooks),
+    );
+
+    // Audible — always registered. Unauthenticated API, no config needed.
+    builder = builder.add_provider(
+        P::Audible,
+        livrarr_external_data::ProviderClient::Audible(
+            livrarr_external_data::audible::AudibleCatalogClient::new(http_fetcher.clone(), 5 * 60),
+        )
+        .with_call_sink(call_sink.clone()),
+        queue_cfg(P::Audible),
+    );
+
+    builder = builder.with_applicability_rule(Arc::new(|provider, work| {
+        if matches!(
+            livrarr_external_data::language::provider_priority(work.language.as_deref()),
+            livrarr_external_data::language::ProviderPriority::English
+        ) {
+            return !matches!(provider, P::GoogleBooks);
+        }
+        matches!(
+            provider,
+            P::Goodreads | P::Audnexus | P::GoogleBooks | P::Audible
+        )
+    }));
+
+    // Pipeline-level skip records (no anchor / policy) flow through the
+    // queue's own sink seam (REQ-001).
+    builder = builder.with_call_sink(call_sink.clone());
+
+    // Persistent provider-response cache (REQ-009): TOML-configured TTL
+    // and row cap, no env-var override (Servarr convention).
+    builder = builder.with_provider_cache(
+        chrono::Duration::days(metadata_cache.ttl_days as i64),
+        metadata_cache.max_rows,
+    );
+
+    let db_arc = Arc::new(db.clone());
+    let queue = Arc::new(builder.build(db_arc.clone()));
+
+    // Merge engine: purely deterministic (REQ-005) — the per-merge priority
+    // model comes from `MergeInput`; no LLM is consulted anywhere in merge.
+    let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
+
+    let llm_configured = live_metadata_config.snapshot().llm_enabled;
+    let service = Arc::new(
+        m::EnrichmentServiceImpl::new(db_arc, queue.clone(), merge_engine, llm_configured)
+            .with_transport_cache(transport_cache.clone())
+            .with_call_sink(call_sink.clone()),
+    );
+    (queue, service)
+}
+
+/// Pre-warm SQLite's page cache so the first request isn't slow.
+/// Exception to "no SQL outside livrarr-db": these are throwaway startup
+/// queries that touch hot pages. Not worth a trait method.
+async fn prewarm_sqlite_cache(state: &AppState) {
+    let _ = sqlx::query("SELECT COUNT(*) FROM works")
+        .fetch_one(state.db.pool())
+        .await;
+    let _ = sqlx::query("SELECT COUNT(*) FROM library_items")
+        .fetch_one(state.db.pool())
+        .await;
+}
+
+/// Step 14: bind the HTTP listener. Exits the process if the port can't be
+/// bound.
+async fn bind_listener(config: &AppConfig) -> (TcpListener, String) {
     let addr = format!("{}:{}", config.server.bind_address, config.server.port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
@@ -855,7 +968,18 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    (listener, addr)
+}
 
+/// Run the one-shot startup passes, in order: chapter backfill, the cover
+/// startup sequence (itself strictly ordered — layout migration, then gate
+/// recovery, then provenance backfill; see `livrarr_metadata::cover_startup`),
+/// then series backfill.
+async fn run_startup_passes(
+    job_runner: &livrarr_server::jobs::JobRunner,
+    svc_db: &livrarr_db::sqlite::SqliteDb,
+    data_dir: &std::path::Path,
+) {
     job_runner
         .spawn_startup_pass(
             "chapter_backfill",
@@ -886,14 +1010,22 @@ async fn main() {
             livrarr_server::jobs::series_backfill::run_series_backfill(svc_db.clone()),
         )
         .await;
+}
 
-    info!("Listening on {addr}");
-
-    // Step 15: Serve with graceful shutdown on SIGTERM/Ctrl+C.
-    // Cancel background jobs immediately when signal fires (before HTTP drain).
-    // Remove PID file early so a container restart doesn't deadlock on stale lock.
+/// Step 15: serve with graceful shutdown on SIGTERM/Ctrl+C — cancelling
+/// background jobs and releasing the PID lock as soon as the signal fires
+/// (before the HTTP drain completes, so a container restart doesn't
+/// deadlock on a stale lock) — then wait for jobs and the call-sink writer
+/// to finish draining before the final PID-lock release.
+async fn serve_until_shutdown(
+    listener: TcpListener,
+    app: axum::Router,
+    job_runner: &livrarr_server::jobs::JobRunner,
+    call_sink_handle: tokio::task::JoinHandle<()>,
+    data_dir: &std::path::Path,
+) {
     let job_cancel = job_runner.cancel_token();
-    let shutdown_data_dir = data_dir.clone();
+    let shutdown_data_dir = data_dir.to_path_buf();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -916,7 +1048,7 @@ async fn main() {
     // Drain the call-record sink (its writer shares the job cancel token).
     let _ = call_sink_handle.await;
 
-    livrarr_db::pool::release_pid_lock(&data_dir);
+    livrarr_db::pool::release_pid_lock(data_dir);
     info!("Livrarr stopped");
 }
 

@@ -187,9 +187,34 @@ kk-build state files remain authoritative for gates; this section is the narrati
     dev-restart green, poller + RSS ticks end-to-end, zero errors. Wiki: no content-page
     falsifications (API-listing lines only — audit entry in wiki/log.md); no new insight
     (error-handling below wiki granularity).
-  - **Remaining in the ratified quality lane after 2d:** Wave 3 items 1-5 (pure moves:
-    #28, #24, #25, #27, #29), one at a time on a quiet tree. New follow-on awaiting PO
-    prioritization: tests/implementation/ orphan triage (see the 2a entry).
+  - **Wave 3 items 1-5 EXECUTED + COMMITTED (2026-07-13 ~20:30 UTC, same session):** PO
+    live-word amendment: run in PARALLEL, not one-at-a-time ("push forward on the rest -
+    use subagents - in parallel if possible", 2026-07-13) — five sonnet worktree agents,
+    disjoint crates, Wave-1 protocol (no Serena editing, plain edits + git grep,
+    crate-scoped gates + downstream compile proofs per agent). Outcomes: #28 merge engine
+    → livrarr-enrichment/src/merge_engine.rs (24 symbols; 7 re-exported, 17 verified
+    zero-caller stay private) · #24 db lib.rs → 31 per-entity src/api/*.rs modules +
+    barrel (byte-identical trait/struct name-set: 33 traits/41 structs) · #25 domain
+    lib.rs → entities/enrichment_types/infra_config/util modules (105 items accounted;
+    TEMP(pk-tdd) banner deleted) · #27 goodreads.rs → goodreads/{mod,client,parsers,
+    llm_repair}.rs (157 test attrs before==after; two include_str! fixture paths
+    mechanically corrected) · #29 main() 871→497 lines via 12 named private init fns
+    (AppState wiring block deliberately left inline — the licensed too-tangled case;
+    two clone→to_path_buf conversions forced by borrowed params). Merge: five branch
+    diffs applied to one tree (disjoint, zero conflicts) + ONE review fold. Gates:
+    fmt clean · clippy 0 · workspace 1532/0/299 — IDENTICAL to pre-wave baseline (the
+    pure-move signature). Smoke: snapshot livrarr.db.pre-wave3-smoke-20260713 →
+    dev-restart green, full startup sequence + all ticks, zero errors (#29's
+    startup-order claim verified live). Reviews: gemini PASS (stale-echo noise) / codex
+    PASS with one CONFIRMED P2 fold — the domain/enrichment splits' `pub mod` minted
+    unconsumed public paths (AR-13 class); narrowed to private `mod`, root re-exports
+    only (disposition: review-code-wave3-disposition.md). Docs-sync subagent swept
+    wiki/docs citations (claim list spot-verified; historical audit docs left as
+    knowingly-stale per policy).
+  - **Quality lane state after Wave 3: items 1-5 DONE. Remaining:** Wave 3 items 6-10
+    stay approve-piecemeal (not started); #37 PARKED. Follow-ons awaiting PO
+    prioritization: tests/implementation/ orphan triage (2a entry) · metadata-pathway.md
+    pre-Phase-5 rewrite (own pass) · identity-fix unit (PO schedules).
 
 ---
 

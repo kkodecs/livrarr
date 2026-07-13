@@ -4,7 +4,7 @@ Foundation crate. All dependency arrows point here. Defines entities, enums, err
 
 ---
 
-## Entities (lib.rs)
+## Entities (entities.rs, enrichment_types.rs, infra_config.rs)
 
 ### Newtype IDs
 - `UserId` — typed ID for users
@@ -72,7 +72,7 @@ Foundation crate. All dependency arrows point here. Defines entities, enums, err
 - `ApplyMergeOutcome` — result of applying a merge
 - `ExternalIdType` — provider-specific external ID type
 
-### Utility Functions (lib.rs)
+### Utility Functions (util.rs)
 - `sanitize_path_component(s)` — strips illegal characters for use in file paths
 - `derive_sort_name(name)` — derives a sort-friendly name from an author/title string
 - `normalize_for_matching(s)` — normalizes text for fuzzy matching comparison
