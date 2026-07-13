@@ -5,6 +5,9 @@ edition = "2021"
 license = "GPL-3.0-only"
 publish = false
 
+[features]
+qw2_compile_red = []
+
 [dependencies]
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true, features = ["test-helpers"] }
@@ -368,6 +371,14 @@ path = "../../tests/behavioral/test_s6_retry_all_incomplete.rs"
 [[test]]
 name = "test_cross_format_resume"
 path = "../../tests/behavioral/test_cross_format_resume.rs"
+
+[[test]]
+name = "test_qw2_class_a_pins"
+path = "../../tests/behavioral/test_qw2_class_a_pins.rs"
+
+[[test]]
+name = "test_qw2_robustness_pins"
+path = "../../tests/behavioral/test_qw2_robustness_pins.rs"
 
 [[test]]
 name = "test_mc_instrumentation"

@@ -193,7 +193,10 @@ async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
 
     loop {
         let next_allowed = {
-            let mut state = handle.state.lock().unwrap();
+            let mut state = handle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if state.heap.is_empty() {
                 // Reset the flag ATOMICALLY with the empty check (same lock hold) so a
                 // concurrent `acquire` cannot observe a stale `true`, skip spawning, and
@@ -213,14 +216,19 @@ async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
         // to a normal grant below.
         if let Some(breaker) = &handle.breaker {
             let retry_after = {
-                let mut b = breaker.lock().unwrap();
+                let mut b = breaker
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 match b.current() {
                     CircuitState::Open => Some(b.retry_after()),
                     CircuitState::Closed | CircuitState::HalfOpen => None,
                 }
             };
             if let Some(retry_after) = retry_after {
-                let mut state = handle.state.lock().unwrap();
+                let mut state = handle
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let item = state.heap.pop().expect(
                     "dispatcher is the sole consumer; heap was non-empty at the last check",
                 );
@@ -241,7 +249,10 @@ async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
             .await
             .expect("outbound queue semaphore is never closed");
 
-        let mut state = handle.state.lock().unwrap();
+        let mut state = handle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let item = state
             .heap
             .pop()
@@ -279,7 +290,10 @@ impl OutboundQueue {
     /// Return the bucket's handle, creating it (and its dispatcher-less initial
     /// state) on first use.
     fn bucket_handle(&self, bucket: &RateBucket) -> BucketHandle {
-        let mut registry = self.registry.lock().unwrap();
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         registry
             .entry(bucket.clone())
             .or_insert_with(|| BucketHandle::new(bucket, interval_for(bucket)))
@@ -316,7 +330,10 @@ impl OutboundQueue {
         let (turn_tx, turn_rx) = oneshot::channel();
 
         {
-            let mut state = handle.state.lock().unwrap();
+            let mut state = handle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.heap.push(QueuedItem {
                 priority,
                 seq,
@@ -342,7 +359,10 @@ impl OutboundQueue {
     pub fn report_outcome(&self, bucket: RateBucket, outcome: BreakerSignal) {
         let handle = self.bucket_handle(&bucket);
         if let Some(breaker) = &handle.breaker {
-            breaker.lock().unwrap().apply(outcome);
+            breaker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .apply(outcome);
         }
     }
 
@@ -357,7 +377,10 @@ impl OutboundQueue {
     pub fn reset_breaker_for_tests(&self, bucket: RateBucket) {
         let handle = self.bucket_handle(&bucket);
         if let Some(breaker) = &handle.breaker {
-            *breaker.lock().unwrap() = BreakerState::new(breaker::config_for(&bucket));
+            *breaker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                BreakerState::new(breaker::config_for(&bucket));
         }
     }
 
@@ -374,7 +397,9 @@ impl OutboundQueue {
     ) {
         let handle = self.bucket_handle(&bucket);
         if let Some(breaker) = &handle.breaker {
-            *breaker.lock().unwrap() = BreakerState::new(config);
+            *breaker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = BreakerState::new(config);
         }
     }
 }
@@ -1063,5 +1088,27 @@ mod tests {
             .acquire(bucket, RequestPriority::Normal)
             .await
             .expect_err("a HalfOpen probe failure must reopen the breaker");
+    }
+
+    #[tokio::test]
+    async fn poisoned_bucket_state_lock_does_not_panic_dispatcher() {
+        let handle = BucketHandle::new(&RateBucket::OpenLibrary, Duration::ZERO);
+        let state = Arc::clone(&handle.state);
+
+        let poison = std::thread::spawn(move || {
+            let _guard = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            panic!("poison isolated bucket state");
+        })
+        .join();
+        assert!(poison.is_err());
+        assert!(handle.state.is_poisoned());
+
+        let result = tokio::spawn(run_dispatcher(handle, Duration::ZERO)).await;
+        assert!(
+            result.is_ok(),
+            "dispatcher should tolerate a poisoned bucket state lock"
+        );
     }
 }

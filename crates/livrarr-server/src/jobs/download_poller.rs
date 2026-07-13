@@ -15,7 +15,7 @@ use livrarr_domain::{EventType, GrabStatus, NotificationType};
 
 pub(super) async fn download_poller_tick(
     state: AppState,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<(), String> {
     let clients = state
         .db
@@ -24,6 +24,9 @@ pub(super) async fn download_poller_tick(
         .map_err(|e| format!("list clients: {e}"))?;
 
     for client in clients.iter().filter(|c| c.enabled) {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
         match client.client_type() {
             "sabnzbd" => {
                 if let Err(e) = poll_sabnzbd(&state, client).await {
@@ -44,6 +47,9 @@ pub(super) async fn download_poller_tick(
     }
 
     // Retry failed imports with exponential backoff (max 5 retries).
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
     retry_failed_imports(&state).await;
 
     Ok(())

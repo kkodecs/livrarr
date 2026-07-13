@@ -1,16 +1,12 @@
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::Json;
+
+use crate::ApiError;
 
 use livrarr_domain::services::CoverService;
 use livrarr_domain::{CoverCandidate, CoverMediaType, SelectCoverRequest};
-
-#[derive(serde::Serialize)]
-struct ErrorBody {
-    error: String,
-    message: String,
-}
 
 use crate::context::{HasCoverService, HasDataDir};
 use crate::mediacover::{placeholder_response, resolve_cover_path, serve_image};
@@ -20,13 +16,23 @@ pub async fn get_cover_alternatives<S: HasCoverService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<CoverCandidate>>, StatusCode> {
+) -> Result<Json<Vec<CoverCandidate>>, ApiError> {
     let candidates = state
         .cover_service()
         .fetch_alternatives(ctx.user.id, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(cover_service_error)?;
     Ok(Json(candidates))
+}
+
+fn cover_service_error(e: livrarr_domain::services::CoverServiceError) -> ApiError {
+    use livrarr_domain::services::CoverServiceError;
+    match e {
+        CoverServiceError::NotFound => ApiError::NotFound,
+        CoverServiceError::InvalidCandidate(m) => ApiError::BadRequest(m),
+        CoverServiceError::UploadValidation(m) => ApiError::BadRequest(m),
+        other => ApiError::Internal(format!("cover service: {other:?}")),
+    }
 }
 
 pub async fn select_cover_handler<S: HasCoverService>(
@@ -34,18 +40,12 @@ pub async fn select_cover_handler<S: HasCoverService>(
     ctx: AuthContext,
     Path(id): Path<i64>,
     Json(req): Json<SelectCoverRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, ApiError> {
     state
         .cover_service()
         .select_cover(ctx.user.id, id, &req.candidate_id, req.media_type)
         .await
-        .map_err(|e| match e {
-            livrarr_domain::services::CoverServiceError::NotFound => StatusCode::NOT_FOUND,
-            livrarr_domain::services::CoverServiceError::InvalidCandidate(_) => {
-                StatusCode::BAD_REQUEST
-            }
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        })?;
+        .map_err(cover_service_error)?;
     Ok(StatusCode::OK)
 }
 
@@ -65,7 +65,7 @@ pub async fn upload_cover_handler<S: HasCoverService>(
     Path(id): Path<i64>,
     Query(params): Query<UploadCoverQuery>,
     mut multipart: Multipart,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     let mut image_data: Option<Vec<u8>> = None;
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("image_data") || field.name() == Some("file") {
@@ -73,38 +73,14 @@ pub async fn upload_cover_handler<S: HasCoverService>(
             break;
         }
     }
-    let data = image_data.ok_or_else(|| {
-        let msg = "no image_data field in multipart".to_string();
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: msg.clone(),
-                message: msg,
-            }),
-        )
-            .into_response()
-    })?;
+    let data = image_data
+        .ok_or_else(|| ApiError::BadRequest("no image_data field in multipart".into()))?;
 
     state
         .cover_service()
         .upload_cover(ctx.user.id, id, &data, params.media_type)
         .await
-        .map_err(|e| {
-            let (status, msg) = match e {
-                livrarr_domain::services::CoverServiceError::UploadValidation(m) => {
-                    (StatusCode::BAD_REQUEST, m)
-                }
-                other => (StatusCode::INTERNAL_SERVER_ERROR, format!("{other:?}")),
-            };
-            (
-                status,
-                Json(ErrorBody {
-                    error: msg.clone(),
-                    message: msg,
-                }),
-            )
-                .into_response()
-        })?;
+        .map_err(cover_service_error)?;
     Ok(StatusCode::OK)
 }
 

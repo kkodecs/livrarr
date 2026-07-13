@@ -120,6 +120,9 @@ impl<T> ProviderOutcome<T> {
 #[derive(Debug, Clone)]
 pub enum ProviderFetchError {
     CircuitOpen(std::time::Duration),
+    /// The resource is genuinely absent upstream (HTTP 404) — a no-match,
+    /// never a transient failure. Callers may fall through to weaker tiers.
+    NotFound,
     Other(String),
 }
 
@@ -127,6 +130,7 @@ impl std::fmt::Display for ProviderFetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CircuitOpen(d) => write!(f, "circuit open, retry after {d:?}"),
+            Self::NotFound => write!(f, "not found"),
             Self::Other(s) => write!(f, "{s}"),
         }
     }

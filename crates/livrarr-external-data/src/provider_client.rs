@@ -771,14 +771,14 @@ impl HardcoverClient {
 /// `work.ol_key`; works without an `ol_key` are reported as `NotFound` without
 /// hitting the network.
 #[derive(Clone)]
-pub struct OpenLibraryClient {
-    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+pub struct OpenLibraryClient<F: HttpFetcher = livrarr_http::fetcher::HttpFetcherImpl> {
+    fetcher: F,
     retry_backoff_secs: i64,
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
-impl OpenLibraryClient {
-    pub fn new(fetcher: livrarr_http::fetcher::HttpFetcherImpl) -> Self {
+impl<F: HttpFetcher> OpenLibraryClient<F> {
+    pub fn new(fetcher: F) -> Self {
         Self {
             fetcher,
             retry_backoff_secs: 5 * 60,
@@ -853,7 +853,10 @@ impl OpenLibraryClient {
         work: &Work,
         priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
-        // Tier 1: ISBN lookup
+        // Tier 1: ISBN lookup. Transient failures on this strong signal return
+        // immediately (circuit pause or retry-later) — mirroring the Hardcover
+        // tiers — so a blip never degrades the fetch to the weaker fuzzy tier.
+        // Only a genuine no-match (Ok(None)) falls through.
         if let Some(isbn) = work.isbn_13.as_deref().filter(|s| !s.is_empty()) {
             let normalized = livrarr_domain::strip_isbn_punctuation(isbn);
             match self.isbn_lookup(&normalized, priority).await {
@@ -864,28 +867,59 @@ impl OpenLibraryClient {
                             payload.isbn_13 = Some(normalized.clone());
                             return ProviderOutcome::Success(Box::new(payload));
                         }
+                        Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                            return circuit_open_outcome(retry_after);
+                        }
+                        Err(crate::types::ProviderFetchError::NotFound) => {
+                            tracing::debug!(isbn = %normalized, "OL ISBN detail: work absent");
+                        }
                         Err(e) => {
-                            tracing::debug!(isbn = %normalized, error = %e, "OL ISBN detail miss");
+                            tracing::debug!(isbn = %normalized, error = %e, "OL ISBN detail failed");
+                            return ProviderOutcome::WillRetry {
+                                reason: livrarr_domain::WillRetryReason::ServerError,
+                                next_attempt_at: Utc::now()
+                                    + chrono::Duration::seconds(self.retry_backoff_secs),
+                            };
                         }
                     }
                 }
                 Ok(None) => {
                     tracing::debug!(isbn = %normalized, "OL ISBN lookup: no work found");
                 }
+                Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                    return circuit_open_outcome(retry_after);
+                }
                 Err(e) => {
                     tracing::debug!(isbn = %normalized, error = %e, "OL ISBN lookup failed");
+                    return ProviderOutcome::WillRetry {
+                        reason: livrarr_domain::WillRetryReason::ServerError,
+                        next_attempt_at: Utc::now()
+                            + chrono::Duration::seconds(self.retry_backoff_secs),
+                    };
                 }
             }
         }
 
-        // Tier 2: ol_key direct lookup (existing behavior)
+        // Tier 2: ol_key direct lookup. Same strong-signal rule as tier 1:
+        // transient failures return; the fuzzy tier is never their fallback.
         if let Some(ol_key) = work.ol_key.as_deref().filter(|s| !s.is_empty()) {
             match query_ol_detail(&self.fetcher, ol_key, priority).await {
                 Ok(detail) => {
                     return ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail)));
                 }
+                Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
+                    return circuit_open_outcome(retry_after);
+                }
+                Err(crate::types::ProviderFetchError::NotFound) => {
+                    tracing::debug!(ol_key = %ol_key, "OL key detail: work absent");
+                }
                 Err(e) => {
-                    tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail miss");
+                    tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail failed");
+                    return ProviderOutcome::WillRetry {
+                        reason: livrarr_domain::WillRetryReason::ServerError,
+                        next_attempt_at: Utc::now()
+                            + chrono::Duration::seconds(self.retry_backoff_secs),
+                    };
                 }
             }
         }
@@ -1029,6 +1063,180 @@ impl OpenLibraryClient {
             Ok(detail) => Ok(Some(self.build_payload(&ol_key, detail))),
             Err(_) => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod openlibrary_qw2_pins {
+    use super::*;
+    use livrarr_domain::services::{FetchError, FetchResponse};
+
+    fn ok_json(value: serde_json::Value) -> Result<FetchResponse, FetchError> {
+        Ok(FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: value.to_string().into_bytes(),
+        })
+    }
+
+    fn server_error(status: u16) -> Result<FetchResponse, FetchError> {
+        Err(FetchError::HttpError {
+            status,
+            classification: "server_error".to_string(),
+        })
+    }
+
+    fn work(isbn_13: Option<&str>, ol_key: Option<&str>) -> Work {
+        Work {
+            id: 1,
+            user_id: 1,
+            title: "Fuzzy Success".to_string(),
+            author_name: "Fuzzy Author".to_string(),
+            isbn_13: isbn_13.map(str::to_string),
+            ol_key: ol_key.map(str::to_string),
+            ..Work::default()
+        }
+    }
+
+    fn fuzzy_success_search() -> Result<FetchResponse, FetchError> {
+        ok_json(serde_json::json!({
+            "docs": [{
+                "key": "/works/OLFUZZY1W",
+                "title": "Fuzzy Success",
+                "author_name": ["Fuzzy Author"]
+            }]
+        }))
+    }
+
+    fn fuzzy_success_detail() -> Result<FetchResponse, FetchError> {
+        ok_json(serde_json::json!({
+            "title": "Fuzzy Success",
+            "description": "detail"
+        }))
+    }
+
+    fn empty_editions() -> Result<FetchResponse, FetchError> {
+        ok_json(serde_json::json!({ "entries": [] }))
+    }
+
+    fn has_fuzzy_search(fetcher: &crate::test_support::RecordingHttpFetcher) -> bool {
+        fetcher
+            .requests()
+            .iter()
+            .any(|req| req.url.contains("/search.json?q="))
+    }
+
+    #[tokio::test]
+    async fn qw2_openlibrary_isbn_circuit_open_never_falls_to_fuzzy_search() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_response(Err(
+            FetchError::CircuitOpen {
+                retry_after: Duration::from_secs(17),
+            },
+        ));
+        fetcher.push_response(fuzzy_success_search());
+        fetcher.push_response(fuzzy_success_detail());
+        fetcher.push_response(empty_editions());
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch(
+                &work(Some("978-1-234-56789-7"), None),
+                RequestPriority::Normal,
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::CircuitOpen,
+                ..
+            }
+        ));
+        assert!(!has_fuzzy_search(&client.fetcher));
+    }
+
+    #[tokio::test]
+    async fn qw2_openlibrary_isbn_server_error_never_falls_to_fuzzy_search() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_response(server_error(503));
+        fetcher.push_response(fuzzy_success_search());
+        fetcher.push_response(fuzzy_success_detail());
+        fetcher.push_response(empty_editions());
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch(
+                &work(Some("978-1-234-56789-7"), None),
+                RequestPriority::Normal,
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::ServerError,
+                ..
+            }
+        ));
+        assert!(!has_fuzzy_search(&client.fetcher));
+    }
+
+    #[tokio::test]
+    async fn qw2_openlibrary_ol_key_server_error_never_falls_to_fuzzy_search() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_response(server_error(502));
+        fetcher.push_response(fuzzy_success_search());
+        fetcher.push_response(fuzzy_success_detail());
+        fetcher.push_response(empty_editions());
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch(&work(None, Some("OL999W")), RequestPriority::Normal)
+            .await;
+
+        assert!(matches!(
+            outcome,
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::ServerError,
+                ..
+            }
+        ));
+        assert!(!has_fuzzy_search(&client.fetcher));
+    }
+
+    #[tokio::test]
+    async fn qw2_openlibrary_genuine_isbn_no_match_can_fall_through_to_fuzzy_success() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_response(ok_json(
+            serde_json::json!({ "works": [] }),
+        ));
+        fetcher.push_response(fuzzy_success_search());
+        fetcher.push_response(fuzzy_success_detail());
+        fetcher.push_response(empty_editions());
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch(
+                &work(Some("978-1-234-56789-7"), None),
+                RequestPriority::Normal,
+            )
+            .await;
+
+        assert!(matches!(outcome, ProviderOutcome::Success(_)));
+        assert!(has_fuzzy_search(&client.fetcher));
+    }
+
+    #[tokio::test]
+    async fn qw2_openlibrary_dead_ol_key_404_can_fall_through_to_fuzzy_success() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
+        fetcher.push_response(fuzzy_success_search());
+        fetcher.push_response(fuzzy_success_detail());
+        fetcher.push_response(empty_editions());
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch(&work(None, Some("OL404GONE")), RequestPriority::Normal)
+            .await;
+
+        assert!(matches!(outcome, ProviderOutcome::Success(_)));
+        assert!(has_fuzzy_search(&client.fetcher));
     }
 }
 

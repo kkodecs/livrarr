@@ -2,7 +2,8 @@ use chrono::Utc;
 use sqlx::Row;
 
 use crate::sqlite::SqliteDb;
-use crate::sqlite_common::{map_db_err, parse_dt, parse_media_type};
+use crate::sqlite_common::{map_db_err, parse_dt};
+use crate::sqlite_library_item::row_to_library_item;
 use crate::{CreateImportDbRequest, DbError, Import, ImportDb, LibraryItem, LibraryItemId, UserId};
 
 fn row_to_import(row: sqlx::sqlite::SqliteRow) -> Result<Import, DbError> {
@@ -44,47 +45,6 @@ fn row_to_import(row: sqlx::sqlite::SqliteRow) -> Result<Import, DbError> {
         target_root_folder_id: row
             .try_get("target_root_folder_id")
             .map_err(|e| DbError::Io(Box::new(e)))?,
-    })
-}
-
-fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbError> {
-    let media_type_str: String = row
-        .try_get("media_type")
-        .map_err(|e| DbError::Io(Box::new(e)))?;
-    let imported_at_str: String = row
-        .try_get("imported_at")
-        .map_err(|e| DbError::Io(Box::new(e)))?;
-
-    Ok(LibraryItem {
-        id: row
-            .try_get::<i64, _>("id")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
-        user_id: row
-            .try_get::<i64, _>("user_id")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
-        work_id: row
-            .try_get::<i64, _>("work_id")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
-        root_folder_id: row
-            .try_get::<i64, _>("root_folder_id")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
-        path: row.try_get("path").map_err(|e| DbError::Io(Box::new(e)))?,
-        media_type: parse_media_type(&media_type_str)?,
-        file_size: row
-            .try_get::<i64, _>("file_size")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
-        import_id: row
-            .try_get("import_id")
-            .map_err(|e| DbError::Io(Box::new(e)))?,
-        imported_at: parse_dt(&imported_at_str)?,
-        tag_status: livrarr_domain::TagStatus::Pending,
-        tagged_at_generation: 0,
-        duration_seconds: row
-            .try_get::<Option<f64>, _>("duration_seconds")
-            .unwrap_or(None),
-        chapter_scan_status: row
-            .try_get::<Option<String>, _>("chapter_scan_status")
-            .unwrap_or(None),
     })
 }
 

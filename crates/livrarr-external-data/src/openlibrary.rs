@@ -57,6 +57,9 @@ pub async fn query_ol_detail<F: HttpFetcher>(
     };
 
     if !(200..300).contains(&resp.status) {
+        if resp.status == 404 {
+            return Err(ProviderFetchError::NotFound);
+        }
         if (500..600).contains(&resp.status) {
             outbound_queue::shared()
                 .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
@@ -383,14 +386,14 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    async fn query_ol_detail_maps_http_404_to_error() {
+    async fn query_ol_detail_maps_http_404_to_not_found() {
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
 
         let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal)
             .await
             .unwrap_err();
 
-        assert_eq!(err.to_string(), "HTTP 404");
+        assert!(matches!(err, ProviderFetchError::NotFound));
     }
 
     #[tokio::test]

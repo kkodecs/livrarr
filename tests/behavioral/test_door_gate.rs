@@ -1158,6 +1158,7 @@ async fn a2_series_monitor_worker_constructible_arm_adds_auto_added_series_candi
 
     service
         .run_series_monitor_worker(SeriesMonitorWorkerParams {
+            cancel: tokio_util::sync::CancellationToken::new(),
             user_id,
             author_id: author.id,
             series_id: series.id,

@@ -12,8 +12,12 @@ use livrarr_domain::services::RssSyncWorkflow;
 // ---------------------------------------------------------------------------
 
 /// RSS sync background job tick (called by interval job runner).
-pub async fn rss_sync_tick(state: AppState, _cancel: CancellationToken) -> Result<(), String> {
+pub async fn rss_sync_tick(state: AppState, cancel: CancellationToken) -> Result<(), String> {
     use std::sync::atomic::Ordering;
+
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
 
     let config = state
         .db

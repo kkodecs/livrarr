@@ -181,7 +181,7 @@ pub fn normalize(s: &str) -> String {
 
     let stripped: String = decomposed
         .chars()
-        .filter(|c| !unicode_is_combining_mark(*c))
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
         .collect();
 
     let mut result = stripped.to_lowercase();
@@ -234,30 +234,6 @@ fn token_set_similarity(a: &str, b: &str) -> f64 {
     let sa = ta.join(" ");
     let sb = tb.join(" ");
     levenshtein_sim(&sa, &sb)
-}
-
-fn unicode_is_combining_mark(c: char) -> bool {
-    matches!(unicode_general_category(c),
-        '\u{0300}'..='\u{036F}'
-        | '\u{0483}'..='\u{0489}'
-        | '\u{0591}'..='\u{05BD}'
-        | '\u{0610}'..='\u{061A}'
-        | '\u{064B}'..='\u{065F}'
-        | '\u{0670}'
-        | '\u{06D6}'..='\u{06DC}'
-        | '\u{0730}'..='\u{074A}'
-        | '\u{0900}'..='\u{0903}'
-        | '\u{093A}'..='\u{094F}'
-        | '\u{0951}'..='\u{0957}'
-        | '\u{0981}'..='\u{0983}'
-        | '\u{FE00}'..='\u{FE0F}'
-        | '\u{FE20}'..='\u{FE2F}'
-        | '\u{20D0}'..='\u{20FF}'
-    )
-}
-
-fn unicode_general_category(c: char) -> char {
-    c
 }
 
 #[cfg(test)]

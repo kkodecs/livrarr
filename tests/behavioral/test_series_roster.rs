@@ -237,6 +237,7 @@ async fn worker_run_persists_roster_and_expansion_uses_store() {
     let svc = series_service(db.clone(), fetcher.clone());
 
     svc.run_series_monitor_worker(SeriesMonitorWorkerParams {
+        cancel: tokio_util::sync::CancellationToken::new(),
         user_id,
         author_id,
         series_id,
@@ -284,6 +285,7 @@ async fn worker_empty_fetch_does_not_erase_stored_roster() {
 
     // The worker run consumes the drifted response.
     svc.run_series_monitor_worker(SeriesMonitorWorkerParams {
+        cancel: tokio_util::sync::CancellationToken::new(),
         user_id,
         author_id,
         series_id,
@@ -338,6 +340,7 @@ async fn worker_partial_pagination_does_not_persist_partial_roster() {
     // Worker run walks page 1 (2 of 3 declared primaries) then an unreadable
     // page 2 — the partial collection must be discarded, not persisted.
     svc.run_series_monitor_worker(SeriesMonitorWorkerParams {
+        cancel: tokio_util::sync::CancellationToken::new(),
         user_id,
         author_id,
         series_id,

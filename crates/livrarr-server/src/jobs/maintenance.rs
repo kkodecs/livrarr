@@ -14,9 +14,13 @@ const CALL_RECORD_RETENTION: livrarr_db::RetentionPolicy = livrarr_db::Retention
 /// (REQ-001). Registered on a 6h interval.
 pub async fn call_record_retention_tick(
     state: AppState,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<(), String> {
     use livrarr_db::ProviderCallRecordDb;
+
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
 
     match state.db.evict_call_records(CALL_RECORD_RETENTION).await {
         Ok(evicted) => {

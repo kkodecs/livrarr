@@ -86,6 +86,41 @@ kk-build state files remain authoritative for gates; this section is the narrati
   - Awaiting PO (morning): D1 (qBit truth table) + D2 (swallowed-writes policy) ratification ·
     Wave 3 go/park calls · the identity-fix unit (try-again wiring + quorum adoption + tooltip)
     scheduling.
+  - **D1 READY FOR RATIFICATION (2026-07-13):** docs/d1-qbit-state-truth-table-2026-07-13.md —
+    sourced from qBit 5.0 API docs + both live classifiers, cross-family verified with 3 folds
+    applied (forcedMetaDL row; checkingUP→Queued; moving→Downloading) and dispositions on
+    record. One decision: ratify as folded → 2a implements the single shared classifier.
+  - **Wave 2 EXECUTED + COMMITTED (2026-07-13 ~11:20 UTC, overnight run) — the six D1/D2-independent
+    groups (2b, 2c, 2e, 2f, 2g, 2h), red-test-first throughout:** 10 red pins authored (Codex;
+    two rounds — round 1's OL pins were rejected for testing a local harness instead of the real
+    path; fixed by making the OL client generic over its fetcher, then re-authored in-crate
+    against the REAL fetch), gemini test review PASS via free-form fallback (schema mode failed
+    twice — known gotcha), every pin verified red by the orchestrator BEFORE its fix, every pin
+    green after. Fixes: Readarr-path canonical row mapper (stale copy deleted) · OL strong-signal
+    tiers return circuit/retry-later on transient errors, fall through ONLY on genuine no-match
+    (post-review fold: HTTP 404 = new ProviderFetchError::NotFound, dead ol_keys keep their fuzzy
+    recovery — codex r2 P1, confirmed at source, fixed + regression-pinned) · CancellationToken
+    through the series worker into BOTH GR pagers with select!-ed sleeps + tick consults
+    (poller/rss/retention; the two single-atomic-call cleanup ticks deliberately unchanged) ·
+    poison-tolerant locks across outbound_queue · combining-mark stripping via
+    unicode_normalization (scores change for some non-Latin scripts — pinned, Thai divergence
+    empirically confirmed) · cover endpoints on the ApiError envelope (ErrorBody deleted).
+    Gates: fmt clean · clippy 0 · workspace 1528/0/299 effective (150 suites; sole failure was
+    the documented goodreads-tracer breaker flake, green on isolated re-run). Reviews: gemini
+    PASS ×2 (tests r3 free-form, code r2), codex FAIL→folded (r2 P1 above); dispositions in
+    build/reviews/quality-waves/. Smoke: DB snapshotted (livrarr.db.pre-wave2-smoke-20260713),
+    dev-restart green, post-restart log zero errors with rss/poller ticks completing end-to-end;
+    SAB 403 warn verified pre-existing (1419/day since at least 07-11). Docs-sync: wiki verified
+    CLEAN for all 8 behavior changes (audit entry in wiki/log.md); two pre-existing drifts
+    reported (enrichment-pipeline.md OL cover_url claim contradicts the corrected
+    metadata-pathway.md; handlers.md lacks a cover.rs section).
+    FOLLOW-ON DEBT (recorded, not done): tokens still don't reach INSIDE rss_sync_run's per-user
+    loop or give handler-spawned workers shutdown-linked lifetimes (fresh tokens are
+    uncancellable) — same class as the pre-existing handler-spawn gap; candidate future unit.
+  - **D2 PROPOSED (one line, 2026-07-13):** a failed best-effort DB write is warn!-logged with
+    entity context and never counted as success (no `.ok()`-swallow, no `let _ =`, no
+    success-log-before-result); where the caller can act on the failure (retryable step,
+    user-facing operation), the error propagates instead. Ratify → 2d sweeps #19-#22 under it.
 
 ---
 

@@ -16,7 +16,7 @@ fn tag_status_str(s: TagStatus) -> &'static str {
     }
 }
 
-fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbError> {
+pub(crate) fn row_to_library_item(row: sqlx::sqlite::SqliteRow) -> Result<LibraryItem, DbError> {
     let media_type_str: String = row
         .try_get("media_type")
         .map_err(|e| DbError::Io(Box::new(e)))?;

@@ -316,7 +316,7 @@ where
                     return Some(roster.entries);
                 }
             }
-            let books = fetch_series_roster_pages(&self.fetcher, &gr_key)
+            let books = fetch_series_roster_pages(&self.fetcher, &gr_key, None)
                 .await
                 .ok()?;
             let entries = to_roster_entries(&books);
@@ -336,7 +336,7 @@ where
 
         // Fetch first; adopt only with a non-empty roster in hand — an empty
         // parse would write work_count = 0, which wins the ST-007 guard.
-        let books = match fetch_series_roster_pages(&self.fetcher, &gr_key).await {
+        let books = match fetch_series_roster_pages(&self.fetcher, &gr_key, None).await {
             Ok(b) => b,
             Err(e) => {
                 tracing::debug!(series = %series.name, gr_key = %gr_key, error = %e,
@@ -604,7 +604,8 @@ where
                 if let Some(cached) = cache {
                     (cached.entries, cached.raw_entries, Some(cached.fetched_at))
                 } else {
-                    let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+                    let raw_entries =
+                        fetch_author_series_pages(&self.fetcher, gr_key, None).await?;
                     let target_language = self.effective_target_language(&author).await;
                     let raw_entries = self
                         .classify_series_languages(&author.name, &target_language, raw_entries)
@@ -689,7 +690,7 @@ where
             })?;
 
         let _ = self.db.delete_series_cache(author_id).await;
-        let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key).await?;
+        let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key, None).await?;
         let target_language = self.effective_target_language(&author).await;
         let raw_entries = self
             .classify_series_languages(&author.name, &target_language, raw_entries)
@@ -827,6 +828,7 @@ where
         params: SeriesMonitorWorkerParams,
     ) -> Result<(), SeriesServiceError> {
         let SeriesMonitorWorkerParams {
+            cancel,
             user_id,
             author_id,
             series_id,
@@ -845,7 +847,8 @@ where
                 other => SeriesServiceError::Db(other),
             })?;
 
-        let all_books = fetch_series_roster_pages(&self.fetcher, &series_gr_key).await?;
+        let all_books =
+            fetch_series_roster_pages(&self.fetcher, &series_gr_key, Some(&cancel)).await?;
 
         tracing::info!(
             series = %series_name,
@@ -1240,7 +1243,7 @@ where
         let entries = match stored {
             Some(entries) => entries,
             None => {
-                let books = fetch_series_roster_pages(&self.fetcher, &series.gr_key).await?;
+                let books = fetch_series_roster_pages(&self.fetcher, &series.gr_key, None).await?;
                 let entries = to_roster_entries(&books);
                 if entries.is_empty() {
                     let rows = linked
@@ -1322,7 +1325,11 @@ async fn fetch_gr_html<F: HttpFetcher>(
 async fn fetch_series_roster_pages<F: HttpFetcher>(
     fetcher: &F,
     series_gr_key: &str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<Vec<livrarr_external_data::goodreads::GoodreadsSeriesBook>, SeriesServiceError> {
+    let cancelled = |c: Option<&tokio_util::sync::CancellationToken>| {
+        c.map(|t| t.is_cancelled()).unwrap_or(false)
+    };
     let mut collected = Vec::new();
     let mut primary_count: Option<usize> = None;
     let mut page = 1;
@@ -1354,7 +1361,18 @@ async fn fetch_series_roster_pages<F: HttpFetcher>(
         }
 
         page += 1;
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        match cancel {
+            Some(c) => {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    _ = c.cancelled() => break,
+                }
+            }
+            None => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+        if cancelled(cancel) {
+            break;
+        }
     }
 
     let Some(needed) = primary_count else {
@@ -1580,7 +1598,11 @@ async fn resolve_gr_candidates_json<F: HttpFetcher>(
 async fn fetch_author_series_pages<F: HttpFetcher>(
     fetcher: &F,
     gr_author_id: &str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<Vec<SeriesCacheEntry>, SeriesServiceError> {
+    let cancelled = |c: Option<&tokio_util::sync::CancellationToken>| {
+        c.map(|t| t.is_cancelled()).unwrap_or(false)
+    };
     // Primary: HTML series list page (has proper gr_keys for monitoring)
     let mut all_entries = Vec::new();
     let mut page = 1;
@@ -1612,7 +1634,18 @@ async fn fetch_author_series_pages<F: HttpFetcher>(
         }
 
         page += 1;
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        match cancel {
+            Some(c) => {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    _ = c.cancelled() => break,
+                }
+            }
+            None => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+        if cancelled(cancel) {
+            break;
+        }
     }
 
     // No GR `/search` fallback (REQ-005/ST-012): the series-list pages are

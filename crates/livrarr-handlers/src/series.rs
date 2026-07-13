@@ -265,6 +265,7 @@ pub async fn monitor_series<S: HasSeriesQueryService>(
         if let Err(e) = bg_state
             .series_query_service()
             .run_series_monitor_worker(SeriesMonitorWorkerParams {
+                cancel: tokio_util::sync::CancellationToken::new(),
                 user_id,
                 author_id: id,
                 series_id,
@@ -390,6 +391,7 @@ pub async fn promote_series<S: HasSeriesQueryService>(
         if let Err(e) = bg_state
             .series_query_service()
             .run_series_monitor_worker(SeriesMonitorWorkerParams {
+                cancel: tokio_util::sync::CancellationToken::new(),
                 user_id,
                 author_id,
                 series_id,

@@ -166,6 +166,9 @@ pub struct MonitorSeriesView {
 
 #[derive(Debug)]
 pub struct SeriesMonitorWorkerParams {
+    /// Cooperative-shutdown token: the worker's paced GR pagination selects
+    /// its sleeps against this and returns early when it fires.
+    pub cancel: tokio_util::sync::CancellationToken,
     pub user_id: UserId,
     pub author_id: AuthorId,
     pub series_id: i64,
