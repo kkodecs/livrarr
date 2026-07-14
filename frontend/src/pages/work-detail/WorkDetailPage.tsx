@@ -997,7 +997,7 @@ function ReleasesTab({ workId }: { workId: number }) {
   // 'cacheCheck' = ask backend for cached results only (no indexer hits) — used on mount
   // 'search'     = full search hitting all indexers
   // 'refresh'    = full search bypassing backend cache
-  const modeRef = useRef<"cacheCheck" | "search" | "refresh">("search");
+  const modeRef = useRef<"cacheCheck" | "search" | "refresh">("cacheCheck");
   const [hasSearched, setHasSearched] = useState(false);
   const {
     data: searchResponse,
@@ -1173,7 +1173,7 @@ function ReleasesTab({ workId }: { workId: number }) {
     setHasSearched(true);
     refetch();
   };
-  const doSearch = () => runQuery("search");
+  const doSearch = () => runQuery("refresh");
 
   // Error state — show if query failed and we have no prior results.
   if (isError && !hasResults) {

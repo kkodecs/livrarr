@@ -107,8 +107,10 @@ struct BucketState {
 struct BucketHandle {
     state: Arc<Mutex<BucketState>>,
     semaphore: Arc<Semaphore>,
-    /// `None` for `RateBucket::None` / `Indexer(_)` (R-5/R-6: exempt, never
-    /// trip). `Some` for the six breaker-tracked provider buckets.
+    /// `None` for `RateBucket::None` (R-5) and any future pace-only
+    /// aggregate bucket. `Some` for every breaker-tracked bucket — the six
+    /// book-provider APIs plus `Indexer(_)`, which is single-host (origin-
+    /// keyed) and so carries a breaker like the rest.
     breaker: Option<Arc<Mutex<BreakerState>>>,
 }
 
@@ -967,27 +969,24 @@ mod tests {
         );
     }
 
-    /// `None`, `Indexer(_)`, and (B3) `OpenLibraryCovers` are exempt from
-    /// breaker tracking (R-5/R-6): no amount of reported failure ever trips
-    /// them. `OpenLibraryCovers` is pace-only — it must NOT be in
-    /// `breaker::breaker_tracked`'s six-bucket allowlist.
+    /// `None` and (B3) `OpenLibraryCovers` are exempt from breaker tracking
+    /// (R-5/R-6): no amount of reported failure ever trips them.
+    /// `OpenLibraryCovers` is pace-only — it must NOT be in
+    /// `breaker::breaker_tracked`'s allowlist. `Indexer(_)` is NOT exempt
+    /// (see `indexer_bucket_is_breaker_tracked_and_trips_at_the_failure_threshold`
+    /// below) — it is single-host via origin keying, so it carries a breaker
+    /// like the six book-provider buckets.
     #[tokio::test]
-    async fn none_indexer_and_ol_covers_buckets_never_trip_regardless_of_reported_failures() {
+    async fn none_and_ol_covers_buckets_never_trip_regardless_of_reported_failures() {
         let queue = OutboundQueue::new();
-        let indexer = RateBucket::Indexer("test-indexer".to_string());
         let ol_covers = RateBucket::OpenLibraryCovers;
 
         for _ in 0..20 {
             queue.report_outcome(RateBucket::None, BreakerSignal::Failure);
-            queue.report_outcome(indexer.clone(), BreakerSignal::Failure);
             queue.report_outcome(ol_covers.clone(), BreakerSignal::Failure);
         }
         queue.report_outcome(
             RateBucket::None,
-            BreakerSignal::TripImmediately { open_for: None },
-        );
-        queue.report_outcome(
-            indexer.clone(),
             BreakerSignal::TripImmediately { open_for: None },
         );
         queue.report_outcome(
@@ -1000,13 +999,36 @@ mod tests {
             .await
             .expect("RateBucket::None must never trip");
         queue
-            .acquire(indexer, RequestPriority::Normal)
-            .await
-            .expect("RateBucket::Indexer(_) must never trip");
-        queue
             .acquire(ol_covers, RequestPriority::Normal)
             .await
             .expect("RateBucket::OpenLibraryCovers must never trip (pace-only, R-6)");
+    }
+
+    /// `Indexer(_)` is breaker-tracked: a plain reported `Failure` trips it
+    /// via the normal failure-threshold path, exactly like the six book-
+    /// provider buckets — origin keying makes each indexer bucket single-
+    /// host, so tracking it honors the per-host principle instead of
+    /// violating it. The 429-triggers-`TripImmediately`-with-a-30-minute-
+    /// cooldown behavior is covered end-to-end by
+    /// `crates/livrarr-http/tests/indexer_breaker_pins.rs`.
+    #[tokio::test]
+    async fn indexer_bucket_is_breaker_tracked_and_trips_at_the_failure_threshold() {
+        let queue = OutboundQueue::new();
+        let bucket = RateBucket::Indexer("unit-test-indexer-origin".to_string());
+
+        for _ in 0..4 {
+            queue.report_outcome(bucket.clone(), BreakerSignal::Failure);
+        }
+        queue
+            .acquire(bucket.clone(), RequestPriority::Normal)
+            .await
+            .expect("4 failures must not trip a 5-failure threshold");
+
+        queue.report_outcome(bucket.clone(), BreakerSignal::Failure);
+        queue
+            .acquire(bucket, RequestPriority::Normal)
+            .await
+            .expect_err("the 5th failure must trip an indexer bucket Closed -> Open");
     }
 
     /// Open → HalfOpen → Closed: once the open window elapses, the next

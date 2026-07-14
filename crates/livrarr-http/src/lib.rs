@@ -166,6 +166,26 @@ pub fn livrarr_user_agent() -> String {
     )
 }
 
+/// Normalize a URL down to its origin — lowercased `scheme://host[:port]` —
+/// so different fetches against the same indexer host (search, grab, RSS)
+/// share one `RateBucket::Indexer` pace lane and cooldown, regardless of
+/// path, query string, or the indexer's configured display name. Returns
+/// `None` if the URL fails to parse or carries no host.
+///
+/// Lives here rather than in livrarr-domain because livrarr-domain does not
+/// depend on the `url` crate; livrarr-download and livrarr-metadata both
+/// already depend on livrarr-http, so this is the one shared crate that
+/// needs no new dependency edge for either caller.
+pub fn normalized_origin(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let scheme = parsed.scheme();
+    let host = parsed.host_str()?.to_lowercase();
+    match parsed.port() {
+        Some(port) => Some(format!("{scheme}://{host}:{port}")),
+        None => Some(format!("{scheme}://{host}")),
+    }
+}
+
 fn background_retry_disposition(error_kind: HttpErrorKind) -> RetryDisposition {
     match error_kind {
         HttpErrorKind::Status5xx | HttpErrorKind::Connection => RetryDisposition::Retryable,

@@ -17,7 +17,7 @@ pub struct ReleaseSearchResponse {
     pub search_query: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReleaseResult {
     pub title: String,
     pub indexer: String,

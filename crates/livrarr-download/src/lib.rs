@@ -1,4 +1,5 @@
 pub mod grab_service;
+mod release_search_cache;
 pub mod release_service;
 
 use livrarr_domain::{DbError, DownloadClientId, GrabId, QueueStatus, RemotePathMapping, WorkId};

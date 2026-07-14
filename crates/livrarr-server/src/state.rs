@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 pub use crate::infra::cache::{
-    cleanup_manual_import_scans, GrabSearchCache, ManualImportScanMap, ManualImportScanState,
-    GRAB_CACHE_CLEANUP_INTERVAL_SECS, GRAB_CACHE_TTL_SECS, STATE_MAP_TTL,
+    cleanup_manual_import_scans, ManualImportScanMap, ManualImportScanState, STATE_MAP_TTL,
 };
 pub use crate::infra::log_buffer::{LogBuffer, LogLevelHandle, MAX_LOG_LINES};
 
@@ -128,7 +127,6 @@ pub struct AppState {
     pub log_level_handle: Arc<LogLevelHandle>,
     /// Limits concurrent imports to avoid blocking poller and exhausting I/O.
     pub import_semaphore: Arc<tokio::sync::Semaphore>,
-    pub grab_search_cache: Arc<GrabSearchCache>,
     /// Last RSS sync completion timestamp (unix seconds, 0 = never).
     pub rss_last_run: Arc<std::sync::atomic::AtomicI64>,
     /// Guard against concurrent RSS sync runs.

@@ -285,7 +285,6 @@ async fn main() {
         log_buffer: log_buffer.clone(),
         log_level_handle: log_level_handle.clone(),
         import_semaphore: import_semaphore.clone(),
-        grab_search_cache: Arc::new(livrarr_server::state::GrabSearchCache::new()),
         rss_last_run: rss_last_run.clone(),
         rss_sync_running: rss_sync_running.clone(),
         readarr_import_progress: readarr_import_progress_arc.clone(),

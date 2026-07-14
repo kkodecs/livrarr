@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use livrarr_domain::services::{
-    FetchError, FetchRequest, FetchResponse, HttpFetcher, HttpMethod, UserAgentProfile,
+    FetchError, FetchRequest, FetchResponse, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
 
 use crate::breaker::BreakerSignal;
@@ -19,6 +19,12 @@ use crate::ssrf;
 /// like phase1 cover download's 3s budget) happens to be. Chosen to comfortably
 /// cover a slow-but-live handshake while cutting off a black-holed host fast.
 const FAST_CONNECT_TIMEOUT: Duration = Duration::from_millis(600);
+
+/// Cooldown applied to an `Indexer(_)` bucket's breaker when a 429 trips it
+/// immediately — a definitive "stop", not a maybe (same reasoning as the GR
+/// anti-bot immediate trip). Book-provider buckets are unaffected: their 429
+/// handling stays at the client layer and keeps reporting plain `Failure`.
+const INDEXER_RATE_LIMITED_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 
 // ---------------------------------------------------------------------------
 // Anti-bot detection
@@ -75,6 +81,13 @@ pub struct HttpFetcherImpl {
     /// against the same live host within one process still get connection
     /// reuse — only `fetch_ssrf_safe_fast_connect` uses it.
     fast_connect_ssrf_client: reqwest::Client,
+    /// Same trust posture as `client` (unrestricted — admin-configured
+    /// infrastructure per the SSRF trusted-infrastructure pattern) but never
+    /// auto-follows redirects, so `fetch_no_redirect` can hand the caller a
+    /// raw 3xx response and its `Location` header instead of erroring (or
+    /// silently chasing it) — e.g. to recover a `magnet:` redirect target
+    /// reqwest's redirect-following client rejects.
+    no_redirect_client: reqwest::Client,
 }
 
 impl HttpFetcherImpl {
@@ -98,10 +111,16 @@ impl HttpFetcherImpl {
             .build()
             .map_err(|e| e.to_string())?;
 
+        let no_redirect_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| e.to_string())?;
+
         Ok(Self {
             client,
             ssrf_client,
             fast_connect_ssrf_client,
+            no_redirect_client,
         })
     }
 
@@ -172,10 +191,20 @@ impl HttpFetcherImpl {
 
         let status = response.status().as_u16();
 
-        // 429 → RateLimited
+        // 429 → RateLimited. For an `Indexer(_)` bucket this is a definitive
+        // "stop" — trip its breaker immediately with a 30-minute cooldown
+        // instead of counting toward the generic failure threshold (same
+        // reasoning as the anti-bot immediate trip below). Book-provider
+        // buckets are unchanged: plain `Failure`, same as always.
         if status == 429 {
-            outbound_queue::shared()
-                .report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
+            let signal = if matches!(req.rate_bucket, RateBucket::Indexer(_)) {
+                BreakerSignal::TripImmediately {
+                    open_for: Some(INDEXER_RATE_LIMITED_COOLDOWN),
+                }
+            } else {
+                BreakerSignal::Failure
+            };
+            outbound_queue::shared().report_outcome(req.rate_bucket.clone(), signal);
             return Err(FetchError::RateLimited);
         }
 
@@ -444,6 +473,10 @@ impl HttpFetcher for HttpFetcherImpl {
     ) -> Result<FetchResponse, FetchError> {
         self.fetch_ssrf_safe_impl(req, &self.fast_connect_ssrf_client)
             .await
+    }
+
+    async fn fetch_no_redirect(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+        self.do_fetch(&self.no_redirect_client, req).await
     }
 }
 

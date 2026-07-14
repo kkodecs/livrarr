@@ -8,11 +8,14 @@ use livrarr_db::{
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 
+use crate::release_search_cache::ReleaseSearchCache;
+
 /// ReleaseService implementation — search indexers and grab releases.
 pub struct ReleaseServiceImpl<D, H> {
     db: D,
     http: H,
     trusted_origins: std::sync::Arc<livrarr_http::ssrf::TrustedOrigins>,
+    cache: ReleaseSearchCache,
 }
 
 impl<D, H> ReleaseServiceImpl<D, H> {
@@ -25,6 +28,7 @@ impl<D, H> ReleaseServiceImpl<D, H> {
             db,
             http,
             trusted_origins,
+            cache: ReleaseSearchCache::new(),
         }
     }
 }
@@ -89,144 +93,200 @@ where
             format!("{} {}", work.title, last_name)
         };
 
-        // Fan-out parallel requests with per-indexer 30s timeout
-        let mut handles = tokio::task::JoinSet::new();
-
-        for indexer in &indexers {
-            let db = self.db.clone();
-            let http = self.http.clone();
-            let query = query.clone();
-            let indexer_id = indexer.id;
-            let indexer_name = indexer.name.clone();
-
-            handles.spawn(async move {
-                // Fetch indexer with credentials for the API key
-                let indexer = match db.get_indexer_with_credentials(indexer_id).await {
-                    Ok(i) => i,
-                    Err(e) => {
-                        return (indexer_name, Err(format!("failed to load indexer: {e}")));
-                    }
-                };
-
-                // Build Torznab search URL
-                let base_url = indexer.url.trim_end_matches('/');
-                let api_path = indexer.api_path.trim_start_matches('/');
-                let mut url = format!(
-                    "{base_url}/{api_path}?t=search&q={}",
-                    urlencoding::encode(&query)
-                );
-                if let Some(ref api_key) = indexer.api_key {
-                    url.push_str(&format!("&apikey={}", urlencoding::encode(api_key)));
-                }
-                // Add categories
-                if !indexer.categories.is_empty() {
-                    let cats: Vec<String> =
-                        indexer.categories.iter().map(|c| c.to_string()).collect();
-                    url.push_str(&format!("&cat={}", cats.join(",")));
-                }
-
-                let fetch_req = FetchRequest {
-                    url,
-                    method: HttpMethod::Get,
-                    headers: vec![],
-                    body: None,
-                    timeout: Duration::from_secs(30),
-                    rate_bucket: RateBucket::Indexer(indexer_name.clone()),
-                    max_body_bytes: 10 * 1024 * 1024,
-                    anti_bot_check: false,
-                    user_agent: UserAgentProfile::Server,
-                    priority: RequestPriority::Normal,
-                };
-
-                match http.fetch(fetch_req).await {
-                    Ok(resp) if resp.status == 200 => {
-                        (indexer_name, Ok::<Vec<u8>, String>(resp.body))
-                    }
-                    Ok(resp) => (
-                        indexer_name,
-                        Err::<Vec<u8>, String>(format!("HTTP {}", resp.status)),
-                    ),
-                    Err(e) => (indexer_name, Err::<Vec<u8>, String>(format!("{e}"))),
-                }
-            });
-        }
-
         let mut all_results: Vec<ReleaseResult> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
         let mut any_success = false;
+        let mut any_live_attempted = false;
+        let mut oldest_cache_age: Option<u64> = None;
 
-        while let Some(join_result) = handles.join_next().await {
-            match join_result {
-                Ok((indexer_name, Ok(body))) => {
+        // Per indexer: `refresh` always goes live and rewrites the cache;
+        // otherwise a fresh (<24h) cache entry is served with zero HTTP. A
+        // miss goes live UNLESS `cache_only`, in which case that indexer
+        // contributes nothing — silently, since a cold cache is the normal
+        // day-one state, not an error.
+        let mut live_indexers: Vec<&Indexer> = Vec::new();
+        for indexer in &indexers {
+            if !req.refresh {
+                if let Some((cached, age)) = self
+                    .cache
+                    .get(&work.title, &work.author_name, indexer.id)
+                    .await
+                {
                     any_success = true;
-                    match parse_torznab_xml(&body) {
-                        Ok(TorznabParseResult::Items(items)) => {
-                            for item in &items {
-                                if item.guid.is_empty() {
-                                    warnings.push(format!(
-                                        "indexer {indexer_name}: skipped item missing guid (title: {})",
-                                        if item.title.is_empty() { "<unknown>" } else { &item.title }
-                                    ));
-                                } else if item.download_url.is_empty() {
-                                    warnings.push(format!(
-                                        "indexer {indexer_name}: skipped item missing downloadUrl (guid: {})",
-                                        item.guid
-                                    ));
-                                }
-                            }
-                            let results: Vec<ReleaseResult> = items
-                                .into_iter()
-                                .filter(|item| {
-                                    !item.guid.is_empty() && !item.download_url.is_empty()
-                                })
-                                .map(|item| {
-                                    let protocol = if item
-                                        .enclosure_type
-                                        .as_deref()
-                                        .is_some_and(|t| t.contains("nzb"))
-                                    {
-                                        DownloadProtocol::Usenet
-                                    } else {
-                                        DownloadProtocol::Torrent
-                                    };
-                                    ReleaseResult {
-                                        title: item.title,
-                                        indexer: indexer_name.to_string(),
-                                        size: item.size,
-                                        guid: item.guid,
-                                        download_url: item.download_url,
-                                        seeders: item.seeders,
-                                        leechers: item.leechers,
-                                        publish_date: item.publish_date,
-                                        protocol,
-                                        categories: item.categories,
-                                    }
-                                })
-                                .collect();
-                            all_results.extend(results);
-                        }
-                        Ok(TorznabParseResult::Error { code, description }) => {
-                            warnings.push(redact_secrets(&format!(
-                                "indexer {indexer_name}: error {code}: {description}"
-                            )));
-                        }
+                    oldest_cache_age = Some(oldest_cache_age.map_or(age, |a| a.max(age)));
+                    all_results.extend(cached);
+                    continue;
+                }
+            }
+
+            if req.cache_only {
+                continue;
+            }
+
+            live_indexers.push(indexer);
+        }
+
+        if !live_indexers.is_empty() {
+            any_live_attempted = true;
+
+            // Fan-out parallel requests with per-indexer 30s timeout
+            let mut handles = tokio::task::JoinSet::new();
+
+            for indexer in &live_indexers {
+                let db = self.db.clone();
+                let http = self.http.clone();
+                let query = query.clone();
+                let indexer_id = indexer.id;
+                let indexer_name = indexer.name.clone();
+
+                handles.spawn(async move {
+                    // Fetch indexer with credentials for the API key
+                    let indexer = match db.get_indexer_with_credentials(indexer_id).await {
+                        Ok(i) => i,
                         Err(e) => {
-                            warnings.push(redact_secrets(&format!("indexer {indexer_name}: {e}")));
+                            return (
+                                indexer_name,
+                                indexer_id,
+                                Err(format!("failed to load indexer: {e}")),
+                            );
+                        }
+                    };
+
+                    // Build Torznab search URL
+                    let base_url = indexer.url.trim_end_matches('/');
+                    let api_path = indexer.api_path.trim_start_matches('/');
+                    let mut url = format!(
+                        "{base_url}/{api_path}?t=search&q={}",
+                        urlencoding::encode(&query)
+                    );
+                    if let Some(ref api_key) = indexer.api_key {
+                        url.push_str(&format!("&apikey={}", urlencoding::encode(api_key)));
+                    }
+                    // Add categories
+                    if !indexer.categories.is_empty() {
+                        let cats: Vec<String> =
+                            indexer.categories.iter().map(|c| c.to_string()).collect();
+                        url.push_str(&format!("&cat={}", cats.join(",")));
+                    }
+
+                    let origin = livrarr_http::normalized_origin(&indexer.url)
+                        .unwrap_or_else(|| indexer.url.clone());
+                    let fetch_req = FetchRequest {
+                        url,
+                        method: HttpMethod::Get,
+                        headers: vec![],
+                        body: None,
+                        timeout: Duration::from_secs(30),
+                        rate_bucket: RateBucket::Indexer(origin),
+                        max_body_bytes: 10 * 1024 * 1024,
+                        anti_bot_check: false,
+                        user_agent: UserAgentProfile::Server,
+                        priority: RequestPriority::Normal,
+                    };
+
+                    match http.fetch(fetch_req).await {
+                        Ok(resp) if resp.status == 200 => {
+                            (indexer_name, indexer_id, Ok::<Vec<u8>, String>(resp.body))
+                        }
+                        Ok(resp) => (
+                            indexer_name,
+                            indexer_id,
+                            Err::<Vec<u8>, String>(format!("HTTP {}", resp.status)),
+                        ),
+                        Err(e) => (
+                            indexer_name,
+                            indexer_id,
+                            Err::<Vec<u8>, String>(format!("{e}")),
+                        ),
+                    }
+                });
+            }
+
+            while let Some(join_result) = handles.join_next().await {
+                match join_result {
+                    Ok((indexer_name, indexer_id, Ok(body))) => {
+                        any_success = true;
+                        match parse_torznab_xml(&body) {
+                            Ok(TorznabParseResult::Items(items)) => {
+                                for item in &items {
+                                    if item.guid.is_empty() {
+                                        warnings.push(format!(
+                                            "indexer {indexer_name}: skipped item missing guid (title: {})",
+                                            if item.title.is_empty() { "<unknown>" } else { &item.title }
+                                        ));
+                                    } else if item.download_url.is_empty() {
+                                        warnings.push(format!(
+                                            "indexer {indexer_name}: skipped item missing downloadUrl (guid: {})",
+                                            item.guid
+                                        ));
+                                    }
+                                }
+                                let results: Vec<ReleaseResult> = items
+                                    .into_iter()
+                                    .filter(|item| {
+                                        !item.guid.is_empty() && !item.download_url.is_empty()
+                                    })
+                                    .map(|item| {
+                                        let protocol = if item
+                                            .enclosure_type
+                                            .as_deref()
+                                            .is_some_and(|t| t.contains("nzb"))
+                                        {
+                                            DownloadProtocol::Usenet
+                                        } else {
+                                            DownloadProtocol::Torrent
+                                        };
+                                        ReleaseResult {
+                                            title: item.title,
+                                            indexer: indexer_name.to_string(),
+                                            size: item.size,
+                                            guid: item.guid,
+                                            download_url: item.download_url,
+                                            seeders: item.seeders,
+                                            leechers: item.leechers,
+                                            publish_date: item.publish_date,
+                                            protocol,
+                                            categories: item.categories,
+                                        }
+                                    })
+                                    .collect();
+                                self.cache
+                                    .put(
+                                        &work.title,
+                                        &work.author_name,
+                                        indexer_id,
+                                        results.clone(),
+                                    )
+                                    .await;
+                                all_results.extend(results);
+                            }
+                            Ok(TorznabParseResult::Error { code, description }) => {
+                                warnings.push(redact_secrets(&format!(
+                                    "indexer {indexer_name}: error {code}: {description}"
+                                )));
+                            }
+                            Err(e) => {
+                                warnings
+                                    .push(redact_secrets(&format!("indexer {indexer_name}: {e}")));
+                            }
                         }
                     }
-                }
-                Ok((indexer_name, Err(err_msg))) => {
-                    warnings.push(redact_secrets(&format!(
-                        "indexer {indexer_name}: {err_msg}"
-                    )));
-                }
-                Err(join_err) => {
-                    warnings.push(format!("indexer task panicked: {join_err}"));
+                    Ok((indexer_name, _indexer_id, Err(err_msg))) => {
+                        warnings.push(redact_secrets(&format!(
+                            "indexer {indexer_name}: {err_msg}"
+                        )));
+                    }
+                    Err(join_err) => {
+                        warnings.push(format!("indexer task panicked: {join_err}"));
+                    }
                 }
             }
         }
 
-        if !any_success {
+        // `AllIndexersFailed` is reserved for a mode that actually attempted
+        // live fetches and had every attempt fail — never for a mode (like a
+        // cold `cache_only` search) that contacted nobody.
+        if !any_success && any_live_attempted {
             return Err(ReleaseServiceError::AllIndexersFailed);
         }
 
@@ -259,7 +319,7 @@ where
         Ok(ReleaseSearchResponse {
             results: all_results,
             warnings,
-            cache_age_seconds: None,
+            cache_age_seconds: oldest_cache_age,
             search_query: query,
         })
     }
@@ -274,6 +334,28 @@ where
                 )));
             }
         }
+
+        // Indexer-origin fetches during this grab (torrent-file, NZB,
+        // Transmission URL fallback, magnet-redirect probe) key their pace
+        // lane and cooldown on the CONFIGURED indexer's origin — looked up
+        // by `req.indexer` (display name) — not on the download URL's host,
+        // so an indexer that proxies or redirects through a different host
+        // cannot evade its own bucket. Falls back to the download URL's own
+        // origin when the name matches no configured indexer, so an ad-hoc
+        // or renamed indexer still gets the grab instead of failing it.
+        let configured_indexer = self
+            .db
+            .list_indexers()
+            .await
+            .ok()
+            .and_then(|indexers| indexers.into_iter().find(|i| i.name == req.indexer));
+        let indexer_origin = match configured_indexer {
+            Some(indexer) => {
+                livrarr_http::normalized_origin(&indexer.url).unwrap_or_else(|| indexer.url.clone())
+            }
+            None => livrarr_http::normalized_origin(&req.download_url)
+                .unwrap_or_else(|| req.download_url.clone()),
+        };
 
         // Determine client_type from protocol.
         // For Torrent, prefer the is_default_for_protocol client (could be qBittorrent or Transmission).
@@ -327,12 +409,22 @@ where
         let dispatch_result = match req.protocol {
             DownloadProtocol::Torrent => match client.implementation {
                 DownloadClientImplementation::Transmission => {
-                    dispatch_transmission(&self.http, &client, &req.download_url).await
+                    dispatch_transmission(&self.http, &client, &req.download_url, &indexer_origin)
+                        .await
                 }
-                _ => dispatch_torrent(&self.http, &client, &req.download_url).await,
+                _ => {
+                    dispatch_torrent(&self.http, &client, &req.download_url, &indexer_origin).await
+                }
             },
             DownloadProtocol::Usenet => {
-                dispatch_usenet(&self.http, &client, &req.download_url, &req.title).await
+                dispatch_usenet(
+                    &self.http,
+                    &client,
+                    &req.download_url,
+                    &req.title,
+                    &indexer_origin,
+                )
+                .await
             }
         };
 
@@ -401,19 +493,26 @@ enum TorrentDispatchSource {
 /// - Normal fetch fails and a redirect-to-magnet is recovered → `Magnet`
 ///   (hash extracted from the recovered URI; dispatching the magnet avoids
 ///   re-hitting an indexer endpoint the client may not be able to reach).
-/// - All else fails → `Url` (original URL as last-resort fallback).
+/// - Normal fetch fails for any other reason → `Url` (original URL as
+///   last-resort fallback, letting the download client fetch it directly).
+///
+/// `RateLimited`/`CircuitOpen` are NOT degraded to the `Url` fallback: the
+/// indexer is cooling down, so this returns `Err` and the caller fails the
+/// grab hard instead of handing the client a URL it would hit outside our
+/// pacing — a delegated bypass of the cooldown.
 async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
     http: &H,
     download_url: &str,
-) -> (Option<String>, TorrentDispatchSource) {
+    origin: &str,
+) -> Result<(Option<String>, TorrentDispatchSource), FetchError> {
     use crate::{extract_torrent_hash, TorrentSource};
 
     if download_url.starts_with("magnet:") {
         let hash = extract_torrent_hash(&TorrentSource::Magnet(download_url.to_string())).ok();
-        return (
+        return Ok((
             hash,
             TorrentDispatchSource::Magnet(download_url.to_string()),
-        );
+        ));
     }
 
     let resp = match http
@@ -423,7 +522,7 @@ async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
             headers: vec![],
             body: None,
             timeout: Duration::from_secs(60),
-            rate_bucket: RateBucket::None,
+            rate_bucket: RateBucket::Indexer(origin.to_string()),
             max_body_bytes: 4 * 1024 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
@@ -432,22 +531,25 @@ async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
         .await
     {
         Ok(r) => r,
+        Err(e @ (FetchError::RateLimited | FetchError::CircuitOpen { .. })) => return Err(e),
         Err(_) => {
             // The fetch may have failed because the URL redirects to a magnet: URI.
             // reqwest's redirect-following client rejects non-HTTP schemes, so a
             // 301/302 Location: magnet:?xt=... response causes an Err rather than a
             // usable redirect. Some indexer proxies (e.g. Prowlarr) use this pattern.
-            // Probe with a no-redirect client to recover the magnet if that's the case.
-            if let Some(magnet) = probe_for_magnet_redirect(download_url).await {
+            // Probe with a no-redirect request to recover the magnet if that's the case.
+            if let Some(magnet) =
+                probe_for_magnet_redirect(http, download_url, origin.to_string()).await
+            {
                 let hash = extract_torrent_hash(&TorrentSource::Magnet(magnet.clone())).ok();
-                return (hash, TorrentDispatchSource::Magnet(magnet));
+                return Ok((hash, TorrentDispatchSource::Magnet(magnet)));
             }
-            return (None, TorrentDispatchSource::Url(download_url.to_string()));
+            return Ok((None, TorrentDispatchSource::Url(download_url.to_string())));
         }
     };
 
     if !(200..300).contains(&resp.status) {
-        return (None, TorrentDispatchSource::Url(download_url.to_string()));
+        return Ok((None, TorrentDispatchSource::Url(download_url.to_string())));
     }
 
     // Some indexers return a magnet URI as the response body
@@ -455,7 +557,7 @@ async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
         let trimmed = text.trim();
         if trimmed.starts_with("magnet:") {
             let hash = extract_torrent_hash(&TorrentSource::Magnet(trimmed.to_string())).ok();
-            return (hash, TorrentDispatchSource::Magnet(trimmed.to_string()));
+            return Ok((hash, TorrentDispatchSource::Magnet(trimmed.to_string())));
         }
     }
 
@@ -464,37 +566,48 @@ async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
         data: resp.body.clone(),
     })
     .ok();
-    (hash, TorrentDispatchSource::File(resp.body))
+    Ok((hash, TorrentDispatchSource::File(resp.body)))
 }
 
-/// Probe a URL with a no-redirect client and return the Location value if it is
-/// a magnet: URI. Used to recover from redirect-to-magnet responses that cause
-/// the redirect-following client to error on the non-HTTP scheme.
-async fn probe_for_magnet_redirect(url: &str) -> Option<String> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
-        .build()
-        .ok()?;
-    let resp = client
-        .get(url)
-        .header(
-            reqwest::header::USER_AGENT,
-            livrarr_http::livrarr_user_agent(),
-        )
-        .send()
+/// Probe a URL with a request whose redirects are NOT auto-followed, and
+/// return the `Location` value if the response is a redirect to a `magnet:`
+/// URI. Used to recover from redirect-to-magnet responses that cause the
+/// normal redirect-following fetch to error on the non-HTTP scheme. Goes
+/// through livrarr-http's fetcher (`fetch_no_redirect`) on the same indexer
+/// bucket as the primary attempt, so it inherits pacing, cooldown, UA
+/// policy, and SSRF posture like every other outbound call — no bespoke
+/// `reqwest::Client` here.
+async fn probe_for_magnet_redirect<H: HttpFetcher>(
+    http: &H,
+    url: &str,
+    origin: String,
+) -> Option<String> {
+    let resp = http
+        .fetch_no_redirect(FetchRequest {
+            url: url.to_string(),
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(10),
+            rate_bucket: RateBucket::Indexer(origin),
+            max_body_bytes: 4096,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
+        })
         .await
         .ok()?;
-    if !resp.status().is_redirection() {
+
+    if !(300..400).contains(&resp.status) {
         return None;
     }
     let location = resp
-        .headers()
-        .get(reqwest::header::LOCATION)?
-        .to_str()
-        .ok()?;
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+        .map(|(_, v)| v.clone())?;
     if location.starts_with("magnet:") {
-        Some(location.to_string())
+        Some(location)
     } else {
         None
     }
@@ -509,8 +622,11 @@ async fn dispatch_torrent<H: HttpFetcher>(
     http: &H,
     client: &DownloadClient,
     download_url: &str,
+    origin: &str,
 ) -> Result<String, String> {
-    let (hash, dispatch_source) = fetch_torrent_dispatch_source(http, download_url).await;
+    let (hash, dispatch_source) = fetch_torrent_dispatch_source(http, download_url, origin)
+        .await
+        .map_err(|e| format!("indexer cooling down — retry later: {e}"))?;
     let download_id = hash.unwrap_or_else(|| "pending".to_string());
 
     let scheme = if client.use_ssl { "https" } else { "http" };
@@ -643,8 +759,11 @@ async fn dispatch_transmission<H: HttpFetcher>(
     http: &H,
     client: &DownloadClient,
     download_url: &str,
+    origin: &str,
 ) -> Result<String, String> {
-    let (hash, dispatch_source) = fetch_torrent_dispatch_source(http, download_url).await;
+    let (hash, dispatch_source) = fetch_torrent_dispatch_source(http, download_url, origin)
+        .await
+        .map_err(|e| format!("indexer cooling down — retry later: {e}"))?;
     let download_id = hash.unwrap_or_else(|| "pending".to_string());
 
     let scheme = if client.use_ssl { "https" } else { "http" };
@@ -672,7 +791,7 @@ async fn dispatch_transmission<H: HttpFetcher>(
                     headers: vec![],
                     body: None,
                     timeout: Duration::from_secs(30),
-                    rate_bucket: RateBucket::None,
+                    rate_bucket: RateBucket::Indexer(origin.to_string()),
                     max_body_bytes: 10 * 1024 * 1024,
                     anti_bot_check: false,
                     user_agent: UserAgentProfile::Server,
@@ -775,6 +894,7 @@ async fn dispatch_usenet<H: HttpFetcher>(
     client: &DownloadClient,
     download_url: &str,
     title: &str,
+    origin: &str,
 ) -> Result<String, String> {
     // Step 1: Download NZB from indexer.
     let nzb_resp = http
@@ -784,7 +904,7 @@ async fn dispatch_usenet<H: HttpFetcher>(
             headers: vec![],
             body: None,
             timeout: Duration::from_secs(60),
-            rate_bucket: RateBucket::None,
+            rate_bucket: RateBucket::Indexer(origin.to_string()),
             max_body_bytes: 16 * 1024 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,

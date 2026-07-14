@@ -193,12 +193,16 @@ pub fn config_for(bucket: &RateBucket) -> CircuitBreakerConfig {
     }
 }
 
-/// Breaker-tracked buckets: exactly the six single-host book-provider APIs.
-/// Every other bucket — `None`, `Indexer(_)`, and any future bucket (e.g. a
-/// cover-image bucket aggregating many hosts) — is pace-only: no breaker
-/// state, never trips. The allowlist is deliberate: a new bucket must opt IN
-/// to breaking, because a shared breaker over a multi-host bucket lets one
-/// bad host suppress the rest.
+/// Breaker-tracked buckets: the six single-host book-provider APIs, plus
+/// `Indexer(_)` — each indexer bucket is keyed by normalized upstream origin
+/// (scheme://host[:port]), so it is single-host exactly like the book
+/// providers and tracking it honors the same per-host principle. Every other
+/// bucket — `None`, and any future bucket that aggregates multiple hosts
+/// (e.g. a cover-image bucket) — is pace-only: no breaker state, never trips.
+/// The allowlist is deliberate: a new bucket must opt IN to breaking, because
+/// a shared breaker over a multi-host AGGREGATE bucket lets one bad host
+/// suppress the rest — that failure mode, not single-host tracking itself,
+/// is what stays forbidden.
 pub fn breaker_tracked(bucket: &RateBucket) -> bool {
     matches!(
         bucket,
@@ -208,5 +212,6 @@ pub fn breaker_tracked(bucket: &RateBucket) -> bool {
             | RateBucket::GoogleBooks
             | RateBucket::Audnexus
             | RateBucket::Audible
+            | RateBucket::Indexer(_)
     )
 }

@@ -215,6 +215,32 @@ kk-build state files remain authoritative for gates; this section is the narrati
     stay approve-piecemeal (not started); #37 PARKED. Follow-ons awaiting PO
     prioritization: tests/implementation/ orphan triage (2a entry) · metadata-pathway.md
     pre-Phase-5 rewrite (own pass) · identity-fix unit (PO schedules).
+  - **INDEXER-CITIZENSHIP UNIT EXECUTED + COMMITTED (2026-07-14 ~00:45 UTC):** design-first
+    (design-indexer-rate-limits.md, 4 review rounds: r2 3 folds incl. the raw-reqwest
+    canonical-transport violation surfaced + origin-vs-name keying + cold-cache
+    empty-success; r3 2 folds incl. MY misclassification of qBit auth/add as indexer
+    fetches; r4 PO-ordered gut-check PASS — codex-only per PO gemini waiver). 8 red-first
+    pins (7 citizenship + 1 breaker; codex-authored; orchestrator-verified red→green).
+    Implementation: sonnet agent + a fold round (codex r6 R-7 configured-origin grab
+    keying FOLDED with its own red pin; gemini r6 R-8 normalized_origin hoisted to
+    livrarr-http — one authority, zero new dep edges; R-10 doc line). r7 confirmation:
+    BOTH families PASS, zero findings. Gates: fmt clean · clippy 0 · workspace
+    1541/0/299 (152 suites, +9 pins fully reconciled) · smoke green (snapshot
+    livrarr.db.pre-indexer-smoke-20260714; RSS tick on origin-keyed lanes, zero errors,
+    no MaM rate-limit warning that tick). Insight 71; dispositions in
+    build/reviews/quality-waves/review-code-indexer-disposition.md. Residuals recorded:
+    unused `url` dep in livrarr-download (roads-class), duplicate-display-name first-match,
+    zero-indexers AllIndexersFailed under cache_only (pre-existing).
+  - **NEXT UNITS ORDERED (PO, 2026-07-13 evening):** (1) indexer rate-limiting fixes
+    (unthrottled grab-file fetch, dead search cache, no 429 backoff — per the
+    code-verified audit) FIRST, then (2) the identity-fix unit (wire the "try again"
+    refresh caller of clear_anchor_dead_ends + trace-then-fix quorum key-adoption
+    [World War Z / work 71] + honest Unverified-badge tooltip). Alpha6 scope is
+    DISCUSSED AFTER both land — not yet set (the 2026-06-10 "Sprints A–F" gate remains
+    the last ratified definition until that discussion). PARKED meanwhile:
+    tests/implementation/ orphan triage, Wave 3 items 6-10, secret-hygiene drafts,
+    metadata-pathway.md rewrite, #37. The PO's SABnzbd 403 install issue is slated for
+    the alpha6 test window (test enablement, not release scope).
 
 ---
 

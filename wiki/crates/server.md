@@ -33,7 +33,6 @@ Composition root. Depends on all other crates. Nothing depends on it.
 | `log_buffer` | `Arc<LogBuffer>` | In-memory ring buffer of recent log lines |
 | `log_level_handle` | `Arc<LogLevelHandle>` | Runtime log level control |
 | `import_semaphore` | `Arc<Semaphore>` | Limits concurrent import I/O |
-| `grab_search_cache` | `Arc<GrabSearchCache>` | TTL cache for release search results |
 | `cover_proxy_cache` | `Arc<CoverProxyCache>` | LRU cache for proxied cover images |
 | `live_metadata_config` | `LiveMetadataConfig` | Mutable snapshot of `MetadataConfig`; updated on config save, read by enrichment |
 | `manual_import_scans` | `Arc<ManualImportScanMap>` | In-progress scan state keyed by scan ID |
@@ -193,9 +192,9 @@ Free helper functions for the import pipeline — no DB or service-layer access;
 - `cwa_copy` — CWA-style copy (hardlink-first, fall back to copy) for import
 
 ### cache.rs
-- `GrabSearchCache` — TTL-based in-memory cache for release search results (keyed by work + query)
 - `ManualImportScanState` — per-scan state for in-flight manual import scans
 - `cleanup_manual_import_scans` — evict completed/stale scan entries
+- (Release search caching lives in `livrarr-download`'s `ReleaseSearchCache` now — see the indexer-citizenship unit; the old server-side `GrabSearchCache` was dead code and was deleted.)
 
 ### cover_cache.rs
 - `CoverProxyCache` — LRU + TTL cache for proxied cover images (avoids re-fetching remote URLs)

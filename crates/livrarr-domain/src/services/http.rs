@@ -122,6 +122,31 @@ pub trait HttpFetcher: Send + Sync {
     ) -> impl core::future::Future<Output = Result<FetchResponse, FetchError>> {
         async move { self.fetch_ssrf_safe(req).await }
     }
+
+    /// Fetch without following redirects — the raw response (status +
+    /// headers, including `Location` on a 3xx) is returned so the caller can
+    /// read a redirect target the auto-following client would otherwise
+    /// chase, or — for a non-HTTP target like a `magnet:` URI — error on.
+    /// Goes through the same pacing/breaker/UA path as `fetch`; only the
+    /// underlying client's redirect policy differs.
+    ///
+    /// Defaulted to `fetch` so every existing implementor keeps today's
+    /// behavior unless it opts in with a dedicated no-redirect client;
+    /// `HttpFetcherImpl` is the only override. Pre-desugared for the same
+    /// reason as `fetch_ssrf_safe_fast_connect` above.
+    ///
+    /// Plainly: the default body below calls `fetch`, so it FOLLOWS
+    /// redirects — it does not suppress them. Only an implementor that
+    /// overrides this method (like `HttpFetcherImpl`) actually stops at a
+    /// redirect. A test double that needs no-redirect behavior (e.g. to
+    /// return a 3xx with a `Location` header) must override
+    /// `fetch_no_redirect` itself; overriding `fetch` alone is not enough.
+    fn fetch_no_redirect(
+        &self,
+        req: FetchRequest,
+    ) -> impl core::future::Future<Output = Result<FetchResponse, FetchError>> {
+        async move { self.fetch(req).await }
+    }
 }
 
 #[cfg(test)]
