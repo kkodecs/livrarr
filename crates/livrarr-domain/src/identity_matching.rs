@@ -65,6 +65,23 @@ impl ParsedTitle {
     }
 }
 
+/// Why a title pair landed in the grey band instead of `Same`. Computed once,
+/// inside the verdict; the highest-risk trigger wins when several co-occur
+/// (`VolumeAsymmetry` > `SubtitleDisagreement` > `OneSidedSubtitle`), so
+/// `OneSidedSubtitle` always means *solely* that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GreyCause {
+    /// Equal mains; the only demotion trigger was a true subtitle on exactly
+    /// one side. No volume asymmetry, no subtitle disagreement.
+    OneSidedSubtitle,
+    /// Equal mains; both sides carry true subtitles and they differ.
+    SubtitleDisagreement,
+    /// Equal mains; volume evidence on exactly one side.
+    VolumeAsymmetry,
+    /// Mains not equal; similarity at or above [`TITLE_GREY_FLOOR`].
+    NearMain,
+}
+
 /// Identity-grade comparison of two parsed titles.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TitleVerdict {
@@ -73,8 +90,9 @@ pub enum TitleVerdict {
     /// Close but not certain: near-equal mains (token-set Jaccard at or above
     /// [`TITLE_GREY_FLOOR`]), or exact mains demoted by tail evidence
     /// (one-sided tail, disagreeing subtitles, one-sided volume info).
-    /// `score` is the computed main-title token-set Jaccard.
-    Grey { score: f64 },
+    /// `score` is the computed main-title token-set Jaccard; `cause` names
+    /// the demotion trigger.
+    Grey { score: f64, cause: GreyCause },
     /// Below the grey floor, or no usable title on either side.
     Different,
     /// Conflicting volume numbers (from parsed tails or caller-supplied
@@ -235,13 +253,24 @@ pub fn title_verdict_with_positions(
             _ => true,
         };
         if one_sided_volume || subtitles_demote {
-            return TitleVerdict::Grey { score };
+            // Highest-risk trigger wins, so OneSidedSubtitle means solely that.
+            let cause = if one_sided_volume {
+                GreyCause::VolumeAsymmetry
+            } else if a.subtitle.is_some() && b.subtitle.is_some() {
+                GreyCause::SubtitleDisagreement
+            } else {
+                GreyCause::OneSidedSubtitle
+            };
+            return TitleVerdict::Grey { score, cause };
         }
         return TitleVerdict::Same;
     }
 
     if score >= TITLE_GREY_FLOOR {
-        return TitleVerdict::Grey { score };
+        return TitleVerdict::Grey {
+            score,
+            cause: GreyCause::NearMain,
+        };
     }
     TitleVerdict::Different
 }
@@ -332,28 +361,65 @@ pub fn language_verdict(
     }
 }
 
+fn present(v: Option<&str>) -> Option<&str> {
+    v.map(str::trim).filter(|s| !s.is_empty())
+}
+fn id_eq(x: Option<&str>, y: Option<&str>) -> bool {
+    matches!((present(x), present(y)), (Some(p), Some(q)) if p == q)
+}
+fn id_differs(x: Option<&str>, y: Option<&str>) -> bool {
+    matches!((present(x), present(y)), (Some(p), Some(q)) if p != q)
+}
+
+/// Any same-provider WORK key (OL/GR/HC) present on both sides and different.
+/// Checked per provider over raw evidence: [`id_verdict`]'s equality-first
+/// collapse deliberately reports `WorkKeyEqual` for mixed agree+contradict
+/// evidence, which a trust decision must not inherit.
+fn work_key_contradiction(a: &IdEvidence, b: &IdEvidence) -> bool {
+    id_differs(a.ol_key, b.ol_key)
+        || id_differs(a.gr_key, b.gr_key)
+        || id_differs(a.hc_key, b.hc_key)
+}
+
 /// Compare the identifier evidence of two records.
 pub fn id_verdict(a: &IdEvidence, b: &IdEvidence) -> IdVerdict {
-    fn present(v: Option<&str>) -> Option<&str> {
-        v.map(str::trim).filter(|s| !s.is_empty())
-    }
-    fn eq(x: Option<&str>, y: Option<&str>) -> bool {
-        matches!((present(x), present(y)), (Some(p), Some(q)) if p == q)
-    }
-    fn differs(x: Option<&str>, y: Option<&str>) -> bool {
-        matches!((present(x), present(y)), (Some(p), Some(q)) if p != q)
-    }
-
-    if eq(a.ol_key, b.ol_key) || eq(a.gr_key, b.gr_key) || eq(a.hc_key, b.hc_key) {
+    if id_eq(a.ol_key, b.ol_key) || id_eq(a.gr_key, b.gr_key) || id_eq(a.hc_key, b.hc_key) {
         return IdVerdict::WorkKeyEqual;
     }
-    if differs(a.ol_key, b.ol_key) || differs(a.gr_key, b.gr_key) || differs(a.hc_key, b.hc_key) {
+    if work_key_contradiction(a, b) {
         return IdVerdict::WorkKeyContradiction;
     }
-    if eq(a.isbn_13, b.isbn_13) || eq(a.asin, b.asin) {
+    if id_eq(a.isbn_13, b.isbn_13) || id_eq(a.asin, b.asin) {
         return IdVerdict::EditionBridge;
     }
     IdVerdict::NoEvidence
+}
+
+/// AC-004/D4/REQ-006 trust shape for a text-corroborated identity: may this
+/// pair's identifiers + title evidence be trusted at an identity seat?
+/// NOT a full acceptance decision — callers apply their seat's author bar.
+/// Takes RAW evidence rather than a collapsed [`IdVerdict`]: the collapsed
+/// verdict reports `WorkKeyEqual` as soon as any work key matches, which would
+/// mask a contradicting sibling key on a mixed payload.
+pub fn title_id_trust(title: &TitleVerdict, a: &IdEvidence, b: &IdEvidence) -> bool {
+    // REQ-006: a same-provider work-key contradiction is the collision shape —
+    // never auto-same, regardless of title evidence, in both directions.
+    if work_key_contradiction(a, b) {
+        return false;
+    }
+    match title {
+        TitleVerdict::Same => true,
+        // AC-004: a grey pair whose sole demotion trigger is the one-sided
+        // subtitle may be confirmed by an agreeing ID — and only by one.
+        TitleVerdict::Grey {
+            cause: GreyCause::OneSidedSubtitle,
+            ..
+        } => matches!(
+            id_verdict(a, b),
+            IdVerdict::WorkKeyEqual | IdVerdict::EditionBridge
+        ),
+        _ => false,
+    }
 }
 
 /// Deterministic identity key for storage and exact-equality lookups: the
@@ -1111,7 +1177,7 @@ mod tests {
         let a = parse_title("The Wise Man's Fear");
         let b = parse_title("The Wise Man's Fear Chronicle");
         match title_verdict(&a, &b) {
-            TitleVerdict::Grey { score } => {
+            TitleVerdict::Grey { score, .. } => {
                 assert!(score >= TITLE_GREY_FLOOR, "score {score}");
                 assert!(score < 1.0, "score {score}");
             }
@@ -1417,6 +1483,232 @@ mod tests {
         };
         assert_eq!(id_verdict(&a, &b), IdVerdict::NoEvidence);
         assert_eq!(id_verdict(&a, &a), IdVerdict::NoEvidence);
+    }
+
+    // --- settle-road matching pins ---
+
+    #[test]
+    fn cause_one_sided_subtitle_is_exposed_on_equal_main_grey() {
+        let bare = parse_title("World War Z");
+        let subtitled = parse_title("World War Z: An Oral History of the Zombie War");
+        assert_eq!(bare.main, subtitled.main);
+        assert!(bare.subtitle.is_none());
+        assert!(subtitled.subtitle.is_some());
+
+        assert!(matches!(
+            title_verdict(&bare, &subtitled),
+            TitleVerdict::Grey {
+                cause: GreyCause::OneSidedSubtitle,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn cause_subtitle_disagreement_is_exposed_on_equal_main_grey() {
+        let final_empire = parse_title("Mistborn: The Final Empire");
+        let well = parse_title("Mistborn: The Well of Ascension");
+        assert_eq!(final_empire.main, well.main);
+        assert!(final_empire.subtitle.is_some());
+        assert!(well.subtitle.is_some());
+        assert_ne!(final_empire.subtitle, well.subtitle);
+
+        assert!(matches!(
+            title_verdict(&final_empire, &well),
+            TitleVerdict::Grey {
+                cause: GreyCause::SubtitleDisagreement,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn cause_volume_asymmetry_is_exposed_on_one_sided_volume_grey() {
+        let bare = parse_title("History of Rome");
+        let volume = parse_title("History of Rome, Vol. 2");
+        assert_eq!(bare.main, volume.main);
+        assert!(bare.volume_numbers().is_empty());
+        assert_eq!(volume.volume_numbers(), vec![2.0]);
+
+        assert!(matches!(
+            title_verdict(&bare, &volume),
+            TitleVerdict::Grey {
+                cause: GreyCause::VolumeAsymmetry,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn cause_volume_asymmetry_wins_over_one_sided_subtitle() {
+        let bare = parse_title("History of Rome");
+        let subtitled_volume = parse_title("History of Rome, Vol. 2: Civil Wars");
+        assert_eq!(bare.main, subtitled_volume.main);
+        assert!(bare.subtitle.is_none());
+        assert!(subtitled_volume.subtitle.is_some());
+        assert!(bare.volume_numbers().is_empty());
+        assert_eq!(subtitled_volume.volume_numbers(), vec![2.0]);
+
+        assert!(matches!(
+            title_verdict(&bare, &subtitled_volume),
+            TitleVerdict::Grey {
+                cause: GreyCause::VolumeAsymmetry,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn cause_near_main_and_junk_tail_guards_hold() {
+        // Guard: near-main pairs are still grey, but for the near-main cause.
+        let near_a = parse_title("The Wise Man's Fear");
+        let near_b = parse_title("The Wise Man's Fear Chronicle");
+        assert!(matches!(
+            title_verdict(&near_a, &near_b),
+            TitleVerdict::Grey {
+                cause: GreyCause::NearMain,
+                ..
+            }
+        ));
+
+        // Guard: recognized junk tails do not demote exact mains.
+        assert_eq!(
+            title_verdict(&parse_title("Dune"), &parse_title("Dune: A Novel")),
+            TitleVerdict::Same
+        );
+
+        // Guard: the equal-main causes are defined ONLY for equal mains — a
+        // near-main pair with one-sided volume evidence still classifies as
+        // NearMain (both causes are untrusted at every seat, so this is a
+        // taxonomy pin, not a trust-behavior fork).
+        let near_bare = parse_title("The Wise Man's Fear");
+        let near_volume = parse_title("The Wise Man's Fear Chronicle, Vol. 2");
+        assert_ne!(near_bare.main, near_volume.main);
+        assert_eq!(near_volume.volume_numbers(), vec![2.0]);
+        assert!(matches!(
+            title_verdict(&near_bare, &near_volume),
+            TitleVerdict::Grey {
+                cause: GreyCause::NearMain,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn title_id_trust_vetoes_mixed_work_key_evidence_on_same_title() {
+        let a = IdEvidence {
+            ol_key: Some("OL-A"),
+            hc_key: Some("HC-A"),
+            ..Default::default()
+        };
+        let b = IdEvidence {
+            ol_key: Some("OL-A"),
+            hc_key: Some("HC-B"),
+            ..Default::default()
+        };
+
+        assert!(!title_id_trust(&TitleVerdict::Same, &a, &b));
+    }
+
+    #[test]
+    fn title_id_trust_allows_one_sided_subtitle_grey_with_edition_bridge() {
+        let a = IdEvidence {
+            isbn_13: Some("9780000000001"),
+            ..Default::default()
+        };
+        let b = IdEvidence {
+            isbn_13: Some("9780000000001"),
+            ..Default::default()
+        };
+        let title = TitleVerdict::Grey {
+            score: 1.0,
+            cause: GreyCause::OneSidedSubtitle,
+        };
+
+        assert!(title_id_trust(&title, &a, &b));
+    }
+
+    #[test]
+    fn title_id_trust_allows_one_sided_subtitle_grey_with_work_key_equality() {
+        let a = IdEvidence {
+            ol_key: Some("OL-A"),
+            ..Default::default()
+        };
+        let b = IdEvidence {
+            ol_key: Some("OL-A"),
+            ..Default::default()
+        };
+        let title = TitleVerdict::Grey {
+            score: 1.0,
+            cause: GreyCause::OneSidedSubtitle,
+        };
+
+        assert!(title_id_trust(&title, &a, &b));
+    }
+
+    #[test]
+    fn title_id_trust_guards_for_unsupported_title_and_evidence_shapes() {
+        // Guards: exact title needs no ID evidence; grey needs corroborating IDs.
+        assert!(title_id_trust(
+            &TitleVerdict::Same,
+            &IdEvidence::default(),
+            &IdEvidence::default()
+        ));
+        assert!(!title_id_trust(
+            &TitleVerdict::Grey {
+                score: 1.0,
+                cause: GreyCause::OneSidedSubtitle,
+            },
+            &IdEvidence::default(),
+            &IdEvidence::default()
+        ));
+
+        let bridge_a = IdEvidence {
+            isbn_13: Some("9780000000001"),
+            ..Default::default()
+        };
+        let bridge_b = IdEvidence {
+            isbn_13: Some("9780000000001"),
+            ..Default::default()
+        };
+        for cause in [
+            GreyCause::NearMain,
+            GreyCause::SubtitleDisagreement,
+            GreyCause::VolumeAsymmetry,
+        ] {
+            assert!(!title_id_trust(
+                &TitleVerdict::Grey { score: 1.0, cause },
+                &bridge_a,
+                &bridge_b
+            ));
+        }
+
+        let work_a = IdEvidence {
+            ol_key: Some("OL-A"),
+            ..Default::default()
+        };
+        let work_b = IdEvidence {
+            ol_key: Some("OL-A"),
+            ..Default::default()
+        };
+        assert!(!title_id_trust(&TitleVerdict::Different, &work_a, &work_b));
+        assert!(!title_id_trust(&TitleVerdict::VetoVolume, &work_a, &work_b));
+    }
+
+    #[test]
+    fn title_id_trust_vetoes_isbn_bridge_when_same_provider_work_keys_differ() {
+        let a = IdEvidence {
+            gr_key: Some("1"),
+            isbn_13: Some("9780000000001"),
+            ..Default::default()
+        };
+        let b = IdEvidence {
+            gr_key: Some("2"),
+            isbn_13: Some("9780000000001"),
+            ..Default::default()
+        };
+
+        assert!(!title_id_trust(&TitleVerdict::Same, &a, &b));
     }
 
     #[test]

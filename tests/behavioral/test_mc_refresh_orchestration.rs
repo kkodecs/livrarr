@@ -9,7 +9,7 @@
 use livrarr_behavioral::stubs::{create_test_user, StubEnrichmentWorkflow, StubHttpFetcher};
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::{CreateWorkDbRequest, ProviderRetryStateDb, WorkDb, WorkDbCreate};
-use livrarr_domain::identity::{AnchorSetter, AnchorType};
+use livrarr_domain::identity::{AnchorSetter, AnchorType, IdentityState, LatencyTier, RawHarvest};
 use livrarr_domain::services::{
     EnrichmentMode, RefreshSurface, WorkIdentityRepository, WorkService,
 };
@@ -21,6 +21,7 @@ use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
+use livrarr_metadata::enrichment_workflow_service::ResetOnlyEnrichmentWorkflow;
 use livrarr_metadata::work_service::WorkServiceImpl;
 
 type TestWorkService = WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher>;
@@ -36,6 +37,28 @@ fn gr_key_bearing_ol_stub(title: &str) -> StubProviderClient {
             ol_key: Some("OL777000W".to_string()),
             gr_key: Some("234225".to_string()),
             isbn_13: Some("9780441013593".to_string()),
+            language: Some("en".to_string()),
+            ..NormalizedWorkDetail::default()
+        })),
+    )
+}
+
+fn gr_stub(
+    title: &str,
+    ol_key: Option<&str>,
+    hc_key: Option<&str>,
+    isbn_13: Option<&str>,
+    gr_key: &str,
+) -> StubProviderClient {
+    StubProviderClient::new(
+        MetadataProvider::Goodreads,
+        ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
+            title: Some(title.to_string()),
+            author_name: Some("Refresh Audit".to_string()),
+            ol_key: ol_key.map(str::to_string),
+            hc_key: hc_key.map(str::to_string),
+            gr_key: Some(gr_key.to_string()),
+            isbn_13: isbn_13.map(str::to_string),
             language: Some("en".to_string()),
             ..NormalizedWorkDetail::default()
         })),
@@ -237,6 +260,80 @@ async fn dead_ended_completion_suppression_survives_plain_refresh() {
 }
 
 #[tokio::test]
+async fn not_found_interactive_refresh_clears_dead_ends_and_rechases() {
+    // REQ-009: a single-work, user-clicked try-again refresh for an Unverified
+    // (`NotFound`) work must clear durable anchor dead-ends before the chaseable
+    // gate runs, so a previously exhausted missing anchor is actually re-chased.
+    let db = livrarr_db::test_helpers::create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let (work, created) = db
+        .create_work(CreateWorkDbRequest {
+            user_id,
+            title: "Try Again Completion".to_string(),
+            author_name: "Refresh Audit".to_string(),
+            normalized_title: normalize_for_matching("Try Again Completion"),
+            normalized_author: normalize_for_matching("Refresh Audit"),
+            ol_key: Some("OL777000W".to_string()),
+            isbn_13: Some("9780441013593".to_string()),
+            asin: Some("B000TEST".to_string()),
+            language: Some("en".to_string()),
+            monitor_ebook: true,
+            ..Default::default()
+        })
+        .await
+        .expect("seed not-found work missing only gr_key");
+    assert!(created);
+    db.set_identity_status(user_id, work.id, IdentityStatus::NotFound)
+        .await
+        .expect("mark work not found");
+    db.confirm_anchor(
+        work.id,
+        AnchorType::new(AnchorType::HC_WORK),
+        "HC-TRY-AGAIN",
+        AnchorSetter::User,
+    )
+    .await
+    .expect("seed hc anchor");
+    for _ in 0..3 {
+        db.bump_anchor_attempt(work.id, AnchorType::new(AnchorType::GR_WORK))
+            .await
+            .expect("seed gr_key dead-end at threshold");
+    }
+    // The try-again door depends on the workflow reset's REAL DB semantics:
+    // `reset_for_manual_refresh` recovers the terminal NotFound from the anchor
+    // columns before settle_identity runs. The counting stub performs no DB
+    // write, which leaves the work NotFound and trips settle's REQ-006 terminal
+    // guard — so this pin wires the reset-only production workflow (scatter is
+    // outside this pin's charter).
+    let ol = gr_key_bearing_ol_stub("Try Again Completion");
+    let svc = WorkServiceImpl::new(
+        db.clone(),
+        ResetOnlyEnrichmentWorkflow::new(db.clone()),
+        StubHttpFetcher::new(),
+        tempfile::tempdir()
+            .expect("test data dir")
+            .path()
+            .to_path_buf(),
+    )
+    .with_resolver(std::sync::Arc::new(resolver_with_stubs(vec![ol.clone()])));
+
+    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
+        .await
+        .expect("try-again refresh work");
+
+    let dead_ends = db
+        .list_anchor_dead_ends(work.id)
+        .await
+        .expect("read dead-ends after try-again refresh");
+    let resolver_calls = ol.call_count();
+    assert_eq!(
+        (dead_ends.is_empty(), resolver_calls > 0),
+        (true, true),
+        "REQ-009: NotFound interactive try-again refresh must clear anchor dead-ends and re-chase; dead_ends={dead_ends:?}, resolver_calls={resolver_calls}"
+    );
+}
+
+#[tokio::test]
 async fn explicit_retry_reset_reenables_completion_suppression_matrix() {
     // REQ-008/AC-010 resume matrix: plain refresh does not clear suppression;
     // an explicit retry reset does — and the NEXT refresh then actually
@@ -361,5 +458,181 @@ async fn refresh_bulk_surface_dispatches_scatter_at_low_priority() {
             (EnrichmentMode::Manual, RequestPriority::Low)
         )),
         "a bulk refresh dispatches at Manual mode / Low priority"
+    );
+}
+
+#[tokio::test]
+async fn refresh_adopts_goodreads_key_for_one_sided_subtitle_with_isbn_bridge() {
+    let db = livrarr_db::test_helpers::create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let isbn = "9780307346612";
+    let (work, created) = db
+        .create_work(CreateWorkDbRequest {
+            isbn_13: Some(isbn.to_string()),
+            ..work_req(user_id, "World War Z")
+        })
+        .await
+        .expect("seed bare-main work with isbn bridge");
+    assert!(created);
+    db.set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
+        .await
+        .expect("mark work confirmed");
+    let gr = gr_stub(
+        "World War Z: An Oral History of the Zombie War",
+        None,
+        None,
+        Some(isbn),
+        "234225",
+    );
+    let svc = service_with_resolver(
+        db.clone(),
+        StubEnrichmentWorkflow::succeeding(),
+        resolver_with_stubs(vec![gr]),
+    );
+
+    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
+        .await
+        .expect("refresh work");
+
+    assert_eq!(
+        db.get_work(user_id, work.id)
+            .await
+            .expect("read refreshed work")
+            .gr_key
+            .as_deref(),
+        Some("234225"),
+        "one-sided subtitle plus matching ISBN should trust and persist the Goodreads key"
+    );
+}
+
+#[tokio::test]
+async fn refresh_does_not_merge_containment_sibling_without_anchor_corroboration() {
+    let db = livrarr_db::test_helpers::create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let work = seed_gr_keyless_work(&db, user_id, "Dune").await;
+    let ol = StubProviderClient::new(
+        MetadataProvider::OpenLibrary,
+        ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
+            title: Some("Dune Messiah".to_string()),
+            author_name: Some("Refresh Audit".to_string()),
+            ol_key: Some("OL-DUNE-MESSIAH".to_string()),
+            isbn_13: Some("9780000000002".to_string()),
+            language: Some("en".to_string()),
+            ..NormalizedWorkDetail::default()
+        })),
+    );
+    let svc = service_with_resolver(
+        db.clone(),
+        StubEnrichmentWorkflow::succeeding(),
+        resolver_with_stubs(vec![ol]),
+    );
+
+    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
+        .await
+        .expect("refresh work");
+
+    let refreshed = db
+        .get_work(user_id, work.id)
+        .await
+        .expect("read refreshed work");
+    assert_eq!(
+        refreshed.ol_key, None,
+        "containment sibling title must not merge an OpenLibrary anchor"
+    );
+    assert_eq!(
+        refreshed.identity_status,
+        IdentityStatus::Pending,
+        "containment sibling title must leave the work pending"
+    );
+}
+
+#[tokio::test]
+async fn refresh_rejects_goodreads_key_when_exact_title_has_contradicting_sibling_work_key() {
+    let db = livrarr_db::test_helpers::create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let (work, created) = db
+        .create_work(CreateWorkDbRequest {
+            ol_key: Some("OL-A".to_string()),
+            ..work_req(user_id, "Mixed Evidence")
+        })
+        .await
+        .expect("seed confirmed work with sibling anchors");
+    assert!(created);
+    db.set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
+        .await
+        .expect("mark work confirmed");
+    // hc_key has no CreateWorkDbRequest field; the anchor write syncs the
+    // denormalized works column (confirm_anchor_in_tx REQ-029).
+    db.confirm_anchor(
+        work.id,
+        AnchorType::new(AnchorType::HC_WORK),
+        "HC-A",
+        AnchorSetter::User,
+    )
+    .await
+    .expect("seed contradicting-slot hc anchor");
+    let gr = gr_stub("Mixed Evidence", Some("OL-A"), Some("HC-B"), None, "777");
+    let svc = service_with_resolver(
+        db.clone(),
+        StubEnrichmentWorkflow::succeeding(),
+        resolver_with_stubs(vec![gr]),
+    );
+
+    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
+        .await
+        .expect("refresh work");
+
+    assert_eq!(
+        db.get_work(user_id, work.id)
+            .await
+            .expect("read refreshed work")
+            .gr_key,
+        None,
+        "exact title must not trust a Goodreads key when another work key contradicts"
+    );
+}
+
+#[tokio::test]
+async fn resolve_identity_adopts_goodreads_key_for_user_confirmed_bridge_only_subtitle_match() {
+    let db = livrarr_db::test_helpers::create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let isbn = "9780307346612";
+    let gr = gr_stub(
+        "World War Z: An Oral History of the Zombie War",
+        None,
+        None,
+        Some(isbn),
+        "234225",
+    );
+    let svc = service_with_resolver(
+        db,
+        StubEnrichmentWorkflow::succeeding(),
+        resolver_with_stubs(vec![gr]),
+    );
+
+    let resolved = svc
+        .resolve_identity(
+            user_id,
+            RawHarvest {
+                isbn: Some(isbn.to_string()),
+                title: Some("World War Z".to_string()),
+                author_name: Some("Refresh Audit".to_string()),
+                language: Some("en".to_string()),
+                user_confirmed: true,
+                ..RawHarvest::default()
+            },
+            LatencyTier::Interactive,
+        )
+        .await
+        .expect("resolve bridge-only identity");
+
+    let anchors = match resolved.identity {
+        IdentityState::Confirmed { anchors, .. } => anchors,
+        other => panic!("expected confirmed identity, got {other:?}"),
+    };
+    assert_eq!(
+        anchors.gr_key.as_deref(),
+        Some("234225"),
+        "bridge-only user-confirmed seed should trust the corroborated Goodreads key"
     );
 }

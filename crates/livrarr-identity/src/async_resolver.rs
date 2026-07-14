@@ -12,6 +12,7 @@ use livrarr_domain::identity::{
     IdentityReport, IncomingConflictPayload, LatencyTier, NewIdentityConflict, Resolution,
     ResolverVerdictKind, WorkSeed,
 };
+use livrarr_domain::identity_matching::{self, AuthorVerdict, IdEvidence, TitleVerdict};
 use livrarr_domain::services::{
     LlmCallRequest, LlmCaller, LlmPurpose, WorkIdentityError, WorkIdentityRepository,
 };
@@ -142,7 +143,7 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
         Resolution::Resolved { identity, .. } => {
             // FLM gate: auto-confirm when the resolved title/author match the seed.
             // Only if both fail do we hold anchors as pending for user review.
-            let verified = flm_match(&work.title, &work.author_name, &identity);
+            let verified = flm_match(work, &identity);
             if verified {
                 anchors_merged = repo
                     .merge_missing_anchors(work.id, &identity)
@@ -183,7 +184,7 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
         }
         Resolution::Unresolved { captured, .. } => {
             // ST-002: transient — absorb anchors when title/author match, else hold pending.
-            let verified = flm_match(&work.title, &work.author_name, &captured);
+            let verified = flm_match(work, &captured);
             if verified {
                 anchors_merged = repo
                     .merge_missing_anchors(work.id, &captured)
@@ -260,64 +261,47 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
     })
 }
 
-/// FLM (Fuzzy Livrarr Match): true when the resolved identity's title and
-/// author both match the seed. Title match = word-set containment after
-/// subtitle stripping (handles "Dune" vs "Dune: A Novel"). Author match =
-/// alphanumeric-only equality (handles "W.E.B. Griffin" vs "WEB Griffin").
-fn flm_match(seed_title: &str, seed_author: &str, identity: &CapturedIdentity) -> bool {
+/// FLM (Fuzzy Livrarr Match): may the resolved identity's anchors auto-merge
+/// onto the seed work? Routes through the one matching authority
+/// (`title_id_trust`): exact-main title equality, or a one-sided-subtitle grey
+/// corroborated by an independently agreeing hard ID (AC-004); a same-provider
+/// work-key contradiction never merges. The author must Agree — an authorless
+/// identity never auto-merges (today's equality bar, via the authority).
+fn flm_match(work: &Work, identity: &CapturedIdentity) -> bool {
     if identity.title.is_empty() || identity.author_name.is_empty() {
         return false;
     }
-    flm_title(seed_title, &identity.title)
-        && canon_author(seed_author) == canon_author(&identity.author_name)
-}
-
-fn flm_title(a: &str, b: &str) -> bool {
-    let norm = |s: &str| -> String {
-        let s = s.to_lowercase();
-        let s = s.split(':').next().unwrap_or(&s).to_owned();
-        let s = s.split(" - ").next().unwrap_or(&s).to_owned();
-        let s = s
-            .strip_prefix("the ")
-            .or_else(|| s.strip_prefix("a "))
-            .or_else(|| s.strip_prefix("an "))
-            .unwrap_or(&s)
-            .to_owned();
-        s.chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+    let title = identity_matching::title_verdict(
+        &identity_matching::parse_title(&work.title),
+        &identity_matching::parse_title(&identity.title),
+    );
+    let work_evidence = IdEvidence {
+        ol_key: work.ol_key.as_deref(),
+        gr_key: work.gr_key.as_deref(),
+        hc_key: work.hc_key.as_deref(),
+        isbn_13: work.isbn_13.as_deref(),
+        asin: work.asin.as_deref(),
     };
-    let na = norm(a);
-    let nb = norm(b);
-    if na == nb {
-        return true;
-    }
-    if na.is_empty() || nb.is_empty() {
+    let identity_evidence = IdEvidence {
+        ol_key: identity.ol_key.as_deref(),
+        gr_key: identity.gr_key.as_deref(),
+        hc_key: identity.hc_key.as_deref(),
+        isbn_13: identity.isbn_13.as_deref(),
+        asin: identity.asin.as_deref(),
+    };
+    if !identity_matching::title_id_trust(&title, &identity_evidence, &work_evidence) {
+        if let TitleVerdict::Grey { cause, .. } = title {
+            tracing::debug!(?cause, work_id = work.id, "flm declined grey identity");
+        }
         return false;
     }
-    let (shorter, longer) = if na.len() <= nb.len() {
-        (&na, &nb)
-    } else {
-        (&nb, &na)
-    };
-    let longer_words: std::collections::HashSet<&str> = longer.split_whitespace().collect();
-    shorter.split_whitespace().all(|w| longer_words.contains(w))
-}
-
-fn canon_author(s: &str) -> String {
-    let s = s.trim();
-    let s = if let Some((last, first)) = s.split_once(',') {
-        format!("{} {}", first.trim(), last.trim())
-    } else {
-        s.to_owned()
-    };
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
+    matches!(
+        identity_matching::author_verdict(
+            std::slice::from_ref(&identity.author_name),
+            std::slice::from_ref(&work.author_name),
+        ),
+        AuthorVerdict::Agree
+    )
 }
 
 /// A captured identity carries a work anchor iff one of OL/GR/HC is present and

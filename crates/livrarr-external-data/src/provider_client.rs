@@ -1861,7 +1861,7 @@ fn gr_best_match(
         }
         let (tier, score) = match title_verdict(&seed, &parse_title(&h.title)) {
             TitleVerdict::Same => (2u8, 1.0),
-            TitleVerdict::Grey { score } => (1u8, score),
+            TitleVerdict::Grey { score, .. } => (1u8, score),
             TitleVerdict::Different | TitleVerdict::VetoVolume => continue,
         };
         let beats_best = match best {

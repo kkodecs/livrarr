@@ -1569,7 +1569,7 @@ const IDENTITY_BADGE: Record<IdentityStatus, { tone: BadgeTone; label: string; t
   provisional: { tone: "blue", label: "Provisional", tip: "Identified by ISBN (barcode); no master record yet — may later upgrade to Confirmed." },
   conflict: { tone: "red", label: "Conflict", tip: "Sources disagree on the match; needs your review." },
   needs_review: { tone: "orange", label: "Needs Review", tip: "Couldn't match this book automatically; needs your review." },
-  not_found: { tone: "amber", label: "Unverified", tip: "No source could confirm this match — every provider was rejected. Edit the identity or refresh to retry." },
+  not_found: { tone: "amber", label: "Unverified", tip: "No source could confirm this match — every provider was rejected. Refresh to retry, or delete and re-add to pick a different match." },
 };
 
 // Enrichment (details) state machine — "what do we know about it?". The canonical

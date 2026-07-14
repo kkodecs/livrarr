@@ -1,5 +1,12 @@
 # Wiki Change Log
 
+## 2026-07-14 — Settle-road title trust: cause-aware grey + one trust policy; flm colon-truncation killed
+
+**Updated pages:**
+- insights.md — new insight 72 (the settle-road trust unit: `GreyCause` on `TitleVerdict::Grey`, `title_id_trust` as the ONE text-corroborated-trust policy, `flm_title`/`canon_author` deleted, try-again dead-end clearing, fixture-faithfulness lessons); insight 59 amended (grey-never-absorbs now names its one ratified exception — AC-004 anchor trust at the two settle-road seats).
+
+**Context:** identity-fix unit (quality-waves). The WWZ GR-key drop and the flm containment gate were two strictness bugs on one road; both seats now consume the matching authority. Contract: `design-settle-road-matching.md` (3-round design review + test review + r8 code review, both families PASS).
+
 ## 2026-06-14 — Work-creation pipeline mapped; M9 convergence gap documented
 
 **New page:**

@@ -1563,6 +1563,24 @@ where
         let mut work = work;
         if let Some(resolver) = self.resolver.as_ref() {
             let _id_span = livrarr_domain::perf::StageTimer::start("identity", work_id);
+            // REQ-009: the single-work manual refresh is the "try again" door for a
+            // stuck identity — clear the dead-end counters so the chase gate below
+            // can re-attempt. Healthy works keep the Sprint-E skip; bulk sweeps
+            // never clear (a routine sweep must not resurrect dead ends).
+            if matches!(surface, RefreshSurface::Interactive)
+                && work.identity_status == livrarr_domain::IdentityStatus::NotFound
+            {
+                if let Err(e) = self.db.clear_anchor_dead_ends(work.id).await {
+                    tracing::warn!(work_id, "refresh: failed to clear anchor dead-ends: {e}");
+                }
+                // reset_for_manual_refresh (above) already recovered the terminal
+                // status from the anchor columns; re-read so settle_identity sees
+                // the recovered status — its REQ-006 terminal guard no-ops on the
+                // stale NotFound and the try-again resolve would never run.
+                if let Ok(w) = self.db.get_work(user_id, work_id).await {
+                    work = w;
+                }
+            }
             let anchors = self.db.list_anchors(work.id).await.unwrap_or_default();
             let dead_ends = self
                 .db

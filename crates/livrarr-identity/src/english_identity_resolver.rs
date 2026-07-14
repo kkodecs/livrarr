@@ -121,17 +121,20 @@ impl EnglishIdentityResolver for LiveEnglishIdentityResolver {
 
         // Identity fan-outs are otherwise forensically invisible (per-client
         // sinks instrument the anchor-fetch surface, not this road) — log the
-        // responder shapes the quorum will arbitrate.
+        // responder payloads the quorum will arbitrate. Real values, not
+        // presence booleans: an exact-text-match failure is only diagnosable
+        // from the text both sides actually held (all fields are public
+        // provider metadata; this log never carries user data).
         for (provider, d) in &responders {
             tracing::debug!(
                 provider = provider.record_key(),
                 title = d.title.as_deref().unwrap_or(""),
-                has_author = d.author_name.is_some(),
-                ol = d.ol_key.is_some(),
-                gr = d.gr_key.is_some(),
-                hc = d.hc_key.is_some(),
-                isbn = d.isbn_13.is_some(),
-                asin = d.asin.is_some(),
+                author = d.author_name.as_deref().unwrap_or(""),
+                ol = d.ol_key.as_deref().unwrap_or(""),
+                gr = d.gr_key.as_deref().unwrap_or(""),
+                hc = d.hc_key.as_deref().unwrap_or(""),
+                isbn = d.isbn_13.as_deref().unwrap_or(""),
+                asin = d.asin.as_deref().unwrap_or(""),
                 "identity fan-out responder"
             );
         }
@@ -336,9 +339,11 @@ pub fn build_transient_work_from_seed(seed: &WorkSeed, user_id: UserId) -> Work 
 }
 
 /// Trust a non-harvested Goodreads key only by inspecting the payload the fetch
-/// already returned (no extra network, REQ-014): require a populated title that
-/// matches the resolved identity beyond the similarity threshold (REQ-024);
-/// otherwise the key is not trusted. A title-less anti-bot payload always fails.
+/// already returned (no extra network, REQ-014/REQ-024): exact-main title
+/// equality, or — per AC-004 — a one-sided-subtitle grey corroborated by an
+/// independently agreeing hard ID (`title_id_trust`, the one matching
+/// authority). A same-provider work-key contradiction is never trusted. A
+/// title-less anti-bot payload always fails.
 pub fn verify_gr_payload(payload: &NormalizedWorkDetail, captured: &CapturedIdentity) -> bool {
     let payload_title = match payload.title.as_deref() {
         Some(t) if !t.trim().is_empty() => t,
@@ -350,18 +355,43 @@ pub fn verify_gr_payload(payload: &NormalizedWorkDetail, captured: &CapturedIden
     let payload_author = payload.author_name.as_deref().unwrap_or("");
     let pt = identity_matching::parse_title(payload_title);
     let ct = identity_matching::parse_title(&captured.title);
-    if identity_matching::title_verdict(&pt, &ct) != identity_matching::TitleVerdict::Same {
+    let title = identity_matching::title_verdict(&pt, &ct);
+    // The seed carries no gr_key at this gate (caller precondition), so the
+    // key under judgment can never corroborate itself through the evidence.
+    let payload_evidence = identity_matching::IdEvidence {
+        ol_key: payload.ol_key.as_deref(),
+        gr_key: payload.gr_key.as_deref(),
+        hc_key: payload.hc_key.as_deref(),
+        isbn_13: payload.isbn_13.as_deref(),
+        asin: payload.asin.as_deref(),
+    };
+    let seed_evidence = identity_matching::IdEvidence {
+        ol_key: captured.ol_key.as_deref(),
+        gr_key: captured.gr_key.as_deref(),
+        hc_key: captured.hc_key.as_deref(),
+        isbn_13: captured.isbn_13.as_deref(),
+        asin: captured.asin.as_deref(),
+    };
+    if !identity_matching::title_id_trust(&title, &payload_evidence, &seed_evidence) {
+        if let identity_matching::TitleVerdict::Grey { cause, .. } = title {
+            tracing::debug!(?cause, "gr payload trust declined on grey title");
+        }
         return false;
     }
-    // REQ-005c: an authorless side abstains rather than vetoing — agreement
-    // then rests on the exact title equality already established above.
-    matches!(
-        identity_matching::author_verdict(
-            &[payload_author.to_string()],
-            std::slice::from_ref(&captured.author_name),
+    let author = identity_matching::author_verdict(
+        &[payload_author.to_string()],
+        std::slice::from_ref(&captured.author_name),
+    );
+    match title {
+        // REQ-005c: an authorless side abstains rather than vetoing —
+        // agreement then rests on the exact title equality.
+        identity_matching::TitleVerdict::Same => matches!(
+            author,
+            identity_matching::AuthorVerdict::Agree | identity_matching::AuthorVerdict::Abstain
         ),
-        identity_matching::AuthorVerdict::Agree | identity_matching::AuthorVerdict::Abstain
-    )
+        // The grey arm carries weaker title evidence: the author must agree.
+        _ => matches!(author, identity_matching::AuthorVerdict::Agree),
+    }
 }
 
 /// Group responders by shared returned anchor or normalized title+author:
@@ -808,7 +838,7 @@ fn candidates_from_responders(
                 identity_matching::parse_title(detail.title.as_deref().unwrap_or(""));
             let title_jaccard = match identity_matching::title_verdict(&seed_title, &detail_title) {
                 identity_matching::TitleVerdict::Same => 1.0,
-                identity_matching::TitleVerdict::Grey { score } => score,
+                identity_matching::TitleVerdict::Grey { score, .. } => score,
                 identity_matching::TitleVerdict::Different
                 | identity_matching::TitleVerdict::VetoVolume => 0.0,
             };

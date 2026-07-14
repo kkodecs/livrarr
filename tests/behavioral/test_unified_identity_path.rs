@@ -322,7 +322,9 @@ fn assert_report(
 #[tokio::test]
 async fn ac_001_pending_work_anchor_ends_confirmed_with_anchor_persisted() {
     // AC-001 / REQ-001, REQ-003
-    let case = seed_work("AC001 Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
+    // The resolved identity's title must match the work's (the old containment
+    // gate tolerated the "AC001" prefix; the matching authority does not).
+    let case = seed_work("Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
     let resolver =
         ScriptedResolver::new(resolved(captured(Some("OL45883W"), None, None, None, None)));
 
@@ -353,7 +355,7 @@ async fn ac_001_pending_work_anchor_ends_confirmed_with_anchor_persisted() {
 #[tokio::test]
 async fn ac_002_pending_bridge_only_ends_provisional() {
     // AC-002 / REQ-003
-    let case = seed_work("AC002 Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
+    let case = seed_work("Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
     let resolver = ScriptedResolver::new(resolved(captured(
         None,
         None,
@@ -458,18 +460,10 @@ async fn ac_004_interactive_no_candidates_stays_pending() {
 #[tokio::test]
 async fn ac_005_resolvable_work_reaches_same_identity_in_both_modes() {
     // AC-005 / REQ-005
-    let interactive = seed_work(
-        "AC005 Interactive Dune",
-        IdentityStatus::Pending,
-        SeedAnchors::NONE,
-    )
-    .await;
-    let background = seed_work(
-        "AC005 Background Dune",
-        IdentityStatus::Pending,
-        SeedAnchors::NONE,
-    )
-    .await;
+    // Separate DBs per seed_work; identical titles are fine and must match
+    // the scripted identity's title for the authority-grade gate.
+    let interactive = seed_work("Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
+    let background = seed_work("Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
     let identity = captured(
         Some("OL45883W"),
         Some("234225"),
@@ -519,7 +513,7 @@ async fn ac_005_resolvable_work_reaches_same_identity_in_both_modes() {
 #[tokio::test]
 async fn ac_006_transient_unresolved_merges_captured_anchors_and_stays_pending() {
     // AC-006 / REQ-003
-    let case = seed_work("AC006 Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
+    let case = seed_work("Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
     let resolver = ScriptedResolver::new(unresolved(
         PendingReason::OlUnavailable,
         captured(None, None, None, Some("9780441013593"), None),
@@ -587,7 +581,7 @@ async fn ac_007_pending_conflict_ends_terminal_conflict() {
 async fn ac_008_confirmed_weaker_verdict_does_not_overwrite_or_downgrade() {
     // AC-008 / REQ-004
     let case = seed_work(
-        "AC008 Dune",
+        "Dune",
         IdentityStatus::Confirmed,
         SeedAnchors {
             ol_key: Some("OL111W"),
@@ -619,7 +613,12 @@ async fn ac_008_confirmed_weaker_verdict_does_not_overwrite_or_downgrade() {
     assert_eq!(after.identity_status, IdentityStatus::Confirmed);
     assert_eq!(after.ol_key.as_deref(), Some("OL111W"));
     assert_anchor(&anchors, AnchorType::OL_WORK, "OL111W");
-    assert_anchor(&anchors, AnchorType::ISBN_13, "9780441013593");
+    // REQ-006 contradiction veto (settle-road matching): an identity whose
+    // work key contradicts the established anchor merges NOTHING — its
+    // non-contradicting ids are held as pending anchors, never confirmed.
+    assert!(!anchors
+        .iter()
+        .any(|(kind, value)| kind == AnchorType::ISBN_13 && value == "9780441013593"));
     assert!(!anchors
         .iter()
         .any(|(kind, value)| kind == AnchorType::OL_WORK && value == "OL222W"));
@@ -628,14 +627,14 @@ async fn ac_008_confirmed_weaker_verdict_does_not_overwrite_or_downgrade() {
         IdentityStatus::Confirmed,
         IdentityStatus::Confirmed,
         Some(ResolverVerdictKind::Unresolved),
-        &["isbn_13"],
+        &[],
     );
 }
 
 #[tokio::test]
 async fn ac_009_identity_settle_does_not_change_metadata_fields() {
     // AC-009 / REQ-004
-    let case = seed_work("AC009 Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
+    let case = seed_work("Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
     let before = case.work.clone();
     let resolver = ScriptedResolver::new(resolved(captured(
         Some("OL45883W"),
@@ -831,7 +830,7 @@ async fn ac_012_never_writes_not_found_and_existing_not_found_is_preserved() {
 #[tokio::test]
 async fn ac_013_engine_performs_badge_and_anchor_writes_report_is_audit_only() {
     // AC-013 / REQ-008
-    let case = seed_work("AC013 Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
+    let case = seed_work("Dune", IdentityStatus::Pending, SeedAnchors::NONE).await;
     let resolver = ScriptedResolver::new(resolved(captured(
         Some("OL45883W"),
         None,
@@ -869,7 +868,7 @@ async fn ac_013_engine_performs_badge_and_anchor_writes_report_is_audit_only() {
 async fn ac_014_provisional_reresolves_to_work_anchor_upgrades_to_confirmed() {
     // AC-014 / REQ-003, REQ-007
     let case = seed_work(
-        "AC014 Dune",
+        "Dune",
         IdentityStatus::Provisional,
         SeedAnchors {
             ol_key: None,
