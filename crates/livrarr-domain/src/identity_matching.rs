@@ -314,6 +314,76 @@ pub fn author_verdict(a: &[String], b: &[String]) -> AuthorVerdict {
     }
 }
 
+/// Shared identity-grade provider hit-picker (matching-conformance unit).
+///
+/// Chooses the best candidate `(title, author)` pair for a seed, routing the
+/// decision through the ONE authority (`parse_title` / `title_verdict` /
+/// `author_verdict`) — the single replacement for the loose whole-string
+/// 0.75-jaccard pickers (`score_provider_candidates`, `score_candidates`) and
+/// the home of `gr_best_match`'s selection logic (REQ-001 / AC-001).
+///
+/// `accept_grey`:
+/// * `false` — Same-only. The four newly-conformed pickers (Audible, OpenLibrary,
+///   Hardcover, Google Books) pass this: a `Grey` title match never becomes their
+///   provider answer, because those payloads reach a background field-merge via the
+///   anchor-only reuse cache and REQ-008 forbids writing grey-matched provider data.
+/// * `true` — Same-or-Grey. Goodreads only: its grey subtitled-from-bare picks are
+///   the input the ratified `verify_gr_payload` / AC-004 corroboration hatch consumes
+///   (settle-road unit), and are gated downstream, not here.
+///
+/// Author bar: a `Same` title accepts `author_verdict ∈ {Agree, Abstain}`; a `Grey`
+/// title requires `Agree` strictly (any-shared-token dies — D9 / AC-008). Ranking:
+/// `Same` beats `Grey`, higher grey score beats lower, earliest hit breaks ties.
+/// Returns `None` when nothing clears the bar (the provider abstains).
+pub fn pick_best_candidate(
+    seed_title: &str,
+    seed_author: &str,
+    candidates: &[(String, String)],
+    accept_grey: bool,
+) -> Option<usize> {
+    let seed_parsed = parse_title(seed_title);
+    let seed_authors = [seed_author.to_string()];
+    // (index, tier: Same=2 / Grey=1, grey score)
+    let mut best: Option<(usize, u8, f64)> = None;
+    for (idx, (cand_title, cand_author)) in candidates.iter().enumerate() {
+        let (tier, score) = match title_verdict(&seed_parsed, &parse_title(cand_title)) {
+            TitleVerdict::Same => {
+                if matches!(
+                    author_verdict(&seed_authors, std::slice::from_ref(cand_author)),
+                    AuthorVerdict::Agree | AuthorVerdict::Abstain
+                ) {
+                    (2u8, 1.0)
+                } else {
+                    continue;
+                }
+            }
+            TitleVerdict::Grey { score, .. } => {
+                if accept_grey
+                    && matches!(
+                        author_verdict(&seed_authors, std::slice::from_ref(cand_author)),
+                        AuthorVerdict::Agree
+                    )
+                {
+                    (1u8, score)
+                } else {
+                    continue;
+                }
+            }
+            TitleVerdict::Different | TitleVerdict::VetoVolume => continue,
+        };
+        let beats = match best {
+            None => true,
+            Some((_, best_tier, best_score)) => {
+                tier > best_tier || (tier == best_tier && score > best_score)
+            }
+        };
+        if beats {
+            best = Some((idx, tier, score));
+        }
+    }
+    best.map(|(idx, ..)| idx)
+}
+
 /// Exactly-one-unambiguous-match author adoption gate (author-dedup).
 ///
 /// `Some(i)` iff `candidate` adoption-matches `stored[i]` and nothing else.
@@ -1722,6 +1792,316 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(id_verdict(&a, &b), IdVerdict::NoEvidence);
+    }
+
+    // --- pick_best_candidate ---
+
+    fn hit(title: &str, author: &str) -> (String, String) {
+        (title.to_string(), author.to_string())
+    }
+
+    fn one_sided_subtitle_grey(seed: &str, candidate: &str) {
+        assert!(matches!(
+            title_verdict(&parse_title(seed), &parse_title(candidate)),
+            TitleVerdict::Grey {
+                cause: GreyCause::OneSidedSubtitle,
+                ..
+            }
+        ));
+    }
+
+    fn assert_dune_same_agree() {
+        assert_eq!(
+            title_verdict(&parse_title("Dune"), &parse_title("Dune")),
+            TitleVerdict::Same
+        );
+        assert_eq!(
+            author_verdict(
+                &["Frank Herbert".to_string()],
+                &["Frank Herbert".to_string()]
+            ),
+            AuthorVerdict::Agree
+        );
+    }
+
+    fn assert_dune_same_author_abstain() {
+        assert_eq!(
+            title_verdict(&parse_title("Dune"), &parse_title("Dune")),
+            TitleVerdict::Same
+        );
+        assert_eq!(
+            author_verdict(&["Frank Herbert".to_string()], &["".to_string()]),
+            AuthorVerdict::Abstain
+        );
+    }
+
+    fn assert_dune_messiah_rejected_before_same() {
+        assert_eq!(
+            title_verdict(&parse_title("Dune"), &parse_title("Dune Messiah")),
+            TitleVerdict::Different
+        );
+        assert_eq!(
+            title_verdict(&parse_title("Dune"), &parse_title("Dune")),
+            TitleVerdict::Same
+        );
+    }
+
+    fn world_war_z_grey_candidates() -> Vec<(String, String)> {
+        vec![
+            hit("Neuromancer", "William Gibson"),
+            hit(
+                "World War Z: An Oral History of the Zombie War",
+                "Max Brooks",
+            ),
+        ]
+    }
+
+    #[test]
+    fn pick_a1_accepts_same_agree_when_grey_disabled() {
+        let candidates = vec![hit("Dune", "Frank Herbert")];
+        assert_dune_same_agree();
+
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &candidates, false),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn pick_a1_accepts_same_agree_when_grey_enabled() {
+        let candidates = vec![hit("Dune", "Frank Herbert")];
+        assert_dune_same_agree();
+
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &candidates, true),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn pick_a2_accepts_same_abstain_when_grey_disabled() {
+        let candidates = vec![hit("Dune", "")];
+        assert_dune_same_author_abstain();
+
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &candidates, false),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn pick_a2_accepts_same_abstain_when_grey_enabled() {
+        let candidates = vec![hit("Dune", "")];
+        assert_dune_same_author_abstain();
+
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &candidates, true),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn pick_a3_rejects_one_sided_subtitle_grey_when_disabled() {
+        let candidates = vec![hit(
+            "World War Z: An Oral History of the Zombie War",
+            "Max Brooks",
+        )];
+        one_sided_subtitle_grey(
+            "World War Z",
+            "World War Z: An Oral History of the Zombie War",
+        );
+        assert_eq!(
+            author_verdict(&["Max Brooks".to_string()], &["Max Brooks".to_string()]),
+            AuthorVerdict::Agree
+        );
+
+        assert_eq!(
+            pick_best_candidate("World War Z", "Max Brooks", &candidates, false),
+            None
+        );
+    }
+
+    #[test]
+    fn pick_a3_accepts_one_sided_subtitle_grey_when_enabled() {
+        let candidates = vec![hit(
+            "World War Z: An Oral History of the Zombie War",
+            "Max Brooks",
+        )];
+        one_sided_subtitle_grey(
+            "World War Z",
+            "World War Z: An Oral History of the Zombie War",
+        );
+        assert_eq!(
+            author_verdict(&["Max Brooks".to_string()], &["Max Brooks".to_string()]),
+            AuthorVerdict::Agree
+        );
+
+        assert_eq!(
+            pick_best_candidate("World War Z", "Max Brooks", &candidates, true),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn pick_rejects_same_title_with_shared_surname_author_grey() {
+        let candidates = vec![hit("Storm Front", "Jane Smith")];
+        assert_eq!(
+            title_verdict(&parse_title("Storm Front"), &parse_title("Storm Front")),
+            TitleVerdict::Same
+        );
+        assert_eq!(
+            author_verdict(&["John Smith".to_string()], &["Jane Smith".to_string()]),
+            AuthorVerdict::Grey
+        );
+
+        assert_eq!(
+            pick_best_candidate("Storm Front", "John Smith", &candidates, false),
+            None
+        );
+        assert_eq!(
+            pick_best_candidate("Storm Front", "John Smith", &candidates, true),
+            None
+        );
+    }
+
+    #[test]
+    fn pick_a5_skips_rejected_hit_when_grey_disabled() {
+        let candidates = vec![
+            hit("Dune Messiah", "Frank Herbert"),
+            hit("Dune", "Frank Herbert"),
+        ];
+        assert_dune_messiah_rejected_before_same();
+
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &candidates, false),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn pick_a5_skips_rejected_hit_when_grey_enabled() {
+        let candidates = vec![
+            hit("Dune Messiah", "Frank Herbert"),
+            hit("Dune", "Frank Herbert"),
+        ];
+        assert_dune_messiah_rejected_before_same();
+
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &candidates, true),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn pick_a6_ranks_same_above_grey_when_grey_is_enabled() {
+        let candidates = vec![
+            hit("The Power Broker: The Life of Robert Moses", "Robert Caro"),
+            hit("The Power Broker", "Robert Caro"),
+        ];
+        one_sided_subtitle_grey(
+            "The Power Broker",
+            "The Power Broker: The Life of Robert Moses",
+        );
+        assert_eq!(
+            title_verdict(
+                &parse_title("The Power Broker"),
+                &parse_title("The Power Broker")
+            ),
+            TitleVerdict::Same
+        );
+
+        assert_eq!(
+            pick_best_candidate("The Power Broker", "Robert Caro", &candidates, true),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn pick_rejects_hard_title_and_author_mismatches() {
+        let different_title = vec![hit("Neuromancer", "William Gibson")];
+        assert_eq!(
+            title_verdict(&parse_title("Dune"), &parse_title("Neuromancer")),
+            TitleVerdict::Different
+        );
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &different_title, false),
+            None
+        );
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &different_title, true),
+            None
+        );
+
+        let veto_volume = vec![hit("Alpha, Vol. 3", "Ann Author")];
+        assert_eq!(
+            title_verdict(&parse_title("Alpha, Vol. 2"), &parse_title("Alpha, Vol. 3")),
+            TitleVerdict::VetoVolume
+        );
+        assert_eq!(
+            pick_best_candidate("Alpha, Vol. 2", "Ann Author", &veto_volume, false),
+            None
+        );
+        assert_eq!(
+            pick_best_candidate("Alpha, Vol. 2", "Ann Author", &veto_volume, true),
+            None
+        );
+
+        let author_disagree = vec![hit("Dune", "William Gibson")];
+        assert_eq!(
+            author_verdict(
+                &["Frank Herbert".to_string()],
+                &["William Gibson".to_string()]
+            ),
+            AuthorVerdict::Disagree
+        );
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &author_disagree, false),
+            None
+        );
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &author_disagree, true),
+            None
+        );
+    }
+
+    #[test]
+    fn pick_a8_abstains_on_empty_candidates() {
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &[], false),
+            None
+        );
+        assert_eq!(
+            pick_best_candidate("Dune", "Frank Herbert", &[], true),
+            None
+        );
+    }
+
+    #[test]
+    fn pick_a8_rejects_only_grey_candidate_when_disabled() {
+        let candidates = world_war_z_grey_candidates();
+        one_sided_subtitle_grey(
+            "World War Z",
+            "World War Z: An Oral History of the Zombie War",
+        );
+
+        assert_eq!(
+            pick_best_candidate("World War Z", "Max Brooks", &candidates, false),
+            None
+        );
+    }
+
+    #[test]
+    fn pick_a8_accepts_only_grey_candidate_when_enabled() {
+        let candidates = world_war_z_grey_candidates();
+        one_sided_subtitle_grey(
+            "World War Z",
+            "World War Z: An Oral History of the Zombie War",
+        );
+
+        assert_eq!(
+            pick_best_candidate("World War Z", "Max Brooks", &candidates, true),
+            Some(1)
+        );
     }
 
     // --- identity_key ---

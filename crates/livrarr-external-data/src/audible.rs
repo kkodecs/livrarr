@@ -1,7 +1,6 @@
 use livrarr_domain::services::{
     FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
-use livrarr_domain::text_norm;
 use livrarr_domain::RequestPriority;
 use livrarr_http::breaker::BreakerSignal;
 use livrarr_http::outbound_queue;
@@ -146,12 +145,11 @@ impl AudibleCatalogClient {
                         .into_iter()
                         .map(|t| (t, author.clone()))
                         .collect();
-                    if score_provider_candidates(
+                    if livrarr_domain::identity_matching::pick_best_candidate(
                         &work.title,
                         &work.author_name,
                         &candidates,
-                        0.75,
-                        1,
+                        false,
                     )
                     .is_some()
                     {
@@ -200,9 +198,12 @@ impl AudibleCatalogClient {
                     }
                 }
 
-                if let Some(vidx) =
-                    score_provider_candidates(&work.title, &work.author_name, &candidates, 0.75, 1)
-                {
+                if let Some(vidx) = livrarr_domain::identity_matching::pick_best_candidate(
+                    &work.title,
+                    &work.author_name,
+                    &candidates,
+                    false,
+                ) {
                     let pi = variant_to_product[vidx];
                     return crate::ProviderOutcome::Success(Box::new(map_audible_to_detail(
                         &products[pi],
@@ -341,41 +342,6 @@ pub async fn lookup_audible_by_asin<F: HttpFetcher>(
     outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Success);
 
     Ok(data.products.into_iter().next())
-}
-
-// ─── Scoring helper ──────────────────────────────────────────────────────
-
-pub fn score_provider_candidates(
-    seed_title: &str,
-    seed_author: &str,
-    candidates: &[(String, String)],
-    min_title_jaccard: f64,
-    min_author_overlap: u32,
-) -> Option<usize> {
-    let seed_title_tokens = text_norm::title_tokens(seed_title);
-    let seed_author_tokens = text_norm::author_tokens(seed_author);
-
-    candidates
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, (title, author))| {
-            let title_jaccard =
-                text_norm::jaccard(&seed_title_tokens, &text_norm::title_tokens(title));
-            let author_overlap = seed_author_tokens
-                .intersection(&text_norm::author_tokens(author))
-                .count() as u32;
-            if title_jaccard >= min_title_jaccard && author_overlap >= min_author_overlap {
-                Some((idx, title_jaccard, author_overlap))
-            } else {
-                None
-            }
-        })
-        .max_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.2.cmp(&b.2))
-        })
-        .map(|(idx, _, _)| idx)
 }
 
 /// Title variants Audible may use for a product, fed to the (strict, shared)

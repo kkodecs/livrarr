@@ -252,7 +252,9 @@ pub async fn query_hardcover<F: HttpFetcher>(
                 })
                 .collect();
             let scored: Vec<(String, String)> = kept.iter().map(|(_, c)| c.clone()).collect();
-            match crate::audible::score_provider_candidates(title, author, &scored, 0.75, 1) {
+            match livrarr_domain::identity_matching::pick_best_candidate(
+                title, author, &scored, false,
+            ) {
                 Some(pick) => kept[pick].0,
                 None => {
                     return Err(HardcoverError::NoMatch(
@@ -937,5 +939,46 @@ mod tests {
             .unwrap();
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_picker_conformance_hardcover_abstains_on_grey_author_hit() {
+        let canned = serde_json::json!({
+            "data": {
+                "search": {
+                    "results": {
+                        "hits": [{
+                            "document": {
+                                "id": 42,
+                                "title": "Storm Front",
+                                "author_names": ["Jane Smith"],
+                                "users_read_count": 10
+                            }
+                        }]
+                    }
+                }
+            }
+        });
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        let err = query_hardcover(
+            &fetcher,
+            "Storm Front",
+            "John Smith",
+            "tok",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            HardcoverError::NoMatch(msg) => {
+                assert_eq!(msg, "no confident deterministic match");
+            }
+            other => panic!("expected NoMatch for grey author hit, got {other:?}"),
+        }
     }
 }

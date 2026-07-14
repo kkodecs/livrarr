@@ -1021,9 +1021,15 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             .cloned()
             .unwrap_or_default();
 
-        let candidates: Vec<(String, String)> = docs
+        // Keep each doc's ORIGINAL index: `filter_map` compacts the candidate
+        // list (docs without a title are dropped), so the picker's index must
+        // map back through `kept` before indexing `docs` — otherwise a dropped
+        // earlier doc shifts the index and `docs[idx]` reads the wrong work's
+        // key. Mirrors the Hardcover/Goodreads sites.
+        let kept: Vec<(usize, (String, String))> = docs
             .iter()
-            .filter_map(|doc| {
+            .enumerate()
+            .filter_map(|(i, doc)| {
                 let title = doc.get("title")?.as_str()?.to_string();
                 let author = doc
                     .get("author_name")
@@ -1032,20 +1038,21 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                Some((title, author))
+                Some((i, (title, author)))
             })
             .collect();
 
-        let best_idx = crate::audible::score_provider_candidates(
+        let candidates: Vec<(String, String)> = kept.iter().map(|(_, c)| c.clone()).collect();
+
+        let best_idx = livrarr_domain::identity_matching::pick_best_candidate(
             &work.title,
             &work.author_name,
             &candidates,
-            0.75,
-            1,
+            false,
         );
 
         let idx = match best_idx {
-            Some(i) => i,
+            Some(i) => kept[i].0,
             None => return Ok(None),
         };
 
@@ -1237,6 +1244,33 @@ mod openlibrary_qw2_pins {
 
         assert!(matches!(outcome, ProviderOutcome::Success(_)));
         assert!(has_fuzzy_search(&client.fetcher));
+    }
+
+    #[tokio::test]
+    async fn provider_picker_conformance_openlibrary_abstains_on_grey_author_hit() {
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_response(ok_json(serde_json::json!({
+                "docs": [{
+                    "key": "/works/OLGREY1W",
+                    "title": "Storm Front",
+                    "author_name": ["Jane Smith"]
+                }]
+            })));
+        let client = OpenLibraryClient::new(fetcher);
+        let work = Work {
+            id: 1,
+            user_id: 1,
+            title: "Storm Front".to_string(),
+            author_name: "John Smith".to_string(),
+            ..Work::default()
+        };
+
+        let outcome = client.fetch(&work, RequestPriority::Normal).await;
+
+        assert!(
+            matches!(outcome, ProviderOutcome::NotFound),
+            "grey author hit must abstain, got {outcome:?}"
+        );
     }
 }
 
@@ -1822,62 +1856,34 @@ fn is_gr_junk_edition(title: &str) -> bool {
     JUNK.iter().any(|needle| lower.contains(needle))
 }
 
-/// Deterministic Goodreads search-hit selection — no LLM. Drop junk
-/// editions, require author-token overlap (unchanged guard), then judge the
-/// title through the one matching authority: `Same` or `Grey` (the authority
-/// floors grey at 0.75 of the MAIN title) picks; `Different` and
-/// `VetoVolume` never do. The hit's DECORATED title is parsed — decoration
-/// "(Series, #N)" reads structurally as a series marker and its volume
-/// evidence participates in the veto, while a subtitled record still matches
-/// a bare seed on main-title equality (the 2026-07-03 refresh-residue
-/// shape). Ranking: Same beats Grey, higher grey score beats lower, then
-/// author overlap; earliest hit wins ties (GR relevance order). Returns
-/// None when nothing qualifies — a wrong GR key is worse than none, so GR
-/// abstains.
+/// Deterministic Goodreads search-hit selection — no LLM. Drop junk editions
+/// (R-7: pre-filtered before candidates are built, so a study-guide/summary
+/// trap-corpus hit can never be picked), then delegate to the one shared
+/// identity-grade picker (`identity_matching::pick_best_candidate`,
+/// matching-conformance unit) with `accept_grey = true`: GR alone may return
+/// a grey subtitled-from-bare pick, because that is the input the ratified
+/// `verify_gr_payload` / AC-004 grey-corroboration hatch consumes downstream.
+/// The hit's DECORATED title is parsed — decoration "(Series, #N)" reads
+/// structurally as a series marker and its volume evidence participates in
+/// the veto, while a subtitled record still matches a bare seed on
+/// main-title equality (the 2026-07-03 refresh-residue shape). Ranking:
+/// `Same` beats `Grey`, higher grey score beats lower, earliest hit wins
+/// ties (GR relevance order). Returns None when nothing qualifies — a wrong
+/// GR key is worse than none, so GR abstains.
 fn gr_best_match(
     title: &str,
     author: &str,
     hits: &[goodreads::GoodreadsSearchResult],
 ) -> Option<usize> {
-    use livrarr_domain::identity_matching::{parse_title, title_verdict, TitleVerdict};
-    use livrarr_domain::text_norm;
-
-    let seed = parse_title(title);
-    let seed_author_tokens = text_norm::author_tokens(author);
-
-    // (index, tier: Same=2 / Grey=1, grey score, author overlap)
-    let mut best: Option<(usize, u8, f64, u32)> = None;
-    for (idx, h) in hits.iter().enumerate() {
-        if is_gr_junk_edition(&h.title) {
-            continue;
-        }
-        let author_overlap = seed_author_tokens
-            .intersection(&text_norm::author_tokens(
-                h.author.as_deref().unwrap_or_default(),
-            ))
-            .count() as u32;
-        if author_overlap < 1 {
-            continue;
-        }
-        let (tier, score) = match title_verdict(&seed, &parse_title(&h.title)) {
-            TitleVerdict::Same => (2u8, 1.0),
-            TitleVerdict::Grey { score, .. } => (1u8, score),
-            TitleVerdict::Different | TitleVerdict::VetoVolume => continue,
-        };
-        let beats_best = match best {
-            None => true,
-            Some((_, best_tier, best_score, best_overlap)) => {
-                tier > best_tier
-                    || (tier == best_tier
-                        && (score > best_score
-                            || (score == best_score && author_overlap > best_overlap)))
-            }
-        };
-        if beats_best {
-            best = Some((idx, tier, score, author_overlap));
-        }
-    }
-    best.map(|(idx, ..)| idx)
+    let kept: Vec<(usize, (String, String))> = hits
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| !is_gr_junk_edition(&h.title))
+        .map(|(i, h)| (i, (h.title.clone(), h.author.clone().unwrap_or_default())))
+        .collect();
+    let pairs: Vec<(String, String)> = kept.iter().map(|(_, p)| p.clone()).collect();
+    livrarr_domain::identity_matching::pick_best_candidate(title, author, &pairs, true)
+        .map(|pick| kept[pick].0)
 }
 
 /// Construct a `GoodreadsClient` against the production Goodreads URL.
@@ -1952,6 +1958,12 @@ mod tests {
             gr_best_match("The Power Broker", "Robert A. Caro", &hits),
             None
         );
+    }
+
+    #[test]
+    fn picker_rejects_shared_surname_author_grey() {
+        let hits = vec![hit("Storm Front", Some("Storm Front"), "Jane Smith")];
+        assert_eq!(gr_best_match("Storm Front", "John Smith", &hits), None);
     }
 
     #[test]

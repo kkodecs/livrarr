@@ -385,15 +385,7 @@ fn test_sfc_audible_provider_map_empty_narrators_list_to_none() {
     not_yet_implemented();
 }
 
-/// TDD canary — calls the real score_provider_candidates stub.
-/// This test is NOT ignored so that `cargo test` exits non-zero (red gate).
-#[test]
-fn test_sfc_audible_provider_canary_score_stub_is_unimplemented() {
-    let _ = livrarr_external_data::audible::score_provider_candidates(
-        "Dune",
-        "Frank Herbert",
-        &[("Dune".into(), "Frank Herbert".into())],
-        0.75,
-        1,
-    );
-}
+// The SFC `score_provider_candidates` canary was removed with the matching-conformance
+// unit: that function is deleted (REQ-001/AC-001 — one shared `pick_best_candidate`),
+// and this canary asserted nothing (`let _ = ...`). The rest of this stalled
+// search-fallback-chain scaffolding remains for the separate orphan-test triage.

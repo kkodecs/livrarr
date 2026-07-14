@@ -622,20 +622,16 @@ pub async fn scan<S: ManualImportHandlerContext>(
                 continue;
             }
             if let Some(p) = scan.files.get(file_idx).and_then(|f| f.parsed.as_ref()) {
-                // Strip a trailing parenthetical and an over-long subtitle so the
-                // author corpus match keys on the core title (same cleaning the
-                // old per-file OL search used).
-                let mut clean_title = match p.title.find('(') {
+                // Strip a trailing parenthetical so the author corpus match keys
+                // on the core title (same cleaning the old per-file OL search
+                // used). No colon truncation: the raw parsed title (subtitle
+                // included) feeds the identity authority, which already handles
+                // subtitles — cutting it here would mangle the comparand before
+                // it reaches best_candidate_index_lang / identity_absorb_match.
+                let clean_title = match p.title.find('(') {
                     Some(paren) => p.title[..paren].trim().to_string(),
                     None => p.title.trim().to_string(),
                 };
-                if clean_title.len() > 60 {
-                    if let Some(colon) = clean_title.find(':') {
-                        if colon > 5 {
-                            clean_title = clean_title[..colon].trim().to_string();
-                        }
-                    }
-                }
                 queries.push(EagerQuery {
                     id: file_idx,
                     title: clean_title,

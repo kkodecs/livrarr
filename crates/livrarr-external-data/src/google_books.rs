@@ -3,7 +3,6 @@ use std::time::Duration;
 use livrarr_domain::services::{
     FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
-use livrarr_domain::text_norm;
 use livrarr_domain::RequestPriority;
 use livrarr_http::breaker::BreakerSignal;
 use livrarr_http::outbound_queue;
@@ -12,8 +11,6 @@ use serde::Deserialize;
 use crate::live_config::LiveMetadataConfig;
 use crate::{NormalizedWorkDetail, ProviderOutcome};
 
-const MIN_TITLE_JACCARD: f64 = 0.75;
-const MIN_AUTHOR_OVERLAP: u32 = 1;
 const DEFAULT_BASE_URL: &str = "https://www.googleapis.com/books/v1";
 
 // ---------------------------------------------------------------------------
@@ -435,7 +432,24 @@ impl GoogleBooksClient {
             );
             ProviderOutcome::NotFound
         } else {
-            match score_candidates(&work.title, &work.author_name, items) {
+            let pairs: Vec<(String, String)> = items
+                .iter()
+                .map(|v| {
+                    let vi = v.volume_info.as_ref();
+                    let title = vi.and_then(|x| x.title.clone()).unwrap_or_default();
+                    let author = vi
+                        .and_then(|x| x.authors.as_ref())
+                        .map(|a| a.join(" "))
+                        .unwrap_or_default();
+                    (title, author)
+                })
+                .collect();
+            match livrarr_domain::identity_matching::pick_best_candidate(
+                &work.title,
+                &work.author_name,
+                &pairs,
+                false,
+            ) {
                 Some(idx) => {
                     let vi = items[idx].volume_info.as_ref().unwrap();
                     let gb_title = vi.title.as_deref().unwrap_or("?");
@@ -456,40 +470,6 @@ impl GoogleBooksClient {
             }
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Scoring
-// ---------------------------------------------------------------------------
-
-pub fn score_candidates(work_title: &str, work_author: &str, items: &[GbVolume]) -> Option<usize> {
-    let seed_title = text_norm::title_tokens(work_title);
-    let seed_author = text_norm::author_tokens(work_author);
-
-    let mut scored: Vec<(usize, f64, u32)> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, vol)| {
-            let vi = vol.volume_info.as_ref()?;
-            let title = vi.title.as_deref()?;
-            let hit_title = text_norm::title_tokens(title);
-            let title_jaccard = text_norm::jaccard(&seed_title, &hit_title);
-            let hit_author_str = vi.authors.as_ref().map(|a| a.join(" ")).unwrap_or_default();
-            let hit_author = text_norm::author_tokens(&hit_author_str);
-            let author_overlap = seed_author.intersection(&hit_author).count() as u32;
-            Some((i, title_jaccard, author_overlap))
-        })
-        .collect();
-
-    scored.retain(|(_, j, o)| *j >= MIN_TITLE_JACCARD && *o >= MIN_AUTHOR_OVERLAP);
-
-    scored.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.2.cmp(&a.2))
-    });
-
-    scored.first().map(|(idx, _, _)| *idx)
 }
 
 // ---------------------------------------------------------------------------
@@ -682,25 +662,6 @@ fn map_http_error(status: u16) -> ProviderOutcome<NormalizedWorkDetail> {
 mod tests {
     use super::*;
 
-    fn gb_volume(title: Option<&str>, authors: &[&str]) -> GbVolume {
-        GbVolume {
-            id: Some("volume-id".to_string()),
-            volume_info: Some(GbVolumeInfo {
-                title: title.map(str::to_string),
-                subtitle: None,
-                authors: Some(authors.iter().map(|a| (*a).to_string()).collect()),
-                description: None,
-                published_date: None,
-                publisher: None,
-                page_count: None,
-                categories: None,
-                language: None,
-                image_links: None,
-                industry_identifiers: None,
-            }),
-        }
-    }
-
     fn gb_identifier(identifier_type: Option<&str>, identifier: Option<&str>) -> GbIdentifier {
         GbIdentifier {
             identifier_type: identifier_type.map(str::to_string),
@@ -788,94 +749,6 @@ mod tests {
         let id: GbIdentifier = serde_json::from_str(json).unwrap();
         assert!(id.identifier_type.is_none());
         assert_eq!(id.identifier.as_deref(), Some("1234567890"));
-    }
-
-    /// REQ-003: score_candidates returns the exact-match index when title Jaccard and author overlap meet thresholds.
-    #[test]
-    fn score_candidates_perfect_match_returns_first_index() {
-        let items = vec![gb_volume(Some("Kitchen"), &["Banana Yoshimoto"])];
-        let seed_title = livrarr_domain::text_norm::title_tokens("Kitchen");
-        let hit_title = livrarr_domain::text_norm::title_tokens("Kitchen");
-        let seed_author = livrarr_domain::text_norm::author_tokens("Banana Yoshimoto");
-        let hit_author = livrarr_domain::text_norm::author_tokens("Banana Yoshimoto");
-        let author_overlap = seed_author.intersection(&hit_author).count() as u32;
-
-        assert!(livrarr_domain::text_norm::jaccard(&seed_title, &hit_title) >= MIN_TITLE_JACCARD);
-        assert!(author_overlap >= MIN_AUTHOR_OVERLAP);
-        assert_eq!(
-            score_candidates("Kitchen", "Banana Yoshimoto", &items),
-            Some(0)
-        );
-    }
-
-    /// REQ-003: score_candidates ranks candidates by title Jaccard, then author overlap, with no runner-up rejection.
-    #[test]
-    fn score_candidates_multiple_candidates_best_index_wins() {
-        let items = vec![
-            gb_volume(Some("Kitchen Confidential Revised"), &["Banana Yoshimoto"]),
-            gb_volume(Some("Kitchen"), &["Banana Yoshimoto"]),
-            gb_volume(Some("Kitchen"), &["Someone Else"]),
-        ];
-        let seed = livrarr_domain::text_norm::title_tokens("Kitchen");
-        let runner_up = livrarr_domain::text_norm::title_tokens("Kitchen Confidential Revised");
-        let best = livrarr_domain::text_norm::title_tokens("Kitchen");
-
-        // Runner-up has lower Jaccard than best; best is exact match
-        assert!(
-            livrarr_domain::text_norm::jaccard(&seed, &runner_up)
-                < livrarr_domain::text_norm::jaccard(&seed, &best)
-        );
-        // Best candidate (index 1) wins — exact title match + author overlap
-        assert_eq!(
-            score_candidates("Kitchen", "Banana Yoshimoto", &items),
-            Some(1)
-        );
-    }
-
-    /// REQ-003: score_candidates returns None when every candidate falls below the title threshold.
-    #[test]
-    fn score_candidates_low_title_jaccard_returns_none() {
-        let items = vec![gb_volume(Some("Norwegian Wood"), &["Banana Yoshimoto"])];
-        let seed = livrarr_domain::text_norm::title_tokens("Kitchen");
-        let miss = livrarr_domain::text_norm::title_tokens("Norwegian Wood");
-
-        assert!(livrarr_domain::text_norm::jaccard(&seed, &miss) < MIN_TITLE_JACCARD);
-        assert_eq!(
-            score_candidates("Kitchen", "Banana Yoshimoto", &items),
-            None
-        );
-    }
-
-    /// REQ-003: score_candidates returns None when title matches but author overlap is zero.
-    #[test]
-    fn score_candidates_zero_author_overlap_returns_none() {
-        let items = vec![gb_volume(Some("Kitchen"), &["Haruki Murakami"])];
-        let seed_author = livrarr_domain::text_norm::author_tokens("Banana Yoshimoto");
-        let hit_author = livrarr_domain::text_norm::author_tokens("Haruki Murakami");
-
-        assert_eq!(seed_author.intersection(&hit_author).count(), 0);
-        assert_eq!(
-            score_candidates("Kitchen", "Banana Yoshimoto", &items),
-            None
-        );
-    }
-
-    /// REQ-003: score_candidates returns None for empty input and skips candidates with missing volumeInfo/title.
-    #[test]
-    fn score_candidates_empty_or_malformed_items_return_none() {
-        let malformed = vec![
-            GbVolume {
-                id: Some("missing-info".to_string()),
-                volume_info: None,
-            },
-            gb_volume(None, &["Banana Yoshimoto"]),
-        ];
-
-        assert_eq!(score_candidates("Kitchen", "Banana Yoshimoto", &[]), None);
-        assert_eq!(
-            score_candidates("Kitchen", "Banana Yoshimoto", &malformed),
-            None
-        );
     }
 
     /// REQ-002 REQ-011 REQ-012 REQ-013 REQ-002: map_volume_to_detail maps all supported fields from canned Google Books JSON.
@@ -1183,31 +1056,6 @@ mod tests {
         assert_eq!(
             isbn10_to_isbn13("1-55404-295-X").as_deref(),
             Some("9781554042951")
-        );
-    }
-
-    /// REQ-003: score_candidates handles candidates with missing authors gracefully.
-    #[test]
-    fn score_candidates_candidate_with_no_authors_returns_none() {
-        let items = vec![GbVolume {
-            id: Some("no-author".to_string()),
-            volume_info: Some(GbVolumeInfo {
-                title: Some("Kitchen".to_string()),
-                subtitle: None,
-                authors: None,
-                description: None,
-                published_date: None,
-                publisher: None,
-                page_count: None,
-                categories: None,
-                language: None,
-                image_links: None,
-                industry_identifiers: None,
-            }),
-        }];
-        assert_eq!(
-            score_candidates("Kitchen", "Banana Yoshimoto", &items),
-            None
         );
     }
 

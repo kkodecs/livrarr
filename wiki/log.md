@@ -404,3 +404,10 @@ PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
 - crates/server.md: the implementing agent removed the two stale `GrabSearchCache` references (the type + AppState field were deleted with the dead cache; the surviving `infra/cache.rs` content is the unrelated manual-import scan state).
 - New committed docs: `design-indexer-rate-limits.md` (the 4-round-reviewed contract) + dispositions under build/reviews/quality-waves/ (local, untracked by convention).
 - Verified no other wiki page asserts the pre-unit behavior (searched: GrabSearchCache, RateBucket::None grab claims, release search caching, indexer 429/backoff): grab-system.md and rss-sync.md describe flows above this granularity; rss-sync.md's known stale points (sequential/category-only) predate this unit and are unchanged by it.
+
+## 2026-07-14 — matching-conformance unit (insight 59 amended, 13 corrected; design doc committed)
+
+- insights.md: amended insight 59 — the shared provider hit-picker is now `pick_best_candidate` (identity_matching); the loose 0.75-jaccard `score_provider_candidates`/`score_candidates` are deleted; the 5 provider search sites route through it (`accept_grey=false` for Audible/OL/HC/GB, `true` for GR); author bar = `author_verdict` everywhere; OL index-back mapping fixed. Corrected insight 13's two stale "shared 0.75 picker" phrasings.
+- New committed doc: `design-provider-picker-conformance.md` (both-family design review PASS r10; IMPLEMENTED header). Per-round dispositions under build/reviews/quality-waves/ (local, untracked by convention).
+- Removed a stale SFC TDD canary (`tests/behavioral/test_sfc_audible_provider.rs`) that referenced the deleted `score_provider_candidates`; the rest of that stalled search-fallback-chain file is left for the separate orphan-test triage (insight 65 backlog).
+- Codex code-review r1 caught a PRE-EXISTING OpenLibrary wrong-key bug (a compacted candidate index used against the unfiltered `docs` array) — folded (original-index `kept` mapping, mirrors HC/GR); r2 both families PASS.
