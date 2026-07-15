@@ -2,6 +2,7 @@
 //! dispatch and the identity-resolution fan-out) and by the discovery path
 //! (`search_openlibrary`).
 
+use livrarr_domain::identity_matching;
 use livrarr_domain::seed::iso639_1_to_3;
 use livrarr_domain::services::{
     FetchError, FetchRequest, HttpFetcher, HttpMethod, LookupResult, RateBucket, UserAgentProfile,
@@ -24,14 +25,12 @@ pub struct OlDetailResult {
     pub cover_id: Option<i64>,
 }
 
-/// Fetch work detail + first edition ISBN for an OpenLibrary work key.
-///
-/// `ol_key` accepts either bare keys (`OL12345W`) or path-prefixed forms
-/// (`/works/OL12345W`).
 pub async fn query_ol_detail<F: HttpFetcher>(
     fetcher: &F,
     ol_key: &str,
     priority: RequestPriority,
+    preferred_language: Option<&str>,
+    preferred_title: Option<&str>,
 ) -> Result<OlDetailResult, ProviderFetchError> {
     let key = ol_key.trim_start_matches("/works/").trim_start_matches('/');
 
@@ -91,8 +90,24 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         .and_then(|arr| arr.iter().find_map(|v| v.as_i64()))
         .filter(|&id| id > 0);
 
-    // Fetch editions for ISBN.
-    let mut isbn_13 = None;
+    // Fetch editions for ISBN. A work's edition list spans every language AND
+    // every variant (Young Readers / abridged / anniversary retellings all
+    // ride the same OL work) — picking the first edition with any ISBN can
+    // land on a different product entirely (the live bug: a language-only
+    // preference still picked "Code Breaker -- Young Readers Edition" over
+    // the actual book). Preference order: an edition whose OWN title matches
+    // the one we're resolving for (via the shared title-matching authority —
+    // catches the Young Readers/abridged case regardless of language), tie-
+    // broken by a matching language when more than one title-matching
+    // edition exists; otherwise the first edition carrying any ISBN, exactly
+    // as before — the safety net when nothing lines up.
+    let preferred_ol_lang = preferred_language.map(iso639_1_to_3);
+    let preferred_parsed_title = preferred_title
+        .filter(|t| !t.trim().is_empty())
+        .map(identity_matching::parse_title);
+    let mut title_and_language_isbn = None;
+    let mut title_only_isbn = None;
+    let mut fallback_isbn_13 = None;
     let editions_url = format!("https://openlibrary.org/works/{key}/editions.json?limit=10");
     let editions_req = FetchRequest {
         url: editions_url,
@@ -110,16 +125,59 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         if let Ok(ed_data) = serde_json::from_slice::<serde_json::Value>(&ed_resp.body) {
             if let Some(entries) = ed_data.get("entries").and_then(|e| e.as_array()) {
                 for entry in entries {
-                    if let Some(isbns) = entry.get("isbn_13").and_then(|i| i.as_array()) {
-                        if let Some(isbn) = isbns.first().and_then(|v| v.as_str()) {
-                            isbn_13 = Some(isbn.to_string());
-                            break;
+                    let Some(isbn) = entry
+                        .get("isbn_13")
+                        .and_then(|i| i.as_array())
+                        .and_then(|isbns| isbns.first())
+                        .and_then(|v| v.as_str())
+                    else {
+                        continue;
+                    };
+                    if fallback_isbn_13.is_none() {
+                        fallback_isbn_13 = Some(isbn.to_string());
+                    }
+
+                    let title_matches = match (
+                        &preferred_parsed_title,
+                        entry.get("title").and_then(|t| t.as_str()),
+                    ) {
+                        (Some(want), Some(edition_title)) if !edition_title.trim().is_empty() => {
+                            identity_matching::title_verdict(
+                                want,
+                                &identity_matching::parse_title(edition_title),
+                            ) == identity_matching::TitleVerdict::Same
                         }
+                        _ => false,
+                    };
+                    if !title_matches {
+                        continue;
+                    }
+                    if title_only_isbn.is_none() {
+                        title_only_isbn = Some(isbn.to_string());
+                    }
+
+                    let matches_language = preferred_ol_lang.is_some_and(|want| {
+                        let want_key = format!("/languages/{want}");
+                        entry
+                            .get("languages")
+                            .and_then(|l| l.as_array())
+                            .is_some_and(|langs| {
+                                langs.iter().any(|l| {
+                                    l.get("key").and_then(|k| k.as_str()) == Some(want_key.as_str())
+                                })
+                            })
+                    });
+                    if matches_language {
+                        title_and_language_isbn = Some(isbn.to_string());
+                        break;
                     }
                 }
             }
         }
     }
+    let isbn_13 = title_and_language_isbn
+        .or(title_only_isbn)
+        .or(fallback_isbn_13);
 
     Ok(OlDetailResult {
         title,
@@ -332,7 +390,7 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        let result = query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal)
+        let result = query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal, None, None)
             .await
             .unwrap();
 
@@ -370,9 +428,15 @@ mod tests {
             canned.to_string().into_bytes(),
         );
 
-        query_ol_detail(&fetcher, "/works/OL42W", RequestPriority::Normal)
-            .await
-            .unwrap();
+        query_ol_detail(
+            &fetcher,
+            "/works/OL42W",
+            RequestPriority::Normal,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let reqs = fetcher.requests();
         assert_eq!(reqs[0].url, "https://openlibrary.org/works/OL42W.json");
@@ -389,7 +453,7 @@ mod tests {
     async fn query_ol_detail_maps_http_404_to_not_found() {
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
 
-        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal)
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
             .await
             .unwrap_err();
 
@@ -402,11 +466,139 @@ mod tests {
             livrarr_domain::services::FetchError::Timeout(std::time::Duration::from_secs(30)),
         );
 
-        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal)
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
             .await
             .unwrap_err();
 
         assert!(err.to_string().contains("request failed"));
+    }
+
+    // -------------------------------------------------------------------
+    // ISBN selection: a work's edition list spans every language AND every
+    // variant (Young Readers/abridged retellings ride the same OL work) —
+    // the live bug reproduced below with the real edition shape for this
+    // work: the Portuguese edition sorts first, then an English "Young
+    // Readers Edition" (a different, abridged product), then the actual
+    // English edition further down.
+    // -------------------------------------------------------------------
+
+    fn code_breaker_editions_canned() -> serde_json::Value {
+        serde_json::json!({
+            "entries": [
+                {
+                    "title": "A decodificadora",
+                    "isbn_13": ["9786555601824"],
+                    "languages": [{"key": "/languages/por"}]
+                },
+                {
+                    "title": "Code Breaker -- Young Readers Edition",
+                    "isbn_13": ["9781665910682"],
+                    "languages": [{"key": "/languages/eng"}]
+                },
+                {
+                    "title": "The Code Breaker",
+                    "isbn_13": ["9781982115852"],
+                    "languages": [{"key": "/languages/eng"}]
+                }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_prefers_title_and_language_match_over_wrong_title_same_language_edition(
+    ) {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            code_breaker_editions_canned().to_string().into_bytes(),
+        );
+
+        let result = query_ol_detail(
+            &fetcher,
+            "OL24217656W",
+            RequestPriority::Normal,
+            Some("en"),
+            Some("The Code Breaker"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.isbn_13.as_deref(),
+            Some("9781982115852"),
+            "must skip the language-matching but wrongly-titled Young Readers edition"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_prefers_title_match_even_when_edition_has_no_language_tag() {
+        let canned = serde_json::json!({
+            "entries": [
+                {
+                    "title": "Code Breaker -- Young Readers Edition",
+                    "isbn_13": ["9781665910682"],
+                    "languages": [{"key": "/languages/eng"}]
+                },
+                {
+                    "title": "The Code Breaker",
+                    "isbn_13": ["9781797147338"],
+                    "languages": []
+                }
+            ]
+        });
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            canned.to_string().into_bytes(),
+        );
+
+        let result = query_ol_detail(
+            &fetcher,
+            "OL24217656W",
+            RequestPriority::Normal,
+            Some("en"),
+            Some("The Code Breaker"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.isbn_13.as_deref(),
+            Some("9781797147338"),
+            "a matching title outranks a matching-language wrong title, even with no language tag of its own"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_falls_back_to_first_isbn_when_no_title_given() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            code_breaker_editions_canned().to_string().into_bytes(),
+        );
+
+        let result = query_ol_detail(&fetcher, "OL24217656W", RequestPriority::Normal, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.isbn_13.as_deref(), Some("9786555601824"));
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_falls_back_to_first_isbn_when_no_edition_title_matches() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            code_breaker_editions_canned().to_string().into_bytes(),
+        );
+
+        let result = query_ol_detail(
+            &fetcher,
+            "OL24217656W",
+            RequestPriority::Normal,
+            Some("en"),
+            Some("Some Entirely Different Title"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.isbn_13.as_deref(), Some("9786555601824"));
     }
 
     // -------------------------------------------------------------------

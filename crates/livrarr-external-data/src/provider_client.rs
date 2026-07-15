@@ -836,7 +836,7 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         ol_key: &str,
         priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
-        match query_ol_detail(&self.fetcher, ol_key, priority).await {
+        match query_ol_detail(&self.fetcher, ol_key, priority, None, None).await {
             Ok(detail) => ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail))),
             Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
                 circuit_open_outcome(retry_after)
@@ -861,7 +861,15 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             let normalized = livrarr_domain::strip_isbn_punctuation(isbn);
             match self.isbn_lookup(&normalized, priority).await {
                 Ok(Some(ol_work_key)) => {
-                    match query_ol_detail(&self.fetcher, &ol_work_key, priority).await {
+                    match query_ol_detail(
+                        &self.fetcher,
+                        &ol_work_key,
+                        priority,
+                        work.language.as_deref(),
+                        Some(work.title.as_str()),
+                    )
+                    .await
+                    {
                         Ok(detail) => {
                             let mut payload = self.build_payload(&ol_work_key, detail);
                             payload.isbn_13 = Some(normalized.clone());
@@ -903,7 +911,15 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         // Tier 2: ol_key direct lookup. Same strong-signal rule as tier 1:
         // transient failures return; the fuzzy tier is never their fallback.
         if let Some(ol_key) = work.ol_key.as_deref().filter(|s| !s.is_empty()) {
-            match query_ol_detail(&self.fetcher, ol_key, priority).await {
+            match query_ol_detail(
+                &self.fetcher,
+                ol_key,
+                priority,
+                work.language.as_deref(),
+                Some(work.title.as_str()),
+            )
+            .await
+            {
                 Ok(detail) => {
                     return ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail)));
                 }
@@ -1066,7 +1082,15 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             None => return Ok(None),
         };
 
-        match query_ol_detail(&self.fetcher, &ol_key, priority).await {
+        match query_ol_detail(
+            &self.fetcher,
+            &ol_key,
+            priority,
+            work.language.as_deref(),
+            Some(work.title.as_str()),
+        )
+        .await
+        {
             Ok(detail) => Ok(Some(self.build_payload(&ol_key, detail))),
             Err(_) => Ok(None),
         }
