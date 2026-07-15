@@ -136,31 +136,39 @@ pub fn apply_remote_path_mapping(
         })
         .collect();
 
-    // Find longest matching remote_path prefix for this host.
-    // Enforce directory boundary: remote_path must match at a `/` boundary
-    // to prevent partial matches (e.g., /data/downloads matching /data/downloads_new).
+    // Find longest matching remote_path prefix for this host. A trailing
+    // slash on remote_path is a normal way to type a directory and must not
+    // change matching — compare with it stripped. Enforce directory boundary:
+    // remote_path must match at a `/` boundary to prevent partial matches
+    // (e.g., /data/downloads matching /data/downloads_new).
     let best_match = host_matches
         .iter()
         .filter(|m| {
             let rp = m.remote_path.replace('\\', "/");
-            if content_path.starts_with(&rp) {
-                // Exact match or next char is '/' (directory boundary).
-                content_path.len() == rp.len()
-                    || content_path.as_bytes().get(rp.len()) == Some(&b'/')
-                    || rp.ends_with('/')
-            } else {
-                false
-            }
+            let rp = rp.trim_end_matches('/');
+            content_path == rp
+                || content_path
+                    .strip_prefix(rp)
+                    .is_some_and(|rest| rest.starts_with('/'))
         })
-        .max_by_key(|m| m.remote_path.len());
+        .max_by_key(|m| m.remote_path.trim_end_matches('/').len());
 
     match best_match {
         Some(mapping) => {
             let rp = mapping.remote_path.replace('\\', "/");
-            let local = content_path.replacen(&rp, &mapping.local_path, 1);
-            // Normalize double slashes from trailing/leading slash mismatches.
+            let rp = rp.trim_end_matches('/');
+            // Both roots are compared/joined with trailing slashes stripped,
+            // so the remainder (empty, or always "/..." per the boundary
+            // check above) supplies the one separator either root's own
+            // trailing slash used to. Whatever combination of trailing
+            // slashes remote_path/local_path were configured with, the
+            // join is always exactly one separator — never zero (mapping
+            // /a/b/ -> /local with no local trailing slash used to glue
+            // the next path segment straight onto "local") or two.
+            let local_root = mapping.local_path.trim_end_matches('/');
+            let remainder = content_path.strip_prefix(rp).unwrap_or("");
             Ok(PathMappingResult {
-                local_path: local.replace("//", "/"),
+                local_path: format!("{local_root}{remainder}"),
                 configured_remote_path: Some(mapping.remote_path.clone()),
                 configured_local_path: Some(mapping.local_path.clone()),
             })
@@ -225,4 +233,92 @@ pub(crate) fn cwa_copy(
     }
 
     result
+}
+
+#[cfg(test)]
+mod apply_remote_path_mapping_tests {
+    use super::*;
+
+    fn mapping(remote_path: &str, local_path: &str) -> livrarr_domain::RemotePathMapping {
+        livrarr_domain::RemotePathMapping {
+            id: 1,
+            host: "sab.example.com".to_string(),
+            remote_path: remote_path.to_string(),
+            local_path: local_path.to_string(),
+        }
+    }
+
+    #[test]
+    fn remote_trailing_slash_local_no_trailing_slash_still_joins_with_one_separator() {
+        // The live bug (2026-07-14): a trailing slash on remote_path only
+        // used to glue the local root straight onto the next path segment
+        // with zero separators.
+        let m = mapping("/home/user/downloads/sabnzbd/complete/", "/mnt/incoming");
+        let result = apply_remote_path_mapping(
+            &[m],
+            "sab.example.com",
+            "/home/user/downloads/sabnzbd/complete/Book Title",
+        )
+        .unwrap();
+        assert_eq!(result.local_path, "/mnt/incoming/Book Title");
+    }
+
+    #[test]
+    fn neither_side_has_trailing_slash() {
+        let m = mapping("/home/user/downloads/complete", "/mnt/incoming");
+        let result = apply_remote_path_mapping(
+            &[m],
+            "sab.example.com",
+            "/home/user/downloads/complete/Book",
+        )
+        .unwrap();
+        assert_eq!(result.local_path, "/mnt/incoming/Book");
+    }
+
+    #[test]
+    fn both_sides_have_trailing_slash() {
+        let m = mapping("/home/user/downloads/complete/", "/mnt/incoming/");
+        let result = apply_remote_path_mapping(
+            &[m],
+            "sab.example.com",
+            "/home/user/downloads/complete/Book",
+        )
+        .unwrap();
+        assert_eq!(result.local_path, "/mnt/incoming/Book");
+    }
+
+    #[test]
+    fn only_local_side_has_trailing_slash() {
+        let m = mapping("/home/user/downloads/complete", "/mnt/incoming/");
+        let result = apply_remote_path_mapping(
+            &[m],
+            "sab.example.com",
+            "/home/user/downloads/complete/Book",
+        )
+        .unwrap();
+        assert_eq!(result.local_path, "/mnt/incoming/Book");
+    }
+
+    #[test]
+    fn exact_match_with_no_remainder() {
+        let m = mapping("/home/user/downloads/complete/", "/mnt/incoming");
+        let result =
+            apply_remote_path_mapping(&[m], "sab.example.com", "/home/user/downloads/complete")
+                .unwrap();
+        assert_eq!(result.local_path, "/mnt/incoming");
+    }
+
+    #[test]
+    fn prefix_must_match_at_a_directory_boundary() {
+        // /data/downloads must not match /data/downloads_extra/... — same
+        // shape as the qBittorrent path_starts_with boundary bug.
+        let m = mapping("/data/downloads", "/mnt/incoming");
+        let result =
+            apply_remote_path_mapping(&[m], "sab.example.com", "/data/downloads_extra/Book")
+                .unwrap();
+        assert_eq!(
+            result.local_path, "/data/downloads_extra/Book",
+            "unmapped — returned unchanged"
+        );
+    }
 }
