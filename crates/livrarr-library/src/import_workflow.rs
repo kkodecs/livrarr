@@ -319,9 +319,11 @@ struct SourceFile {
     media_type: MediaType,
 }
 
-fn enumerate_source_files(source: &Path) -> Result<Vec<SourceFile>, String> {
+fn enumerate_source_files(source: &Path) -> Result<(Vec<SourceFile>, u64), String> {
     let mut files = Vec::new();
+    let mut total_size = 0u64;
     if source.is_file() {
+        total_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
         if let Some(media_type) = classify_file(source) {
             files.push(SourceFile {
                 path: source.to_path_buf(),
@@ -329,17 +331,61 @@ fn enumerate_source_files(source: &Path) -> Result<Vec<SourceFile>, String> {
             });
         }
     } else if source.is_dir() {
-        walk_dir(source, &mut files)?;
+        walk_dir(source, &mut files, &mut total_size)?;
     } else {
         return Err(format!(
             "source is neither file nor directory: {}",
             source.display()
         ));
     }
-    Ok(files)
+    Ok((files, total_size))
 }
 
-fn walk_dir(dir: &Path, files: &mut Vec<SourceFile>) -> Result<(), String> {
+#[cfg(test)]
+mod enumerate_source_files_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_file(path: &Path, byte_len: usize) {
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(&vec![0u8; byte_len]).unwrap();
+    }
+
+    #[test]
+    fn total_size_includes_unrecognized_files_alongside_recognized_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir.path().join("A Time of Dread.epub"), 3_900_000);
+        write_file(&dir.path().join("A Time of Dread.mobi"), 3_700_000);
+        write_file(&dir.path().join("cover.jpg"), 1_300_000);
+
+        let (files, total_size) = enumerate_source_files(dir.path()).unwrap();
+
+        assert_eq!(
+            files.len(),
+            2,
+            "only the two recognized ebook files are importable"
+        );
+        assert_eq!(
+            total_size,
+            3_900_000 + 3_700_000 + 1_300_000,
+            "total on-disk size must include the unrecognized cover image too, \
+             or a fully-downloaded release with extra files reads as partial"
+        );
+    }
+
+    #[test]
+    fn total_size_matches_files_when_nothing_unrecognized_present() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir.path().join("book.epub"), 1_000_000);
+
+        let (files, total_size) = enumerate_source_files(dir.path()).unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(total_size, 1_000_000);
+    }
+}
+
+fn walk_dir(dir: &Path, files: &mut Vec<SourceFile>, total_size: &mut u64) -> Result<(), String> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -371,8 +417,13 @@ fn walk_dir(dir: &Path, files: &mut Vec<SourceFile>) -> Result<(), String> {
             continue;
         }
         if ft.is_dir() {
-            walk_dir(&path, files)?;
+            walk_dir(&path, files, total_size)?;
         } else if ft.is_file() {
+            // Every file counts toward the on-disk total — including ones
+            // classify_file won't recognize (cover art, NFO, samples) —
+            // so the size-completeness check below compares against what
+            // actually downloaded, not just the subset Livrarr imports.
+            *total_size += entry.metadata().map(|m| m.len()).unwrap_or(0);
             if let Some(media_type) = classify_file(&path) {
                 files.push(SourceFile { path, media_type });
             }
@@ -986,7 +1037,7 @@ where
 
         // Enumerate files
         let source_clone = source.clone();
-        let source_files =
+        let (source_files, total_size) =
             tokio::task::spawn_blocking(move || enumerate_source_files(&source_clone))
                 .await
                 .map_err(|e| ImportWorkflowError::SourceNotResolved(format!("spawn error: {e}")))?
@@ -1027,20 +1078,14 @@ where
             });
         }
 
-        // File size pre-check BEFORE format filtering — sum all recognized files
-        // against grab.size (which includes all formats in the torrent).
+        // File size pre-check BEFORE format filtering — compares the full
+        // on-disk size (every file under the source path, not just the
+        // ones Livrarr recognizes as importable) against grab.size, so a
+        // bundled cover image, NFO, or sample file doesn't read as a
+        // partial download.
         if let Some(expected_size) = grab.size {
             if expected_size > 0 {
-                let paths: Vec<PathBuf> = source_files.iter().map(|f| f.path.clone()).collect();
-                let local_total: i64 = tokio::task::spawn_blocking(move || {
-                    paths
-                        .iter()
-                        .filter_map(|p| std::fs::metadata(p).ok())
-                        .map(|m| m.len() as i64)
-                        .sum()
-                })
-                .await
-                .unwrap_or(0);
+                let local_total = total_size as i64;
 
                 if local_total < expected_size * 9 / 10 {
                     let error = format!(
