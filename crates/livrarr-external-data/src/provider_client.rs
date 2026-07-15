@@ -1069,7 +1069,17 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
 
         let idx = match best_idx {
             Some(i) => kept[i].0,
-            None => return Ok(None),
+            None => {
+                tracing::debug!(
+                    work_id = work.id,
+                    title = %work.title,
+                    author = %work.author_name,
+                    candidates = candidates.len(),
+                    top_candidate = candidates.first().map(|(t, _)| t.as_str()).unwrap_or(""),
+                    "OpenLibrary title+author search: no candidate cleared the identity bar — OL result dropped from the fan-out"
+                );
+                return Ok(None);
+            }
         };
 
         let ol_key = docs[idx]
