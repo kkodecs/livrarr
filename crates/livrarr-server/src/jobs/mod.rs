@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::state::AppState;
 use livrarr_db::sqlite::SqliteDb;
@@ -193,7 +193,7 @@ impl JobRunner {
                             s.running = false;
                             s.panic_notified = false;
                         }
-                        debug!("job '{job_name}' tick completed");
+                        trace!("job '{job_name}' tick completed");
                     }
                     Ok(Err(e)) => {
                         error!("job '{job_name}' error: {e}");
