@@ -8,10 +8,6 @@ import {
   listAuthors,
   getAuthorSeries,
   getSeriesBooks,
-  monitorSeries,
-  promoteSeries,
-  resolveGr,
-  updateAuthor,
   updateSeries,
 } from "@/api";
 import { PageToolbar } from "@/components/Page/PageToolbar";
@@ -24,9 +20,10 @@ import { HelpTip } from "@/components/HelpTip";
 import { BookCover } from "@/components/BookCover";
 import { MediaStatusRow } from "@/components/MediaStatusRow";
 import { cn } from "@/utils/cn";
+import { useSeriesPromote } from "@/hooks/useSeriesPromote";
+import { SeriesPickerModal, AuthorResolveModal } from "@/components/SeriesPromoteModals";
 import type {
   AuthorResponse,
-  PromoteSeriesResponse,
   SeriesResponse,
   SeriesWithAuthorResponse,
 } from "@/types/api";
@@ -111,12 +108,9 @@ export default function SeriesPage() {
   );
 }
 
-type PromoteFlags = { monitorEbook: boolean; monitorAudiobook: boolean };
 
-type PromoteFlow =
-  | { step: "picker"; candidates: SeriesResponse[]; flags: PromoteFlags }
-  | { step: "author"; authorId: number; flags: PromoteFlags }
-  | null;
+
+
 
 function SeriesRow({
   series: s,
@@ -126,7 +120,6 @@ function SeriesRow({
   onChanged: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [flow, setFlow] = useState<PromoteFlow>(null);
   // Language for works this monitor creates (REQ-003) — pre-filled from the
   // persisted choice, else the dominant language of the linked works. Held at
   // row level so it rides every step of the promote flow (picker / author
@@ -139,32 +132,11 @@ function SeriesRow({
   const isStub = !s.grKey;
   const displayCount = isStub ? s.worksInLibrary : s.bookCount;
 
-  const promoteMutation = useMutation({
-    mutationFn: (params: { grKey?: string; flags: PromoteFlags }) =>
-      promoteSeries(s.id, {
-        grKey: params.grKey ?? null,
-        monitorEbook: params.flags.monitorEbook,
-        monitorAudiobook: params.flags.monitorAudiobook,
-        language,
-      }),
-    onSuccess: (resp: PromoteSeriesResponse, params) => {
-      if (resp.status === "monitoring") {
-        setFlow(null);
-        toast.success("Series monitoring started");
-        onChanged();
-      } else if (resp.status === "needsPicker") {
-        setFlow({
-          step: "picker",
-          candidates: resp.candidates ?? [],
-          flags: params.flags,
-        });
-      } else if (resp.status === "needsAuthorResolution") {
-        setFlow({ step: "author", authorId: resp.authorId, flags: params.flags });
-      }
-    },
-    onError: () => {
-      toast.error("Failed to start monitoring");
-    },
+  const { promote, isPending, flow, cancelFlow } = useSeriesPromote({
+    authorId: s.authorId,
+    seriesId: s.id,
+    language,
+    onMonitoring: onChanged,
   });
 
   // Language change on an already-monitored series (REQ-003/AC-007): persists
@@ -254,7 +226,7 @@ function SeriesRow({
             </select>
           )}
           {!isMonitored &&
-            (promoteMutation.isPending ? (
+            (isPending ? (
               <Loader2 size={14} className="animate-spin text-brand" />
             ) : (
               <div className="flex items-center gap-1.5">
@@ -280,7 +252,7 @@ function SeriesRow({
                   <button
                     key={label}
                     type="button"
-                    onClick={() => promoteMutation.mutate({ flags })}
+                    onClick={() => promote({ flags })}
                     className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
                   >
                     {label}
@@ -297,17 +269,17 @@ function SeriesRow({
         <SeriesPickerModal
           seriesName={s.name}
           candidates={flow.candidates}
-          pending={promoteMutation.isPending}
-          onPick={(grKey) => promoteMutation.mutate({ grKey, flags: flow.flags })}
-          onCancel={() => setFlow(null)}
+          pending={isPending}
+          onPick={(grKey) => promote({ grKey, flags: flow.flags })}
+          onCancel={cancelFlow}
         />
       )}
       {flow?.step === "author" && (
         <AuthorResolveModal
           authorId={flow.authorId}
           authorName={s.authorName}
-          onResolved={() => promoteMutation.mutate({ flags: flow.flags })}
-          onCancel={() => setFlow(null)}
+          onResolved={() => promote({ flags: flow.flags })}
+          onCancel={cancelFlow}
         />
       )}
     </div>
@@ -415,129 +387,8 @@ function SeriesWorksExpansion({
 
 /// REQ-009 picker: no/ambiguous exact match — the user chooses which of the
 /// author's GR series this stub is, or cancels (stub left unchanged).
-function SeriesPickerModal({
-  seriesName,
-  candidates,
-  pending,
-  onPick,
-  onCancel,
-}: {
-  seriesName: string;
-  candidates: SeriesResponse[];
-  pending: boolean;
-  onPick: (grKey: string) => void;
-  onCancel: () => void;
-}) {
-  return (
-    <FormModal open onOpenChange={(o) => !o && onCancel()} title="Match Series">
-      <p className="mb-3 text-xs text-muted">
-        Which Goodreads series is <span className="text-zinc-200">{seriesName}</span>?
-      </p>
-      {candidates.length === 0 && (
-        <p className="py-2 text-sm text-zinc-500">
-          No series found on the author's Goodreads page.
-        </p>
-      )}
-      <div className="space-y-1">
-        {candidates.map((c) => (
-          <button
-            key={c.grKey}
-            type="button"
-            disabled={pending}
-            onClick={() => onPick(c.grKey)}
-            className="flex w-full items-center justify-between rounded border border-border px-3 py-2 text-sm text-zinc-200 hover:border-brand hover:bg-surface-hover"
-          >
-            <span className="truncate">{c.name}</span>
-            <span className="ml-2 shrink-0 text-xs text-zinc-500">
-              {c.bookCount} {c.bookCount === 1 ? "book" : "books"}
-            </span>
-          </button>
-        ))}
-      </div>
-    </FormModal>
-  );
-}
-
 /// REQ-009 author leg: the stub's author has no Goodreads key — resolve it
 /// via the existing author-candidate road, then retry the promotion.
-function AuthorResolveModal({
-  authorId,
-  authorName,
-  onResolved,
-  onCancel,
-}: {
-  authorId: number;
-  authorName: string;
-  onResolved: () => void;
-  onCancel: () => void;
-}) {
-  const [linking, setLinking] = useState(false);
-
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["resolve-gr", authorId],
-    queryFn: () => resolveGr(authorId),
-    staleTime: 0,
-  });
-
-  // resolve-gr may auto-link when there's a single unambiguous match.
-  const autoLinked = data?.autoLinked === true;
-  useEffect(() => {
-    if (autoLinked) onResolved();
-  }, [autoLinked]);
-  if (autoLinked) return null;
-
-  const pick = async (grKey: string) => {
-    setLinking(true);
-    try {
-      await updateAuthor(authorId, { grKey });
-      onResolved();
-    } catch {
-      toast.error("Failed to link author");
-      setLinking(false);
-    }
-  };
-
-  return (
-    <FormModal open onOpenChange={(o) => !o && onCancel()} title="Link Author to Goodreads">
-      <p className="mb-3 text-xs text-muted">
-        <span className="text-zinc-200">{authorName}</span> has no Goodreads
-        link yet — pick the right author to continue.
-      </p>
-      {isLoading && (
-        <div className="flex items-center gap-2 py-2 text-sm text-zinc-500">
-          <Loader2 size={14} className="animate-spin" /> Searching Goodreads...
-        </div>
-      )}
-      {error != null && (
-        <p className="py-2 text-sm text-red-400">
-          Author lookup failed — try again later.
-        </p>
-      )}
-      {data && !data.autoLinked && data.candidates.length === 0 && (
-        <p className="py-2 text-sm text-zinc-500">
-          Author not found on Goodreads.
-        </p>
-      )}
-      <div className="space-y-1">
-        {(data?.candidates ?? []).map((c) => (
-          <button
-            key={c.grKey}
-            type="button"
-            disabled={linking}
-            onClick={() => void pick(c.grKey)}
-            className="flex w-full items-center justify-between rounded border border-border px-3 py-2 text-sm text-zinc-200 hover:border-brand hover:bg-surface-hover"
-          >
-            <span className="truncate">{c.name}</span>
-            <span className="ml-2 shrink-0 text-xs text-zinc-500">
-              {c.grKey}
-            </span>
-          </button>
-        ))}
-      </div>
-    </FormModal>
-  );
-}
-
 function AddSeriesModal({
   open,
   onOpenChange,
@@ -630,7 +481,6 @@ function AuthorSeriesExpander({
   onAdded: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [monitoringKey, setMonitoringKey] = useState<string | null>(null);
   // Language for works these monitors create (REQ-003) — one choice per
   // author block, defaulted to the author's persisted monitor language.
   const [language, setLanguage] = useState(author.monitorLanguage ?? "en");
@@ -642,30 +492,14 @@ function AuthorSeriesExpander({
     staleTime: 0,
   });
 
-  const monitorMutation = useMutation({
-    mutationFn: (params: {
-      grKey: string;
-      monitorEbook: boolean;
-      monitorAudiobook: boolean;
-    }) => {
-      setMonitoringKey(params.grKey);
-      return monitorSeries(author.id, { ...params, language });
-    },
-    onSuccess: () => {
-      setMonitoringKey(null);
-      queryClient.invalidateQueries({ queryKey: ["series", author.id] });
-      onAdded();
-      toast.success("Series monitoring started");
-    },
-    onError: () => {
-      setMonitoringKey(null);
-      toast.error("Failed to monitor series");
-    },
-  });
-
   const unmonitoredSeries = (data?.series ?? []).filter(
     (s) => !s.monitorEbook && !s.monitorAudiobook && !existingGrKeys.has(s.grKey),
   );
+
+  const handleAdded = () => {
+    queryClient.invalidateQueries({ queryKey: ["series", author.id] });
+    onAdded();
+  };
 
   return (
     <div className="rounded border border-border">
@@ -705,74 +539,109 @@ function AuthorSeriesExpander({
             </div>
           )}
           {unmonitoredSeries.map((s) => (
-            <div
-              key={s.grKey}
-              className="flex items-center justify-between px-3 py-1.5 text-sm border-t border-border/50"
-            >
-              <div>
-                <span className="text-zinc-200">{s.name}</span>
-                <span className="ml-2 text-xs text-zinc-500">
-                  {s.bookCount} {s.bookCount === 1 ? "book" : "books"}
-                </span>
-              </div>
-              {monitoringKey === s.grKey ? (
-                <Loader2 size={12} className="animate-spin text-brand" />
-              ) : (
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-zinc-500">Monitor:</span>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      monitorMutation.mutate({
-                        grKey: s.grKey,
-                        monitorEbook: true,
-                        monitorAudiobook: false,
-                      });
-                    }}
-                    disabled={monitorMutation.isPending}
-                    className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
-                  >
-                    Ebook
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      monitorMutation.mutate({
-                        grKey: s.grKey,
-                        monitorEbook: false,
-                        monitorAudiobook: true,
-                      });
-                    }}
-                    disabled={monitorMutation.isPending}
-                    className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
-                  >
-                    Audio
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      monitorMutation.mutate({
-                        grKey: s.grKey,
-                        monitorEbook: true,
-                        monitorAudiobook: true,
-                      });
-                    }}
-                    disabled={monitorMutation.isPending}
-                    className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
-                  >
-                    Both
-                  </button>
-                </div>
-              )}
-            </div>
+            <AuthorSeriesExpanderRow
+              key={s.grKey || s.id}
+              authorId={author.id}
+              authorName={author.name}
+              series={s}
+              language={language}
+              onAdded={handleAdded}
+            />
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+
+function AuthorSeriesExpanderRow({
+  authorId,
+  authorName,
+  series: s,
+  language,
+  onAdded,
+}: {
+  authorId: number;
+  authorName: string;
+  series: SeriesResponse;
+  language: string;
+  onAdded: () => void;
+}) {
+  const { promote, isPending, flow, cancelFlow } = useSeriesPromote({
+    authorId,
+    seriesId: s.id,
+    language,
+    onMonitoring: onAdded,
+  });
+
+  return (
+    <div className="flex items-center justify-between px-3 py-1.5 text-sm border-t border-border/50">
+      <div>
+        <span className="text-zinc-200">{s.name}</span>
+        <span className="ml-2 text-xs text-zinc-500">
+          {s.bookCount} {s.bookCount === 1 ? "book" : "books"}
+        </span>
+      </div>
+      {isPending ? (
+        <Loader2 size={12} className="animate-spin text-brand" />
+      ) : (
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-zinc-500">Monitor:</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              promote({ flags: { monitorEbook: true, monitorAudiobook: false } });
+            }}
+            disabled={isPending}
+            className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
+          >
+            Ebook
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              promote({ flags: { monitorEbook: false, monitorAudiobook: true } });
+            }}
+            disabled={isPending}
+            className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
+          >
+            Audio
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              promote({ flags: { monitorEbook: true, monitorAudiobook: true } });
+            }}
+            disabled={isPending}
+            className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
+          >
+            Both
+          </button>
+        </div>
+      )}
+      {flow?.step === "picker" && (
+        <SeriesPickerModal
+          seriesName={s.name}
+          candidates={flow.candidates}
+          pending={isPending}
+          onPick={(grKey) => promote({ grKey, flags: flow.flags })}
+          onCancel={cancelFlow}
+        />
+      )}
+      {flow?.step === "author" && (
+        <AuthorResolveModal
+          authorId={flow.authorId}
+          authorName={authorName}
+          onResolved={() => promote({ flags: flow.flags })}
+          onCancel={cancelFlow}
+        />
       )}
     </div>
   );

@@ -20,7 +20,6 @@ import {
   addWork,
   getAuthorSeries,
   refreshAuthorSeries,
-  monitorSeries,
   updateSeries,
   resolveGr,
 } from "@/api";
@@ -38,6 +37,8 @@ import { formatRelativeDate } from "@/utils/format";
 import { BookCover } from "@/components/BookCover";
 import { cn } from "@/utils/cn";
 import { HelpTip } from "@/components/HelpTip";
+import { useSeriesPromote } from "@/hooks/useSeriesPromote";
+import { SeriesPickerModal, AuthorResolveModal as SeriesAuthorResolveModal } from "@/components/SeriesPromoteModals";
 import type { AuthorDetailResponse } from "@/types/api";
 
 // #112: a plain, human-readable label for a language code — "Auto: ES"
@@ -538,7 +539,6 @@ function SeriesSection({
   showAllLanguages: boolean;
 }) {
   const queryClient = useQueryClient();
-  const [monitoringKey, setMonitoringKey] = useState<string | null>(null);
   const [resolveOpen, setResolveOpen] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
 
@@ -562,26 +562,6 @@ function SeriesSection({
     onError: () => toast.error("Failed to refresh series"),
   });
 
-  const monitorMutation = useMutation({
-    mutationFn: (params: { grKey: string; monitorEbook: boolean; monitorAudiobook: boolean }) => {
-      setMonitoringKey(params.grKey);
-      // #112: the backend overrides this with the series' own detected
-      // language whenever one is known — this is only the fallback for a
-      // series with no detected language (series_query_service.rs monitor_series).
-      return monitorSeries(authorId, { ...params, language: authorLanguage });
-    },
-    onSuccess: () => {
-      setMonitoringKey(null);
-      queryClient.invalidateQueries({ queryKey: ["series", authorId] });
-      queryClient.invalidateQueries({ queryKey: ["author", String(authorId)] });
-      toast.success("Series monitoring started");
-    },
-    onError: () => {
-      setMonitoringKey(null);
-      toast.error("Failed to monitor series");
-    },
-  });
-
   const unmonitorMutation = useMutation({
     mutationFn: (seriesId: number) =>
       updateSeries(seriesId, { monitorEbook: false, monitorAudiobook: false }),
@@ -592,6 +572,11 @@ function SeriesSection({
     },
     onError: () => toast.error("Failed to unmonitor series"),
   });
+
+  const handleMonitored = () => {
+    queryClient.invalidateQueries({ queryKey: ["series", authorId] });
+    queryClient.invalidateQueries({ queryKey: ["author", String(authorId)] });
+  };
 
   if (!hasGrKey) {
     return (
@@ -696,17 +681,12 @@ function SeriesSection({
             <tbody>
               {visibleSeries.map((s) => (
                 <SeriesRow
-                  key={s.grKey}
+                  key={s.id ?? s.grKey}
+                  authorId={authorId}
+                  authorName={author.name}
                   series={s}
                   authorLanguage={authorLanguage}
-                  isMonitoring={monitoringKey === s.grKey}
-                  onMonitor={(monitorEbook, monitorAudiobook) =>
-                    monitorMutation.mutate({
-                      grKey: s.grKey,
-                      monitorEbook,
-                      monitorAudiobook,
-                    })
-                  }
+                  onMonitored={handleMonitored}
                   onUnmonitor={() => s.id && unmonitorMutation.mutate(s.id)}
                 />
               ))}
@@ -719,104 +699,135 @@ function SeriesSection({
 }
 
 function SeriesRow({
+  authorId,
+  authorName,
   series,
   authorLanguage,
-  isMonitoring,
-  onMonitor,
+  onMonitored,
   onUnmonitor,
 }: {
+  authorId: number;
+  authorName: string;
   series: SeriesResponse;
   authorLanguage: string;
-  isMonitoring: boolean;
-  onMonitor: (ebook: boolean, audiobook: boolean) => void;
+  onMonitored: () => void;
   onUnmonitor: () => void;
 }) {
   const isMonitored = series.monitorEbook || series.monitorAudiobook;
   const isForeign = series.language != null && series.language !== authorLanguage;
   const isUnknownLanguage = series.language == null;
+  // A stub has no Goodreads key yet; its count is the FK-linked library count.
+  const isStub = !series.grKey;
+  const displayCount = isStub ? series.worksInLibrary : series.bookCount;
+
+  const { promote, isPending, flow, cancelFlow } = useSeriesPromote({
+    authorId,
+    seriesId: series.id,
+    language: authorLanguage,
+    onMonitoring: onMonitored,
+  });
 
   return (
-    <tr className="border-b border-border/50">
-      <td className="px-2 py-2">
-        <div className="flex items-center gap-2">
-          <span
-            className={cn(
-              "h-2 w-2 shrink-0 rounded-full",
-              isMonitored ? "bg-green-500" : "bg-zinc-600",
+    <>
+      <tr className="border-b border-border/50">
+        <td className="px-2 py-2">
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "h-2 w-2 shrink-0 rounded-full",
+                isMonitored ? "bg-green-500" : "bg-zinc-600",
+              )}
+            />
+            <span className="font-medium text-zinc-200">{series.name}</span>
+            {isForeign && (
+              <span
+                className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400"
+                title="Detected automatically. If you monitor this series, books it creates will use this language, not the Monitor language setting above."
+              >
+                {languageLabel(series.language!)}
+              </span>
             )}
-          />
-          <span className="font-medium text-zinc-200">{series.name}</span>
-          {isForeign && (
-            <span
-              className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400"
-              title="Detected automatically. If you monitor this series, books it creates will use this language, not the Monitor language setting above."
-            >
-              {languageLabel(series.language!)}
-            </span>
-          )}
-          {isUnknownLanguage && (
-            <span
-              className="text-xs italic text-zinc-600"
-              title="Couldn't confirm what language this is — shown by default rather than guessed."
-            >
-              language unknown
-            </span>
-          )}
-        </div>
-        {isMonitored && (
-          <div className="ml-4 mt-0.5 flex gap-2 text-xs text-zinc-500">
-            {series.monitorEbook && <span className="text-green-600">Ebook</span>}
-            {series.monitorAudiobook && <span className="text-green-600">Audiobook</span>}
+            {isUnknownLanguage && (
+              <span
+                className="text-xs italic text-zinc-600"
+                title="Couldn't confirm what language this is — shown by default rather than guessed."
+              >
+                language unknown
+              </span>
+            )}
           </div>
-        )}
-      </td>
-      <td className="hidden sm:table-cell px-2 py-2 text-xs text-zinc-500 text-right whitespace-nowrap">
-        {series.bookCount} {series.bookCount === 1 ? "book" : "books"}
-      </td>
-      <td className="hidden sm:table-cell px-2 py-2 text-xs text-zinc-500 text-right whitespace-nowrap">
-        {series.worksInLibrary > 0 && (
-          <span className="text-green-600">{series.worksInLibrary} in library</span>
-        )}
-      </td>
-      <td className="px-2 py-2 text-right whitespace-nowrap">
-        {isMonitoring ? (
-          <Loader2 size={14} className="inline animate-spin text-brand" />
-        ) : isMonitored ? (
-          <button
-            type="button"
-            onClick={onUnmonitor}
-            className="text-xs text-red-400 hover:underline"
-          >
-            Unmonitor
-          </button>
-        ) : (
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs text-zinc-500">Monitor:</span>
+          {isMonitored && (
+            <div className="ml-4 mt-0.5 flex gap-2 text-xs text-zinc-500">
+              {series.monitorEbook && <span className="text-green-600">Ebook</span>}
+              {series.monitorAudiobook && <span className="text-green-600">Audiobook</span>}
+            </div>
+          )}
+        </td>
+        <td className="hidden sm:table-cell px-2 py-2 text-xs text-zinc-500 text-right whitespace-nowrap">
+          {displayCount} {displayCount === 1 ? "book" : "books"}
+        </td>
+        <td className="hidden sm:table-cell px-2 py-2 text-xs text-zinc-500 text-right whitespace-nowrap">
+          {!isStub && series.worksInLibrary > 0 && (
+            <span className="text-green-600">{series.worksInLibrary} in library</span>
+          )}
+        </td>
+        <td className="px-2 py-2 text-right whitespace-nowrap">
+          {isPending ? (
+            <Loader2 size={14} className="inline animate-spin text-brand" />
+          ) : isMonitored ? (
             <button
               type="button"
-              onClick={() => onMonitor(true, false)}
-              className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
+              onClick={onUnmonitor}
+              className="text-xs text-red-400 hover:underline"
             >
-              Ebook
+              Unmonitor
             </button>
-            <button
-              type="button"
-              onClick={() => onMonitor(false, true)}
-              className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
-            >
-              Audio
-            </button>
-            <button
-              type="button"
-              onClick={() => onMonitor(true, true)}
-              className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
-            >
-              Both
-            </button>
-          </div>
-        )}
-      </td>
-    </tr>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-zinc-500">Monitor:</span>
+              <button
+                type="button"
+                onClick={() => promote({ flags: { monitorEbook: true, monitorAudiobook: false } })}
+                className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
+              >
+                Ebook
+              </button>
+              <button
+                type="button"
+                onClick={() => promote({ flags: { monitorEbook: false, monitorAudiobook: true } })}
+                className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
+              >
+                Audio
+              </button>
+              <button
+                type="button"
+                onClick={() => promote({ flags: { monitorEbook: true, monitorAudiobook: true } })}
+                className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
+              >
+                Both
+              </button>
+            </div>
+          )}
+        </td>
+      </tr>
+      {flow?.step === "picker" && (
+        <SeriesPickerModal
+          seriesName={series.name}
+          candidates={flow.candidates}
+          pending={isPending}
+          onPick={(grKey) => promote({ grKey, flags: flow.flags })}
+          onCancel={cancelFlow}
+        />
+      )}
+      {flow?.step === "author" && (
+        <SeriesAuthorResolveModal
+          authorId={flow.authorId}
+          authorName={authorName}
+          onResolved={() => promote({ flags: flow.flags })}
+          onCancel={cancelFlow}
+        />
+      )}
+    </>
   );
 }
 
