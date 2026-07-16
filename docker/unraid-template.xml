@@ -7,7 +7,7 @@
 -->
 <Container version="2">
   <Name>Livrarr</Name>
-  <Repository>ghcr.io/kkodecs/livrarr:0.1.0-alpha5</Repository>
+  <Repository>ghcr.io/kkodecs/livrarr:0.1.0-alpha6</Repository>
   <Registry>https://github.com/kkodecs/livrarr/pkgs/container/livrarr</Registry>
   <Network>bridge</Network>
   <MyIP/>
