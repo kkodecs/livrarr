@@ -37,6 +37,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useUIStore } from "@/stores/ui";
 import { getHealthSummary } from "@/api";
 import { formatRelativeDate } from "@/utils/format";
+import { parseLatestRelease, isUpdateAvailable } from "@/utils/versionCheck";
 import { useState, useEffect, type ReactNode } from "react";
 
 interface NavItem {
@@ -354,20 +355,17 @@ function useVersionCheck() {
     fetch(RELEASES_API)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (!Array.isArray(data)) return;
-        const latest = data.find(
-          (r: { tag_name?: string }) => r.tag_name && /^v?\d/.test(r.tag_name),
-        );
-        if (latest?.tag_name) {
-          setLatestVersion(latest.tag_name.replace(/^v/, ""));
-          setLatestUrl(latest.html_url);
+        const latest = parseLatestRelease(data);
+        if (latest) {
+          setLatestVersion(latest.version);
+          setLatestUrl(latest.url);
         }
       })
       .catch(() => {});
   }, [checkForUpdates]);
 
   const hasUpdate =
-    checkForUpdates && currentVersion && latestVersion && latestVersion !== currentVersion;
+    checkForUpdates && isUpdateAvailable(currentVersion, latestVersion);
 
   return { currentVersion, latestVersion, latestUrl, hasUpdate };
 }
