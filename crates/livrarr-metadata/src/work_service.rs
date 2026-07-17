@@ -2315,13 +2315,15 @@ where
             // (resolve_cover bails on User) and update_cover_metadata keeps the
             // cover_manual flag set. Without this, the phase-1 write would assign
             // Validated trust and reset cover_manual to false, letting background
-            // enrichment replace the user's chosen cover.
-            let trust = if work.cover_manual && work.cover_url.is_some() {
-                livrarr_domain::CoverTrust::User
-            } else {
-                let is_fallback = phase1_mtime.is_some() && work.cover_url.is_none();
-                crate::cover_resolution::phase1_trust(is_user_initiated, is_fallback)
-            };
+            // enrichment replace the user's chosen cover. That lock is earned
+            // only when the download actually succeeded — see
+            // `addtime_cover_trust`.
+            let trust = addtime_cover_trust(
+                work.cover_manual,
+                work.cover_url.is_some(),
+                phase1_mtime.is_some(),
+                is_user_initiated,
+            );
             let source = work.cover_source.as_deref().unwrap_or("add");
             // REQ-017/S3: measure the bytes phase-1 just wrote instead of
             // stamping 0x0 — the file only exists when phase1_mtime is Some;
@@ -2715,4 +2717,87 @@ fn is_supported_image(bytes: &[u8]) -> bool {
         return true;
     }
     false
+}
+
+/// Trust to stamp for the phase-1 add-time cover write (REQ-010).
+///
+/// A user-picked candidate (`cover_manual` with a `cover_url` set from the
+/// selected search result) locks at `CoverTrust::User` so background
+/// enrichment never overrides it (`resolve_cover` bails on `User`) — but
+/// only when the phase-1 download actually produced a file
+/// (`download_succeeded`). A failed download leaves no file on disk; locking
+/// that slot at `User` trust would permanently refuse every future
+/// candidate before the write gate ever checks whether a file exists (the
+/// bug this guards against). A failed user-pick download instead falls back
+/// to `CoverTrust::Unvalidated` — the weakest trust, since
+/// `allows_replacement_by` returns `true` for every incoming trust — leaving
+/// the slot fully replaceable, consistent with how `derive_cover_trust`
+/// already maps every non-success provider outcome.
+///
+/// Every other add (no manual pick, or a manual pick with no URL) keeps the
+/// existing `phase1_trust` computation unchanged.
+fn addtime_cover_trust(
+    cover_manual: bool,
+    has_cover_url: bool,
+    download_succeeded: bool,
+    is_user_initiated: bool,
+) -> livrarr_domain::CoverTrust {
+    if cover_manual && has_cover_url {
+        return if download_succeeded {
+            livrarr_domain::CoverTrust::User
+        } else {
+            livrarr_domain::CoverTrust::Unvalidated
+        };
+    }
+    let is_fallback = download_succeeded && !has_cover_url;
+    crate::cover_resolution::phase1_trust(is_user_initiated, is_fallback)
+}
+
+#[cfg(test)]
+mod addtime_cover_trust_tests {
+    use super::*;
+
+    #[test]
+    fn manual_pick_failed_download_is_replaceable() {
+        // BUG: a user-picked candidate whose phase-1 download failed must
+        // not lock the slot at User trust — no file landed, so the write
+        // gate would refuse every future candidate forever.
+        let trust = addtime_cover_trust(true, true, false, true);
+        assert_ne!(trust, livrarr_domain::CoverTrust::User);
+        assert_eq!(trust, livrarr_domain::CoverTrust::Unvalidated);
+    }
+
+    #[test]
+    fn manual_pick_successful_download_stays_user_locked() {
+        // Deliberate product behavior: a successful user-picked download
+        // keeps the absolute User lock so enrichment never overrides it.
+        let trust = addtime_cover_trust(true, true, true, true);
+        assert_eq!(trust, livrarr_domain::CoverTrust::User);
+    }
+
+    #[test]
+    fn manual_pick_without_url_is_unaffected() {
+        // cover_manual with no cover_url never entered the User-lock branch
+        // before this fix and must not start now — falls through to
+        // phase1_trust exactly as it always has (is_fallback = downloaded
+        // && !has_cover_url).
+        assert_eq!(
+            addtime_cover_trust(true, false, true, true),
+            crate::cover_resolution::phase1_trust(true, true)
+        );
+    }
+
+    #[test]
+    fn non_manual_add_delegates_to_phase1_trust_unchanged() {
+        // Non-manual path is untouched by this fix — delegates to
+        // phase1_trust exactly as before.
+        assert_eq!(
+            addtime_cover_trust(false, true, true, true),
+            crate::cover_resolution::phase1_trust(true, false)
+        );
+        assert_eq!(
+            addtime_cover_trust(false, false, false, false),
+            crate::cover_resolution::phase1_trust(false, false)
+        );
+    }
 }

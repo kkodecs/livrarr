@@ -221,6 +221,15 @@ async fn ac4_sovereignty_user_trust_incumbent_never_downloads_or_writes() {
     .await
     .unwrap();
 
+    // A User lock is honored only while its file exists on disk — materialize
+    // the user's cover so this test pins the protected case.
+    tokio::fs::write(
+        covers_dir.path().join(format!("{}.jpg", work.id)),
+        fake_jpeg(900, 1300),
+    )
+    .await
+    .unwrap();
+
     // A huge candidate that must never actually be fetched.
     let http = StubHttpFetcher::with_ok(200, fake_jpeg(2000, 3000));
 
@@ -273,6 +282,15 @@ async fn ac4_sovereignty_applies_to_the_audiobook_slot_too() {
     .await
     .unwrap();
 
+    // A User lock is honored only while its file exists on disk — materialize
+    // the user's audiobook cover so this test pins the protected case.
+    tokio::fs::write(
+        covers_dir.path().join(format!("{}_audio.jpg", work.id)),
+        fake_jpeg(900, 1300),
+    )
+    .await
+    .unwrap();
+
     let http = StubHttpFetcher::with_ok(200, fake_jpeg(2000, 3000));
 
     let outcome = run_cover_write_gate(
@@ -301,6 +319,110 @@ async fn ac4_sovereignty_applies_to_the_audiobook_slot_too() {
         after.audiobook_cover_url.as_deref(),
         Some("https://example.test/user-audio.jpg")
     );
+}
+
+#[tokio::test]
+async fn user_lock_in_the_committed_unrenamed_crash_window_still_blocks() {
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_dir = tempfile::tempdir().unwrap();
+
+    // The crash-safe protocol's committed-but-unrenamed state: the DB row is
+    // already User, the final .jpg is missing, and the candidate tmp + meta
+    // sidecar await startup recovery's rename. A provider candidate must not
+    // bulldoze the pending user cover.
+    db.update_cover_metadata(
+        user_id,
+        work.id,
+        Some("https://example.test/user-pick.jpg"),
+        "user_upload",
+        CoverTrust::User,
+        900,
+        1300,
+    )
+    .await
+    .unwrap();
+    let tmp = covers_dir.path().join(format!("{}.candidate.tmp", work.id));
+    let meta = covers_dir
+        .path()
+        .join(format!("{}.candidate.meta.json", work.id));
+    tokio::fs::write(&tmp, fake_jpeg(900, 1300)).await.unwrap();
+    tokio::fs::write(&meta, b"{}").await.unwrap();
+
+    let http = StubHttpFetcher::with_ok(200, fake_jpeg(2000, 3000));
+
+    let outcome = run_cover_write_gate(
+        &db,
+        &http,
+        user_id,
+        CoverWriteGateInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Ebook,
+            resolution: ebook_resolution(
+                "https://i.gr-assets.com/never.jpg",
+                "goodreads",
+                CoverTrust::Validated,
+            ),
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, GateOutcome::NoOp));
+    assert_eq!(http.call_count(), 0);
+    assert!(
+        tokio::fs::try_exists(&tmp).await.unwrap() && tokio::fs::try_exists(&meta).await.unwrap(),
+        "the pending user candidate files must be left for recovery"
+    );
+}
+
+#[tokio::test]
+async fn user_trust_row_with_no_file_on_disk_is_replaceable() {
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_dir = tempfile::tempdir().unwrap();
+
+    // A damaged slot: User trust stamped by a failed add-time download —
+    // cover_url set, 0x0 dims, no file on disk.
+    db.update_cover_metadata(
+        user_id,
+        work.id,
+        Some("https://covers.openlibrary.org/failed.jpg"),
+        "add",
+        CoverTrust::User,
+        0,
+        0,
+    )
+    .await
+    .unwrap();
+
+    let http = StubHttpFetcher::with_ok(200, fake_jpeg(640, 960));
+
+    let outcome = run_cover_write_gate(
+        &db,
+        &http,
+        user_id,
+        CoverWriteGateInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Ebook,
+            resolution: ebook_resolution(
+                "https://assets.hardcover.app/real.jpg",
+                "hardcover",
+                CoverTrust::Validated,
+            ),
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, GateOutcome::Accepted { .. }),
+        "a fileless User lock must not refuse a real candidate"
+    );
+    let after = db.get_work(user_id, work.id).await.unwrap();
+    assert_eq!(after.cover_trust, CoverTrust::Validated);
+    assert_eq!(after.cover_source.as_deref(), Some("hardcover"));
+    assert_ne!((after.cover_width, after.cover_height), (0, 0));
 }
 
 #[tokio::test]

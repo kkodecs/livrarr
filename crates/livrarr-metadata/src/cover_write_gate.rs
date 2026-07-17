@@ -95,7 +95,8 @@ pub(crate) fn final_cover_path(covers_dir: &Path, work_id: WorkId, suffix: &str)
 /// Observable result of offering one candidate to the gate.
 #[derive(Debug)]
 pub enum GateOutcome {
-    /// No candidate, User-locked, or trust disallows replacement — no-op.
+    /// No candidate, a User lock backed by an existing file, or trust
+    /// disallows replacement — no-op.
     NoOp,
     /// Same URL already committed to disk — an unchanged pick on refresh
     /// must not re-download every pass.
@@ -148,6 +149,25 @@ fn current_state_for_slot(work: &Work, media_type: CoverMediaType) -> CurrentCov
     }
 }
 
+/// Whether the incumbent's trust should block the candidate outright, before
+/// any download is attempted. A User lock is absolute only while its file
+/// still exists on disk (`locked_file_exists`) — a User-trust row with no
+/// file is a damaged slot (e.g. a failed phase-1 add-time download, see
+/// `addtime_cover_trust` in work_service.rs) and must not permanently refuse
+/// every future candidate. Any other trust falls back to the usual
+/// replacement rule. Pure and file-I/O-free so it's unit testable directly.
+fn trust_blocks_candidate(
+    current_trust: CoverTrust,
+    incoming_trust: CoverTrust,
+    locked_file_exists: bool,
+) -> bool {
+    if current_trust == CoverTrust::User {
+        locked_file_exists
+    } else {
+        !current_trust.allows_replacement_by(incoming_trust)
+    }
+}
+
 pub struct CoverWriteGateInput {
     pub covers_dir: PathBuf,
     pub work_id: WorkId,
@@ -190,15 +210,28 @@ where
     );
     let sibling_cover_url = work.audiobook_cover_url.clone();
 
-    if current.trust == CoverTrust::User {
-        return GateOutcome::NoOp;
-    }
-    if !current.trust.allows_replacement_by(resolution.trust) {
-        return GateOutcome::NoOp;
-    }
-
     let suffix = media_type.suffix();
     let final_path = final_cover_path(&covers_dir, work_id, suffix);
+
+    // A User lock is honored only when its cover actually exists on disk —
+    // either the final .jpg, or the crash-safe protocol's committed-but-
+    // unrenamed state (candidate meta sidecar present: the DB row is already
+    // User and startup recovery owns finishing the rename). A failed phase-1
+    // add-time download stamps User trust with NOTHING on disk (0x0 dims,
+    // cover_url still set — see `addtime_cover_trust` in work_service.rs);
+    // only that fully-empty shape is a damaged, replaceable slot. Only pay
+    // for the existence checks when the row is actually User-locked.
+    let locked_file_exists = if current.trust == CoverTrust::User {
+        tokio::fs::try_exists(&final_path).await.unwrap_or(false)
+            || tokio::fs::try_exists(&candidate_meta_path(&covers_dir, work_id, suffix))
+                .await
+                .unwrap_or(false)
+    } else {
+        false
+    };
+    if trust_blocks_candidate(current.trust, resolution.trust, locked_file_exists) {
+        return GateOutcome::NoOp;
+    }
 
     if current.url.as_deref() == Some(resolution.url.as_str()) {
         let exists = tokio::fs::try_exists(&final_path).await.unwrap_or(false);
@@ -610,5 +643,59 @@ pub(crate) async fn invalidate_thumbnails(
     if media_type == CoverMediaType::Ebook && sibling_cover_url.is_none() {
         let audio_thumb = final_cover_path(covers_dir, work_id, "_audio_thumb");
         let _ = tokio::fs::remove_file(&audio_thumb).await;
+    }
+}
+
+#[cfg(test)]
+mod trust_blocks_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn user_lock_with_missing_file_does_not_block() {
+        // BUG: a User-trust slot with no file on disk (a failed phase-1
+        // add-time download) must not permanently refuse every candidate.
+        assert!(!trust_blocks_candidate(
+            CoverTrust::User,
+            CoverTrust::Validated,
+            false,
+        ));
+    }
+
+    #[test]
+    fn user_lock_with_existing_file_blocks() {
+        // A real user-chosen cover on disk stays absolute.
+        assert!(trust_blocks_candidate(
+            CoverTrust::User,
+            CoverTrust::Validated,
+            true,
+        ));
+    }
+
+    #[test]
+    fn validated_rejects_unvalidated_regardless_of_file_flag() {
+        assert!(trust_blocks_candidate(
+            CoverTrust::Validated,
+            CoverTrust::Unvalidated,
+            false,
+        ));
+        assert!(trust_blocks_candidate(
+            CoverTrust::Validated,
+            CoverTrust::Unvalidated,
+            true,
+        ));
+    }
+
+    #[test]
+    fn unvalidated_never_blocks() {
+        assert!(!trust_blocks_candidate(
+            CoverTrust::Unvalidated,
+            CoverTrust::Unvalidated,
+            false,
+        ));
+        assert!(!trust_blocks_candidate(
+            CoverTrust::Unvalidated,
+            CoverTrust::User,
+            false,
+        ));
     }
 }
