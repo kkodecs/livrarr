@@ -1697,80 +1697,15 @@ impl GoodreadsClient {
                 candidate: None,
             }));
         }
-
-        let title = &work.title;
-        let author = &work.author_name;
-
-        // 2. Search GR by title+author via the WAF-free autocomplete endpoint,
-        // then a deterministic best-match pick (no LLM). A fetch error here is
-        // most often GR rate-limiting / anti-bot during a bulk burst — log it
-        // (previously a silent `?`, which hid these failures) and still
-        // propagate so map_fetch_err can schedule a retry.
-        let mut hits = match goodreads::search_goodreads(
+        search_resolve_detail(
             &self.fetcher,
             &self.base_url,
-            title,
+            &work.title,
+            &work.author_name,
+            work.isbn_13.as_deref().filter(|s| !s.is_empty()),
             priority,
         )
         .await
-        {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(title = %title, error = ?e, "GR autocomplete failed (likely rate-limit/anti-bot)");
-                return Err(e);
-            }
-        };
-
-        if hits.is_empty() && !title.is_ascii() {
-            let ascii_title: String = title.chars().filter(|c| c.is_ascii()).collect();
-            if !ascii_title.trim().is_empty() {
-                hits = match goodreads::search_goodreads(
-                    &self.fetcher,
-                    &self.base_url,
-                    &ascii_title,
-                    priority,
-                )
-                .await
-                {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::warn!(title = %title, error = ?e, "GR autocomplete (ascii retry) failed (likely rate-limit/anti-bot)");
-                        return Err(e);
-                    }
-                };
-            }
-        }
-
-        if let Some(idx) = gr_best_match(title, author, &hits) {
-            tracing::debug!(title = %title, chosen_idx = idx, "GR search result selected (deterministic)");
-            return Ok(Some(ResolvedGrDetail {
-                url: goodreads::resolve_detail_url(&self.base_url, &hits[idx].detail_url),
-                candidate: Some(GrCandidateText {
-                    title: hits[idx].title.clone(),
-                    title_bare: hits[idx].title_bare.clone(),
-                    author: hits[idx].author.clone(),
-                    cover_url: hits[idx].cover_url.clone(),
-                    series_name: hits[idx].series_name.clone(),
-                    series_position: hits[idx].series_position,
-                }),
-            }));
-        }
-
-        // No confident GR match. Identity must degrade without an LLM (spec:
-        // work-creation-consistency) — we do NOT ask an LLM to recall a key
-        // from memory: a fabricated key is worse than no key. The other
-        // providers carry identity; GR simply abstains. Log so abstains are
-        // visible (empty results vs hits-present-but-no-confident-match).
-        if hits.is_empty() {
-            tracing::debug!(title = %title, "GR autocomplete: no results");
-        } else {
-            tracing::debug!(
-                title = %title,
-                hit_count = hits.len(),
-                "GR abstained: no confident title/author match"
-            );
-        }
-        Ok(None)
     }
 
     fn map_fetch_err(&self, err: GoodreadsFetchError) -> ProviderOutcome<NormalizedWorkDetail> {
@@ -1888,6 +1823,127 @@ fn is_gr_junk_edition(title: &str) -> bool {
     ];
     let lower = title.to_lowercase();
     JUNK.iter().any(|needle| lower.contains(needle))
+}
+
+/// Search-tier resolution for a work with no established GR key: the seed's
+/// own ISBN first (when it has one), then title. Free function over the
+/// fetcher so both tiers are testable with the crate's recording double.
+///
+/// ISBN tier: autocomplete indexes ISBNs, and an ISBN query returns the
+/// seed's OWN edition — whose detail page carries that same ISBN, so the
+/// REQ-024 trust gate's edition bridge (`payload.isbn_13 == seed.isbn_13`)
+/// corroborates a grey subtitled-from-bare title with no trust-rule change.
+/// The hit must clear the same junk filter and deterministic picker as any
+/// other candidate: an edition whose display title doesn't match the seed
+/// (decorated printings) abstains here and falls through to the title tier.
+/// A fetch error on this tier also falls through — the title tier keeps
+/// today's error semantics, so a GR outage behaves exactly as before.
+async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
+    fetcher: &F,
+    base_url: &str,
+    title: &str,
+    author: &str,
+    isbn_13: Option<&str>,
+    priority: RequestPriority,
+) -> Result<Option<ResolvedGrDetail>, GoodreadsFetchError> {
+    if let Some(isbn) = isbn_13 {
+        match goodreads::search_goodreads(fetcher, base_url, isbn, priority).await {
+            Ok(isbn_hits) => {
+                if let Some(idx) = gr_best_match(title, author, &isbn_hits) {
+                    tracing::debug!(
+                        title = %title,
+                        isbn,
+                        chosen_idx = idx,
+                        "GR ISBN-tier hit selected (deterministic)"
+                    );
+                    return Ok(Some(ResolvedGrDetail {
+                        url: goodreads::resolve_detail_url(base_url, &isbn_hits[idx].detail_url),
+                        candidate: Some(GrCandidateText {
+                            title: isbn_hits[idx].title.clone(),
+                            title_bare: isbn_hits[idx].title_bare.clone(),
+                            author: isbn_hits[idx].author.clone(),
+                            cover_url: isbn_hits[idx].cover_url.clone(),
+                            series_name: isbn_hits[idx].series_name.clone(),
+                            series_position: isbn_hits[idx].series_position,
+                        }),
+                    }));
+                }
+                tracing::debug!(
+                    title = %title,
+                    isbn,
+                    hit_count = isbn_hits.len(),
+                    "GR ISBN tier: no confident match — falling through to title search"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    title = %title,
+                    isbn,
+                    error = ?e,
+                    "GR ISBN-tier autocomplete failed — falling through to title search"
+                );
+            }
+        }
+    }
+
+    // Title tier: search GR by title via the WAF-free autocomplete endpoint,
+    // then a deterministic best-match pick (no LLM). A fetch error here is
+    // most often GR rate-limiting / anti-bot during a bulk burst — log it
+    // (previously a silent `?`, which hid these failures) and still
+    // propagate so map_fetch_err can schedule a retry.
+    let mut hits = match goodreads::search_goodreads(fetcher, base_url, title, priority).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(title = %title, error = ?e, "GR autocomplete failed (likely rate-limit/anti-bot)");
+            return Err(e);
+        }
+    };
+
+    if hits.is_empty() && !title.is_ascii() {
+        let ascii_title: String = title.chars().filter(|c| c.is_ascii()).collect();
+        if !ascii_title.trim().is_empty() {
+            hits = match goodreads::search_goodreads(fetcher, base_url, &ascii_title, priority)
+                .await
+            {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(title = %title, error = ?e, "GR autocomplete (ascii retry) failed (likely rate-limit/anti-bot)");
+                    return Err(e);
+                }
+            };
+        }
+    }
+
+    if let Some(idx) = gr_best_match(title, author, &hits) {
+        tracing::debug!(title = %title, chosen_idx = idx, "GR search result selected (deterministic)");
+        return Ok(Some(ResolvedGrDetail {
+            url: goodreads::resolve_detail_url(base_url, &hits[idx].detail_url),
+            candidate: Some(GrCandidateText {
+                title: hits[idx].title.clone(),
+                title_bare: hits[idx].title_bare.clone(),
+                author: hits[idx].author.clone(),
+                cover_url: hits[idx].cover_url.clone(),
+                series_name: hits[idx].series_name.clone(),
+                series_position: hits[idx].series_position,
+            }),
+        }));
+    }
+
+    // No confident GR match. Identity must degrade without an LLM (spec:
+    // work-creation-consistency) — we do NOT ask an LLM to recall a key
+    // from memory: a fabricated key is worse than no key. The other
+    // providers carry identity; GR simply abstains. Log so abstains are
+    // visible (empty results vs hits-present-but-no-confident-match).
+    if hits.is_empty() {
+        tracing::debug!(title = %title, "GR autocomplete: no results");
+    } else {
+        tracing::debug!(
+            title = %title,
+            hit_count = hits.len(),
+            "GR abstained: no confident title/author match"
+        );
+    }
+    Ok(None)
 }
 
 /// Deterministic Goodreads search-hit selection — no LLM. Drop junk editions
@@ -2035,5 +2091,119 @@ mod tests {
             gr_best_match("The Power Broker", "Robert A. Caro", &hits),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn isbn_tier_selects_the_seed_edition_before_title_search() {
+        let body = r#"[{"title":"Sapiens","bookTitleBare":"Sapiens","bookUrl":"/book/show/135802293","author":{"name":"Yuval Noah Harari"}}]"#;
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
+
+        let resolved = search_resolve_detail(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Sapiens",
+            "Yuval Noah Harari",
+            Some("9781529913934"),
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap()
+        .expect("the ISBN-tier hit must resolve");
+
+        assert!(resolved.url.ends_with("/book/show/135802293"));
+        let reqs = fetcher.requests();
+        assert_eq!(
+            reqs.len(),
+            1,
+            "a confident ISBN-tier pick makes no title query"
+        );
+        assert!(reqs[0].url.ends_with("q=9781529913934"));
+    }
+
+    #[tokio::test]
+    async fn isbn_tier_decorated_edition_title_falls_through_to_title_search() {
+        // The seed's edition exists on GR but its display title is decorated
+        // beyond the picker's bar — the tier abstains and the title tier
+        // still runs, preserving today's behavior for everything else.
+        let isbn_body = r#"[{"title":"Sapiens (10 Year Anniversary Edition) /anglais","bookTitleBare":"Sapiens (10 Year Anniversary Edition) /anglais","bookUrl":"/book/show/135802293","author":{"name":"Yuval Noah Harari"}}]"#;
+        let title_body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"/book/show/23692271","author":{"name":"Yuval Noah Harari"}}]"#;
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, isbn_body.as_bytes().to_vec());
+        fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: title_body.as_bytes().to_vec(),
+        }));
+
+        let resolved = search_resolve_detail(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Sapiens",
+            "Yuval Noah Harari",
+            Some("9781529913934"),
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap()
+        .expect("the title tier must still produce the grey subtitled pick");
+
+        assert!(resolved.url.ends_with("/book/show/23692271"));
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 2, "ISBN query first, then the title query");
+        assert!(reqs[0].url.ends_with("q=9781529913934"));
+        assert!(reqs[1].url.ends_with("q=Sapiens"));
+    }
+
+    #[tokio::test]
+    async fn isbn_tier_fetch_error_falls_through_to_title_search() {
+        let title_body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"/book/show/23692271","author":{"name":"Yuval Noah Harari"}}]"#;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::RateLimited,
+        );
+        fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: title_body.as_bytes().to_vec(),
+        }));
+
+        let resolved = search_resolve_detail(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Sapiens",
+            "Yuval Noah Harari",
+            Some("9781529913934"),
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap()
+        .expect("an ISBN-tier fetch error must not kill the title tier");
+
+        assert!(resolved.url.ends_with("/book/show/23692271"));
+        assert_eq!(fetcher.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn no_isbn_seed_goes_straight_to_title_search() {
+        let body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"/book/show/23692271","author":{"name":"Yuval Noah Harari"}}]"#;
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
+
+        let resolved = search_resolve_detail(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Sapiens",
+            "Yuval Noah Harari",
+            None,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap()
+        .expect("the title tier is unchanged for a no-ISBN seed");
+
+        assert!(resolved.url.ends_with("/book/show/23692271"));
+        let reqs = fetcher.requests();
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].url.ends_with("q=Sapiens"));
     }
 }

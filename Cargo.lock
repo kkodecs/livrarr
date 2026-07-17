@@ -1563,7 +1563,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "livrarr-behavioral"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "assert_matches",
  "async-trait",
@@ -1602,11 +1602,11 @@ dependencies = [
 
 [[package]]
 name = "livrarr-cli"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 
 [[package]]
 name = "livrarr-db"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-domain"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "chrono",
  "quick-xml 0.37.5",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-download"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "bendy",
  "chrono",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-enrichment"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "chrono",
  "image",
@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-external-data"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "chrono",
  "csv",
@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-handlers"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "axum",
  "chrono",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-http"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "chrono",
  "livrarr-domain",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-identity"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "futures",
  "livrarr-domain",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-jobs"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "livrarr-domain",
  "thiserror 2.0.18",
@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-library"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "livrarr-db",
  "livrarr-domain",
@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-matching"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "chrono",
  "id3",
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-materialize"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "image",
  "livrarr-domain",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-metadata"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "chrono",
  "csv",
@@ -1858,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-server"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "argon2",
  "axum",
@@ -1910,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "livrarr-tagwrite"
-version = "0.1.0-alpha5"
+version = "0.1.0-alpha6"
 dependencies = [
  "futures",
  "id3",

@@ -92,6 +92,14 @@ static RE_TITLE_SERIES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\s*\(([^,]+),\s*#(\d+(?:\.\d+)?)\)\s*$"#).unwrap());
 
 // Detail page regex patterns
+
+/// Locates the Next.js hydration payload — the primary source since GR's
+/// 2026-07 React/Next redesign of the book detail page. The book/work/series/
+/// contributor data lives in this script's Apollo-cache-shaped JSON.
+static RE_NEXT_DATA: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?si)<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>"#).unwrap()
+});
+
 static RE_JSONLD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?si)<script\s+type="application/ld\+json">(.*?)</script>"#).unwrap()
 });
@@ -224,7 +232,7 @@ struct AutocompleteEntry {
 /// number (0.0) on some unrated editions — one such entry must not fail the
 /// batch. Numbers render to the same two-decimal form the strings use, so the
 /// downstream "0.00" = unrated filter applies uniformly.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 #[serde(untagged)]
 enum StringOrNumber {
     S(String),
@@ -236,6 +244,17 @@ impl StringOrNumber {
         match self {
             StringOrNumber::S(s) => s,
             StringOrNumber::N(n) => format!("{n:.2}"),
+        }
+    }
+
+    /// Numeric value regardless of wire representation — used by the GR
+    /// detail-page Apollo-state path (`averageRating`), which has shown the
+    /// same string-or-number inconsistency as the autocomplete `avgRating`
+    /// field above.
+    fn into_f64(self) -> Option<f64> {
+        match self {
+            StringOrNumber::S(s) => s.parse().ok(),
+            StringOrNumber::N(n) => Some(n),
         }
     }
 }
@@ -319,9 +338,424 @@ pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
 
 /// Parse a Goodreads book detail page for metadata.
 ///
-/// Primary source: JSON-LD `<script type="application/ld+json">` blocks.
-/// Secondary source: regex for description, genres, series, published date.
+/// Primary source (2026-07 Next.js redesign): the `__NEXT_DATA__` script's
+/// Apollo-cache JSON — the book/work/series/contributor objects backing the
+/// page's React hydration (see [`parse_detail_next_data`]). Fallback source
+/// (pre-redesign pages, or any page GR still serves in the old shape): JSON-LD
+/// `<script type="application/ld+json">` blocks + regex for description,
+/// genres, series, published date (see [`parse_detail_html_legacy`]).
+///
+/// When NEITHER path yields anything usable this warns with enough shape
+/// detail to diagnose the next layout drift, rather than silently returning
+/// an empty result — an empty parse is drift, not truth (insight 62).
 pub fn parse_detail_html(html: &str) -> Option<GoodreadsDetailResult> {
+    if let Some(result) = parse_detail_next_data(html) {
+        return Some(result);
+    }
+    if let Some(result) = parse_detail_html_legacy(html) {
+        return Some(result);
+    }
+    if !html.is_empty() {
+        tracing::warn!(
+            has_next_data_script = RE_NEXT_DATA.is_match(html),
+            has_jsonld_script = RE_JSONLD.is_match(html),
+            len = html.len(),
+            "GR detail page: neither the Next.js data blob nor the legacy JSON-LD/regex path yielded anything usable — treating as unreadable, not empty"
+        );
+    }
+    None
+}
+
+// =============================================================================
+// Detail page parsing — Next.js / Apollo-state primary path (2026-07 redesign)
+// =============================================================================
+
+/// One `{"__ref": "Type:key"}` pointer into the Apollo cache.
+#[derive(serde::Deserialize)]
+struct ApolloRef {
+    #[serde(rename = "__ref")]
+    r#ref: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApolloLanguage {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApolloBookDetails {
+    #[serde(default)]
+    isbn: Option<String>,
+    #[serde(default)]
+    isbn13: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    num_pages: Option<StringOrInt>,
+    #[serde(default)]
+    language: Option<ApolloLanguage>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApolloGenre {
+    #[serde(default, rename = "webUrl")]
+    web_url: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApolloGenreEdge {
+    #[serde(default)]
+    genre: Option<ApolloGenre>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApolloBookSeriesEntry {
+    #[serde(default)]
+    user_position: Option<StringOrInt>,
+    #[serde(default)]
+    series: Option<ApolloRef>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApolloContributorEdge {
+    #[serde(default)]
+    node: Option<ApolloRef>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApolloBook {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    details: Option<ApolloBookDetails>,
+    #[serde(default)]
+    primary_contributor_edge: Option<ApolloContributorEdge>,
+    #[serde(default)]
+    book_series: Vec<ApolloBookSeriesEntry>,
+    #[serde(default)]
+    book_genres: Vec<ApolloGenreEdge>,
+    #[serde(default)]
+    work: Option<ApolloRef>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApolloWorkDetails {
+    #[serde(default)]
+    publication_time: Option<StringOrInt>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApolloWorkStats {
+    #[serde(default)]
+    average_rating: Option<StringOrNumber>,
+    #[serde(default)]
+    ratings_count: Option<StringOrInt>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApolloWork {
+    #[serde(default)]
+    details: Option<ApolloWorkDetails>,
+    #[serde(default)]
+    stats: Option<ApolloWorkStats>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApolloSeries {
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApolloContributor {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Find this page's primary Book entity in the Apollo cache. Prefers the
+/// explicit `getBookByLegacyId(...)` `ROOT_QUERY` pointer — it names THIS
+/// page's book even if a future layout embeds other `Book:` stubs (e.g. a
+/// "readers also enjoyed" carousel) — and falls back to the sole `Book:`
+/// entry when that pointer is absent. Zero or multiple candidates is
+/// ambiguous, never a guess.
+fn find_apollo_book(
+    apollo: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&serde_json::Value> {
+    if let Some(root) = apollo.get("ROOT_QUERY").and_then(|v| v.as_object()) {
+        let mut pointers = root
+            .iter()
+            .filter(|(k, _)| k.starts_with("getBookByLegacyId("));
+        if let Some((_, first)) = pointers.next() {
+            if pointers.next().is_some() {
+                // Two pointers = two preloaded books and no way to know which
+                // one this page is about — same abstain policy as the bare
+                // multi-Book scan below. A wrong book is worse than none.
+                tracing::warn!(
+                    "GR detail page: multiple getBookByLegacyId pointers in ROOT_QUERY — cannot pick unambiguously"
+                );
+                return None;
+            }
+            if let Some(book) = first
+                .get("__ref")
+                .and_then(|v| v.as_str())
+                .and_then(|book_ref| apollo.get(book_ref))
+            {
+                return Some(book);
+            }
+        }
+    }
+
+    let mut books = apollo.iter().filter(|(k, _)| k.starts_with("Book:"));
+    let first = books.next()?;
+    if books.next().is_some() {
+        tracing::warn!(
+            "GR detail page: multiple Book entities in apolloState — cannot pick unambiguously"
+        );
+        return None;
+    }
+    Some(first.1)
+}
+
+/// Genre slugs from `bookGenres` edges, deduplicated, in document order. The
+/// slug is read off each genre's own `webUrl` (last path segment) rather than
+/// derived from its display name, so it matches the legacy path's slug shape
+/// ("non-fiction", not "Nonfiction") without guessing GR's naming rule. Each
+/// entry resolves independently — one entry missing a usable URL just drops
+/// from the list rather than failing the batch.
+fn genres_from_apollo(edges: &[ApolloGenreEdge]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut genres = Vec::new();
+    for edge in edges {
+        let Some(slug) = edge
+            .genre
+            .as_ref()
+            .and_then(|g| g.web_url.as_deref())
+            .and_then(|url| url.rsplit('/').next())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if seen.insert(slug.to_string()) {
+            genres.push(slug.to_string());
+        }
+    }
+    genres
+}
+
+/// Apollo text fields (descriptions, bios) can carry raw HTML the same way
+/// the legacy `Formatted` span does — strip tags and decode entities so the
+/// blob path never regresses the "plain text description" contract.
+fn clean_apollo_text(raw: &str) -> Option<String> {
+    let stripped = RE_HTML_TAG.replace_all(raw, "");
+    let decoded = decode_html_entities(&stripped);
+    let trimmed = decoded.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Parse a Goodreads book detail page via the `__NEXT_DATA__` Apollo-cache
+/// blob (2026-07 Next.js redesign). Returns `None` when the marker script is
+/// absent (an older-shaped page — not drift, just the other path's job) or
+/// when it's present but unreadable (drift — logged so the next layout
+/// change is diagnosable). Every cross-reference (work/series/author)
+/// resolves independently: one missing satellite object degrades only the
+/// fields it would have supplied, never the whole parse.
+/// Build the Book model field-by-field: a PRESENT field whose shape drifted
+/// drops alone (warned) instead of failing the whole Book — `#[serde(default)]`
+/// only covers ABSENT fields, and one malformed nested member must not erase
+/// an otherwise-readable page.
+fn lenient_apollo_book(obj: &serde_json::Map<String, serde_json::Value>) -> ApolloBook {
+    ApolloBook {
+        title: lenient_field(obj, "title"),
+        description: lenient_field(obj, "description"),
+        image_url: lenient_field(obj, "imageUrl"),
+        details: lenient_field(obj, "details"),
+        primary_contributor_edge: lenient_field(obj, "primaryContributorEdge"),
+        book_series: lenient_field::<Vec<ApolloBookSeriesEntry>>(obj, "bookSeries")
+            .unwrap_or_default(),
+        book_genres: lenient_field::<Vec<ApolloGenreEdge>>(obj, "bookGenres").unwrap_or_default(),
+        work: lenient_field(obj, "work"),
+    }
+}
+
+fn lenient_field<T: serde::de::DeserializeOwned>(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<T> {
+    let v = obj.get(key)?;
+    if v.is_null() {
+        return None;
+    }
+    match serde_json::from_value(v.clone()) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                field = key,
+                "GR detail page: Book field shape drifted — dropping this field only"
+            );
+            None
+        }
+    }
+}
+
+fn parse_detail_next_data(html: &str) -> Option<GoodreadsDetailResult> {
+    let cap = RE_NEXT_DATA.captures(html)?;
+    let blob = &cap[1];
+
+    let root: serde_json::Value = match serde_json::from_str(blob) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "GR detail page: __NEXT_DATA__ present but not valid JSON — layout drifted"
+            );
+            return None;
+        }
+    };
+
+    let Some(apollo) = root
+        .get("props")
+        .and_then(|v| v.get("pageProps"))
+        .and_then(|v| v.get("apolloState"))
+        .and_then(|v| v.as_object())
+    else {
+        tracing::warn!(
+            "GR detail page: __NEXT_DATA__ present but no props.pageProps.apolloState — layout drifted"
+        );
+        return None;
+    };
+
+    let Some(book_value) = find_apollo_book(apollo) else {
+        tracing::warn!(
+            "GR detail page: apolloState present but no resolvable Book entity — layout drifted"
+        );
+        return None;
+    };
+
+    let Some(book_obj) = book_value.as_object() else {
+        tracing::warn!("GR detail page: Book entity is not a JSON object — layout drifted");
+        return None;
+    };
+    let book = lenient_apollo_book(book_obj);
+
+    if book.title.is_none() && book.primary_contributor_edge.is_none() {
+        tracing::warn!(
+            "GR detail page: Book entity carried neither title nor author — treating as drift, not truth"
+        );
+        return None;
+    }
+
+    let work: Option<ApolloWork> = book
+        .work
+        .as_ref()
+        .and_then(|r| r.r#ref.as_deref())
+        .and_then(|key| apollo.get(key))
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    if book.work.is_some() && work.is_none() {
+        tracing::warn!(
+            "GR detail page: Book has a work reference that did not resolve — rating/rating count/publish date will be missing"
+        );
+    }
+
+    let author = book
+        .primary_contributor_edge
+        .as_ref()
+        .and_then(|edge| edge.node.as_ref())
+        .and_then(|r| r.r#ref.as_deref())
+        .and_then(|key| apollo.get(key))
+        .and_then(|v| serde_json::from_value::<ApolloContributor>(v.clone()).ok())
+        .and_then(|c| c.name);
+
+    let (series_name, series_position) = match book.book_series.first() {
+        Some(entry) => {
+            let position = entry
+                .user_position
+                .as_ref()
+                .and_then(|p| p.clone().into_string().parse::<f64>().ok());
+            let name = entry
+                .series
+                .as_ref()
+                .and_then(|r| r.r#ref.as_deref())
+                .and_then(|key| apollo.get(key))
+                .and_then(|v| serde_json::from_value::<ApolloSeries>(v.clone()).ok())
+                .and_then(|s| s.title);
+            (name, position)
+        }
+        None => (None, None),
+    };
+
+    let details = book.details.as_ref();
+    let isbn = details
+        .and_then(|d| d.isbn13.clone())
+        .or_else(|| details.and_then(|d| d.isbn.clone()));
+    let page_count = details
+        .and_then(|d| d.num_pages.as_ref())
+        .and_then(|p| p.clone().into_string().parse::<i32>().ok());
+    let book_format = details.and_then(|d| d.format.clone());
+    let language = details
+        .and_then(|d| d.language.as_ref())
+        .and_then(|l| l.name.as_deref())
+        .map(livrarr_domain::normalize_language);
+
+    let genres = genres_from_apollo(&book.book_genres);
+    let description = book.description.as_deref().and_then(clean_apollo_text);
+
+    let stats = work.as_ref().and_then(|w| w.stats.as_ref());
+    let rating = stats
+        .and_then(|s| s.average_rating.as_ref())
+        .and_then(|r| r.clone().into_f64());
+    let rating_count = stats
+        .and_then(|s| s.ratings_count.as_ref())
+        .and_then(|c| c.clone().into_string().parse::<i32>().ok());
+    let publish_date = work
+        .as_ref()
+        .and_then(|w| w.details.as_ref())
+        .and_then(|d| d.publication_time.as_ref())
+        .and_then(|t| t.clone().into_string().parse::<i64>().ok())
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|dt| dt.format("%Y-%m-%d").to_string());
+
+    Some(GoodreadsDetailResult {
+        title: book.title,
+        author,
+        isbn,
+        rating,
+        rating_count,
+        page_count,
+        language,
+        cover_url: book.image_url,
+        book_format,
+        description,
+        genres,
+        series_name,
+        series_position,
+        publish_date,
+    })
+}
+
+// =============================================================================
+// Detail page parsing — legacy JSON-LD/regex path (fallback)
+// =============================================================================
+
+/// Legacy extraction: JSON-LD `<script type="application/ld+json">` as
+/// primary, regex (description/genres/series/published date) as secondary.
+/// Kept as the fallback for any page GR still serves in the pre-2026-07
+/// shape (older cached responses, or a future partial rollback).
+fn parse_detail_html_legacy(html: &str) -> Option<GoodreadsDetailResult> {
     // Find the Book JSON-LD block
     let book_json = find_book_jsonld(html);
 
@@ -669,7 +1103,10 @@ static RE_REACT_PROPS: LazyLock<Regex> =
 
 /// `bookId` arrives as a JSON string; tolerate a bare number (the autocomplete
 /// avgRating lesson — one differently-typed field must not drop an entry).
-#[derive(serde::Deserialize)]
+/// Also reused by the detail-page Apollo-state path for `userPosition`,
+/// `numPages`, `ratingsCount`, and `publicationTime` — the same defensive
+/// posture against a GR wire-shape tweak.
+#[derive(serde::Deserialize, Clone)]
 #[serde(untagged)]
 enum StringOrInt {
     S(String),
@@ -1476,6 +1913,147 @@ mod tests {
         let result = parse_detail_html(html).unwrap();
         assert!(result.title.is_none()); // No JSON-LD parsed
         assert!(result.description.is_some()); // But regex found description
+    }
+
+    // =========================================================================
+    // Detail page parsing — Next.js / Apollo-state primary path (2026-07-16)
+    // =========================================================================
+
+    /// Real page captured 2026-07-16 from production: Sapiens: A Brief
+    /// History of Humankind by Yuval Noah Harari, GR book id 23692271. GR's
+    /// React/Next redesign moved book data into a `__NEXT_DATA__` Apollo-state
+    /// blob; this is the ground truth for that new shape. All assertions below
+    /// were read directly out of the fixture's embedded JSON.
+    const BOOK_PAGE_SAPIENS: &str = include_str!("../../fixtures/gr-book-23692271.html");
+
+    #[test]
+    fn detail_next_data_sapiens_fixture_extracts_full_metadata() {
+        // This is a regression pin for the live bug: `parse_detail_html`
+        // undercounted genres on this exact fixture before the Apollo-state
+        // path existed (legacy HTML-anchor scraping found only 7 of the 10
+        // genres the page's own data carries — GR renders the rest without a
+        // clickable link). That undercount made this assertion FAIL against
+        // the pre-fix code; it now passes because the blob is read directly.
+        let result = parse_detail_html(BOOK_PAGE_SAPIENS).expect("must parse");
+
+        assert_eq!(
+            result.title.as_deref(),
+            Some("Sapiens: A Brief History of Humankind")
+        );
+        assert_eq!(result.author.as_deref(), Some("Yuval Noah Harari"));
+        // This edition's Apollo `BookDetails` carries `isbn: null` AND
+        // `isbn13: null` — genuinely absent from the blob (verified in the
+        // fixture JSON), not a parse failure. Legacy JSON-LD agreed (also
+        // None) — no regression here, just nothing to report.
+        assert_eq!(result.isbn, None, "this edition's blob has no ISBN at all");
+        assert!(
+            (result.rating.expect("rating") - 4.33).abs() < 0.001,
+            "rating from Work.stats.averageRating"
+        );
+        assert_eq!(
+            result.rating_count,
+            Some(1_310_797),
+            "rating count from Work.stats.ratingsCount"
+        );
+        assert_eq!(
+            result.page_count,
+            Some(512),
+            "page count from Book.details.numPages"
+        );
+        assert_eq!(result.language.as_deref(), Some("en"));
+        assert_eq!(
+            result.cover_url.as_deref(),
+            Some("https://m.media-amazon.com/images/S/compressed.photo.goodreads.com/books/1703329310i/23692271.jpg")
+        );
+        assert_eq!(result.book_format.as_deref(), Some("Paperback"));
+        let desc = result.description.expect("description");
+        assert!(desc.starts_with("From a renowned historian comes a groundbreaking narrative"));
+        assert!(desc.ends_with("Robert Wright, and Sharon Moalem."));
+        assert_eq!(
+            desc.chars().count(),
+            1565,
+            "Book.description length, unaltered — no tags/entities to strip in this fixture"
+        );
+        // All 10 genres from `bookGenres` — the legacy path only ever found 7
+        // (only entries GR renders as clickable anchor tags; sociology,
+        // historical, and evolution are listed in the data but never link out).
+        assert_eq!(
+            result.genres,
+            vec![
+                "non-fiction",
+                "history",
+                "science",
+                "audiobook",
+                "philosophy",
+                "anthropology",
+                "psychology",
+                "sociology",
+                "historical",
+                "evolution",
+            ]
+        );
+        assert_eq!(result.series_name.as_deref(), Some("Homo"));
+        assert_eq!(result.series_position, Some(1.0));
+        // Work.details.publicationTime = 1293868800000ms = 2011-01-01 UTC —
+        // the WORK's original/first-published date (matches legacy's "First
+        // published" semantics), not this specific paperback printing's own
+        // 2015 publicationTime.
+        assert_eq!(result.publish_date.as_deref(), Some("2011-01-01"));
+    }
+
+    #[test]
+    fn detail_next_data_neither_shape_present_is_none() {
+        // A page with NEITHER the new __NEXT_DATA__ blob NOR any legacy
+        // JSON-LD/Formatted/genre-link markers. Layout drift, not truth —
+        // must come back empty, never a fabricated partial result. (This
+        // also exercises the final "both paths failed" warn in
+        // `parse_detail_html`.)
+        let html = "<html><body><p>Some unrelated page content with no recognizable markers.</p></body></html>";
+        assert!(parse_detail_html(html).is_none());
+    }
+
+    #[test]
+    fn detail_next_data_malformed_json_falls_through_to_none() {
+        // The __NEXT_DATA__ script exists (so the primary path is attempted)
+        // but its body isn't valid JSON, and there are no legacy markers
+        // either. Exercises `parse_detail_next_data`'s "not valid JSON" warn
+        // branch; must degrade to None, not panic.
+        let html = r#"<html><body><script id="__NEXT_DATA__" type="application/json">{this is not valid json}</script></body></html>"#;
+        assert!(parse_detail_html(html).is_none());
+    }
+
+    #[test]
+    fn detail_next_data_no_book_entity_falls_through_to_none() {
+        // Valid __NEXT_DATA__ JSON with a real apolloState shape, but zero
+        // `Book:`-prefixed entries and no `getBookByLegacyId` pointer —
+        // simulates GR shipping a page (or a non-book page) where the Apollo
+        // cache never got a Book entity. Exercises `find_apollo_book`'s "no
+        // resolvable Book entity" warn branch; must degrade to None (no
+        // legacy markers present to fall back on).
+        let html = r#"<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"apolloState":{"ROOT_QUERY":{"__typename":"Query"}}}}}</script></body></html>"#;
+        assert!(parse_detail_html(html).is_none());
+    }
+
+    #[test]
+    fn detail_next_data_multiple_legacyid_pointers_abstains() {
+        // Two getBookByLegacyId pointers = two preloaded books; iteration
+        // order must never pick one. Abstain (and here, with no legacy
+        // markers, the whole parse comes back None) — a wrong book is worse
+        // than none.
+        let html = r#"<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"apolloState":{"ROOT_QUERY":{"getBookByLegacyId({\"legacyId\":\"1\"})":{"__ref":"Book:kca://book/1"},"getBookByLegacyId({\"legacyId\":\"2\"})":{"__ref":"Book:kca://book/2"}},"Book:kca://book/1":{"title":"Book One"},"Book:kca://book/2":{"title":"Book Two"}}}}}</script></body></html>"#;
+        assert!(parse_detail_html(html).is_none());
+    }
+
+    #[test]
+    fn detail_next_data_malformed_present_field_drops_alone() {
+        // `details` is PRESENT but the wrong shape (an array). The field must
+        // drop alone — title and the rest of the Book still parse. Pins the
+        // per-field leniency of `lenient_apollo_book` (serde defaults only
+        // cover ABSENT fields).
+        let html = r#"<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"apolloState":{"ROOT_QUERY":{"getBookByLegacyId({\"legacyId\":\"9\"})":{"__ref":"Book:kca://book/9"}},"Book:kca://book/9":{"title":"Resilient Title","details":[1,2,3]}}}}}</script></body></html>"#;
+        let result = parse_detail_html(html).expect("title must survive a malformed details field");
+        assert_eq!(result.title.as_deref(), Some("Resilient Title"));
+        assert!(result.isbn.is_none());
     }
 
     // =========================================================================
