@@ -719,6 +719,11 @@ function SeriesRow({
   // A stub has no Goodreads key yet; its count is the FK-linked library count.
   const isStub = !series.grKey;
   const displayCount = isStub ? series.worksInLibrary : series.bookCount;
+  // This listing already carries the real Goodreads key for any row that has
+  // one (masked to "" only for a genuine unresolved stub, same signal as
+  // isStub above) — always forward it so a series with no DB row yet doesn't
+  // fall back to sending an empty grKey to the monitor door.
+  const knownGrKey = series.grKey || undefined;
 
   const { promote, isPending, flow, cancelFlow } = useSeriesPromote({
     authorId,
@@ -787,21 +792,21 @@ function SeriesRow({
               <span className="text-xs text-zinc-500">Monitor:</span>
               <button
                 type="button"
-                onClick={() => promote({ flags: { monitorEbook: true, monitorAudiobook: false } })}
+                onClick={() => promote({ grKey: knownGrKey, flags: { monitorEbook: true, monitorAudiobook: false } })}
                 className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
               >
                 Ebook
               </button>
               <button
                 type="button"
-                onClick={() => promote({ flags: { monitorEbook: false, monitorAudiobook: true } })}
+                onClick={() => promote({ grKey: knownGrKey, flags: { monitorEbook: false, monitorAudiobook: true } })}
                 className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
               >
                 Audio
               </button>
               <button
                 type="button"
-                onClick={() => promote({ flags: { monitorEbook: true, monitorAudiobook: true } })}
+                onClick={() => promote({ grKey: knownGrKey, flags: { monitorEbook: true, monitorAudiobook: true } })}
                 className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
               >
                 Both

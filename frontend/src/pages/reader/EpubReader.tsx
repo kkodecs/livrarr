@@ -263,8 +263,21 @@ export function EpubReader({ libraryItemId }: Props) {
     if (location === 0) {
       const spine = rendition.book?.spine;
       if (spine) {
-        // Display the first spine section so epub.js resolves a CFI, then advance.
+        // Display the first LINEAR spine section so epub.js resolves a CFI.
+        // A linear="no" head item (cover) accepts display() but next() from
+        // it is a no-op — jumping past it IS the advance, so only chain
+        // next() when the first linear item is also the spine head.
+        const items =
+          (spine as unknown as { items?: Array<{ href?: string; linear?: boolean | string }> })
+            .items ?? [];
+        const firstLinear = items.find(
+          (it) => it.linear !== false && it.linear !== "no",
+        );
         const first = spine.get(0);
+        if (firstLinear?.href && first && firstLinear.href !== first.href) {
+          rendition.display(firstLinear.href);
+          return;
+        }
         if (first) {
           rendition.display(first.href).then(() => rendition.next());
           return;
@@ -675,6 +688,26 @@ export function EpubReader({ libraryItemId }: Props) {
               }
             });
             rendition.book.ready.then(() => {
+              // A spine that opens with non-linear front matter (<itemref
+              // linear="no"> cover) strands epub.js at location 0: next()
+              // from a non-linear section is a no-op, and the built-in
+              // arrows call next() directly. With no saved position, open
+              // at the first LINEAR spine item instead. A saved-progress
+              // CFI landing before or after this wins either way — both
+              // paths go through setLocation and this only replaces 0.
+              const items =
+                (
+                  rendition.book.spine as unknown as {
+                    items?: Array<{ href?: string; linear?: boolean | string }>;
+                  }
+                ).items ?? [];
+              const firstLinear = items.find(
+                (it) => it.linear !== false && it.linear !== "no",
+              );
+              const linearHref = firstLinear?.href;
+              if (linearHref) {
+                setLocation((current) => (current === 0 ? linearHref : current));
+              }
               const key = `livrarr-locations-${libraryItemId}`;
               const stored = localStorage.getItem(key);
               if (stored) {

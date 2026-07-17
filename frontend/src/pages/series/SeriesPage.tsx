@@ -568,6 +568,12 @@ function AuthorSeriesExpanderRow({
   language: string;
   onAdded: () => void;
 }) {
+  // This listing already carries the real Goodreads key for any row that has
+  // one (masked to "" only for a genuine unresolved stub) — always forward it
+  // so a series with no DB row yet doesn't fall back to sending an empty
+  // grKey to the monitor door.
+  const knownGrKey = s.grKey || undefined;
+
   const { promote, isPending, flow, cancelFlow } = useSeriesPromote({
     authorId,
     seriesId: s.id,
@@ -593,7 +599,7 @@ function AuthorSeriesExpanderRow({
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              promote({ flags: { monitorEbook: true, monitorAudiobook: false } });
+              promote({ grKey: knownGrKey, flags: { monitorEbook: true, monitorAudiobook: false } });
             }}
             disabled={isPending}
             className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
@@ -605,7 +611,7 @@ function AuthorSeriesExpanderRow({
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              promote({ flags: { monitorEbook: false, monitorAudiobook: true } });
+              promote({ grKey: knownGrKey, flags: { monitorEbook: false, monitorAudiobook: true } });
             }}
             disabled={isPending}
             className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"
@@ -617,7 +623,7 @@ function AuthorSeriesExpanderRow({
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              promote({ flags: { monitorEbook: true, monitorAudiobook: true } });
+              promote({ grKey: knownGrKey, flags: { monitorEbook: true, monitorAudiobook: true } });
             }}
             disabled={isPending}
             className="rounded border border-border px-2 py-0.5 text-xs text-zinc-300 hover:bg-surface-hover hover:text-brand"

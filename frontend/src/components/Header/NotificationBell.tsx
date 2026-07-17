@@ -69,7 +69,13 @@ export function NotificationBell() {
             {String(d.clientName)} reports that {title ? <strong className="font-semibold text-white">{title}</strong> : <strong className="font-semibold text-white">Grab {String(d.grabId)}</strong>} (grab {String(d.grabId)} in the <a href="/activity/queue" className="text-brand hover:underline">queue</a>) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.
           </div>,
           {
+            // Stable per-notification id: a remounted bell re-issuing this
+            // toast REPLACES the live one instead of stacking a duplicate.
+            id: `pathnotfound-${n.id}`,
             duration: Infinity,
+            // The toast's X is the user's dismissal — persist it, or the
+            // still-unread notification re-toasts on every page load.
+            onDismiss: () => dismiss.mutate(n.id),
             description: (
               <ul className="mt-1.5 space-y-0.5 text-xs list-disc pl-4">
                 <li>
