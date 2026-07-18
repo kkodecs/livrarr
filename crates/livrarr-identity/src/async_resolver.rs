@@ -20,6 +20,23 @@ use livrarr_domain::{IdentityStatus, UserId, Work};
 
 use crate::english_identity_resolver::EnglishIdentityResolver;
 
+/// A captured value for a slot whose works column is already populated is
+/// never held as a pending guess: that slot's identifier is the one identity
+/// and enrichment run on (mirrors `merge_missing_anchors`' monotonic fill),
+/// and offering it for affirmation would invite replacing a settled
+/// identifier with an unverified one.
+fn anchor_slot_occupied(work: &Work, anchor_type: &str) -> bool {
+    let value = match anchor_type {
+        AnchorType::OL_WORK => work.ol_key.as_deref(),
+        AnchorType::GR_WORK => work.gr_key.as_deref(),
+        AnchorType::HC_WORK => work.hc_key.as_deref(),
+        AnchorType::ISBN_13 => work.isbn_13.as_deref(),
+        AnchorType::ASIN => work.asin.as_deref(),
+        _ => None,
+    };
+    value.is_some_and(|v| !v.is_empty())
+}
+
 /// Conditional background LLM identity validation (D-013/Q-001): consulted ONLY
 /// when the deterministic layer left identity ambiguous — i.e. no corroborating
 /// work anchor. A multi-anchor identity needs no LLM check, so no call is made
@@ -175,8 +192,16 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
                     (AnchorType::ASIN, identity.asin.as_deref()),
                 ] {
                     if let Some(v) = value {
-                        repo.record_pending_anchor(work.id, AnchorType::new(anchor_type), v)
-                            .await?;
+                        if anchor_slot_occupied(work, anchor_type) {
+                            tracing::debug!(
+                                work_id = work.id,
+                                anchor_type,
+                                "pending guess dropped: slot already settled"
+                            );
+                        } else {
+                            repo.record_pending_anchor(work.id, AnchorType::new(anchor_type), v)
+                                .await?;
+                        }
                     }
                 }
             }
@@ -201,8 +226,16 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
                     (AnchorType::ASIN, captured.asin.as_deref()),
                 ] {
                     if let Some(v) = value {
-                        repo.record_pending_anchor(work.id, AnchorType::new(anchor_type), v)
-                            .await?;
+                        if anchor_slot_occupied(work, anchor_type) {
+                            tracing::debug!(
+                                work_id = work.id,
+                                anchor_type,
+                                "pending guess dropped: slot already settled"
+                            );
+                        } else {
+                            repo.record_pending_anchor(work.id, AnchorType::new(anchor_type), v)
+                                .await?;
+                        }
                     }
                 }
             }

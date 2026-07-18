@@ -928,6 +928,34 @@ pub async fn author_search<S: HasAuthorMonitorWorkflow>(
     axum::http::StatusCode::ACCEPTED
 }
 
+/// Anchor types already settled for this work: a confirmed ledger row, or a
+/// populated denormalized works column (pre-ledger works carry only the
+/// column). A pending guess for a settled slot is never offered and never
+/// affirmable — confirming it would silently replace the identifier the
+/// work's identity and enrichment already run on.
+fn settled_anchor_types(
+    work: &livrarr_domain::Work,
+    anchors: &[livrarr_domain::identity::WorkIdentityAnchor],
+) -> std::collections::HashSet<String> {
+    let mut settled: std::collections::HashSet<String> = anchors
+        .iter()
+        .filter(|a| a.confidence == AnchorConfidence::Confirmed)
+        .map(|a| a.anchor_type.as_str().to_string())
+        .collect();
+    for (anchor_type, value) in [
+        (AnchorType::OL_WORK, work.ol_key.as_deref()),
+        (AnchorType::GR_WORK, work.gr_key.as_deref()),
+        (AnchorType::HC_WORK, work.hc_key.as_deref()),
+        (AnchorType::ISBN_13, work.isbn_13.as_deref()),
+        (AnchorType::ASIN, work.asin.as_deref()),
+    ] {
+        if value.is_some_and(|v| !v.is_empty()) {
+            settled.insert(anchor_type.to_string());
+        }
+    }
+    settled
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingAnchorDto {
@@ -957,7 +985,7 @@ pub async fn list_pending_anchors<S: HasWorkIdentityRepository + HasWorkService>
     // R-3: the repo methods are work-id-only (no user scope), so verify ownership
     // via the user-scoped service first — another user's work must read as 404,
     // and a real service error must surface as 500, not be masked as not-found.
-    state
+    let work = state
         .work_service()
         .get(ctx.user.id, work_id)
         .await
@@ -972,9 +1000,14 @@ pub async fn list_pending_anchors<S: HasWorkIdentityRepository + HasWorkService>
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    let settled = settled_anchor_types(&work, &anchors);
     let dtos = anchors
         .into_iter()
-        .filter(|a| a.confidence == AnchorConfidence::Pending && !a.anchor_value.is_empty())
+        .filter(|a| {
+            a.confidence == AnchorConfidence::Pending
+                && !a.anchor_value.is_empty()
+                && !settled.contains(a.anchor_type.as_str())
+        })
         .map(|a| PendingAnchorDto {
             anchor_type: a.anchor_type.as_str().to_string(),
             value: a.anchor_value,
@@ -997,7 +1030,7 @@ pub async fn affirm_pending_anchor<S: HasWorkIdentityRepository + HasWorkService
 
     // R-3: confirm_anchor mutates works.* with no user scope — verify ownership
     // before any mutation so a cross-user affirm cannot touch another's work.
-    state
+    let work = state
         .work_service()
         .get(user_id, work_id)
         .await
@@ -1014,6 +1047,16 @@ pub async fn affirm_pending_anchor<S: HasWorkIdentityRepository + HasWorkService
         .list_anchors(work_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // Backstop to the settled-slot filter in `list_pending_anchors`: a stale or
+    // hand-crafted affirm for a settled slot must not replace the identifier in
+    // force (confirm_anchor overwrites works.* unconditionally).
+    if settled_anchor_types(&work, &anchors).contains(anchor_type.as_str()) {
+        return Err(ApiError::Conflict {
+            reason: "an identifier of this type is already confirmed for this work".into(),
+        });
+    }
+
     let value = anchors
         .into_iter()
         .find(|a| a.confidence == AnchorConfidence::Pending && a.anchor_type == anchor_type)

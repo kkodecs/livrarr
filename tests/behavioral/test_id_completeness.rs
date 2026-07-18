@@ -1388,6 +1388,63 @@ async fn test_id_completeness_pending_anchor_handlers_affirm_list_and_cross_user
     assert_eq!(after_cross.gr_key, None);
 }
 
+#[tokio::test]
+async fn test_id_completeness_settled_slot_guesses_are_hidden_and_unaffirmable() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    // The ol slot is settled both ways at once: populated works column AND a
+    // confirmed ledger row (the two signals the settled-slot rule reads).
+    let work = seed_work(
+        &db,
+        user_id,
+        "Settled Slot",
+        IdentityStatus::Confirmed,
+        EnrichmentStatus::Enriched,
+        SeedAnchors {
+            ol_key: Some("OL1W"),
+            ..SeedAnchors::default()
+        },
+    )
+    .await;
+    confirm_anchor(&db, work.id, AnchorType::OL_WORK, "OL1W").await;
+
+    // A competing guess for the settled slot + a guess for a genuinely open slot.
+    db.record_pending_anchor(work.id, AnchorType::new(AnchorType::OL_WORK), "OL999W")
+        .await
+        .expect("record competing OL guess");
+    db.record_pending_anchor(work.id, AnchorType::new(AnchorType::ASIN), "B0SETTLED1")
+        .await
+        .expect("record open-slot ASIN guess");
+
+    let state = test_state(db.clone());
+
+    let list = list_pending_anchors(
+        State(state.clone()),
+        auth_context(&db, user_id).await,
+        Path(work.id),
+    )
+    .await
+    .expect("list pending anchors")
+    .0;
+    assert_eq!(list.len(), 1, "settled-slot OL guess must be hidden");
+    assert_eq!(list[0].anchor_type, AnchorType::ASIN);
+
+    let err = affirm_pending_anchor(
+        State(state),
+        auth_context(&db, user_id).await,
+        Path((work.id, AnchorType::OL_WORK.to_string())),
+    )
+    .await
+    .expect_err("settled-slot affirm must be refused");
+    assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+    let after = db.get_work(user_id, work.id).await.expect("read work");
+    assert_eq!(
+        after.ol_key.as_deref(),
+        Some("OL1W"),
+        "the confirmed identifier must be untouched"
+    );
+}
+
 struct JsonLike<T>(T);
 
 #[tokio::test]

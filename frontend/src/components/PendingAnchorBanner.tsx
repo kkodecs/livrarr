@@ -18,6 +18,16 @@ function sourceLabel(anchorType: string): string {
   return SOURCE_LABELS[anchorType] ?? anchorType;
 }
 
+// Public page for a pending anchor's id, so a guess can be eyeballed before
+// confirming. Hardcover is absent: its key is a numeric API id with no public
+// URL, so that id renders as plain text.
+const SOURCE_URLS: Record<string, (value: string) => string> = {
+  gr_work: (v) => `https://www.goodreads.com/book/show/${encodeURIComponent(v)}`,
+  ol_work: (v) => `https://openlibrary.org/works/${encodeURIComponent(v)}`,
+  isbn_13: (v) => `https://isbnsearch.org/isbn/${encodeURIComponent(v)}`,
+  asin: (v) => `https://www.amazon.com/dp/${encodeURIComponent(v)}`,
+};
+
 /**
  * Inline, non-blocking banner listing fuzzy-matched identifier guesses for a
  * work. Each guess can be confirmed with one click, which promotes it to a real
@@ -45,7 +55,10 @@ export function PendingAnchorBanner({ workId }: { workId: number }) {
     onError: () => toast.error("Could not confirm the match"),
   });
 
-  if (!pending || pending.length === 0) return null;
+  // hc_work is omitted: Hardcover's key is an internal numeric id with no
+  // public page, so a guess for it cannot be checked before confirming.
+  const visible = (pending ?? []).filter((p) => p.anchorType !== "hc_work");
+  if (visible.length === 0) return null;
 
   return (
     <div className="mt-4 rounded-lg border border-border bg-zinc-900/60 px-4 py-3">
@@ -60,7 +73,7 @@ export function PendingAnchorBanner({ workId }: { workId: number }) {
         Confirm one to use it for richer metadata and covers.
       </p>
       <ul className="flex flex-col gap-0.5">
-        {pending.map((p: PendingAnchorDTO) => (
+        {visible.map((p: PendingAnchorDTO) => (
           <li
             key={`${p.anchorType}:${p.value}`}
             className="flex items-center gap-3 rounded px-2 py-1.5 hover:bg-zinc-800/50"
@@ -68,7 +81,18 @@ export function PendingAnchorBanner({ workId }: { workId: number }) {
             <span className="min-w-[7rem] rounded bg-zinc-800 px-2 py-0.5 text-center text-xs font-medium text-zinc-200">
               {sourceLabel(p.anchorType)}
             </span>
-            <span className="font-mono text-xs text-zinc-500">{p.value}</span>
+            {SOURCE_URLS[p.anchorType] ? (
+              <a
+                href={SOURCE_URLS[p.anchorType](p.value)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-xs text-zinc-500 underline decoration-zinc-700 underline-offset-2 hover:text-zinc-300"
+              >
+                {p.value}
+              </a>
+            ) : (
+              <span className="font-mono text-xs text-zinc-500">{p.value}</span>
+            )}
             <span className="flex-1" />
             <button
               onClick={() => affirm.mutate(p.anchorType)}
