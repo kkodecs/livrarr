@@ -1,4 +1,4 @@
-## [0.1.0-alpha6] - 2026-07-16
+## [0.1.0-alpha6] - 2026-07-18
 
 ### 🚀 Features
 
@@ -99,6 +99,10 @@
 - Import completeness — count all on-disk files, not just recognized media
 - SABnzbd path mapping — strip trailing slashes before joining
 - Openlibrary search — log a dropped tier-3 result instead of failing silently
+- *(covers)* Failed add-time downloads no longer create permanent user-locks
+- *(goodreads)* ISBN-first search tier + detail parser for the Next.js page shape
+- *(ui)* Series monitor keys, non-linear EPUB covers, notification toast dismissal
+- *(identity)* Make the possible-matches surface trustworthy
 
 ### 💼 Other
 
@@ -255,6 +259,8 @@ fix(hooks): use absolute path for pii-check PreToolUse hook
 - Record #36 as incomplete (pinned, not implemented) — caught at plan audit
 - Insight 73 — subtitle-trust-gaps findings
 - Move stray design/spec/plan artifacts out of repo root into docs/
+- *(changelog)* Regenerate for 0.1.0-alpha6, stop dropping non-conventional commits
+- *(wiki)* Insights 63/73 amendments + insight 74 (session findings 2026-07-17)
 
 ### ⚡ Performance
 
