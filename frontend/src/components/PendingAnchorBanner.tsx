@@ -73,7 +73,9 @@ export function PendingAnchorBanner({ workId }: { workId: number }) {
         Confirm one to use it for richer metadata and covers.
       </p>
       <ul className="flex flex-col gap-0.5">
-        {visible.map((p: PendingAnchorDTO) => (
+        {visible.map((p: PendingAnchorDTO) => {
+          const sourceUrl = SOURCE_URLS[p.anchorType];
+          return (
           <li
             key={`${p.anchorType}:${p.value}`}
             className="flex items-center gap-3 rounded px-2 py-1.5 hover:bg-zinc-800/50"
@@ -81,9 +83,9 @@ export function PendingAnchorBanner({ workId }: { workId: number }) {
             <span className="min-w-[7rem] rounded bg-zinc-800 px-2 py-0.5 text-center text-xs font-medium text-zinc-200">
               {sourceLabel(p.anchorType)}
             </span>
-            {SOURCE_URLS[p.anchorType] ? (
+            {sourceUrl ? (
               <a
-                href={SOURCE_URLS[p.anchorType](p.value)}
+                href={sourceUrl(p.value)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-mono text-xs text-zinc-500 underline decoration-zinc-700 underline-offset-2 hover:text-zinc-300"
@@ -102,7 +104,8 @@ export function PendingAnchorBanner({ workId }: { workId: number }) {
               Confirm
             </button>
           </li>
-        ))}
+          );
+        })}
       </ul>
     </div>
   );
