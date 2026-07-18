@@ -1,10 +1,5 @@
 ## [0.1.0-alpha6] - 2026-07-18
 
-### 🐛 Bug Fixes
-
-- *(ui)* Narrow the possible-match link lookup for the strict tsc gate
-## [0.1.0-alpha6] - 2026-07-18
-
 ### 🚀 Features
 
 - *(work-creation-consistency)* Identity federation + Layers 0-2 + Stage-5 review fixes
@@ -108,6 +103,7 @@
 - *(goodreads)* ISBN-first search tier + detail parser for the Next.js page shape
 - *(ui)* Series monitor keys, non-linear EPUB covers, notification toast dismissal
 - *(identity)* Make the possible-matches surface trustworthy
+- *(ui)* Narrow the possible-match link lookup for the strict tsc gate
 
 ### 💼 Other
 
@@ -267,6 +263,7 @@ fix(hooks): use absolute path for pii-check PreToolUse hook
 - *(changelog)* Regenerate for 0.1.0-alpha6, stop dropping non-conventional commits
 - *(wiki)* Insights 63/73 amendments + insight 74 (session findings 2026-07-17)
 - *(changelog)* Fold the post-bump fix set into 0.1.0-alpha6
+- *(changelog)* Fold the tsc-gate fix into 0.1.0-alpha6
 
 ### ⚡ Performance
 
