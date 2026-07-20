@@ -1,5 +1,7 @@
 use chrono::Utc;
 use livrarr_db::sqlite::SqliteDb;
+use livrarr_db::{record_history, WorkDb};
+use livrarr_domain::history_events;
 use livrarr_domain::identity::*;
 use livrarr_domain::services::{ConflictError, IdentityConflictService, WorkIdentityRepository};
 use livrarr_domain::UserId;
@@ -75,7 +77,39 @@ impl IdentityConflictService for LiveIdentityConflictService {
                     ConflictError::InvalidPrimaryAnchor
                 }
                 livrarr_db::ConflictApplyError::Db(db_err) => ConflictError::Db(db_err.to_string()),
-            })
+            })?;
+
+        let work_title = self
+            .db
+            .get_work(user_id, conflict.existing_work_id)
+            .await
+            .map(|w| w.title)
+            .unwrap_or_default();
+        let action_label = match action {
+            ConflictResolutionAction::KeepExisting => "keep-existing",
+            ConflictResolutionAction::AcceptSeparate => "accept-separate",
+            ConflictResolutionAction::ReplaceAnchor => "replace-anchor",
+            ConflictResolutionAction::Merge => "merge",
+        };
+        let identity = format!(
+            "{} — {}{}",
+            conflict.incoming.title,
+            conflict.incoming.author_name,
+            first_anchor_suffix(&conflict.incoming)
+        );
+        record_history(
+            &self.db,
+            user_id,
+            history_events::identity_resolved(
+                conflict.existing_work_id,
+                &work_title,
+                action_label,
+                identity,
+            ),
+        )
+        .await;
+
+        Ok(())
     }
 
     async fn dismiss(&self, id: i64, user_id: UserId) -> Result<(), ConflictError> {
@@ -105,5 +139,23 @@ impl IdentityConflictService for LiveIdentityConflictService {
                     ConflictError::Db("unexpected anchor validation error in dismiss".to_string())
                 }
             })
+    }
+}
+
+/// The first present anchor on an incoming conflict payload, formatted as
+/// " (label value)" for appending to an identity summary — empty when the
+/// payload carries no anchor.
+fn first_anchor_suffix(incoming: &IncomingConflictPayload) -> String {
+    let anchor = incoming
+        .ol_key
+        .as_deref()
+        .map(|v| ("ol_key", v))
+        .or_else(|| incoming.gr_key.as_deref().map(|v| ("gr_key", v)))
+        .or_else(|| incoming.hc_key.as_deref().map(|v| ("hc_key", v)))
+        .or_else(|| incoming.isbn_13.as_deref().map(|v| ("isbn_13", v)))
+        .or_else(|| incoming.asin.as_deref().map(|v| ("asin", v)));
+    match anchor {
+        Some((label, value)) => format!(" ({label} {value})"),
+        None => String::new(),
     }
 }

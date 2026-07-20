@@ -311,6 +311,7 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
             audiobook_cover_resolution: None,
             identity_not_found: false,
             changed: true,
+            attempted: true,
         })
     }
 

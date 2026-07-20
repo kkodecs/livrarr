@@ -1,5 +1,6 @@
 mod enrichment_types;
 mod entities;
+pub mod history_events;
 pub mod identity;
 pub mod identity_matching;
 mod infra_config;

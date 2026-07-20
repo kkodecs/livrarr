@@ -411,3 +411,11 @@ PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
 - New committed doc: `design-provider-picker-conformance.md` (both-family design review PASS r10; IMPLEMENTED header). Per-round dispositions under build/reviews/quality-waves/ (local, untracked by convention).
 - Removed a stale SFC TDD canary (`tests/behavioral/test_sfc_audible_provider.rs`) that referenced the deleted `score_provider_candidates`; the rest of that stalled search-fallback-chain file is left for the separate orphan-test triage (insight 65 backlog).
 - Codex code-review r1 caught a PRE-EXISTING OpenLibrary wrong-key bug (a compacted candidate index used against the unfiltered `docs` array) — folded (original-index `kept` mapping, mirrors HC/GR); r2 both families PASS.
+
+## 2026-07-19 — work-history architecture gate closed (spine amended to 17; insight 48 corrected)
+
+- docs/canonical-model.yaml: HistoryEvent added to the entity spine (17th entity) + amendments row — work-history architecture review r1, both families independently flagged the omission; altitude precedent PlaybackProgress/Bookmark.
+- insights.md: corrected insight 48 — canonical model path is `docs/canonical-model.yaml` (not `architecture/`; moved 2026-06-29) and the spine is now 17 concepts.
+- Ground-truth found during review folds (recorded in ir-v1-work-history.yaml + contract, spec ST-006 left untouched per closed-spec discipline): `retag_library_items` has THREE production callers — import_service.rs:111 (import-time), :284 (post-enrichment), :522 (reorganize_work_files, r2 Codex find; absent from ST-006's ":111/284" cite). Also: `supersede_anchor` has zero production callers; `HistoryServiceImpl` is the struct, `LiveHistoryService` its SqliteDb alias (state.rs:94).
+- Architecture artifacts live at repo root: ir-v1-work-history.yaml + contract-work-history.yaml (r3 both-family PASS, zero findings; verify.py architecture + review both PASS on file).
+- 2026-07-19: insights.md +76 (work_update echo / NoChange has no producers / content_changed is the truthful changed signal) — work-history Stage 5 session.

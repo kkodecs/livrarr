@@ -141,6 +141,7 @@ fn readarr_candidate_with_foreign_book_id() -> WorkCandidate {
         provenance_setter: Some(ProvenanceSetter::Import),
         import_id: Some("readarr-import".to_string()),
         cover_manual: false,
+        add_source: livrarr_domain::history_events::WorkAddSource::Search,
     }
 }
 

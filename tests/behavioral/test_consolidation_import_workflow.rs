@@ -14,7 +14,7 @@ use livrarr_db::{
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use livrarr_handlers::context::{
-    HasFileService, HasImportService, HasRootFolderService, HasWorkService,
+    HasFileService, HasHistoryService, HasImportService, HasRootFolderService, HasWorkService,
 };
 use livrarr_handlers::root_folder::scan;
 use livrarr_handlers::AuthContext;
@@ -1716,12 +1716,32 @@ impl ImportService for StubImportServiceForScan {
     }
 }
 
+/// History recording is not under test in this suite — the wh_* suites pin the
+/// scan road's events against a real DB; this double only satisfies the bound.
+struct InertHistoryServiceForScan;
+
+impl HistoryService for InertHistoryServiceForScan {
+    async fn list_paginated(
+        &self,
+        _user_id: UserId,
+        _filter: HistoryFilter,
+        _page: u32,
+        _page_size: u32,
+    ) -> Result<(Vec<HistoryEvent>, i64), HistoryServiceError> {
+        Ok((vec![], 0))
+    }
+
+    async fn record(&self, _user_id: UserId, _draft: livrarr_domain::history_events::HistoryDraft) {
+    }
+}
+
 #[derive(Clone)]
 struct ScanTestState {
     root_folder: std::sync::Arc<StubRootFolderService>,
     work: std::sync::Arc<StubWorkService>,
     file: std::sync::Arc<StubFileService>,
     import: std::sync::Arc<StubImportServiceForScan>,
+    history: std::sync::Arc<InertHistoryServiceForScan>,
 }
 
 impl HasRootFolderService for ScanTestState {
@@ -1740,6 +1760,12 @@ impl HasFileService for ScanTestState {
     type FileSvc = StubFileService;
     fn file_service(&self) -> &Self::FileSvc {
         &self.file
+    }
+}
+impl HasHistoryService for ScanTestState {
+    type HistorySvc = InertHistoryServiceForScan;
+    fn history_service(&self) -> &Self::HistorySvc {
+        &self.history
     }
 }
 impl HasImportService for ScanTestState {
@@ -1796,6 +1822,7 @@ async fn scan_adopts_new_file_via_import_service() {
         }),
         file: std::sync::Arc::new(StubFileService { items: vec![] }),
         import: std::sync::Arc::new(StubImportServiceForScan { workflow }),
+        history: std::sync::Arc::new(InertHistoryServiceForScan),
     };
 
     let result = scan(
@@ -1929,6 +1956,7 @@ async fn scan_path_collision_lands_in_scan_errors_and_walk_continues() {
         }),
         file: std::sync::Arc::new(StubFileService { items: vec![] }),
         import: std::sync::Arc::new(StubImportServiceForScan { workflow }),
+        history: std::sync::Arc::new(InertHistoryServiceForScan),
     };
 
     let result = scan(
@@ -2092,6 +2120,7 @@ async fn scan_foreign_work_item_in_file_list_still_surfaces_collision() {
             items: vec![owner_item],
         }),
         import: std::sync::Arc::new(StubImportServiceForScan { workflow }),
+        history: std::sync::Arc::new(InertHistoryServiceForScan),
     };
 
     let result = scan(

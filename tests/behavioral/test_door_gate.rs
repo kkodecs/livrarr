@@ -58,9 +58,9 @@ use livrarr_domain::{
     UserRole, Work, WorkId,
 };
 use livrarr_handlers::context::{
-    HasAppConfigService, HasAuthorService, HasEnrichmentWorkflow, HasIdentityResolver,
-    HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkIdentityRepository,
-    HasWorkService,
+    HasAppConfigService, HasAuthorService, HasEnrichmentWorkflow, HasHistoryService,
+    HasIdentityResolver, HasNotificationService, HasSeriesQueryService, HasTagService,
+    HasWorkIdentityRepository, HasWorkService,
 };
 use livrarr_handlers::work::RefreshAllParams;
 use livrarr_handlers::work::{affirm_pending_anchor, refresh, refresh_all, retry_all_incomplete};
@@ -1680,6 +1680,26 @@ impl WorkIdentityRepository for RecordingIdentityRepo {
     }
 }
 
+/// History recording is not under test here — the wh_* suites pin the affirm
+/// door's event against a real DB; this double only satisfies the bound.
+#[derive(Clone)]
+struct InertHistoryService;
+
+impl HistoryService for InertHistoryService {
+    async fn list_paginated(
+        &self,
+        _user_id: UserId,
+        _filter: livrarr_domain::HistoryFilter,
+        _page: u32,
+        _page_size: u32,
+    ) -> Result<(Vec<livrarr_domain::HistoryEvent>, i64), HistoryServiceError> {
+        Ok((vec![], 0))
+    }
+
+    async fn record(&self, _user_id: UserId, _draft: livrarr_domain::history_events::HistoryDraft) {
+    }
+}
+
 #[derive(Clone)]
 struct HandlerState {
     work: RecordingWorkService,
@@ -1691,6 +1711,7 @@ struct HandlerState {
     config: InertConfigService,
     notifications: InertNotificationService,
     tags: InertTagService,
+    history: InertHistoryService,
 }
 
 impl HandlerState {
@@ -1705,6 +1726,7 @@ impl HandlerState {
             config: InertConfigService,
             notifications: InertNotificationService,
             tags: InertTagService,
+            history: InertHistoryService,
         }
     }
 }
@@ -1761,6 +1783,12 @@ impl HasTagService for HandlerState {
     type TagSvc = InertTagService;
     fn tag_service(&self) -> &Self::TagSvc {
         &self.tags
+    }
+}
+impl HasHistoryService for HandlerState {
+    type HistorySvc = InertHistoryService;
+    fn history_service(&self) -> &Self::HistorySvc {
+        &self.history
     }
 }
 

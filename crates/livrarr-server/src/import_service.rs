@@ -1085,6 +1085,7 @@ mod manual_import_door_tests {
         let tag_service = Arc::new(crate::tag_service::LiveTagService::new(
             import_io.clone(),
             data_dir.clone(),
+            db.clone(),
         ));
         let settings_service = Arc::new(LiveSettingsService::new(db.clone()));
         let http_client_safe = livrarr_http::HttpClientBuilder::default().build().unwrap();

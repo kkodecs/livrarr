@@ -2,8 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use livrarr_db::{
-    CreateGrabDbRequest, CreateHistoryEventDbRequest, DownloadClientDb, GrabDb, HistoryDb,
-    IndexerDb, WorkDb,
+    record_history, CreateGrabDbRequest, DownloadClientDb, GrabDb, HistoryDb, IndexerDb, WorkDb,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::*;
@@ -458,20 +457,26 @@ where
             .map_err(ReleaseServiceError::Db)?;
 
         // Create history event
-        let _ = self
+        let work_title = self
             .db
-            .create_history_event(CreateHistoryEventDbRequest {
-                user_id,
-                work_id: Some(req.work_id),
-                event_type: EventType::Grabbed,
-                data: serde_json::json!({
-                    "title": req.title,
-                    "indexer": req.indexer,
-                    "guid": req.guid,
-                    "download_client_id": client.id,
-                }),
-            })
-            .await;
+            .get_work(user_id, req.work_id)
+            .await
+            .map(|w| w.title)
+            .unwrap_or_default();
+        record_history(
+            &self.db,
+            user_id,
+            history_events::grabbed(
+                req.work_id,
+                &work_title,
+                None,
+                &req.title,
+                &req.indexer,
+                &req.guid,
+                client.id,
+            ),
+        )
+        .await;
 
         Ok(grab)
     }

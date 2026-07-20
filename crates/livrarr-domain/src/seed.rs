@@ -9,6 +9,7 @@
 //! resolved language into the identity payload the candidate carries, so the
 //! seed fields and the identity harvest can never disagree.
 
+use crate::history_events::WorkAddSource;
 use crate::identity::{CandidateId, IdentityState, WorkCandidate, WorkSeed, WorkSeedFields};
 use crate::services::SourceProviderData;
 use crate::ProvenanceSetter;
@@ -108,6 +109,7 @@ pub fn seed_add_box(
     WorkCandidate {
         fields,
         identity,
+        add_source: WorkAddSource::Search,
         candidate_id,
         source_provider_data: None,
         file_path: None,
@@ -132,6 +134,7 @@ pub fn seed_manual_import(
     WorkCandidate {
         fields,
         identity,
+        add_source: WorkAddSource::FileImport,
         candidate_id,
         source_provider_data: None,
         file_path: None,
@@ -155,6 +158,7 @@ pub fn seed_list_import(
     WorkCandidate {
         fields,
         identity,
+        add_source: WorkAddSource::ListImport,
         candidate_id,
         source_provider_data: None,
         file_path: None,
@@ -175,6 +179,7 @@ pub fn seed_author_monitor(input: SeedInput, identity: IdentityState) -> WorkCan
     WorkCandidate {
         fields,
         identity,
+        add_source: WorkAddSource::AuthorMonitor,
         candidate_id: None,
         source_provider_data: None,
         file_path: None,
@@ -201,6 +206,7 @@ pub fn seed_series_monitor(
     WorkCandidate {
         fields,
         identity,
+        add_source: WorkAddSource::SeriesMonitor,
         candidate_id: None,
         source_provider_data: None,
         file_path: None,
@@ -227,6 +233,7 @@ pub fn seed_readarr_import(
     WorkCandidate {
         fields,
         identity,
+        add_source: WorkAddSource::Readarr,
         candidate_id: None,
         source_provider_data: Some(source_provider_data),
         file_path: None,

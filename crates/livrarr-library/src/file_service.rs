@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use livrarr_db::{ConfigDb, LibraryItemDb, PlaybackProgressDb, RootFolderDb};
+use livrarr_db::{
+    record_history, ConfigDb, HistoryDb, LibraryItemDb, PlaybackProgressDb, RootFolderDb, WorkDb,
+};
+use livrarr_domain::history_events;
 use livrarr_domain::services::{
     EmailPayload, FileService, FileServiceError, ItemProgress, ProgressKind,
 };
@@ -28,7 +31,15 @@ impl<D> FileServiceImpl<D> {
 
 impl<D> FileService for FileServiceImpl<D>
 where
-    D: LibraryItemDb + RootFolderDb + ConfigDb + PlaybackProgressDb + Send + Sync + 'static,
+    D: LibraryItemDb
+        + RootFolderDb
+        + ConfigDb
+        + PlaybackProgressDb
+        + WorkDb
+        + HistoryDb
+        + Send
+        + Sync
+        + 'static,
 {
     async fn list(&self, user_id: UserId) -> Result<Vec<LibraryItem>, FileServiceError> {
         self.db
@@ -57,10 +68,29 @@ where
     }
 
     async fn delete(&self, user_id: UserId, item_id: i64) -> Result<(), FileServiceError> {
-        self.db
+        let item = self
+            .db
             .delete_library_item(user_id, item_id)
             .await
             .map_err(map_db_err)?;
+        let work_title = self
+            .db
+            .get_work(user_id, item.work_id)
+            .await
+            .map(|w| w.title)
+            .unwrap_or_default();
+        record_history(
+            &self.db,
+            user_id,
+            history_events::file_deleted(
+                item.work_id,
+                &work_title,
+                &item.path,
+                item.media_type.as_str(),
+                false,
+            ),
+        )
+        .await;
         Ok(())
     }
 

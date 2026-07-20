@@ -50,6 +50,8 @@ entities:
   # Acquisition infrastructure (admin-configured, trusted)
   - { name: DownloadClient, kind: struct, module: livrarr-domain, description: "an admin-configured download engine (qBittorrent / SABnzbd / Transmission); trusted infrastructure" }
   - { name: Indexer, kind: struct, module: livrarr-domain, description: "an admin-configured Torznab/Newznab source (Prowlarr optional); trusted infrastructure" }
+  # Audit trail (work-history, 2026-07-18)
+  - { name: HistoryEvent, kind: struct, module: livrarr-domain, description: "the persisted, user-visible record of a lifecycle moment (append-only; survives work deletion via ON DELETE SET NULL; observer, never actor — writing one never fails the operation it records)" }
 
 # Legal dependency edges (the seams). Each crate may depend ONLY on its listed targets.
 # Authored INTENT from the specs — not a Cargo.toml transcription.
@@ -121,3 +123,4 @@ amendments:
   - { date: 2026-06-10, change: "livrarr-library seam authored as intent (may depend on livrarr-materialize, no livrarr-tagwrite edge) while live code still depends on tagwrite directly", reason: "one save home (metadata-refactor REQ-012, metadata-modularization REQ-003); the live edge is conformance backlog (decision S1)" }
   - { date: 2026-06-11, change: "Release conformed — ReleaseSearchResult relocated to livrarr-domain as Release (services/release.rs, Sprint B REQ-004); deliberate-red budget back to 0 of 2", reason: "conformance backlog #141 delivered by metadata-correctness; PO approved closing the deviation (5c walkthrough, 2026-06-11)" }
   - { date: 2026-07-05, change: "S1 conformed — livrarr-library no longer depends on livrarr-tagwrite (Cargo.toml: domain + db only); tag-write road R10 CLEAN since 2026-07-04, write_tags reachable only via TagService/materialize", reason: "one save home (decision S1) delivered by the R6/R7 import consolidation; #143 closed. Optional TagService/materialize function merge deferred as behavior-preserving cleanup, not a conformance requirement" }
+  - { date: 2026-07-18, change: "HistoryEvent added to the spine (17th entity) — the persisted per-work audit record (pub struct in livrarr-domain entities.rs; pre-existing type, newly recognized as spine-level)", reason: "work-history architecture review round 1: both families independently flagged the omission (google R-1, openai R-2). It is persisted, user-visible on two surfaces, carries its own cross-feature invariants (append-only, survives work deletion, observer-never-actor), and sits at the same altitude as the consumption records already on the spine (PlaybackProgress, Bookmark). Every future feature's lifecycle moments conform to it." }

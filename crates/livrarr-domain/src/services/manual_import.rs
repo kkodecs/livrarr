@@ -49,12 +49,4 @@ pub trait ManualImportService: Send + Sync {
         media_type: MediaType,
         file_size: i64,
     ) -> Result<LibraryItem, ManualImportServiceError>;
-
-    async fn create_history_event(
-        &self,
-        user_id: UserId,
-        work_id: Option<WorkId>,
-        event_type: crate::EventType,
-        data: serde_json::Value,
-    ) -> Result<(), ManualImportServiceError>;
 }

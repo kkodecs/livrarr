@@ -100,6 +100,7 @@ async fn main() {
     let tag_service_arc = Arc::new(livrarr_server::tag_service::LiveTagService::new(
         import_io_arc.clone(),
         data_dir_arc.clone(),
+        svc_db.clone(),
     ));
     let import_svc_arc = Arc::new(livrarr_server::import_service::LiveImportService::new(
         import_io_arc.clone(),
@@ -973,7 +974,7 @@ async fn bind_listener(config: &AppConfig) -> (TcpListener, String) {
 /// Run the one-shot startup passes, in order: chapter backfill, the cover
 /// startup sequence (itself strictly ordered — layout migration, then gate
 /// recovery, then provenance backfill; see `livrarr_metadata::cover_startup`),
-/// then series backfill.
+/// then series backfill, then history backfill.
 async fn run_startup_passes(
     job_runner: &livrarr_server::jobs::JobRunner,
     svc_db: &livrarr_db::sqlite::SqliteDb,
@@ -1007,6 +1008,13 @@ async fn run_startup_passes(
             "series_backfill",
             svc_db.clone(),
             livrarr_server::jobs::series_backfill::run_series_backfill(svc_db.clone()),
+        )
+        .await;
+    job_runner
+        .spawn_startup_pass(
+            "history_backfill",
+            svc_db.clone(),
+            livrarr_server::jobs::history_backfill::run_history_backfill(svc_db.clone()),
         )
         .await;
 }

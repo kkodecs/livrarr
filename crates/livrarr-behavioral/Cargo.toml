@@ -529,3 +529,51 @@ name = "test_author_dedup"
 path = "../../tests/behavioral/test_author_dedup.rs"
 
 # --- End orphan-test cleanup 2026-07-11 ---
+
+# --- work-history RED suite (Code stage step 4a) ---
+
+[[test]]
+name = "test_wh_payloads"
+path = "../../tests/behavioral/test_wh_payloads.rs"
+
+[[test]]
+name = "test_wh_birth"
+path = "../../tests/behavioral/test_wh_birth.rs"
+
+[[test]]
+name = "test_wh_metadata_events"
+path = "../../tests/behavioral/test_wh_metadata_events.rs"
+
+[[test]]
+name = "test_wh_import_events"
+path = "../../tests/behavioral/test_wh_import_events.rs"
+
+[[test]]
+name = "test_wh_tags"
+path = "../../tests/behavioral/test_wh_tags.rs"
+
+[[test]]
+name = "test_wh_deletion"
+path = "../../tests/behavioral/test_wh_deletion.rs"
+
+[[test]]
+name = "test_wh_merge"
+path = "../../tests/behavioral/test_wh_merge.rs"
+
+[[test]]
+name = "test_wh_identity_events"
+path = "../../tests/behavioral/test_wh_identity_events.rs"
+
+[[test]]
+name = "test_wh_observer"
+path = "../../tests/behavioral/test_wh_observer.rs"
+
+[[test]]
+name = "test_wh_robust_reads"
+path = "../../tests/behavioral/test_wh_robust_reads.rs"
+
+[[test]]
+name = "test_wh_backfill"
+path = "../../tests/behavioral/test_wh_backfill.rs"
+
+# --- End work-history RED suite ---

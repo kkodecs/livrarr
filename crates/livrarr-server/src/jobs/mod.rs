@@ -4,6 +4,7 @@
 
 pub mod chapter_backfill;
 pub mod cover_startup;
+pub mod history_backfill;
 pub mod series_backfill;
 
 use std::sync::Arc;

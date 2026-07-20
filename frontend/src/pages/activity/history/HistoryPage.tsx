@@ -12,6 +12,9 @@ import {
   XCircle,
   FileDown,
   FileX,
+  BookPlus,
+  GitMerge,
+  BadgeCheck,
 } from "lucide-react";
 import { getHistory, listWorks } from "@/api";
 import { workName } from "@/utils/works";
@@ -38,6 +41,10 @@ const EVENT_ICONS: Record<EventType, React.ElementType> = {
   tagWritten: Tag,
   tagWriteFailed: Tag,
   fileDeleted: Trash2,
+  added: BookPlus,
+  workDeleted: Trash2,
+  worksMerged: GitMerge,
+  identityResolved: BadgeCheck,
 };
 
 const EVENT_LABELS: Record<EventType, string> = {
@@ -51,6 +58,10 @@ const EVENT_LABELS: Record<EventType, string> = {
   tagWritten: "Tag Written",
   tagWriteFailed: "Tag Write Failed",
   fileDeleted: "File Deleted",
+  added: "Added",
+  workDeleted: "Work Deleted",
+  worksMerged: "Works Merged",
+  identityResolved: "Identity Resolved",
 };
 
 const ALL_EVENT_TYPES: EventType[] = [
@@ -64,6 +75,10 @@ const ALL_EVENT_TYPES: EventType[] = [
   "tagWritten",
   "tagWriteFailed",
   "fileDeleted",
+  "added",
+  "workDeleted",
+  "worksMerged",
+  "identityResolved",
 ];
 
 const ROW_LIMIT = 1000;
@@ -112,6 +127,7 @@ export default function HistoryPage() {
     if (eventData.indexer) parts.push(`via ${eventData.indexer}`);
     if (eventData.path) parts.push(String(eventData.path));
     if (eventData.message) parts.push(String(eventData.message));
+    if (parts.length === 0 && eventData.work_title) parts.push(String(eventData.work_title));
     return parts.join(" \u2014 ") || "\u2014";
   }
 
@@ -154,6 +170,7 @@ export default function HistoryPage() {
                 <tbody>
                   {displayRows.map((row) => {
                     const Icon = EVENT_ICONS[row.eventType] ?? AlertCircle;
+                    const workTitle = row.data.work_title;
                     return (
                       <tr
                         key={row.id}
@@ -174,6 +191,8 @@ export default function HistoryPage() {
                             >
                               {workName(works, row.workId)}
                             </Link>
+                          ) : workTitle ? (
+                            <span>{String(workTitle)}</span>
                           ) : (
                             <span className="text-muted">—</span>
                           )}

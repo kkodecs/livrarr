@@ -1,0 +1,70 @@
+metadata:
+  feature: "work-history"
+  spec_ref: "spec-work-history.md"
+  ir_ref: "ir-v1-work-history.yaml"
+
+module_dependency:
+  - source: "livrarr-handlers"
+    forbidden_targets:
+      - "livrarr-db"
+      - "livrarr-metadata"
+      - "livrarr-tagwrite"
+      - "livrarr-download"
+      - "livrarr-server"
+    rationale: >
+      Compile wall (wiki/architecture/overview.md:31-33,52): the two identity-door history
+      writes in livrarr-handlers (review-candidate apply, pending-anchor affirm) reach
+      persistence ONLY through the domain HistoryService trait's new `record` method via the
+      existing HasHistoryService accessor — never a livrarr-db type. Authoritative check:
+      cargo tree -p livrarr-handlers.
+  - source: "livrarr-domain"
+    forbidden_targets:
+      - "livrarr-db"
+      - "livrarr-metadata"
+      - "livrarr-enrichment"
+      - "livrarr-server"
+      - "livrarr-handlers"
+      - "livrarr-library"
+      - "livrarr-download"
+    rationale: >
+      domain is the dependency sink. The new history_events module (HistoryDraft, typed
+      constructors, WorkAddSource) and the HistoryService::record trait method add NO upstream
+      edge — constructors are pure data builders over types domain already owns (EventType,
+      serde_json::Value, chrono). The record_history helper that CONSUMES HistoryDb therefore
+      lives in livrarr-db, not domain (IR v1 D-WRITE-PATH).
+
+forbidden_pattern:
+  - pattern: 'DELETE\s+FROM\s+history'
+    description: "No code path may delete history rows — including the backfill's idempotency mechanism."
+    severity: "P0"
+    rationale: >
+      REQ-010 (round 3): idempotency must be non-destructive — backfilled rows whose work was
+      since deleted are unreconstructable, so delete-and-resynthesize erases real history.
+      History is append-only feature-wide (retention is keep-forever); merge REPOINTS rows
+      (UPDATE), never removes them (REQ-007).
+  - pattern: 'let\s+_\s*=\s*[^;]*create_history_event'
+    description: "A history-write result must never be silently discarded."
+    severity: "P1"
+    rationale: >
+      REQ-009 requires a logged warning on write failure. The one sanctioned shape is the
+      record_history helper (absorb + tracing::warn); release_service.rs:461's current
+      `let _ =` discard is the exact anti-pattern being retired (IR v1 D-EXISTING-WRITERS).
+  - pattern: 'create_history_event\([^)]*\)\s*\.\s*await\s*\?'
+    description: "A history write must never propagate its error into the host operation."
+    severity: "P0"
+    rationale: >
+      REQ-009: observer, never actor. A `?` on the insert fails the operation the event was
+      merely recording. All writer sites route through record_history / HistoryService::record,
+      whose signatures make propagation impossible.
+
+reviewer_invariants:
+  - "Observer semantics hold at EVERY writer site: event write after (or transactionally beside) the fact, failure warns and never fails/blocks/retries the host operation, and no event is written for an operation that did not happen (Err/409 paths write nothing). REQ-009 / AC-009."
+  - "One moment, one event: whole-work delete = one workDeleted with NO per-file events; materialize's in-enrichment tag write = tags_written flag on the enriched event, NEVER a separate tagWritten; add_fast created=false writes nothing; merge_deferred background enrichment writes nothing (the concluding pass is the moment). REQ-001/002/004/006, AC-002/006."
+  - "Payload discipline: writer sites build payloads ONLY via the domain history_events constructors — no ad-hoc serde_json::json! at any writer site. Every work-attached payload carries work_title (work_author where sensible) under exactly those keys; the grab-family `title` key keeps its RELEASE-title meaning and `guid` its exact value (the backfill's per-fact grab dedup depends on it). REQ-013 / AC-013, REQ-010."
+  - "livrarr-enrichment stays history-free: no history types, constructors, or writes appear in it — the REQ-002 writer lives at run_unified_enrichment's completion in livrarr-metadata (IR v1 D-ENRICH-HOME). Check: no ir-v2 enrichment module carries history calls; no livrarr-enrichment source references record_history/HistoryDraft."
+  - "Backfill honesty: synthesizes only from persisted timestamps (spec ST-007 columns); every synthesized row carries backfilled: true; event dates come from the FACT (added_at/grabbed_at/imported_at/enriched_at), never Utc::now(); the _livrarr_meta marker is written only on FULL completion; the pass never gates server readiness; fixtures pin BOTH sides of the imported-coverage window [imported_at − 5s, + 1h]. REQ-010 / AC-010."
+  - "Kind-string agreement: the serde camelCase derive (entities.rs:144-145), parse_event_type, and event_type_str agree for all 14 kinds — consolidated onto one source or pinned by a unit test enumerating every variant (IR v1 db-history-write-core binding invariant)."
+  - "REQ-012 skip-at-read only: the typed EventType enum stays strict for writes; unknown-kind rows are skipped with a warning in the two list methods; the frontend's generic row renders only the version-skew case (server-sent kind with no local label). AC-011/012."
+  - "User attribution: every event (live and backfilled) takes user_id from the owning entity's NOT NULL column (spec ST-010) — no global/system user appears anywhere."
+  - "Door completeness: the surface inventory is 25 rows (IR v1's 22 — six REQ-001 creation doors, five REQ-008 identity rows incl. the proven-empty door (d) and the deliberate dismiss exclusion, five REQ-005/006 removal doors, six moment-surfaces covering REQ-002/003/004/013 — plus three design-stage additions: the root-folder ADOPT door (handlers/root_folder.rs:267, REQ-003's 'or adopted' clause) and the two REQ-013 existing-writer migration surfaces, ReleaseService::grab (release_service.rs:461) and the download_poller SAB-failure arm (:545), r5 codex R-6); ir-v2 carries every row with `traced` at the exact road-entry call line (verify.py _check_doors gates that form). Two enumerations bind: (1) REQ-008 door (d) is an EMPTY SET as of 2026-07-18 (complete production-caller enumeration of confirm_anchor / confirm_anchor_and_recompute_badge / supersede_anchor — sole user-initiated caller is the affirm door); ANY future user-initiated caller of those methods, or new manual identity-edit surface, must add its identityResolved writer and doors row in the same change. (2) retag_library_items has THREE production callers (import_service.rs:111, :284, :522 — the third, reorganize_work_files, found in r2 and absent from spec ST-006's caller cite); the REQ-004 hook lives INSIDE the method so all callers present and future are covered — a caller-site write scheme is forbidden."
+  - "Faithful fixtures: behavioral tests drive real entry paths over a real :memory: DB (wiki/patterns/async-service.md stub policy — no DB stubs); injected end-states forbidden (feedback_faithful_fixtures_and_design_first)."

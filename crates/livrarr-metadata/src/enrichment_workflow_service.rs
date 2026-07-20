@@ -83,6 +83,7 @@ where
             audiobook_cover_resolution: result.audiobook_cover_resolution,
             identity_not_found: result.identity_not_found,
             changed: result.changed,
+            attempted: result.attempted,
         })
     }
 

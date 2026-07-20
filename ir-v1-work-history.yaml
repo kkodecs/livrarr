@@ -1,0 +1,563 @@
+metadata:
+  feature: "work-history"
+  stage: v1-structural
+  spec_ref: "spec-work-history.md"
+  version: 1
+  review_round: 1
+  round1_dispositions: >
+    r1 both families FAIL (2 findings each). ACCEPTED (merged google R-1 + openai R-2):
+    HistoryEvent marked in domain_entities AND added to the canonical spine with an
+    amendments[] row (decision D-SPINE) — both families independently rejected the
+    "history rows are not spine" framing; the PlaybackProgress/Bookmark altitude precedent
+    decides it. ACCEPTED openai R-1: the REQ-008 door-(d) deferral was an architecture-stage
+    gap — resolved IN v1 by complete fresh-index enumeration of all production callers of the
+    three defining methods (result: door (d) is an EMPTY SET today; evidence in the
+    handlers-identity-doors module + doors table). PARTIAL google R-2: the claim that the v1
+    GATE mandates a doors: section is wrong-stage (verify.py runs _check_doors on IR v2 only —
+    verify.py:452 vs :361); the SUBSTANCE is accepted and a doors: table is added to v1 anyway
+    (this project's door-miss streak, wiki insight 46, argues for tracing at the earliest
+    stage), with `traced` upgraded to per-door road-entry call lines at ir-v2.
+  round2_dispositions: >
+    r2 google PASS (1 P2), codex FAIL (1 P1); both folded. google R-3 (naming) FOLDED with a
+    precision the finding itself lacked: BOTH names are real — HistoryServiceImpl<D> is the
+    struct (server history_service.rs:5) and LiveHistoryService is the SqliteDb type alias
+    (state.rs:94) AppState's field uses (:170); the IR now names the struct and notes the alias
+    once. codex R-3 (doors completeness) ACCEPTED: the inventory gains 6 moment-surface rows
+    (enrichment road, manual-import confirm, grab-road batch import, the batch-retag road, the
+    convergence per-item recovery, materialize's flag-only path), and its cited THIRD
+    retag_library_items caller is VERIFIED REAL — import_service.rs:522 inside
+    reorganize_work_files (:496-531), absent from spec ST-006's caller parenthetical
+    (":111/284"). Spec text left untouched (closed spec; stale citation flagged to the PO —
+    the ST's actual three-PATHS guarantee is unaffected); architecturally the finding
+    STRENGTHENS D-TAG-HANDLE: hooking retag_library_items itself covers all three callers
+    including the one nobody had listed, where caller-site writes would have missed it.
+  grounding: >
+    All hook-site facts below re-verified against source 2026-07-18 (architecture survey +
+    targeted traces). Key survey corrections folded: work_service.rs lives in livrarr-METADATA
+    (not livrarr-server); the domain HistoryService trait is read-only today (writes go straight
+    to the livrarr-db HistoryDb trait at 4 call sites); create_history_event stamps
+    date = Utc::now() server-side (sqlite_history.rs:154-172), unusable for backfill dates;
+    the only production enrich_work dispatch is work_service.rs:2471 inside
+    run_unified_enrichment (code-index full enumeration: 2 hits, the second is
+    enrichment_workflow_service.rs:65 — the adapter's inner delegation, same road).
+
+system_architecture:
+  summary: >
+    History becomes complete by adding writers at every lifecycle moment, all funneled through
+    ONE write discipline: typed per-kind event constructors in livrarr-domain (enforcing the
+    REQ-013 work_title/work_author payload keys) produce a HistoryDraft; a single observer-write
+    helper record_history in livrarr-db (REQ-009: log-warn on failure, never propagate) performs
+    every insert. Crates with a db handle (metadata, server, library, download) call the helper
+    directly; the two identity doors that live in livrarr-handlers (compile wall — no db) write
+    via ONE new method `record` added to the existing domain HistoryService trait (impl'd by the
+    existing HistoryServiceImpl — aliased LiveHistoryService = HistoryServiceImpl<SqliteDb> at
+    state.rs:94 — already exposed to handlers via HasHistoryService). The REQ-002
+    enriched/enrichmentFailed writer sits at the END of run_unified_enrichment (livrarr-metadata,
+    work_service.rs:2415-2647) — the one orchestration chokepoint that sees the enrich result
+    (changed, merge_deferred, status) AND the materialize outcome (tags_written flag) for every
+    trigger, because the only production enrich_work dispatch in the workspace is its Step 2
+    (:2471). livrarr-enrichment itself gains NO history code. Two latent bugs are fixed in
+    livrarr-db (merge_works history repoint inside the existing transaction; unknown-kind rows
+    skipped at list-read instead of failing the whole query). A one-time backfill runs as a
+    non-blocking startup pass in livrarr-server via the existing spawn_startup_pass mechanism
+    (jobs/mod.rs:254-313), completion-marked in _livrarr_meta (identity_key_generation
+    precedent, pool.rs:425), synthesizing only from persisted facts with per-fact non-destructive
+    dedup. Frontend: 4 new kinds in the union + label/icon/filter maps + a version-skew-safe
+    generic row. New event kinds: added, workDeleted, worksMerged, identityResolved (REQ-001,
+    REQ-006, REQ-007, REQ-008); writers added for existing kinds (REQ-002, REQ-003, REQ-004,
+    REQ-005); robustness REQ-009, REQ-012; backfill REQ-010; UI REQ-011; payload identity REQ-013.
+  components:
+    - { name: "domain-history-model",       crate: "livrarr-domain",   kind: "types + typed constructors + 1 trait method" }
+    - { name: "db-history-write-core",      crate: "livrarr-db",       kind: "observer-write helper + request date param + kind maps" }
+    - { name: "db-history-robust-reads",    crate: "livrarr-db",       kind: "list-read skip-unknown fix" }
+    - { name: "db-merge-history-repoint",   crate: "livrarr-db",       kind: "merge_works tx statement" }
+    - { name: "metadata-lifecycle-writers", crate: "livrarr-metadata", kind: "writer hooks (birth, enrich, delete, merge)" }
+    - { name: "server-moment-writers",      crate: "livrarr-server",   kind: "writer hooks (manual import, tags, deletes, undo, conflict door)" }
+    - { name: "handlers-identity-doors",    crate: "livrarr-handlers", kind: "writer hooks via domain trait (compile-wall safe)" }
+    - { name: "library-writers",            crate: "livrarr-library",  kind: "writer hooks (file delete, batch import migration)" }
+    - { name: "download-grab-writer",       crate: "livrarr-download", kind: "existing grabbed writer migration" }
+    - { name: "server-history-backfill",    crate: "livrarr-server",   kind: "one-time startup pass" }
+    - { name: "frontend-history-ui",        crate: "frontend (not a workspace crate)", kind: "TS union + maps + generic fallback" }
+  connections:
+    - "every writer builds its payload via a domain constructor (history_events.rs) and hands the HistoryDraft to record_history (db crates) or HistoryService::record (handlers)"
+    - "record_history calls HistoryDb::create_history_event (crates/livrarr-db/src/api/history.rs:6-26) and absorbs+warns on error (REQ-009)"
+    - "run_unified_enrichment (livrarr-metadata work_service.rs:2415) writes the REQ-002 event where enrich_result.changed/.merge_deferred (enrichment_workflow_service.rs:76-86) and mat_outcome (:2606-2614) are in scope"
+    - "handlers identity doors (identity_review.rs resolve :118-161, work.rs affirm_pending_anchor :1024-1090) add a HasHistoryService bound and call the new HistoryService::record"
+    - "merge_works (sqlite_work.rs:750-834) gains the history repoint UPDATE bound to its existing tx; the worksMerged event is recorded by the merge caller in livrarr-metadata after commit"
+    - "backfill pass registered via JobRunner::spawn_startup_pass (server jobs/mod.rs:254-313) — panic-isolated, non-blocking, JobStatus-visible; marker row in _livrarr_meta (migration 010 table)"
+  deployment: "In-process workspace code + frontend bundle. NO new DB migration (history.event_type is TEXT — spec ST-008; the _livrarr_meta marker row is inserted at runtime by the pass itself)."
+
+languages: ["Rust", "TypeScript"]
+
+frameworks:
+  - "tokio (async; spawn_startup_pass for the backfill; task yielding between batches)"
+  - "trait_variant::make(Send) convention for the HistoryService trait extension (insight 8)"
+  - "React (existing history surfaces only — no new pages)"
+
+approved_libraries:
+  - { name: "serde_json", use: "event payload construction (existing workspace dep; payloads are serde_json::Value in HistoryEvent — entities.rs:578-587)" }
+  - { name: "chrono",     use: "event/backfill dates (existing project-wide convention)" }
+  - { name: "tracing",    use: "REQ-009 warn on failed history writes; REQ-012 warn on skipped rows" }
+  - { name: "tokio",      use: "backfill batching/yield + startup spawn (existing)" }
+  - { name: "trait-variant", use: "the HistoryService trait extension keeps the existing trait_variant::make(Send) form (insight 8 convention)" }
+  - { name: "sqlx",       use: "the merge-repoint UPDATE + _livrarr_meta marker queries in livrarr-db/server (existing workspace dep)" }
+  - note: "NO new third-party dependency, backend or frontend (icons come from the existing lucide set)."
+
+modules:
+  - name: "domain-history-model"
+    crate: "livrarr-domain"
+    responsibility: >
+      The shared vocabulary every writer uses. (1) EventType (entities.rs:141-157) gains 4
+      variants: Added, WorkDeleted, WorksMerged, IdentityResolved — serde camelCase strings
+      become added/workDeleted/worksMerged/identityResolved (REQ-001/006/007/008). (2) NEW module
+      history_events.rs: HistoryDraft + one typed constructor per written event shape. The
+      constructors are the REQ-013 enforcement point: work-attached kinds REQUIRE work_title
+      (and take work_author where sensible) as typed parameters under the reserved keys
+      work_title/work_author; the grab-family release-title key `title` keeps its existing
+      meaning (release_service.rs:461-474 payload) and is never conflated. Backfill variants set
+      backfilled: true and carry the caller-supplied historical date. (3) WorkAddSource enum for
+      the REQ-001 door label (search | list-import | readarr | author-monitor | series-monitor |
+      file-import); how the label travels to add_fast (seed field vs parameter) is design-stage
+      per REQ-001 — the per-door seed_* constructors in livrarr-domain/src/seed.rs (insight 53)
+      are the natural carrier candidate. (4) The read-only domain HistoryService trait
+      (services/history.rs:11-20) gains ONE write method `record` with an infallible signature —
+      observer semantics in the type (REQ-009): callers cannot even propagate a failure.
+    dependencies: []
+    public_api:
+      types:
+        - kind: enum
+          name: "EventType"
+          fields:
+            - { name: "Added",            type: "(new variant)" }
+            - { name: "WorkDeleted",      type: "(new variant)" }
+            - { name: "WorksMerged",      type: "(new variant)" }
+            - { name: "IdentityResolved", type: "(new variant)" }
+          note: "EXISTING enum extended (entities.rs:141-157; 10 existing variants unchanged). Serde camelCase derive already present (:144-145)."
+        - kind: struct
+          name: "HistoryDraft"
+          fields:
+            - { name: "work_id",    type: "Option<WorkId>" }
+            - { name: "event_type", type: "EventType" }
+            - { name: "data",       type: "serde_json::Value" }
+            - { name: "date",       type: "Option<DateTime<Utc>>" }
+          note: "date None = write-time now() (live writers); Some = historical fact date (backfill, REQ-010). Constructors produce it fully formed — writer sites never hand-build payload JSON."
+        - kind: enum
+          name: "WorkAddSource"
+          fields:
+            - { name: "Search",        type: "" }
+            - { name: "ListImport",    type: "" }
+            - { name: "Readarr",       type: "" }
+            - { name: "AuthorMonitor", type: "" }
+            - { name: "SeriesMonitor", type: "" }
+            - { name: "FileImport",    type: "" }
+          note: "REQ-001 source label; serialized to the spec's kebab strings."
+      functions:
+        - name: "history_events::added"
+          signature: "pub fn added(work_id: WorkId, work_title: &str, work_author: Option<&str>, source: WorkAddSource) -> HistoryDraft"
+          maps_reqs: ["REQ-001", "REQ-013"]
+          note: "Exemplar constructor. The full set (one per written shape, ~15 incl. backfill variants: enriched, enrichment_failed, imported_manual, imported_batch, import_failed, tag_written, tag_write_failed, file_deleted, work_deleted, works_merged, identity_resolved, grabbed, download_failed, backfill_*) is enumerated with exact signatures in IR v2 — each pins its payload keys there."
+        - name: "HistoryService::record"
+          kind: "NEW trait method on the existing read-only trait (services/history.rs:11-20)"
+          inputs:
+            - { name: "user_id", type: "UserId" }
+            - { name: "draft",   type: "HistoryDraft" }
+          output: "() — infallible by signature; the impl absorbs+warns (REQ-009)"
+          maps_reqs: ["REQ-008", "REQ-009"]
+          note: "Exists so livrarr-handlers door sites can write history through the compile wall (handlers depend on domain only — wiki/architecture/overview.md:31-33). Impl'd by the existing HistoryServiceImpl<D: HistoryDb> (server history_service.rs:5-38; r2: the struct name — LiveHistoryService is its SqliteDb type alias, state.rs:94) delegating to record_history."
+
+  - name: "db-history-write-core"
+    crate: "livrarr-db"
+    responsibility: >
+      The ONE physical write chokepoint. (1) record_history: takes any HistoryDb impl + user_id +
+      HistoryDraft, maps to CreateHistoryEventDbRequest, calls create_history_event, and on Err
+      logs tracing::warn and returns () — REQ-009's observer rule implemented once, not at ~15
+      sites. Fixes release_service's current silent `let _ =` discard shape by construction.
+      (2) CreateHistoryEventDbRequest (api/history.rs:28-33) gains `date: Option<DateTime<Utc>>`;
+      create_history_event (sqlite_history.rs:154-172) uses it when Some, else now() — the
+      backfill cannot exist without this (REQ-010 fact dates; AC-010 "correct per-fact dates").
+      (3) parse_event_type (sqlite_history.rs:32-48) + event_type_str (:50-63) gain the 4 new
+      kinds. BINDING invariant: the hand-maintained string maps and the serde camelCase derive
+      must agree for all 14 kinds — design stage decides whether to consolidate the maps onto the
+      serde derive (preferred if zero-cost) or keep parallel arms + a unit test pinning agreement.
+    dependencies: ["domain-history-model"]
+    public_api:
+      functions:
+        - name: "record_history"
+          signature: "pub async fn record_history<D: HistoryDb>(db: &D, user_id: UserId, draft: HistoryDraft)"
+          output: "() — never an error (REQ-009)"
+          maps_reqs: ["REQ-009", "REQ-013"]
+        - name: "HistoryDb::create_history_event"
+          kind: "EXISTING (api/history.rs:24-26) — request struct extended with the optional date field"
+          maps_reqs: ["REQ-010"]
+
+  - name: "db-history-robust-reads"
+    crate: "livrarr-db"
+    responsibility: >
+      REQ-012: both list methods (sqlite_history.rs list_history :66-99, list_history_paginated
+      :101-152) currently collect row-parses into one Result (:98, :147-150) — one unknown
+      event_type string fails the entire query (spec ST-008 rollback hazard). Change: per-row
+      parse; an unrecognized kind is skipped with a tracing::warn naming the kind; remaining rows
+      return. The paginated COUNT query counts raw rows — the count-vs-skipped drift handling
+      (accept slight over-count vs filtered count) is a design-stage decision recorded in IR v2.
+      Covers BOTH read surfaces for free: the primary GET /history route (router.rs:391 →
+      handlers/history.rs:26-78) and the secondary Readarr-compatible HistoryApi
+      (api_secondary_impl.rs:709+ calls the same db methods).
+    dependencies: ["domain-history-model"]
+    public_api:
+      functions:
+        - name: "HistoryDb::list_history / list_history_paginated"
+          kind: "EXISTING signatures unchanged — row-handling behavior change only"
+          maps_reqs: ["REQ-012"]
+
+  - name: "db-merge-history-repoint"
+    crate: "livrarr-db"
+    responsibility: >
+      REQ-007(a): merge_works (sqlite_work.rs:750-834) gains one statement inside its EXISTING
+      transaction (begin :757, commit :832), alongside the library_items (:779-785) and grabs
+      (:787-793) repoints: UPDATE history SET work_id = survivor WHERE work_id = loser. Closes
+      the ST-002 orphaning bug. The wrong in-code comment (:812-816 — claims history "cascades
+      away"; schema says ON DELETE SET NULL, 001_initial_schema.sql:216) is corrected to describe
+      the new behavior.
+    dependencies: []
+    public_api:
+      functions:
+        - name: "WorkDb::merge_works"
+          kind: "EXISTING signature unchanged — tx gains the history repoint"
+          maps_reqs: ["REQ-007"]
+
+  - name: "metadata-lifecycle-writers"
+    crate: "livrarr-metadata"
+    responsibility: >
+      Writer hooks at the work-lifecycle moments owned by WorkServiceImpl (work_service.rs;
+      self.db in scope at every site). (1) REQ-001 birth: inside add_fast at the created=true
+      arms only (create_work calls :773/:971 + the create_work_with_anchor arm) — one `added`
+      event with the WorkAddSource door label; a dedup-hit return (created=false, spec ST-005)
+      writes nothing. Door-label threading mechanism (seed field vs parameter) is design-stage
+      (REQ-001); IR v2 MUST carry a doors: section tracing all six doors to add_fast.
+      (2) REQ-002 metadata events: at the END of run_unified_enrichment (:2415-2647) — the one
+      chokepoint every trigger rides (sole production enrich_work dispatch :2471). Writes exactly
+      one event per completed attempt: enriched (payload: changed flag from enrich_result.changed,
+      resulting status incl. Thin, tags_written flag derived from the materialize outcome
+      :2606-2614) or enrichmentFailed (reason summary; incl. the early-return failure arms
+      :2475-2478, :2482-2488). Records NOTHING when merge_deferred=true (lib.rs:620-641 outcome,
+      round-4 rule), when identity-blocked (those attempts never reach this function), or when
+      the pass never dispatched (terminal-skip no-op detection via the result's provider
+      outcomes — exact predicate is design-stage). (3) REQ-006: workDeleted at the delete road
+      (:1490-1521) — one composite event (title, author, files-removed count); write ordered so
+      the insert succeeds (before the row delete, reference then nulled by ON DELETE SET NULL —
+      or with work_id None; design picks one, spec REQ-006 allows either). (4) REQ-007(b):
+      worksMerged on the survivor, written by the merge caller after merge_works commits.
+      WorkServiceImpl's D bounds gain HistoryDb.
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    public_api:
+      functions:
+        - name: "WorkServiceImpl::add_fast / run_unified_enrichment / delete / merge callers"
+          kind: "EXISTING functions — internal hook additions only; no public signature changes except any door-label threading decided at design (REQ-001)"
+          maps_reqs: ["REQ-001", "REQ-002", "REQ-006", "REQ-007", "REQ-013"]
+
+  - name: "server-moment-writers"
+    crate: "livrarr-server"
+    responsibility: >
+      Writer hooks in the composition root. (1) REQ-003: the manual-import road records
+      imported/importFailed with per-file payload (work title, path, media type); the dead
+      ManualImportServiceImpl::create_history_event wrapper (manual_import_service.rs:106-123,
+      zero callers — spec ST-003) is removed in favor of the shared path (its D bounds already
+      include HistoryDb :30). (2) REQ-004 tag events: retag_library_items (tag_service.rs:77+)
+      records one tagWritten/tagWriteFailed per work per pass — LiveTagService (:7-10) holds NO
+      db today, so it gains a history-capable handle via constructor injection (wiki rule: no
+      OnceLock, explicit construction — overview.md:60-65); the convergence sweep
+      (jobs/tag_convergence.rs:98 calls tag_sync_single_item directly, state.db in scope) records
+      one event per recovered ITEM with a single-file payload (round-3 rule). Materialize's
+      in-enrichment write records NO tag event (it rides the enriched payload's tags_written flag
+      — REQ-004/round-4, written by metadata-lifecycle-writers). (3) REQ-005(b)(c): fileDeleted
+      at the manual-import delete (manual_import_service.rs:70-79 — returns the deleted
+      LibraryItem) and the secondary-API delete (api_secondary_impl.rs:692-705 — SqliteDb held
+      directly :31-34). (4) REQ-005(e): Readarr import UNDO (readarr_import_workflow.rs:297-345,
+      holds db: SqliteDb :37) — fileDeleted per removed file + workDeleted per removed orphan
+      work, payloads undo-marked; needed because undo bypasses the work-delete service
+      (delete_orphan_works_by_import :337-341). (5) REQ-008 conflict door:
+      LiveIdentityConflictService::resolve (services/identity_conflict_service.rs:47-79, holds
+      db: SqliteDb :7-9) records identityResolved naming each of the four actions incl.
+      KeepExisting (ConflictResolutionAction, identity.rs:514-519). (6) HistoryServiceImpl
+      (history_service.rs:5-38) implements the new HistoryService::record by delegating to
+      record_history. (7) REQ-013 migration: the download_poller downloadFailed writer
+      (jobs/download_poller.rs:545-559) moves onto the typed constructor, gaining work_title.
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    public_api:
+      functions:
+        - name: "HistoryServiceImpl::record"
+          kind: "NEW trait-method impl (delegates to record_history)"
+          maps_reqs: ["REQ-008", "REQ-009"]
+        - name: "LiveTagService::new"
+          kind: "EXISTING constructor — gains the injected history handle (exact type at design)"
+          maps_reqs: ["REQ-004"]
+
+  - name: "handlers-identity-doors"
+    crate: "livrarr-handlers"
+    responsibility: >
+      The two REQ-008 doors that live behind the compile wall (no livrarr-db dependency —
+      overview.md:31-33): (a) review-candidate apply (identity_review.rs resolve :118-161,
+      apply_review_candidate call :148) and (c) pending-anchor affirm (work.rs
+      affirm_pending_anchor :1024-1090, confirm_anchor_and_recompute_badge call :1071). Each adds
+      a HasHistoryService bound (accessor already exists — handlers/history.rs:9 uses it for
+      reads) and records identityResolved AFTER the underlying operation returns Ok — the claim
+      pattern (TOCTOU UPDATE, insight 60) guarantees exactly-once per settled action; a 409/Err
+      writes nothing (REQ-009: no event for an operation that did not happen). Door (b) is
+      server-side (server-moment-writers). Door (d) manual edit/supersede is RESOLVED at v1
+      (r1 openai R-1): the spec defines door (d) as "the user-initiated callers of
+      confirm_anchor / confirm_anchor_and_recompute_badge / supersede_anchor". Complete
+      production-caller enumeration (fresh code-index 2026-07-18, unbounded): supersede_anchor —
+      ZERO call sites; confirm_anchor_and_recompute_badge — exactly one, the affirm door
+      (handlers work.rs:1071, AnchorSetter::User) = door (c); confirm_anchor — two, both
+      system-side and spec-excluded (add_fast anchor persist, metadata work_service.rs:837;
+      the Import-setter internal call, db sqlite_work_identity.rs:250). The remaining handler
+      sites touching the identity repo are read-only or already-covered doors
+      (list_pending_anchors work.rs:998 is a GET; work.rs:1046 is the affirm door's internal
+      list read; identity_review.rs sites are the review surface — resolve covered as door (a),
+      dismiss records nothing per spec Non-Requirements). Therefore door (d) is an EMPTY SET in
+      today's production code — no additional hook exists to build. The contract binds the
+      future: any new user-initiated caller of the three methods must add its identityResolved
+      writer and doors row.
+    dependencies: ["domain-history-model"]
+    public_api:
+      functions:
+        - name: "identity_review::resolve / work::affirm_pending_anchor"
+          kind: "EXISTING handlers — added HasHistoryService bound + record call; routes unchanged"
+          maps_reqs: ["REQ-008"]
+
+  - name: "library-writers"
+    crate: "livrarr-library"
+    responsibility: >
+      (1) REQ-005(a): the library file-delete road (file_service.rs delete :59-65). FileServiceImpl's
+      bounds (:31) gain HistoryDb; delete only receives item_id, so it reads the item (and its
+      work's title for the REQ-013 snapshot) BEFORE deleting — exact read shape at design.
+      (2) REQ-013 migration: the existing batch-import writer (import_workflow.rs:1288-1306,
+      grab road) moves onto the typed constructor — batch-counts payload shape preserved
+      (imported/failed/skipped counts + release-title `title` key, spec REQ-003 keeps the shapes
+      distinct), gaining work_title/work_author.
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    public_api:
+      functions:
+        - name: "FileServiceImpl::delete"
+          kind: "EXISTING signature unchanged — internal event hook"
+          maps_reqs: ["REQ-005", "REQ-013"]
+
+  - name: "download-grab-writer"
+    crate: "livrarr-download"
+    responsibility: >
+      REQ-013 migration of the grabbed writer (release_service.rs:461-474): typed constructor,
+      payload gains work_title/work_author; the release-title `title` and guid keys keep their
+      exact meaning (the backfill's per-fact grab matching depends on guid — spec REQ-010).
+      The current silent `let _ =` error discard becomes the helper's warn-log (REQ-009 requires
+      the warning).
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    public_api:
+      functions:
+        - name: "grabbed-event write in ReleaseService::grab"
+          kind: "EXISTING site — constructor + helper migration only"
+          maps_reqs: ["REQ-009", "REQ-013"]
+
+  - name: "server-history-backfill"
+    crate: "livrarr-server"
+    responsibility: >
+      REQ-010: one-time startup pass registered via JobRunner::spawn_startup_pass
+      ("history_backfill", jobs/mod.rs:254-313 pattern) — non-blocking (server serves while it
+      runs), panic-isolated, JobStatus-visible; NOT the C.1 blocking/exit(1) shape (that pattern
+      gates startup — pool.rs:425-435 — which REQ-010 forbids). Marker: _livrarr_meta key
+      (migration-010 table), written ONLY on full completion; a completed pass never reruns.
+      Synthesizes, per user, from persisted facts only (spec ST-007): added (works.added_at,
+      source omitted), grabbed (grabs: title/indexer/guid, dated grabbed_at), imported
+      (library_items.imported_at), at most one enriched (works.enriched_at + enrichment_source),
+      and grab-failure events with the exact GrabStatus mapping (entities.rs:59-67: Failed →
+      downloadFailed, ImportFailed → importFailed with import_error text; Removed and in-flight
+      statuses → nothing), dated at grabbed_at. Every row: backfilled: true + work_title snapshot
+      (REQ-013). Dedup is per source FACT (grab matching exact via guid; imported coverage =
+      same work AND date ∈ [imported_at − 5s, imported_at + 1h], best-effort by declaration —
+      spec REQ-010 fixed rule). Idempotency is NON-DESTRUCTIVE: crash+restart never duplicates
+      and never deletes backfilled rows (a delete-and-resynthesize mechanism is forbidden —
+      deleted works' rows are unreconstructable). Writes in small batched transactions with
+      yielding between batches (SQLite single-writer). New bulk read queries land on livrarr-db
+      traits as needed — signatures at design.
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    public_api:
+      functions:
+        - name: "run_history_backfill"
+          signature: "pub async fn run_history_backfill(db: &SqliteDb) -> (rough shape; exact signature + report type at design)"
+          maps_reqs: ["REQ-010", "REQ-013"]
+
+  - name: "frontend-history-ui"
+    crate: "frontend (not a workspace crate)"
+    responsibility: >
+      REQ-011. (1) EventType union (frontend/src/types/api.ts:48-58) += the 4 new kind strings.
+      (2) Global page (HistoryPage.tsx): EVENT_ICONS (:30-41), EVENT_LABELS (:43-54),
+      ALL_EVENT_TYPES filter array (:56-67) gain entries; unknown-kind rendering becomes generic
+      (raw kind text + default icon) instead of a crash/blank — the version-skew case only, since
+      the server skips unrecognized kinds at read (REQ-012). (3) Per-work tab (HistoryTab.tsx):
+      its separate EVENT_ICONS map (:10-21) gains entries + a default-icon fallback; its label
+      rendering is ALREADY generic (camelCase→spaced regex :68) and needs no label map.
+    dependencies: []
+    public_api:
+      types:
+        - { kind: "TS union", name: "EventType (frontend)", fields: [], note: "4 new literals matching serde camelCase strings" }
+      functions: []
+
+shared_types:
+  - { name: "EventType",                    where: "livrarr-domain (existing, EXTENDED — entities.rs:141-157): +Added, +WorkDeleted, +WorksMerged, +IdentityResolved" }
+  - { name: "HistoryEvent",                 where: "livrarr-domain (existing, unchanged — entities.rs:578-587)" }
+  - { name: "HistoryDraft",                 where: "livrarr-domain (NEW — the constructor output every writer hands to the write chokepoint)" }
+  - { name: "WorkAddSource",                where: "livrarr-domain (NEW — REQ-001 door label)" }
+  - { name: "CreateHistoryEventDbRequest",  where: "livrarr-db (existing, EXTENDED — api/history.rs:28-33 gains date: Option<DateTime<Utc>>)" }
+  - { name: "HistoryFilter",                where: "livrarr-domain (existing, unchanged — entities.rs:589-594)" }
+  - { name: "GrabStatus",                   where: "livrarr-domain (existing, read-only by the backfill — entities.rs:59-67)" }
+
+dependency_graph:
+  - { source: "livrarr-db",       target: "livrarr-domain" }
+  - { source: "livrarr-metadata", target: "livrarr-domain" }
+  - { source: "livrarr-metadata", target: "livrarr-db" }
+  - { source: "livrarr-metadata", target: "livrarr-enrichment" }
+  - { source: "livrarr-metadata", target: "livrarr-materialize" }
+  - { source: "livrarr-server",   target: "livrarr-domain" }
+  - { source: "livrarr-server",   target: "livrarr-db" }
+  - { source: "livrarr-handlers", target: "livrarr-domain" }
+  - { source: "livrarr-library",  target: "livrarr-domain" }
+  - { source: "livrarr-library",  target: "livrarr-db" }
+  - { source: "livrarr-download", target: "livrarr-domain" }
+  - { source: "livrarr-download", target: "livrarr-db" }
+
+data_flow:
+  sources:
+    - { entity: "Work",         origin: "lifecycle moments: add_fast created=true (REQ-001), delete road (REQ-006), merge (REQ-007), enrichment pass completion at run_unified_enrichment (REQ-002), identity door actions (REQ-008)" }
+    - { entity: "LibraryItem",  origin: "file moments: manual/grab imports (REQ-003), tag passes (REQ-004), file deletions via every enumerated door (REQ-005)" }
+    - { entity: "Grab",         origin: "existing grabbed/downloadFailed writers (payload migration only, REQ-013); backfill fact rows: grabs.grabbed_at/title/indexer/guid/status/import_error (REQ-010)" }
+    - { entity: "HistoryDraft", origin: "typed constructors in livrarr-domain — the only sanctioned payload builder (REQ-013)" }
+  sinks:
+    - { entity: "HistoryEvent", destination: "history table via record_history → HistoryDb::create_history_event — the one write chokepoint (REQ-009); rows survive work deletion (ON DELETE SET NULL, 001_initial_schema.sql:216)" }
+    - { entity: "HistoryEvent", destination: "existing read surfaces: GET /history (router.rs:391) for both UI pages + the secondary HistoryApi — with unknown kinds skipped at read (REQ-012) and rendered generically on version skew (REQ-011)" }
+  state_machines: []
+  invariants:
+    - "Observer, never actor: a failed history write warns and returns; it never fails, blocks, or retries the host operation; no event for an operation that did not happen (REQ-009)."
+    - "One moment, one event: composite delete = one workDeleted, no per-file events; materialize's in-enrichment tag write = tags_written flag on the enriched event, never a separate tag event; a dedup-hit add (created=false) writes nothing; a merge_deferred background attempt writes nothing (REQ-001/002/004/006)."
+    - "Self-identifying payloads: every work-attached event carries work_title (work_author where sensible) under exactly those keys; grab-family `title` stays the RELEASE title (REQ-013)."
+    - "History is append-only: no code path deletes or rewrites history rows; the backfill's idempotency is non-destructive; merge REPOINTS rows, never drops them (REQ-007/010)."
+    - "Backfill honesty: synthesize only from persisted timestamps; every synthesized row carries backfilled: true; per-fact dedup (guid-exact for grabs; declared best-effort window for imported); completed pass never reruns; server stays responsive while it runs (REQ-010)."
+    - "Robust reads: an unrecognized stored kind is skipped with a warning at list time and never fails the query; the typed EventType enum stays strict for writes (REQ-012)."
+    - "Every event write is user-attributed from the owning entity (spec ST-010 — user_id NOT NULL on works/grabs/library_items); no global system user."
+
+domain_entities:
+  - Work
+  - Grab
+  - LibraryItem
+  - HistoryEvent
+
+# Entry-surface inventory (r1 google R-2 substance, applied early — the v1 rows carry the
+# door's candidate-construction / service-entry line as `traced`; ir-v2 upgrades each to the
+# exact call line that puts the door on the road, which is what verify.py _check_doors gates).
+doors:
+  - { door: "interactive add (search)",  road_entry: "WorkService::add_fast", traced: "crates/livrarr-handlers/src/work.rs:227", note: "seed_add_box → add_fast call at :247; REQ-001 label Search" }
+  - { door: "list import",               road_entry: "WorkService::add (→ add_fast, work_service.rs:320)", traced: "crates/livrarr-metadata/src/list_service.rs:122", note: "seed_list_import; REQ-001 label ListImport" }
+  - { door: "Readarr import",            road_entry: "WorkService::add (→ add_fast)", traced: "crates/livrarr-server/src/readarr_import_workflow.rs:1272", note: "seed_readarr_import (:1273-1288); REQ-001 label Readarr" }
+  - { door: "author monitor",            road_entry: "WorkService::add (→ add_fast)", traced: "crates/livrarr-metadata/src/author_monitor_workflow.rs:513", note: "seed_author_monitor; REQ-001 label AuthorMonitor" }
+  - { door: "series monitor",            road_entry: "WorkService::add (→ add_fast)", traced: "crates/livrarr-metadata/src/series_query_service/service.rs:1003", note: "seed_series_monitor; REQ-001 label SeriesMonitor" }
+  - { door: "file-scan / manual import", road_entry: "WorkService::add (→ add_fast)", traced: "crates/livrarr-handlers/src/manual_import.rs:1148", note: "seed_manual_import; REQ-001 label FileImport; the same confirm road records REQ-003 imported/importFailed" }
+  - { door: "identity: review-candidate apply", road_entry: "apply_review_candidate", traced: "crates/livrarr-handlers/src/identity_review.rs:148", note: "REQ-008 door (a); writer via HistoryService::record" }
+  - { door: "identity: conflict resolution",    road_entry: "LiveIdentityConflictService::resolve", traced: "crates/livrarr-server/src/services/identity_conflict_service.rs:47", note: "REQ-008 door (b); all four actions incl. KeepExisting" }
+  - { door: "identity: pending-anchor affirm",  road_entry: "confirm_anchor_and_recompute_badge", traced: "crates/livrarr-handlers/src/work.rs:1071", note: "REQ-008 door (c); AnchorSetter::User" }
+  - { door: "identity: review dismiss",         road_entry: "identity_review dismiss", traced: "crates/livrarr-handlers/src/identity_review.rs:181", note: "records NOTHING (spec Non-Requirements — settles nothing); listed to make the exclusion deliberate" }
+  - { door: "identity: manual edit/supersede",  road_entry: "(none — empty set today)", traced: "crates/livrarr-domain/src/services/work_identity.rs:31", note: "REQ-008 door (d): zero production user-initiated callers beyond door (c) — full enumeration in handlers-identity-doors; contract binds future surfaces" }
+  - { door: "file delete: library road",        road_entry: "FileServiceImpl::delete", traced: "crates/livrarr-library/src/file_service.rs:59", note: "REQ-005(a) fileDeleted" }
+  - { door: "file delete: manual-import",       road_entry: "ManualImportServiceImpl::delete_library_item", traced: "crates/livrarr-server/src/manual_import_service.rs:70", note: "REQ-005(b) fileDeleted; returns the deleted LibraryItem" }
+  - { door: "file delete: secondary API",       road_entry: "LibraryFileApi::delete", traced: "crates/livrarr-server/src/api_secondary_impl.rs:692", note: "REQ-005(c) fileDeleted" }
+  - { door: "work delete (composite)",          road_entry: "WorkService delete road", traced: "crates/livrarr-metadata/src/work_service.rs:1490", note: "REQ-006 one workDeleted, no per-file events" }
+  - { door: "Readarr import UNDO",              road_entry: "LiveReadarrImportWorkflow undo", traced: "crates/livrarr-server/src/readarr_import_workflow.rs:297", note: "REQ-005(e) fileDeleted per file + workDeleted per orphan, undo-marked; bypasses the work-delete service (:337-341)" }
+  # Moment-surfaces (r2 codex R-3): pipeline/pass surfaces that fire writers without being user
+  # doors — inventoried so completeness is checkable per REQ, not just per entry door.
+  - { door: "enrichment pipeline (every trigger)", road_entry: "run_unified_enrichment", traced: "crates/livrarr-metadata/src/work_service.rs:2471", note: "REQ-002; the sole production enrich_work dispatch — add/manual/bulk/convergence/monitor triggers all ride it; merge_deferred, identity-blocked, and never-dispatched passes record nothing" }
+  - { door: "manual-import confirm (import/adopt)", road_entry: "manual-import confirm road", traced: "crates/livrarr-handlers/src/manual_import.rs:1148", note: "REQ-003 imported/importFailed, per-file payload; same confirm road as the file-scan creation door; exact writer line at ir-v2" }
+  - { door: "grab-road batch import (existing writer)", road_entry: "import_workflow grab-import completion", traced: "crates/livrarr-library/src/import_workflow.rs:1288", note: "REQ-013 payload migration only; batch-counts shape preserved (spec REQ-003)" }
+  - { door: "tag pass: batch retag road", road_entry: "retag_library_items (hook INSIDE the method)", traced: "crates/livrarr-server/src/tag_service.rs:78", note: "REQ-004 one event per work per pass. ALL THREE production callers covered by the in-method hook (complete enumeration 2026-07-18): import_service.rs:111 (import-time single item), :284 (post-enrichment batch), :522 (file-reorganize retag, reorganize_work_files :496-531 — r2-found, ABSENT from spec ST-006's ':111/284' caller cite; the ST's three-PATHS guarantee itself is unaffected)" }
+  - { door: "tag pass: convergence per-item recovery", road_entry: "tag_sync_single_item direct call", traced: "crates/livrarr-server/src/jobs/tag_convergence.rs:98", note: "REQ-004 round-3 rule: one event per recovered ITEM, single-file payload; bypasses LiveTagService, hence its own hook" }
+  - { door: "tag pass: materialize in-enrichment write", road_entry: "livrarr_tagwrite::write_tags_batch via materialize", traced: "crates/livrarr-materialize/src/lib.rs:341", note: "records NO tag event — rides the enriched payload's tags_written flag (REQ-004 round-4, 'one moment, one event'); flag written by the enrichment-pipeline row above" }
+
+decisions:
+  - id: "D-WRITE-PATH"
+    title: "One write discipline: domain constructors → HistoryDraft → record_history (db) / HistoryService::record (handlers)"
+    decision: >
+      Typed per-kind constructors live in livrarr-domain (compile-wall-visible to every writer);
+      the single observer-write helper record_history lives in livrarr-db beside the HistoryDb
+      trait it consumes (a domain-resident generic helper is impossible — HistoryDb is a
+      livrarr-db trait and domain depends on nothing). The two handler-crate doors write via ONE
+      new method on the existing domain HistoryService trait, impl'd by LiveHistoryService.
+      Rejected: (a) per-site serde_json::json! payloads (today's shape) — REQ-013's reserved keys
+      become unenforceable across ~15 sites and the existing 4 sites already drifted three
+      payload conventions; (b) writing identity events INSIDE the db-layer door methods
+      (apply_review_candidate etc.) gated on AnchorSetter::User — puts human-readable payload
+      composition in the persistence layer and couples REQ-008's user/system distinction to a
+      parameter whose semantics can drift; the doors themselves know the action.
+  - id: "D-ENRICH-HOME"
+    title: "The REQ-002 writer lives at run_unified_enrichment's completion, NOT inside livrarr-enrichment"
+    decision: >
+      AC-002 requires the enriched payload to carry tags_written, which is knowable only AFTER
+      materialization — and materialize runs in run_unified_enrichment Step 5 (work_service.rs
+      :2606-2614), after enrich_work returns. The workspace's ONLY production enrich_work
+      dispatch is that function's Step 2 (:2471; the second textual hit is the
+      EnrichmentWorkflowImpl adapter's inner delegation on the same road —
+      enrichment_workflow_service.rs:63-74), so writing the event at the function's completion
+      covers every trigger (add, manual, bulk, convergence, monitors) by construction, sees
+      changed/status/merge_deferred (DomainEnrichmentResult fields :76-86) for the payload and
+      the no-event rules, and keeps livrarr-enrichment history-free (spec ST-004 stays the
+      application chokepoint; the EVENT rides the orchestration moment one level up).
+  - id: "D-DATE-PARAM"
+    title: "CreateHistoryEventDbRequest gains an optional caller-supplied date"
+    decision: >
+      create_history_event stamps date = Utc::now() server-side (sqlite_history.rs:154-172,
+      survey-verified) — the backfill's per-fact historical dates (REQ-010, AC-010) are
+      impossible without a date field. Optional with None = now keeps all live writers unchanged
+      in behavior. Rejected: a separate backfill-only insert method — two insert paths for one
+      table reintroduces the divergence class this feature exists to close.
+  - id: "D-NO-MIGRATION"
+    title: "Zero DB migrations"
+    decision: >
+      history.event_type is TEXT (spec ST-008) — new kinds need no schema change. The backfill
+      marker is a runtime row in the existing _livrarr_meta table (migration 010), inserted by
+      the pass itself on completion (INSERT ... ON CONFLICT DO UPDATE per insight 20; the
+      069-style migration-seeded marker is unnecessary — nothing needs the row to pre-exist).
+  - id: "D-EXISTING-WRITERS"
+    title: "The 3 live writers + the dead wrapper migrate onto the shared path"
+    decision: >
+      REQ-013 forces a payload change (add work_title) on release_service/download_poller/
+      import_workflow anyway, so they adopt the constructors + helper in the same touch —
+      closing REQ-009's silent-discard gap at release_service (`let _ =`, :461) and REQ-003's
+      false affordance (the zero-caller ManualImportServiceImpl::create_history_event wrapper is
+      REMOVED; the manual-import writer uses the shared path its D: HistoryDb bound already
+      permits). Payload compatibility: every existing key keeps its exact name and meaning
+      (release `title`, batch counts, guid); REQ-013 keys are ADDED. Existing stored rows are
+      untouched.
+  - id: "D-SPINE"
+    title: "HistoryEvent joins the canonical entity spine (r1 fold, both families)"
+    decision: >
+      HistoryEvent is marked in domain_entities and added to docs/canonical-model.yaml with an
+      amendments[] row (2026-07-18). The initial draft treated history rows as non-spine records
+      about spine entities; both review families independently rejected that framing (google R-1,
+      openai R-2), and the model's own contents decide it: PlaybackProgress, Bookmark, and
+      AudiobookChapter — per-user/consumption records of the same altitude — are already spine.
+      HistoryEvent is persisted, user-visible on two surfaces, and now carries cross-feature
+      invariants every future feature conforms to (append-only, survives work deletion,
+      observer-never-actor). Spine growth is deliberate and logged, not silent — exactly what
+      the amendment mechanism is for.
+  - id: "D-TAG-HANDLE"
+    title: "LiveTagService gains a history handle by constructor injection"
+    decision: >
+      retag_library_items is the per-pass chokepoint (spec ST-006) but LiveTagService holds no
+      persistence handle (tag_service.rs:7-10). Constructor injection (explicit field, wiki
+      no-OnceLock rule — overview.md:60-65) over writing events at its two callers
+      (import_service.rs:111/284) — caller-side writes duplicate the discipline and any future
+      third caller silently loses coverage. Concrete type vs generic at design.
+
+open_for_design:
+  - "REQ-001 door-label threading: seed-field (seed.rs per-door constructors — the six door rows above each construct through their own seed_* fn, making the seed the natural label carrier) vs call parameter; ir-v2 upgrades each doors row's `traced` to the exact road-entry call line."
+  - "REQ-002 no-event predicate for never-dispatched passes (terminal-skip): derive from DomainEnrichmentResult.provider_outcomes — exact rule + fixture."
+  - "REQ-002 tags_written derivation from the MaterializeOutcome shape (read the type at design)."
+  - "REQ-010 backfill DB query signatures (bulk scans per user, coverage lookups) + batch size/yield cadence + the marker key name."
+  - "REQ-012 paginated COUNT vs skipped-row drift handling."
+  - "Kind-string map consolidation (serde-derived vs parallel arms + agreement test)."
+  - "REQ-005(a) file_service delete payload reads (item + work title before delete)."

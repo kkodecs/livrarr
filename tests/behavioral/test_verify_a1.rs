@@ -114,6 +114,7 @@ fn gr_only_candidate() -> WorkCandidate {
         provenance_setter: Some(ProvenanceSetter::User),
         import_id: None,
         cover_manual: false,
+        add_source: livrarr_domain::history_events::WorkAddSource::Search,
     }
 }
 
@@ -158,6 +159,7 @@ fn monitor_ol_candidate() -> WorkCandidate {
         provenance_setter: Some(ProvenanceSetter::AutoAdded),
         import_id: None,
         cover_manual: false,
+        add_source: livrarr_domain::history_events::WorkAddSource::AuthorMonitor,
     }
 }
 
@@ -202,6 +204,7 @@ fn monitor_ol_candidate_different_title() -> WorkCandidate {
         provenance_setter: Some(ProvenanceSetter::AutoAdded),
         import_id: None,
         cover_manual: false,
+        add_source: livrarr_domain::history_events::WorkAddSource::AuthorMonitor,
     }
 }
 

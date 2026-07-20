@@ -117,6 +117,7 @@ fn make_candidate(title: &str, author: &str, ol_key: Option<&str>) -> WorkCandid
         provenance_setter: None,
         import_id: None,
         cover_manual: false,
+        add_source: livrarr_domain::history_events::WorkAddSource::Search,
     }
 }
 

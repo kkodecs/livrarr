@@ -41,6 +41,10 @@ fn parse_event_type(s: &str) -> Result<EventType, DbError> {
         "tagWritten" => Ok(EventType::TagWritten),
         "tagWriteFailed" => Ok(EventType::TagWriteFailed),
         "fileDeleted" => Ok(EventType::FileDeleted),
+        "added" => Ok(EventType::Added),
+        "workDeleted" => Ok(EventType::WorkDeleted),
+        "worksMerged" => Ok(EventType::WorksMerged),
+        "identityResolved" => Ok(EventType::IdentityResolved),
         _ => Err(DbError::IncompatibleData {
             detail: format!("unknown event type: {s}"),
         }),
@@ -59,7 +63,30 @@ fn event_type_str(t: EventType) -> &'static str {
         EventType::TagWritten => "tagWritten",
         EventType::TagWriteFailed => "tagWriteFailed",
         EventType::FileDeleted => "fileDeleted",
+        EventType::Added => "added",
+        EventType::WorkDeleted => "workDeleted",
+        EventType::WorksMerged => "worksMerged",
+        EventType::IdentityResolved => "identityResolved",
     }
+}
+
+/// REQ-012: a row whose stored `event_type` this binary does not recognize is
+/// skipped with a warning — it never fails the list. Any other row problem
+/// (bad JSON, bad date) still fails the query.
+fn collect_known_rows(rows: Vec<sqlx::sqlite::SqliteRow>) -> Result<Vec<HistoryEvent>, DbError> {
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let kind: String = row
+            .try_get("event_type")
+            .map_err(|e| DbError::Io(Box::new(e)))?;
+        if parse_event_type(&kind).is_err() {
+            let id: Option<i64> = row.try_get("id").ok();
+            tracing::warn!(kind = %kind, id = ?id, "skipping history row with unrecognized kind");
+            continue;
+        }
+        events.push(row_to_history_event(row)?);
+    }
+    Ok(events)
 }
 
 impl HistoryDb for SqliteDb {
@@ -95,7 +122,7 @@ impl HistoryDb for SqliteDb {
         }
 
         let rows = q.fetch_all(self.pool()).await.map_err(map_db_err)?;
-        rows.into_iter().map(row_to_history_event).collect()
+        collect_known_rows(rows)
     }
 
     async fn list_history_paginated(
@@ -144,15 +171,12 @@ impl HistoryDb for SqliteDb {
         dq = dq.bind(per_page as i64).bind(offset);
 
         let rows = dq.fetch_all(self.pool()).await.map_err(map_db_err)?;
-        let events = rows
-            .into_iter()
-            .map(row_to_history_event)
-            .collect::<Result<Vec<_>, _>>()?;
+        let events = collect_known_rows(rows)?;
         Ok((events, total))
     }
 
     async fn create_history_event(&self, req: CreateHistoryEventDbRequest) -> Result<(), DbError> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let date = req.date.unwrap_or_else(chrono::Utc::now).to_rfc3339();
         let event_type_s = event_type_str(req.event_type);
         let data_str = serde_json::to_string(&req.data).map_err(|e| DbError::Io(Box::new(e)))?;
 
@@ -163,7 +187,7 @@ impl HistoryDb for SqliteDb {
         .bind(req.work_id)
         .bind(event_type_s)
         .bind(&data_str)
-        .bind(&now)
+        .bind(&date)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?;

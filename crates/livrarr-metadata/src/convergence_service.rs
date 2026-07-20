@@ -39,6 +39,7 @@ where
         + livrarr_db::ProviderRetryStateDb
         + ConfigDb
         + livrarr_db::SeriesDb
+        + livrarr_db::HistoryDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
@@ -247,6 +248,7 @@ where
         + livrarr_db::ProviderRetryStateDb
         + ConfigDb
         + livrarr_db::SeriesDb
+        + livrarr_db::HistoryDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,

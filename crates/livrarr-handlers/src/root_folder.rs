@@ -3,16 +3,19 @@ use std::path::PathBuf;
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::context::{HasFileService, HasImportService, HasRootFolderService, HasWorkService};
+use crate::context::{
+    HasFileService, HasHistoryService, HasImportService, HasRootFolderService, HasWorkService,
+};
 use crate::middleware::RequireAdmin;
 use crate::{
     ApiError, CreateRootFolderRequest, RootFolderResponse, ScanErrorEntry, ScanResult,
     ScanUnmatchedFile,
 };
+use livrarr_domain::history_events;
 use livrarr_domain::identity_matching::identity_key_flat;
 use livrarr_domain::services::{
-    AdoptScannedFileRequest, FileService, ImportFileOutcome, ImportService, ImportWorkflowError,
-    RootFolderService, WorkService,
+    AdoptScannedFileRequest, FileService, HistoryService, ImportFileOutcome, ImportService,
+    ImportWorkflowError, RootFolderService, WorkService,
 };
 use livrarr_domain::{classify_file, MediaType};
 
@@ -100,7 +103,9 @@ pub async fn delete<S: HasRootFolderService>(
     Ok(())
 }
 
-pub async fn scan<S: HasRootFolderService + HasWorkService + HasFileService + HasImportService>(
+pub async fn scan<
+    S: HasRootFolderService + HasWorkService + HasFileService + HasImportService + HasHistoryService,
+>(
     State(state): State<S>,
     RequireAdmin(auth): RequireAdmin,
     Path(id): Path<i64>,
@@ -277,25 +282,64 @@ pub async fn scan<S: HasRootFolderService + HasWorkService + HasFileService + Ha
                         .await
                     {
                         Ok(
-                            ImportFileOutcome::Adopted { .. }
-                            | ImportFileOutcome::Imported { .. }
-                            | ImportFileOutcome::Skipped { .. },
+                            ImportFileOutcome::Adopted { .. } | ImportFileOutcome::Imported { .. },
                         ) => {
                             matched += 1;
+                            state
+                                .history_service()
+                                .record(
+                                    user_id,
+                                    history_events::imported_manual(
+                                        work.id,
+                                        &work.title,
+                                        &sf.path.display().to_string(),
+                                        media_type.as_str(),
+                                    ),
+                                )
+                                .await;
                         }
-                        Err(ImportWorkflowError::PathCollision(path)) => {
+                        Ok(ImportFileOutcome::Skipped { .. }) => {
+                            matched += 1;
+                        }
+                        Err(ref e @ ImportWorkflowError::PathCollision(ref path)) => {
                             errors.push(ScanErrorEntry {
                                 path: sf.path.display().to_string(),
                                 message: format!(
                                     "path collision: {path} already claimed by a different work"
                                 ),
                             });
+                            state
+                                .history_service()
+                                .record(
+                                    user_id,
+                                    history_events::import_failed_manual(
+                                        work.id,
+                                        &work.title,
+                                        &sf.path.display().to_string(),
+                                        Some(media_type.as_str()),
+                                        &e.to_string(),
+                                    ),
+                                )
+                                .await;
                         }
                         Err(e) => {
                             errors.push(ScanErrorEntry {
                                 path: sf.path.display().to_string(),
                                 message: format!("failed to adopt file: {e}"),
                             });
+                            state
+                                .history_service()
+                                .record(
+                                    user_id,
+                                    history_events::import_failed_manual(
+                                        work.id,
+                                        &work.title,
+                                        &sf.path.display().to_string(),
+                                        Some(media_type.as_str()),
+                                        &e.to_string(),
+                                    ),
+                                )
+                                .await;
                         }
                     }
                 } else {

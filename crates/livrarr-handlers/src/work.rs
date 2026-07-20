@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::context::{
     HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
-    HasDiscoveryService, HasEmailService, HasEnrichmentWorkflow, HasFileService,
+    HasDiscoveryService, HasEmailService, HasEnrichmentWorkflow, HasFileService, HasHistoryService,
     HasIdentityResolver, HasImportService, HasNotificationService, HasSeriesQueryService,
     HasTagService, HasWorkIdentityRepository, HasWorkService,
 };
@@ -19,11 +19,12 @@ use crate::{
     MergePreviewResponse, MergeWorksRequest, MergeWorksResponse, RefreshWorkResponse,
     UpdateWorkRequest, WorkDetailResponse, WorkSearchResult,
 };
+use livrarr_domain::history_events;
 use livrarr_domain::identity::{AnchorConfidence, AnchorSetter, AnchorType};
 use livrarr_domain::services::{
     AppConfigService, AuthorService, CreateNotificationRequest, DiscoveryService, EmailService,
-    FileService, ImportService, MergeFieldChoiceEntry, NotificationService, RefreshSurface,
-    SeriesQueryService, WorkIdentityRepository, WorkService, WorkServiceError,
+    FileService, HistoryService, ImportService, MergeFieldChoiceEntry, NotificationService,
+    RefreshSurface, SeriesQueryService, WorkIdentityRepository, WorkService, WorkServiceError,
 };
 
 fn proxy_cover_url(url: String) -> String {
@@ -1018,10 +1019,9 @@ pub async fn list_pending_anchors<S: HasWorkIdentityRepository + HasWorkService>
     Ok(Json(dtos))
 }
 
-/// Affirm a pending identity guess: promote it to a confirmed anchor (synced into
-/// `works.*`) and kick a background enrichment for the now-unlocked provider
-/// (REQ-005).
-pub async fn affirm_pending_anchor<S: HasWorkIdentityRepository + HasWorkService>(
+pub async fn affirm_pending_anchor<
+    S: HasWorkIdentityRepository + HasWorkService + HasHistoryService,
+>(
     State(state): State<S>,
     ctx: AuthContext,
     Path((work_id, anchor_type)): Path<(i64, String)>,
@@ -1068,9 +1068,27 @@ pub async fn affirm_pending_anchor<S: HasWorkIdentityRepository + HasWorkService
     // atomic transaction (M-020 fix — badge must not wait for bg refresh).
     state
         .work_identity_repo()
-        .confirm_anchor_and_recompute_badge(work_id, anchor_type, &value, AnchorSetter::User)
+        .confirm_anchor_and_recompute_badge(
+            work_id,
+            anchor_type.clone(),
+            &value,
+            AnchorSetter::User,
+        )
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    state
+        .history_service()
+        .record(
+            user_id,
+            history_events::identity_resolved(
+                work_id,
+                &work.title,
+                "affirm",
+                format!("{} {}", anchor_type.as_str(), value),
+            ),
+        )
+        .await;
 
     // Fire-and-forget the enrichment the newly-confirmed anchor unlocks.
     let s = state.clone();

@@ -178,6 +178,7 @@ fn candidate_with_identity(
         provenance_setter: None,
         import_id: None,
         cover_manual: false,
+        add_source: livrarr_domain::history_events::WorkAddSource::Search,
     }
 }
 
@@ -258,6 +259,7 @@ impl EnrichmentWorkflow for SpyEnrichmentWorkflow {
             provider_outcomes: HashMap::new(),
             cover_resolution: None,
             audiobook_cover_resolution: None,
+            attempted: true,
         })
     }
 

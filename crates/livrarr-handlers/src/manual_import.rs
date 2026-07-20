@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::context::{
-    HasAppConfigService, HasAuthorService, HasDiscoveryService, HasImportService,
-    HasManualImportScan, HasManualImportService, HasMatchingService, HasWorkService,
+    HasAppConfigService, HasAuthorService, HasDiscoveryService, HasHistoryService,
+    HasImportService, HasManualImportScan, HasManualImportService, HasMatchingService,
+    HasWorkService,
 };
 
 pub trait ManualImportHandlerContext:
@@ -18,6 +19,7 @@ pub trait ManualImportHandlerContext:
     + HasWorkService
     + HasDiscoveryService
     + HasImportService
+    + HasHistoryService
     + Clone
     + Send
     + Sync
@@ -34,6 +36,7 @@ impl<T> ManualImportHandlerContext for T where
         + HasWorkService
         + HasDiscoveryService
         + HasImportService
+        + HasHistoryService
         + Clone
         + Send
         + Sync
@@ -42,9 +45,11 @@ impl<T> ManualImportHandlerContext for T where
 }
 use crate::middleware::RequireAdmin;
 use crate::ApiError;
+use livrarr_domain::history_events;
 use livrarr_domain::services::{
-    AppConfigService, AuthorService, DiscoveryService, ImportFileResult, ImportService,
-    ImportSingleFileRequest, ManualImportService, MatchingService, RefreshSurface, WorkService,
+    AppConfigService, AuthorService, DiscoveryService, HistoryService, ImportFileResult,
+    ImportService, ImportSingleFileRequest, ManualImportService, MatchingService, RefreshSurface,
+    WorkService,
 };
 use livrarr_domain::{classify_file, MediaType};
 
@@ -257,6 +262,10 @@ pub struct ImportResult {
     pub status: ImportStatus,
     pub work_id: Option<i64>,
     pub error: Option<String>,
+    /// `Some` once file classification succeeds; `None` on the
+    /// pre-classification failure paths (unrecognized media, missing root
+    /// folder) — the type carries what each path truly knows.
+    pub media_type: Option<MediaType>,
 }
 
 #[derive(Debug, Serialize)]
@@ -871,6 +880,74 @@ pub async fn import<S: ManualImportHandlerContext>(
                 &default_language,
             )
             .await;
+
+            // Per-file history write (REQ-003): the writer matches on the
+            // outcome shape rather than trusting status alone, since a
+            // successful classification is what guarantees work_id/media_type.
+            match (&result.status, result.work_id, result.media_type) {
+                (ImportStatus::Imported, Some(wid), Some(mt)) => {
+                    let work_title = state
+                        .work_service()
+                        .get(user_id, wid)
+                        .await
+                        .map(|w| w.title)
+                        .unwrap_or_default();
+                    state
+                        .history_service()
+                        .record(
+                            user_id,
+                            history_events::imported_manual(
+                                wid,
+                                &work_title,
+                                &result.path,
+                                mt.as_str(),
+                            ),
+                        )
+                        .await;
+                }
+                (ImportStatus::Imported, _, _) => {
+                    warn!(
+                        "manual import: Imported result missing work_id or media_type for {}",
+                        result.path
+                    );
+                }
+                (ImportStatus::Failed, Some(wid), mt) => {
+                    let work_title = state
+                        .work_service()
+                        .get(user_id, wid)
+                        .await
+                        .map(|w| w.title)
+                        .unwrap_or_default();
+                    state
+                        .history_service()
+                        .record(
+                            user_id,
+                            history_events::import_failed_manual(
+                                wid,
+                                &work_title,
+                                &result.path,
+                                mt.map(|m| m.as_str()),
+                                result.error.as_deref().unwrap_or_default(),
+                            ),
+                        )
+                        .await;
+                }
+                (ImportStatus::Failed, None, mt) => {
+                    state
+                        .history_service()
+                        .record(
+                            user_id,
+                            history_events::import_failed_unattached(
+                                &result.path,
+                                mt.map(|m| m.as_str()),
+                                result.error.as_deref().unwrap_or_default(),
+                            ),
+                        )
+                        .await;
+                }
+                (ImportStatus::Skipped, ..) => {}
+            }
+
             results.push(result);
         }
         results
@@ -918,6 +995,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
                 status: ImportStatus::Failed,
                 work_id: None,
                 error: Some("unrecognized media type".into()),
+                media_type: None,
             };
         }
     };
@@ -930,6 +1008,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
                 status: ImportStatus::Failed,
                 work_id: None,
                 error: Some(format!("no root folder configured for {:?}", media_type)),
+                media_type: Some(media_type),
             };
         }
     };
@@ -952,6 +1031,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
                 status: ImportStatus::Failed,
                 work_id: None,
                 error: Some(format!("work creation failed: {e}")),
+                media_type: Some(media_type),
             };
         }
     };
@@ -987,6 +1067,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
                 status: ImportStatus::Imported,
                 work_id: Some(work_id),
                 error: None,
+                media_type: Some(media_type),
             }
         }
         ImportFileResult::Warning(w) => {
@@ -999,6 +1080,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
                 status: ImportStatus::Imported,
                 work_id: Some(work_id),
                 error: None,
+                media_type: Some(media_type),
             }
         }
         ImportFileResult::Skipped(msg) => {
@@ -1011,6 +1093,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
                 status: ImportStatus::Skipped,
                 work_id: Some(work_id),
                 error: None,
+                media_type: Some(media_type),
             }
         }
         ImportFileResult::Failed(e) => {
@@ -1023,6 +1106,7 @@ async fn import_single_item<S: ManualImportHandlerContext>(
                 status: ImportStatus::Failed,
                 work_id: Some(work_id),
                 error: Some(e),
+                media_type: Some(media_type),
             }
         }
     }

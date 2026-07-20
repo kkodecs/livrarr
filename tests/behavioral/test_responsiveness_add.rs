@@ -220,6 +220,7 @@ impl EnrichmentWorkflow for SleepingWorkflow {
             audiobook_cover_resolution: None,
             identity_not_found: false,
             changed: false,
+            attempted: true,
         })
     }
 
@@ -307,6 +308,7 @@ impl EnrichmentWorkflow for GatedWorkflow {
             audiobook_cover_resolution: None,
             identity_not_found: false,
             changed: false,
+            attempted: true,
         })
     }
 
@@ -385,6 +387,7 @@ impl EnrichmentWorkflow for RecordingPersistingWorkflow {
             audiobook_cover_resolution: None,
             identity_not_found: false,
             changed: false,
+            attempted: true,
         })
     }
 
@@ -929,6 +932,7 @@ impl livrarr_domain::services::EnrichmentWorkflow for RecordingDelayedWorkflow {
             audiobook_cover_resolution: None,
             identity_not_found: false,
             changed: false,
+            attempted: true,
         })
     }
 

@@ -125,6 +125,8 @@ impl EnrichmentWorkflow for StubNoEnrichment {
         Ok(EnrichmentResult {
             identity_not_found: false,
             changed: false,
+            // A no-op workflow never dispatches or merges — not an attempt.
+            attempted: false,
             enrichment_status: EnrichmentStatus::Unenriched,
             enrichment_source: None,
             work: Work::default(),
@@ -287,6 +289,7 @@ where
         + livrarr_db::ProviderRetryStateDb
         + ConfigDb
         + livrarr_db::SeriesDb
+        + livrarr_db::HistoryDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
@@ -554,6 +557,9 @@ where
         // The persisted identity badge derived from the candidate's anchors
         // (REQ-014/016, D-013) — written at create and used to gate enrichment.
         let derived_identity = candidate.identity.derived_identity_status();
+        // The creation door's label (REQ-001), copied out before candidate
+        // fields move below; stamped only by the seed_* constructors.
+        let add_source = candidate.add_source;
 
         // The originating door's identity patience (REQ-005) + conflict
         // attribution (REQ-020), threaded to the one identity road through the
@@ -864,6 +870,7 @@ where
                     author_id,
                     derived_identity,
                     is_user_initiated,
+                    add_source,
                 )
                 .await
             }
@@ -1052,6 +1059,7 @@ where
                     author_id,
                     derived_identity,
                     is_user_initiated,
+                    add_source,
                 )
                 .await
             }
@@ -1473,7 +1481,8 @@ where
     }
 
     async fn delete(&self, user_id: UserId, work_id: WorkId) -> Result<(), WorkServiceError> {
-        self.db
+        let work = self
+            .db
             .get_work(user_id, work_id)
             .await
             .map_err(|e| match e {
@@ -1495,6 +1504,17 @@ where
                 DbError::NotFound { .. } => WorkServiceError::NotFound,
                 other => WorkServiceError::Db(other),
             })?;
+
+        // REQ-006: one composite workDeleted after successful deletion, with
+        // work_id None (D-DELETE-ORDER: the work row is gone, so an attached
+        // insert would violate the FK); the payload snapshot identifies the
+        // row. No per-file events on this road.
+        livrarr_db::record_history(
+            &self.db,
+            user_id,
+            history_events::work_deleted(&work.title, Some(&work.author_name), items.len(), false),
+        )
+        .await;
 
         // REQ-001/AC-012: deleting a work unlinks it; GC an unmonitored stub
         // left with zero linked works.
@@ -1934,6 +1954,20 @@ where
                 other => WorkServiceError::Db(other),
             })?;
 
+        // REQ-007(b): the survivor gains one worksMerged naming the merged-
+        // away work, after the transactional repoint+delete committed.
+        livrarr_db::record_history(
+            &self.db,
+            user_id,
+            history_events::works_merged(
+                survivor_id,
+                &updated_survivor.title,
+                &loser.title,
+                loser_id,
+            ),
+        )
+        .await;
+
         // Physical file reorganization (REQ-015 c) is a separate, best-effort
         // step the caller runs via `ImportService::reorganize_work_files` —
         // this service has no filesystem access (compile-wall seam,
@@ -1994,6 +2028,7 @@ where
         + EnrichmentRetryDb
         + livrarr_db::ProviderRetryStateDb
         + livrarr_db::SeriesDb
+        + livrarr_db::HistoryDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
@@ -2269,7 +2304,18 @@ where
         author_id: Option<i64>,
         derived_identity: livrarr_domain::IdentityStatus,
         is_user_initiated: bool,
+        add_source: history_events::WorkAddSource,
     ) -> Result<AddWorkResult, WorkServiceError> {
+        // REQ-001: the birth event, at the one created:true funnel — the work
+        // row is already committed. Dedup returns, adopt returns, and race
+        // losers never pass here, so exactly-once holds by construction.
+        livrarr_db::record_history(
+            &self.db,
+            user_id,
+            history_events::added(work.id, &work.title, Some(&work.author_name), add_source),
+        )
+        .await;
+
         // Persist the identity-confidence badge derived at resolution time
         // (REQ-014/D-013) — independent of enrichment, written once at create.
         self.db
@@ -2387,6 +2433,7 @@ where
         + EnrichmentRetryDb
         + livrarr_db::SeriesDb
         + livrarr_db::ProviderRetryStateDb
+        + livrarr_db::HistoryDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
@@ -2474,6 +2521,19 @@ where
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(work_id, "run_unified_enrichment: enrich_work failed: {e}");
+                // REQ-002: a failing attempt records exactly one
+                // enrichmentFailed; the host road still returns normally.
+                livrarr_db::record_history(
+                    &self.db,
+                    user_id,
+                    history_events::enrichment_failed(
+                        work_id,
+                        &work.title,
+                        Some(&work.author_name),
+                        &e.to_string(),
+                    ),
+                )
+                .await;
                 return (EnrichmentStatus::Failed, false);
             }
         };
@@ -2483,6 +2543,17 @@ where
             Ok(w) => w,
             Err(e) => {
                 tracing::warn!(work_id, "run_unified_enrichment: get_work failed: {e}");
+                livrarr_db::record_history(
+                    &self.db,
+                    user_id,
+                    history_events::enrichment_failed(
+                        work_id,
+                        &work.title,
+                        Some(&work.author_name),
+                        &format!("work reload after enrichment failed: {e}"),
+                    ),
+                )
+                .await;
                 return (EnrichmentStatus::Failed, false);
             }
         };
@@ -2609,7 +2680,7 @@ where
             let _mat_span = livrarr_domain::perf::StageTimer::start("materialize", work_id);
             livrarr_domain::services::MaterializeService::materialize(&materialize, mat_req).await
         };
-        if let Err(e) = mat_outcome {
+        if let Err(e) = &mat_outcome {
             tracing::warn!(work_id, "run_unified_enrichment: materialize failed: {e}");
         }
 
@@ -2641,6 +2712,27 @@ where
                     tracing::warn!(work_id, "audiobook cover dimension backfill failed: {e}");
                 }
             }
+        }
+
+        // REQ-002: exactly one of {enriched, enrichmentFailed, nothing} per
+        // invocation. A deferred merge records nothing — the concluding pass
+        // is the moment; a pass that never attempted (no provider dispatch,
+        // no merge application) records nothing.
+        if !enrich_result.merge_deferred && enrich_result.attempted {
+            let tags_written = matches!(&mat_outcome, Ok(o) if o.tags_written);
+            livrarr_db::record_history(
+                &self.db,
+                user_id,
+                history_events::enriched(
+                    work_id,
+                    &post_enrich_work.title,
+                    Some(&post_enrich_work.author_name),
+                    enrich_result.changed,
+                    &final_status,
+                    tags_written,
+                ),
+            )
+            .await;
         }
 
         (final_status, identity_not_found)

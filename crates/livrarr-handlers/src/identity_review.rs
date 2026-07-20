@@ -3,11 +3,12 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::context::{HasWorkIdentityRepository, HasWorkService};
+use crate::context::{HasHistoryService, HasWorkIdentityRepository, HasWorkService};
 use crate::{ApiError, AuthContext};
+use livrarr_domain::history_events;
 use livrarr_domain::identity::{AnchorSetter, Candidate};
 use livrarr_domain::services::{
-    WorkIdentityError, WorkIdentityRepository, WorkService, WorkServiceError,
+    HistoryService, WorkIdentityError, WorkIdentityRepository, WorkService, WorkServiceError,
 };
 
 /// One ranked candidate behind a `NeedsReview` park (AC-013) — a genuinely
@@ -110,19 +111,14 @@ pub async fn list<S: HasWorkIdentityRepository>(
     Ok(Json(out))
 }
 
-/// Apply a picked candidate (AC-013): confirms its anchors, recomputes the
-/// badge, and un-parks the work — all inside
-/// `WorkIdentityRepository::apply_review_candidate`'s one transaction (the
-/// existing resolve flow's badge-recompute pattern, generalized to a
-/// candidate's full anchor set).
-pub async fn resolve<S: HasWorkIdentityRepository + HasWorkService>(
+pub async fn resolve<S: HasWorkIdentityRepository + HasWorkService + HasHistoryService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(work_id): Path<i64>,
     Json(body): Json<ResolveReviewRequest>,
 ) -> Result<StatusCode, ApiError> {
     // Ownership check before any mutation (P4 — no cross-user resolve).
-    state
+    let work = state
         .work_service()
         .get(ctx.user.id, work_id)
         .await
@@ -156,6 +152,19 @@ pub async fn resolve<S: HasWorkIdentityRepository + HasWorkService>(
             },
             other => ApiError::Internal(other.to_string()),
         })?;
+
+    state
+        .history_service()
+        .record(
+            ctx.user.id,
+            history_events::identity_resolved(
+                work_id,
+                &work.title,
+                "review-candidate-apply",
+                format!("{} — {}", chosen.anchors.title, chosen.anchors.author_name),
+            ),
+        )
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }

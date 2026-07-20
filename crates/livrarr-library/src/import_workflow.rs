@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use crate::atomic_copy;
 use livrarr_db::{
-    ChapterDb, ConfigDb, CreateHistoryEventDbRequest, CreateLibraryItemDbRequest, GrabDb,
-    HistoryDb, KashLinkDb, LibraryItemDb, NewKashLink, RemotePathMappingDb, RootFolderDb, WorkDb,
+    record_history, ChapterDb, ConfigDb, CreateLibraryItemDbRequest, GrabDb, HistoryDb, KashLinkDb,
+    LibraryItemDb, NewKashLink, RemotePathMappingDb, RootFolderDb, WorkDb,
 };
+use livrarr_domain::history_events;
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::{
     ChapterExtractionError, ChapterExtractor, FailedFile, ImportFileOutcome, ImportFileRequest,
@@ -14,8 +15,7 @@ use livrarr_domain::services::{
     SkippedFile,
 };
 use livrarr_domain::{
-    classify_file, sanitize_path_component, DbError, EventType, GrabId, GrabStatus, MediaType,
-    UserId, WorkId,
+    classify_file, sanitize_path_component, DbError, GrabId, GrabStatus, MediaType, UserId, WorkId,
 };
 use sha2::{Digest, Sha256};
 
@@ -1286,32 +1286,21 @@ where
         }
 
         // Record history event
-        let event_type = if final_status == GrabStatus::Imported {
-            EventType::Imported
-        } else {
-            EventType::ImportFailed
-        };
-        if let Err(e) = self
-            .db
-            .create_history_event(CreateHistoryEventDbRequest {
-                user_id,
-                work_id: Some(work_id),
-                event_type,
-                data: serde_json::json!({
-                    "title": grab.title,
-                    "imported": imported_files.len(),
-                    "failed": failed_files.len(),
-                    "skipped": skipped_files.len(),
-                }),
-            })
-            .await
-        {
-            tracing::warn!(
-                grab_id = grab_id,
-                work_id = work_id,
-                "import: failed to record history event: {e}"
-            );
-        }
+        record_history(
+            &self.db,
+            user_id,
+            history_events::imported_batch(
+                work_id,
+                &work.title,
+                Some(&work.author_name),
+                &grab.title,
+                final_status == GrabStatus::Imported,
+                imported_files.len(),
+                failed_files.len(),
+                skipped_files.len(),
+            ),
+        )
+        .await;
 
         Ok(ImportResult {
             grab_id,

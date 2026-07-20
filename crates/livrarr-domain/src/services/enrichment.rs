@@ -33,6 +33,11 @@ pub struct EnrichmentResult {
     /// resolution. Drives the materialize gate in `run_unified_enrichment` (REQ-012):
     /// cover download + retag runs only when `changed = true`.
     pub changed: bool,
+    /// True when the pass ran to completion — a provider dispatch or a
+    /// cached-candidate merge concluded (including a no-op merge). False only
+    /// when the pass ended with no provider dispatch and no merge application.
+    /// The history writer records no metadata event for an unattempted pass.
+    pub attempted: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

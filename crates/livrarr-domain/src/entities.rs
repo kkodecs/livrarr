@@ -41,6 +41,17 @@ pub enum MediaType {
     Audiobook,
 }
 
+impl MediaType {
+    /// The serde string form ("ebook" / "audiobook"), for event payloads and
+    /// other places that need the canonical lowercase name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MediaType::Ebook => "ebook",
+            MediaType::Audiobook => "audiobook",
+        }
+    }
+}
+
 /// Canonical UserRole — admin or user.
 ///
 /// Satisfies: AUTH-002
@@ -154,6 +165,10 @@ pub enum EventType {
     TagWritten,
     TagWriteFailed,
     FileDeleted,
+    Added,
+    WorkDeleted,
+    WorksMerged,
+    IdentityResolved,
 }
 
 /// Notification types — in-app notification system.
@@ -354,7 +369,7 @@ impl std::fmt::Debug for Session {
 /// Work entity — the primary domain object.
 ///
 /// Satisfies: SEARCH-004, SEARCH-006, SEARCH-013
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Work {
     pub id: WorkId,
     pub user_id: UserId,

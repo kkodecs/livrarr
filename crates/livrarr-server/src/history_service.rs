@@ -1,4 +1,5 @@
-use livrarr_db::HistoryDb;
+use livrarr_db::{record_history, HistoryDb};
+use livrarr_domain::history_events::HistoryDraft;
 use livrarr_domain::services::{HistoryService, HistoryServiceError};
 use livrarr_domain::{HistoryEvent, HistoryFilter, UserId};
 
@@ -34,5 +35,9 @@ where
             .list_history_paginated(user_id, filter, page, page_size)
             .await
             .map_err(map_db_err)
+    }
+
+    async fn record(&self, user_id: UserId, draft: HistoryDraft) {
+        record_history(&self.db, user_id, draft).await
     }
 }

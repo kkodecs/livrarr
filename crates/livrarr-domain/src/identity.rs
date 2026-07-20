@@ -571,4 +571,8 @@ pub struct WorkCandidate {
     pub provenance_setter: Option<crate::ProvenanceSetter>,
     pub import_id: Option<String>,
     pub cover_manual: bool,
+    /// The creation door that built this candidate (the `added` event's source
+    /// label). Stamped exclusively by the per-door `seed_*` constructors in
+    /// [`crate::seed`] — callers never pass it, so a door cannot mislabel itself.
+    pub add_source: crate::history_events::WorkAddSource,
 }

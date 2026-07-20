@@ -3,7 +3,8 @@ use tracing::warn;
 
 use crate::state::AppState;
 use crate::tag_service::{build_tag_metadata, read_cover_bytes, tag_sync_single_item};
-use livrarr_db::{LibraryItemDb, WorkDb};
+use livrarr_db::{record_history, HistoryDb, LibraryItemDb, WorkDb};
+use livrarr_domain::history_events;
 use livrarr_domain::services::ImportIoService;
 use livrarr_domain::TagStatus;
 
@@ -52,77 +53,97 @@ pub async fn tag_convergence_tick(
                 Err(_) => break,
             };
 
-            let work = match state.db.get_work(item.user_id, item.work_id).await {
-                Ok(w) => w,
-                Err(e) => {
-                    warn!(
-                        item_id = item.id,
-                        work_id = item.work_id,
-                        "tag_convergence: get_work failed: {e}"
-                    );
-                    continue;
-                }
-            };
-
-            if work.enrichment_status != livrarr_domain::EnrichmentStatus::Enriched {
-                // Work not ready yet — skip, will be picked up on next tick.
-                continue;
-            }
-
-            let tag_metadata = build_tag_metadata(&work);
-            let cover_data = read_cover_bytes(&state.data_dir, item.user_id, work.id).await;
-
-            // Look up root folder path for this item.
-            let root_folder_path = match state
-                .import_io_service
-                .get_root_folder(item.root_folder_id)
-                .await
-            {
-                Ok(rf) => rf.path,
-                Err(e) => {
-                    warn!(
-                        item_id = item.id,
-                        root_folder_id = item.root_folder_id,
-                        "tag_convergence: get_root_folder failed: {e}"
-                    );
-                    continue;
-                }
-            };
-
-            let merge_generation = state
-                .db
-                .get_merge_generation(item.user_id, work.id)
-                .await
-                .unwrap_or(0);
-
-            let tag_result = tag_sync_single_item(
-                item,
-                &root_folder_path,
-                &tag_metadata,
-                cover_data.as_deref(),
-            )
-            .await;
-
-            let new_status = match tag_result {
-                Ok(()) => TagStatus::Synced,
-                Err(ref e) => {
-                    warn!(item_id = item.id, "tag_convergence: tag write failed: {e}");
-                    TagStatus::Failed
-                }
-            };
-
-            if let Err(e) = state
-                .db
-                .update_library_item_tag_status(item.id, new_status, merge_generation)
-                .await
-            {
-                warn!(
-                    item_id = item.id,
-                    "tag_convergence: update_library_item_tag_status failed: {e}"
-                );
-            }
+            recover_item_tags(&state.db, &*state.import_io_service, &state.data_dir, item).await;
         }
     }
 
     Ok(())
+}
+
+/// Per-item tag recovery: syncs tags for one item, updates its tag status,
+/// and records history when the file lands `Synced`.
+pub async fn recover_item_tags<D, I>(
+    db: &D,
+    import_io: &I,
+    data_dir: &std::path::Path,
+    item: &livrarr_domain::LibraryItem,
+) where
+    D: WorkDb + LibraryItemDb + HistoryDb + Send + Sync,
+    I: ImportIoService + Send + Sync,
+{
+    let work = match db.get_work(item.user_id, item.work_id).await {
+        Ok(w) => w,
+        Err(e) => {
+            warn!(
+                item_id = item.id,
+                work_id = item.work_id,
+                "tag_convergence: get_work failed: {e}"
+            );
+            return;
+        }
+    };
+
+    if work.enrichment_status != livrarr_domain::EnrichmentStatus::Enriched {
+        // Work not ready yet — skip, will be picked up on next tick.
+        return;
+    }
+
+    let tag_metadata = build_tag_metadata(&work);
+    let cover_data = read_cover_bytes(data_dir, item.user_id, work.id).await;
+
+    // Look up root folder path for this item.
+    let root_folder_path = match import_io.get_root_folder(item.root_folder_id).await {
+        Ok(rf) => rf.path,
+        Err(e) => {
+            warn!(
+                item_id = item.id,
+                root_folder_id = item.root_folder_id,
+                "tag_convergence: get_root_folder failed: {e}"
+            );
+            return;
+        }
+    };
+
+    let merge_generation = db
+        .get_merge_generation(item.user_id, work.id)
+        .await
+        .unwrap_or(0);
+
+    let tag_result = tag_sync_single_item(
+        item,
+        &root_folder_path,
+        &tag_metadata,
+        cover_data.as_deref(),
+    )
+    .await;
+
+    let new_status = match tag_result {
+        Ok(()) => TagStatus::Synced,
+        Err(ref e) => {
+            warn!(item_id = item.id, "tag_convergence: tag write failed: {e}");
+            TagStatus::Failed
+        }
+    };
+
+    match db
+        .update_library_item_tag_status(item.id, new_status, merge_generation)
+        .await
+    {
+        Ok(()) => {
+            if new_status == TagStatus::Synced {
+                record_history(
+                    db,
+                    item.user_id,
+                    history_events::tag_written_item(item.work_id, &work.title, &item.path),
+                )
+                .await;
+            }
+        }
+        Err(e) => {
+            warn!(
+                item_id = item.id,
+                "tag_convergence: update_library_item_tag_status failed: {e}"
+            );
+        }
+    }
 }

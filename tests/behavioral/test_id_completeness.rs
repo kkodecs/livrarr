@@ -31,7 +31,7 @@ use livrarr_external_data::transport_cache::TransportCache;
 use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
-use livrarr_handlers::context::{HasWorkIdentityRepository, HasWorkService};
+use livrarr_handlers::context::{HasHistoryService, HasWorkIdentityRepository, HasWorkService};
 use livrarr_handlers::work::{affirm_pending_anchor, list_pending_anchors};
 use livrarr_handlers::AuthContext;
 use livrarr_metadata::async_resolver::settle_identity;
@@ -71,6 +71,7 @@ impl EnglishIdentityResolver for ScriptedResolver {
 struct TestState {
     work_service: Arc<TestWorkService>,
     identity_repo: SqliteDb,
+    history_service: Arc<livrarr_server::history_service::HistoryServiceImpl<SqliteDb>>,
 }
 
 impl HasWorkService for TestState {
@@ -86,6 +87,14 @@ impl HasWorkIdentityRepository for TestState {
 
     fn work_identity_repo(&self) -> &Self::WorkIdentityRepo {
         &self.identity_repo
+    }
+}
+
+impl HasHistoryService for TestState {
+    type HistorySvc = livrarr_server::history_service::HistoryServiceImpl<SqliteDb>;
+
+    fn history_service(&self) -> &Self::HistorySvc {
+        &self.history_service
     }
 }
 
@@ -270,6 +279,9 @@ fn test_state(db: SqliteDb) -> TestState {
             db.clone(),
             StubEnrichmentWorkflow::succeeding(),
             None,
+        )),
+        history_service: Arc::new(livrarr_server::history_service::HistoryServiceImpl::new(
+            db.clone(),
         )),
         identity_repo: db,
     }

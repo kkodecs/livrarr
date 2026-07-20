@@ -1,0 +1,771 @@
+metadata:
+  feature: "work-history"
+  stage: v2-operational
+  spec_ref: "spec-work-history.md"
+  ir_v1_ref: "ir-v1-work-history.yaml"
+  version: 1
+  review_round: 1
+  round1_dispositions: >
+    Design r1: gemini PASS (1 P2), codex FAIL (2 P1) — all three verified against source and
+    folded. gemini R-1: backfill pseudocode used panicking map indexing (titles[work_id]) while
+    claiming graceful degradation — now .get().unwrap_or_default() everywhere. codex R-1
+    CONFIRMED (the trace-the-branch class): import_single_item constructs early
+    ImportResult{Failed} returns (unrecognized media :901-911, missing root folder,
+    work-creation failure) BEFORE the ImportFileResult match my writer sat on — silent failures.
+    Fix: the REQ-003 writer moves to import_single_item's SOLE caller (manual_import.rs:863
+    confirm loop, caller census: one production call site), seeing every ImportResult regardless
+    of path; a no-work failure records with work_id None (path + error payload; work_title only
+    when a work exists). codex R-2 CONFIRMED by direct read: the adopt handler's success arm
+    matches Adopted | Imported | Skipped together (root_folder.rs:279-283) — writer now
+    exhaustive: Adopted|Imported → imported, Skipped → nothing, Err arms (:286-299) →
+    importFailed. TDD directives updated to pin early+late manual failures and adopt-arm
+    exhaustiveness.
+  round2_dispositions: >
+    Design r2: gemini TIMEOUT (600s, REVIEW_INCOMPLETE — no verdict; round 3 covers it), codex
+    FAIL (1 P1). codex R-2 CONFIRMED by tracing the cited branch (lib.rs:515-564): the
+    cached-candidate reuse arm returns provider_outcomes: HashMap::new() on a COMPLETED
+    attempt (comment ':554 — No provider_outcomes on the cached-reuse path') with changed
+    computed from merge output (:545-547) — so the r1 predicate (outcomes empty && !changed)
+    would suppress a completed no-op reuse's enriched{changed:false}, violating REQ-002/AC-002/
+    Q-001. The pre-declared fallback is PROMOTED to the design: EnrichmentResult gains
+    `attempted: bool` — authored by enrich_work's own control flow (true on the cached-reuse
+    completion arm and the network completion path; false only when the pass ends with no
+    dispatch and no merge), threaded through the EnrichmentWorkflowImpl adapter onto the domain
+    result. The heuristic predicate is DELETED; the writer gates on !attempted. New TDD case:
+    cached reuse + ApplyMergeOutcome::NoChange → enriched{changed:false}.
+  round3_dispositions: >
+    Design r3: gemini PASS (2 P2), codex FAIL (1 P1) — all three verified by direct read and
+    folded. gemini R-3: the history repoint now matches its siblings' exact shape — UPDATE
+    history SET work_id = ? WHERE user_id = ? AND work_id = ? (library_items/grabs repoints at
+    sqlite_work.rs:779/:787 both filter user_id and bind req.user_id; history's only index is
+    idx_history_user_id). gemini R-4 CONFIRMED against my survey's wrong "in scope" claim: the
+    delete road DISCARDS get_work's result (:1476-1482, ownership check only) — pseudocode now
+    binds `let work = ...` so title/author exist for the payload. codex R-3 CONFIRMED (an
+    inconsistency I introduced in the r1 fold): the required-field constructor cannot express
+    the early no-work failures, and ImportResult carries no media_type (manual_import.rs:253-260;
+    early failures return work_id: None at :913-921/:925-933). Fix: failure shapes split —
+    import_failed_manual keeps a required work_id/work_title with media_type now Option;
+    NEW import_failed_unattached(path, media_type: Option, error) for the no-work case;
+    ImportResult gains media_type: Option<MediaType> (Some once classification succeeds), so
+    the confirm loop's writes are typed end-to-end. TDD pins the two failure payload shapes
+    separately.
+  round4_dispositions: >
+    Design r4: gemini PASS (0 findings), codex FAIL (1 NEW P1) — ACCEPTED. codex R-5: the
+    backfill routed its inserts through record_history (infallible, absorbs errors — REQ-009's
+    observer shape), so insert failures were invisible to the all_users_clean marker decision:
+    a transient insert error could lose rows AND write history_backfill_generation=1 —
+    permanent, contradicting REQ-010/AC-010 and the contract's marker-only-on-full-completion
+    invariant. Root cause: I over-applied observer semantics — REQ-009 protects live HOST
+    operations from history failures; the backfill has no host operation, its history writes
+    ARE the operation. Fix: the backfill calls the FALLIBLE HistoryDb::create_history_event
+    directly (constructors still build every draft — payload discipline unchanged; a local
+    draft→request helper); any insert Err → warn + mark the user failed + continue (one bad row
+    must not abort the user's remaining facts) → no marker → rerun next boot is additive via
+    per-fact dedup. Live writers keep record_history unchanged. New TDD case pins
+    insert-failure → no marker → rerun completes.
+  round6_dispositions: >
+    Design r6 (PO-sanctioned confirm round): gemini PASS (0 findings), codex FAIL (1 P1, R-8 —
+    a residue of MY r5 fold): the success arm still passed Option<MediaType> into
+    imported_manual's required &str (I had converted only the two failure arms). Folded: the
+    confirm-loop match now destructures (status, work_id, media_type) — the success arm binds
+    the proven Some(mt) and calls mt.as_str(); an impossible (Imported, None-shape) gets a
+    defensive warn + no event, never a panic. One-line class; gate re-PASS.
+  code_review_dispositions: >
+    Code-review r1 (codex FAIL 3, gemini REVIEW_INCOMPLETE ×2 — 600s dispatcher timeout, since
+    raised to 1200s): R-1 (P1) FOLDED — poll_sabnzbd's Failed arm wrote downloadFailed even when
+    update_grab_status Err'd, and the still-active grab re-entered the arm next tick (duplicate);
+    the write now sits inside the update's Ok(()) arm (adjacent-shape sweep: release_service's
+    grabbed writer already sits after its upsert's success point; the SAB orphan arm writes no
+    event by design). R-2 (P2) REJECTED as re-litigation of the ratified D-COUNT decision
+    (db-history-robust-reads.decisions — raw COUNT is the documented accepted drift, pinned by
+    test_wh_robust_reads). R-3 (P3) ACCEPTED as a record correction: the staged-vs-worktree
+    fixture delta on test_wh_backfill.rs is three changes (seed_download_client FK fix this
+    session; import_id Some→None and a lifetime elision from an earlier session) — zero test
+    bodies touched; session log corrected. Code-review r2 (codex FAIL 3): R-2/R-3 persist-flags
+    dispositioned as above (no change); R-4 (P1) FOLDED — D-FAILURE-COVERAGE upgraded to the
+    two-tier dedup recorded in that decision row, backfilled failure constructors gained guid,
+    new behavioral pin wh_backfill_failure_dedup_is_per_guid_for_same_title_grabs.
+  tests_stage_dispositions: >
+    Tests-review r1 (Gemini-only by policy — Codex auto-excluded as test author): FAIL, 4
+    findings, dispositioned together with the two integrator-withheld flags 2026-07-19.
+    R-1 (P1) CONFIRMED AND EXTENDED: the secondary-API deletion test drove raw
+    SqliteDb::delete_library_item and asserted a fileDeleted event there — forbidden by
+    D-WRITE-PATH (no writer inside DB methods). Source verification went further: lib.rs
+    gates `api_secondary_impl` behind #[cfg(test)], SecondaryApiImpl has ZERO production
+    references (Serena reference sweep + main.rs/router search), and no other type
+    implements LibraryFileApi — REQ-005 door (c) has NO production surface today (the
+    door-(d) empty-set shape). Test DELETED with an in-file disposition record; NO writer
+    will be built for the cfg(test)-only module; flagged to the PO as a spec-level stale
+    enumeration (spec untouched). R-2 (P1) CONFIRMED: the Readarr-undo test drove
+    LiveReadarrImportService wrapper methods and asserted events the design writes in
+    LiveReadarrImportWorkflow::undo (:248-363, titles pre-fetched before deletion); the
+    workflow is unconstructible from behavioral (concrete LiveWorkService/LiveImportWorkflow
+    chain). Converted to a todo!() placeholder carrying the Stage-5 plan: undo's body
+    touches only readarr_import_service + data_dir + db, so implementation extracts the
+    deletion+event loop into a pub fn (trait method delegates) and the test realizes
+    against that seam red-first. R-3/R-4 (P1, converging with withheld flag 2): the
+    identity-events TestState pattern disproves blanket handler-context unreachability —
+    ALL SEVEN import_events placeholders realized at disposition (manual confirm success/
+    early/late + adopt Adopted/Skipped/Err via a TestState with 11 Has* impls and a
+    scripted domain ImportService; grab-road batch via the real ImportWorkflowImpl<SqliteDb>
+    mirroring test_consolidation_import_workflow). The three tags placeholders stay
+    todo!() with named Stage-5 seams: reorganize (LiveImportService explicit construction)
+    and the two convergence tests (tick takes AppState — jobs/tag_convergence.rs:13 —
+    so Stage 5 extracts the per-item recovery helper the tick calls and both tests realize
+    against it). Withheld flag 1 folded (Gemini missed it): the tags_written metadata test
+    scripted a flag its own double discarded while the design derives it from REAL
+    materialization (MaterializeOutcome.tags_written) — rewritten onto a real minimal-EPUB
+    library item driving the real materialize step (n2 t_e precedent), the scripted field
+    deleted (clears the one deliberate clippy warning), and the changed-pass test now also
+    pins tags_written:false for the no-files side. Fixture-satisfiability fix folded in the
+    same pass: metadata_events' seed helper now sets IdentityStatus::Confirmed explicitly
+    (create_work alone does not confirm; without it the completed-pass fixtures could stay
+    gate-blocked forever — n2 precedent). Disposition verification also caught two fixture
+    bugs the 47-red consolidated run masked: BOTH grabbed-event tests were red-for-the-wrong-
+    reason — ReleaseService::grab SSRF-rejects raw magnet download URLs at entry
+    (release_service.rs:330-336; is_trusted is false for non-http schemes and validate_url
+    returns InvalidScheme), so grab().unwrap() panicked before any event — fixed to a
+    trusted http torrent URL + three scripted responses (the indexer-citizenship-pins
+    recipe); and test_wh_deletion's per-item root-folder creation hit the
+    UNIQUE(root_folders.media_type) constraint on the two-file work-delete fixture —
+    get-or-create fix. Side flag for the PO (surfaced, not fixed — out of feature scope):
+    production magnet handling lives only BEHIND the grab entry gate (http links that
+    redirect to magnets); a raw magnet: download_url from an indexer result appears
+    front-door-blocked. Stage-5 obligations from this disposition: the Readarr-undo
+    extracted seam, the convergence per-item recovery helper, realizing the 4 remaining
+    todo!() tests red-first as those seams land, and NO secondary-API writer.
+  round5_dispositions: >
+    Design r5: both families FAIL — 3 findings, all detail-class, all verified and folded.
+    gemini R-6 (P2, true by my own text): the Readarr-undo pseudocode kept the panicking
+    titles[..] indexing I had fixed in the backfill at r3 — now the same safe-lookup shape.
+    gemini R-7 (P1) CONFIRMED by symbol read: MediaType (entities.rs:33-41) is a bare 2-variant
+    enum with NO impl block anywhere (code-index: zero `impl MediaType` hits) — as_str()/
+    as_deref() in my pseudocode did not exist. Fix: domain-history-model declares
+    MediaType::as_str(&self) -> &'static str ("ebook"/"audiobook", equal to the serde lowercase
+    strings; AnchorType::as_str convention), and the Option sites use .map(|m| m.as_str()).
+    codex R-6 (P1): the two REQ-013 migration surfaces (ReleaseService::grab grabbed writer,
+    download_poller SAB downloadFailed writer) were designed as modules but MISSING from the
+    doors inventory — two rows added (25 total), contract count updated; their payload-separation
+    TDD already existed in the modules and is now referenced by the rows.
+  note: >
+    Extends IR v1 with pseudocode, call annotations, conditions, capability surveys, and TDD
+    directives. IR v1 remains the source of truth for system_architecture, shared_types,
+    dependency_graph, domain_entities, and data_flow. Every signature below was read from live
+    source 2026-07-19 (design-stage survey + direct reads). Two stale-spec-citation flags carried
+    for the PO (spec text untouched): ST-006 lists 2 retag callers where 3 exist
+    (import_service.rs:522 reorganize road); ST-005's "create_work_with_anchor arm (~852)" is a
+    COMMENT in live code, not a call — both add_fast arms call create_work, and
+    create_work_with_anchor has zero production callers (test-only). Neither weakens the STs'
+    actual guarantees; both STRENGTHEN this design (in-method tag hook; single birth funnel).
+
+# Inherited verbatim from IR v1 so the compliance gate can validate LIBRARY call annotations.
+approved_libraries:
+  - { name: "serde_json", use: "event payload construction (existing workspace dep)" }
+  - { name: "chrono",     use: "event/backfill dates (existing project-wide convention)" }
+  - { name: "tracing",    use: "REQ-009 warn on failed history writes; REQ-012 warn on skipped rows" }
+  - { name: "tokio",      use: "backfill spawn + yielding (existing)" }
+  - { name: "trait-variant", use: "the HistoryService trait extension keeps the existing trait_variant::make(Send) form (insight 8 convention)" }
+  - { name: "sqlx",       use: "the merge-repoint UPDATE + _livrarr_meta marker queries (existing workspace dep)" }
+  - note: "NO new third-party dependency, backend or frontend."
+
+modules:
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "domain-history-model"
+    crate: "livrarr-domain"
+    responsibility: >
+      The shared vocabulary: 4 new EventType variants, the HistoryDraft + typed constructor
+      family (the ONLY sanctioned payload builder — REQ-013 keys enforced by signature), the
+      WorkAddSource door label carried on WorkCandidate and stamped by the six seed_*
+      constructors, and the one new write method on the domain HistoryService trait.
+    dependencies: []
+    module_invariants:
+      - "Constructors are pure (no I/O, no clock reads except none — date is a parameter or None)."
+      - "Every work-attached constructor REQUIRES work_title; grab-family constructors keep `title` = RELEASE title and never alias it to work_title (REQ-013)."
+      - "WorkAddSource is stamped ONLY inside seed_* constructors — no caller passes it separately, so a door cannot mislabel itself (REQ-001)."
+    capability_survey:
+      - { capability: "event payload building", existing_source: "4 ad-hoc serde_json::json! sites (release_service.rs:461-474, download_poller.rs:545-559, import_workflow.rs:1288-1313, dead manual_import_service.rs:106-123)", reuse_decision: "REPLACE with typed constructors", rationale: "3 sites already drifted 3 payload conventions; REQ-013's reserved keys are unenforceable as ad-hoc JSON" }
+      - { capability: "event kind enum", existing_source: "EventType, 10 variants (entities.rs:141-157, serde camelCase)", reuse_decision: "EXTEND same enum (+4)", rationale: "REQ-001/006/007/008; TEXT column, no migration (ST-008)" }
+      - { capability: "door-scoped candidate facts", existing_source: "the six per-door seed_* constructors (seed.rs:99-241) — insight 53's single seed-construction point", reuse_decision: "REUSE as the label carrier — add one field, stamp per constructor", rationale: "REQ-001's design-stage question answered: the constructor IS the door; a candidate field survives every intermediate hop into add_fast unchanged" }
+      - { capability: "history write surface for handler doors", existing_source: "HistoryService trait, read-only 1 method (services/history.rs:11-20); HasHistoryService accessor exists (handlers/context.rs:156-159)", reuse_decision: "EXTEND the trait with `record`", rationale: "compile wall (overview.md:31-33): handlers reach persistence only via domain traits; no HistoryService stub exists anywhere (survey census) so exactly one impl updates" }
+    public_api:
+      types:
+        - { kind: enum,   name: "EventType (+4 variants)", note: "Added | WorkDeleted | WorksMerged | IdentityResolved appended to entities.rs:147-156; serde camelCase strings added/workDeleted/worksMerged/identityResolved" }
+        - { kind: struct, name: "HistoryDraft", note: "{ work_id: Option<WorkId>, event_type: EventType, data: serde_json::Value, date: Option<DateTime<Utc>> } — date None = write-time now (live writers); Some = fact date (backfill)" }
+        - { kind: enum,   name: "WorkAddSource", note: "Search | ListImport | Readarr | AuthorMonitor | SeriesMonitor | FileImport; as_str() → the spec's labels search|list-import|readarr|author-monitor|series-monitor|file-import" }
+        - { kind: "field-add", name: "WorkCandidate.add_source", note: "NEW field `add_source: WorkAddSource` on WorkCandidate (identity.rs:556-574). Stamped: seed_add_box→Search (:99-122), seed_manual_import→FileImport (:124-146), seed_list_import→ListImport (:148-169), seed_author_monitor→AuthorMonitor (:171-189), seed_series_monitor→SeriesMonitor (:191-215), seed_readarr_import→Readarr (:217-241). Constructor census exhaustive (survey: no other seed_* exists); struct-literal sites outside seed.rs are illegal per insight 53 and unchanged." }
+        - { kind: "impl-add", name: "MediaType::as_str", note: "NEW `impl MediaType { pub fn as_str(&self) -> &'static str }` → \"ebook\" | \"audiobook\" — equal to the serde lowercase strings (entities.rs:33-41). r5 gemini R-7: NO impl MediaType exists today (code-index: zero hits), so every pseudocode payload conversion routes through this one impl (AnchorType::as_str convention); Option sites use .map(|m| m.as_str())." }
+      functions:
+        - name: "history_events constructor family"
+          signature: "pub fn <kind>(...typed fields...) -> HistoryDraft — one per written shape, module livrarr-domain/src/history_events.rs (NEW)"
+          output: "HistoryDraft"
+          maps_reqs: ["REQ-001","REQ-002","REQ-003","REQ-004","REQ-005","REQ-006","REQ-007","REQ-008","REQ-010","REQ-013"]
+          pseudocode:
+            - "Pattern (every constructor): build serde_json::json!({...}) with EXACTLY the keys listed below; return HistoryDraft{ work_id, event_type, data, date } (date None unless a backfill variant taking `date: DateTime<Utc>`)."
+            - "added(work_id, work_title, work_author: Option, source: WorkAddSource) → Added; keys: work_title, work_author?, source (source.as_str())."
+            - "added_backfilled(work_id, work_title, work_author?, date) → Added; keys: work_title, work_author?, backfilled:true (source omitted — spec Non-Requirements: not reconstructible)."
+            - "enriched(work_id, work_title, work_author?, changed: bool, status: &EnrichmentStatus, tags_written: bool) → Enriched; keys: work_title, work_author?, changed, status (status string incl. thin), tags_written."
+            - "enriched_backfilled(work_id, work_title, work_author?, source: Option<String>, date) → Enriched; keys: work_title, work_author?, source?, backfilled:true."
+            - "enrichment_failed(work_id, work_title, work_author?, reason: &str) → EnrichmentFailed; keys: work_title, work_author?, reason."
+            - "imported_manual(work_id, work_title, path: &str, media_type: &str) → Imported; keys: work_title, path, media_type (spec REQ-003 per-file shape; success always has a classified type)."
+            - "import_failed_manual(work_id: WorkId, work_title, path, media_type: Option<&str>, error: &str) → ImportFailed; keys: work_title, path, media_type?, error (work-ATTACHED failure)."
+            - "import_failed_unattached(path: &str, media_type: Option<&str>, error: &str) → ImportFailed with work_id None; keys: path, media_type?, error (r3: the early manual-import failures — unrecognized media, missing root folder, work-create failure — have NO work to snapshot; identified by path)."
+            - "imported_batch(work_id, work_title, work_author?, release_title: &str, imported: usize, failed: usize, skipped: usize) → Imported|ImportFailed chosen by caller's existing final_status ternary; keys: title (RELEASE — preserved meaning), imported, failed, skipped, work_title, work_author? (REQ-013 adds, never renames)."
+            - "imported_backfilled(work_id, work_title, path, media_type, date) → Imported; keys: work_title, path, media_type, backfilled:true."
+            - "import_failed_backfilled(work_id, work_title, release_title, guid, import_error: Option<&str>, date) → ImportFailed; keys: title (release), guid, error?, work_title, backfilled:true (GrabStatus::ImportFailed mapping, REQ-010; guid added at code-review r2 — the per-fact failure dedup key)."
+            - "download_failed_backfilled(work_id, work_title, release_title, guid, import_error: Option<&str>, date) → DownloadFailed; keys: title (release), guid, error?, work_title, backfilled:true (GrabStatus::Failed mapping; guid as above)."
+            - "tag_written(work_id, work_title, attempted: usize, succeeded: usize) → TagWritten; keys: work_title, attempted, succeeded."
+            - "tag_write_failed(work_id, work_title, attempted: usize, first_error: &str) → TagWriteFailed; keys: work_title, attempted, error."
+            - "tag_written_item(work_id, work_title, path: &str) → TagWritten; keys: work_title, path (convergence single-file shape, spec REQ-004 round-3)."
+            - "file_deleted(work_id, work_title, path, media_type, undo: bool) → FileDeleted; keys: work_title, path, media_type, undo (undo:true only on the Readarr-undo road, else key omitted)."
+            - "work_deleted(work_title, work_author?, files_removed: usize, undo: bool) → WorkDeleted with work_id: None (see D-DELETE-ORDER); keys: work_title, work_author?, files_removed, undo?."
+            - "works_merged(survivor_work_id, survivor_title, merged_title, merged_work_id) → WorksMerged on the survivor; keys: work_title (survivor snapshot), merged_title, merged_work_id."
+            - "grabbed(work_id, work_title, work_author?, release_title, indexer, guid, download_client_id) → Grabbed; keys: title (RELEASE), indexer, guid, download_client_id (all four preserved verbatim — backfill dedup depends on guid), work_title, work_author?."
+            - "grabbed_backfilled(work_id, work_title, release_title, indexer, guid, date) → Grabbed; keys: title, indexer, guid, work_title, backfilled:true."
+            - "download_failed(work_id, work_title, release_title, error: &str) → DownloadFailed; keys: title (release — preserved), error, work_title (download_poller migration)."
+            - "identity_resolved(work_id, work_title, action: &str, identity: String) → IdentityResolved; keys: work_title, action, identity (human-readable chosen-identity summary, e.g. 'Title — Author (gr_key 123)')."
+          call_annotations:
+            - { call: "serde_json::json!", type: "LIBRARY", target: "serde_json" }
+            - { call: "WorkAddSource::as_str", type: "NEW", target: "domain-history-model" }
+          preconditions:
+            - "Callers pass the work's CURRENT title (post-merge state where applicable) — constructors never fetch."
+          postconditions:
+            - "Every returned draft's data contains work_title for work-attached kinds; backfill variants contain backfilled:true and carry Some(date)."
+          decisions:
+            - { key: "constructors-not-builder", value: "one flat fn per shape, no builder type", rationale: "16 fixed shapes; a builder invites optional-key drift, the exact REQ-013 failure mode" }
+          tdd_directives:
+            - "AC-013: every constructor's output contains work_title (property-style test over the family); grab-family outputs keep title == release title distinct from work_title."
+        - name: "HistoryService::record"
+          signature: "async fn record(&self, user_id: UserId, draft: HistoryDraft)  — NEW method on the trait (services/history.rs:11-20, trait_variant::make(Send))"
+          output: "() — infallible by signature (REQ-009 in the type)"
+          maps_reqs: ["REQ-008","REQ-009"]
+          pseudocode:
+            - "Trait declaration only here; the single impl (survey census: HistoryServiceImpl is the trait's only impl, no stub exists) delegates to record_history (module db-history-write-core)."
+          call_annotations:
+            - { call: "trait_variant::make", type: "LIBRARY", target: "trait-variant" }
+          tdd_directives:
+            - "AC-009 (handler-door slice): a failing HistoryDb underneath record() logs a warning and the calling handler still returns success."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "db-history-write-core"
+    crate: "livrarr-db"
+    responsibility: "The one physical write chokepoint (record_history), the caller-supplied date, and the kind maps."
+    dependencies: ["domain-history-model"]
+    module_invariants:
+      - "record_history NEVER returns an error and never panics on write failure — warn + return (REQ-009)."
+      - "parse_event_type / event_type_str / serde camelCase agree for all 14 kinds (tri-map test)."
+    capability_survey:
+      - { capability: "history insert", existing_source: "HistoryDb::create_history_event (api/history.rs:24-26; impl sqlite_history.rs:154-172, stamps date=now server-side)", reuse_decision: "REUSE + EXTEND request with date: Option<DateTime<Utc>>", rationale: "backfill needs fact dates (D-DATE-PARAM); a second insert path was rejected in IR v1" }
+      - { capability: "kind string maps", existing_source: "parse_event_type (sqlite_history.rs:32-48) + event_type_str (:50-63), exhaustive matches", reuse_decision: "EXTEND both (+4 arms each), keep as matches", rationale: "exhaustive match = the compiler forces every future variant's arms; consolidation onto serde adds runtime cost for zero drift benefit once the tri-map test exists (settles the IR v1 open item)" }
+    public_api:
+      functions:
+        - name: "record_history"
+          signature: "pub async fn record_history<D: HistoryDb>(db: &D, user_id: UserId, draft: HistoryDraft)"
+          output: "()"
+          maps_reqs: ["REQ-009","REQ-013"]
+          pseudocode:
+            - "req := CreateHistoryEventDbRequest{ user_id, work_id: draft.work_id, event_type: draft.event_type, data: draft.data, date: draft.date }."
+            - "match db.create_history_event(req).await { Ok(()) => (), Err(e) => tracing::warn!(?event_type, ?work_id, \"history write failed: {e}\") } — never propagate, never retry (REQ-009)."
+          call_annotations:
+            - { call: "HistoryDb::create_history_event", type: "EXISTING", target: "livrarr-db api/history.rs:24 (request struct extended)" }
+            - { call: "tracing::warn!", type: "LIBRARY", target: "tracing" }
+          tdd_directives:
+            - "AC-009: with a HistoryDb double whose create fails, record_history returns () and the host operation (driven end-to-end) succeeds; a warning is observable."
+        - name: "CreateHistoryEventDbRequest.date + create_history_event"
+          signature: "struct gains date: Option<DateTime<Utc>>; impl uses req.date.unwrap_or_else(Utc::now).to_rfc3339() (sqlite_history.rs:154-172)"
+          output: "Result<(), DbError> (unchanged)"
+          maps_reqs: ["REQ-010"]
+          pseudocode:
+            - "Only the date-derivation line changes: Some(d) → d.to_rfc3339(); None → Utc::now().to_rfc3339() (exact current behavior)."
+            - "Compile ripple (mechanical): the 3 live writer literals (migrating anyway) + the test StubDb impl (livrarr-download/tests/indexer_citizenship_pins.rs:935) gain the field."
+          call_annotations:
+            - { call: "chrono::Utc::now", type: "LIBRARY", target: "chrono" }
+          tdd_directives:
+            - "AC-010 (dates): a draft with Some(fact_date) persists that exact date; None persists now."
+        - name: "parse_event_type / event_type_str (+4 arms)"
+          signature: "unchanged signatures; +4 match arms each: added, workDeleted, worksMerged, identityResolved"
+          output: "unchanged"
+          maps_reqs: ["REQ-001","REQ-006","REQ-007","REQ-008","REQ-011"]
+          pseudocode:
+            - "Add the 4 arms to each map, strings equal to the serde camelCase names."
+            - "NEW unit test (this crate): for every EventType variant v — parse_event_type(event_type_str(v)) == v AND serde_json::to_value(v) == json!(event_type_str(v)) (tri-map agreement across all 14)."
+          call_annotations:
+            - { call: "serde_json::to_value", type: "LIBRARY", target: "serde_json" }
+          tdd_directives:
+            - "Tri-map agreement test enumerates ALL variants via an exhaustive match-derived list, not a hand list."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "db-history-robust-reads"
+    crate: "livrarr-db"
+    responsibility: "REQ-012: an unknown stored kind never fails a list; skip + warn, scoped to kind-parse failures only."
+    dependencies: ["domain-history-model"]
+    module_invariants:
+      - "Skip applies ONLY to an unrecognized event_type string; any other row corruption (bad JSON/date) keeps today's fail-the-query behavior (surgical scope, ST-008's actual hazard)."
+    capability_survey:
+      - { capability: "row parse + collect", existing_source: "row_to_history_event (sqlite_history.rs:9-30); both list methods collect into one Result (:98, :147-150)", reuse_decision: "MODIFY the two collect sites; keep row_to_history_event", rationale: "the failure to fix is the collect-fails-all shape, not the parser" }
+    public_api:
+      functions:
+        - name: "list_history / list_history_paginated (row-handling change)"
+          signature: "signatures unchanged (api/history.rs:8-23)"
+          output: "unchanged"
+          maps_reqs: ["REQ-012"]
+          pseudocode:
+            - "Per fetched row: kind_str := row.get(\"event_type\"). If parse_event_type(kind_str) errs → tracing::warn!(kind=%kind_str, id, \"skipping history row with unrecognized kind\"); continue."
+            - "Else row_to_history_event(row) as today; its OTHER errors still propagate (fail the query) — unchanged semantics outside the unknown-kind case."
+            - "Paginated COUNT query (:129) stays raw COUNT(*): a page may briefly under-fill by the skipped rows during version skew — accepted + documented (D-COUNT below); LIMIT/OFFSET math unchanged."
+          call_annotations:
+            - { call: "parse_event_type", type: "EXISTING", target: "sqlite_history.rs:32" }
+            - { call: "tracing::warn!", type: "LIBRARY", target: "tracing" }
+          decisions:
+            - { key: "D-COUNT", value: "raw COUNT, no filtered recount", rationale: "a filtered count must parse every row (defeats LIMIT); the drift exists only in the transient rollback/skew scenario REQ-012 exists for, and over-count is harmless there (settles the IR v1 open item)" }
+          tdd_directives:
+            - "AC-012: seed a history table with one alien-kind row among N real rows (raw SQL insert); both list methods return the N real rows; warning logged; paginated count == N+1 accepted in the assertion (documented drift)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "db-merge-history-repoint"
+    crate: "livrarr-db"
+    responsibility: "REQ-007(a): merge_works repoints history rows inside its existing transaction; the wrong cascade comment is corrected."
+    dependencies: []
+    module_invariants:
+      - "The repoint is an UPDATE — merge never deletes history rows (append-only invariant)."
+    capability_survey:
+      - { capability: "merge transaction", existing_source: "merge_works tx (sqlite_work.rs:750-833): begin :757, library_items repoint :779-785, grabs repoint :787-793, loser DELETE :817-822, commit :832", reuse_decision: "REUSE the tx — add one statement after the grabs repoint", rationale: "same-transaction atomicity is the REQ-007 requirement; the pattern is sitting right there twice" }
+    public_api:
+      functions:
+        - name: "merge_works (tx statement add)"
+          signature: "unchanged"
+          output: "unchanged"
+          maps_reqs: ["REQ-007"]
+          pseudocode:
+            - "After the grabs repoint (:793): sqlx::query(\"UPDATE history SET work_id = ? WHERE user_id = ? AND work_id = ?\").bind(req.survivor_id).bind(req.user_id).bind(req.loser_id).execute(&mut *tx) — the user_id clause matches the sibling repoints verbatim (:779/:787 both filter it; r3 gemini R-3: history's only useful index is idx_history_user_id, and req.user_id is bound two statements up)."
+            - "Replace the :814-816 comment's history claim with the truth: history is repointed above; remaining loser-FK'd rows (anchors, provenance, dissents) cascade."
+          call_annotations:
+            - { call: "sqlx::query", type: "EXISTING", target: "same pattern as :779-793 (sqlx is an existing workspace dep used throughout this file)" }
+          tdd_directives:
+            - "AC-007 (db half): merge B→A with history rows on B; after merge every former-B row has work_id == A; row count unchanged."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "metadata-lifecycle-writers"
+    crate: "livrarr-metadata"
+    responsibility: "Birth, enrichment, work-delete, and merge events at their WorkServiceImpl moments. D bounds gain HistoryDb."
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    module_invariants:
+      - "Birth: exactly one added per created work, zero for dedup/race-loser/adopt returns — enforced structurally by hooking finish_created_work_fast, the ONLY constructor of AddWorkResult{created:true} (survey §4)."
+      - "Enrichment: at most one event per run_unified_enrichment invocation; merge_deferred and never-dispatched invocations record zero."
+    capability_survey:
+      - { capability: "single birth funnel", existing_source: "finish_created_work_fast (work_service.rs:2257-2375) — sole created:true constructor; both create arms (:773/:971) funnel here; handle_race_loser (:2223) hardcodes created:false", reuse_decision: "REUSE as the one hook point; thread add_source in as a parameter", rationale: "REQ-001 exactly-once falls out of the existing funnel instead of being re-proved at 2 create sites (supersedes IR v1's 'created=true arms' framing — one site, not two)" }
+      - { capability: "enrichment completion visibility", existing_source: "run_unified_enrichment (:2415-2647): enrich_result (changed/merge_deferred/status) + mat_outcome (:2606-2614, MaterializeOutcome.tags_written bool exists — materialize.rs:71-84)", reuse_decision: "REUSE — write at function completion paths; the attempted/no-attempt distinction CANNOT be derived from the existing result fields (the cached-reuse arm returns an empty outcomes map on a completed attempt, lib.rs:548-563) so EnrichmentResult gains `attempted: bool` authored at the source of truth", rationale: "IR v1 D-ENRICH-HOME; tags_written is a plain bool on the outcome, exactly the REQ-004 flag shape; the attempted signal is enrich_work's own control-flow fact, not a history concern — livrarr-enrichment stays history-free" }
+      - { capability: "delete/merge context", existing_source: "delete (:1475-1522) loads work :1476 + items :1484 pre-delete; merge_works service (:1852-1948) loads survivor+loser pre-call", reuse_decision: "REUSE in-scope values", rationale: "titles/counts already fetched; zero new reads" }
+    public_api:
+      types:
+        - { kind: "field-add", name: "EnrichmentResult.attempted", note: "NEW `attempted: bool` on BOTH result types + the adapter: the enrichment-crate EnrichmentResult (livrarr-enrichment/src/lib.rs — set true at the cached-reuse completion arm :548-563 and at the network-path completion; false only when the pass ends with no provider dispatch and no merge application) and the domain services EnrichmentResult (services/enrichment.rs:18-36), threaded through EnrichmentWorkflowImpl's conversion (enrichment_workflow_service.rs:76-86). Not a history type — the attempt/no-attempt fact authored where it is known (r2 codex R-2)." }
+      functions:
+        - name: "finish_created_work_fast (param + hook)"
+          signature: "pub(crate)-internal signature gains `add_source: WorkAddSource` (callers :773-arm and :971-arm pass candidate.add_source)"
+          output: "unchanged (Result<AddWorkResult, WorkServiceError>)"
+          maps_reqs: ["REQ-001","REQ-009","REQ-013"]
+          pseudocode:
+            - "At function entry (the work row is already committed — the fact exists): record_history(&self.db, user_id, history_events::added(work.id, &work.title, Some(&work.author_name), add_source)).await."
+            - "Rest of the function unchanged. Dedup returns, adopt returns, and handle_race_loser never pass here → zero events by construction (AC-001 negative half)."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "history_events::added", type: "NEW", target: "domain-history-model" }
+          preconditions:
+            - "work is the just-created row (actually_created == true at both callers)."
+          decisions:
+            - { key: "record-at-entry", value: "event at funnel entry, not after cover/series steps", rationale: "the recorded moment is CREATION (already durable); later cosmetic steps failing must not lose the birth record (REQ-009: the operation happened)" }
+          tdd_directives:
+            - "AC-001: drive each of the six doors' real entry (seed_* + add/add_fast) on a fresh :memory: DB → exactly one added event with that door's source label; re-adding the same book → zero new added events."
+        - name: "run_unified_enrichment (completion writes)"
+          signature: "unchanged (:2415)"
+          output: "unchanged"
+          maps_reqs: ["REQ-002","REQ-004","REQ-009","REQ-013"]
+          pseudocode:
+            - "Early-fail arm :2475-2478 (enrich_work Err e): record enrichment_failed(work_id, &work.title, Some(&work.author_name), &e.to_string()) via record_history, then return (Failed, false) as today."
+            - "Early-fail arm :2482-2488 (post-enrich get_work Err): same enrichment_failed write (reason = reload error), then return as today."
+            - "After the materialize block (:2614) and dim-backfill, before the final return (:2646):"
+            - "  if enrich_result.merge_deferred → return WITHOUT event (spec REQ-002 round-4: the concluding pass is the moment)."
+            - "  if !enrich_result.attempted → return WITHOUT event (the pass ended with no provider dispatch and no merge — 'an attempt that never runs records nothing'; identity-blocked attempts never reach this function at all). The r1 heuristic (outcomes empty && !changed) is DELETED — it collided with the cached-reuse completion arm, which returns an EMPTY outcomes map on a real completed attempt (lib.rs:548-563, r2 codex R-2)."
+            - "  tags_written := (mat_outcome as computed at :2608-2611) matched: Ok(o) → o.tags_written, Err(_) → false."
+            - "  record_history(&self.db, user_id, history_events::enriched(work_id, &post_enrich_work.title, Some(&post_enrich_work.author_name), enrich_result.changed, &final_status, tags_written)).await  — post-merge title = current truth (REQ-013)."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "history_events::enriched / enrichment_failed", type: "NEW", target: "domain-history-model" }
+            - { call: "MaterializeOutcome.tags_written", type: "EXISTING", target: "livrarr-domain/src/services/materialize.rs:71-84" }
+          invariants:
+            - "Exactly one of {enriched, enrichmentFailed, nothing} per invocation; nothing ⇔ merge_deferred ∨ !attempted."
+          tdd_directives:
+            - "AC-002: manual refresh applying changes → one enriched{changed:true}; no-op completed pass → enriched{changed:false}; failing enrichment → one enrichmentFailed; identity-parked work → zero events (drive the real gate road); scripted merge_deferred result → zero events; a pass whose materialization wrote tags → enriched payload tags_written:true."
+            - "AC-002 cached-reuse case (r2): candidate reuse whose merge lands ApplyMergeOutcome::NoChange → exactly one enriched{changed:false} (the empty-outcomes completed attempt MUST record — pins the attempted signal against the collision the r1 predicate had)."
+            - "AC-003: bulk refresh over N eligible works → exactly N metadata events; a convergence-driven enrichment → exactly one."
+            - "No-attempt fixture: a work whose every provider is phase2-terminal (pass ends with no dispatch and no merge) → zero events (pins attempted=false on that path)."
+        - name: "delete (workDeleted hook)"
+          signature: "unchanged (:1475)"
+          output: "unchanged"
+          maps_reqs: ["REQ-006","REQ-009","REQ-013"]
+          pseudocode:
+            - "BIND the ownership check's result (r3 gemini R-4 — live code DISCARDS it, :1476-1482 has no `let`): `let work = self.db.get_work(user_id, work_id).await.map_err(...)?;` — same call, now kept for the payload. items (:1484) already bound."
+            - "AFTER self.db.delete_work(...) returns Ok(deleted) (:1490-1497): record_history(&self.db, user_id, history_events::work_deleted(&work.title, Some(&work.author_name), items.len(), false)).await — draft carries work_id: None (D-DELETE-ORDER)."
+            - "No per-file events anywhere in this road (composite rule). File-removal loop (:1510-1519) unchanged."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "history_events::work_deleted", type: "NEW", target: "domain-history-model" }
+          decisions:
+            - { key: "D-DELETE-ORDER", value: "write AFTER successful deletion with work_id: None", rationale: "spec REQ-006 allows either ordering; before-delete risks a false event when delete_work errs, and after-delete cannot carry Some(work_id) (FK row is gone — insert would violate REFERENCES works(id)). Null-reference + REQ-013 payload identification is correct-by-construction. Applies to every workDeleted writer (this road + Readarr undo)." }
+          tdd_directives:
+            - "AC-006 (composite half): delete a work with 2 files → exactly one workDeleted{files_removed:2}, zero fileDeleted; the work's PRIOR events and the new row list on the global page with work reference null (ST-001)."
+        - name: "merge_works service (worksMerged hook)"
+          signature: "unchanged (:1852)"
+          output: "unchanged"
+          maps_reqs: ["REQ-007","REQ-013"]
+          pseudocode:
+            - "survivor and loser both loaded pre-call. After self.db.merge_works(...) Ok(updated_survivor): record_history(&self.db, user_id, history_events::works_merged(survivor_id, &updated_survivor.title, &loser.title, loser_id)).await."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "history_events::works_merged", type: "NEW", target: "domain-history-model" }
+          tdd_directives:
+            - "AC-007: merge B into A (B has history) → B's rows list under A's tab (repoint, db half) AND A gains one worksMerged naming B; no row still points at B."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "server-moment-writers"
+    crate: "livrarr-server"
+    responsibility: "Composition-root writer hooks: manual-import service delete, secondary-API delete, both tag passes, Readarr undo, the conflict door, the HistoryServiceImpl::record impl, and the download_poller payload migration."
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    module_invariants:
+      - "Every hook writes AFTER its operation's success point; Err/early-return paths write nothing (REQ-009)."
+      - "The dead ManualImportServiceImpl::create_history_event wrapper (:106-123, zero callers) is DELETED — REQ-003's no-false-affordance clause."
+    capability_survey:
+      - { capability: "manual-import delete context", existing_source: "delete_library_item returns the deleted LibraryItem (manual_import_service.rs:70-79); bounds already include WorkDb + HistoryDb (:30)", reuse_decision: "REUSE — title via get_work, write via record_history", rationale: "all payload fields reachable with one existing read" }
+      - { capability: "secondary-API delete context", existing_source: "LibraryFileApi::delete (api_secondary_impl.rs:692-705), holds SqliteDb (:31-34), item returned before fs remove", reuse_decision: "REUSE", rationale: "same shape as above" }
+      - { capability: "per-pass tag results", existing_source: "retag_library_items (tag_service.rs:78-237) returns Vec<TagSyncItemResult> {library_item_id, succeeded, error} per ONE work per call; LiveTagService::new(import_io, data_dir) (:13-18) holds NO db; ALL THREE callers ride the method (import_service.rs:111/:284/:522)", reuse_decision: "REUSE the method as the hook; INJECT SqliteDb via constructor", rationale: "IR v1 D-TAG-HANDLE; attempted = items.len(), succeeded = results filter count — the exact REQ-004 payload" }
+      - { capability: "convergence per-item context", existing_source: "tag_convergence_tick (:22-128): item + work (get_work :55) + user_id in scope at the :98 call; result is per-file Result<(), String>", reuse_decision: "REUSE state.db + in-scope values", rationale: "single-file payload rule (round 3)" }
+      - { capability: "undo context", existing_source: "readarr_import_workflow: items loop :321-329 has item in scope (the :297-319 fs loop has only paths); orphan ids :331-335 fetched BEFORE delete_orphan_works_by_import :337-341 which returns only a count", reuse_decision: "REUSE the item loop for fileDeleted; PRE-FETCH orphan titles by id before deletion", rationale: "titles are unrecoverable after the delete (survey §10) — fetch-then-delete-then-record" }
+      - { capability: "conflict resolve context", existing_source: "LiveIdentityConflictService::resolve (:47-79): conflict {existing_work_id, incoming payload} + action + user_id in scope; holds SqliteDb", reuse_decision: "REUSE; one get_work for the title snapshot", rationale: "REQ-008 door (b); all four actions pass one point (:69-78)" }
+    public_api:
+      functions:
+        - name: "HistoryServiceImpl::record (impl)"
+          signature: "impl of HistoryService::record for HistoryServiceImpl<D: HistoryDb> (history_service.rs:22-38)"
+          output: "()"
+          maps_reqs: ["REQ-008","REQ-009"]
+          pseudocode:
+            - "record_history(&self.db, user_id, draft).await — nothing else. The only impl of the trait (survey census)."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+          tdd_directives: ["Covered by the handler-door tests (AC-008) driving the real service over :memory: SqliteDb."]
+        - name: "ManualImportServiceImpl::delete_library_item (hook) + wrapper deletion"
+          signature: "unchanged (:70-79); create_history_event wrapper (:106-123) DELETED"
+          output: "unchanged"
+          maps_reqs: ["REQ-003","REQ-005","REQ-013"]
+          pseudocode:
+            - "item := self.db.delete_library_item(user_id, item_id).await? (existing). work_title := self.db.get_work(user_id, item.work_id).await.map(|w| w.title).unwrap_or_default() (file delete leaves the work alive — normal-path Ok; on Err record with empty title + the warn ride)."
+            - "record_history(&self.db, user_id, history_events::file_deleted(item.work_id, &work_title, &item.path, item.media_type.as_str(), false)).await. Return item."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "WorkDb::get_work", type: "EXISTING", target: "bounds already carry WorkDb (manual_import_service.rs:30)" }
+          tdd_directives:
+            - "AC-006 (door b): manual-import delete → one fileDeleted{path, media_type, work_title}."
+        - name: "SecondaryApi LibraryFileApi::delete (hook)"
+          signature: "unchanged (api_secondary_impl.rs:692-705)"
+          output: "unchanged"
+          maps_reqs: ["REQ-005","REQ-013"]
+          pseudocode:
+            - "Same shape as the manual-import delete hook: after self.db.delete_library_item Ok(item) → get_work title → record_history(file_deleted(..., undo:false)); fs remove stays best-effort after."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+          tdd_directives:
+            - "AC-006 (door c): secondary-API delete → one fileDeleted."
+        - name: "LiveTagService (db injection + per-pass events)"
+          signature: "LiveTagService::new(import_io: Arc<I>, data_dir: Arc<PathBuf>, db: SqliteDb) — constructor gains db; retag_library_items signature unchanged"
+          output: "unchanged (Vec<TagSyncItemResult>)"
+          maps_reqs: ["REQ-004","REQ-009","REQ-013"]
+          pseudocode:
+            - "At the end of retag_library_items (results fully built, :237 region): if items.is_empty() → return results (no pass happened, no event)."
+            - "attempted := items.len(); succeeded := results.iter().filter(|r| r.succeeded).count(); user := work.user_id (ST-010)."
+            - "if succeeded > 0 → record_history(&self.db, user, tag_written(work.id, &work.title, attempted, succeeded)); else → record_history(..., tag_write_failed(work.id, &work.title, attempted, first error message)) (spec: tagWriteFailed iff ZERO succeeded)."
+            - "Constructor ripple: main.rs:100 production site passes svc_db.clone(); the test-only constructor in import_service.rs:1085 (mod manual_import_door_tests :1055) updates mechanically."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "history_events::tag_written / tag_write_failed", type: "NEW", target: "domain-history-model" }
+          invariants:
+            - "One event per (work, pass-invocation) across ALL THREE callers (:111/:284/:522) — the in-method hook is the coverage proof (contract enumeration 2)."
+          tdd_directives:
+            - "AC-005: an import that writes tags → one tagWritten{attempted, succeeded} for the work; a pass where every file fails → one tagWriteFailed{first error}; the reorganize road (:522) driven end-to-end also yields exactly one event (the r2-found caller)."
+        - name: "tag_convergence_tick (per-item recovery event)"
+          signature: "unchanged (:22)"
+          output: "unchanged"
+          maps_reqs: ["REQ-004","REQ-013"]
+          pseudocode:
+            - "In the per-item loop, after tag_sync_single_item(...) (:98) returns Ok and the item is marked Synced: record_history(&state.db, item.user_id, tag_written_item(item.work_id, &work.title, &item.path)).await (work already fetched :55)."
+            - "A FAILED recovery attempt records nothing — the original batch pass already recorded the failure; per-sweep re-recording of the same failing item would spam one event per sweep (spec round-3 wording binds the RECOVERED case)."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "history_events::tag_written_item", type: "NEW", target: "domain-history-model" }
+          tdd_directives:
+            - "AC-005 (convergence half): a sweep-recovered item → one tagWritten with single-file payload; a still-failing item in the same sweep → zero new events."
+        - name: "Readarr undo (fileDeleted per item + workDeleted per orphan)"
+          signature: "unchanged (readarr_import_workflow.rs:297-345 region)"
+          output: "unchanged"
+          maps_reqs: ["REQ-005","REQ-006","REQ-013"]
+          pseudocode:
+            - "Before the loops: titles := map over unique work_ids of items ∪ orphan_work_ids → get_work(user_id, id).title (works still alive here). title_of := |id| titles.get(&id).map(String::as_str).unwrap_or_default() — NEVER index the map (r5 gemini R-6, same rule as the backfill: a concurrent deletion degrades to empty-title + warn, not a panic in a background workflow)."
+            - "Item loop (:321-329): after delete_library_item_by_id(item.id) Ok → record_history(&self.db, user_id, file_deleted(item.work_id, title_of(item.work_id), &item.path, item.media_type.as_str(), undo:true))."
+            - "Orphans: orphan_work_ids already fetched (:331-335). After delete_orphan_works_by_import Ok (:337-341): for id in orphan_work_ids → record_history(&self.db, user_id, work_deleted(title_of(id), None, 0, undo:true)) — work_id None per D-DELETE-ORDER; files_removed 0 (its files were recorded individually above)."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "WorkDb::get_work", type: "EXISTING", target: "self.db: SqliteDb (readarr_import_workflow.rs:37)" }
+          tdd_directives:
+            - "AC-006 (undo): a Readarr import undo → fileDeleted per removed file + workDeleted per removed orphan work, every payload undo-marked."
+        - name: "LiveIdentityConflictService::resolve (identityResolved hook)"
+          signature: "unchanged (:47-79)"
+          output: "unchanged"
+          maps_reqs: ["REQ-008","REQ-013"]
+          pseudocode:
+            - "After apply_conflict_resolution Ok (:69-78): work_title := get_work(user_id, conflict.existing_work_id).title (best-effort; empty on Err). action_str := one of keep-existing|accept-separate|replace-anchor|merge. identity := summary from conflict.incoming (its title/author/anchor)."
+            - "record_history(&self.db, user_id, identity_resolved(conflict.existing_work_id, &work_title, action_str, identity)).await — ALL FOUR actions including KeepExisting (a kept identity is still a decision)."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "history_events::identity_resolved", type: "NEW", target: "domain-history-model" }
+          tdd_directives:
+            - "AC-008: each of the four conflict actions → exactly one identityResolved naming that action."
+        - name: "download_poller DownloadFailed migration"
+          signature: "unchanged writer site (jobs/download_poller.rs:545-559)"
+          output: "unchanged"
+          maps_reqs: ["REQ-009","REQ-013"]
+          pseudocode:
+            - "Replace the literal with: work_title := state.db.get_work(user_id, grab.work_id).title (best-effort); record_history(&state.db, user_id, download_failed(grab.work_id, &work_title, &grab.title, &fail_msg)).await — existing keys title/error preserved, work_title added; the site's own warn block is subsumed by record_history's."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+          tdd_directives:
+            - "AC-013 slice: a SAB-failure event payload carries both title (release) and work_title."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "handlers-identity-doors"
+    crate: "livrarr-handlers"
+    responsibility: "The compile-walled writers: identity review-apply, pending-anchor affirm, the manual-import confirm road, and the root-folder adopt road — all via HistoryService::record."
+    dependencies: ["domain-history-model"]
+    module_invariants:
+      - "No livrarr-db type appears; writes go through HasHistoryService only (cargo tree -p livrarr-handlers stays db-free)."
+      - "Every write sits strictly AFTER the underlying operation's Ok; 409/Err paths write nothing (the claim patterns give exactly-once)."
+    capability_survey:
+      - { capability: "history access from handlers", existing_source: "HasHistoryService (context.rs:156-159) + AppState impl (state.rs:529-534) — read path already wired (handlers/history.rs:26)", reuse_decision: "REUSE the accessor; ADD the bound to 3 sites (identity_review::resolve, work::affirm_pending_anchor, ManualImportHandlerContext) + root_folder's scan handler bound set", rationale: "insight 9h narrow-bounds pattern; zero new plumbing" }
+      - { capability: "human-readable chosen identity", existing_source: "Candidate.anchors: CapturedIdentity carries title + author_name directly (identity.rs:106-114, :152-165)", reuse_decision: "REUSE — no lookup needed at the review door", rationale: "payload composes from in-scope data" }
+      - { capability: "manual-import per-file completion", existing_source: "import_single_item (handlers/manual_import.rs:900-1029) — path, media_type, work id, ImportStatus all in scope at ImportResult build; work created via add at :1165", reuse_decision: "REUSE as the REQ-003 write point", rationale: "the one function that knows per-file success/failure with full context; writing inside server ImportService::import_single_file was REJECTED — its callers are not enumerated as manual-only, risking double-writes with the grab road's batch event" }
+      - { capability: "adopt completion", existing_source: "root_folder.rs:267-297 adopt_scanned_file call; ImportFileOutcome::Adopted matched at :280", reuse_decision: "REUSE as the adopt-road write point", rationale: "REQ-003 'imported or adopted'; same handler-level pattern" }
+    public_api:
+      functions:
+        - name: "identity_review::resolve (hook)"
+          signature: "bounds gain HasHistoryService (currently S: HasWorkIdentityRepository + HasWorkService, :118)"
+          output: "unchanged"
+          maps_reqs: ["REQ-008","REQ-013"]
+          pseudocode:
+            - "After apply_review_candidate Ok (:148): state.history_service().record(ctx.user.id, identity_resolved(work_id, &work.title /* the work loaded for ownership; if not currently loaded, load via work_service().get as the affirm door does */, \"review-candidate-apply\", format!(\"{} — {}\", chosen.anchors.title, chosen.anchors.author_name))).await."
+            - "Dismiss handler (:181 region): NO write (spec Non-Requirements — deliberate exclusion)."
+          call_annotations:
+            - { call: "HistoryService::record", type: "NEW", target: "domain-history-model" }
+            - { call: "history_events::identity_resolved", type: "NEW", target: "domain-history-model" }
+          tdd_directives:
+            - "AC-008: review apply → one identityResolved{action: review-candidate-apply}; a second apply on the same park → 409 and zero additional events (claim pattern); dismiss → zero events."
+        - name: "work::affirm_pending_anchor (hook)"
+          signature: "bounds gain HasHistoryService (:1024)"
+          output: "unchanged"
+          maps_reqs: ["REQ-008","REQ-013"]
+          pseudocode:
+            - "After confirm_anchor_and_recompute_badge Ok (:1073), before the fire-and-forget refresh spawn (:1076): state.history_service().record(user_id, identity_resolved(work_id, &work.title /* loaded :1033-1040 */, \"affirm\", format!(\"{} {}\", anchor_type.as_str(), value))).await."
+            - "The settled-slot 409 (:1054-1058) and not-found (:1064) paths write nothing."
+          call_annotations:
+            - { call: "HistoryService::record", type: "NEW", target: "domain-history-model" }
+          tdd_directives:
+            - "AC-008: affirm → one identityResolved{action: affirm}; affirming a settled slot → 409, zero events. Door (d) negative: no other surface writes identityResolved (empty-set enumeration, IR v1)."
+        - name: "manual-import confirm loop (REQ-003 writes at import_single_item's sole caller)"
+          signature: "ManualImportHandlerContext composite gains HasHistoryService (insight 41 pattern); the writer sits in the confirm loop at manual_import.rs:863 (`let result = import_single_item(...)`) — import_single_item itself unchanged (:900)"
+          output: "unchanged (ImportResult per file)"
+          maps_reqs: ["REQ-003","REQ-009","REQ-013"]
+          pseudocode:
+            - "ImportResult (manual_import.rs:253-260) gains `media_type: Option<MediaType>` — Some once classification succeeds (:901-911 sets it), None on the pre-classification failures (r3 codex R-3: the type carries what each path truly knows)."
+            - "After `let result = import_single_item(...)` (:863) — the ONE caller (production census 2026-07-19), so every ImportResult passes here including the EARLY Failed constructions inside import_single_item (unrecognized media :913-921, missing root folder :925-933, work-creation failure — r1 codex R-1):"
+            - "  match (result.status, result.work_id, result.media_type):"
+            - "    (Imported, Some(wid), Some(mt)) → work_title := state.work_service().get(user_id, wid).title (best-effort); record(user_id, imported_manual(wid, &work_title, &result.path, mt.as_str())) (r6 codex R-8: the Option is unwrapped by the match arm — success always carries the classified type, manual_import.rs:911/:973)."
+            - "    (Imported, _, None) | (Imported, None, _) → unreachable by construction (success implies a resolved work + classified type); defensive arm: tracing::warn! + no event — never panic."
+            - "    (Failed, Some(wid), mt) → work_title as above; record(user_id, import_failed_manual(wid, &work_title, &result.path, mt.map(|m| m.as_str()), &result.error))."
+            - "    (Failed, None, mt) → record(user_id, import_failed_unattached(&result.path, mt.map(|m| m.as_str()), &result.error)) — typed no-work shape, work_id None."
+            - "    (Skipped, _, _) → nothing (no import happened)."
+            - "The dead service wrapper this replaces is deleted in server-moment-writers."
+          call_annotations:
+            - { call: "HistoryService::record", type: "NEW", target: "domain-history-model" }
+            - { call: "history_events::imported_manual / import_failed_manual", type: "NEW", target: "domain-history-model" }
+            - { call: "WorkService::get", type: "EXISTING", target: "HasWorkService (already bound on the manual-import module)" }
+          tdd_directives:
+            - "AC-004: a succeeding manual-import confirmation → one imported {work_title, path, media_type}; an EARLY failure (unrecognized media — no work ever resolved) → one importFailed via the UNATTACHED shape {path, error, work_id null, no work_title key}; a LATE failure (import error on a resolved work) → one importFailed via the ATTACHED shape carrying work_title; grab-road batch payload unchanged; zero caller-less history methods remain."
+        - name: "root_folder adopt handler (REQ-003 adopt writes)"
+          signature: "the adopt handler's bound set gains HasHistoryService (root_folder.rs:267 site)"
+          output: "unchanged"
+          maps_reqs: ["REQ-003","REQ-013"]
+          pseudocode:
+            - "The writer is EXHAUSTIVE over the adopt_scanned_file result (r1 codex R-2 — the live success arm matches Adopted | Imported | Skipped together, :279-283):"
+            - "  Ok(Adopted{..}) | Ok(Imported{..}) → record(user_id, imported_manual(work.id, &work.title, &sf.path, media_type_str)) — work in scope from the matching loop; Imported is unreachable today (AdoptInPlace) but a legal future materialization change must not silently lose its event."
+            - "  Ok(Skipped{..}) → nothing (no import happened)."
+            - "  Err(_) arms (:286-299, incl. PathCollision) → record(user_id, import_failed_manual(work.id, &work.title, &sf.path, media_type_str, &error_message)) alongside the existing ScanErrorEntry push."
+          call_annotations:
+            - { call: "HistoryService::record", type: "NEW", target: "domain-history-model" }
+          tdd_directives:
+            - "AC-004 (adopt): adopting a scanned file → one imported per-file event; a Skipped outcome → zero events; an adopt error → one importFailed; the writer match is exhaustive over ImportFileOutcome (compile-pinned, no `_` arm on success outcomes)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "library-writers"
+    crate: "livrarr-library"
+    responsibility: "The library file-delete writer and the grab-road batch-import payload migration."
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    module_invariants:
+      - "file_service::delete keeps returning () — the event is a side observation, never a new failure mode."
+    capability_survey:
+      - { capability: "delete context", existing_source: "FileServiceImpl bounds D: LibraryItemDb + RootFolderDb + ConfigDb + PlaybackProgressDb (:31) — NO WorkDb; delete (:59-65) discards the returned LibraryItem", reuse_decision: "EXTEND bounds with WorkDb + HistoryDb; STOP discarding the returned item", rationale: "REQ-013 needs the work title; library→db edge already legal; SqliteDb satisfies all bounds" }
+      - { capability: "batch import writer", existing_source: "import_workflow.rs:1288-1313 (Imported/ImportFailed ternary, counts payload, warn-logged)", reuse_decision: "MIGRATE onto imported_batch constructor + record_history", rationale: "REQ-013 adds work_title/work_author; keys/shape preserved (spec REQ-003)" }
+    public_api:
+      functions:
+        - name: "FileServiceImpl::delete (hook)"
+          signature: "bounds line (:31) gains WorkDb + HistoryDb; fn signature unchanged (:59)"
+          output: "unchanged (Result<(), FileServiceError>)"
+          maps_reqs: ["REQ-005","REQ-009","REQ-013"]
+          pseudocode:
+            - "item := self.db.delete_library_item(user_id, item_id).await.map_err(map_db_err)? (bind the already-returned item instead of discarding)."
+            - "work_title := self.db.get_work(user_id, item.work_id).await.map(|w| w.title).unwrap_or_default()."
+            - "record_history(&self.db, user_id, file_deleted(item.work_id, &work_title, &item.path, item.media_type.as_str(), false)).await; Ok(())."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "WorkDb::get_work", type: "EXISTING", target: "new bound; impl SqliteDb" }
+          tdd_directives:
+            - "AC-006 (door a): the library file-delete road → one fileDeleted{path, media_type, work_title}."
+        - name: "grab-road batch writer migration"
+          signature: "unchanged site (import_workflow.rs:1288-1313)"
+          output: "unchanged"
+          maps_reqs: ["REQ-003","REQ-009","REQ-013"]
+          pseudocode:
+            - "Replace the json! literal with imported_batch(work_id, &work.title, Some(&work.author_name), &grab.title, imported_files.len(), failed_files.len(), skipped_files.len()) routed through record_history (kind chosen by the existing final_status ternary; the work is in scope on this road — verify the exact binding at implementation, else one get_work)."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+          tdd_directives:
+            - "AC-004 (grab road): batch payload keys imported/failed/skipped/title unchanged; work_title/work_author added (AC-013)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "download-grab-writer"
+    crate: "livrarr-download"
+    responsibility: "grabbed writer migration: typed constructor, work_title, and the end of the silent discard."
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    module_invariants:
+      - "guid / title / indexer / download_client_id keys byte-preserved — the backfill's per-fact grab dedup reads guid (REQ-010)."
+    capability_survey:
+      - { capability: "grabbed writer", existing_source: "release_service.rs:461-474 — `let _ =` DISCARDS the write error with no log at all", reuse_decision: "MIGRATE onto grabbed() + record_history", rationale: "REQ-009 requires the warn; REQ-013 adds work_title; one get_work for the title (db in scope)" }
+    public_api:
+      functions:
+        - name: "grabbed write in ReleaseService::grab"
+          signature: "unchanged site (:461-474)"
+          output: "unchanged"
+          maps_reqs: ["REQ-009","REQ-013"]
+          pseudocode:
+            - "work_title := self.db.get_work(user_id, req.work_id).await.map(|w| w.title).unwrap_or_default(); record_history(&self.db, user_id, grabbed(req.work_id, &work_title, None, &req.title, &req.indexer, &req.guid, client.id)).await — replaces the `let _ =` block."
+          call_annotations:
+            - { call: "record_history", type: "NEW", target: "db-history-write-core" }
+            - { call: "WorkDb::get_work", type: "EXISTING", target: "livrarr-db (crate already depends on it)" }
+          tdd_directives:
+            - "AC-013 slice: a grab event carries guid + title (release) + work_title; RSS grabs still produce exactly one grabbed (ST-009 — no second writer added)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "server-history-backfill"
+    crate: "livrarr-server"
+    responsibility: "REQ-010: the one-time, non-blocking, non-destructive startup synthesis pass."
+    dependencies: ["domain-history-model", "db-history-write-core"]
+    module_invariants:
+      - "Synthesizes ONLY from persisted timestamps (ST-007); every row backfilled:true + work_title; NEVER deletes or rewrites rows; marker written only on full completion; server serves while it runs."
+      - "The backfill's inserts are FALLIBLE and tracked (r4 codex R-5): REQ-009's observer rule protects live HOST operations — the backfill has none; a swallowed insert error here becomes permanent loss once the marker lands. Every insert failure defers the marker."
+    capability_survey:
+      - { capability: "startup registration", existing_source: "JobRunner::spawn_startup_pass (jobs/mod.rs:254-313) + run_startup_passes (main.rs:977-1012, 3 existing calls)", reuse_decision: "REUSE — 4th call, identical shape", rationale: "panic-isolated, JobStatus-visible, fire-and-forget (REQ-010 non-gating)" }
+      - { capability: "completion marker", existing_source: "_livrarr_meta reads/writes are inline sqlx at call sites; identity-key precedent does UPDATE-only and WORKS ONLY because migration 069 pre-seeded the row (pool.rs:425-493)", reuse_decision: "NEW inline queries with INSERT ... ON CONFLICT(key) DO UPDATE", rationale: "IR v1 D-NO-MIGRATION (no seeding migration) — a bare UPDATE on an unseeded key silently no-ops (survey-flagged trap); insert-or-update is immune. INSERT OR REPLACE stays banned (insight 20)" }
+      - { capability: "bulk fact reads", existing_source: "UserDb::list_users (api/user.rs:22); WorkDb::list_works (api/work.rs:40, unbounded); LibraryItemDb::list_library_items (api/library_item.rs:19, unbounded); GrabDb list_grabs_paginated ONLY (api/grab.rs:65-71 — no unbounded grab list exists)", reuse_decision: "REUSE all — grabs via paging (500/page)", rationale: "zero new DB surface; paging doubles as batching for the biggest table" }
+      - { capability: "coverage lookups", existing_source: "HistoryDb::list_history filters by event_type AND work_id AND dates, unbounded (sqlite_history.rs:66-99)", reuse_decision: "REUSE — one per-kind query per user, folded into in-memory sets", rationale: "per-fact dedup (REQ-010) without N queries" }
+    public_api:
+      functions:
+        - name: "run_history_backfill"
+          signature: "pub async fn run_history_backfill(db: SqliteDb)  (new file crates/livrarr-server/src/jobs/history_backfill.rs; registered in run_startup_passes as spawn_startup_pass(\"history_backfill\", svc_db.clone(), run_history_backfill(svc_db.clone())))"
+          output: "() — errors are warned, never crash the pass (panic isolation is the runner's backstop)"
+          maps_reqs: ["REQ-010","REQ-013"]
+          pseudocode:
+            - "MARKER GUARD: SELECT value FROM _livrarr_meta WHERE key='history_backfill_generation'; parsed >= 1 → return (completed pass never reruns)."
+            - "insert(draft) helper (BACKFILL-LOCAL, r4 codex R-5): build CreateHistoryEventDbRequest from the draft and call db.create_history_event DIRECTLY — on Err: tracing::warn! + set the current user's clean flag false + CONTINUE with the remaining facts. NOT record_history: the infallible observer helper is for live writers with a host operation to protect; here a swallowed failure would poison the marker."
+            - "all_users_clean := true. FOR user IN db.list_users():"
+            - "  COVERAGE PRELOAD (one list_history call per kind, this user): grabbed_guids := set of payload.guid over {event_type: Grabbed}; added_covered := set of work_id over {Added}; enriched_covered := set of work_id over {Enriched}; imported_events := Vec<(work_id, date)> over {Imported} ∪ {ImportFailed}; failure_covered := set of (work_id, payload.title) over {DownloadFailed} ∪ {ImportFailed}."
+            - "  WORKS PASS: works := db.list_works(user); titles := map id→(title, author). FOR work: if !added_covered.contains(work.id) → insert(added_backfilled(work.id, title, author, parse(work.added_at))). If work.enriched_at is Some AND !enriched_covered.contains(work.id) → insert(enriched_backfilled(work.id, title, author, work.enrichment_source, parse(enriched_at))) (at most one — ST-007's last-success-only)."
+            - "  GRABS PASS: page through list_grabs_paginated(user, page, 500). FOR grab: title_of := |id| titles.get(&id).map(|(t, _)| t.as_str()).unwrap_or_default() (NEVER index — r1 gemini R-1: a work deleted mid-pass must degrade to empty-title + warn, not panic). if !grabbed_guids.contains(grab.guid) → insert(grabbed_backfilled(grab.work_id, title_of(grab.work_id), &grab.title, &grab.indexer, &grab.guid, parse(grab.grabbed_at))). THEN the failure mapping (spec REQ-010, GrabStatus entities.rs:59-67): Failed → insert(download_failed_backfilled(..., grab.import_error, grabbed_at)) unless failure_covered contains (work_id, grab.title); ImportFailed → insert(import_failed_backfilled(...)) (same guard); Sent/Confirmed/Importing/Imported/Removed → nothing."
+            - "  ITEMS PASS: FOR item IN db.list_library_items(user): covered := imported_events.any(|(w, d)| w == item.work_id && d ∈ [imported_at − 5s, imported_at + 1h]); if !covered → insert(imported_backfilled(item.work_id, title_of(item.work_id), &item.path, media_type, parse(imported_at))) (spec's declared BEST-EFFORT window; both sides pinned)."
+            - "  PACING: tokio::task::yield_now() every 50 writes (each insert is its own implicit tx — no long writer lock; see D-ROW-TX)."
+            - "  Any per-user hard error (a list query failing) OR any insert() failure during the user's passes → tracing::warn!, all_users_clean = false; list failures skip to the next user, insert failures continue the current user's remaining facts (r4 codex R-5)."
+            - "MARKER: if all_users_clean → INSERT INTO _livrarr_meta(key, value) VALUES('history_backfill_generation','1') ON CONFLICT(key) DO UPDATE SET value='1'. Else no marker (rerun next boot; per-fact coverage makes the rerun additive-only)."
+            - "Title map note: grabs/items always reference live works (their FKs cascade on work delete), so titles[work_id] is total; a race with a concurrent delete degrades to empty-title + warn, never a crash."
+          call_annotations:
+            - { call: "UserDb::list_users / WorkDb::list_works / LibraryItemDb::list_library_items / GrabDb::list_grabs_paginated / HistoryDb::list_history", type: "EXISTING", target: "livrarr-db api traits (survey §12)" }
+            - { call: "HistoryDb::create_history_event (direct, fallible — via the local insert() helper)", type: "EXISTING", target: "livrarr-db api/history.rs:24 (r4: NOT record_history — insert failures must defer the marker)" }
+            - { call: "backfill constructors (drafts)", type: "NEW", target: "domain-history-model" }
+            - { call: "sqlx::query (marker)", type: "EXISTING", target: "inline _livrarr_meta access, same style as pool.rs:427/:481" }
+            - { call: "tokio::task::yield_now", type: "LIBRARY", target: "tokio" }
+            - { call: "chrono date parse", type: "LIBRARY", target: "chrono" }
+          decisions:
+            - { key: "D-ROW-TX", value: "per-row autocommit inserts + yield every 50, not explicit batch transactions", rationale: "REQ-010's actual constraint is never starving the single writer; per-row implicit txs hold the lock per-statement (shortest possible), and an explicit batching layer would need new DB surface for zero user-visible gain. The spec's 'small batched transactions' intent (no long lock, yielding) is met; deviation noted for review." }
+            - { key: "D-FAILURE-COVERAGE", value: "grab-failure dedup is TWO-TIER: a DownloadFailed/ImportFailed row carrying a guid key (backfill-written rows stamp it) covers exactly that grab; a guid-less row (live failure writers persist no guid) covers by (work_id, release title)", rationale: "real live failure payloads carry no guid (survey §13: {title, error}), so guid-exactness is impossible against THEM — but rows the backfill itself writes CAN self-identify, and must: (work, title) alone loses the second of two same-titled failed grabs from different indexers across a crash-rerun (code-review r2 codex R-4, folded 2026-07-20 — pinned by wh_backfill_failure_dedup_is_per_guid_for_same_title_grabs). Guid rows stay out of the title tier; the guid-less tier keeps erring toward not synthesizing — same trade the spec's imported window makes" }
+          tdd_directives:
+            - "AC-010 (the full fixture): mixed library (works + grabs in each terminal status + items + some real history rows incl. a batch imported row) → synthesizes exactly the uncovered facts, all backfilled:true with fact dates; a manual-import item newer than a real imported row AND outside +1h → synthesized; just-inside vs just-outside window items → skipped vs synthesized; rerun (and rerun after a simulated mid-pass crash: kill after user 1 of 2, marker absent) → zero duplicates, zero lost rows incl. backfilled rows of a since-deleted work; marker present after a clean full pass → third run does nothing; server accepts requests while running (behavioral: the pass is a spawned task, assert non-blocking registration shape)."
+            - "AC-010 insert-failure case (r4): a HistoryDb double whose create fails for one row mid-pass → the pass completes the remaining facts, writes NO marker, and the next run synthesizes exactly the missing row (no duplicates of the succeeded ones)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: "frontend-history-ui"
+    crate: "frontend (not a workspace crate)"
+    responsibility: "REQ-011: the 4 new kinds on both surfaces + version-skew safety, riding the existing graceful fallbacks."
+    dependencies: []
+    module_invariants:
+      - "The runtime `??` fallbacks stay — they ARE the version-skew rendering (survey: HistoryPage :156/:165 already fall back to AlertCircle + raw kind; HistoryTab :61/:68 to Clock + regex label)."
+    capability_survey:
+      - { capability: "kind rendering", existing_source: "HistoryPage EVENT_ICONS/:30-41, EVENT_LABELS/:43-54, ALL_EVENT_TYPES/:56-67 (TS-exhaustive Record<EventType,_> — compiler forces the new entries); HistoryTab EVENT_ICONS :10-21 (loose Record<string,_>) + regex label :68", reuse_decision: "EXTEND all maps; keep fallbacks", rationale: "the union extension makes TS enforce HistoryPage completeness for free" }
+      - { capability: "work identification on rows", existing_source: "eventDetails (:109-116) + summarizeHistoryData (HistoryTab :85-91) read payload keys generically", reuse_decision: "EXTEND to prefer data.work_title when the work reference is null", rationale: "AC-013: deleted works' rows show their title instead of '—'" }
+    public_api:
+      types:
+        - { kind: "TS union", name: "EventType (frontend, api.ts:48-58)", note: "+ \"added\" | \"workDeleted\" | \"worksMerged\" | \"identityResolved\"" }
+      functions:
+        - name: "map + rendering extensions"
+          signature: "HistoryPage.tsx three maps + HistoryTab.tsx icon map + both surfaces' work-title fallback"
+          output: "n/a (TSX)"
+          maps_reqs: ["REQ-011","REQ-013"]
+          pseudocode:
+            - "api.ts union += 4 literals (compiler then forces HistoryPage's three Record<EventType,_> maps)."
+            - "HistoryPage: EVENT_ICONS += added→BookPlus, workDeleted→Trash2, worksMerged→GitMerge, identityResolved→BadgeCheck (existing lucide set); EVENT_LABELS += 'Added'/'Work Deleted'/'Works Merged'/'Identity Resolved'; ALL_EVENT_TYPES += the 4 (filter dropdown)."
+            - "HistoryTab: EVENT_ICONS += the same 4; label stays regex-derived (already generic)."
+            - "Both surfaces: where the row's work link/name renders and the work reference is null → fall back to payload.work_title before '—' (AC-013); eventDetails/summarize gain work_title in their generic reads."
+          call_annotations:
+            - { call: "lucide-react icons", type: "EXISTING", target: "frontend existing dependency (no new package)" }
+          tdd_directives:
+            - "AC-011: every kind renders label+icon on both surfaces and appears in the filter; a mocked API response with kind 'futureKind' renders a generic row (raw text + fallback icon) without breaking the page (pin the fallback against regression — it is now load-bearing)."
+            - "AC-013 (UI half): a deleted work's surviving rows show work_title on the global page; grab-family rows show release title separately."
+
+# Entry-surface inventory — traced upgraded to the exact road-entry call lines (verify.py _check_doors form).
+doors:
+  - { door: "interactive add (search)",  road_entry: "WorkService::add_fast", traced: "crates/livrarr-handlers/src/work.rs:247", note: "seed_add_box :227 stamps Search; REQ-001" }
+  - { door: "list import",               road_entry: "WorkService::add", traced: "crates/livrarr-metadata/src/list_service.rs:403", note: "seed_list_import via resolve_candidate_from_row (:122) stamps ListImport" }
+  - { door: "Readarr import",            road_entry: "WorkService::add", traced: "crates/livrarr-server/src/readarr_import_workflow.rs:1373", note: "seed_readarr_import :1273 stamps Readarr" }
+  - { door: "author monitor",            road_entry: "WorkService::add", traced: "crates/livrarr-metadata/src/author_monitor_workflow.rs:544", note: "seed_author_monitor :513 stamps AuthorMonitor" }
+  - { door: "series monitor",            road_entry: "WorkService::add", traced: "crates/livrarr-metadata/src/series_query_service/service.rs:1001", note: "seed_series_monitor :1003 stamps SeriesMonitor (multiline call opens :999)" }
+  - { door: "file-scan / manual import (work creation)", road_entry: "WorkService::add", traced: "crates/livrarr-handlers/src/manual_import.rs:1165", note: "seed_manual_import :1148 stamps FileImport" }
+  - { door: "identity: review-candidate apply", road_entry: "apply_review_candidate", traced: "crates/livrarr-handlers/src/identity_review.rs:148", note: "REQ-008 (a); writer via HistoryService::record after Ok" }
+  - { door: "identity: conflict resolution",    road_entry: "apply_conflict_resolution", traced: "crates/livrarr-server/src/services/identity_conflict_service.rs:69", note: "REQ-008 (b); all four actions incl. KeepExisting" }
+  - { door: "identity: pending-anchor affirm",  road_entry: "confirm_anchor_and_recompute_badge", traced: "crates/livrarr-handlers/src/work.rs:1071", note: "REQ-008 (c)" }
+  - { door: "identity: review dismiss",         road_entry: "identity_review dismiss", traced: "crates/livrarr-handlers/src/identity_review.rs:181", note: "records NOTHING (deliberate exclusion)" }
+  - { door: "identity: manual edit/supersede",  road_entry: "(none — empty set today)", traced: "crates/livrarr-domain/src/services/work_identity.rs:31", note: "REQ-008 (d): proven empty (IR v1 enumeration); contract binds future surfaces" }
+  - { door: "file delete: library road",        road_entry: "FileServiceImpl::delete", traced: "crates/livrarr-library/src/file_service.rs:59", note: "REQ-005(a)" }
+  - { door: "file delete: manual-import",       road_entry: "ManualImportServiceImpl::delete_library_item", traced: "crates/livrarr-server/src/manual_import_service.rs:70", note: "REQ-005(b)" }
+  - { door: "file delete: secondary API",       road_entry: "LibraryFileApi::delete", traced: "crates/livrarr-server/src/api_secondary_impl.rs:692", note: "REQ-005(c) — EMPTY SET today (tests-stage disposition 2026-07-19): the module is #[cfg(test)] in lib.rs, SecondaryApiImpl has zero production references, no other LibraryFileApi impl exists; NO writer built; any productionization must add the writer + test in the same change (door-(d) precedent); PO-flagged" }
+  - { door: "work delete (composite)",          road_entry: "WorkServiceImpl::delete", traced: "crates/livrarr-metadata/src/work_service.rs:1490", note: "REQ-006; one workDeleted after Ok, work_id None (D-DELETE-ORDER)" }
+  - { door: "Readarr import UNDO",              road_entry: "LiveReadarrImportWorkflow undo", traced: "crates/livrarr-server/src/readarr_import_workflow.rs:321", note: "REQ-005(e): fileDeleted in the item loop :321-329; workDeleted per orphan after :337-341; titles pre-fetched" }
+  - { door: "enrichment pipeline (every trigger)", road_entry: "run_unified_enrichment", traced: "crates/livrarr-metadata/src/work_service.rs:2471", note: "REQ-002; sole production enrich_work dispatch" }
+  - { door: "manual-import confirm (per-file import)", road_entry: "import_single_item", traced: "crates/livrarr-handlers/src/manual_import.rs:863", note: "REQ-003 writes at the sole caller's result loop (covers the early Failed paths inside :900-1029 — r1 codex R-1)" }
+  - { door: "root-folder adopt", road_entry: "ImportService::adopt_scanned_file", traced: "crates/livrarr-handlers/src/root_folder.rs:267", note: "REQ-003 'or adopted'; Adopted outcome matched :280 (r3-added door — 23rd row)" }
+  - { door: "grab-road batch import (existing writer)", road_entry: "import_workflow grab-import completion", traced: "crates/livrarr-library/src/import_workflow.rs:1288", note: "REQ-013 migration only" }
+  - { door: "grab (existing grabbed writer)", road_entry: "ReleaseService::grab history write", traced: "crates/livrarr-download/src/release_service.rs:461", note: "REQ-013/REQ-009 migration (r5 codex R-6): typed grabbed() + record_history replaces the silent `let _ =`; guid/title/indexer keys byte-preserved; TDD = download-grab-writer AC-013 slice" }
+  - { door: "SAB download-failure (existing writer)", road_entry: "download_poller SAB Failed arm", traced: "crates/livrarr-server/src/jobs/download_poller.rs:545", note: "REQ-013 migration (r5 codex R-6): download_failed() constructor adds work_title, release-title key preserved; TDD = server-moment-writers AC-013 slice" }
+  - { door: "tag pass: batch retag road", road_entry: "retag_library_items (in-method hook)", traced: "crates/livrarr-server/src/tag_service.rs:78", note: "covers ALL THREE callers: import_service.rs:111/:284/:522" }
+  - { door: "tag pass: convergence per-item recovery", road_entry: "tag_sync_single_item call", traced: "crates/livrarr-server/src/jobs/tag_convergence.rs:98", note: "success-only single-file events" }
+  - { door: "tag pass: materialize in-enrichment write", road_entry: "write_tags_batch via materialize", traced: "crates/livrarr-materialize/src/lib.rs:341", note: "NO separate event — tags_written flag on enriched" }

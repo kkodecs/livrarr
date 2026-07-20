@@ -792,6 +792,18 @@ impl WorkDb for SqliteDb {
             .await
             .map_err(map_db_err)?;
 
+        // History rows move with the merge too (REQ-007a) — an UPDATE, never
+        // a delete: history is append-only, and `history.work_id` is
+        // `ON DELETE SET NULL`, so unrepointed rows would orphan when the
+        // loser row is deleted below.
+        sqlx::query("UPDATE history SET work_id = ? WHERE user_id = ? AND work_id = ?")
+            .bind(req.survivor_id)
+            .bind(req.user_id)
+            .bind(req.loser_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
         // Write the caller-resolved user-sovereign field values onto the
         // survivor (REQ-015 d — the service layer already applied the
         // OR/conflict-choice logic; this is a plain write).
@@ -809,11 +821,11 @@ impl WorkDb for SqliteDb {
         .await
         .map_err(map_db_err)?;
 
-        // The loser is removed only now that the survivor owns its items
-        // and grabs (REQ-015 e). Everything else FK'd to the loser
-        // (identity anchors, provenance, dissents, history, ...) cascades
-        // away with it — that metadata is system/provider-derived, not
-        // per-user consumption data, so its loss is the intended outcome.
+        // The loser is removed only now that the survivor owns its items,
+        // grabs, and history rows (REQ-015 e). The remaining loser-FK'd rows
+        // (identity anchors, provenance, dissents) cascade away with it —
+        // that metadata is system/provider-derived, not per-user consumption
+        // data, so its loss is the intended outcome.
         sqlx::query("DELETE FROM works WHERE id = ? AND user_id = ?")
             .bind(req.loser_id)
             .bind(req.user_id)

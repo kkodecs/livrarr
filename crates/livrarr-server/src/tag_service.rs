@@ -1,19 +1,27 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use livrarr_db::record_history;
+use livrarr_domain::history_events;
 use livrarr_domain::services::{ImportIoService, TagService, TagSyncItemResult};
 use livrarr_domain::{LibraryItem, Work};
 
 pub struct LiveTagService<I> {
     import_io: Arc<I>,
     data_dir: Arc<PathBuf>,
+    db: livrarr_db::sqlite::SqliteDb,
 }
 
 impl<I> LiveTagService<I> {
-    pub fn new(import_io: Arc<I>, data_dir: Arc<PathBuf>) -> Self {
+    pub fn new(
+        import_io: Arc<I>,
+        data_dir: Arc<PathBuf>,
+        db: livrarr_db::sqlite::SqliteDb,
+    ) -> Self {
         Self {
             import_io,
             data_dir,
+            db,
         }
     }
 }
@@ -74,12 +82,8 @@ pub async fn tag_sync_single_item(
     }
 }
 
-impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
-    async fn retag_library_items(
-        &self,
-        work: &Work,
-        items: &[LibraryItem],
-    ) -> Vec<TagSyncItemResult> {
+impl<I: ImportIoService + Send + Sync> LiveTagService<I> {
+    async fn retag_pass(&self, work: &Work, items: &[LibraryItem]) -> Vec<TagSyncItemResult> {
         let tag_metadata = build_tag_metadata(work);
         let cover_data = read_cover_bytes(&self.data_dir, work.user_id, work.id).await;
 
@@ -232,6 +236,35 @@ impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
                 }
             }
         }
+
+        results
+    }
+}
+
+impl<I: ImportIoService + Send + Sync> TagService for LiveTagService<I> {
+    async fn retag_library_items(
+        &self,
+        work: &Work,
+        items: &[LibraryItem],
+    ) -> Vec<TagSyncItemResult> {
+        let results = self.retag_pass(work, items).await;
+
+        if items.is_empty() {
+            return results;
+        }
+
+        let attempted = items.len();
+        let succeeded = results.iter().filter(|r| r.succeeded).count();
+        let draft = if succeeded > 0 {
+            history_events::tag_written(work.id, &work.title, attempted, succeeded)
+        } else {
+            let first_error = results
+                .iter()
+                .find_map(|r| r.error.as_deref())
+                .unwrap_or("tag write failed");
+            history_events::tag_write_failed(work.id, &work.title, attempted, first_error)
+        };
+        record_history(&self.db, work.user_id, draft).await;
 
         results
     }

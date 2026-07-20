@@ -301,6 +301,7 @@ pub mod tests {
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
+                    attempted: true,
                 }),
                 StubEnrichmentMode::Partial => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -317,6 +318,7 @@ pub mod tests {
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
+                    attempted: true,
                 }),
                 StubEnrichmentMode::AllFail => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -337,6 +339,7 @@ pub mod tests {
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
+                    attempted: true,
                 }),
                 StubEnrichmentMode::NotFound => Err(EnrichmentError::WorkNotFound),
                 StubEnrichmentMode::ManualCover => Ok(EnrichmentResult {
@@ -354,6 +357,7 @@ pub mod tests {
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
+                    attempted: true,
                 }),
                 StubEnrichmentMode::LlmFallback => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -367,6 +371,7 @@ pub mod tests {
                     cover_resolution: None,
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
+                    attempted: true,
                 }),
             }
         }

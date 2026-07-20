@@ -55,7 +55,11 @@ export type EventType =
   | "enrichmentFailed"
   | "tagWritten"
   | "tagWriteFailed"
-  | "fileDeleted";
+  | "fileDeleted"
+  | "added"
+  | "workDeleted"
+  | "worksMerged"
+  | "identityResolved";
 export type DownloadClientImplementation = "qBittorrent" | "sabnzbd" | "transmission";
 export type LlmProvider = "groq" | "gemini" | "openai" | "custom";
 

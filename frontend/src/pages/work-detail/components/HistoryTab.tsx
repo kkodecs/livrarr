@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Download, Trash2, Book, ExternalLink, Pencil, Clock } from "lucide-react";
+import { Download, Trash2, Book, ExternalLink, Pencil, Clock, BookPlus, GitMerge, BadgeCheck } from "lucide-react";
 import { getHistory } from "@/api";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
@@ -18,6 +18,10 @@ const EVENT_ICONS: Record<string, typeof Download> = {
   tagWritten: Pencil,
   tagWriteFailed: Trash2,
   fileDeleted: Trash2,
+  added: BookPlus,
+  workDeleted: Trash2,
+  worksMerged: GitMerge,
+  identityResolved: BadgeCheck,
 };
 
 export function HistoryTab({ workId }: { workId: number }) {
@@ -87,5 +91,6 @@ function summarizeHistoryData(entry: HistoryResponse): string {
   if (d.title && typeof d.title === "string") return d.title;
   if (d.message && typeof d.message === "string") return d.message;
   if (d.path && typeof d.path === "string") return d.path;
+  if (d.work_title && typeof d.work_title === "string") return d.work_title;
   return "";
 }

@@ -7,14 +7,14 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use livrarr_db::sqlite::SqliteDb;
-use livrarr_db::{ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest};
+use livrarr_db::{record_history, ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest, WorkDb};
 use livrarr_domain::identity_matching::{identity_key, unambiguous_author_match};
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::{
     ReadarrImportWorkflow, ServiceError, SourceProviderData, WorkService,
 };
 use livrarr_domain::{
-    derive_sort_name, sanitize_path_component, Author, AuthorId, Import, MediaType,
+    derive_sort_name, history_events, sanitize_path_component, Author, AuthorId, Import, MediaType,
 };
 
 use livrarr_http::HttpClient;
@@ -250,118 +250,182 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         user_id: i64,
         import_id: String,
     ) -> Result<ReadarrUndoResponse, ServiceError> {
-        let imp = self
-            .readarr_import_service
-            .get_import(&import_id)
-            .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?
-            .ok_or_else(|| ServiceError::Internal("Import not found".into()))?;
+        undo_import(
+            &self.readarr_import_service,
+            &self.data_dir,
+            &self.db,
+            user_id,
+            &import_id,
+        )
+        .await
+    }
+}
 
-        if imp.user_id != user_id {
-            return Err(ServiceError::Internal("Forbidden".into()));
+pub async fn undo_import(
+    readarr_import_service: &crate::state::ReadarrImportServiceImpl,
+    data_dir: &std::path::Path,
+    db: &SqliteDb,
+    user_id: i64,
+    import_id: &str,
+) -> Result<ReadarrUndoResponse, ServiceError> {
+    let imp = readarr_import_service
+        .get_import(import_id)
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+        .ok_or_else(|| ServiceError::Internal("Import not found".into()))?;
+
+    if imp.user_id != user_id {
+        return Err(ServiceError::Internal("Forbidden".into()));
+    }
+    if imp.status == "running" {
+        return Err(ServiceError::Internal(
+            "Cannot undo a running import".into(),
+        ));
+    }
+
+    let items = readarr_import_service
+        .list_library_items_by_import(import_id)
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?;
+
+    // Titles are unrecoverable once the work rows die, so pre-fetch them while
+    // the works are still alive.
+    let mut titles: HashMap<i64, String> = HashMap::new();
+    let item_work_ids: HashSet<i64> = items.iter().map(|item| item.work_id).collect();
+    for id in item_work_ids {
+        if let Ok(work) = db.get_work(user_id, id).await {
+            titles.insert(id, work.title);
         }
-        if imp.status == "running" {
-            return Err(ServiceError::Internal(
-                "Cannot undo a running import".into(),
-            ));
-        }
+    }
 
-        let items = self
-            .readarr_import_service
-            .list_library_items_by_import(&import_id)
+    let root_folder_path: Option<String> = if let Some(rf_id) = imp.target_root_folder_id {
+        readarr_import_service
+            .get_root_folder(rf_id)
             .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            .ok()
+            .map(|rf| rf.path)
+    } else {
+        None
+    };
 
-        let root_folder_path: Option<String> = if let Some(rf_id) = imp.target_root_folder_id {
-            self.readarr_import_service
-                .get_root_folder(rf_id)
-                .await
-                .ok()
-                .map(|rf| rf.path)
-        } else {
-            None
-        };
+    let undo_items: Vec<_> = items
+        .iter()
+        .map(|item| {
+            let full_path = if let Some(ref root) = root_folder_path {
+                PathBuf::from(root).join(&item.path)
+            } else {
+                PathBuf::from(&item.path)
+            };
+            (full_path, item.path.clone())
+        })
+        .collect();
 
-        let undo_items: Vec<_> = items
-            .iter()
-            .map(|item| {
-                let full_path = if let Some(ref root) = root_folder_path {
-                    PathBuf::from(root).join(&item.path)
-                } else {
-                    PathBuf::from(&item.path)
-                };
-                (full_path, item.path.clone())
-            })
-            .collect();
-
-        let (files_deleted, files_skipped) = tokio::task::spawn_blocking(move || {
-            let mut deleted = 0i64;
-            let mut skipped = 0i64;
-            for (full_path, rel_path) in &undo_items {
-                match std::fs::remove_file(full_path) {
-                    Ok(()) => {
-                        deleted += 1;
-                        info!(path = %rel_path, "Undo: deleted file");
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        deleted += 1;
-                        debug!(path = %rel_path, "Undo: file already absent");
-                    }
-                    Err(e) => {
-                        warn!(path = %rel_path, "Undo: failed to delete: {e}");
-                        skipped += 1;
-                    }
+    let (files_deleted, files_skipped) = tokio::task::spawn_blocking(move || {
+        let mut deleted = 0i64;
+        let mut skipped = 0i64;
+        for (full_path, rel_path) in &undo_items {
+            match std::fs::remove_file(full_path) {
+                Ok(()) => {
+                    deleted += 1;
+                    info!(path = %rel_path, "Undo: deleted file");
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    deleted += 1;
+                    debug!(path = %rel_path, "Undo: file already absent");
+                }
+                Err(e) => {
+                    warn!(path = %rel_path, "Undo: failed to delete: {e}");
+                    skipped += 1;
                 }
             }
-            (deleted, skipped)
-        })
-        .await
-        .unwrap_or((0, items.len() as i64));
+        }
+        (deleted, skipped)
+    })
+    .await
+    .unwrap_or((0, items.len() as i64));
 
-        for item in &items {
-            if let Err(e) = self
-                .readarr_import_service
-                .delete_library_item_by_id(item.id)
-                .await
-            {
+    for item in &items {
+        match readarr_import_service
+            .delete_library_item_by_id(item.id)
+            .await
+        {
+            Ok(()) => {
+                let title = titles.get(&item.work_id).cloned().unwrap_or_default();
+                record_history(
+                    db,
+                    user_id,
+                    history_events::file_deleted(
+                        item.work_id,
+                        &title,
+                        &item.path,
+                        item.media_type.as_str(),
+                        true,
+                    ),
+                )
+                .await;
+            }
+            Err(e) => {
                 warn!(id = item.id, "Undo: failed to delete library item: {e}");
             }
         }
-
-        let orphan_work_ids = self
-            .readarr_import_service
-            .list_orphan_work_ids_by_import(&import_id)
-            .await
-            .unwrap_or_default();
-
-        let works_deleted = self
-            .readarr_import_service
-            .delete_orphan_works_by_import(&import_id)
-            .await
-            .unwrap_or(0);
-
-        for wid in &orphan_work_ids {
-            livrarr_metadata::work_service::delete_cover_files(&self.data_dir, user_id, *wid).await;
-        }
-
-        let authors_deleted = self
-            .readarr_import_service
-            .delete_orphan_authors_by_import(&import_id)
-            .await
-            .unwrap_or(0);
-
-        self.readarr_import_service
-            .update_import_status(&import_id, "undone")
-            .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
-
-        Ok(ReadarrUndoResponse {
-            files_deleted,
-            files_skipped,
-            works_deleted,
-            authors_deleted,
-        })
     }
+
+    let orphan_work_ids = readarr_import_service
+        .list_orphan_work_ids_by_import(import_id)
+        .await
+        .unwrap_or_default();
+
+    for id in &orphan_work_ids {
+        if !titles.contains_key(id) {
+            if let Ok(work) = db.get_work(user_id, *id).await {
+                titles.insert(*id, work.title);
+            }
+        }
+    }
+
+    let title_of = |id: i64| titles.get(&id).cloned().unwrap_or_default();
+
+    let works_deleted = match readarr_import_service
+        .delete_orphan_works_by_import(import_id)
+        .await
+    {
+        Ok(count) => {
+            for id in &orphan_work_ids {
+                record_history(
+                    db,
+                    user_id,
+                    history_events::work_deleted(&title_of(*id), None, 0, true),
+                )
+                .await;
+            }
+            count
+        }
+        Err(e) => {
+            warn!(import_id = %import_id, "Undo: failed to delete orphan works: {e}");
+            0
+        }
+    };
+
+    for wid in &orphan_work_ids {
+        livrarr_metadata::work_service::delete_cover_files(data_dir, user_id, *wid).await;
+    }
+
+    let authors_deleted = readarr_import_service
+        .delete_orphan_authors_by_import(import_id)
+        .await
+        .unwrap_or(0);
+
+    readarr_import_service
+        .update_import_status(import_id, "undone")
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?;
+
+    Ok(ReadarrUndoResponse {
+        files_deleted,
+        files_skipped,
+        works_deleted,
+        authors_deleted,
+    })
 }
 
 // =============================================================================

@@ -50,6 +50,7 @@ impl EnrichmentService for SuccessEnrichment {
             audiobook_cover_resolution: None,
             changed: false,
             dissents: Vec::new(),
+            attempted: true,
         })
     }
     async fn reset_for_manual_refresh(
@@ -91,6 +92,7 @@ impl EnrichmentService for DeferredEnrichment {
             audiobook_cover_resolution: None,
             changed: false,
             dissents: Vec::new(),
+            attempted: true,
         })
     }
     async fn reset_for_manual_refresh(
@@ -132,6 +134,7 @@ impl EnrichmentService for FailedEnrichment {
             audiobook_cover_resolution: None,
             changed: false,
             dissents: Vec::new(),
+            attempted: true,
         })
     }
     async fn reset_for_manual_refresh(

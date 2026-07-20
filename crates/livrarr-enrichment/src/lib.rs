@@ -107,6 +107,13 @@ pub struct EnrichmentResult {
     /// Per-field/per-provider dissents recorded by this merge (REQ-014):
     /// excluded contributions, persisted queryably; never block the merge.
     pub dissents: Vec<livrarr_domain::FieldDissent>,
+    /// True when the pass ran to completion — a provider dispatch or a
+    /// cached-candidate merge concluded (including a no-op merge). False only
+    /// when the pass ended with no provider dispatch and no merge application.
+    /// Authored by `enrich_work`'s own control flow; the cached-reuse arm
+    /// returns an empty `provider_outcomes` map on a completed attempt, so
+    /// emptiness is NOT a usable no-attempt signal.
+    pub attempted: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -241,6 +248,20 @@ fn resolve_status(
     } else {
         EnrichmentStatus::Failed
     }
+}
+
+/// REQ-002 (work-history): "did this pass change the work" — content fields
+/// only. The apply's bookkeeping writes (status/source/enriched_at) don't
+/// count: the enriched event carries status separately, and a pass that only
+/// re-stamped bookkeeping changed nothing the user can see. Compared on the
+/// persisted rows because `MergeOutput.work_update` is a last-known-good echo
+/// (`Some` on every eligible merge) — presence is not a change signal.
+fn content_changed(before: &Work, after: &Work) -> bool {
+    let mut before = before.clone();
+    before.enrichment_status = after.enrichment_status;
+    before.enriched_at = after.enriched_at;
+    before.enrichment_source = after.enrichment_source.clone();
+    before != *after
 }
 
 // =============================================================================
@@ -542,7 +563,7 @@ where
                     )
                     .await;
                     let result_work = self.db.get_work(user_id, work_id).await.ok()?;
-                    let changed = merge_output.work_update.is_some()
+                    let changed = content_changed(&work, &result_work)
                         || merge_output.cover_resolution.is_some()
                         || merge_output.audiobook_cover_resolution.is_some();
                     Some(EnrichmentResult {
@@ -560,6 +581,7 @@ where
                         identity_not_found: false,
                         changed,
                         dissents,
+                        attempted: true,
                     })
                 }
                 ApplyMergeOutcome::Superseded => {
@@ -638,6 +660,7 @@ where
                 identity_not_found: false,
                 changed: false,
                 dissents: Vec::new(),
+                attempted: true,
             });
         }
 
@@ -778,7 +801,7 @@ where
                     )
                     .await;
                     let result_work = self.db.get_work(user_id, work_id).await?;
-                    let changed = merge_output.work_update.is_some()
+                    let changed = content_changed(&current_work, &result_work)
                         || merge_output.cover_resolution.is_some()
                         || merge_output.audiobook_cover_resolution.is_some();
                     return Ok(EnrichmentResult {
@@ -795,6 +818,12 @@ where
                         identity_not_found: false,
                         changed,
                         dissents,
+                        // A pass whose scatter dispatched nothing (every
+                        // provider terminal-skipped, no injected source
+                        // payload) and whose merge changed nothing never
+                        // attempted anything — REQ-002's "an attempt that
+                        // never runs records nothing".
+                        attempted: !scatter_result.outcomes.is_empty() || changed,
                     });
                 }
                 ApplyMergeOutcome::Superseded => {

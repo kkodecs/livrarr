@@ -3,11 +3,11 @@ use tracing::{info, warn};
 
 use crate::state::AppState;
 use livrarr_db::{
-    CreateHistoryEventDbRequest, CreateNotificationDbRequest, DownloadClientDb, GrabDb, HistoryDb,
-    NotificationDb,
+    record_history, CreateNotificationDbRequest, DownloadClientDb, GrabDb, NotificationDb, WorkDb,
 };
+use livrarr_domain::history_events;
 use livrarr_domain::services::{ImportIoService, ImportService};
-use livrarr_domain::{EventType, GrabStatus, NotificationType};
+use livrarr_domain::{GrabStatus, NotificationType};
 use livrarr_download::classify_qbit_state;
 
 // ---------------------------------------------------------------------------
@@ -530,7 +530,7 @@ async fn poll_sabnzbd(
                         .and_then(|m| m.as_str())
                         .unwrap_or("unknown failure");
                     warn!("poller: SABnzbd failed grab {}: {fail_msg}", grab.id);
-                    if let Err(e) = state
+                    match state
                         .db
                         .update_grab_status(
                             grab.user_id,
@@ -540,22 +540,31 @@ async fn poll_sabnzbd(
                         )
                         .await
                     {
-                        warn!("poller: failed to update grab {} status: {e}", grab.id);
-                    }
-                    if let Err(e) = state
-                        .db
-                        .create_history_event(CreateHistoryEventDbRequest {
-                            user_id: grab.user_id,
-                            work_id: Some(grab.work_id),
-                            event_type: EventType::DownloadFailed,
-                            data: serde_json::json!({
-                                "title": grab.title,
-                                "error": fail_msg,
-                            }),
-                        })
-                        .await
-                    {
-                        tracing::warn!("create_history_event failed: {e}");
+                        Ok(()) => {
+                            // Event only after the transition persists: on a failed
+                            // update the grab stays active, so the next poll re-enters
+                            // this arm — an early write would duplicate the event.
+                            let work_title = state
+                                .db
+                                .get_work(grab.user_id, grab.work_id)
+                                .await
+                                .map(|w| w.title)
+                                .unwrap_or_default();
+                            record_history(
+                                &state.db,
+                                grab.user_id,
+                                history_events::download_failed(
+                                    grab.work_id,
+                                    &work_title,
+                                    &grab.title,
+                                    fail_msg,
+                                ),
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            warn!("poller: failed to update grab {} status: {e}", grab.id);
+                        }
                     }
                 }
                 _ => {

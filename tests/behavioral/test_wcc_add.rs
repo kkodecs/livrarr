@@ -141,6 +141,7 @@ fn confirmed_candidate(identity: CapturedIdentity) -> WorkCandidate {
         provenance_setter: Some(ProvenanceSetter::Import),
         import_id: None,
         cover_manual: false,
+        add_source: livrarr_domain::history_events::WorkAddSource::Search,
     }
 }
 
@@ -203,6 +204,7 @@ fn pending_candidate_from_unresolved_isbn() -> WorkCandidate {
         provenance_setter: Some(ProvenanceSetter::Import),
         import_id: None,
         cover_manual: false,
+        add_source: livrarr_domain::history_events::WorkAddSource::Search,
     }
 }
 

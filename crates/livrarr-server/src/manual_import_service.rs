@@ -1,11 +1,11 @@
 use livrarr_db::{
-    ConfigDb, CreateHistoryEventDbRequest, CreateLibraryItemDbRequest, HistoryDb, LibraryItemDb,
-    RootFolderDb, WorkDb,
+    record_history, ConfigDb, CreateLibraryItemDbRequest, HistoryDb, LibraryItemDb, RootFolderDb,
+    WorkDb,
 };
+use livrarr_domain::history_events;
 use livrarr_domain::services::{ManualImportService, ManualImportServiceError};
 use livrarr_domain::{
-    EventType, LibraryItem, LibraryItemId, MediaType, RootFolder, RootFolderId, UserId, Work,
-    WorkId,
+    LibraryItem, LibraryItemId, MediaType, RootFolder, RootFolderId, UserId, Work, WorkId,
 };
 
 pub struct ManualImportServiceImpl<D> {
@@ -72,10 +72,30 @@ where
         user_id: UserId,
         item_id: LibraryItemId,
     ) -> Result<LibraryItem, ManualImportServiceError> {
-        self.db
+        let item = self
+            .db
             .delete_library_item(user_id, item_id)
             .await
-            .map_err(map_db_err)
+            .map_err(map_db_err)?;
+        let work_title = self
+            .db
+            .get_work(user_id, item.work_id)
+            .await
+            .map(|w| w.title)
+            .unwrap_or_default();
+        record_history(
+            &self.db,
+            user_id,
+            history_events::file_deleted(
+                item.work_id,
+                &work_title,
+                &item.path,
+                item.media_type.as_str(),
+                false,
+            ),
+        )
+        .await;
+        Ok(item)
     }
 
     async fn create_library_item(
@@ -100,25 +120,6 @@ where
                 tagged_at_generation: 0,
             })
             .await
-            .map_err(map_db_err)
-    }
-
-    async fn create_history_event(
-        &self,
-        user_id: UserId,
-        work_id: Option<WorkId>,
-        event_type: EventType,
-        data: serde_json::Value,
-    ) -> Result<(), ManualImportServiceError> {
-        self.db
-            .create_history_event(CreateHistoryEventDbRequest {
-                user_id,
-                work_id,
-                event_type,
-                data,
-            })
-            .await
-            .map(|_| ())
             .map_err(map_db_err)
     }
 }
