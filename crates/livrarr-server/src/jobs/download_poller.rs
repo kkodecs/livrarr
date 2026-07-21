@@ -239,7 +239,7 @@ async fn poll_qbittorrent(
                     grab.id
                 );
                 let age = chrono::Utc::now() - grab.grabbed_at;
-                if age > chrono::Duration::minutes(5) {
+                if age > chrono::Duration::minutes(15) {
                     let _ = state
                         .db
                         .create_notification(CreateNotificationDbRequest {
@@ -460,7 +460,7 @@ async fn poll_sabnzbd(
                             grab.id
                         );
                         let age = chrono::Utc::now() - grab.grabbed_at;
-                        if age > chrono::Duration::minutes(5) {
+                        if age > chrono::Duration::minutes(15) {
                             let _ = state
                                 .db
                                 .create_notification(CreateNotificationDbRequest {
