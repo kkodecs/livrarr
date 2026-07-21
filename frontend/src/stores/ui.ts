@@ -16,6 +16,7 @@ interface UIState {
   worksFilter: string;
   worksMediaFilter: string;
   worksLanguageFilter: string;
+  worksCollapseSeries: boolean;
   posterZoom: number;
   relativeDates: boolean;
   dateFormat: string;
@@ -33,6 +34,7 @@ interface UIState {
   setWorksFilter: (filter: string) => void;
   setWorksMediaFilter: (filter: string) => void;
   setWorksLanguageFilter: (filter: string) => void;
+  setWorksCollapseSeries: (collapse: boolean) => void;
   setPosterZoom: (zoom: number) => void;
   setRelativeDates: (value: boolean) => void;
   setDateFormat: (fmt: string) => void;
@@ -56,6 +58,7 @@ export const useUIStore = create<UIState>()(
       worksFilter: "",
       worksMediaFilter: "",
       worksLanguageFilter: "",
+      worksCollapseSeries: false,
       posterZoom: 5,
       relativeDates: true,
       dateFormat: "MMM d, yyyy",
@@ -76,6 +79,7 @@ export const useUIStore = create<UIState>()(
       setWorksFilter: (filter) => set({ worksFilter: filter }),
       setWorksMediaFilter: (filter) => set({ worksMediaFilter: filter }),
       setWorksLanguageFilter: (filter) => set({ worksLanguageFilter: filter }),
+      setWorksCollapseSeries: (collapse) => set({ worksCollapseSeries: collapse }),
       setPosterZoom: (zoom) => set({ posterZoom: zoom }),
       setRelativeDates: (value) => set({ relativeDates: value }),
       setDateFormat: (fmt) => set({ dateFormat: fmt }),

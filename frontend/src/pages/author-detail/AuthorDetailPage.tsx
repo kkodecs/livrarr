@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useParams, useNavigate } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -47,6 +47,16 @@ import type { AuthorDetailResponse } from "@/types/api";
 function languageLabel(code: string): string {
   const known = SUPPORTED_LANGUAGES.find((l) => l.code === code);
   return known ? `${known.flag} ${known.englishName}` : code.toUpperCase();
+}
+
+// Stable identity for a bibliography row: title alone collides when an author
+// has two distinct entries with the same title (different OL keys/years).
+function bibliographyEntryKey(e: {
+  olKey: string | null;
+  title: string;
+  year: number | null;
+}): string {
+  return e.olKey ?? `${e.title}|${e.year ?? ""}`;
 }
 
 export default function AuthorDetailPage() {
@@ -138,6 +148,18 @@ export default function AuthorDetailPage() {
   // against to decide "does this match the author" — the persisted monitor
   // setting, same fallback used everywhere else on this page.
   const authorLanguage = author.monitorLanguage ?? "en";
+
+  // #129: after "Add All" lands the bibliography, keep the author current —
+  // same enable path as the Monitored button.
+  const enableMonitoring = () => {
+    if (author.monitored && author.monitorNewItems) return;
+    updateMutation.mutate({
+      monitored: true,
+      monitorNewItems: true,
+      monitorLanguage: displayedLanguage,
+    });
+    toast.success(`Monitoring enabled for ${author.name}`);
+  };
 
   return (
     <>
@@ -313,6 +335,7 @@ export default function AuthorDetailPage() {
           authorLanguage={authorLanguage}
           showAllLanguages={showAllLanguages}
           libraryOlKeys={new Set(works.map((w) => w.olKey).filter(Boolean) as string[])}
+          enableMonitoring={enableMonitoring}
         />
       </PageContent>
 
@@ -336,17 +359,24 @@ function BibliographySection({
   authorLanguage,
   showAllLanguages,
   libraryOlKeys,
+  enableMonitoring,
 }: {
   authorId: number;
   author: AuthorDetailResponse["author"];
   authorLanguage: string;
   showAllLanguages: boolean;
   libraryOlKeys: Set<string>;
+  enableMonitoring: () => void;
 }) {
   const queryClient = useQueryClient();
   const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
   const [addingKey, setAddingKey] = useState<string | null>(null);
   const [showRaw, setShowRaw] = useState(false);
+  const [addAllOpen, setAddAllOpen] = useState(false);
+  const [addAllProgress, setAddAllProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
 
   const { data: bib, isLoading } = useQuery({
     queryKey: ["bibliography", authorId, showRaw],
@@ -373,7 +403,7 @@ function BibliographySection({
       year: number | null;
       language?: string | null;
     }) => {
-      setAddingKey(entry.title);
+      setAddingKey(bibliographyEntryKey(entry));
       return addWork({
         olKey: entry.olKey || null,
         title: entry.title,
@@ -388,9 +418,10 @@ function BibliographySection({
       });
     },
     onSuccess: (data, entry) => {
-      setAddedKeys((prev) => new Set(prev).add(entry.title));
+      setAddedKeys((prev) => new Set(prev).add(bibliographyEntryKey(entry)));
       setAddingKey(null);
       queryClient.invalidateQueries({ queryKey: ["author", String(authorId)] });
+      queryClient.invalidateQueries({ queryKey: ["bibliography", authorId] });
       queryClient.invalidateQueries({ queryKey: ["works"] });
       toast.success(`Added "${data.work.title}"`);
     },
@@ -406,6 +437,74 @@ function BibliographySection({
     (e) => showAllLanguages || e.language == null || e.language === authorLanguage,
   );
   const hiddenCount = (bib?.entries.length ?? 0) - visibleEntries.length;
+
+  // #129: everything on screen that isn't in the library yet — exactly the
+  // rows whose per-entry "Add" button shows. "Add All" presses them all.
+  const missingEntries = visibleEntries.filter(
+    (e) =>
+      !(
+        e.alreadyInLibrary ||
+        (e.olKey != null && libraryOlKeys.has(e.olKey)) ||
+        addedKeys.has(bibliographyEntryKey(e))
+      ),
+  );
+
+  // Leaving the page stops the add loop (and blocks a second overlapping run
+  // on return); the works added so far stay, the rest need another click.
+  const unmountedRef = useRef(false);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+    };
+  }, []);
+
+  const runAddAll = async () => {
+    const seen = new Set<string>();
+    const targets = missingEntries.filter((e) => {
+      const k = bibliographyEntryKey(e);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    let added = 0;
+    let failed = 0;
+    setAddAllProgress({ done: 0, total: targets.length });
+    for (let i = 0; i < targets.length; i++) {
+      if (unmountedRef.current) break;
+      const entry = targets[i];
+      if (!entry) continue;
+      try {
+        await addWork({
+          olKey: entry.olKey || null,
+          title: entry.title,
+          authorName: author.name,
+          authorOlKey: author.olKey ?? null,
+          year: entry.year,
+          coverUrl: null,
+          language: entry.language ?? authorLanguage,
+        });
+        added++;
+        setAddedKeys((prev) => new Set(prev).add(bibliographyEntryKey(entry)));
+      } catch {
+        failed++;
+      }
+      setAddAllProgress({ done: i + 1, total: targets.length });
+    }
+    // Refresh caches even after an aborted run, so a return visit shows the
+    // true partial state instead of stale "not in library" rows.
+    queryClient.invalidateQueries({ queryKey: ["author", String(authorId)] });
+    queryClient.invalidateQueries({ queryKey: ["bibliography", authorId] });
+    queryClient.invalidateQueries({ queryKey: ["works"] });
+    if (unmountedRef.current) return;
+    setAddAllProgress(null);
+    if (failed === 0) {
+      toast.success(`Added ${added} work${added !== 1 ? "s" : ""} to your library`);
+    } else {
+      toast.warning(`Added ${added}, failed ${failed} of ${targets.length} works`);
+    }
+    if (added > 0) enableMonitoring();
+  };
 
   return (
     <section className="mt-8">
@@ -450,10 +549,28 @@ function BibliographySection({
         ) : (
           <button
             onClick={() => refreshMutation.mutate()}
-            className="text-xs text-zinc-500 hover:text-zinc-300"
+            disabled={addAllProgress != null}
+            className="text-xs text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
           >
             Refresh
           </button>
+        )}
+        {addAllProgress ? (
+          <span className="flex items-center gap-1.5 text-xs text-brand">
+            <Loader2 size={10} className="animate-spin" /> Adding{" "}
+            {addAllProgress.done}/{addAllProgress.total}...
+          </span>
+        ) : (
+          hasBib &&
+          missingEntries.length > 0 && (
+            <button
+              onClick={() => setAddAllOpen(true)}
+              disabled={addMutation.isPending}
+              className="text-xs text-brand hover:underline disabled:opacity-50"
+            >
+              Add All ({missingEntries.length})
+            </button>
+          )
         )}
       </div>
       {!hasBib && !isFetching && (
@@ -467,13 +584,13 @@ function BibliographySection({
       {hasBib && visibleEntries.length > 0 && <div className="overflow-x-auto rounded border border-border">
         <table className="w-full text-sm">
           <tbody>
-            {visibleEntries.map((entry) => {
-              const inLibrary = entry.alreadyInLibrary || (entry.olKey != null && libraryOlKeys.has(entry.olKey)) || addedKeys.has(entry.title);
+            {visibleEntries.map((entry, entryIdx) => {
+              const inLibrary = entry.alreadyInLibrary || (entry.olKey != null && libraryOlKeys.has(entry.olKey)) || addedKeys.has(bibliographyEntryKey(entry));
               const isForeign = entry.language != null && entry.language !== authorLanguage;
               const isUnknownLanguage = entry.language == null;
               return (
                 <tr
-                  key={`${entry.olKey ?? ''}-${entry.title}-${entry.year ?? ''}`}
+                  key={`${bibliographyEntryKey(entry)}-${entryIdx}`}
                   className={cn(
                     "border-b border-border/50",
                     inLibrary ? "text-zinc-500" : "text-zinc-200",
@@ -504,13 +621,13 @@ function BibliographySection({
                   </td>
                   <td className="px-2 py-1.5 w-10 text-right">
                     {!inLibrary && (
-                      addingKey === entry.title ? (
+                      addingKey === bibliographyEntryKey(entry) ? (
                         <Loader2 size={12} className="inline animate-spin text-brand" />
                       ) : (
                         <button
                           onClick={() => addMutation.mutate(entry)}
-                          disabled={addMutation.isPending}
-                          className="text-xs text-brand hover:underline"
+                          disabled={addMutation.isPending || addAllProgress != null}
+                          className="text-xs text-brand hover:underline disabled:opacity-50"
                         >
                           Add
                         </button>
@@ -523,6 +640,21 @@ function BibliographySection({
           </tbody>
         </table>
       </div>}
+      <ConfirmModal
+        open={addAllOpen}
+        onOpenChange={setAddAllOpen}
+        title={`Add ${missingEntries.length} works?`}
+        description={`Add all ${missingEntries.length} listed works by ${author.name} to your library, then turn on monitoring so future releases are picked up automatically. Works are added one at a time — a large bibliography can take a few minutes.${
+          !showAllLanguages && hiddenCount > 0
+            ? ` The ${hiddenCount} entr${hiddenCount === 1 ? "y" : "ies"} hidden by the language filter will not be added.`
+            : ""
+        }`}
+        confirmLabel="Add All"
+        variant="default"
+        onConfirm={() => {
+          void runAddAll();
+        }}
+      />
     </section>
   );
 }
