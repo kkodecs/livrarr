@@ -49,28 +49,41 @@ fn request(url: &str, bucket: RateBucket) -> FetchRequest {
     }
 }
 
+/// #130 regression, end-to-end through `HttpFetcherImpl`: two indexers behind
+/// ONE Prowlarr origin. A 429 for indexer A trips only A's per-indexer
+/// rate-limit breaker — NOT the shared transport breaker (the host answered, so
+/// it stays alive) and NOT sibling indexer B on the same origin.
 #[tokio::test]
-async fn indexer_429_opens_only_that_origin_bucket() {
+async fn indexer_429_opens_only_that_indexer_not_its_origin_siblings() {
+    // Connection 1 = A's 429; connection 2 = B's 200. A's second fetch is
+    // CircuitOpen (no HTTP), so it never reaches the server.
     let server_url = spawn_status_server(vec![429, 200]).await;
     let fetcher = HttpFetcherImpl::new().unwrap();
-    let bucket_a = RateBucket::Indexer("pin-origin-a-20260713".to_string());
-    let bucket_b = RateBucket::Indexer("pin-origin-b-20260713".to_string());
+    let origin = "pin-shared-prowlarr-origin-20260721".to_string();
+    let indexer_a = RateBucket::Indexer {
+        origin: origin.clone(),
+        indexer: Some("pin-indexer-a-20260721".to_string()),
+    };
+    let indexer_b = RateBucket::Indexer {
+        origin,
+        indexer: Some("pin-indexer-b-20260721".to_string()),
+    };
 
-    let first = fetcher.fetch(request(&server_url, bucket_a.clone())).await;
+    let first = fetcher.fetch(request(&server_url, indexer_a.clone())).await;
     assert!(
         matches!(first, Err(FetchError::RateLimited)),
-        "first indexer response should surface as RateLimited, got {first:?}"
+        "first indexer response (429) should surface as RateLimited, got {first:?}"
     );
 
-    let second_same_bucket = fetcher.fetch(request(&server_url, bucket_a)).await;
+    let second_same_indexer = fetcher.fetch(request(&server_url, indexer_a)).await;
     assert!(
-        matches!(second_same_bucket, Err(FetchError::CircuitOpen { .. })),
-        "same indexer bucket should be breaker-blocked after 429, got {second_same_bucket:?}"
+        matches!(second_same_indexer, Err(FetchError::CircuitOpen { .. })),
+        "the SAME indexer must be breaker-blocked after its own 429, got {second_same_indexer:?}"
     );
 
-    let other_bucket = fetcher.fetch(request(&server_url, bucket_b)).await;
+    let sibling_same_origin = fetcher.fetch(request(&server_url, indexer_b)).await;
     assert!(
-        other_bucket.is_ok(),
-        "different indexer origin bucket must still proceed, got {other_bucket:?}"
+        sibling_same_origin.is_ok(),
+        "a sibling indexer on the SAME Prowlarr origin must still proceed after A's 429 (issue #130), got {sibling_same_origin:?}"
     );
 }

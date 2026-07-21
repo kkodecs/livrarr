@@ -68,6 +68,12 @@ struct QueuedItem {
     priority: RequestPriority,
     seq: u64,
     turn: oneshot::Sender<TurnResult>,
+    /// The per-indexer rate-limit breaker for this item's FULL bucket value,
+    /// resolved once at enqueue time (`Some` only for a fully-resolved
+    /// `Indexer { indexer: Some(_) }` bucket). The dispatcher gates on this
+    /// independently of the lane's shared transport breaker (`BucketHandle.
+    /// breaker`); it is not part of the heap ordering.
+    rl_breaker: Option<Arc<Mutex<BreakerState>>>,
 }
 
 impl PartialEq for QueuedItem {
@@ -107,10 +113,14 @@ struct BucketState {
 struct BucketHandle {
     state: Arc<Mutex<BucketState>>,
     semaphore: Arc<Semaphore>,
-    /// `None` for `RateBucket::None` (R-5) and any future pace-only
-    /// aggregate bucket. `Some` for every breaker-tracked bucket — the six
-    /// book-provider APIs plus `Indexer(_)`, which is single-host (origin-
-    /// keyed) and so carries a breaker like the rest.
+    /// The lane's TRANSPORT-level breaker, keyed by pace key (origin for
+    /// indexers). `None` for `RateBucket::None` / `OpenLibraryCovers` and any
+    /// future pace-only aggregate bucket. `Some` for every breaker-tracked
+    /// pace bucket — the six book-provider APIs plus every `Indexer` origin
+    /// lane. It answers "is this host up?" (connection errors / timeouts),
+    /// never sees a 429, and is shared by all indexers on one origin. The
+    /// per-indexer rate-limit breaker is separate (`OutboundQueue::
+    /// rate_limit_breakers`) and lives on each `QueuedItem` as `rl_breaker`.
     breaker: Option<Arc<Mutex<BreakerState>>>,
 }
 
@@ -178,15 +188,52 @@ fn interval_for(bucket: &RateBucket) -> Duration {
         // OL's ISBN-cover endpoint limit is ~100 requests/IP/5min ≈ 1 per 3s.
         // Pace-only (R-6) — never added to `breaker::breaker_tracked`.
         RateBucket::OpenLibraryCovers => Duration::from_secs(3),
-        RateBucket::Indexer(_) => Duration::from_millis(500),
+        RateBucket::Indexer { .. } => Duration::from_millis(500),
         RateBucket::None => Duration::ZERO,
     }
 }
 
-/// One bucket's dispatcher loop: pace sends by `interval`, cap in-flight sends via
-/// the bucket's semaphore, and grant queued callers their turn in `(priority DESC,
-/// seq ASC)` order. Exits — self-cleaning via [`DispatcherGuard`] — once the queue
-/// drains empty; the next `acquire` call on this bucket respawns it.
+/// Project a bucket down to its PACING key — the key the registry (pacing +
+/// in-flight cap + transport breaker) is stored under. Identity for every
+/// variant except `Indexer`, whose per-indexer id is erased so all indexers
+/// proxied through one origin share a single pace lane and one transport-level
+/// breaker (politeness is to the machine). The per-indexer rate-limit breaker
+/// is keyed by the FULL bucket value elsewhere (`rate_limit_breakers`), not by
+/// this projection.
+fn pace_key(bucket: &RateBucket) -> RateBucket {
+    match bucket {
+        RateBucket::Indexer { origin, .. } => RateBucket::Indexer {
+            origin: origin.clone(),
+            indexer: None,
+        },
+        other => other.clone(),
+    }
+}
+
+/// If `breaker` is `Some` and currently Open, the time remaining in its open
+/// window; otherwise `None`. `current()` transitions Open→HalfOpen internally
+/// once the window elapses, so a HalfOpen breaker returns `None` and a probe is
+/// admitted. Mutates the breaker (the window transition), so callers hold the
+/// state lock across it — the breaker is a leaf lock, taken state→breaker.
+fn breaker_open_retry(breaker: Option<&Arc<Mutex<BreakerState>>>) -> Option<Duration> {
+    let breaker = breaker?;
+    let mut b = breaker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match b.current() {
+        CircuitState::Open => Some(b.retry_after()),
+        CircuitState::Closed | CircuitState::HalfOpen => None,
+    }
+}
+
+/// One pace lane's dispatcher loop: pace sends by `interval`, cap in-flight
+/// sends via the lane's semaphore, and grant queued callers their turn in
+/// `(priority DESC, seq ASC)` order. Two breaker levels gate a grant — the
+/// item's per-indexer rate-limit breaker (`QueuedItem::rl_breaker`) and the
+/// lane's shared transport breaker (`handle.breaker`); an Open breaker on
+/// either rejects the item with `Err(retry_after)` and no HTTP. Exits —
+/// self-cleaning via [`DispatcherGuard`] — once the queue drains empty; the
+/// next `acquire` call on this lane respawns it.
 async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
     let mut guard = DispatcherGuard {
         state: Arc::clone(&handle.state),
@@ -194,51 +241,44 @@ async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
     };
 
     loop {
+        // Phase 1 — early drain + breaker gate, under ONE state-lock hold
+        // (peek/check/pop share the hold, so there is no rl-breaker TOCTOU):
+        // reject each top item whose rate-limit breaker OR the lane's transport
+        // breaker is Open — popped and errored with no pacing slot and no
+        // in-flight permit consumed — until the top item is grantable or the
+        // heap drains empty.
         let next_allowed = {
             let mut state = handle
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if state.heap.is_empty() {
-                // Reset the flag ATOMICALLY with the empty check (same lock hold) so a
-                // concurrent `acquire` cannot observe a stale `true`, skip spawning, and
-                // orphan its item while this dispatcher exits. The guard is disarmed
-                // because this clean path already cleared the flag.
-                state.dispatcher_running = false;
-                guard.disarm();
-                return;
-            }
-            state.last_dispatch + interval
-        };
-
-        // Breaker gate (R-3), checked BEFORE pacing/semaphore: an Open breaker
-        // rejects the top queued item immediately — no HTTP, no pacing slot
-        // consumed, no in-flight permit touched. `handle.breaker` is `None`
-        // for exempt buckets (`None`/`Indexer(_)`), which always fall through
-        // to a normal grant below.
-        if let Some(breaker) = &handle.breaker {
-            let retry_after = {
-                let mut b = breaker
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                match b.current() {
-                    CircuitState::Open => Some(b.retry_after()),
-                    CircuitState::Closed | CircuitState::HalfOpen => None,
+            loop {
+                if state.heap.is_empty() {
+                    // Clear the flag ATOMICALLY with the empty check (same lock
+                    // hold) so a concurrent `acquire` cannot observe a stale
+                    // `true`, skip spawning, and orphan its item. Disarm the
+                    // guard — this clean path already cleared the flag.
+                    state.dispatcher_running = false;
+                    guard.disarm();
+                    return;
                 }
-            };
-            if let Some(retry_after) = retry_after {
-                let mut state = handle
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let item = state.heap.pop().expect(
-                    "dispatcher is the sole consumer; heap was non-empty at the last check",
-                );
-                drop(state);
-                let _ = item.turn.send(Err(retry_after));
-                continue;
+                // Clone the top item's rl_breaker handle so the immutable peek
+                // borrow is released before any mutable pop.
+                let top_rl = state.heap.peek().and_then(|item| item.rl_breaker.clone());
+                let retry_after = breaker_open_retry(top_rl.as_ref())
+                    .or_else(|| breaker_open_retry(handle.breaker.as_ref()));
+                match retry_after {
+                    Some(retry_after) => {
+                        let item = state.heap.pop().expect(
+                            "dispatcher is the sole consumer; heap was non-empty at the last check",
+                        );
+                        let _ = item.turn.send(Err(retry_after));
+                        // Re-peek the new top under the same lock hold.
+                    }
+                    None => break state.last_dispatch + interval,
+                }
             }
-        }
+        };
 
         if next_allowed > Instant::now() {
             tokio::time::sleep_until(next_allowed).await;
@@ -251,6 +291,10 @@ async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
             .await
             .expect("outbound queue semaphore is never closed");
 
+        // Phase 3 — grant-time re-check: the item now on top may differ from
+        // the one Phase 1 cleared (a higher-priority item could have arrived
+        // during the pacing sleep / semaphore wait) and either breaker may have
+        // tripped in that window. Pop and re-check BOTH before granting.
         let mut state = handle
             .state
             .lock()
@@ -259,11 +303,23 @@ async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
             .heap
             .pop()
             .expect("dispatcher is the sole consumer; heap was non-empty at the last check");
+        let retry_after = breaker_open_retry(item.rl_breaker.as_ref())
+            .or_else(|| breaker_open_retry(handle.breaker.as_ref()));
+        if let Some(retry_after) = retry_after {
+            // Tripped during the wait (or the heap reordered to a tripped
+            // item): reject, free the permit, and DO NOT advance the pacing
+            // clock — only a successful hand-off is a dispatch.
+            drop(state);
+            drop(permit);
+            let _ = item.turn.send(Err(retry_after));
+            continue;
+        }
 
-        // Grant the turn. `send` is the commit point: advance the pacing clock ONLY on a
-        // successful hand-off. If the caller cancelled, its receiver is gone and `send`
-        // returns the permit in `Err` — it drops here, freeing the in-flight slot, and no
-        // pacing is consumed. A cancelled wait must never burn a slot or an interval.
+        // Grant the turn. `send` is the commit point: advance the pacing clock
+        // ONLY on a successful hand-off. If the caller cancelled, its receiver
+        // is gone and `send` returns the permit in `Err` — it drops here,
+        // freeing the in-flight slot, and no pacing is consumed. A cancelled
+        // wait must never burn a slot or an interval.
         if item.turn.send(Ok(permit)).is_ok() {
             state.last_dispatch = Instant::now();
         }
@@ -279,6 +335,14 @@ async fn run_dispatcher(handle: BucketHandle, interval: Duration) {
 #[derive(Clone)]
 pub struct OutboundQueue {
     registry: Arc<Mutex<HashMap<RateBucket, BucketHandle>>>,
+    /// The second breaker level (issue #130): per-INDEXER rate-limit breakers,
+    /// keyed by the FULL `Indexer { origin, indexer: Some(id) }` bucket value —
+    /// distinct from `registry`, which is keyed by the pace projection (origin
+    /// only). Created lazily on first use of a resolvable indexer bucket and
+    /// bounded by the number of configured indexers. A 429 for one indexer
+    /// trips only its own entry; its neighbours on the same origin are
+    /// untouched.
+    rate_limit_breakers: Arc<Mutex<HashMap<RateBucket, Arc<Mutex<BreakerState>>>>>,
 }
 
 impl OutboundQueue {
@@ -286,20 +350,52 @@ impl OutboundQueue {
     pub fn new() -> Self {
         Self {
             registry: Arc::new(Mutex::new(HashMap::new())),
+            rate_limit_breakers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Return the bucket's handle, creating it (and its dispatcher-less initial
-    /// state) on first use.
+    /// Return the pace lane's handle (pacing, in-flight cap, transport breaker),
+    /// creating it on first use. Keyed by the PACE projection, so all indexers
+    /// on one origin share a handle.
     fn bucket_handle(&self, bucket: &RateBucket) -> BucketHandle {
+        let key = pace_key(bucket);
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         registry
-            .entry(bucket.clone())
-            .or_insert_with(|| BucketHandle::new(bucket, interval_for(bucket)))
+            .entry(key.clone())
+            .or_insert_with(|| BucketHandle::new(&key, interval_for(&key)))
             .clone()
+    }
+
+    /// The per-indexer rate-limit breaker for `bucket`, created on first use.
+    /// `Some` only for a fully-resolved indexer bucket (`Indexer { indexer:
+    /// Some(_) }`); `None` for everything else — provider buckets (whose only
+    /// breaker is the transport one), `Indexer { indexer: None }`, `None`, and
+    /// covers. Keyed by the full bucket value, so two indexers on one origin
+    /// get two distinct breakers.
+    fn rate_limit_breaker(&self, bucket: &RateBucket) -> Option<Arc<Mutex<BreakerState>>> {
+        if !matches!(
+            bucket,
+            RateBucket::Indexer {
+                indexer: Some(_),
+                ..
+            }
+        ) {
+            return None;
+        }
+        let mut map = self
+            .rate_limit_breakers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Some(
+            map.entry(bucket.clone())
+                .or_insert_with(|| {
+                    Arc::new(Mutex::new(BreakerState::new(breaker::config_for(bucket))))
+                })
+                .clone(),
+        )
     }
 
     /// Enqueue an outbound call for `bucket` at `priority` and await your turn.
@@ -329,6 +425,10 @@ impl OutboundQueue {
 
         let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
         let handle = self.bucket_handle(&bucket);
+        // Resolve the per-indexer rate-limit breaker ONCE, before taking the
+        // state lock (the map lock is a leaf lock released here). `None` for
+        // every non-`Indexer{Some}` bucket.
+        let rl_breaker = self.rate_limit_breaker(&bucket);
         let (turn_tx, turn_rx) = oneshot::channel();
 
         {
@@ -340,6 +440,7 @@ impl OutboundQueue {
                 priority,
                 seq,
                 turn: turn_tx,
+                rl_breaker,
             });
             if !state.dispatcher_running {
                 state.dispatcher_running = true;
@@ -355,12 +456,33 @@ impl OutboundQueue {
         })
     }
 
-    /// Report a dispatched call's outcome to `bucket`'s breaker (R-8/R-12/R-14).
-    /// `None`/`Indexer(_)` buckets carry no breaker state — this is a no-op for
-    /// them. O(1), a brief lock, never held across an `.await`.
+    /// Report a dispatched call's outcome to `bucket`'s TRANSPORT-level breaker
+    /// (R-8/R-12/R-14) — the pace-lane breaker, keyed by pace key. This is the
+    /// reporter the six provider clients call (their bucket's only breaker) and
+    /// the one `do_fetch` uses for transport failures and host-alive successes
+    /// on every bucket, indexers included. `None`/`OpenLibraryCovers` carry no
+    /// breaker — a no-op for them. The per-indexer rate-limit level has its own
+    /// reporter (`report_rate_limit_outcome`). O(1), a brief lock, never held
+    /// across an `.await`.
     pub fn report_outcome(&self, bucket: RateBucket, outcome: BreakerSignal) {
         let handle = self.bucket_handle(&bucket);
         if let Some(breaker) = &handle.breaker {
+            breaker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .apply(outcome);
+        }
+    }
+
+    /// Report an outcome to `bucket`'s per-INDEXER rate-limit breaker (issue
+    /// #130). A no-op unless `bucket` is a fully-resolved `Indexer { indexer:
+    /// Some(_) }`. `do_fetch` calls this with `TripImmediately` on a 429 (that
+    /// one indexer is rate-limited) and `Success` on any completed non-429
+    /// response (which closes a half-open probe). Disjoint from the transport
+    /// level: this breaker never sees a transport failure. O(1), a brief lock,
+    /// never held across an `.await`.
+    pub fn report_rate_limit_outcome(&self, bucket: RateBucket, outcome: BreakerSignal) {
+        if let Some(breaker) = self.rate_limit_breaker(&bucket) {
             breaker
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -389,8 +511,9 @@ impl OutboundQueue {
     /// Test-only: replace `bucket`'s breaker with one built from a caller-supplied
     /// config (e.g. a short `open_duration_secs` so an Open→HalfOpen transition
     /// doesn't require a real wall-clock wait). Mirrors the enrichment queue's
-    /// own `with_initial_circuit_state` test seam. A no-op for exempt buckets
-    /// (`None`/`Indexer(_)`) — they carry no breaker to replace.
+    /// own `with_initial_circuit_state` test seam. Operates on the TRANSPORT
+    /// breaker (pace key); a no-op for pace-only buckets
+    /// (`None`/`OpenLibraryCovers`) — they carry no breaker to replace.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_breaker_config_for_tests(
         &self,
@@ -1004,17 +1127,27 @@ mod tests {
             .expect("RateBucket::OpenLibraryCovers must never trip (pace-only, R-6)");
     }
 
-    /// `Indexer(_)` is breaker-tracked: a plain reported `Failure` trips it
-    /// via the normal failure-threshold path, exactly like the six book-
-    /// provider buckets — origin keying makes each indexer bucket single-
-    /// host, so tracking it honors the per-host principle instead of
-    /// violating it. The 429-triggers-`TripImmediately`-with-a-30-minute-
-    /// cooldown behavior is covered end-to-end by
-    /// `crates/livrarr-http/tests/indexer_breaker_pins.rs`.
+    // -------------------------------------------------------------------
+    // Two-level indexer breaker (issue #130): a shared TRANSPORT breaker per
+    // origin ("is the host up?") and a per-INDEXER rate-limit breaker
+    // ("is this one indexer 429ing?"). The two levels see disjoint signals.
+    // -------------------------------------------------------------------
+
+    fn indexer_bucket(origin: &str, id: &str) -> RateBucket {
+        RateBucket::Indexer {
+            origin: origin.to_string(),
+            indexer: Some(id.to_string()),
+        }
+    }
+
+    /// An indexer lane's TRANSPORT breaker trips on the normal failure
+    /// threshold, exactly like the six provider buckets: 5 reported `Failure`s
+    /// (host down / timeouts) open it. `report_outcome` targets the transport
+    /// level (keyed by origin).
     #[tokio::test]
-    async fn indexer_bucket_is_breaker_tracked_and_trips_at_the_failure_threshold() {
+    async fn indexer_transport_breaker_trips_at_the_failure_threshold() {
         let queue = OutboundQueue::new();
-        let bucket = RateBucket::Indexer("unit-test-indexer-origin".to_string());
+        let bucket = indexer_bucket("unit-test-indexer-origin", "unit-test-indexer-id");
 
         for _ in 0..4 {
             queue.report_outcome(bucket.clone(), BreakerSignal::Failure);
@@ -1028,7 +1161,212 @@ mod tests {
         queue
             .acquire(bucket, RequestPriority::Normal)
             .await
-            .expect_err("the 5th failure must trip an indexer bucket Closed -> Open");
+            .expect_err("the 5th transport failure must trip the indexer lane Closed -> Open");
+    }
+
+    /// #130 regression (load-bearing): two indexers on ONE origin. Tripping A's
+    /// per-indexer rate-limit breaker rejects A but leaves sibling B free —
+    /// with no extra pacing wait, since A's rejection consumes no dispatch.
+    #[tokio::test]
+    async fn rate_limit_trip_on_one_indexer_does_not_block_a_same_origin_sibling() {
+        let queue = OutboundQueue::new();
+        let a = indexer_bucket("origin-130", "id-a");
+        let b = indexer_bucket("origin-130", "id-b");
+
+        queue.report_rate_limit_outcome(
+            a.clone(),
+            BreakerSignal::TripImmediately { open_for: None },
+        );
+
+        queue
+            .acquire(a, RequestPriority::Normal)
+            .await
+            .expect_err("indexer A's own rate-limit breaker is open");
+        queue
+            .acquire(b, RequestPriority::Normal)
+            .await
+            .expect("sibling indexer B on the same origin must not be blocked by A's 429 (#130)");
+    }
+
+    /// An OPEN high-priority indexer must not starve a CLOSED low-priority
+    /// sibling on the same origin: both queued at once, the open one is
+    /// rejected and the closed one is still granted.
+    #[tokio::test]
+    async fn open_high_priority_indexer_does_not_starve_a_closed_low_priority_sibling() {
+        let queue = Arc::new(OutboundQueue::new());
+        let a = indexer_bucket("origin-mixed", "id-a");
+        let b = indexer_bucket("origin-mixed", "id-b");
+        queue.report_rate_limit_outcome(
+            a.clone(),
+            BreakerSignal::TripImmediately { open_for: None },
+        );
+
+        let qa = Arc::clone(&queue);
+        let a_task =
+            tokio::spawn(async move { qa.acquire(a, RequestPriority::Interactive).await.is_err() });
+        let qb = Arc::clone(&queue);
+        let b_task = tokio::spawn(async move { qb.acquire(b, RequestPriority::Low).await.is_ok() });
+
+        assert!(
+            a_task.await.unwrap(),
+            "open high-priority indexer A must be rejected"
+        );
+        assert!(
+            b_task.await.unwrap(),
+            "closed low-priority sibling B must still be granted"
+        );
+    }
+
+    /// Grant-time re-check: a rate-limit breaker that trips WHILE its item is in
+    /// the pacing sleep is caught when the permit is granted — the item is
+    /// rejected, the permit released, and the pacing clock not advanced.
+    #[tokio::test(start_paused = true)]
+    async fn rate_limit_trip_during_pacing_sleep_is_caught_at_grant_time() {
+        let queue = Arc::new(OutboundQueue::new());
+        let bucket = indexer_bucket("origin-race", "id-race");
+
+        // First grant advances the pacing clock so the SECOND item must wait a
+        // full 500ms interval — the window in which we trip the breaker.
+        let first = queue
+            .acquire(bucket.clone(), RequestPriority::Normal)
+            .await
+            .expect("first grant");
+        drop(first);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let q2 = Arc::clone(&queue);
+        let b2 = bucket.clone();
+        tokio::spawn(async move {
+            let res = q2.acquire(b2, RequestPriority::Normal).await;
+            tx.send(res.is_err()).unwrap();
+        });
+        settle().await;
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "second item must still be in the pacing sleep, not yet granted"
+        );
+
+        // Trip the rate-limit breaker mid-sleep, then let the sleep elapse.
+        queue.report_rate_limit_outcome(bucket, BreakerSignal::TripImmediately { open_for: None });
+        advance(Duration::from_millis(500)).await;
+        settle().await;
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(true),
+            "an item whose breaker tripped mid-sleep must be rejected at grant time"
+        );
+    }
+
+    /// The transport breaker is shared per ORIGIN: transport failures open the
+    /// whole lane (every indexer on that origin), but a different origin is
+    /// untouched.
+    #[tokio::test]
+    async fn transport_failures_trip_the_whole_origin_lane_but_not_other_origins() {
+        let queue = OutboundQueue::new();
+        let x_a = indexer_bucket("origin-x", "id-a");
+        let x_b = indexer_bucket("origin-x", "id-b");
+        let y = indexer_bucket("origin-y", "id-a");
+
+        for _ in 0..5 {
+            queue.report_outcome(x_a.clone(), BreakerSignal::Failure);
+        }
+
+        queue
+            .acquire(x_a, RequestPriority::Normal)
+            .await
+            .expect_err("origin X's transport breaker is open");
+        queue
+            .acquire(x_b, RequestPriority::Normal)
+            .await
+            .expect_err("a sibling indexer on origin X shares the open transport breaker");
+        queue
+            .acquire(y, RequestPriority::Normal)
+            .await
+            .expect("a different origin must be unaffected");
+    }
+
+    /// A 429 STORM (rate-limit trip + transport success, mirroring `do_fetch`'s
+    /// 429 path) trips only the indexer's rate-limit breaker and never moves the
+    /// shared transport breaker — a sibling on the same origin keeps flowing.
+    #[tokio::test]
+    async fn a_429_storm_trips_the_indexer_but_leaves_the_transport_lane_closed() {
+        let queue = OutboundQueue::new();
+        let a = indexer_bucket("origin-429storm", "id-a");
+        let b = indexer_bucket("origin-429storm", "id-b");
+
+        for _ in 0..10 {
+            queue.report_rate_limit_outcome(
+                a.clone(),
+                BreakerSignal::TripImmediately { open_for: None },
+            );
+            queue.report_outcome(a.clone(), BreakerSignal::Success);
+        }
+
+        queue
+            .acquire(a, RequestPriority::Normal)
+            .await
+            .expect_err("indexer A's rate-limit breaker is open after its 429s");
+        queue
+            .acquire(b, RequestPriority::Normal)
+            .await
+            .expect("the transport lane stayed closed under a 429 storm — sibling B proceeds");
+    }
+
+    /// `Indexer { indexer: None }` (unresolved-identity fallback) has NO
+    /// rate-limit breaker — a rate-limit trip report is a no-op — but it IS
+    /// still subject to its origin's transport gate.
+    #[tokio::test]
+    async fn indexer_with_no_id_has_no_rate_limit_breaker_but_shares_the_transport_gate() {
+        let queue = OutboundQueue::new();
+        let none_id = RateBucket::Indexer {
+            origin: "origin-noid".to_string(),
+            indexer: None,
+        };
+
+        queue.report_rate_limit_outcome(
+            none_id.clone(),
+            BreakerSignal::TripImmediately { open_for: None },
+        );
+        queue
+            .acquire(none_id.clone(), RequestPriority::Normal)
+            .await
+            .expect("indexer:None has no rate-limit breaker to trip");
+
+        for _ in 0..5 {
+            queue.report_outcome(none_id.clone(), BreakerSignal::Failure);
+        }
+        queue
+            .acquire(none_id, RequestPriority::Normal)
+            .await
+            .expect_err("indexer:None is still subject to the transport lane gate");
+    }
+
+    /// The rate-limit breaker recovers per its own level: once its cooldown
+    /// elapses it admits a probe, and a Success (a completed non-429 response)
+    /// closes it.
+    #[tokio::test]
+    async fn rate_limit_breaker_recovers_via_a_successful_probe() {
+        let queue = OutboundQueue::new();
+        let bucket = indexer_bucket("origin-halfopen", "id-a");
+
+        // Tiny open window so HalfOpen is reached without a long real wait.
+        queue.report_rate_limit_outcome(
+            bucket.clone(),
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_millis(5)),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        queue
+            .acquire(bucket.clone(), RequestPriority::Normal)
+            .await
+            .expect("HalfOpen must admit a probe once the cooldown elapses");
+        queue.report_rate_limit_outcome(bucket.clone(), BreakerSignal::Success);
+        queue
+            .acquire(bucket, RequestPriority::Normal)
+            .await
+            .expect("the rate-limit breaker must be closed after a successful probe");
     }
 
     /// Open → HalfOpen → Closed: once the open window elapses, the next

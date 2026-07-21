@@ -252,7 +252,10 @@ async fn a1_grab_torrent_file_download_uses_origin_keyed_indexer_bucket() {
         .expect("grab must fetch the indexer download URL");
     assert_eq!(
         indexer_fetch.rate_bucket,
-        RateBucket::Indexer("https://indexer.example:8443".to_string())
+        RateBucket::Indexer {
+            origin: "https://indexer.example:8443".to_string(),
+            indexer: Some("42".to_string()),
+        }
     );
 }
 
@@ -279,7 +282,10 @@ async fn grab_bucket_keys_on_configured_indexer_origin_not_download_host() {
         .expect("grab must fetch the release download URL");
     assert_eq!(
         torrent_file_fetch.rate_bucket,
-        RateBucket::Indexer("https://tracker.example".to_string())
+        RateBucket::Indexer {
+            origin: "https://tracker.example".to_string(),
+            indexer: Some("42".to_string()),
+        }
     );
 }
 
@@ -300,7 +306,10 @@ async fn a2_search_uses_origin_keyed_indexer_bucket_not_display_name() {
         .expect("search must fetch the indexer API");
     assert_eq!(
         search_fetch.rate_bucket,
-        RateBucket::Indexer("https://indexer.example:8443".to_string())
+        RateBucket::Indexer {
+            origin: "https://indexer.example:8443".to_string(),
+            indexer: Some("42".to_string()),
+        }
     );
 }
 

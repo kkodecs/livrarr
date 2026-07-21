@@ -20,11 +20,28 @@ use crate::ssrf;
 /// cover a slow-but-live handshake while cutting off a black-holed host fast.
 const FAST_CONNECT_TIMEOUT: Duration = Duration::from_millis(600);
 
-/// Cooldown applied to an `Indexer(_)` bucket's breaker when a 429 trips it
-/// immediately — a definitive "stop", not a maybe (same reasoning as the GR
-/// anti-bot immediate trip). Book-provider buckets are unaffected: their 429
-/// handling stays at the client layer and keeps reporting plain `Failure`.
+/// Default cooldown for an indexer's per-indexer rate-limit breaker when a 429
+/// trips it and no usable `Retry-After` is present — a definitive "stop", not a
+/// maybe (same reasoning as the GR anti-bot immediate trip). Provider buckets
+/// are unaffected: their 429 handling stays at the client layer and keeps
+/// reporting plain `Failure`.
 const INDEXER_RATE_LIMITED_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+
+/// Translate a 429's `Retry-After` header into a rate-limit-breaker open
+/// window. Delta-seconds ONLY: an integer string → that many seconds, clamped
+/// to `[10s, 6h]` (a 1–9s value floors to 10s; a value over 6h caps to 6h).
+/// Anything else — absent, `≤ 0`, non-integer, or an HTTP-date form — falls
+/// back to [`INDEXER_RATE_LIMITED_COOLDOWN`] (30 min). Delta-seconds is the
+/// only honored form because it is unambiguous under clock drift; no claim is
+/// made about what any indexer emits — the fallback IS the contract.
+fn indexer_rate_limit_open_for(retry_after: Option<&str>) -> Duration {
+    const MIN: Duration = Duration::from_secs(10);
+    const MAX: Duration = Duration::from_secs(6 * 60 * 60);
+    match retry_after.and_then(|s| s.trim().parse::<i64>().ok()) {
+        Some(secs) if secs > 0 => Duration::from_secs(secs as u64).clamp(MIN, MAX),
+        _ => INDEXER_RATE_LIMITED_COOLDOWN,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Anti-bot detection
@@ -191,20 +208,43 @@ impl HttpFetcherImpl {
 
         let status = response.status().as_u16();
 
-        // 429 → RateLimited. For an `Indexer(_)` bucket this is a definitive
-        // "stop" — trip its breaker immediately with a 30-minute cooldown
-        // instead of counting toward the generic failure threshold (same
-        // reasoning as the anti-bot immediate trip below). Book-provider
-        // buckets are unchanged: plain `Failure`, same as always.
+        // 429 → RateLimited, routed by bucket (issue #130):
+        //   * `Indexer { indexer: Some(_) }`: this ONE indexer is rate-limited.
+        //     Trip its per-indexer rate-limit breaker (honoring `Retry-After`,
+        //     else a 30-minute cooldown) AND report SUCCESS to the shared
+        //     transport breaker — the host answered, so it must not look dead to
+        //     its neighbours on the same origin.
+        //   * `Indexer { indexer: None }` (unresolved-identity fallback): no
+        //     per-indexer breaker to trip; still report transport success.
+        //   * Provider buckets: unchanged — plain `Failure` toward the
+        //     transport (provider) threshold, exactly as before.
         if status == 429 {
-            let signal = if matches!(req.rate_bucket, RateBucket::Indexer(_)) {
-                BreakerSignal::TripImmediately {
-                    open_for: Some(INDEXER_RATE_LIMITED_COOLDOWN),
+            let queue = outbound_queue::shared();
+            match &req.rate_bucket {
+                RateBucket::Indexer {
+                    indexer: Some(_), ..
+                } => {
+                    let open_for = indexer_rate_limit_open_for(
+                        response
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok()),
+                    );
+                    queue.report_rate_limit_outcome(
+                        req.rate_bucket.clone(),
+                        BreakerSignal::TripImmediately {
+                            open_for: Some(open_for),
+                        },
+                    );
+                    queue.report_outcome(req.rate_bucket.clone(), BreakerSignal::Success);
                 }
-            } else {
-                BreakerSignal::Failure
-            };
-            outbound_queue::shared().report_outcome(req.rate_bucket.clone(), signal);
+                RateBucket::Indexer { indexer: None, .. } => {
+                    queue.report_outcome(req.rate_bucket.clone(), BreakerSignal::Success);
+                }
+                _ => {
+                    queue.report_outcome(req.rate_bucket.clone(), BreakerSignal::Failure);
+                }
+            }
             return Err(FetchError::RateLimited);
         }
 
@@ -269,6 +309,18 @@ impl HttpFetcherImpl {
                 BreakerSignal::TripImmediately { open_for: None },
             );
             return Err(FetchError::AntiBotDetected);
+        }
+
+        // A completed response (any status) on an Indexer bucket: the host is
+        // alive (transport success) and — past the 429 early-return above — is
+        // not rate-limiting this indexer, so report rate-limit success too,
+        // which cleanly closes a half-open probe once a cooldown has elapsed.
+        // Provider buckets self-report at their client layer; `do_fetch` stays
+        // silent for them on success.
+        if matches!(req.rate_bucket, RateBucket::Indexer { .. }) {
+            let queue = outbound_queue::shared();
+            queue.report_outcome(req.rate_bucket.clone(), BreakerSignal::Success);
+            queue.report_rate_limit_outcome(req.rate_bucket.clone(), BreakerSignal::Success);
         }
 
         Ok(FetchResponse {
@@ -520,6 +572,45 @@ mod redaction_tests {
         assert!(
             msg.contains("[REDACTED]"),
             "expected redacted url in error, got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod retry_after_tests {
+    use super::*;
+
+    /// Design §6 matrix: a 429's `Retry-After` → the rate-limit breaker's open
+    /// window. Delta-seconds only, clamped to `[10s, 6h]`; everything else
+    /// (absent, `≤ 0`, non-integer, HTTP-date) falls back to the 30-min default.
+    #[test]
+    fn indexer_retry_after_open_for_matrix() {
+        let default = Duration::from_secs(30 * 60);
+        let d = indexer_rate_limit_open_for;
+        assert_eq!(d(None), default, "absent → 30-min default");
+        assert_eq!(
+            d(Some("120")),
+            Duration::from_secs(120),
+            "plain delta-seconds"
+        );
+        assert_eq!(d(Some("3")), Duration::from_secs(10), "1-9s floors to 10s");
+        assert_eq!(
+            d(Some("999999")),
+            Duration::from_secs(6 * 60 * 60),
+            ">6h caps to 6h"
+        );
+        assert_eq!(d(Some("0")), default, "zero → default");
+        assert_eq!(d(Some("-5")), default, "negative → default");
+        assert_eq!(
+            d(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            default,
+            "HTTP-date form is not honored → default"
+        );
+        assert_eq!(d(Some("garbage")), default, "non-integer → default");
+        assert_eq!(
+            d(Some("  60  ")),
+            Duration::from_secs(60),
+            "surrounding whitespace trimmed"
         );
     }
 }

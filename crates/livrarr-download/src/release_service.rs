@@ -176,7 +176,10 @@ where
                         headers: vec![],
                         body: None,
                         timeout: Duration::from_secs(30),
-                        rate_bucket: RateBucket::Indexer(origin),
+                        rate_bucket: RateBucket::Indexer {
+                            origin,
+                            indexer: Some(indexer_id.to_string()),
+                        },
                         max_body_bytes: 10 * 1024 * 1024,
                         anti_bot_check: false,
                         user_agent: UserAgentProfile::Server,
@@ -335,25 +338,34 @@ where
         }
 
         // Indexer-origin fetches during this grab (torrent-file, NZB,
-        // Transmission URL fallback, magnet-redirect probe) key their pace
-        // lane and cooldown on the CONFIGURED indexer's origin — looked up
-        // by `req.indexer` (display name) — not on the download URL's host,
-        // so an indexer that proxies or redirects through a different host
-        // cannot evade its own bucket. Falls back to the download URL's own
-        // origin when the name matches no configured indexer, so an ad-hoc
-        // or renamed indexer still gets the grab instead of failing it.
+        // Transmission URL fallback, magnet-redirect probe) ride the CONFIGURED
+        // indexer's bucket — origin (pace + transport breaker) plus the
+        // indexer's stable DB id (per-indexer rate-limit breaker), looked up by
+        // `req.indexer` (display name). Keying on the configured origin, not the
+        // download URL's host, stops an indexer that proxies or redirects
+        // through another host from evading its own pacing/cooldown; carrying
+        // the id means a 429 on this indexer trips only its own cooldown, not
+        // its neighbours on the same host (issue #130). Falls back to the
+        // download URL's origin with NO indexer id when the name matches nothing
+        // configured (ad-hoc/renamed): pacing + the transport gate still apply,
+        // but there is no per-indexer rate-limit breaker.
         let configured_indexer = self
             .db
             .list_indexers()
             .await
             .ok()
             .and_then(|indexers| indexers.into_iter().find(|i| i.name == req.indexer));
-        let indexer_origin = match configured_indexer {
-            Some(indexer) => {
-                livrarr_http::normalized_origin(&indexer.url).unwrap_or_else(|| indexer.url.clone())
-            }
-            None => livrarr_http::normalized_origin(&req.download_url)
-                .unwrap_or_else(|| req.download_url.clone()),
+        let indexer_bucket = match configured_indexer {
+            Some(indexer) => RateBucket::Indexer {
+                origin: livrarr_http::normalized_origin(&indexer.url)
+                    .unwrap_or_else(|| indexer.url.clone()),
+                indexer: Some(indexer.id.to_string()),
+            },
+            None => RateBucket::Indexer {
+                origin: livrarr_http::normalized_origin(&req.download_url)
+                    .unwrap_or_else(|| req.download_url.clone()),
+                indexer: None,
+            },
         };
 
         // Determine client_type from protocol.
@@ -408,11 +420,11 @@ where
         let dispatch_result = match req.protocol {
             DownloadProtocol::Torrent => match client.implementation {
                 DownloadClientImplementation::Transmission => {
-                    dispatch_transmission(&self.http, &client, &req.download_url, &indexer_origin)
+                    dispatch_transmission(&self.http, &client, &req.download_url, &indexer_bucket)
                         .await
                 }
                 _ => {
-                    dispatch_torrent(&self.http, &client, &req.download_url, &indexer_origin).await
+                    dispatch_torrent(&self.http, &client, &req.download_url, &indexer_bucket).await
                 }
             },
             DownloadProtocol::Usenet => {
@@ -421,7 +433,7 @@ where
                     &client,
                     &req.download_url,
                     &req.title,
-                    &indexer_origin,
+                    &indexer_bucket,
                 )
                 .await
             }
@@ -508,7 +520,7 @@ enum TorrentDispatchSource {
 async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
     http: &H,
     download_url: &str,
-    origin: &str,
+    bucket: &RateBucket,
 ) -> Result<(Option<String>, TorrentDispatchSource), FetchError> {
     use crate::{extract_torrent_hash, TorrentSource};
 
@@ -527,7 +539,7 @@ async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
             headers: vec![],
             body: None,
             timeout: Duration::from_secs(60),
-            rate_bucket: RateBucket::Indexer(origin.to_string()),
+            rate_bucket: bucket.clone(),
             max_body_bytes: 4 * 1024 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
@@ -543,9 +555,7 @@ async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
             // 301/302 Location: magnet:?xt=... response causes an Err rather than a
             // usable redirect. Some indexer proxies (e.g. Prowlarr) use this pattern.
             // Probe with a no-redirect request to recover the magnet if that's the case.
-            if let Some(magnet) =
-                probe_for_magnet_redirect(http, download_url, origin.to_string()).await
-            {
+            if let Some(magnet) = probe_for_magnet_redirect(http, download_url, bucket).await {
                 let hash = extract_torrent_hash(&TorrentSource::Magnet(magnet.clone())).ok();
                 return Ok((hash, TorrentDispatchSource::Magnet(magnet)));
             }
@@ -585,7 +595,7 @@ async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
 async fn probe_for_magnet_redirect<H: HttpFetcher>(
     http: &H,
     url: &str,
-    origin: String,
+    bucket: &RateBucket,
 ) -> Option<String> {
     let resp = http
         .fetch_no_redirect(FetchRequest {
@@ -594,7 +604,7 @@ async fn probe_for_magnet_redirect<H: HttpFetcher>(
             headers: vec![],
             body: None,
             timeout: Duration::from_secs(10),
-            rate_bucket: RateBucket::Indexer(origin),
+            rate_bucket: bucket.clone(),
             max_body_bytes: 4096,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,
@@ -627,9 +637,9 @@ async fn dispatch_torrent<H: HttpFetcher>(
     http: &H,
     client: &DownloadClient,
     download_url: &str,
-    origin: &str,
+    bucket: &RateBucket,
 ) -> Result<String, String> {
-    let (hash, dispatch_source) = fetch_torrent_dispatch_source(http, download_url, origin)
+    let (hash, dispatch_source) = fetch_torrent_dispatch_source(http, download_url, bucket)
         .await
         .map_err(|e| format!("indexer cooling down — retry later: {e}"))?;
     let download_id = hash.unwrap_or_else(|| "pending".to_string());
@@ -764,9 +774,9 @@ async fn dispatch_transmission<H: HttpFetcher>(
     http: &H,
     client: &DownloadClient,
     download_url: &str,
-    origin: &str,
+    bucket: &RateBucket,
 ) -> Result<String, String> {
-    let (hash, dispatch_source) = fetch_torrent_dispatch_source(http, download_url, origin)
+    let (hash, dispatch_source) = fetch_torrent_dispatch_source(http, download_url, bucket)
         .await
         .map_err(|e| format!("indexer cooling down — retry later: {e}"))?;
     let download_id = hash.unwrap_or_else(|| "pending".to_string());
@@ -796,7 +806,7 @@ async fn dispatch_transmission<H: HttpFetcher>(
                     headers: vec![],
                     body: None,
                     timeout: Duration::from_secs(30),
-                    rate_bucket: RateBucket::Indexer(origin.to_string()),
+                    rate_bucket: bucket.clone(),
                     max_body_bytes: 10 * 1024 * 1024,
                     anti_bot_check: false,
                     user_agent: UserAgentProfile::Server,
@@ -899,7 +909,7 @@ async fn dispatch_usenet<H: HttpFetcher>(
     client: &DownloadClient,
     download_url: &str,
     title: &str,
-    origin: &str,
+    bucket: &RateBucket,
 ) -> Result<String, String> {
     // Step 1: Download NZB from indexer.
     let nzb_resp = http
@@ -909,7 +919,7 @@ async fn dispatch_usenet<H: HttpFetcher>(
             headers: vec![],
             body: None,
             timeout: Duration::from_secs(60),
-            rate_bucket: RateBucket::Indexer(origin.to_string()),
+            rate_bucket: bucket.clone(),
             max_body_bytes: 16 * 1024 * 1024,
             anti_bot_check: false,
             user_agent: UserAgentProfile::Server,

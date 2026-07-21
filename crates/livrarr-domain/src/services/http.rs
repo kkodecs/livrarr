@@ -25,7 +25,21 @@ pub enum RateBucket {
     /// (M3): cover fetches must never draw against the OL book-metadata API's
     /// rate budget.
     OpenLibraryCovers,
-    Indexer(String),
+    /// A configured indexer's outbound traffic, split into two failure domains
+    /// (issue #130). `origin` is the normalized upstream host
+    /// (`scheme://host[:port]`) — the pacing and transport-breaker domain, so
+    /// every indexer proxied through one Prowlarr host shares one pace lane and
+    /// one "is the host up?" breaker. `indexer` is the stable DB id of the
+    /// configured indexer row — the rate-limit-breaker domain, so a single
+    /// indexer's 429 trips only its own cooldown and never blacks out its
+    /// neighbours on the same host. `indexer` is `None` only for a release-file
+    /// fetch where no indexer row is resolvable (renamed/ad-hoc): pacing and the
+    /// transport gate still apply, but there is no per-indexer rate-limit
+    /// breaker.
+    Indexer {
+        origin: String,
+        indexer: Option<String>,
+    },
     None,
 }
 

@@ -193,16 +193,24 @@ pub fn config_for(bucket: &RateBucket) -> CircuitBreakerConfig {
     }
 }
 
-/// Breaker-tracked buckets: the six single-host book-provider APIs, plus
-/// `Indexer(_)` — each indexer bucket is keyed by normalized upstream origin
-/// (scheme://host[:port]), so it is single-host exactly like the book
-/// providers and tracking it honors the same per-host principle. Every other
-/// bucket — `None`, and any future bucket that aggregates multiple hosts
-/// (e.g. a cover-image bucket) — is pace-only: no breaker state, never trips.
-/// The allowlist is deliberate: a new bucket must opt IN to breaking, because
+/// Transport-level breaker-tracked buckets. Called with the PACE projection
+/// of a bucket (`outbound_queue::pace_key`), so an `Indexer` here is always
+/// origin-only (`indexer: None`): the transport breaker is one-per-host and
+/// answers "is this host up?" — it trips on connection errors / timeouts,
+/// never on a 429. The six single-host book-provider APIs keep their existing
+/// role at this level.
+///
+/// The SECOND breaker level — one per individual configured indexer, keyed by
+/// the full `Indexer { origin, indexer: Some(id) }` value — lives in the queue
+/// (`rate_limit_breakers`), not here; it trips on a 429 for that one indexer
+/// and is what stops one indexer's rate-limit from suppressing its neighbours
+/// on the same Prowlarr host (issue #130). The two levels see disjoint signals.
+///
+/// Every other pace bucket — `None`, `OpenLibraryCovers`, and any future
+/// bucket that aggregates multiple hosts — is pace-only: no breaker state,
+/// never trips. The allowlist is deliberate: a new bucket must opt IN, because
 /// a shared breaker over a multi-host AGGREGATE bucket lets one bad host
-/// suppress the rest — that failure mode, not single-host tracking itself,
-/// is what stays forbidden.
+/// suppress the rest — the exact failure mode #130 hit.
 pub fn breaker_tracked(bucket: &RateBucket) -> bool {
     matches!(
         bucket,
@@ -212,6 +220,6 @@ pub fn breaker_tracked(bucket: &RateBucket) -> bool {
             | RateBucket::GoogleBooks
             | RateBucket::Audnexus
             | RateBucket::Audible
-            | RateBucket::Indexer(_)
+            | RateBucket::Indexer { .. }
     )
 }

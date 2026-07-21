@@ -117,10 +117,11 @@ where
                 headers: vec![],
                 body: None,
                 timeout: Duration::from_secs(30),
-                rate_bucket: RateBucket::Indexer(
-                    livrarr_http::normalized_origin(&indexer.url)
+                rate_bucket: RateBucket::Indexer {
+                    origin: livrarr_http::normalized_origin(&indexer.url)
                         .unwrap_or_else(|| indexer.url.clone()),
-                ),
+                    indexer: Some(indexer.id.to_string()),
+                },
                 max_body_bytes: 5 * 1024 * 1024,
                 anti_bot_check: false,
                 user_agent: UserAgentProfile::Server,
