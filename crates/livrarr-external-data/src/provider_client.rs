@@ -1915,26 +1915,41 @@ impl GoodreadsClient {
         // Direct parse path. On Parse failure, optionally fall through to
         // LLM extraction if configured (typical for foreign-language pages
         // where JSON-LD / regex don't match the locale-specific HTML).
-        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url, priority).await
-        {
-            Ok(h) => h,
-            Err(err) => {
-                if !had_gr_key {
-                    if let Some(payload) = self
-                        .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate, priority)
-                        .await
-                    {
-                        tracing::info!(
-                            gr_key = payload.gr_key.as_deref().unwrap_or(""),
-                            verified = payload.title.is_some(),
-                            "GR page fetch failed; returning key payload"
-                        );
-                        return ProviderOutcome::Success(Box::new(payload));
+        //
+        // Unit B4: when `work.gr_key` is unset, `resolved.url` came from
+        // `search_resolve_detail` — Goodreads' own scraped `bookUrl` field
+        // (untrusted input). Fetch through the SSRF-safe method so a
+        // valid-looking GR URL whose response redirects to a loopback/
+        // private address is still rejected (the established-gr_key branch
+        // above builds a trusted, self-constructed URL and stays on
+        // `fetch_by_anchor`/`fetch_detail_by_key`'s unrestricted fetch).
+        let html =
+            match goodreads::fetch_goodreads_html_ssrf_safe(&self.fetcher, &detail_url, priority)
+                .await
+            {
+                Ok(h) => h,
+                Err(err) => {
+                    if !had_gr_key {
+                        if let Some(payload) = self
+                            .fallback_key_payload(
+                                work,
+                                &resolved_gr_key,
+                                &resolved.candidate,
+                                priority,
+                            )
+                            .await
+                        {
+                            tracing::info!(
+                                gr_key = payload.gr_key.as_deref().unwrap_or(""),
+                                verified = payload.title.is_some(),
+                                "GR page fetch failed; returning key payload"
+                            );
+                            return ProviderOutcome::Success(Box::new(payload));
+                        }
                     }
+                    return self.map_fetch_err(err);
                 }
-                return self.map_fetch_err(err);
-            }
-        };
+            };
 
         if let Some(detail) = goodreads::parse_detail_html(&html) {
             let mut payload = self.normalize(&detail_url, detail);
@@ -2221,23 +2236,39 @@ async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
         match goodreads::search_goodreads(fetcher, base_url, isbn, priority).await {
             Ok(isbn_hits) => {
                 if let Some(idx) = gr_best_match(title, author, &isbn_hits) {
-                    tracing::debug!(
+                    // Unit B4: `detail_url` is Goodreads' own scraped JSON
+                    // field ("bookUrl") — untrusted input. Validate the RAW
+                    // value before it can ever become a fetch target; an
+                    // unsafe URL is rejected outright, never trusted, exactly
+                    // like a title/author mismatch (falls through below).
+                    if goodreads::validate_detail_url(&isbn_hits[idx].detail_url) {
+                        tracing::debug!(
+                            title = %title,
+                            isbn,
+                            chosen_idx = idx,
+                            "GR ISBN-tier hit selected (deterministic)"
+                        );
+                        return Ok(Some(ResolvedGrDetail {
+                            url: goodreads::resolve_detail_url(
+                                base_url,
+                                &isbn_hits[idx].detail_url,
+                            ),
+                            candidate: Some(GrCandidateText {
+                                title: isbn_hits[idx].title.clone(),
+                                title_bare: isbn_hits[idx].title_bare.clone(),
+                                author: isbn_hits[idx].author.clone(),
+                                cover_url: isbn_hits[idx].cover_url.clone(),
+                                series_name: isbn_hits[idx].series_name.clone(),
+                                series_position: isbn_hits[idx].series_position,
+                            }),
+                        }));
+                    }
+                    tracing::warn!(
                         title = %title,
                         isbn,
-                        chosen_idx = idx,
-                        "GR ISBN-tier hit selected (deterministic)"
+                        url = %isbn_hits[idx].detail_url,
+                        "GR ISBN-tier hit rejected: detail_url failed SSRF validation"
                     );
-                    return Ok(Some(ResolvedGrDetail {
-                        url: goodreads::resolve_detail_url(base_url, &isbn_hits[idx].detail_url),
-                        candidate: Some(GrCandidateText {
-                            title: isbn_hits[idx].title.clone(),
-                            title_bare: isbn_hits[idx].title_bare.clone(),
-                            author: isbn_hits[idx].author.clone(),
-                            cover_url: isbn_hits[idx].cover_url.clone(),
-                            series_name: isbn_hits[idx].series_name.clone(),
-                            series_position: isbn_hits[idx].series_position,
-                        }),
-                    }));
                 }
                 tracing::debug!(
                     title = %title,
@@ -2286,18 +2317,26 @@ async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
     }
 
     if let Some(idx) = gr_best_match(title, author, &hits) {
-        tracing::debug!(title = %title, chosen_idx = idx, "GR search result selected (deterministic)");
-        return Ok(Some(ResolvedGrDetail {
-            url: goodreads::resolve_detail_url(base_url, &hits[idx].detail_url),
-            candidate: Some(GrCandidateText {
-                title: hits[idx].title.clone(),
-                title_bare: hits[idx].title_bare.clone(),
-                author: hits[idx].author.clone(),
-                cover_url: hits[idx].cover_url.clone(),
-                series_name: hits[idx].series_name.clone(),
-                series_position: hits[idx].series_position,
-            }),
-        }));
+        // Unit B4: same raw-bookUrl validation as the ISBN tier above.
+        if goodreads::validate_detail_url(&hits[idx].detail_url) {
+            tracing::debug!(title = %title, chosen_idx = idx, "GR search result selected (deterministic)");
+            return Ok(Some(ResolvedGrDetail {
+                url: goodreads::resolve_detail_url(base_url, &hits[idx].detail_url),
+                candidate: Some(GrCandidateText {
+                    title: hits[idx].title.clone(),
+                    title_bare: hits[idx].title_bare.clone(),
+                    author: hits[idx].author.clone(),
+                    cover_url: hits[idx].cover_url.clone(),
+                    series_name: hits[idx].series_name.clone(),
+                    series_position: hits[idx].series_position,
+                }),
+            }));
+        }
+        tracing::warn!(
+            title = %title,
+            url = %hits[idx].detail_url,
+            "GR title-tier hit rejected: detail_url failed SSRF validation"
+        );
     }
 
     // No confident GR match. Identity must degrade without an LLM (spec:
@@ -2576,5 +2615,154 @@ mod tests {
         let reqs = fetcher.requests();
         assert_eq!(reqs.len(), 1);
         assert!(reqs[0].url.ends_with("q=Sapiens"));
+    }
+
+    // =========================================================================
+    // Unit B4: the raw scraped bookUrl must be SSRF-validated before it can
+    // become a fetch target.
+    // =========================================================================
+
+    #[tokio::test]
+    async fn title_tier_accepts_relative_and_absolute_https_book_urls() {
+        // Positive control alongside the rejection tests below — a
+        // same-host relative or absolute bookUrl still resolves normally
+        // through the new validation guard.
+        for book_url in [
+            "/book/show/23692271",
+            "https://www.goodreads.com/book/show/23692271",
+        ] {
+            let body = format!(
+                r#"[{{"title":"Sapiens: A Brief History of Humankind","bookUrl":"{book_url}","author":{{"name":"Yuval Noah Harari"}}}}]"#
+            );
+            let fetcher =
+                crate::test_support::RecordingHttpFetcher::with_ok(200, body.into_bytes());
+
+            let resolved = search_resolve_detail(
+                &fetcher,
+                "https://www.goodreads.com",
+                "Sapiens",
+                "Yuval Noah Harari",
+                None,
+                RequestPriority::Normal,
+            )
+            .await
+            .unwrap()
+            .expect("a same-host bookUrl (relative or absolute) must resolve");
+
+            assert!(resolved.url.ends_with("/book/show/23692271"));
+        }
+    }
+
+    #[tokio::test]
+    async fn title_tier_rejects_external_host_book_url() {
+        // Goodreads' own scraped JSON is untrusted input — a bookUrl
+        // pointing off Goodreads must never become a fetch target, even
+        // when the title/author otherwise match. GR abstains exactly like a
+        // title/author mismatch (no confident, SAFE match).
+        let body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"https://evil.com/book/show/1","author":{"name":"Yuval Noah Harari"}}]"#;
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
+
+        let resolved = search_resolve_detail(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Sapiens",
+            "Yuval Noah Harari",
+            None,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
+
+        assert!(resolved.is_none(), "an off-host bookUrl must never resolve");
+    }
+
+    #[tokio::test]
+    async fn title_tier_rejects_http_scheme_book_url() {
+        // validate_detail_url requires https — a plain-http bookUrl (even on
+        // the right host) must never resolve.
+        let body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"http://www.goodreads.com/book/show/1","author":{"name":"Yuval Noah Harari"}}]"#;
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
+
+        let resolved = search_resolve_detail(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Sapiens",
+            "Yuval Noah Harari",
+            None,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            resolved.is_none(),
+            "a plain-http bookUrl must never resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn title_tier_rejects_private_ip_book_url() {
+        // A bookUrl pointing at a loopback/private address must never
+        // resolve — the raw-value gate rejects it outright, before any
+        // connection is ever attempted (fetch_ssrf_safe's redirect-hop check
+        // is the second, independent layer for a URL that passes this gate
+        // but whose *response* redirects somewhere unsafe).
+        let body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"http://127.0.0.1/admin","author":{"name":"Yuval Noah Harari"}}]"#;
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
+
+        let resolved = search_resolve_detail(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Sapiens",
+            "Yuval Noah Harari",
+            None,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            resolved.is_none(),
+            "a private-IP bookUrl must never resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn isbn_tier_rejects_invalid_book_url_and_still_falls_through_to_title_tier() {
+        // The ISBN tier's hit clears the title/author bar but its bookUrl is
+        // unsafe — it must be rejected WITHOUT ever being trusted, and the
+        // title tier still gets its normal chance (mirrors the existing
+        // decorated-title fallthrough behavior above).
+        let isbn_body = r#"[{"title":"Sapiens","bookTitleBare":"Sapiens","bookUrl":"https://evil.com/x","author":{"name":"Yuval Noah Harari"}}]"#;
+        let title_body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"/book/show/23692271","author":{"name":"Yuval Noah Harari"}}]"#;
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, isbn_body.as_bytes().to_vec());
+        fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: title_body.as_bytes().to_vec(),
+        }));
+
+        let resolved = search_resolve_detail(
+            &fetcher,
+            "https://www.goodreads.com",
+            "Sapiens",
+            "Yuval Noah Harari",
+            Some("9781529913934"),
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap()
+        .expect("the title tier must still resolve after the ISBN tier's bookUrl is rejected");
+
+        assert!(resolved.url.ends_with("/book/show/23692271"));
+        assert_eq!(
+            fetcher.requests().len(),
+            2,
+            "ISBN tier attempted (and rejected), then the title tier"
+        );
     }
 }

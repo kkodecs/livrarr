@@ -13,6 +13,11 @@ use livrarr_domain::services::{FetchError, FetchRequest, FetchResponse, HttpFetc
 pub struct RecordingHttpFetcher {
     requests: Arc<Mutex<Vec<FetchRequest>>>,
     responses: Arc<Mutex<Vec<Result<FetchResponse, FetchError>>>>,
+    /// When true, `fetch_ssrf_safe` always rejects (ignoring the response
+    /// queue) while `fetch` behaves normally — lets a test prove a call site
+    /// routes through the SSRF-safe method specifically, rather than the
+    /// unrestricted one (Unit B4).
+    reject_ssrf_safe: bool,
 }
 
 impl Default for RecordingHttpFetcher {
@@ -26,6 +31,7 @@ impl RecordingHttpFetcher {
         Self {
             requests: Arc::new(Mutex::new(vec![])),
             responses: Arc::new(Mutex::new(vec![])),
+            reject_ssrf_safe: false,
         }
     }
 
@@ -55,6 +61,18 @@ impl RecordingHttpFetcher {
 
     pub fn with_error(err: FetchError) -> Self {
         Self::with_response(Err(err))
+    }
+
+    /// A double that succeeds on `fetch` but always rejects `fetch_ssrf_safe`
+    /// with a simulated SSRF error. Proves a call site routes through the
+    /// SSRF-safe method: if the code under test ever called `fetch` instead,
+    /// this would incorrectly observe a success (Unit B4).
+    pub fn with_ok_but_ssrf_safe_rejects(status: u16, body: Vec<u8>) -> Self {
+        let f = Self::with_ok(status, body);
+        Self {
+            reject_ssrf_safe: true,
+            ..f
+        }
     }
 
     /// Queue an additional response, consumed in FIFO order after any
@@ -132,6 +150,11 @@ impl HttpFetcher for RecordingHttpFetcher {
 
     async fn fetch_ssrf_safe(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
         self.requests.lock().unwrap().push(req);
+        if self.reject_ssrf_safe {
+            return Err(FetchError::Ssrf(
+                "rejected by test double (Unit B4)".to_string(),
+            ));
+        }
         self.next_response()
     }
 }

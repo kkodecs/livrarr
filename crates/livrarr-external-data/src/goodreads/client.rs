@@ -98,6 +98,21 @@ fn map_transport_err(context: &str, err: FetchError) -> GoodreadsFetchError {
     }
 }
 
+/// Which underlying `HttpFetcher` method carries a `fetch_goodreads_html*`
+/// request. See the two public entry points below for when each applies.
+enum GrFetchMode {
+    /// The URL was built entirely by trusted code (a fixed base + an
+    /// already-normalized, persisted anchor) — e.g. the established-gr_key
+    /// detail fetch. Not runtime-derived from scraped content.
+    Unrestricted,
+    /// The URL was built from Goodreads' own scraped page/JSON content
+    /// (untrusted input, Unit B4) — e.g. a search-hit's `bookUrl` field.
+    /// `fetch_ssrf_safe` validates every redirect hop, not just the initial
+    /// URL, so a valid-looking GR URL whose *response* redirects to a
+    /// loopback/private address is still rejected.
+    SsrfSafe,
+}
+
 /// Fetch a Goodreads HTML page. Adds the Chrome UA and treats non-success
 /// status and anti-bot challenge pages as errors.
 ///
@@ -107,6 +122,28 @@ pub async fn fetch_goodreads_html<F: HttpFetcher>(
     fetcher: &F,
     url: &str,
     priority: RequestPriority,
+) -> Result<String, GoodreadsFetchError> {
+    fetch_goodreads_html_via(fetcher, url, priority, GrFetchMode::Unrestricted).await
+}
+
+/// Same as [`fetch_goodreads_html`], but routes through `fetch_ssrf_safe`
+/// (Unit B4) — for the search-tier resolution path, where `url` was built
+/// from Goodreads' own scraped `bookUrl` field. `validate_detail_url` guards
+/// the raw value before it ever reaches here; this guards the fetch itself
+/// against a valid-looking URL whose response redirects somewhere unsafe.
+pub async fn fetch_goodreads_html_ssrf_safe<F: HttpFetcher>(
+    fetcher: &F,
+    url: &str,
+    priority: RequestPriority,
+) -> Result<String, GoodreadsFetchError> {
+    fetch_goodreads_html_via(fetcher, url, priority, GrFetchMode::SsrfSafe).await
+}
+
+async fn fetch_goodreads_html_via<F: HttpFetcher>(
+    fetcher: &F,
+    url: &str,
+    priority: RequestPriority,
+    mode: GrFetchMode,
 ) -> Result<String, GoodreadsFetchError> {
     let req = FetchRequest {
         url: url.to_string(),
@@ -122,10 +159,11 @@ pub async fn fetch_goodreads_html<F: HttpFetcher>(
         user_agent: UserAgentProfile::Custom(GOODREADS_USER_AGENT.to_string()),
         priority,
     };
-    let resp = fetcher
-        .fetch(req)
-        .await
-        .map_err(|e| map_transport_err("GR request", e))?;
+    let resp = match mode {
+        GrFetchMode::Unrestricted => fetcher.fetch(req).await,
+        GrFetchMode::SsrfSafe => fetcher.fetch_ssrf_safe(req).await,
+    }
+    .map_err(|e| map_transport_err("GR request", e))?;
     if !(200..300).contains(&resp.status) {
         if (500..600).contains(&resp.status) {
             outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Failure);
@@ -513,5 +551,65 @@ mod tests {
         assert!(validate_cover_url(
             "https://images.gr-assets.com/books/123.jpg"
         ));
+    }
+
+    // =========================================================================
+    // Unit B4: the search-tier resolution fetch must use fetch_ssrf_safe
+    // =========================================================================
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_ssrf_safe_routes_through_fetch_ssrf_safe() {
+        // The search-tier resolution path's HTML fetch (a URL built from
+        // Goodreads' own scraped bookUrl) must go through the per-hop
+        // redirect-validated method, not the unrestricted one — this is what
+        // catches a valid-looking GR URL whose response redirects to a
+        // loopback/private address. Proven with a double that succeeds on
+        // `fetch` but rejects `fetch_ssrf_safe`: if this function ever
+        // regressed to calling `fetch`, this test would incorrectly observe a
+        // successful page fetch instead of the rejection.
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok_but_ssrf_safe_rejects(
+            200,
+            b"<html><body>ok</body></html>".to_vec(),
+        );
+
+        let err = fetch_goodreads_html_ssrf_safe(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, GoodreadsFetchError::Network(_)),
+            "expected the SSRF-safe rejection to surface as a Network fetch error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_established_key_path_stays_unrestricted() {
+        // The established-gr_key detail fetch (`fetch_goodreads_html`, used
+        // by `fetch_detail_by_key`) builds its URL from a fixed base + an
+        // already-normalized, persisted anchor — trusted infrastructure, not
+        // scraped content — and must keep using the unrestricted method so
+        // the existing queue tracer tests (which stand a local TCP listener
+        // in for a live GR server) keep working. A double that succeeds on
+        // `fetch` but REJECTS `fetch_ssrf_safe` proves this call still
+        // reaches the unrestricted path: if it ever regressed to calling
+        // `fetch_ssrf_safe`, this test would incorrectly observe a rejection.
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok_but_ssrf_safe_rejects(
+            200,
+            b"<html><body>ok</body></html>".to_vec(),
+        );
+
+        let html = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("the established-key path must keep using the unrestricted fetch method");
+
+        assert_eq!(html, "<html><body>ok</body></html>");
     }
 }
