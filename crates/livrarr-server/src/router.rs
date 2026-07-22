@@ -36,6 +36,15 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .finish()
         .expect("login rate limiter config");
 
+    // Rate limiter for setup: 5 requests per 60 seconds per IP (mirrors
+    // login_governor — cloned before the global governor consumes `extractor`).
+    let setup_governor = GovernorConfigBuilder::default()
+        .key_extractor(extractor.clone())
+        .period(Duration::from_secs(12)) // 1 token per 12s = 5 per 60s
+        .burst_size(5)
+        .finish()
+        .expect("setup rate limiter config");
+
     // Global rate limiter: 100 requests per second sustained per peer IP.
     let global_governor = GovernorConfigBuilder::default()
         .key_extractor(extractor)
@@ -50,7 +59,11 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/setup/status",
             get(livrarr_handlers::setup::setup_status::<AppState>),
         )
-        .route("/setup", post(livrarr_handlers::setup::setup::<AppState>))
+        .route(
+            "/setup",
+            post(livrarr_handlers::setup::setup::<AppState>)
+                .layer(GovernorLayer::new(setup_governor)),
+        )
         .route(
             "/auth/login",
             post(livrarr_handlers::auth::login::<AppState>)
@@ -665,4 +678,68 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         ),
     ))
     .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tower::ServiceExt;
+
+    async fn ok_handler() -> StatusCode {
+        StatusCode::OK
+    }
+
+    /// Mirrors the `setup_governor` construction in `build_router` (5/min/IP)
+    /// against a standalone route — proving the config trips on the 6th
+    /// request within the window. Keep the period/burst values in sync with
+    /// `build_router` if either changes.
+    #[tokio::test]
+    async fn setup_governor_trips_on_sixth_request_per_minute_per_ip() {
+        let extractor = SmartIpKeyExtractor::new(vec![]);
+        let setup_governor = GovernorConfigBuilder::default()
+            .key_extractor(extractor)
+            .period(Duration::from_secs(12))
+            .burst_size(5)
+            .finish()
+            .expect("setup rate limiter config");
+
+        let app = Router::new().route(
+            "/setup",
+            post(ok_handler).layer(GovernorLayer::new(setup_governor)),
+        );
+
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 12345);
+
+        for attempt in 1..=5 {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/setup")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(peer));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "attempt {attempt} within burst must succeed"
+            );
+        }
+
+        let mut sixth = Request::builder()
+            .method("POST")
+            .uri("/setup")
+            .body(Body::empty())
+            .unwrap();
+        sixth.extensions_mut().insert(ConnectInfo(peer));
+        let resp = app.clone().oneshot(sixth).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "6th request within the window must be rate-limited"
+        );
+    }
 }

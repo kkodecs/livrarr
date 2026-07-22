@@ -212,6 +212,15 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
         Self::validate_username(&req.username)?;
         Self::validate_password(&req.password)?;
 
+        // Hash-free authority check BEFORE any Argon2 hashing runs. Without
+        // this gate, a repeated POST to an already-completed setup still
+        // pays full hashing cost on every request (CPU-DoS). The DB-level
+        // conditional UPDATE below remains as the atomic race-winner for two
+        // requests that both observe setup as pending.
+        if self.is_setup_complete().await? {
+            return Err(AuthError::SetupCompleted);
+        }
+
         let password_hash = self
             .crypto
             .hash_password(&req.password)
@@ -481,11 +490,8 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
     }
 
     async fn is_setup_complete(&self) -> Result<bool, AuthError> {
-        match self.db.get_user(1).await {
-            Ok(user) => Ok(!user.setup_pending),
-            Err(DbError::NotFound { .. }) => Ok(false),
-            Err(e) => Err(AuthError::Db(e)),
-        }
+        let pending = self.db.has_pending_setup().await.map_err(AuthError::Db)?;
+        Ok(!pending)
     }
 
     async fn verify_token(&self, token: &str) -> Result<i64, AuthError> {
@@ -502,5 +508,129 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
             .map_err(AuthError::Db)?
             .ok_or(AuthError::InvalidCredentials)?;
         Ok(session.user_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth_crypto::{AuthCryptoError, TestAuthCrypto};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Wraps `TestAuthCrypto` and counts `hash_password` calls — proves the
+    /// CPU-DoS gate rejects a repeated setup POST before Argon2 would run.
+    struct CountingCrypto {
+        inner: TestAuthCrypto,
+        hash_calls: Arc<AtomicUsize>,
+    }
+
+    impl AuthCryptoService for CountingCrypto {
+        async fn hash_password(&self, password: &str) -> Result<String, AuthCryptoError> {
+            self.hash_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.hash_password(password).await
+        }
+        async fn verify_password(
+            &self,
+            password: &str,
+            hash: &str,
+        ) -> Result<bool, AuthCryptoError> {
+            self.inner.verify_password(password, hash).await
+        }
+        async fn generate_token(&self) -> Result<String, AuthCryptoError> {
+            self.inner.generate_token().await
+        }
+        async fn hash_token(&self, token: &str) -> Result<String, AuthCryptoError> {
+            self.inner.hash_token(token).await
+        }
+        async fn constant_time_eq(&self, a: &[u8], b: &[u8]) -> Result<bool, AuthCryptoError> {
+            self.inner.constant_time_eq(a, b).await
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_setup_succeeds_on_virgin_db() {
+        let db = livrarr_db::test_helpers::create_test_db().await;
+        let service = ServerAuthService::new(db, TestAuthCrypto);
+
+        let result = service
+            .complete_setup(SetupRequest {
+                username: "admin".to_string(),
+                password: "firstpass1".to_string(),
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "setup must succeed on a virgin DB: {result:?}"
+        );
+        assert!(service.is_setup_complete().await.unwrap());
+    }
+
+    /// A repeated POST to an already-completed setup must be rejected
+    /// WITHOUT paying Argon2 hashing cost, and the authority check must
+    /// hold even after user id 1 (the original placeholder row) has been
+    /// deleted while another admin remains.
+    #[tokio::test]
+    async fn double_post_rejects_before_hashing_with_user_one_absent() {
+        let db = livrarr_db::test_helpers::create_test_db().await;
+        let hash_calls = Arc::new(AtomicUsize::new(0));
+        let crypto = CountingCrypto {
+            inner: TestAuthCrypto,
+            hash_calls: hash_calls.clone(),
+        };
+        let service = ServerAuthService::new(db, crypto);
+
+        // First legitimate setup — converts the placeholder user 1.
+        service
+            .complete_setup(SetupRequest {
+                username: "admin".to_string(),
+                password: "firstpass1".to_string(),
+            })
+            .await
+            .expect("first setup must succeed");
+        assert_eq!(hash_calls.load(Ordering::SeqCst), 1);
+
+        // Create a second admin, then delete the original admin (user 1).
+        // Another admin remains, so the deletion is legitimate — this is
+        // the exact drift the old id-1-based check mishandled.
+        let second_admin = service
+            .create_user(AdminCreateUserRequest {
+                username: "admin2".to_string(),
+                password: "secondpass1".to_string(),
+                role: UserRole::Admin,
+            })
+            .await
+            .expect("create second admin");
+        service
+            .delete_user(second_admin.id, 1)
+            .await
+            .expect("delete original admin (another admin remains)");
+
+        // True authority: setup IS complete, even though user id 1 is gone.
+        assert!(
+            service.is_setup_complete().await.unwrap(),
+            "is_setup_complete must reflect real state, not user id 1's presence"
+        );
+
+        let calls_before_second_post = hash_calls.load(Ordering::SeqCst);
+
+        // Double-POST: setup is already complete — must reject without
+        // hashing the attacker-supplied password.
+        let result = service
+            .complete_setup(SetupRequest {
+                username: "attacker".to_string(),
+                password: "whatever12".to_string(),
+            })
+            .await;
+
+        assert!(
+            matches!(result, Err(AuthError::SetupCompleted)),
+            "expected SetupCompleted, got: {result:?}"
+        );
+        assert_eq!(
+            hash_calls.load(Ordering::SeqCst),
+            calls_before_second_post,
+            "second POST must be rejected before Argon2 hashing runs"
+        );
     }
 }

@@ -35,6 +35,14 @@ pub trait UserDb: Send + Sync {
     /// Count users with admin role (for last-admin check).
     async fn count_admins(&self) -> Result<i64, DbError>;
 
+    /// True if a pending-setup principal exists (setup not yet completed).
+    ///
+    /// Hash-free existence check — safe to call before any password hashing.
+    /// This is the true authority for "is setup complete," independent of
+    /// which user id happens to hold the placeholder row (that row can be
+    /// deleted later while another admin remains).
+    async fn has_pending_setup(&self) -> Result<bool, DbError>;
+
     /// Complete setup: update placeholder admin with real credentials.
     /// Atomic conditional: only succeeds if setup_pending = true.
     ///

@@ -161,6 +161,17 @@ impl UserDb for SqliteDb {
             .map_err(|e| DbError::Io(Box::new(e)))
     }
 
+    async fn has_pending_setup(&self) -> Result<bool, DbError> {
+        let row = sqlx::query("SELECT COUNT(*) as cnt FROM users WHERE setup_pending = 1")
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        let count: i64 = row
+            .try_get::<i64, _>("cnt")
+            .map_err(|e| DbError::Io(Box::new(e)))?;
+        Ok(count > 0)
+    }
+
     async fn complete_setup(&self, req: CompleteSetupDbRequest) -> Result<User, DbError> {
         let now = Utc::now().to_rfc3339();
 
