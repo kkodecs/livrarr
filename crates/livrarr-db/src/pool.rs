@@ -233,44 +233,56 @@ pub async fn create_backup(
     Ok(backup_path)
 }
 
-/// Backfill `normalized_title` / `normalized_author` and create the
-/// UNIQUE(user_id, normalized_title, normalized_author) index.
+/// Backfill `normalized_title` / `normalized_author`, merge duplicate work
+/// rows into the oldest keeper across every table that references `works`,
+/// and create the UNIQUE(user_id, normalized_title, normalized_author)
+/// index — all inside ONE transaction (Unit D1).
 ///
-/// Migration 038 added the columns with `'__UNMIGRATED__'` defaults and no
-/// index — duplicates may exist that would violate UNIQUE. This function
-/// computes real normalized values, merges duplicate work rows into the
-/// oldest keeper, then creates the index.
+/// Migration 038 added the two columns with `'__UNMIGRATED__'` defaults and
+/// no index — duplicate rows may share that sentinel. This computes real
+/// values via `identity_matching::identity_key`, resolves any resulting
+/// duplicates per-table (repoint / merge / intentional-cascade — see the
+/// comments on each statement below), then creates the index. Steps 1-3 and
+/// the `_livrarr_meta` completion marker share one transaction, the marker
+/// as the last write before commit (mirrors the idiom in
+/// `sqlite_work_identity.rs`'s `raise_identity_conflict`): a mid-transaction
+/// failure rolls back every data change together with the marker, so a
+/// partial run can never be mistaken for a complete one on the next startup.
 ///
-/// Idempotent: skips quickly if no `__UNMIGRATED__` rows remain.
+/// Idempotent via the `normalized_identity_backfill_complete` marker: once
+/// stamped, this is a single read and an early return.
 pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), String> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE normalized_title = '__UNMIGRATED__'")
-            .fetch_one(pool)
-            .await
-            .map_err(|e| format!("count unmigrated works: {e}"))?;
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM _livrarr_meta WHERE key = 'normalized_identity_backfill_complete'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("read normalized_identity_backfill_complete: {e}"))?;
 
-    if count == 0 {
-        // Still ensure the index exists in case a prior run partially completed.
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_works_identity \
-             ON works(user_id, normalized_title, normalized_author)",
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| format!("create idx_works_identity: {e}"))?;
-        tracing::info!("normalized identity backfill: already complete");
+    if marker.as_deref() == Some("1") {
+        tracing::debug!("normalized identity backfill: already complete (marker present)");
         return Ok(());
     }
 
-    tracing::info!("normalized identity backfill: {count} works to backfill");
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("begin normalized identity backfill transaction: {e}"))?;
 
     // Step 1: compute normalized values for each __UNMIGRATED__ row.
     let rows: Vec<(i64, String, String)> = sqlx::query_as(
         "SELECT id, title, author_name FROM works WHERE normalized_title = '__UNMIGRATED__'",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| format!("select unmigrated rows: {e}"))?;
+
+    if !rows.is_empty() {
+        tracing::info!(
+            "normalized identity backfill: {} works to backfill",
+            rows.len()
+        );
+    }
 
     for (id, title, author_name) in &rows {
         let (norm_title, norm_author) =
@@ -279,13 +291,14 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
             .bind(&norm_title)
             .bind(&norm_author)
             .bind(id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| format!("update normalized for work {id}: {e}"))?;
     }
 
     // Step 2: resolve duplicates. For each (user_id, norm_title, norm_author)
-    // group with cnt > 1, keep the lowest id; redirect dependent rows; drop the rest.
+    // group with cnt > 1, keep the lowest id; every table that references
+    // `works` is resolved before the duplicate row is dropped.
     let dupes: Vec<(i64, String, String, String, i64)> = sqlx::query_as(
         "SELECT user_id, normalized_title, normalized_author, \
                 GROUP_CONCAT(id) as ids, COUNT(*) as cnt \
@@ -293,7 +306,7 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
          GROUP BY user_id, normalized_title, normalized_author \
          HAVING cnt > 1",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| format!("scan duplicates: {e}"))?;
 
@@ -313,11 +326,12 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
         ids.sort_unstable();
         let keeper_id = ids[0];
         for &dup_id in &ids[1..] {
+            // --- Repoint: rows the user relies on or authored directly. ---
             sqlx::query("UPDATE library_items SET work_id = ? WHERE work_id = ? AND user_id = ?")
                 .bind(keeper_id)
                 .bind(dup_id)
                 .bind(user_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| format!("redirect library_items for work {dup_id}: {e}"))?;
 
@@ -325,7 +339,7 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
                 .bind(keeper_id)
                 .bind(dup_id)
                 .bind(user_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| format!("redirect grabs for work {dup_id}: {e}"))?;
 
@@ -333,34 +347,129 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
                 .bind(keeper_id)
                 .bind(dup_id)
                 .bind(user_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| format!("redirect history for work {dup_id}: {e}"))?;
 
-            sqlx::query("UPDATE external_ids SET work_id = ? WHERE work_id = ?")
+            // Bookmarks are user-authored (reading-position markers /
+            // highlights) — repoint, never cascade-drop.
+            sqlx::query("UPDATE bookmarks SET work_id = ? WHERE work_id = ? AND user_id = ?")
                 .bind(keeper_id)
                 .bind(dup_id)
-                .execute(pool)
+                .bind(user_id)
+                .execute(&mut *tx)
                 .await
-                .map_err(|e| format!("redirect external_ids for work {dup_id}: {e}"))?;
+                .map_err(|e| format!("redirect bookmarks for work {dup_id}: {e}"))?;
 
+            // Conflict rows are an audit trail of past identity decisions —
+            // preserve under the surviving work, same treatment as history.
+            sqlx::query(
+                "UPDATE work_identity_conflicts SET existing_work_id = ? \
+                 WHERE existing_work_id = ? AND user_id = ?",
+            )
+            .bind(keeper_id)
+            .bind(dup_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("redirect work_identity_conflicts for work {dup_id}: {e}"))?;
+
+            // --- Merge: real identity data. Collision-safe — never blind-repoint. ---
+            // external_ids: UNIQUE(work_id, id_type, id_value) — keep the
+            // keeper's existing value on collision, adopt anything new.
+            sqlx::query(
+                "INSERT INTO external_ids (work_id, id_type, id_value) \
+                 SELECT ?, id_type, id_value FROM external_ids WHERE work_id = ? \
+                 ON CONFLICT(work_id, id_type, id_value) DO NOTHING",
+            )
+            .bind(keeper_id)
+            .bind(dup_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("merge external_ids for work {dup_id}: {e}"))?;
+            sqlx::query("DELETE FROM external_ids WHERE work_id = ?")
+                .bind(dup_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("clear residual external_ids for work {dup_id}: {e}"))?;
+
+            // work_identity_anchors: THREE overlapping unique constraints —
+            // the (work_id, anchor_type, anchor_value) primary key, one
+            // confirmed anchor per (work_id, anchor_type), and one confirmed
+            // anchor per (user_id, anchor_type, anchor_value). A single named
+            // ON CONFLICT target cannot guard all three at once, so this uses
+            // OR IGNORE (the same sanctioned dedup idiom as
+            // `sqlite_notification.rs`'s race guard): the keeper's own
+            // confirmed anchors always win, and anything new merges in.
+            sqlx::query(
+                "INSERT OR IGNORE INTO work_identity_anchors \
+                 (work_id, anchor_type, anchor_value, confidence, setter, set_at, \
+                  superseded_by, user_id) \
+                 SELECT ?, anchor_type, anchor_value, confidence, setter, set_at, \
+                        superseded_by, user_id \
+                 FROM work_identity_anchors WHERE work_id = ? AND user_id = ?",
+            )
+            .bind(keeper_id)
+            .bind(dup_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("merge work_identity_anchors for work {dup_id}: {e}"))?;
+            sqlx::query("DELETE FROM work_identity_anchors WHERE work_id = ? AND user_id = ?")
+                .bind(dup_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    format!("clear residual work_identity_anchors for work {dup_id}: {e}")
+                })?;
+
+            // --- Intentional cascade: system-derived state scoped to the old
+            // row id. Composite-keyed on work_id (provenance/retry_state by
+            // field/provider, dead_ends by anchor_type, review_candidates is
+            // one row per work) — blind repoint risks a PK collision with the
+            // keeper's own row, and a fresh pass regenerates all five for the
+            // keeper as needed, so the duplicate's rows are simply dropped. ---
             sqlx::query("DELETE FROM work_metadata_provenance WHERE work_id = ? AND user_id = ?")
                 .bind(dup_id)
                 .bind(user_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| format!("delete provenance for work {dup_id}: {e}"))?;
 
             sqlx::query("DELETE FROM provider_retry_state WHERE work_id = ? AND user_id = ?")
                 .bind(dup_id)
                 .bind(user_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| format!("delete retry_state for work {dup_id}: {e}"))?;
 
+            sqlx::query("DELETE FROM work_field_dissents WHERE work_id = ? AND user_id = ?")
+                .bind(dup_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("delete field dissents for work {dup_id}: {e}"))?;
+
+            sqlx::query("DELETE FROM work_anchor_dead_ends WHERE work_id = ? AND user_id = ?")
+                .bind(dup_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("delete anchor dead-ends for work {dup_id}: {e}"))?;
+
+            sqlx::query(
+                "DELETE FROM work_identity_review_candidates WHERE work_id = ? AND user_id = ?",
+            )
+            .bind(dup_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("delete review candidates for work {dup_id}: {e}"))?;
+
             sqlx::query("DELETE FROM works WHERE id = ?")
                 .bind(dup_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| format!("delete duplicate work {dup_id}: {e}"))?;
 
@@ -377,9 +486,26 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_works_identity \
          ON works(user_id, normalized_title, normalized_author)",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("create idx_works_identity: {e}"))?;
+
+    // Completion marker — the LAST write before commit (Unit D1). A
+    // mid-transaction failure above rolls back every data change together
+    // with this marker, so a partial run never reads as "complete" on the
+    // next startup.
+    sqlx::query(
+        "INSERT INTO _livrarr_meta (key, value) \
+         VALUES ('normalized_identity_backfill_complete', '1') \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("stamp normalized_identity_backfill_complete marker: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("commit normalized identity backfill transaction: {e}"))?;
 
     tracing::info!(
         "normalized identity backfill complete: {} works, {merged_count} duplicates resolved",
@@ -803,5 +929,606 @@ mod identity_key_recompute_tests {
             .await
             .expect_err("missing table must error");
         assert!(!is_unique_violation(&missing_table_err));
+    }
+}
+
+/// Unit D1: `backfill_normalized_identity` must be one atomic, table-complete
+/// transaction. Tests seed the REAL pre-migration-038 precondition — raw
+/// `works` rows carrying the `'__UNMIGRATED__'` sentinel, via direct SQL
+/// (not `create_work()`, whose ON CONFLICT target requires the very unique
+/// index this function is responsible for creating).
+#[cfg(test)]
+mod backfill_normalized_identity_tests {
+    use super::*;
+    use crate::sqlite::SqliteDb;
+    use crate::test_helpers::create_test_db;
+    use crate::{CreateUserDbRequest, UserDb, UserRole};
+
+    async fn seed_user(db: &SqliteDb, username: &str) -> i64 {
+        db.create_user(CreateUserDbRequest {
+            username: username.into(),
+            password_hash: "hash".into(),
+            role: UserRole::User,
+            api_key_hash: format!("{username}-key"),
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
+    /// Raw-insert a work carrying the pre-backfill `'__UNMIGRATED__'`
+    /// sentinel in both normalized columns — the exact precondition this
+    /// function operates on.
+    async fn seed_unmigrated_work(
+        pool: &SqlitePool,
+        user_id: i64,
+        title: &str,
+        author: &str,
+    ) -> i64 {
+        let result = sqlx::query(
+            "INSERT INTO works (user_id, title, author_name, normalized_title, \
+             normalized_author, enrichment_status, added_at) \
+             VALUES (?, ?, ?, '__UNMIGRATED__', '__UNMIGRATED__', 'unenriched', '2026-01-01')",
+        )
+        .bind(user_id)
+        .bind(title)
+        .bind(author)
+        .execute(pool)
+        .await
+        .unwrap();
+        result.last_insert_rowid()
+    }
+
+    async fn seed_root_folder(pool: &SqlitePool) -> i64 {
+        let result = sqlx::query(
+            "INSERT INTO root_folders (path, media_type) VALUES ('/data/ebooks', 'ebook')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        result.last_insert_rowid()
+    }
+
+    async fn seed_download_client(pool: &SqlitePool) -> i64 {
+        let result =
+            sqlx::query("INSERT INTO download_clients (name, host) VALUES ('qbit', 'localhost')")
+                .execute(pool)
+                .await
+                .unwrap();
+        result.last_insert_rowid()
+    }
+
+    async fn seed_library_item(
+        pool: &SqlitePool,
+        user_id: i64,
+        work_id: i64,
+        root_folder_id: i64,
+        path: &str,
+    ) -> i64 {
+        let result = sqlx::query(
+            "INSERT INTO library_items \
+             (user_id, work_id, root_folder_id, path, media_type, file_size, imported_at) \
+             VALUES (?, ?, ?, ?, 'ebook', 1024, '2026-01-01T00:00:00Z')",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(root_folder_id)
+        .bind(path)
+        .execute(pool)
+        .await
+        .unwrap();
+        result.last_insert_rowid()
+    }
+
+    async fn marker_value(pool: &SqlitePool) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT value FROM _livrarr_meta WHERE key = 'normalized_identity_backfill_complete'",
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The test harness bootstraps its own same-column unique index so
+    /// `create_work()`'s ON CONFLICT target always resolves; this function's
+    /// whole job runs BEFORE any such index exists (the real pre-backfill
+    /// state), so tests that need more than one `'__UNMIGRATED__'` row per
+    /// user must drop it first.
+    async fn drop_harness_unique_index(pool: &SqlitePool) {
+        sqlx::query("DROP INDEX IF EXISTS idx_works_user_normalized")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    // ---- (a) Idempotent rerun ----------------------------------------------
+
+    #[tokio::test]
+    async fn idempotent_rerun_leaves_state_byte_identical_and_marker_stable() {
+        let db = create_test_db().await;
+        drop_harness_unique_index(db.pool()).await;
+
+        let user_id = seed_user(&db, "idempotent-user").await;
+        seed_unmigrated_work(db.pool(), user_id, "Dune", "Frank Herbert").await;
+        seed_unmigrated_work(db.pool(), user_id, "Foundation", "Isaac Asimov").await;
+
+        backfill_normalized_identity(db.pool()).await.unwrap();
+
+        let after_first: Vec<(i64, String, String)> =
+            sqlx::query_as("SELECT id, normalized_title, normalized_author FROM works ORDER BY id")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            after_first.len(),
+            2,
+            "both works survive, no merge expected"
+        );
+        assert!(
+            after_first
+                .iter()
+                .all(|(_, t, a)| t != "__UNMIGRATED__" && a != "__UNMIGRATED__"),
+            "both rows must carry real computed values: {after_first:?}"
+        );
+        assert_eq!(
+            marker_value(db.pool()).await.as_deref(),
+            Some("1"),
+            "the completion marker must be stamped after a successful run"
+        );
+
+        // Second run: marker present -> single read, early return, nothing touched.
+        backfill_normalized_identity(db.pool()).await.unwrap();
+
+        let after_second: Vec<(i64, String, String)> =
+            sqlx::query_as("SELECT id, normalized_title, normalized_author FROM works ORDER BY id")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            after_first, after_second,
+            "a second backfill run must leave every row byte-identical"
+        );
+        assert_eq!(marker_value(db.pool()).await.as_deref(), Some("1"));
+    }
+
+    // ---- (b) Mid-transaction failpoint --------------------------------------
+
+    #[tokio::test]
+    async fn mid_transaction_failure_rolls_back_all_data_and_marker_together() {
+        let db = create_test_db().await;
+        drop_harness_unique_index(db.pool()).await;
+
+        let user_id = seed_user(&db, "failpoint-user").await;
+
+        // A simple singleton row — proves Step 1's recompute rolls back too.
+        let singleton_id =
+            seed_unmigrated_work(db.pool(), user_id, "Foundation", "Isaac Asimov").await;
+
+        // A duplicate pair ("Hobbit" / "The Hobbit" fold to the same
+        // identity_key — the leading article is dropped) with dependent rows
+        // in three of the tables the merge must touch.
+        let keeper_id = seed_unmigrated_work(db.pool(), user_id, "Hobbit", "J.R.R. Tolkien").await;
+        let dup_id = seed_unmigrated_work(db.pool(), user_id, "The Hobbit", "J.R.R. Tolkien").await;
+
+        let root_folder_id = seed_root_folder(db.pool()).await;
+        seed_library_item(db.pool(), user_id, dup_id, root_folder_id, "dup.epub").await;
+
+        let client_id = seed_download_client(db.pool()).await;
+        sqlx::query(
+            "INSERT INTO grabs (user_id, work_id, download_client_id, title, indexer, guid, \
+             download_url, grabbed_at) \
+             VALUES (?, ?, ?, 'Some Release', 'indexer1', 'guid-1', 'http://x/y', '2026-01-01')",
+        )
+        .bind(user_id)
+        .bind(dup_id)
+        .bind(client_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO history (user_id, work_id, event_type, date) \
+             VALUES (?, ?, 'added', '2026-01-01')",
+        )
+        .bind(user_id)
+        .bind(dup_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // The failpoint: drop a table the merge must touch, forcing a real,
+        // naturally triggered SQL error ("no such table") — not a test-only
+        // hook — partway through the per-duplicate sequence.
+        sqlx::query("DROP TABLE bookmarks")
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let result = backfill_normalized_identity(db.pool()).await;
+        assert!(
+            result.is_err(),
+            "a mid-transaction SQL error must surface as Err, not a silent partial success"
+        );
+
+        // Step 1's recompute must have rolled back too — the sentinel survives.
+        let singleton_norm: (String, String) =
+            sqlx::query_as("SELECT normalized_title, normalized_author FROM works WHERE id = ?")
+                .bind(singleton_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            singleton_norm,
+            ("__UNMIGRATED__".to_string(), "__UNMIGRATED__".to_string()),
+            "Step 1's update for an unrelated row must roll back with the rest of the transaction"
+        );
+
+        // The duplicate pair must both still exist — dup was never deleted.
+        let still_present: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE id IN (?, ?)")
+                .bind(keeper_id)
+                .bind(dup_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            still_present, 2,
+            "the duplicate row must not be deleted on a rolled-back run"
+        );
+
+        // library_items/grabs/history must still point at dup_id — statements
+        // that executed (uncommitted) earlier in the same per-duplicate
+        // sequence must roll back too, not just the one that errored.
+        let li_work_id: i64 =
+            sqlx::query_scalar("SELECT work_id FROM library_items WHERE root_folder_id = ?")
+                .bind(root_folder_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(li_work_id, dup_id, "library_items redirect must roll back");
+
+        let grab_work_id: i64 =
+            sqlx::query_scalar("SELECT work_id FROM grabs WHERE guid = 'guid-1'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(grab_work_id, dup_id, "grabs redirect must roll back");
+
+        let history_work_id: i64 =
+            sqlx::query_scalar("SELECT work_id FROM history WHERE event_type = 'added'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(history_work_id, dup_id, "history redirect must roll back");
+
+        // The completion marker must never have been written.
+        assert_eq!(
+            marker_value(db.pool()).await,
+            None,
+            "the marker must roll back with the data — a partial run must never read as complete"
+        );
+    }
+
+    // ---- (c) Colliding external-ids/anchors merge cleanly; every referencing table is handled ----
+
+    #[tokio::test]
+    async fn duplicate_merge_resolves_every_referencing_table_without_constraint_failure() {
+        let db = create_test_db().await;
+        drop_harness_unique_index(db.pool()).await;
+
+        let user_id = seed_user(&db, "merge-user").await;
+
+        let keeper_id = seed_unmigrated_work(db.pool(), user_id, "Hobbit", "J.R.R. Tolkien").await;
+        let dup_id = seed_unmigrated_work(db.pool(), user_id, "The Hobbit", "J.R.R. Tolkien").await;
+
+        // library_items + bookmarks (one library item each on keeper and dup).
+        let root_folder_id = seed_root_folder(db.pool()).await;
+        seed_library_item(db.pool(), user_id, keeper_id, root_folder_id, "keeper.epub").await;
+        let dup_item_id =
+            seed_library_item(db.pool(), user_id, dup_id, root_folder_id, "dup.epub").await;
+
+        sqlx::query(
+            "INSERT INTO bookmarks (user_id, work_id, library_item_id, media_type, position, \
+             sort_key, name) VALUES (?, ?, ?, 'ebook', 'epubcfi(/6/2)', 1.0, 'My highlight')",
+        )
+        .bind(user_id)
+        .bind(dup_id)
+        .bind(dup_item_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // grabs + history on dup.
+        let client_id = seed_download_client(db.pool()).await;
+        sqlx::query(
+            "INSERT INTO grabs (user_id, work_id, download_client_id, title, indexer, guid, \
+             download_url, grabbed_at) \
+             VALUES (?, ?, ?, 'Some Release', 'indexer1', 'guid-1', 'http://x/y', '2026-01-01')",
+        )
+        .bind(user_id)
+        .bind(dup_id)
+        .bind(client_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO history (user_id, work_id, event_type, date) \
+             VALUES (?, ?, 'added', '2026-01-01')",
+        )
+        .bind(user_id)
+        .bind(dup_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // work_identity_conflicts on dup — an audit-trail row that must be
+        // preserved (repointed), not cascade-dropped.
+        sqlx::query(
+            "INSERT INTO work_identity_conflicts \
+             (user_id, existing_work_id, kind, incoming_payload_json, raised_at, raised_by, status) \
+             VALUES (?, ?, 'ol_redirect_collision', '{}', '2026-01-01', 'refresh', 'open')",
+        )
+        .bind(user_id)
+        .bind(dup_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // external_ids: one COLLIDING pair (same id_type+id_value on both
+        // keeper and dup) and one non-colliding pair on dup only.
+        sqlx::query(
+            "INSERT INTO external_ids (work_id, id_type, id_value) \
+             VALUES (?, 'isbn_13', '9780000000000')",
+        )
+        .bind(keeper_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO external_ids (work_id, id_type, id_value) \
+             VALUES (?, 'isbn_13', '9780000000000')",
+        )
+        .bind(dup_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO external_ids (work_id, id_type, id_value) \
+             VALUES (?, 'asin', 'B000UNIQUE1')",
+        )
+        .bind(dup_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // work_identity_anchors: a same-type-different-value CONFIRMED
+        // collision (violates uniq_primary_confirmed_anchor, NOT the primary
+        // key) plus a clean non-colliding pending anchor.
+        sqlx::query(
+            "INSERT INTO work_identity_anchors \
+             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+             VALUES (?, 'gr_key', '111222', 'confirmed', 'user', '2026-01-01', ?)",
+        )
+        .bind(keeper_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO work_identity_anchors \
+             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+             VALUES (?, 'gr_key', '999888', 'confirmed', 'auto_search', '2026-01-01', ?)",
+        )
+        .bind(dup_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO work_identity_anchors \
+             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+             VALUES (?, 'asin', 'B0XYZ00001', 'pending', 'auto_search', '2026-01-01', ?)",
+        )
+        .bind(dup_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // Ephemeral/system-derived state on dup — expected to be dropped,
+        // not repointed (composite PKs make blind repoint collision-prone).
+        sqlx::query(
+            "INSERT INTO work_metadata_provenance (user_id, work_id, field, set_at, setter) \
+             VALUES (?, ?, 'title', '2026-01-01', 'enrichment')",
+        )
+        .bind(user_id)
+        .bind(dup_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_retry_state (user_id, work_id, provider) \
+             VALUES (?, ?, 'hardcover')",
+        )
+        .bind(user_id)
+        .bind(dup_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO work_field_dissents \
+             (user_id, work_id, provider, field, offered_value, reason, merge_generation, recorded_at) \
+             VALUES (?, ?, 'openlibrary', 'title', 'Bad Title', 'mismatch', 1, '2026-01-01')",
+        )
+        .bind(user_id)
+        .bind(dup_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO work_anchor_dead_ends \
+             (work_id, anchor_type, attempt_count, last_attempt_at, user_id) \
+             VALUES (?, 'gr_key', 3, '2026-01-01', ?)",
+        )
+        .bind(dup_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // review_candidates: one on keeper (must survive UNTOUCHED) and one
+        // on dup (must be dropped — the primary key is bare work_id, so a
+        // blind repoint would collide with keeper's own row).
+        sqlx::query(
+            "INSERT INTO work_identity_review_candidates \
+             (work_id, user_id, candidates_json, recorded_at) \
+             VALUES (?, ?, '[\"A\"]', '2026-01-01')",
+        )
+        .bind(keeper_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO work_identity_review_candidates \
+             (work_id, user_id, candidates_json, recorded_at) \
+             VALUES (?, ?, '[\"B\"]', '2026-01-01')",
+        )
+        .bind(dup_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // The core assertion: no constraint failure despite the collisions above.
+        backfill_normalized_identity(db.pool())
+            .await
+            .expect("colliding external_ids/anchors must merge without a constraint violation");
+
+        // dup work row is gone.
+        let dup_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE id = ?")
+            .bind(dup_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(dup_count, 0, "the duplicate work row must be deleted");
+
+        // library_items: both rows survive, both now point at keeper.
+        let li_work_ids: Vec<i64> =
+            sqlx::query_scalar("SELECT work_id FROM library_items ORDER BY id")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(li_work_ids, vec![keeper_id, keeper_id]);
+
+        // bookmarks: the user's highlight survives, repointed — never dropped.
+        let bookmark_work_id: i64 = sqlx::query_scalar("SELECT work_id FROM bookmarks")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            bookmark_work_id, keeper_id,
+            "a user bookmark must survive the merge, repointed to the keeper"
+        );
+
+        // grabs / history: repointed, not dropped.
+        let grab_work_id: i64 = sqlx::query_scalar("SELECT work_id FROM grabs")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(grab_work_id, keeper_id);
+        let history_work_id: i64 = sqlx::query_scalar("SELECT work_id FROM history")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(history_work_id, keeper_id);
+
+        // work_identity_conflicts: repointed (audit trail preserved).
+        let conflict_work_id: i64 =
+            sqlx::query_scalar("SELECT existing_work_id FROM work_identity_conflicts")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(conflict_work_id, keeper_id);
+
+        // external_ids: exactly 2 rows survive under keeper — the collided
+        // isbn_13 (keeper's own value kept, not duplicated) + the merged asin.
+        let ext_ids: Vec<(i64, String, String)> =
+            sqlx::query_as("SELECT work_id, id_type, id_value FROM external_ids ORDER BY id_type")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            ext_ids,
+            vec![
+                (keeper_id, "asin".to_string(), "B000UNIQUE1".to_string()),
+                (keeper_id, "isbn_13".to_string(), "9780000000000".to_string()),
+            ],
+            "external_ids must merge to exactly one isbn_13 row plus the new asin, all under keeper"
+        );
+
+        // work_identity_anchors: keeper's own confirmed gr_key survives
+        // unchanged (dup's conflicting confirmed gr_key was dropped, not
+        // forced in), and the non-colliding pending asin merged in.
+        let anchors: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT work_id, anchor_type, anchor_value, confidence FROM work_identity_anchors \
+             ORDER BY anchor_type",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            anchors,
+            vec![
+                (
+                    keeper_id,
+                    "asin".to_string(),
+                    "B0XYZ00001".to_string(),
+                    "pending".to_string()
+                ),
+                (
+                    keeper_id,
+                    "gr_key".to_string(),
+                    "111222".to_string(),
+                    "confirmed".to_string()
+                ),
+            ],
+            "anchors must merge without constraint failure: keeper's confirmed gr_key wins, \
+             dup's conflicting confirmed gr_key is dropped, the non-colliding asin merges in: {anchors:?}"
+        );
+
+        // Ephemeral system-derived state: dropped, not repointed.
+        let provenance_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM work_metadata_provenance")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(provenance_count, 0);
+        let retry_state_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM provider_retry_state")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(retry_state_count, 0);
+        let dissent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM work_field_dissents")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(dissent_count, 0);
+        let dead_end_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM work_anchor_dead_ends")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(dead_end_count, 0);
+
+        // review_candidates: exactly keeper's own pre-existing row survives,
+        // untouched — dup's incompatible row was dropped, not force-repointed.
+        let review_candidates: Vec<(i64, String)> =
+            sqlx::query_as("SELECT work_id, candidates_json FROM work_identity_review_candidates")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(review_candidates, vec![(keeper_id, "[\"A\"]".to_string())]);
     }
 }
