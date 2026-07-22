@@ -548,7 +548,11 @@ async fn fetch_torrent_dispatch_source<H: HttpFetcher>(
         .await
     {
         Ok(r) => r,
-        Err(e @ (FetchError::RateLimited | FetchError::CircuitOpen { .. })) => return Err(e),
+        Err(
+            e @ (FetchError::RateLimited
+            | FetchError::CircuitOpen { .. }
+            | FetchError::QueueFull { .. }),
+        ) => return Err(e),
         Err(_) => {
             // The fetch may have failed because the URL redirects to a magnet: URI.
             // reqwest's redirect-following client rejects non-HTTP schemes, so a

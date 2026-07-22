@@ -266,6 +266,12 @@ fn outcome_record_class(
                 CallOutcomeClass::RateLimited,
                 Some("circuit_open".to_string()),
             ),
+            // D3: same observability treatment as CircuitOpen above — a
+            // local admission-queue pause, not a provider-derived signal.
+            WillRetryReason::QueueFull => (
+                CallOutcomeClass::RateLimited,
+                Some("queue_full".to_string()),
+            ),
         },
         ProviderOutcome::PermanentFailure { reason } => {
             (CallOutcomeClass::Error, Some(format!("{reason:?}")))

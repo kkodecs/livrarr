@@ -139,6 +139,9 @@ fn clone_fetch_error(e: &FetchError) -> FetchError {
         FetchError::CircuitOpen { retry_after } => FetchError::CircuitOpen {
             retry_after: *retry_after,
         },
+        FetchError::QueueFull { retry_after } => FetchError::QueueFull {
+            retry_after: *retry_after,
+        },
     }
 }
 

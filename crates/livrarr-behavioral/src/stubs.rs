@@ -126,6 +126,9 @@ impl StubHttpFetcher {
                     FetchError::CircuitOpen { retry_after } => FetchError::CircuitOpen {
                         retry_after: *retry_after,
                     },
+                    FetchError::QueueFull { retry_after } => FetchError::QueueFull {
+                        retry_after: *retry_after,
+                    },
                 }),
             }
         } else {

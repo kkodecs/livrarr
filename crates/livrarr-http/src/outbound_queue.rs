@@ -53,6 +53,65 @@ pub struct QueuePermit {
 /// open window elapses (R-3: no HTTP happens on this path).
 type TurnResult = Result<OwnedSemaphorePermit, Duration>;
 
+/// Why [`OutboundQueue::acquire`] rejected a request before any HTTP could
+/// happen. Both variants are local/transport-level PAUSES, never a provider
+/// verdict — callers map both to a retryable outcome (D3's budget-exempt
+/// set: neither consumes a retry attempt nor emits a breaker signal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionError {
+    /// The bucket's breaker (transport or, for a fully-resolved indexer,
+    /// rate-limit level) is Open. No HTTP was attempted.
+    CircuitOpen { retry_after: Duration },
+    /// This request's priority has no more reserved admission headroom in
+    /// its bucket's pending queue (D3: priority-reserved admission, never
+    /// eviction — an already-queued item is NEVER shed to make room; see
+    /// [`admission_threshold`]). No HTTP was attempted, and nothing already
+    /// queued was disturbed.
+    QueueFull { retry_after: Duration },
+}
+
+impl AdmissionError {
+    /// Time remaining until a retry might succeed, regardless of which
+    /// admission-rejection reason produced this error.
+    pub fn retry_after(&self) -> Duration {
+        match self {
+            AdmissionError::CircuitOpen { retry_after }
+            | AdmissionError::QueueFull { retry_after } => *retry_after,
+        }
+    }
+}
+
+/// Fixed retry hint attached to a [`AdmissionError::QueueFull`] rejection.
+/// Unlike a breaker's `retry_after` (the real remaining cooldown), admission
+/// rejection carries no natural "time until better" fact — the reserved-
+/// capacity policy in [`admission_threshold`] is priority-based, not time-
+/// based. A small fixed hint encourages a prompt retry without pretending to
+/// a precision the queue doesn't have.
+const QUEUE_FULL_RETRY_AFTER_HINT: Duration = Duration::from_secs(1);
+
+/// Hard ceiling on one bucket's pending (not-yet-dispatched) queue depth —
+/// the top of [`admission_threshold`]'s ladder. No priority, including
+/// Interactive, may push a bucket's heap past this (D3 / PRINCIPLES.md §5).
+const QUEUE_TOTAL_CAP: usize = 512;
+
+/// Priority-reserved admission thresholds (D3): a NEW request at `priority`
+/// is admitted only while its bucket's current pending count is strictly
+/// less than this. The top of the bucket's capacity is progressively
+/// reserved for higher priorities, so a Low-priority burst can never starve
+/// out a Normal/High/Interactive caller under load — admission is the ONLY
+/// gate; an already-queued item is never evicted to make room for a
+/// higher-priority latecomer (shedding a queued item panics the dispatcher's
+/// waiter, since it always expects a non-empty heap after a successful
+/// push — see `run_dispatcher`).
+fn admission_threshold(priority: RequestPriority) -> usize {
+    match priority {
+        RequestPriority::Low => 384,
+        RequestPriority::Normal => 448,
+        RequestPriority::High => 480,
+        RequestPriority::Interactive => QUEUE_TOTAL_CAP,
+    }
+}
+
 /// Process-monotonic sequence number. Assigned once per `acquire` call so same-
 /// priority items dispatch in arrival order.
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -226,6 +285,68 @@ fn breaker_open_retry(breaker: Option<&Arc<Mutex<BreakerState>>>) -> Option<Dura
     }
 }
 
+/// D3: hard cap on the pace registry (`OutboundQueue::registry`) — the six
+/// provider buckets, `OpenLibraryCovers`, `None`'s own key (never actually
+/// stored — `acquire` bypasses the registry for it), and one entry per
+/// distinct indexer ORIGIN ever seen (`pace_key` erases the per-indexer id,
+/// so same-origin indexers share one lane). Bounds memory against indexer
+/// config churn — origins from renamed/removed indexers that are never
+/// fetched again.
+const PACE_REGISTRY_CAP: usize = 256;
+
+/// D3: hard cap on the per-indexer rate-limit breaker registry
+/// (`OutboundQueue::rate_limit_breakers`) — one entry per distinct
+/// fully-resolved `Indexer { indexer: Some(_) }` bucket value.
+const RATE_LIMIT_BREAKER_REGISTRY_CAP: usize = 1024;
+
+/// A pace-lane entry is quiescent — safe to drop from the registry without
+/// disturbing any live state — only when ALL of: no pending items in its
+/// heap, no dispatcher task currently draining it, no in-flight permit
+/// currently held (a bucket can be heap-empty with its dispatcher already
+/// self-exited while a caller still holds a granted permit — checking only
+/// heap/dispatcher would wrongly call that "idle"), and — if it carries a
+/// transport breaker — that breaker is not Open. Dropping a non-quiescent
+/// entry would hand the next caller for this key a FRESH `BucketHandle::new`:
+/// a second, independent pace clock and in-flight semaphore for what should
+/// be one lane, or a silently reset cooldown for a real host failure.
+fn bucket_handle_is_quiescent(handle: &BucketHandle) -> bool {
+    if handle.semaphore.available_permits() < OUTBOUND_IN_FLIGHT_CAP {
+        return false;
+    }
+    let idle = {
+        let state = handle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.heap.is_empty() && !state.dispatcher_running
+    };
+    if !idle {
+        return false;
+    }
+    match &handle.breaker {
+        None => true,
+        Some(breaker) => {
+            let mut b = breaker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            b.current() != CircuitState::Open
+        }
+    }
+}
+
+/// A rate-limit-breaker registry entry is quiescent when it is not
+/// currently Open — mirrors `bucket_handle_is_quiescent`'s breaker rule.
+/// Unlike a pace lane, a rate-limit breaker carries no heap/dispatcher/
+/// in-flight state of its own (it is a pure breaker, gated on separately
+/// from the pace lane at dispatch time) — Closed/HalfOpen carries nothing
+/// worth preserving across a config change, so it may be dropped freely.
+fn rate_limit_breaker_is_quiescent(breaker: &Arc<Mutex<BreakerState>>) -> bool {
+    let mut b = breaker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    b.current() != CircuitState::Open
+}
+
 /// One pace lane's dispatcher loop: pace sends by `interval`, cap in-flight
 /// sends via the lane's semaphore, and grant queued callers their turn in
 /// `(priority DESC, seq ASC)` order. Two breaker levels gate a grant — the
@@ -357,12 +478,22 @@ impl OutboundQueue {
     /// Return the pace lane's handle (pacing, in-flight cap, transport breaker),
     /// creating it on first use. Keyed by the PACE projection, so all indexers
     /// on one origin share a handle.
+    ///
+    /// D3: bounded to [`PACE_REGISTRY_CAP`] quiescent/configured origins.
+    /// Reconciles deleted/renamed indexer configuration by sweeping ONLY
+    /// quiescent entries when a genuinely new key would otherwise push the
+    /// registry past the cap — never the key being looked up, and never a
+    /// non-quiescent one, so eviction can never create a second live pace
+    /// lane or silently reset an open breaker.
     fn bucket_handle(&self, bucket: &RateBucket) -> BucketHandle {
         let key = pace_key(bucket);
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !registry.contains_key(&key) && registry.len() >= PACE_REGISTRY_CAP {
+            registry.retain(|_, handle| !bucket_handle_is_quiescent(handle));
+        }
         registry
             .entry(key.clone())
             .or_insert_with(|| BucketHandle::new(&key, interval_for(&key)))
@@ -375,6 +506,11 @@ impl OutboundQueue {
     /// breaker is the transport one), `Indexer { indexer: None }`, `None`, and
     /// covers. Keyed by the full bucket value, so two indexers on one origin
     /// get two distinct breakers.
+    ///
+    /// D3: bounded to [`RATE_LIMIT_BREAKER_REGISTRY_CAP`] active configured
+    /// indexers, same quiescent-only eviction discipline as `bucket_handle`
+    /// — an Open breaker (an active cooldown) is never evicted, so a 429
+    /// verdict can never be silently forgotten by registry pressure.
     fn rate_limit_breaker(&self, bucket: &RateBucket) -> Option<Arc<Mutex<BreakerState>>> {
         if !matches!(
             bucket,
@@ -389,6 +525,9 @@ impl OutboundQueue {
             .rate_limit_breakers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !map.contains_key(bucket) && map.len() >= RATE_LIMIT_BREAKER_REGISTRY_CAP {
+            map.retain(|_, breaker| !rate_limit_breaker_is_quiescent(breaker));
+        }
         Some(
             map.entry(bucket.clone())
                 .or_insert_with(|| {
@@ -404,12 +543,16 @@ impl OutboundQueue {
     /// paced the bucket (interval since the last ACTUAL dispatch) and acquired an
     /// in-flight permit. Ordering is `(priority DESC, enqueue_sequence ASC)` — highest
     /// priority first, FIFO within a priority via a process-monotonic enqueue
-    /// sequence. The wait is UNBOUNDED; nothing is ever dropped. `RateBucket::None`
-    /// bypasses pacing and the in-flight cap (immediate turn).
+    /// sequence. `RateBucket::None` bypasses pacing, the in-flight cap, AND admission
+    /// (immediate turn, uncapped).
     ///
-    /// Resolves to `Err(retry_after)` when the bucket's breaker is Open at the
-    /// moment a turn would have been granted (R-3): no permit, no HTTP. `retry_after`
-    /// is the time remaining until the breaker's open window elapses.
+    /// Resolves to `Err(AdmissionError::CircuitOpen{retry_after})` when the bucket's
+    /// breaker is Open at the moment a turn would have been granted (R-3): no permit,
+    /// no HTTP. Resolves to `Err(AdmissionError::QueueFull{retry_after})` when this
+    /// priority has no reserved admission headroom left in the bucket's pending queue
+    /// (D3, `admission_threshold`) — checked BEFORE enqueueing, so the wait is bounded
+    /// per bucket (at most `QUEUE_TOTAL_CAP` pending) rather than unbounded; nothing
+    /// already queued is ever shed to make room.
     ///
     /// Cancel-safe by construction: a caller dropped while still queued is skipped and
     /// does NOT consume a pacing slot; a caller dropped after dispatch releases its
@@ -418,12 +561,11 @@ impl OutboundQueue {
         &self,
         bucket: RateBucket,
         priority: RequestPriority,
-    ) -> Result<QueuePermit, Duration> {
+    ) -> Result<QueuePermit, AdmissionError> {
         if bucket == RateBucket::None {
             return Ok(QueuePermit { _permit: None });
         }
 
-        let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
         let handle = self.bucket_handle(&bucket);
         // Resolve the per-indexer rate-limit breaker ONCE, before taking the
         // state lock (the map lock is a leaf lock released here). `None` for
@@ -436,6 +578,15 @@ impl OutboundQueue {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // D3 admission gate: reject BEFORE enqueueing when this priority
+            // has no reserved headroom left. Never touches an already-queued
+            // item — rejection only ever applies to the new arrival.
+            if state.heap.len() >= admission_threshold(priority) {
+                return Err(AdmissionError::QueueFull {
+                    retry_after: QUEUE_FULL_RETRY_AFTER_HINT,
+                });
+            }
+            let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
             state.heap.push(QueuedItem {
                 priority,
                 seq,
@@ -451,9 +602,11 @@ impl OutboundQueue {
         let result = turn_rx
             .await
             .expect("dispatcher dropped a queued item without granting its turn");
-        result.map(|permit| QueuePermit {
-            _permit: Some(permit),
-        })
+        result
+            .map(|permit| QueuePermit {
+                _permit: Some(permit),
+            })
+            .map_err(|retry_after| AdmissionError::CircuitOpen { retry_after })
     }
 
     /// Report a dispatched call's outcome to `bucket`'s TRANSPORT-level breaker
@@ -526,6 +679,38 @@ impl OutboundQueue {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = BreakerState::new(config);
         }
+    }
+
+    /// Test-only (D3): `bucket`'s current pending (not-yet-dispatched)
+    /// queue depth — lets admission tests assert exact threshold behavior
+    /// without needing to inspect dispatcher internals directly.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn pending_count_for_tests(&self, bucket: RateBucket) -> usize {
+        let handle = self.bucket_handle(&bucket);
+        let state = handle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.heap.len()
+    }
+
+    /// Test-only (D3): current number of distinct pace-lane entries.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn pace_registry_len_for_tests(&self) -> usize {
+        self.registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    /// Test-only (D3): current number of distinct per-indexer rate-limit
+    /// breaker entries.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn rate_limit_breaker_count_for_tests(&self) -> usize {
+        self.rate_limit_breakers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 }
 
@@ -1017,7 +1202,8 @@ mod tests {
         let retry_after = queue
             .acquire(bucket, RequestPriority::Normal)
             .await
-            .expect_err("the 5th failure must trip Closed -> Open");
+            .expect_err("the 5th failure must trip Closed -> Open")
+            .retry_after();
         assert!(
             retry_after > Duration::ZERO && retry_after <= Duration::from_secs(60),
             "retry_after should be within the default 60s open window, got {retry_after:?}"
@@ -1062,7 +1248,8 @@ mod tests {
         let retry_after = queue
             .acquire(bucket, RequestPriority::Normal)
             .await
-            .expect_err("an Open breaker must reject the acquire");
+            .expect_err("an Open breaker must reject the acquire")
+            .retry_after();
         assert!(
             retry_after > Duration::from_secs(40) && retry_after <= Duration::from_secs(42),
             "retry_after should reflect the 42s override, not the bucket's default, got {retry_after:?}"
@@ -1085,7 +1272,8 @@ mod tests {
         let retry_after = queue
             .acquire(bucket, RequestPriority::Normal)
             .await
-            .expect_err("an Open breaker must reject the acquire");
+            .expect_err("an Open breaker must reject the acquire")
+            .retry_after();
         assert!(
             retry_after > Duration::from_secs(3599) && retry_after <= Duration::from_secs(3600),
             "Goodreads' default open window is 3600s, got {retry_after:?}"
@@ -1469,6 +1657,271 @@ mod tests {
         assert!(
             result.is_ok(),
             "dispatcher should tolerate a poisoned bucket state lock"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // D3: priority-reserved admission (typed QueueFull backpressure),
+    // bounded pace/rate-limit-breaker registries, and the "never shed a
+    // queued item" invariant.
+    // -------------------------------------------------------------------
+
+    /// Adaptively spawn parked holders (acquire `bucket` at `priority`,
+    /// then park forever on success) until the bucket's PENDING count
+    /// reaches `target`. The dispatcher may opportunistically dispatch up
+    /// to `OUTBOUND_IN_FLIGHT_CAP` holders into permanently-held in-flight
+    /// slots along the way (spawned all at once, some can win the race to
+    /// the dispatcher before pacing blocks further sends) — rather than
+    /// assume a fixed split between "dispatched" and "queued", this checks
+    /// the REAL observed pending count after each spawn and tops up as
+    /// needed, so it converges to exactly `target` regardless of
+    /// scheduling order. A holder whose own acquire loses an admission
+    /// race (vanishingly rare once the in-flight cap is exhausted, which
+    /// happens permanently within the first couple of iterations) simply
+    /// completes without parking — harmless, the loop just spawns another.
+    async fn fill_bucket_to(
+        queue: &Arc<OutboundQueue>,
+        bucket: &RateBucket,
+        priority: RequestPriority,
+        target: usize,
+        holders: &mut Vec<tokio::task::JoinHandle<()>>,
+    ) {
+        while queue.pending_count_for_tests(bucket.clone()) < target {
+            let q = Arc::clone(queue);
+            let b = bucket.clone();
+            holders.push(tokio::spawn(async move {
+                if let Ok(_permit) = q.acquire(b, priority).await {
+                    std::future::pending::<()>().await;
+                }
+            }));
+            settle().await;
+        }
+    }
+
+    /// The full reserved-headroom ladder: Low<384, Normal<448, High<480,
+    /// Interactive<512 (the hard ceiling — no priority, including
+    /// Interactive, may exceed it). Saturating each tier in turn proves a
+    /// lower-priority rejection never blocks a higher-priority admission
+    /// ("Low-saturation still admits higher priorities"), that a rejection
+    /// is zero-HTTP (it returns before the dispatcher's `turn_rx` wait is
+    /// ever reached, so nothing it does could dispatch a send) and never
+    /// grows the heap, and that previously-queued items survive every
+    /// rejection intact (no waiter panic — `run_dispatcher`'s `.expect()`s
+    /// always find a non-empty heap when they should).
+    #[tokio::test(start_paused = true)]
+    async fn priority_reserved_admission_thresholds_gate_by_priority_never_shedding_queued_items() {
+        let queue = Arc::new(OutboundQueue::new());
+        let bucket = RateBucket::Hardcover;
+        let mut holders = Vec::new();
+
+        // Fill to Low's threshold (384).
+        fill_bucket_to(&queue, &bucket, RequestPriority::Low, 384, &mut holders).await;
+        assert_eq!(queue.pending_count_for_tests(bucket.clone()), 384);
+
+        let low_rejected = queue.acquire(bucket.clone(), RequestPriority::Low).await;
+        assert!(
+            matches!(low_rejected, Err(AdmissionError::QueueFull { .. })),
+            "Low at its reserved cap must be rejected with QueueFull, got {low_rejected:?}"
+        );
+        assert_eq!(
+            queue.pending_count_for_tests(bucket.clone()),
+            384,
+            "a rejected admission must never grow the heap"
+        );
+
+        // Normal still has headroom (448 > 384) even while Low is fully
+        // saturated. Fill it to ITS own threshold too.
+        fill_bucket_to(&queue, &bucket, RequestPriority::Normal, 448, &mut holders).await;
+        assert_eq!(queue.pending_count_for_tests(bucket.clone()), 448);
+
+        let normal_rejected = queue.acquire(bucket.clone(), RequestPriority::Normal).await;
+        assert!(
+            matches!(normal_rejected, Err(AdmissionError::QueueFull { .. })),
+            "Normal at its reserved cap must be rejected, got {normal_rejected:?}"
+        );
+        assert_eq!(queue.pending_count_for_tests(bucket.clone()), 448);
+
+        // High still has headroom (480 > 448).
+        fill_bucket_to(&queue, &bucket, RequestPriority::High, 480, &mut holders).await;
+        assert_eq!(queue.pending_count_for_tests(bucket.clone()), 480);
+
+        let high_rejected = queue.acquire(bucket.clone(), RequestPriority::High).await;
+        assert!(
+            matches!(high_rejected, Err(AdmissionError::QueueFull { .. })),
+            "High at its reserved cap must be rejected, got {high_rejected:?}"
+        );
+        assert_eq!(queue.pending_count_for_tests(bucket.clone()), 480);
+
+        // Interactive still has headroom up to the hard ceiling (512).
+        fill_bucket_to(
+            &queue,
+            &bucket,
+            RequestPriority::Interactive,
+            512,
+            &mut holders,
+        )
+        .await;
+        assert_eq!(queue.pending_count_for_tests(bucket.clone()), 512);
+
+        // The hard ceiling: even Interactive is rejected once completely full.
+        let interactive_rejected = queue
+            .acquire(bucket.clone(), RequestPriority::Interactive)
+            .await;
+        assert!(
+            matches!(interactive_rejected, Err(AdmissionError::QueueFull { .. })),
+            "Interactive at the hard 512 ceiling must be rejected too, got {interactive_rejected:?}"
+        );
+        assert_eq!(queue.pending_count_for_tests(bucket.clone()), 512);
+
+        // No waiter panic: the queued items are genuinely intact, not
+        // corrupted by the run of rejections above — advancing time lets
+        // the dispatcher drain one (the in-flight cap admits exactly one
+        // more; both slots are then held forever by parked holders) without
+        // panicking.
+        advance(Duration::from_secs(5)).await;
+        settle().await;
+        assert!(
+            queue.pending_count_for_tests(bucket.clone()) < 512,
+            "a previously queued item must still be dispatchable cleanly after a run of rejections"
+        );
+
+        for h in holders {
+            h.abort();
+        }
+    }
+
+    /// D3: a `QueueFull` rejection must never touch the bucket's breaker —
+    /// admission is checked before any breaker code is reached, exactly
+    /// like `RateBucket::None` never invoking breaker logic. Saturate
+    /// Low's reserved admission, trigger several rejections, then prove
+    /// the breaker is STILL Closed: a fresh Interactive-priority acquire
+    /// (which still has headroom) is ADMITTED, not rejected with
+    /// `CircuitOpen`.
+    #[tokio::test(start_paused = true)]
+    async fn queue_full_rejections_never_trip_or_touch_the_breaker() {
+        let queue = Arc::new(OutboundQueue::new());
+        let bucket = RateBucket::OpenLibrary;
+
+        let mut holders = Vec::new();
+        fill_bucket_to(&queue, &bucket, RequestPriority::Low, 384, &mut holders).await;
+        assert_eq!(queue.pending_count_for_tests(bucket.clone()), 384);
+
+        for _ in 0..10 {
+            let rejected = queue.acquire(bucket.clone(), RequestPriority::Low).await;
+            assert!(matches!(rejected, Err(AdmissionError::QueueFull { .. })));
+        }
+
+        // The breaker must still be Closed: an Interactive request (still
+        // has headroom, 384 < 512) must be ADMITTED — it parks (never
+        // dispatched, since time is never advanced), so spawn it and
+        // confirm it reached the enqueued state rather than resolving
+        // with CircuitOpen.
+        let q2 = Arc::clone(&queue);
+        let b2 = bucket.clone();
+        let interactive =
+            tokio::spawn(async move { q2.acquire(b2, RequestPriority::Interactive).await });
+        settle().await;
+        assert!(
+            !interactive.is_finished(),
+            "an admitted Interactive request should be parked awaiting its turn, not resolved"
+        );
+        assert_eq!(
+            queue.pending_count_for_tests(bucket.clone()),
+            385,
+            "the Interactive request must have been ADMITTED (enqueued), proving the repeated \
+             QueueFull rejections above never tripped the breaker into rejecting it instead"
+        );
+
+        for h in holders.drain(..) {
+            h.abort();
+        }
+        interactive.abort();
+    }
+
+    /// D3: the pace registry never re-creates a live lane under config
+    /// churn. A bucket with a currently-held in-flight permit looks idle
+    /// by heap/dispatcher state alone (its one item already dispatched,
+    /// its dispatcher self-exited once the heap drained empty) — the
+    /// quiescence check must ALSO see the held permit and refuse to evict
+    /// it, even when registry pressure from many other, genuinely
+    /// quiescent origins tries to make room (indexers added/renamed/
+    /// removed over time).
+    #[tokio::test(start_paused = true)]
+    async fn pace_registry_eviction_never_recreates_a_lane_with_a_held_permit() {
+        let queue = OutboundQueue::new();
+        let busy = RateBucket::Indexer {
+            origin: "busy-origin-config-churn".to_string(),
+            indexer: Some("busy-id".to_string()),
+        };
+
+        let permit = queue
+            .acquire(busy.clone(), RequestPriority::Low)
+            .await
+            .unwrap();
+        let original_handle = queue.bucket_handle(&busy);
+        assert_eq!(queue.pace_registry_len_for_tests(), 1);
+
+        for i in 0..PACE_REGISTRY_CAP {
+            let churn_bucket = RateBucket::Indexer {
+                origin: format!("churned-origin-{i}"),
+                indexer: Some(format!("churned-id-{i}")),
+            };
+            queue.report_outcome(churn_bucket, BreakerSignal::Success);
+        }
+
+        let refetched_handle = queue.bucket_handle(&busy);
+        assert!(
+            Arc::ptr_eq(&original_handle.state, &refetched_handle.state),
+            "a bucket with a held in-flight permit must never be evicted and recreated, \
+             even under registry pressure at the cap — that would be a second live pace lane"
+        );
+        assert!(
+            queue.pace_registry_len_for_tests() <= PACE_REGISTRY_CAP + 1,
+            "config churn must not grow the registry unboundedly past the cap"
+        );
+
+        drop(permit);
+    }
+
+    /// D3: the per-indexer rate-limit breaker registry never resets an
+    /// OPEN breaker under registry pressure — an active 429 cooldown must
+    /// survive config churn from OTHER indexers being added/removed.
+    #[tokio::test]
+    async fn rate_limit_breaker_registry_eviction_never_resets_an_open_breaker() {
+        let queue = OutboundQueue::new();
+        let tripped = RateBucket::Indexer {
+            origin: "tripped-origin".to_string(),
+            indexer: Some("tripped-id".to_string()),
+        };
+
+        queue.report_rate_limit_outcome(
+            tripped.clone(),
+            BreakerSignal::TripImmediately { open_for: None },
+        );
+        assert_eq!(queue.rate_limit_breaker_count_for_tests(), 1);
+
+        // Push the registry past its cap with distinct, closed (quiescent)
+        // per-indexer breakers — none of these ever receive a 429.
+        for i in 0..RATE_LIMIT_BREAKER_REGISTRY_CAP {
+            let churn = RateBucket::Indexer {
+                origin: "churn-origin".to_string(),
+                indexer: Some(format!("churn-id-{i}")),
+            };
+            queue.report_rate_limit_outcome(churn, BreakerSignal::Success);
+        }
+        assert!(
+            queue.rate_limit_breaker_count_for_tests() <= RATE_LIMIT_BREAKER_REGISTRY_CAP + 1,
+            "config churn must not grow the registry unboundedly past the cap"
+        );
+
+        // The tripped breaker's cooldown must have survived: acquiring on
+        // it is still rejected with CircuitOpen, never silently reset to
+        // Closed by registry pressure.
+        let result = queue.acquire(tripped, RequestPriority::Normal).await;
+        assert!(
+            matches!(result, Err(AdmissionError::CircuitOpen { .. })),
+            "an OPEN per-indexer rate-limit breaker must survive registry pressure from \
+             unrelated config churn, got {result:?}"
         );
     }
 }

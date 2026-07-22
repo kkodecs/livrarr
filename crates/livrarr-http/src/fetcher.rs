@@ -157,7 +157,12 @@ impl HttpFetcherImpl {
             .await
         {
             Ok(permit) => permit,
-            Err(retry_after) => return Err(FetchError::CircuitOpen { retry_after }),
+            Err(outbound_queue::AdmissionError::CircuitOpen { retry_after }) => {
+                return Err(FetchError::CircuitOpen { retry_after })
+            }
+            Err(outbound_queue::AdmissionError::QueueFull { retry_after }) => {
+                return Err(FetchError::QueueFull { retry_after })
+            }
         };
 
         // Build request

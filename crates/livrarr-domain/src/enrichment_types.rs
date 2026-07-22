@@ -354,6 +354,11 @@ pub enum WillRetryReason {
     /// (R-11): a pause, not a step toward a retry-budget dead-end — must
     /// never consume the attempt budget.
     CircuitOpen,
+    /// The outbound queue's admission cap rejected the request (D3): same
+    /// class as `CircuitOpen` — a local, transport-level pause, never a
+    /// provider verdict — so it must never consume the attempt budget
+    /// either.
+    QueueFull,
 }
 
 /// Reason a provider permanently failed for this work.

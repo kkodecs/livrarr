@@ -538,11 +538,15 @@ where
                 reason,
                 next_attempt_at,
             } => {
-                // R-11: a breaker-open pass is a PAUSE (the provider is
-                // temporarily down), never a step toward a retry-budget
-                // dead-end — it must consume neither the attempt nor the
-                // suppression budget. Return it unchanged.
-                if reason == WillRetryReason::CircuitOpen {
+                // R-11/D3: a breaker-open OR admission-queue-full pass is a
+                // PAUSE (the provider is temporarily down, or the local
+                // outbound queue is momentarily oversubscribed) — never a
+                // step toward a retry-budget dead-end. Neither may consume
+                // the attempt nor the suppression budget. Return unchanged.
+                if matches!(
+                    reason,
+                    WillRetryReason::CircuitOpen | WillRetryReason::QueueFull
+                ) {
                     return Ok(ProviderOutcome::WillRetry {
                         reason,
                         next_attempt_at,
@@ -639,10 +643,15 @@ where
                 reason,
                 next_attempt_at,
             } => {
-                // R-11: a breaker-open pass persists via `record_will_retry_paused`
-                // (same row shape, `attempts` NOT incremented) — a paused provider
-                // must not spend retry budget while its breaker is open.
-                if *reason == WillRetryReason::CircuitOpen {
+                // R-11/D3: a breaker-open OR admission-queue-full pass
+                // persists via `record_will_retry_paused` (same row shape,
+                // `attempts` NOT incremented) — a paused provider must not
+                // spend retry budget while its breaker is open OR the local
+                // outbound queue is momentarily full.
+                if matches!(
+                    *reason,
+                    WillRetryReason::CircuitOpen | WillRetryReason::QueueFull
+                ) {
                     self.retry_db
                         .record_will_retry_paused(work.user_id, work.id, provider, *next_attempt_at)
                         .await?;
@@ -779,6 +788,78 @@ mod circuit_open_budget_tests {
             after.attempts,
             max_attempts - 1,
             "a breaker-open pass must not increment attempts"
+        );
+    }
+
+    /// D3: `WillRetry{QueueFull}` (the outbound queue's admission cap
+    /// rejected the request — no HTTP attempted) must survive the
+    /// `max_attempts` boundary exactly like `WillRetry{CircuitOpen}` does
+    /// above — same budget-exempt class, same non-incrementing persistence
+    /// path (`record_will_retry_paused`).
+    #[tokio::test]
+    async fn will_retry_queue_full_survives_the_max_attempts_boundary() {
+        let (db, work) = seed_db_and_work().await;
+        let max_attempts = 3;
+        for _ in 0..(max_attempts - 1) {
+            db.record_will_retry(
+                work.user_id,
+                work.id,
+                MetadataProvider::OpenLibrary,
+                chrono::Utc::now() + chrono::Duration::seconds(60),
+            )
+            .await
+            .unwrap();
+        }
+        let prior = db
+            .get_retry_state(work.user_id, work.id, MetadataProvider::OpenLibrary)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prior.attempts, max_attempts - 1);
+
+        let client = ProviderClient::Stub(StubProviderClient::new(
+            MetadataProvider::OpenLibrary,
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::QueueFull,
+                next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+            },
+        ));
+        let db = Arc::new(db);
+        let queue = DefaultProviderQueueBuilder::new()
+            .add_provider(MetadataProvider::OpenLibrary, client, config(max_attempts))
+            .build(db.clone());
+
+        let ctx = EnrichmentContext {
+            priority: RequestPriority::Normal,
+            mode: EnrichmentMode::Background,
+            freshness: Freshness::PreferCache,
+        };
+        let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
+        let outcome = result.outcomes.get(&MetadataProvider::OpenLibrary).unwrap();
+
+        assert!(
+            matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::QueueFull,
+                    ..
+                }
+            ),
+            "a queue-full pass at the max_attempts boundary must stay WillRetry{{QueueFull}}, \
+             not convert to PermanentFailure — got {outcome:?}"
+        );
+
+        // record_will_retry_paused must have been used, not record_will_retry:
+        // the prior attempts count is untouched by the QueueFull pass.
+        let after = db
+            .get_retry_state(work.user_id, work.id, MetadataProvider::OpenLibrary)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.attempts,
+            max_attempts - 1,
+            "a queue-full pass must not increment attempts"
         );
     }
 }

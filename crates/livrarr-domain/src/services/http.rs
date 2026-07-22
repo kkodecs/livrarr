@@ -108,6 +108,13 @@ pub enum FetchError {
     /// the time remaining until the breaker's open window elapses.
     #[error("circuit open, retry after {retry_after:?}")]
     CircuitOpen { retry_after: Duration },
+    /// The outbound queue's admission cap rejected this request — its
+    /// bucket's pending queue is at (or past) the reserved threshold for
+    /// this request's priority (D3: priority-reserved admission, never
+    /// eviction). No HTTP was attempted; nothing already queued was
+    /// disturbed. `retry_after` is a hint for when to retry.
+    #[error("queue full, retry after {retry_after:?}")]
+    QueueFull { retry_after: Duration },
 }
 
 #[trait_variant::make(Send)]

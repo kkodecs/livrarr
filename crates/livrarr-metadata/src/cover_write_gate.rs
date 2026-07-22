@@ -60,7 +60,7 @@ pub(crate) async fn lock_slot(
     user_id: UserId,
     work_id: WorkId,
     media_type: CoverMediaType,
-) -> KeyedMutexGuard {
+) -> KeyedMutexGuard<(UserId, WorkId, CoverMediaType)> {
     SLOT_LOCKS.lock((user_id, work_id, media_type)).await
 }
 

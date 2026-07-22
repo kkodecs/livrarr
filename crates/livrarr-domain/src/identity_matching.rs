@@ -275,8 +275,29 @@ pub fn title_verdict_with_positions(
     TitleVerdict::Different
 }
 
+/// Raw-name cap per side for [`author_verdict`] (D3 / PRINCIPLES.md §5): a
+/// side carrying more than this many raw credited-name strings abstains
+/// rather than building comparison state proportional to an unbounded
+/// input. Chosen so the worst-case comparison count
+/// (`AUTHOR_VERDICT_MAX_NAMES_PER_SIDE`^2 = 65,536) stays small.
+pub const AUTHOR_VERDICT_MAX_NAMES_PER_SIDE: usize = 256;
+
 /// Compare two credited-author lists at identity grade.
+///
+/// Bounded (D3): more than [`AUTHOR_VERDICT_MAX_NAMES_PER_SIDE`] raw names
+/// on either side abstains outright — the cap is checked before any
+/// canonicalization or comparison work. Below the cap, this preserves the
+/// exact compatibility-based verdict the naive O(N*M)-pair-vector
+/// implementation computed (see the `author_verdict_matches_the_naive_authority_*`
+/// tests below): the row/column saturating counts plus each row's first
+/// matching column let an `Agree` pair be recovered without materializing
+/// every matching pair, since a row with exactly one match has, by definition,
+/// only the one column its saturating count already implies.
 pub fn author_verdict(a: &[String], b: &[String]) -> AuthorVerdict {
+    if a.len() > AUTHOR_VERDICT_MAX_NAMES_PER_SIDE || b.len() > AUTHOR_VERDICT_MAX_NAMES_PER_SIDE {
+        return AuthorVerdict::Abstain;
+    }
+
     let ca: Vec<CanonicalName> = a.iter().filter_map(|n| canonical_author_name(n)).collect();
     let cb: Vec<CanonicalName> = b.iter().filter_map(|n| canonical_author_name(n)).collect();
     if ca.is_empty() || cb.is_empty() {
@@ -285,25 +306,34 @@ pub fn author_verdict(a: &[String], b: &[String]) -> AuthorVerdict {
 
     // A full-name match pair counts only when it is unambiguous on both
     // sides; a name compatible with several candidates is grey evidence.
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    // O(N+M) auxiliary memory: row/column saturating counts, plus each
+    // row's FIRST matching column — sufficient because a row whose count
+    // is exactly 1 has, definitionally, only that one matching column, so
+    // "first match" and "only match" coincide exactly when it matters.
     let mut row_counts = vec![0usize; ca.len()];
     let mut col_counts = vec![0usize; cb.len()];
+    let mut row_first_match: Vec<Option<usize>> = vec![None; ca.len()];
+    let mut any_match = false;
     for (i, x) in ca.iter().enumerate() {
         for (j, y) in cb.iter().enumerate() {
             if full_name_match(x, y) {
-                row_counts[i] += 1;
-                col_counts[j] += 1;
-                pairs.push((i, j));
+                row_counts[i] = row_counts[i].saturating_add(1);
+                col_counts[j] = col_counts[j].saturating_add(1);
+                row_first_match[i].get_or_insert(j);
+                any_match = true;
             }
         }
     }
-    if pairs
-        .iter()
-        .any(|&(i, j)| row_counts[i] == 1 && col_counts[j] == 1)
-    {
+    let agrees = (0..ca.len()).any(|i| {
+        row_counts[i] == 1
+            && row_first_match[i]
+                .map(|j| col_counts[j] == 1)
+                .unwrap_or(false)
+    });
+    if agrees {
         return AuthorVerdict::Agree;
     }
-    if !pairs.is_empty() {
+    if any_match {
         return AuthorVerdict::Grey;
     }
     let shared_surname = ca.iter().any(|x| cb.iter().any(|y| x.surname == y.surname));
@@ -1424,6 +1454,200 @@ mod tests {
             &names(&["Gabriel Garcia Marquez"]),
         );
         assert_eq!(v, AuthorVerdict::Agree);
+    }
+
+    // --- author_verdict: D3 bound (raw-name cap, pair-vector elimination) ---
+    //
+    // `naive_author_verdict` below is a FROZEN, byte-for-byte copy of
+    // `author_verdict`'s pre-D3 body (the O(N*M) pair-vector
+    // implementation) — a sanctioned duplication whose sole job is to
+    // serve as the diff-oracle these tests check the bounded rewrite
+    // against. Never "fix" or simplify this copy to match the real
+    // function; if it ever needs to change, that means the real function's
+    // semantics changed and the property tests below should catch it.
+    fn naive_author_verdict(a: &[String], b: &[String]) -> AuthorVerdict {
+        let ca: Vec<CanonicalName> = a.iter().filter_map(|n| canonical_author_name(n)).collect();
+        let cb: Vec<CanonicalName> = b.iter().filter_map(|n| canonical_author_name(n)).collect();
+        if ca.is_empty() || cb.is_empty() {
+            return AuthorVerdict::Abstain;
+        }
+
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        let mut row_counts = vec![0usize; ca.len()];
+        let mut col_counts = vec![0usize; cb.len()];
+        for (i, x) in ca.iter().enumerate() {
+            for (j, y) in cb.iter().enumerate() {
+                if full_name_match(x, y) {
+                    row_counts[i] += 1;
+                    col_counts[j] += 1;
+                    pairs.push((i, j));
+                }
+            }
+        }
+        if pairs
+            .iter()
+            .any(|&(i, j)| row_counts[i] == 1 && col_counts[j] == 1)
+        {
+            return AuthorVerdict::Agree;
+        }
+        if !pairs.is_empty() {
+            return AuthorVerdict::Grey;
+        }
+        let shared_surname = ca.iter().any(|x| cb.iter().any(|y| x.surname == y.surname));
+        if shared_surname {
+            AuthorVerdict::Grey
+        } else {
+            AuthorVerdict::Disagree
+        }
+    }
+
+    /// A deterministic corpus spanning the categories the D3 rewrite must
+    /// preserve exactly: permutations (multi-name lists reordered),
+    /// initials (bare + dotted + spaced + glued), surplus middle names,
+    /// duplicate names (repeated within one list), and ambiguity (two+
+    /// compatible candidates on one side). No `proptest`/`quickcheck`
+    /// dependency exists anywhere in this workspace; a full cross-product
+    /// over a rich, hand-built corpus is the deterministic equivalent —
+    /// reproducible, no new dependency, no flake surface.
+    fn author_verdict_corpus() -> Vec<Vec<String>> {
+        let mut corpus: Vec<Vec<String>> = Vec::new();
+
+        // Singletons: bare / initialed / accented / last-first / role-tag /
+        // garbage / empty forms across several distinct people.
+        let singles = [
+            "John Smith",
+            "Jane Smith",
+            "J. Smith",
+            "J.Smith",
+            "Frank Herbert",
+            "Ursula Le Guin",
+            "Jim Butcher",
+            "James Marsters",
+            "Robert Anson Heinlein",
+            "Robert A. Heinlein",
+            "Robert Heinlein",
+            "R. Heinlein",
+            "Jane Joanne Rowling",
+            "Joanne Kathleen Rowling",
+            "J.K. Rowling",
+            "JK Rowling",
+            "Rowling, J. K.",
+            "W.E.B. Griffin",
+            "W. E. B. Griffin",
+            "Gabriel García Márquez",
+            "Gabriel Garcia Marquez",
+            "Jim Butcher (Author)",
+            "James Marsters (Narrator)",
+            "",
+            "   ",
+            "!!! ...",
+        ];
+        for s in singles {
+            corpus.push(names(&[s]));
+        }
+
+        // Duplicates within one list (the same raw string repeated, and a
+        // canonicalization-equivalent repeat).
+        corpus.push(names(&["John Smith", "John Smith"]));
+        corpus.push(names(&["J.K. Rowling", "JK Rowling", "J.K. Rowling"]));
+        corpus.push(names(&[
+            "Robert Heinlein",
+            "Robert Heinlein",
+            "Robert Heinlein",
+        ]));
+
+        // Multi-name lists (extra credited names — non-evidence per the
+        // authority) in several orders (permutations), including
+        // ambiguity-inducing pairs (two names compatible with one initial).
+        let multi_bases: Vec<Vec<&str>> = vec![
+            vec!["Jim Butcher", "James Marsters"],
+            vec!["John Smith", "Jane Smith"],
+            vec!["John Smith", "Jane Smith", "J. Smith"],
+            vec!["Frank Herbert", "Ursula Le Guin", "Jim Butcher"],
+            vec!["Robert A. Heinlein", "Ursula Le Guin"],
+            vec!["J.K. Rowling", "Frank Herbert", "Jim Butcher"],
+            vec!["Jane Joanne Rowling", "J. Rowling"],
+        ];
+        for base in &multi_bases {
+            // All rotations of the base list — a permutation sweep without
+            // needing a combinatorics crate.
+            for rot in 0..base.len() {
+                let mut rotated = base.clone();
+                rotated.rotate_left(rot);
+                corpus.push(names(&rotated));
+            }
+            // Fully reversed order too.
+            let mut reversed = base.clone();
+            reversed.reverse();
+            corpus.push(names(&reversed));
+        }
+
+        corpus
+    }
+
+    #[test]
+    fn author_verdict_matches_the_naive_authority_across_the_generated_corpus() {
+        let corpus = author_verdict_corpus();
+        let mut checked = 0usize;
+        for a in &corpus {
+            for b in &corpus {
+                assert_eq!(
+                    author_verdict(a, b),
+                    naive_author_verdict(a, b),
+                    "author_verdict diverged from the naive authority for a={a:?} b={b:?}"
+                );
+                checked += 1;
+            }
+        }
+        // Sanity: the corpus is actually exercising a meaningful number of
+        // pairings, not silently degenerating to a handful of cases.
+        assert!(
+            checked >= 2500,
+            "expected a substantial cross-product corpus, only checked {checked} pairs"
+        );
+    }
+
+    #[test]
+    fn author_verdict_abstains_past_the_256_raw_name_cap_on_either_side() {
+        fn distinct_names(n: usize) -> Vec<String> {
+            (0..n).map(|i| format!("Author{i} Surname{i}")).collect()
+        }
+
+        // Exactly at the cap: normal behavior (no size-based abstain) — two
+        // disjoint 256-name rosters share no author, so the real verdict is
+        // Disagree, proving the cap did NOT fire here.
+        let a256 = distinct_names(256);
+        let b256 = distinct_names(1000); // offsets so no names collide with a256
+        let b256_disjoint: Vec<String> = b256[500..756].to_vec();
+        assert_eq!(a256.len(), 256);
+        assert_eq!(b256_disjoint.len(), 256);
+        assert_eq!(
+            author_verdict(&a256, &b256_disjoint),
+            AuthorVerdict::Disagree,
+            "256 raw names per side must NOT trigger the size-based Abstain"
+        );
+
+        // One side at 257 (one over the cap): must Abstain, regardless of
+        // the other side.
+        let a257 = distinct_names(257);
+        assert_eq!(
+            author_verdict(&a257, &names(&["Frank Herbert"])),
+            AuthorVerdict::Abstain,
+            "257 raw names on the LEFT side must Abstain"
+        );
+        assert_eq!(
+            author_verdict(&names(&["Frank Herbert"]), &a257),
+            AuthorVerdict::Abstain,
+            "257 raw names on the RIGHT side must Abstain"
+        );
+
+        // Both sides over cap.
+        let b257 = distinct_names(257);
+        assert_eq!(
+            author_verdict(&a257, &b257),
+            AuthorVerdict::Abstain,
+            "both sides over the cap must Abstain"
+        );
     }
 
     // --- language_verdict ---
