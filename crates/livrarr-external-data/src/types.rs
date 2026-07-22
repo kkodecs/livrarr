@@ -115,14 +115,25 @@ impl<T> ProviderOutcome<T> {
 /// Transport/provider failure for query functions that don't already have a
 /// typed error enum (OpenLibrary, Audnexus, Audible). Distinguishes a
 /// breaker-open pause (R-11: the enrichment-surface caller must map this to
-/// `WillRetryReason::CircuitOpen`, never burn retry budget on it) from any
+/// `WillRetryReason::CircuitOpen`, never burn retry budget on it), a genuine
+/// not-found, the two retryable-and-budget-consuming classes (`RateLimited`,
+/// `Transient` — Unit A, mirroring `google_books::map_http_error`), and any
 /// other opaque failure.
 #[derive(Debug, Clone)]
 pub enum ProviderFetchError {
     CircuitOpen(std::time::Duration),
-    /// The resource is genuinely absent upstream (HTTP 404) — a no-match,
+    /// The resource is genuinely absent upstream (HTTP 404/410) — a no-match,
     /// never a transient failure. Callers may fall through to weaker tiers.
     NotFound,
+    /// HTTP 429 — a genuine rate-limit signal from the provider itself (not a
+    /// local queue/circuit pause). This IS a real provider verdict, so unlike
+    /// `CircuitOpen` it consumes one retry-budget attempt; callers map it to
+    /// `WillRetry { RateLimit }` (6h + jitter, matching Google Books).
+    RateLimited,
+    /// HTTP 5xx, or a transport-level timeout/connection/DNS/TLS failure.
+    /// Retryable and budget-consuming; callers map it to
+    /// `WillRetry { ServerError }` (5 min).
+    Transient,
     Other(String),
 }
 
@@ -131,6 +142,8 @@ impl std::fmt::Display for ProviderFetchError {
         match self {
             Self::CircuitOpen(d) => write!(f, "circuit open, retry after {d:?}"),
             Self::NotFound => write!(f, "not found"),
+            Self::RateLimited => write!(f, "rate limited"),
+            Self::Transient => write!(f, "transient failure"),
             Self::Other(s) => write!(f, "{s}"),
         }
     }

@@ -1,6 +1,12 @@
 #![allow(dead_code, unused_imports)]
 //! Behavioral tests for english-work-lifecycle `open_library` directives.
 
+use livrarr_behavioral::stubs::StubHttpFetcher;
+use livrarr_domain::services::FetchError;
+use livrarr_domain::RequestPriority;
+use livrarr_external_data::openlibrary::{isbn_lookup, query_ol_detail};
+use livrarr_external_data::types::ProviderFetchError;
+
 /// REQ-IDs: REQ-003, REQ-010
 /// Directive: 200 normal: OlResult { resolved_key=ol_key, redirected_from=None }.
 #[tokio::test]
@@ -28,10 +34,25 @@ async fn test_ewl_open_library_fetch_work_payload_location_works_ol2w_same_301_c
 
 /// REQ-IDs: REQ-003, REQ-010
 /// Directive: Two consecutive 429s with Retry-After 5: sleeps 5s, retries once, second 429 → WillRetry(RateLimited).
+///
+/// Unit A scope note: the approved Unit A design fixes OL's 429 handling to
+/// a fixed 6h+jitter backoff (mirroring `google_books::map_http_error`), not
+/// a `Retry-After`-driven sleep-and-retry loop — no such loop exists at any
+/// layer of this stack (verified: `HttpFetcherImpl::do_fetch` intercepts a
+/// 429 and returns immediately). This test verifies the part that IS Unit
+/// A's invariant: `query_ol_detail` ("fetch work") must surface a live 429 as
+/// a retryable `ProviderFetchError::RateLimited`, not swallow it, making
+/// exactly one HTTP call.
 #[tokio::test]
-#[ignore = "not yet implemented"]
 async fn test_ewl_open_library_fetch_work_consecutive_429s_retry_after_5_sleeps_5s_retries_once() {
-    todo!()
+    let fetcher = StubHttpFetcher::with_error(FetchError::RateLimited);
+
+    let err = query_ol_detail(&fetcher, "OL1W", RequestPriority::Normal, None, None)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ProviderFetchError::RateLimited));
+    assert_eq!(fetcher.call_count(), 1);
 }
 
 /// REQ-IDs: REQ-003, REQ-010
@@ -97,9 +118,14 @@ async fn test_ewl_open_library_isbn_to_work_mock_ol_200_no_works_field() {
 /// REQ-IDs: REQ-003
 /// Directive: Mock OL two 429s: returns Err(RateLimited).
 #[tokio::test]
-#[ignore = "not yet implemented"]
 async fn test_ewl_open_library_isbn_to_work_mock_ol_429s_err_ratelimited() {
-    todo!()
+    let fetcher = StubHttpFetcher::with_error(FetchError::RateLimited);
+
+    let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ProviderFetchError::RateLimited));
 }
 
 /// REQ-IDs: REQ-003

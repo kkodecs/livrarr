@@ -20,7 +20,9 @@ use livrarr_domain::services::{
     CallOperation, CallOutcomeClass, FetchRequest, HttpFetcher, HttpMethod, ProviderCallRecord,
     ProviderCallSink, RateBucket, UserAgentProfile,
 };
-use livrarr_domain::{AnchorQuery, MetadataProvider, RequestPriority, WillRetryReason, Work};
+use livrarr_domain::{
+    AnchorQuery, MetadataProvider, PermanentFailureReason, RequestPriority, WillRetryReason, Work,
+};
 use livrarr_http::breaker::BreakerSignal;
 use livrarr_http::outbound_queue;
 use livrarr_http::HttpClient;
@@ -217,6 +219,22 @@ fn circuit_open_outcome(retry_after: Duration) -> ProviderOutcome<NormalizedWork
     }
 }
 
+/// Common `WillRetry { RateLimit }` mapping (Unit A): a live 429 is a real
+/// provider verdict (unlike `CircuitOpen`), so it consumes one retry-budget
+/// attempt. Backoff mirrors `google_books::map_http_error`'s quota-exhaustion
+/// formula exactly — 6h + up to 3h jitter — so OL and Audnexus back off on
+/// the same schedule as Google Books rather than pounding a rate-limited
+/// provider every few minutes.
+fn rate_limit_outcome() -> ProviderOutcome<NormalizedWorkDetail> {
+    let jitter_secs = (Utc::now().timestamp_subsec_nanos() % 10_800) as i64;
+    ProviderOutcome::WillRetry {
+        reason: WillRetryReason::RateLimit,
+        next_attempt_at: Utc::now()
+            + chrono::Duration::hours(6)
+            + chrono::Duration::seconds(jitter_secs),
+    }
+}
+
 /// REQ-001 outcome mapping: ProviderOutcome (the control-flow vocabulary) →
 /// CallOutcomeClass (the reporting vocabulary), explicit per variant.
 /// Conflict never originates from a client fetch; it maps to Error
@@ -410,13 +428,7 @@ impl AudnexusClient {
         match result {
             Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
             Ok(None) => ProviderOutcome::NotFound,
-            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
-                circuit_open_outcome(retry_after)
-            }
-            Err(_) => ProviderOutcome::WillRetry {
-                reason: livrarr_domain::WillRetryReason::ServerError,
-                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
-            },
+            Err(e) => audnexus_error_outcome(&e, self.retry_backoff_secs),
         }
     }
 
@@ -431,14 +443,35 @@ impl AudnexusClient {
         {
             Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
             Ok(None) => ProviderOutcome::NotFound,
-            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
-                circuit_open_outcome(retry_after)
-            }
-            Err(_) => ProviderOutcome::WillRetry {
-                reason: livrarr_domain::WillRetryReason::ServerError,
-                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
-            },
+            Err(e) => audnexus_error_outcome(&e, self.retry_backoff_secs),
         }
+    }
+}
+
+/// One classification of a `ProviderFetchError` into the outcome any
+/// Audnexus caller — anchor (`fetch_by_asin`) or seeded (`fetch`) — must
+/// report (Unit A). The single place this decision is made so the two entry
+/// paths cannot drift. Audnexus is keyless: a 403 has no local credential to
+/// fix, so — like any other unexpected 4xx — it is an explicit
+/// `PermanentFailure`, never `NotConfigured` (which would be semantically
+/// false for a provider with no key to check).
+fn audnexus_error_outcome(
+    err: &crate::types::ProviderFetchError,
+    retry_backoff_secs: i64,
+) -> ProviderOutcome<NormalizedWorkDetail> {
+    match err {
+        crate::types::ProviderFetchError::CircuitOpen(retry_after) => {
+            circuit_open_outcome(*retry_after)
+        }
+        crate::types::ProviderFetchError::NotFound => ProviderOutcome::NotFound,
+        crate::types::ProviderFetchError::RateLimited => rate_limit_outcome(),
+        crate::types::ProviderFetchError::Transient => ProviderOutcome::WillRetry {
+            reason: WillRetryReason::ServerError,
+            next_attempt_at: Utc::now() + chrono::Duration::seconds(retry_backoff_secs),
+        },
+        crate::types::ProviderFetchError::Other(_) => ProviderOutcome::PermanentFailure {
+            reason: PermanentFailureReason::Unsupported,
+        },
     }
 }
 
@@ -766,6 +799,34 @@ impl HardcoverClient {
     }
 }
 
+/// One classification of a `ProviderFetchError` into the outcome any
+/// OpenLibrary caller — anchor (`fetch_by_anchor_query`/`detail_by_key`) or
+/// seeded (`fetch`) — must report (Unit A). The single place this decision
+/// is made so the several entry paths built on `isbn_lookup`/`query_ol_detail`
+/// cannot drift. OL is keyless: a 403 has no local credential to fix, so —
+/// like any other unexpected 4xx — it is an explicit `PermanentFailure`,
+/// never `NotConfigured` (which would be semantically false for a provider
+/// with no key to check).
+fn ol_error_outcome(
+    err: &crate::types::ProviderFetchError,
+    retry_backoff_secs: i64,
+) -> ProviderOutcome<NormalizedWorkDetail> {
+    match err {
+        crate::types::ProviderFetchError::CircuitOpen(retry_after) => {
+            circuit_open_outcome(*retry_after)
+        }
+        crate::types::ProviderFetchError::NotFound => ProviderOutcome::NotFound,
+        crate::types::ProviderFetchError::RateLimited => rate_limit_outcome(),
+        crate::types::ProviderFetchError::Transient => ProviderOutcome::WillRetry {
+            reason: WillRetryReason::ServerError,
+            next_attempt_at: Utc::now() + chrono::Duration::seconds(retry_backoff_secs),
+        },
+        crate::types::ProviderFetchError::Other(_) => ProviderOutcome::PermanentFailure {
+            reason: PermanentFailureReason::Unsupported,
+        },
+    }
+}
+
 /// Real-network OpenLibrary adapter. Wraps
 /// `crate::openlibrary::query_ol_detail`. OL detail fetch is keyed on
 /// `work.ol_key`; works without an `ol_key` are reported as `NotFound` without
@@ -811,26 +872,19 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                 match self.isbn_lookup(&normalized, priority).await {
                     Ok(Some(ol_work_key)) => self.detail_by_key(&ol_work_key, priority).await,
                     Ok(None) => ProviderOutcome::NotFound,
-                    Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
-                        circuit_open_outcome(retry_after)
-                    }
-                    Err(_) => ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    },
+                    Err(e) => ol_error_outcome(&e, self.retry_backoff_secs),
                 }
             }
             _ => ProviderOutcome::NotFound,
         }
     }
 
-    /// OL detail fetch by work key. `query_ol_detail`'s error is mostly opaque
-    /// (parse and 4xx/5xx are indistinguishable), so a miss maps to NotFound —
-    /// mirroring the seeded fetch's tier behavior, never a text search. A
-    /// breaker-open pause is the one error kind that must NOT collapse into
-    /// NotFound (R-11: NotFound is phase-2 terminal — persisting it would turn
-    /// a temporary pause into a permanent miss).
+    /// OL detail fetch by work key. A genuine miss (HTTP 404/410) maps to
+    /// NotFound — mirroring the seeded fetch's tier behavior, never a text
+    /// search. A breaker-open pause, a live 429/5xx, or any other opaque
+    /// failure are NOT collapsed into NotFound (R-11 / Unit A: NotFound is
+    /// phase-2 terminal — persisting it would turn a temporary pause or a
+    /// retryable rate-limit into a permanent miss).
     async fn detail_by_key(
         &self,
         ol_key: &str,
@@ -838,12 +892,9 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         match query_ol_detail(&self.fetcher, ol_key, priority, None, None).await {
             Ok(detail) => ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail))),
-            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
-                circuit_open_outcome(retry_after)
-            }
             Err(e) => {
                 tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail miss");
-                ProviderOutcome::NotFound
+                ol_error_outcome(&e, self.retry_backoff_secs)
             }
         }
     }
@@ -875,35 +926,21 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                             payload.isbn_13 = Some(normalized.clone());
                             return ProviderOutcome::Success(Box::new(payload));
                         }
-                        Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
-                            return circuit_open_outcome(retry_after);
-                        }
                         Err(crate::types::ProviderFetchError::NotFound) => {
                             tracing::debug!(isbn = %normalized, "OL ISBN detail: work absent");
                         }
                         Err(e) => {
                             tracing::debug!(isbn = %normalized, error = %e, "OL ISBN detail failed");
-                            return ProviderOutcome::WillRetry {
-                                reason: livrarr_domain::WillRetryReason::ServerError,
-                                next_attempt_at: Utc::now()
-                                    + chrono::Duration::seconds(self.retry_backoff_secs),
-                            };
+                            return ol_error_outcome(&e, self.retry_backoff_secs);
                         }
                     }
                 }
                 Ok(None) => {
                     tracing::debug!(isbn = %normalized, "OL ISBN lookup: no work found");
                 }
-                Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
-                    return circuit_open_outcome(retry_after);
-                }
                 Err(e) => {
                     tracing::debug!(isbn = %normalized, error = %e, "OL ISBN lookup failed");
-                    return ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    };
+                    return ol_error_outcome(&e, self.retry_backoff_secs);
                 }
             }
         }
@@ -923,19 +960,12 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                 Ok(detail) => {
                     return ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail)));
                 }
-                Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
-                    return circuit_open_outcome(retry_after);
-                }
                 Err(crate::types::ProviderFetchError::NotFound) => {
                     tracing::debug!(ol_key = %ol_key, "OL key detail: work absent");
                 }
                 Err(e) => {
                     tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail failed");
-                    return ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    };
+                    return ol_error_outcome(&e, self.retry_backoff_secs);
                 }
             }
         }
@@ -1305,6 +1335,347 @@ mod openlibrary_qw2_pins {
             matches!(outcome, ProviderOutcome::NotFound),
             "grey author hit must abstain, got {outcome:?}"
         );
+    }
+}
+
+/// Unit A: a live 429/5xx/403/other-4xx must be classified identically no
+/// matter which entry path reached it. `ol_error_outcome` /
+/// `audnexus_error_outcome` are the single shared helpers both the anchor
+/// surface (`fetch_by_anchor_query`/`detail_by_key`/`fetch_by_asin`) and the
+/// seeded surface (`fetch`) route through, so this module proves the
+/// classification once per provider and — for OpenLibrary, where the
+/// generic-fetcher client makes it possible — proves it again end-to-end
+/// through real HTTP-status mocking on every tier.
+#[cfg(test)]
+mod unit_a_retry_classification {
+    use super::*;
+    use crate::test_support::RecordingHttpFetcher;
+    use crate::types::ProviderFetchError;
+    use livrarr_domain::services::FetchError;
+
+    fn ol_work(isbn_13: Option<&str>, ol_key: Option<&str>) -> Work {
+        Work {
+            id: 1,
+            user_id: 1,
+            title: "Matrix Work".to_string(),
+            author_name: "Matrix Author".to_string(),
+            isbn_13: isbn_13.map(str::to_string),
+            ol_key: ol_key.map(str::to_string),
+            ..Work::default()
+        }
+    }
+
+    fn assert_rate_limit(outcome: &ProviderOutcome<NormalizedWorkDetail>, ctx: &str) {
+        assert!(
+            matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::RateLimit,
+                    ..
+                }
+            ),
+            "{ctx}: expected WillRetry(RateLimit), got {outcome:?}"
+        );
+    }
+
+    fn assert_transient(outcome: &ProviderOutcome<NormalizedWorkDetail>, ctx: &str) {
+        assert!(
+            matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::ServerError,
+                    ..
+                }
+            ),
+            "{ctx}: expected WillRetry(ServerError), got {outcome:?}"
+        );
+    }
+
+    fn assert_permanent(outcome: &ProviderOutcome<NormalizedWorkDetail>, ctx: &str) {
+        assert!(
+            matches!(outcome, ProviderOutcome::PermanentFailure { .. }),
+            "{ctx}: expected PermanentFailure, got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, ProviderOutcome::NotConfigured),
+            "{ctx}: a keyless provider must never report NotConfigured, got {outcome:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // OpenLibrary: end-to-end HTTP-status mocking across all four entry
+    // points (OpenLibraryClient is generic over HttpFetcher, so it can be
+    // driven directly with the crate's own test double).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn openlibrary_429_matches_across_anchor_and_seeded() {
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::OlKey("OL1W".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_rate_limit(&outcome, "OL anchor/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9781234567890".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_rate_limit(&outcome, "OL anchor/isbn13");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(&ol_work(None, Some("OL1W")), RequestPriority::Normal)
+            .await;
+        assert_rate_limit(&outcome, "OL seeded/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(
+                &ol_work(Some("9781234567890"), None),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_rate_limit(&outcome, "OL seeded/isbn13");
+    }
+
+    #[tokio::test]
+    async fn openlibrary_5xx_matches_across_anchor_and_seeded() {
+        let fetcher = RecordingHttpFetcher::with_ok(503, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::OlKey("OL1W".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_transient(&outcome, "OL anchor/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_ok(503, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9781234567890".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_transient(&outcome, "OL anchor/isbn13");
+
+        let fetcher = RecordingHttpFetcher::with_ok(503, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(&ol_work(None, Some("OL1W")), RequestPriority::Normal)
+            .await;
+        assert_transient(&outcome, "OL seeded/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_ok(503, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(
+                &ol_work(Some("9781234567890"), None),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_transient(&outcome, "OL seeded/isbn13");
+    }
+
+    #[tokio::test]
+    async fn openlibrary_403_matches_across_anchor_and_seeded() {
+        let fetcher = RecordingHttpFetcher::with_ok(403, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::OlKey("OL1W".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_permanent(&outcome, "OL anchor/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_ok(403, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9781234567890".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_permanent(&outcome, "OL anchor/isbn13");
+
+        let fetcher = RecordingHttpFetcher::with_ok(403, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(&ol_work(None, Some("OL1W")), RequestPriority::Normal)
+            .await;
+        assert_permanent(&outcome, "OL seeded/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_ok(403, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(
+                &ol_work(Some("9781234567890"), None),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_permanent(&outcome, "OL seeded/isbn13");
+    }
+
+    #[tokio::test]
+    async fn openlibrary_other_4xx_matches_across_anchor_and_seeded() {
+        let fetcher = RecordingHttpFetcher::with_ok(400, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::OlKey("OL1W".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_permanent(&outcome, "OL anchor/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_ok(400, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9781234567890".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_permanent(&outcome, "OL anchor/isbn13");
+
+        let fetcher = RecordingHttpFetcher::with_ok(400, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(&ol_work(None, Some("OL1W")), RequestPriority::Normal)
+            .await;
+        assert_permanent(&outcome, "OL seeded/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_ok(400, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(
+                &ol_work(Some("9781234567890"), None),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_permanent(&outcome, "OL seeded/isbn13");
+    }
+
+    // -----------------------------------------------------------------
+    // Audnexus: `AudnexusClient` is hard-wired to the concrete
+    // `HttpFetcherImpl` (not generic over `HttpFetcher`), so it cannot be
+    // driven directly with a mock fetcher. Instead this proves the same
+    // invariant in two parts: (1) `cached_fetch`'s HTTP-status classification
+    // is already covered end-to-end in `audnexus.rs`'s own tests via the
+    // generic `query_audnexus`/`query_audnexus_by_asin` free functions; (2)
+    // `audnexus_error_outcome` — the ONE function both `AudnexusClient::fetch`
+    // (seeded) and `fetch_by_asin` (anchor) delegate their `Err` arm to,
+    // verbatim, with no other logic in between — is exercised here directly
+    // against every `ProviderFetchError` variant. Together these prove the
+    // anchor and seeded paths cannot classify the same failure differently,
+    // without requiring `AudnexusClient` itself to become HTTP-mockable.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn audnexus_error_outcome_classifies_every_variant() {
+        assert_rate_limit(
+            &audnexus_error_outcome(&ProviderFetchError::RateLimited, 300),
+            "Audnexus RateLimited",
+        );
+        assert_transient(
+            &audnexus_error_outcome(&ProviderFetchError::Transient, 300),
+            "Audnexus Transient",
+        );
+        assert_permanent(
+            &audnexus_error_outcome(&ProviderFetchError::Other("HTTP 403".to_string()), 300),
+            "Audnexus Other(403)",
+        );
+        assert_permanent(
+            &audnexus_error_outcome(&ProviderFetchError::Other("HTTP 400".to_string()), 300),
+            "Audnexus Other(400)",
+        );
+        assert!(matches!(
+            audnexus_error_outcome(&ProviderFetchError::NotFound, 300),
+            ProviderOutcome::NotFound
+        ));
+        assert!(matches!(
+            audnexus_error_outcome(
+                &ProviderFetchError::CircuitOpen(Duration::from_secs(17)),
+                300
+            ),
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::CircuitOpen,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ol_error_outcome_classifies_every_variant() {
+        assert_rate_limit(
+            &ol_error_outcome(&ProviderFetchError::RateLimited, 300),
+            "OL RateLimited",
+        );
+        assert_transient(
+            &ol_error_outcome(&ProviderFetchError::Transient, 300),
+            "OL Transient",
+        );
+        assert_permanent(
+            &ol_error_outcome(&ProviderFetchError::Other("HTTP 403".to_string()), 300),
+            "OL Other(403)",
+        );
+        assert_permanent(
+            &ol_error_outcome(&ProviderFetchError::Other("HTTP 400".to_string()), 300),
+            "OL Other(400)",
+        );
+        assert!(matches!(
+            ol_error_outcome(&ProviderFetchError::NotFound, 300),
+            ProviderOutcome::NotFound
+        ));
+        assert!(matches!(
+            ol_error_outcome(
+                &ProviderFetchError::CircuitOpen(Duration::from_secs(17)),
+                300
+            ),
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::CircuitOpen,
+                ..
+            }
+        ));
+    }
+
+    /// Consumes exactly one retry-budget attempt (Unit A / budget-exempt
+    /// set): `apply_budget_rules` (livrarr-enrichment) exempts only
+    /// `CircuitOpen` from attempt-counting — every other `WillRetry` reason,
+    /// including the new `RateLimit`/`ServerError` paths this unit adds,
+    /// falls through its generic arm and IS counted. This guardrails that
+    /// invariant at the type level: neither helper ever emits `RateLimit` or
+    /// `ServerError` bundled with `CircuitOpen`'s exemption semantics.
+    #[test]
+    fn rate_limit_and_transient_are_never_circuit_open() {
+        let rl = rate_limit_outcome();
+        assert!(!matches!(
+            rl,
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::CircuitOpen,
+                ..
+            }
+        ));
+        let transient = ol_error_outcome(&ProviderFetchError::Transient, 300);
+        assert!(!matches!(
+            transient,
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::CircuitOpen,
+                ..
+            }
+        ));
     }
 }
 

@@ -13,6 +13,18 @@ use livrarr_http::outbound_queue;
 
 use crate::types::ProviderFetchError;
 
+/// Classify a non-2xx, non-404/410 OpenLibrary response status (Unit A). The
+/// single place this decision is made, shared by `isbn_lookup` and
+/// `query_ol_detail`, so the anchor (`detail_by_key`) and seeded entry paths
+/// built on top of them cannot classify the same status differently.
+fn classify_ol_error(status: u16) -> ProviderFetchError {
+    match status {
+        429 => ProviderFetchError::RateLimited,
+        500..=599 => ProviderFetchError::Transient,
+        _ => ProviderFetchError::Other(format!("HTTP {status}")),
+    }
+}
+
 /// Parsed subset of an OpenLibrary work detail + first edition with ISBN.
 #[derive(Debug, Clone)]
 pub struct OlDetailResult {
@@ -49,21 +61,30 @@ pub async fn query_ol_detail<F: HttpFetcher>(
     };
     let resp = match fetcher.fetch(req).await {
         Ok(r) => r,
+        Err(FetchError::RateLimited) => return Err(ProviderFetchError::RateLimited),
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(ProviderFetchError::CircuitOpen(retry_after));
         }
-        Err(e) => return Err(ProviderFetchError::Other(format!("request failed: {e}"))),
+        // A transport layer that represents an HTTP status as a distinct
+        // error (rather than a normal response) still carries a real status
+        // — classify it exactly like one, so a wrapped 429/5xx doesn't
+        // silently outrank the un-wrapped case.
+        Err(FetchError::HttpError { status, .. }) => return Err(classify_ol_error(status)),
+        Err(e) => {
+            tracing::debug!(ol_key = %ol_key, error = %e, "OL work detail: transport failure");
+            return Err(ProviderFetchError::Transient);
+        }
     };
 
     if !(200..300).contains(&resp.status) {
-        if resp.status == 404 {
+        if resp.status == 404 || resp.status == 410 {
             return Err(ProviderFetchError::NotFound);
         }
         if (500..600).contains(&resp.status) {
             outbound_queue::shared()
                 .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
         }
-        return Err(ProviderFetchError::Other(format!("HTTP {}", resp.status)));
+        return Err(classify_ol_error(resp.status));
     }
 
     let data: serde_json::Value = serde_json::from_slice(&resp.body)
@@ -188,13 +209,14 @@ pub async fn query_ol_detail<F: HttpFetcher>(
 }
 
 /// Resolve an ISBN-13 to its OpenLibrary work key via the ISBN lookup
-/// endpoint. Any non-success status maps to `Ok(None)` ("no work found"),
-/// never a hard error — including a fetcher-intercepted HTTP 429
-/// (`FetchError::RateLimited`), which the pre-fetcher raw-`HttpClient` code
-/// also folded into the same "no work found" outcome (it only ever checked
-/// `resp.status().is_success()`, never treated any particular status as
-/// retry-worthy). Only a transport-level failure (network, timeout, body)
-/// is a hard `Err`.
+/// endpoint. A genuine "no work found" (HTTP 404/410) maps to `Ok(None)` so
+/// callers may fall through to a weaker tier. A live 429 or 5xx is retryable,
+/// not a permanent miss (Unit A): both surface as a typed `Err` —
+/// `RateLimited` / `Transient` — so the caller can schedule a real retry
+/// instead of silently dropping the ISBN. This includes a fetcher-intercepted
+/// HTTP 429 (`FetchError::RateLimited`), which the pre-Unit-A code folded
+/// into the same "no work found" outcome. Any other transport-level failure
+/// (network, timeout, body) is a hard `Err` too.
 pub async fn isbn_lookup<F: HttpFetcher>(
     fetcher: &F,
     isbn: &str,
@@ -215,23 +237,26 @@ pub async fn isbn_lookup<F: HttpFetcher>(
     };
     let resp = match fetcher.fetch(req).await {
         Ok(r) => r,
-        Err(FetchError::RateLimited) => return Ok(None),
+        Err(FetchError::RateLimited) => return Err(ProviderFetchError::RateLimited),
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(ProviderFetchError::CircuitOpen(retry_after));
         }
+        Err(FetchError::HttpError { status, .. }) => return Err(classify_ol_error(status)),
         Err(e) => {
-            return Err(ProviderFetchError::Other(format!(
-                "OL ISBN fetch failed: {e}"
-            )))
+            tracing::debug!(isbn = isbn, error = %e, "OL ISBN fetch: transport failure");
+            return Err(ProviderFetchError::Transient);
         }
     };
 
     if !(200..300).contains(&resp.status) {
+        if resp.status == 404 || resp.status == 410 {
+            return Ok(None);
+        }
         if (500..600).contains(&resp.status) {
             outbound_queue::shared()
                 .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
         }
-        return Ok(None);
+        return Err(classify_ol_error(resp.status));
     }
 
     let data: serde_json::Value = serde_json::from_slice(&resp.body)
@@ -461,7 +486,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_ol_detail_maps_fetch_error_to_error_string() {
+    async fn query_ol_detail_maps_timeout_to_transient() {
+        // Unit A: a transport-level timeout is retryable (Transient), not an
+        // opaque permanent failure.
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             livrarr_domain::services::FetchError::Timeout(std::time::Duration::from_secs(30)),
         );
@@ -470,7 +497,144 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("request failed"));
+        assert!(matches!(err, ProviderFetchError::Transient));
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_maps_wrapped_http_status_to_same_classification_as_raw_status() {
+        // Some transport layers represent an HTTP status as a distinct
+        // `FetchError::HttpError` rather than a normal response. A 429/5xx
+        // wrapped this way must classify identically to the un-wrapped case.
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::HttpError {
+                status: 503,
+                classification: "server_error".to_string(),
+            },
+        );
+
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Transient));
+    }
+
+    // -------------------------------------------------------------------
+    // Unit A: a live 429/5xx on the work-detail call must be retryable, not
+    // folded into an opaque `Other` (which the anchor path `detail_by_key`
+    // used to collapse straight into a permanent `NotFound`).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn query_ol_detail_maps_fetcher_rate_limited_to_rate_limited() {
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_maps_http_429_status_to_rate_limited() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(429, vec![]);
+
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_maps_http_5xx_to_transient() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(503, vec![]);
+
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Transient));
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_maps_http_403_to_other() {
+        // OL is keyless: a 403 has no credential to fix. It is NOT
+        // `NotFound` (unchanged-behavior tests cover that) and the crate
+        // does not construct `NotConfigured` for OL at all — the caller
+        // (`provider_client::ol_error_outcome`) turns this into an explicit
+        // `PermanentFailure`, never a silent "not configured."
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(403, vec![]);
+
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_maps_other_4xx_to_other() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(400, vec![]);
+
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_maps_http_410_to_not_found() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(410, vec![]);
+
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::NotFound));
+    }
+
+    #[test]
+    fn classify_ol_error_maps_429_to_rate_limited() {
+        assert!(matches!(
+            classify_ol_error(429),
+            ProviderFetchError::RateLimited
+        ));
+    }
+
+    #[test]
+    fn classify_ol_error_maps_5xx_to_transient() {
+        assert!(matches!(
+            classify_ol_error(500),
+            ProviderFetchError::Transient
+        ));
+        assert!(matches!(
+            classify_ol_error(503),
+            ProviderFetchError::Transient
+        ));
+        assert!(matches!(
+            classify_ol_error(599),
+            ProviderFetchError::Transient
+        ));
+    }
+
+    #[test]
+    fn classify_ol_error_maps_403_and_other_4xx_to_other() {
+        assert!(matches!(
+            classify_ol_error(403),
+            ProviderFetchError::Other(_)
+        ));
+        assert!(matches!(
+            classify_ol_error(400),
+            ProviderFetchError::Other(_)
+        ));
+        assert!(matches!(
+            classify_ol_error(451),
+            ProviderFetchError::Other(_)
+        ));
     }
 
     // -------------------------------------------------------------------
@@ -640,16 +804,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn isbn_lookup_maps_fetcher_rate_limited_to_ok_none_not_error() {
-        // The pre-fetcher code only ever checked `resp.status().is_success()`
-        // — a 429 fell into the same "no work found" bucket as any other
-        // non-success status, never a hard error. The fetcher now intercepts
-        // 429 as a transport-level `FetchError::RateLimited` before a status
-        // is ever seen; this must still land on `Ok(None)`, not `Err`
-        // (an `Err` here would incorrectly surface as `WillRetry` one layer
-        // up, in `fetch_by_anchor_query`).
-        let fetcher =
-            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+    async fn isbn_lookup_maps_http_410_to_ok_none() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(410, vec![]);
 
         let key = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
             .await
@@ -658,8 +814,78 @@ mod tests {
         assert_eq!(key, None);
     }
 
+    // -------------------------------------------------------------------
+    // Unit A: a live 429/5xx must be retryable, not folded into "no work
+    // found" (the bug: `isbn_lookup` used to fold a 429 into `Ok(None)`,
+    // which `fetch_by_anchor_query`'s `Isbn13` arm reads as a genuine miss
+    // — permanently dropping the book's metadata on a transient rate-limit).
+    // -------------------------------------------------------------------
+
     #[tokio::test]
-    async fn isbn_lookup_maps_network_error_to_err() {
+    async fn isbn_lookup_maps_fetcher_rate_limited_to_err_rate_limited() {
+        // The fetcher intercepts HTTP 429 as a transport-level
+        // `FetchError::RateLimited` before a status is ever seen. This must
+        // now surface as `Err(RateLimited)` so the caller can schedule a
+        // real retry (`WillRetry { RateLimit }`) instead of treating a live
+        // rate-limit as a permanent "no work found."
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+
+        let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn isbn_lookup_maps_http_429_status_to_err_rate_limited() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(429, vec![]);
+
+        let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn isbn_lookup_maps_http_5xx_to_err_transient() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
+
+        let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Transient));
+    }
+
+    #[tokio::test]
+    async fn isbn_lookup_maps_http_403_to_err_other() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(403, vec![]);
+
+        let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn isbn_lookup_maps_other_4xx_to_err_other() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(400, vec![]);
+
+        let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn isbn_lookup_maps_network_error_to_transient() {
+        // Unit A: a connection failure is retryable (Transient), not an
+        // opaque permanent failure.
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             FetchError::Connection("refused".to_string()),
         );
@@ -668,6 +894,6 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("OL ISBN fetch failed"));
+        assert!(matches!(err, ProviderFetchError::Transient));
     }
 }

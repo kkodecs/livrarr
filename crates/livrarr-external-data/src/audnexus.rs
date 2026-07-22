@@ -14,6 +14,20 @@ use tokio::sync::Mutex;
 
 use crate::types::ProviderFetchError;
 
+/// Classify a non-2xx, non-404/410 Audnexus response status (Unit A). The
+/// single place this decision is made, mirroring
+/// `openlibrary::classify_ol_error`, so `cached_fetch`'s one HTTP call site
+/// stays the sole authority both `query_audnexus`/`query_audnexus_by_asin`
+/// (and, one layer up, the anchor and seeded `AudnexusClient` surfaces) build
+/// on.
+fn classify_audnexus_error(status: u16) -> ProviderFetchError {
+    match status {
+        429 => ProviderFetchError::RateLimited,
+        500..=599 => ProviderFetchError::Transient,
+        _ => ProviderFetchError::Other(format!("HTTP {status}")),
+    }
+}
+
 const CACHE_CAP: usize = 512;
 
 struct CachedResponse {
@@ -117,10 +131,11 @@ pub async fn query_audnexus_by_asin<F: HttpFetcher>(
 /// Fetch `url` with `If-Modified-Since` conditional-request caching (R-13):
 /// a prior response's `Last-Modified` header is replayed on the next request
 /// for the same URL; a `304` response is served from the cache without
-/// re-parsing the (empty) body. Any non-success status — including a
-/// fetcher-intercepted HTTP 429 (`FetchError::RateLimited`) — is a soft
-/// `Ok(None)` miss, matching the pre-fetcher code (it only ever checked
-/// `resp.status().is_success()`, never treated any status as retry-worthy).
+/// re-parsing the (empty) body. A genuine "not found" (HTTP 404/410) is a
+/// soft `Ok(None)` miss. A live 429 or 5xx is retryable, not a permanent miss
+/// (Unit A): both surface as a typed `Err` — `RateLimited` / `Transient` —
+/// including a fetcher-intercepted HTTP 429 (`FetchError::RateLimited`),
+/// which the pre-Unit-A code folded into the same "no result" `Ok(None)`.
 async fn cached_fetch<F: HttpFetcher>(
     fetcher: &F,
     url: &str,
@@ -152,11 +167,18 @@ async fn cached_fetch<F: HttpFetcher>(
 
     let resp = match fetcher.fetch(req).await {
         Ok(r) => r,
-        Err(FetchError::RateLimited) => return Ok(None),
+        Err(FetchError::RateLimited) => return Err(ProviderFetchError::RateLimited),
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(ProviderFetchError::CircuitOpen(retry_after));
         }
-        Err(e) => return Err(ProviderFetchError::Other(format!("request failed: {e}"))),
+        // A transport layer that represents an HTTP status as a distinct
+        // error (rather than a normal response) still carries a real status
+        // — classify it exactly like one.
+        Err(FetchError::HttpError { status, .. }) => return Err(classify_audnexus_error(status)),
+        Err(e) => {
+            tracing::debug!(%url, error = %e, "audnexus fetch: transport failure");
+            return Err(ProviderFetchError::Transient);
+        }
     };
 
     if resp.status == 304 {
@@ -169,10 +191,13 @@ async fn cached_fetch<F: HttpFetcher>(
     }
 
     if !(200..300).contains(&resp.status) {
+        if resp.status == 404 || resp.status == 410 {
+            return Ok(None);
+        }
         if (500..600).contains(&resp.status) {
             outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Failure);
         }
-        return Ok(None);
+        return Err(classify_audnexus_error(resp.status));
     }
 
     // HTTP header names are case-insensitive; the fetcher preserves whatever
@@ -395,20 +420,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_audnexus_by_asin_maps_fetcher_rate_limited_to_ok_none_not_error() {
-        // The pre-fetcher code only checked `resp.status().is_success()` — a
-        // 429 fell into the same "no result" bucket as any other
-        // non-success status, never a hard error. The fetcher now
-        // intercepts 429 as a transport-level `FetchError::RateLimited`
-        // before a status is ever seen; this must still land on `Ok(None)`.
-        let fetcher =
-            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+    async fn query_audnexus_by_asin_maps_http_410_to_ok_none() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(410, vec![]);
         let cache = AudnexusCache::new();
 
         let result = query_audnexus_by_asin(
             &fetcher,
             "https://api.audnex.us",
-            "B0RATE",
+            "B0GONE",
             &cache,
             RequestPriority::Normal,
         )
@@ -418,8 +437,148 @@ mod tests {
         assert!(result.is_none());
     }
 
+    // -------------------------------------------------------------------
+    // Unit A: a live 429/5xx must be retryable, not folded into "no result"
+    // (the bug: `cached_fetch` used to fold a 429 into `Ok(None)`, which both
+    // `AudnexusClient::fetch` and `fetch_by_asin` read as a genuine miss —
+    // permanently dropping the book's metadata on a transient rate-limit).
+    // -------------------------------------------------------------------
+
     #[tokio::test]
-    async fn query_audnexus_by_asin_maps_network_error_to_err() {
+    async fn query_audnexus_by_asin_maps_fetcher_rate_limited_to_err_rate_limited() {
+        // The fetcher intercepts HTTP 429 as a transport-level
+        // `FetchError::RateLimited` before a status is ever seen. This must
+        // now surface as `Err(RateLimited)` so the caller can schedule a
+        // real retry (`WillRetry { RateLimit }`) instead of treating a live
+        // rate-limit as a permanent "no result."
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let cache = AudnexusCache::new();
+
+        let err = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0RATE",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_maps_http_429_status_to_err_rate_limited() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(429, vec![]);
+        let cache = AudnexusCache::new();
+
+        let err = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0RATE",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_maps_http_5xx_to_err_transient() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(503, vec![]);
+        let cache = AudnexusCache::new();
+
+        let err = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0SERVERERR",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Transient));
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_maps_http_403_to_err_other() {
+        // Audnexus is keyless: a 403 has no credential to fix. The caller
+        // (`provider_client::audnexus_error_outcome`) turns this into an
+        // explicit `PermanentFailure`, never `NotConfigured`.
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(403, vec![]);
+        let cache = AudnexusCache::new();
+
+        let err = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0FORBIDDEN",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_maps_other_4xx_to_err_other() {
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(400, vec![]);
+        let cache = AudnexusCache::new();
+
+        let err = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0BADREQ",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::Other(_)));
+    }
+
+    #[test]
+    fn classify_audnexus_error_maps_429_to_rate_limited() {
+        assert!(matches!(
+            classify_audnexus_error(429),
+            ProviderFetchError::RateLimited
+        ));
+    }
+
+    #[test]
+    fn classify_audnexus_error_maps_5xx_to_transient() {
+        assert!(matches!(
+            classify_audnexus_error(500),
+            ProviderFetchError::Transient
+        ));
+        assert!(matches!(
+            classify_audnexus_error(503),
+            ProviderFetchError::Transient
+        ));
+    }
+
+    #[test]
+    fn classify_audnexus_error_maps_403_and_other_4xx_to_other() {
+        assert!(matches!(
+            classify_audnexus_error(403),
+            ProviderFetchError::Other(_)
+        ));
+        assert!(matches!(
+            classify_audnexus_error(400),
+            ProviderFetchError::Other(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_maps_network_error_to_transient() {
+        // Unit A: a connection failure is retryable (Transient), not an
+        // opaque permanent failure.
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             FetchError::Connection("refused".to_string()),
         );
@@ -435,6 +594,6 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.to_string().contains("request failed"));
+        assert!(matches!(err, ProviderFetchError::Transient));
     }
 }
