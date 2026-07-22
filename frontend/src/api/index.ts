@@ -590,11 +590,19 @@ export const syncCrossFormatToHere = (id: number, currentTs: number) =>
 export const getDownloadUrl = (id: number) =>
   `/api/v1/workfile/${id}/download`;
 
-// Stream URL with token auth (for HTML5 audio/video elements that can't send headers)
-export const getStreamUrl = (id: number) => {
-  const token = localStorage.getItem("livrarr_token") ?? "";
-  return `/api/v1/stream/${id}?token=${encodeURIComponent(token)}`;
-};
+// Scoped, expiring stream token (Unit C). The `<audio src>` element can't
+// send an Authorization header, so playback needs a URL-embeddable
+// credential — this mints a short-lived (24h) token scoped to one item
+// instead of exposing the raw session token in the URL. `exp` (unix
+// seconds) lets the caller schedule a proactive refresh before it expires.
+export interface StreamTokenResponse {
+  token: string;
+  exp: number;
+}
+export const mintStreamToken = (libraryItemId: number) =>
+  apiFetch<StreamTokenResponse>(`/workfile/${libraryItemId}/stream-token`, {
+    method: "POST",
+  });
 
 // Unmapped Files
 export const scanRootFolder = (id: number) =>

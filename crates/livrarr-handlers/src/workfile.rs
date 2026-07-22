@@ -1,7 +1,8 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 
-use crate::context::HasFileService;
+use crate::context::{HasFileService, HasHmacKey};
+use crate::stream_token::{mint_stream_token, StreamTokenResponse};
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::pagination::{PaginatedResponse, PaginationQuery};
@@ -105,4 +106,26 @@ pub async fn update_progress<S: HasFileService>(
         )
         .await?;
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// `POST /workfile/{id}/stream-token` (Unit C) — mint a short-lived (24h),
+/// scoped stream token for this specific item. The `<audio src>` element
+/// can't send an `Authorization` header, so playback needs a
+/// URL-embeddable credential; this route mints one instead of exposing
+/// the raw session token.
+///
+/// Auth-middleware-protected: `AuthContext` only exists once the request
+/// has passed `auth_middleware`. `resolve_path` both confirms this item
+/// belongs to this user and that it actually resolves on disk, BEFORE any
+/// token is signed — a caller can never mint a token for an item they
+/// don't own.
+pub async fn mint_stream_token_route<S: HasFileService + HasHmacKey>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+) -> Result<Json<StreamTokenResponse>, ApiError> {
+    state.file_service().resolve_path(ctx.user.id, id).await?;
+
+    let (token, exp) = mint_stream_token(state.hmac_key(), ctx.user.id, id, chrono::Utc::now());
+    Ok(Json(StreamTokenResponse { token, exp }))
 }

@@ -577,3 +577,11 @@ name = "test_wh_backfill"
 path = "../../tests/behavioral/test_wh_backfill.rs"
 
 # --- End work-history RED suite ---
+
+# --- Alpha hardening: Unit C (scoped, expiring stream token) ---
+
+[[test]]
+name = "test_stream_token"
+path = "../../tests/behavioral/test_stream_token.rs"
+
+# --- End Unit C ---

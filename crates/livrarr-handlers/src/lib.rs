@@ -28,6 +28,7 @@ pub mod remote_path_mapping;
 pub mod root_folder;
 pub mod series;
 pub mod setup;
+pub mod stream_token;
 pub mod system;
 pub mod types;
 pub mod user;

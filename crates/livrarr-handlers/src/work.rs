@@ -6,8 +6,8 @@ use axum::Json;
 use axum::response::{IntoResponse, Response};
 
 use crate::context::{
-    HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
-    HasDiscoveryService, HasEmailService, HasEnrichmentWorkflow, HasFileService, HasHistoryService,
+    HasAppConfigService, HasAuthorMonitorWorkflow, HasAuthorService, HasDiscoveryService,
+    HasEmailService, HasEnrichmentWorkflow, HasFileService, HasHistoryService, HasHmacKey,
     HasIdentityResolver, HasImportService, HasNotificationService, HasSeriesQueryService,
     HasTagService, HasWorkIdentityRepository, HasWorkService,
 };
@@ -887,20 +887,21 @@ pub async fn download<S: HasFileService>(
     serve_library_file(path, req).await
 }
 
-pub async fn stream<S: HasAuthService + HasFileService>(
+pub async fn stream<S: HasFileService + HasHmacKey>(
     State(state): State<S>,
     Path(id): Path<i64>,
     Query(params): Query<StreamQuery>,
     req: axum::http::Request<axum::body::Body>,
 ) -> Result<Response, ApiError> {
-    use crate::types::auth::AuthService;
-
+    // Unit C: the raw session token is gone from this query param — it's
+    // now a short-lived, scoped stream token (see `crate::stream_token`).
+    // `verify_stream_token` recovers `user_id` from the token itself (never
+    // trusted from a query/user param) and confirms the token's own
+    // `item_id` claim matches the item being requested here.
     let token = params.token.as_deref().ok_or(ApiError::Unauthorized)?;
-    let user_id = state
-        .auth_service()
-        .verify_token(token)
-        .await
-        .map_err(|_| ApiError::Unauthorized)?;
+    let user_id =
+        crate::stream_token::verify_stream_token(state.hmac_key(), token, id, chrono::Utc::now())
+            .map_err(|_| ApiError::Unauthorized)?;
 
     let path = state.file_service().resolve_path(user_id, id).await?;
     serve_library_file(path, req).await

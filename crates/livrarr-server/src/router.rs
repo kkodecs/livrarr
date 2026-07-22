@@ -575,6 +575,14 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/workfile/{id}/cross-format/sync",
             post(livrarr_handlers::cross_format::post_sync_to_here::<AppState>),
         )
+        // Unit C: mint a scoped, expiring stream token. Must be registered
+        // here (before `.layer(auth_middleware)` below) — `Router::layer`
+        // only wraps routes already present on the router, so a route
+        // added afterward would NOT be auth-protected.
+        .route(
+            "/workfile/{id}/stream-token",
+            post(livrarr_handlers::workfile::mint_stream_token_route::<AppState>),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

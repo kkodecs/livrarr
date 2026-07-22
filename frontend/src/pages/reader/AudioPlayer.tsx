@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  getStreamUrl,
   getPlaybackProgress,
   updatePlaybackProgress,
   getCrossFormatPrompt,
@@ -10,6 +9,7 @@ import {
   syncCrossFormatToHere,
 } from "@/api";
 import { apiFetch } from "@/api/client";
+import { useStreamUrl } from "./useStreamUrl";
 import { ResumePromptBanner } from "@/components/ResumePromptBanner";
 import {
   ArrowLeft,
@@ -153,7 +153,10 @@ export function AudioPlayer({
     localStorage.setItem("livrarr_skip_fwd", String(skipFwd));
   }, [skipFwd]);
 
-  const streamUrl = getStreamUrl(libraryItemId);
+  const { streamUrl, handleMediaError, consumeRestore } = useStreamUrl(
+    libraryItemId,
+    audioRef,
+  );
   const coverUrl = `/api/v1/mediacover/${workId}/audiocover.jpg`;
 
   // Load saved progress, then check for a cross-format resume prompt. The
@@ -267,6 +270,18 @@ export function AudioPlayer({
     if (audioRef.current) {
       const d = audioRef.current.duration;
       setDuration(isFinite(d) && d > 0 ? d : 0);
+
+      // A stream-token refresh (proactive or after a media error) reloads
+      // the element under a new src. Restore the exact position/play state
+      // captured just before the swap instead of the server-persisted
+      // checkpoint below, which is for the very first load only.
+      const restore = consumeRestore();
+      if (restore) {
+        audioRef.current.currentTime = restore.time;
+        if (restore.wasPlaying) audioRef.current.play().catch(() => {});
+        return;
+      }
+
       getPlaybackProgress(libraryItemId)
         .then((p) => {
           if (p?.position && audioRef.current) {
@@ -967,10 +982,11 @@ export function AudioPlayer({
       {/* Hidden audio element */}
       <audio
         ref={audioRef}
-        src={streamUrl}
+        src={streamUrl ?? undefined}
         onTimeUpdate={onTimeUpdate}
         onLoadedMetadata={onLoadedMetadata}
         onEnded={() => setPlaying(false)}
+        onError={handleMediaError}
         preload="metadata"
       />
     </div>
