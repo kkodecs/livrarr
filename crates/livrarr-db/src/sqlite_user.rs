@@ -124,30 +124,61 @@ impl UserDb for SqliteDb {
             UserRole::User => "user",
         };
 
-        sqlx::query(
-            "UPDATE users SET username = ?, password_hash = ?, role = ?, updated_at = ? WHERE id = ?",
+        // Sole-admin invariant: the guard only ever fires on a real admin -> user
+        // transition. It is evaluated live, inside this one statement, against the
+        // row's current (pre-update) role and the table-wide admin count, so two
+        // concurrent demotes can't both pass — whichever statement the SQLite
+        // writer lock admits second re-evaluates the count fresh and sees the
+        // other's already-committed demotion. A plain username/password edit, a
+        // no-op role write, or a promotion never touches the predicate, because
+        // `role != 'admin'` or `? != 'user'` is already true for those cases.
+        let result = sqlx::query(
+            "UPDATE users SET username = ?, password_hash = ?, role = ?, updated_at = ? \
+             WHERE id = ? \
+               AND (role != 'admin' OR ? != 'user' \
+                    OR (SELECT COUNT(*) FROM users WHERE role = 'admin') > 1)",
         )
         .bind(&username)
         .bind(&password_hash)
         .bind(role_str)
         .bind(&now)
         .bind(id)
+        .bind(role_str)
         .execute(self.pool())
         .await
         .map_err(map_db_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(if self.get_user(id).await.is_ok() {
+                DbError::LastAdmin
+            } else {
+                DbError::NotFound { entity: "user" }
+            });
+        }
 
         self.get_user(id).await
     }
 
     async fn delete_user(&self, id: UserId) -> Result<(), DbError> {
-        let result = sqlx::query("DELETE FROM users WHERE id = ?")
-            .bind(id)
-            .execute(self.pool())
-            .await
-            .map_err(map_db_err)?;
+        // Same sole-admin guard as `update_user`, evaluated live in one
+        // statement: deleting an admin is blocked only when it is currently
+        // the sole admin.
+        let result = sqlx::query(
+            "DELETE FROM users \
+             WHERE id = ? \
+               AND (role != 'admin' OR (SELECT COUNT(*) FROM users WHERE role = 'admin') > 1)",
+        )
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound { entity: "user" });
+            return Err(if self.get_user(id).await.is_ok() {
+                DbError::LastAdmin
+            } else {
+                DbError::NotFound { entity: "user" }
+            });
         }
         Ok(())
     }

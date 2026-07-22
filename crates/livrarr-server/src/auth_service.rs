@@ -427,6 +427,7 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
         }
         let user = self.db.update_user(id, db_req).await.map_err(|e| match e {
             DbError::NotFound { .. } => AuthError::UserNotFound,
+            DbError::LastAdmin => AuthError::LastAdmin,
             other => AuthError::Db(other),
         })?;
 
@@ -441,25 +442,16 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
         if requesting_user_id == target_user_id {
             return Err(AuthError::CannotDeleteSelf);
         }
-        let target = self
-            .db
-            .get_user(target_user_id)
-            .await
-            .map_err(|e| match e {
-                DbError::NotFound { .. } => AuthError::UserNotFound,
-                other => AuthError::Db(other),
-            })?;
-        if target.role == UserRole::Admin {
-            let admin_count = self.db.count_admins().await.map_err(AuthError::Db)?;
-            if admin_count <= 1 {
-                return Err(AuthError::LastAdmin);
-            }
-        }
+        // The sole-admin invariant is enforced atomically by the DB layer
+        // (guarded in one statement against the live admin count) — no
+        // separate get_user/count_admins pre-check here, which would only
+        // race against a concurrent demote/delete anyway.
         self.db
             .delete_user(target_user_id)
             .await
             .map_err(|e| match e {
                 DbError::NotFound { .. } => AuthError::UserNotFound,
+                DbError::LastAdmin => AuthError::LastAdmin,
                 other => AuthError::Db(other),
             })?;
         Ok(())

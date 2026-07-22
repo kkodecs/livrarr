@@ -21,6 +21,9 @@ fn db_err(e: DbError) -> ApiError {
         DbError::Constraint { message } | DbError::Conflict { message } => {
             ApiError::Conflict { reason: message }
         }
+        DbError::LastAdmin => ApiError::Conflict {
+            reason: "cannot remove the last remaining admin".to_string(),
+        },
         DbError::DataCorruption { detail, .. } => ApiError::Internal(detail),
         DbError::IncompatibleData { detail } => ApiError::Internal(detail),
         DbError::Io(e) => ApiError::Internal(e.to_string()),

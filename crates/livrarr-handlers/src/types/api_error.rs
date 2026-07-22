@@ -542,6 +542,7 @@ fn db_error_to_http(
         DbError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", msg, None),
         DbError::Constraint { .. } => (StatusCode::CONFLICT, "conflict", msg, None),
         DbError::Conflict { .. } => (StatusCode::CONFLICT, "conflict", msg, None),
+        DbError::LastAdmin => (StatusCode::CONFLICT, "conflict", msg, None),
         DbError::DataCorruption { .. } => {
             tracing::error!("DB data corruption: {msg}");
             (

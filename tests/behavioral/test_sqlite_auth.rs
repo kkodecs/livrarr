@@ -822,3 +822,164 @@ async fn delete_expired_sessions_returns_zero_when_nothing_expired() {
 
     assert!(db.get_session("active_only").await.unwrap().is_some());
 }
+
+// =============================================================================
+// Sole-admin invariant (Unit B2) — demotion-only, atomic, disambiguated
+// =============================================================================
+
+/// Concurrent demotion of two admins must leave exactly one admin standing —
+/// the loser sees the guard block it, not a generic failure.
+#[tokio::test]
+async fn concurrent_demote_leaves_exactly_one_admin() {
+    let (db, _dir) = setup_test_db().await;
+
+    let second_admin = db
+        .create_user(CreateUserDbRequest {
+            username: "second_admin_demote".to_string(),
+            password_hash: "pw".to_string(),
+            role: UserRole::Admin,
+            api_key_hash: "second_admin_demote_api".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(db.count_admins().await.unwrap(), 2);
+
+    let demote_first = db.update_user(
+        1,
+        UpdateUserDbRequest {
+            username: None,
+            password_hash: None,
+            role: Some(UserRole::User),
+        },
+    );
+    let demote_second = db.update_user(
+        second_admin.id,
+        UpdateUserDbRequest {
+            username: None,
+            password_hash: None,
+            role: Some(UserRole::User),
+        },
+    );
+    let (r1, r2) = tokio::join!(demote_first, demote_second);
+
+    let (winner, loser) = if r1.is_ok() { (r1, r2) } else { (r2, r1) };
+    assert!(
+        winner.is_ok(),
+        "exactly one demotion must succeed: {winner:?}"
+    );
+    assert!(
+        matches!(loser, Err(DbError::LastAdmin)),
+        "the losing demotion must fail with LastAdmin, got: {loser:?}"
+    );
+
+    assert_eq!(db.count_admins().await.unwrap(), 1);
+}
+
+/// Concurrent deletion of two admins must leave exactly one admin standing.
+#[tokio::test]
+async fn concurrent_delete_leaves_exactly_one_admin() {
+    let (db, _dir) = setup_test_db().await;
+
+    let second_admin = db
+        .create_user(CreateUserDbRequest {
+            username: "second_admin_delete".to_string(),
+            password_hash: "pw".to_string(),
+            role: UserRole::Admin,
+            api_key_hash: "second_admin_delete_api".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(db.count_admins().await.unwrap(), 2);
+
+    let delete_first = db.delete_user(1);
+    let delete_second = db.delete_user(second_admin.id);
+    let (r1, r2) = tokio::join!(delete_first, delete_second);
+
+    let (winner, loser) = if r1.is_ok() { (r1, r2) } else { (r2, r1) };
+    assert!(
+        winner.is_ok(),
+        "exactly one deletion must succeed: {winner:?}"
+    );
+    assert!(
+        matches!(loser, Err(DbError::LastAdmin)),
+        "the losing deletion must fail with LastAdmin, got: {loser:?}"
+    );
+
+    assert_eq!(db.count_admins().await.unwrap(), 1);
+}
+
+/// A plain username/password edit on the sole admin must succeed — the guard
+/// only fires on a real admin -> user transition, never on an unrelated
+/// field edit.
+#[tokio::test]
+async fn update_user_username_and_password_succeeds_for_sole_admin() {
+    let (db, _dir) = setup_test_db().await;
+    assert_eq!(db.count_admins().await.unwrap(), 1);
+
+    let updated = db
+        .update_user(
+            1,
+            UpdateUserDbRequest {
+                username: Some("renamed_admin".to_string()),
+                password_hash: Some("new_pw_hash".to_string()),
+                role: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(updated.username, "renamed_admin");
+    assert_eq!(updated.password_hash, "new_pw_hash");
+    assert_eq!(updated.role, UserRole::Admin);
+    assert_eq!(db.count_admins().await.unwrap(), 1);
+}
+
+/// A missing user must report NotFound, even when the request looks like a
+/// demotion — 0 rows affected must not be misread as LastAdmin when the row
+/// simply doesn't exist.
+#[tokio::test]
+async fn update_missing_user_with_demotion_request_returns_not_found_not_last_admin() {
+    let (db, _dir) = setup_test_db().await;
+
+    let err = db
+        .update_user(
+            9999,
+            UpdateUserDbRequest {
+                username: None,
+                password_hash: None,
+                role: Some(UserRole::User),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_is_not_found(err);
+}
+
+/// A rejected demotion must be all-or-nothing — a mixed request (new
+/// password + role: user) on the sole admin must fail with LastAdmin AND
+/// leave the password hash unchanged.
+#[tokio::test]
+async fn update_user_rejects_demotion_and_leaves_password_unchanged_when_mixed() {
+    let (db, _dir) = setup_test_db().await;
+
+    let before = db.get_user(1).await.unwrap();
+
+    let err = db
+        .update_user(
+            1,
+            UpdateUserDbRequest {
+                username: None,
+                password_hash: Some("attempted_new_hash".to_string()),
+                role: Some(UserRole::User),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, DbError::LastAdmin));
+
+    let after = db.get_user(1).await.unwrap();
+    assert_eq!(after.password_hash, before.password_hash);
+    assert_eq!(after.role, UserRole::Admin);
+}

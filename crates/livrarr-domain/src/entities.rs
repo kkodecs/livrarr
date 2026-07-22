@@ -290,6 +290,9 @@ pub enum DbError {
     #[error("conflict: {message}")]
     Conflict { message: String },
 
+    #[error("cannot remove the last remaining admin")]
+    LastAdmin,
+
     #[error("data corruption in {table}.{column} (row {row_id}): {detail}")]
     DataCorruption {
         table: &'static str,
