@@ -51,6 +51,13 @@ pub async fn recover_interrupted_state(state: &AppState) {
     // Phase 7 will requeue stale Unenriched works via list_stale_unenriched_works.
     // No-op here until Phase 7 lands.
 
+    // Reconcile import-intent crash-consistency records (Unit D2): complete
+    // or roll back any file import interrupted by an unclean shutdown, then
+    // sweep aged, unreferenced staging files. Must run before anything else
+    // can start a new import — nothing is in-flight yet at this point.
+    // Self-logs a summary; nothing further to do with the report here.
+    let _ = state.import_workflow.recover_import_intents().await;
+
     // Sweep stale temp files from root folders (crashed imports).
     sweep_stale_temp_files(state).await;
 }

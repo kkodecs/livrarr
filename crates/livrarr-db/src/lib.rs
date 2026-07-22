@@ -41,6 +41,7 @@ mod sqlite_history;
 mod sqlite_identity_conflict;
 pub use sqlite_identity_conflict::ConflictApplyError;
 mod sqlite_import;
+mod sqlite_import_intent;
 mod sqlite_indexer;
 mod sqlite_kash_link;
 mod sqlite_library_item;

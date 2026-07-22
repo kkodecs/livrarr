@@ -392,4 +392,22 @@ impl LibraryItemDb for SqliteDb {
         .map_err(map_db_err)?;
         Ok(())
     }
+
+    async fn find_library_item_by_path(
+        &self,
+        user_id: UserId,
+        root_folder_id: RootFolderId,
+        path: &str,
+    ) -> Result<Option<LibraryItem>, DbError> {
+        let row = sqlx::query(
+            "SELECT * FROM library_items WHERE user_id = ? AND root_folder_id = ? AND path = ?",
+        )
+        .bind(user_id)
+        .bind(root_folder_id)
+        .bind(path)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(map_db_err)?;
+        row.map(row_to_library_item).transpose()
+    }
 }

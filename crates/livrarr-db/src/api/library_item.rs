@@ -121,6 +121,19 @@ pub trait LibraryItemDb: Send + Sync {
         tag_status: TagStatus,
         tagged_at_generation: i64,
     ) -> Result<(), DbError>;
+
+    /// Look up the item (if any) at a (user_id, root_folder_id, path) key,
+    /// regardless of which work owns it. Read-only pre-check (Unit D2):
+    /// mirrors the collision check `create_library_item` already runs
+    /// internally, exposed here so an import path can detect a different
+    /// work's row at the same target BEFORE any staging file I/O begins —
+    /// not just at the (now post-rename) finalize step.
+    async fn find_library_item_by_path(
+        &self,
+        user_id: UserId,
+        root_folder_id: RootFolderId,
+        path: &str,
+    ) -> Result<Option<LibraryItem>, DbError>;
 }
 
 pub struct CreateLibraryItemDbRequest {
