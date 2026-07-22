@@ -133,11 +133,6 @@ async fn main() {
     let readarr_import_progress_arc = Arc::new(tokio::sync::Mutex::new(
         livrarr_server::readarr_import_service::ReadarrImportProgress::default(),
     ));
-    // Readarr URL is admin-configured trusted infrastructure (matches the
-    // alpha4 trusted-infrastructure pattern: download clients, indexers,
-    // Readarr import all use the unrestricted client because the admin
-    // chose the endpoint).
-    let http_client_for_readarr = http_client.clone();
     // Pre-construct WorkService Arc so series_query_service and readarr_import_wf can share it.
     // Shared provider-client map: one set of per-provider clients reused by the
     // cover service and the identity resolver's multi-provider fan-out.
@@ -453,7 +448,7 @@ async fn main() {
             },
         readarr_import_wf: Arc::new(
             livrarr_server::readarr_import_workflow::LiveReadarrImportWorkflow::new(
-                http_client_for_readarr,
+                http_fetcher.clone(),
                 readarr_import_service_arc,
                 readarr_import_progress_arc,
                 data_dir_arc.clone(),

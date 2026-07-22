@@ -150,3 +150,22 @@ pub struct ReadarrUndoResponse {
     pub works_deleted: i64,
     pub authors_deleted: i64,
 }
+
+// ---------------------------------------------------------------------------
+// Origin trust boundary (Unit B3 Part 1) — admin-approved private origins
+// ---------------------------------------------------------------------------
+
+/// An admin-approved Readarr origin, as surfaced to the settings UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadarrOriginInfo {
+    pub id: i64,
+    pub origin: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddReadarrOriginRequest {
+    pub url: String,
+}

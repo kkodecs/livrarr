@@ -8,7 +8,7 @@
 //!
 //! Per-bucket intervals carry over from the existing fetcher limiter (OpenLibrary /
 //! Goodreads / Hardcover / GoogleBooks 1s, Audnexus 2s, Audible 150ms, Indexer 500ms,
-//! None 0).
+//! Readarr 500ms, None 0).
 //!
 //! Design of record: `docs/metadata-remediation-phase3-queue-design.md` (LOCKED v4).
 //! The queue STATE is process-global — shared by every `HttpFetcherImpl` via
@@ -248,6 +248,11 @@ fn interval_for(bucket: &RateBucket) -> Duration {
         // Pace-only (R-6) — never added to `breaker::breaker_tracked`.
         RateBucket::OpenLibraryCovers => Duration::from_secs(3),
         RateBucket::Indexer { .. } => Duration::from_millis(500),
+        // Self-hosted admin infrastructure, same politeness class as an
+        // indexer host (Unit B3) — not a public rate-limited API to protect,
+        // but a real network service that may share a box with other
+        // services.
+        RateBucket::Readarr { .. } => Duration::from_millis(500),
         RateBucket::None => Duration::ZERO,
     }
 }

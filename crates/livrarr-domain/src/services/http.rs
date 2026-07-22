@@ -40,6 +40,16 @@ pub enum RateBucket {
         origin: String,
         indexer: Option<String>,
     },
+    /// A Readarr import origin (Unit B3 Part 1). `origin` is the normalized
+    /// upstream host (`livrarr_http::normalized_origin` —
+    /// `scheme://host[:port]`) so every request against one Readarr instance
+    /// (connect/preview/start, and every fetch inside one import run) shares
+    /// one pace lane and one transport breaker. Single-level, unlike
+    /// `Indexer` — there is no per-sub-resource rate-limit domain to split
+    /// out here.
+    Readarr {
+        origin: String,
+    },
     None,
 }
 

@@ -470,6 +470,19 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/import/readarr/{import_id}",
             delete(livrarr_handlers::readarr_import::undo::<AppState>),
         )
+        // Origin trust boundary (Unit B3 Part 1) — admin-managed allowlist of
+        // private Readarr origins. `RequireAdmin` gates these two routes at
+        // the handler; connect/preview/start above stay open to every
+        // authenticated user.
+        .route(
+            "/import/readarr/origin",
+            get(livrarr_handlers::readarr_import::list_origins::<AppState>)
+                .post(livrarr_handlers::readarr_import::add_origin::<AppState>),
+        )
+        .route(
+            "/import/readarr/origin/{id}",
+            delete(livrarr_handlers::readarr_import::remove_origin::<AppState>),
+        )
         // List imports (CSV: Goodreads, Hardcover)
         .route(
             "/listimport",

@@ -221,5 +221,6 @@ pub fn breaker_tracked(bucket: &RateBucket) -> bool {
             | RateBucket::Audnexus
             | RateBucket::Audible
             | RateBucket::Indexer { .. }
+            | RateBucket::Readarr { .. }
     )
 }

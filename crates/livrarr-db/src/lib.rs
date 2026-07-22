@@ -52,6 +52,7 @@ mod sqlite_provenance;
 mod sqlite_provider_cache;
 mod sqlite_provider_calls;
 mod sqlite_provider_policy;
+mod sqlite_readarr_origin;
 mod sqlite_remote_path_mapping;
 mod sqlite_retry_state;
 mod sqlite_root_folder;

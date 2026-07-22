@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
@@ -7,7 +8,9 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use livrarr_db::sqlite::SqliteDb;
-use livrarr_db::{record_history, ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest, WorkDb};
+use livrarr_db::{
+    record_history, ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest, ReadarrOriginDb, WorkDb,
+};
 use livrarr_domain::identity_matching::{identity_key, unambiguous_author_match};
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::{
@@ -17,11 +20,25 @@ use livrarr_domain::{
     derive_sort_name, history_events, sanitize_path_component, Author, AuthorId, Import, MediaType,
 };
 
-use livrarr_http::HttpClient;
+use livrarr_http::fetcher::HttpFetcherImpl;
 
-use crate::readarr_client::{self, RdAuthor, RdBook, RdBookFile, RdRootFolder, ReadarrClient};
+use crate::readarr_client::{
+    self, RdAuthor, RdBook, RdBookFile, RdRootFolder, ReadarrClient, ReadarrConnectError,
+};
 use crate::readarr_import_service::ReadarrImportService;
 use crate::state::{LiveWorkService, ReadarrImportServiceImpl};
+
+/// Fixed, fully-generic rejection surfaced for ANY Readarr connection
+/// failure — SSRF/approval rejection, protocol mismatch, network failure,
+/// timeout, or any non-2xx response — reused for both the API response and
+/// any log line, so the two can never drift apart. Never interpolate a
+/// `ReadarrConnectError`'s cause (there isn't one to interpolate) or any
+/// lower-level error text at any of this workflow's Readarr-connection call
+/// sites — that is exactly what the probed target could use to fingerprint
+/// what's behind it.
+fn readarr_rejected() -> ServiceError {
+    ServiceError::Internal(ReadarrConnectError.to_string())
+}
 
 // =============================================================================
 // LiveReadarrImportWorkflow
@@ -29,9 +46,15 @@ use crate::state::{LiveWorkService, ReadarrImportServiceImpl};
 
 #[derive(Clone)]
 pub struct LiveReadarrImportWorkflow {
-    http_client: HttpClient,
+    http_fetcher: HttpFetcherImpl,
     readarr_import_service: Arc<ReadarrImportServiceImpl>,
     readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
+    /// User id that claimed the current (or, once finished, the most
+    /// recently completed) run — 0 means no import has ever run in this
+    /// process (Unit B3 Part 2). Set once, atomically, at slot-claim time in
+    /// `start()`; never cleared, mirroring `readarr_import_progress`'s own
+    /// "last completed state persists until the next run" lifecycle.
+    readarr_import_owner: Arc<AtomicI64>,
     data_dir: Arc<std::path::PathBuf>,
     work_service: Arc<LiveWorkService>,
     db: SqliteDb,
@@ -41,7 +64,7 @@ pub struct LiveReadarrImportWorkflow {
 impl LiveReadarrImportWorkflow {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        http_client: HttpClient,
+        http_fetcher: HttpFetcherImpl,
         readarr_import_service: Arc<ReadarrImportServiceImpl>,
         readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
         data_dir: Arc<std::path::PathBuf>,
@@ -50,14 +73,507 @@ impl LiveReadarrImportWorkflow {
         import_workflow: Arc<crate::state::LiveImportWorkflow>,
     ) -> Self {
         Self {
-            http_client,
+            http_fetcher,
             readarr_import_service,
             readarr_import_progress,
+            readarr_import_owner: Arc::new(AtomicI64::new(0)),
             data_dir,
             work_service,
             db,
             import_workflow,
         }
+    }
+
+    /// Establish and protocol-verify a Readarr client from a raw,
+    /// admin/user-supplied base URL (Unit B3 Part 1 — the SSRF origin-trust
+    /// boundary). Every rejection reason collapses to the same opaque
+    /// `ReadarrConnectError` — response and logs alike never surface
+    /// anything the probed target returned.
+    async fn connect_readarr(
+        &self,
+        url: &str,
+        api_key: &str,
+    ) -> Result<ReadarrClient, ReadarrConnectError> {
+        connect_readarr_verified(&self.db, &self.http_fetcher, url, api_key).await
+    }
+
+    /// Whether `origin` (already normalized — `scheme://host[:port]`, no
+    /// path) may be connected to: either an admin-approved entry, or the
+    /// SSRF-safe classifier judges it public (public destinations carry no
+    /// internal-probe risk). Exposed directly (not only through `connect`)
+    /// so the admission decision is independently testable from the
+    /// network/protocol behavior layered on top of it.
+    pub async fn is_origin_permitted(&self, origin: &str) -> bool {
+        origin_is_permitted(&self.db, origin).await
+    }
+}
+
+/// Whether `origin` (already normalized) may be connected to: either an
+/// admin-approved entry, or the SSRF-safe classifier judges it public
+/// (public destinations carry no internal-probe risk). A DB error is
+/// treated as not-approved (fail closed) — the public-only check still
+/// applies. Free function — only needs a `SqliteDb`, so the origin-trust
+/// decision is unit-testable with a `:memory:` DB alone, without the full
+/// `LiveWorkService`/`LiveImportWorkflow` graph `LiveReadarrImportWorkflow`
+/// otherwise requires (same F11 testability constraint as
+/// `try_claim_readarr_slot` above).
+async fn origin_is_permitted(db: &SqliteDb, origin: &str) -> bool {
+    if matches!(db.is_readarr_origin_approved(origin).await, Ok(true)) {
+        return true;
+    }
+    livrarr_http::ssrf::validate_url(origin).await.is_ok()
+}
+
+/// Establish and protocol-verify a Readarr client from a raw,
+/// admin/user-supplied base URL (Unit B3 Part 1 — the SSRF origin-trust
+/// boundary): normalize (point 2) -> origin admission (point 1) -> construct
+/// -> protocol check (point 4, which itself never follows a redirect, point
+/// 5). Every rejection reason collapses to the same opaque
+/// `ReadarrConnectError` — response and logs alike never surface anything
+/// the probed target returned (point 6). Free function for the same
+/// testability reason as `origin_is_permitted` — needs only a `SqliteDb` and
+/// an `HttpFetcherImpl`, both trivially constructible in a test.
+async fn connect_readarr_verified(
+    db: &SqliteDb,
+    http_fetcher: &HttpFetcherImpl,
+    url: &str,
+    api_key: &str,
+) -> Result<ReadarrClient, ReadarrConnectError> {
+    let (base, origin) = readarr_client::normalize_readarr_base(url)?;
+    if !origin_is_permitted(db, &origin).await {
+        return Err(ReadarrConnectError);
+    }
+    let client = ReadarrClient::new(base, origin, api_key.to_string(), http_fetcher.clone());
+    client.verify_protocol().await?;
+    Ok(client)
+}
+
+/// The single-flight admission decision (Unit B3 Part 2: the global guard is
+/// RETAINED unchanged, never replaced with per-user locks — it protects
+/// shared-work / source-provider-data races, see M2/M8). Check-and-set
+/// `running` atomically under the progress lock; stamp the owner in
+/// lockstep. Free function (not a method) so the admission race is
+/// unit-testable without constructing the full production
+/// `LiveWorkService`/`LiveImportWorkflow` graph `start()` otherwise requires
+/// — mirrors `resolve_batch_author`'s extraction below for the same reason
+/// (see `test_author_dedup.rs`'s documented F11 constraint).
+async fn try_claim_readarr_slot(
+    progress: &Mutex<ReadarrImportProgress>,
+    owner: &AtomicI64,
+    user_id: i64,
+    import_id: &str,
+) -> bool {
+    let mut prog = progress.lock().await;
+    if prog.running {
+        return false;
+    }
+    *prog = ReadarrImportProgress {
+        running: true,
+        import_id: Some(import_id.to_string()),
+        phase: "fetching".to_string(),
+        ..Default::default()
+    };
+    // Never cleared — mirrors `prog`'s own "last completed state persists
+    // until the next run" lifecycle, so the owner can still see their
+    // finished import's results afterward.
+    owner.store(user_id, Ordering::SeqCst);
+    true
+}
+
+/// Filter the shared progress record by ownership (Unit B3 Part 2, audit
+/// finding #11): only the owner sees their own run's owner/import_id/counts/
+/// errors/paths; a non-owner gets 404 (a specific `import_id` was requested
+/// and it isn't theirs — indistinguishable from "no such import", never
+/// confirms a DIFFERENT user owns it) or an idle default (a generic poll with
+/// nothing owned — never the truth about someone else's run). Free
+/// function for the same testability reason as `try_claim_readarr_slot`.
+async fn scoped_readarr_progress(
+    progress: &Mutex<ReadarrImportProgress>,
+    owner: &AtomicI64,
+    user_id: i64,
+    import_id: Option<String>,
+) -> Result<ReadarrImportProgress, ServiceError> {
+    let owner_id = owner.load(Ordering::SeqCst);
+    let prog = progress.lock().await.clone();
+
+    if owner_id != user_id {
+        return match import_id {
+            Some(_) => Err(ServiceError::NotFound),
+            None => Ok(ReadarrImportProgress::default()),
+        };
+    }
+
+    match import_id {
+        Some(requested) if prog.import_id.as_deref() != Some(requested.as_str()) => {
+            Err(ServiceError::NotFound)
+        }
+        _ => Ok(prog),
+    }
+}
+
+#[cfg(test)]
+mod single_flight_and_progress_tests {
+    use super::*;
+
+    fn fresh_state() -> (Arc<Mutex<ReadarrImportProgress>>, Arc<AtomicI64>) {
+        (
+            Arc::new(Mutex::new(ReadarrImportProgress::default())),
+            Arc::new(AtomicI64::new(0)),
+        )
+    }
+
+    #[tokio::test]
+    async fn second_concurrent_start_is_rejected_first_succeeds() {
+        let (progress, owner) = fresh_state();
+        let claimed_a = try_claim_readarr_slot(&progress, &owner, 1, "import-a").await;
+        let claimed_b = try_claim_readarr_slot(&progress, &owner, 2, "import-b").await;
+        assert!(claimed_a, "first caller must claim the slot");
+        assert!(
+            !claimed_b,
+            "second caller must be rejected while one is running"
+        );
+        // The slot still reflects user A's run — never overwritten by B's
+        // rejected attempt.
+        assert_eq!(owner.load(Ordering::SeqCst), 1);
+        assert_eq!(progress.lock().await.import_id.as_deref(), Some("import-a"));
+    }
+
+    #[tokio::test]
+    async fn slot_is_claimable_again_once_marked_not_running() {
+        let (progress, owner) = fresh_state();
+        assert!(try_claim_readarr_slot(&progress, &owner, 1, "import-a").await);
+        progress.lock().await.running = false;
+        assert!(
+            try_claim_readarr_slot(&progress, &owner, 2, "import-b").await,
+            "a freed slot must be claimable by a new caller"
+        );
+        assert_eq!(owner.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn non_owner_polling_with_no_import_id_gets_idle_not_someone_elses_run() {
+        let (progress, owner) = fresh_state();
+        try_claim_readarr_slot(&progress, &owner, 1, "import-a").await;
+        {
+            let mut prog = progress.lock().await;
+            prog.works_processed = 42;
+            prog.errors.push("some internal detail".to_string());
+        }
+
+        let result = scoped_readarr_progress(&progress, &owner, 2, None)
+            .await
+            .expect("a generic poll with nothing owned must not error");
+        assert!(
+            !result.running,
+            "non-owner must see idle, not user 1's live run"
+        );
+        assert_eq!(result.import_id, None);
+        assert_eq!(result.works_processed, 0);
+        assert!(result.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_owner_requesting_a_specific_import_id_gets_not_found() {
+        let (progress, owner) = fresh_state();
+        try_claim_readarr_slot(&progress, &owner, 1, "import-a").await;
+
+        let err = scoped_readarr_progress(&progress, &owner, 2, Some("import-a".to_string()))
+            .await
+            .expect_err("a non-owner naming another user's import id must 404");
+        assert!(matches!(err, ServiceError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn owner_sees_their_own_running_progress() {
+        let (progress, owner) = fresh_state();
+        try_claim_readarr_slot(&progress, &owner, 1, "import-a").await;
+        progress.lock().await.works_processed = 7;
+
+        let result = scoped_readarr_progress(&progress, &owner, 1, None)
+            .await
+            .expect("the owner must see their own progress");
+        assert!(result.running);
+        assert_eq!(result.import_id.as_deref(), Some("import-a"));
+        assert_eq!(result.works_processed, 7);
+
+        let result_by_id =
+            scoped_readarr_progress(&progress, &owner, 1, Some("import-a".to_string()))
+                .await
+                .expect("the owner naming their own import id must see it too");
+        assert_eq!(result_by_id.import_id.as_deref(), Some("import-a"));
+    }
+
+    #[tokio::test]
+    async fn owner_naming_the_wrong_import_id_gets_not_found() {
+        let (progress, owner) = fresh_state();
+        try_claim_readarr_slot(&progress, &owner, 1, "import-a").await;
+
+        let err = scoped_readarr_progress(&progress, &owner, 1, Some("some-other-id".to_string()))
+            .await
+            .expect_err("the owner naming an id that isn't their current run must 404");
+        assert!(matches!(err, ServiceError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn owner_still_sees_completed_report_after_the_slot_is_freed() {
+        // Post-completion ownership: `running` flips false but `import_id`/
+        // counts/errors persist until the NEXT run overwrites them — the
+        // owner must still be able to read their finished report.
+        let (progress, owner) = fresh_state();
+        try_claim_readarr_slot(&progress, &owner, 1, "import-a").await;
+        {
+            let mut prog = progress.lock().await;
+            prog.running = false;
+            prog.phase = "done".to_string();
+            prog.files_processed = 3;
+        }
+
+        let owner_view = scoped_readarr_progress(&progress, &owner, 1, None)
+            .await
+            .expect("the owner must still see their completed report");
+        assert!(!owner_view.running);
+        assert_eq!(owner_view.files_processed, 3);
+        assert_eq!(owner_view.import_id.as_deref(), Some("import-a"));
+
+        let non_owner_view = scoped_readarr_progress(&progress, &owner, 2, None)
+            .await
+            .expect("a non-owner must still see idle, not the completed report");
+        assert!(!non_owner_view.running);
+        assert_eq!(non_owner_view.import_id, None);
+        assert_eq!(non_owner_view.files_processed, 0);
+    }
+
+    #[tokio::test]
+    async fn no_import_ever_run_owner_zero_treats_every_caller_as_non_owner() {
+        let (progress, owner) = fresh_state();
+        let result = scoped_readarr_progress(&progress, &owner, 1, None)
+            .await
+            .expect("no import has ever run — every caller gets idle");
+        assert!(!result.running);
+        // A real user id is never 0 (the first admin is id 1) — a caller
+        // could not accidentally be treated as "the owner" of a fresh slot.
+        assert_ne!(owner.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// Unit B3 Part 1 — origin trust boundary. `origin_is_permitted` and
+/// `connect_readarr_verified` need only a `SqliteDb` + `HttpFetcherImpl`
+/// (never the full `LiveWorkService`/`LiveImportWorkflow` graph), so these
+/// run against a real `:memory:` DB and real local HTTP servers.
+#[cfg(test)]
+mod origin_trust_tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::Router;
+    use livrarr_db::test_helpers::create_test_db;
+    use tokio::net::TcpListener;
+
+    async fn spawn_server(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    fn readarr_status_ok() -> Router {
+        Router::new().route(
+            "/api/v1/system/status",
+            get(|| async { axum::Json(serde_json::json!({"appName": "Readarr"})) }),
+        )
+    }
+
+    // --- Origin admission (point 1): approved-list OR public-safe ---
+
+    #[tokio::test]
+    async fn unapproved_private_origin_is_rejected() {
+        let db = create_test_db().await;
+        assert!(!origin_is_permitted(&db, "http://192.168.50.50:8787").await);
+    }
+
+    #[tokio::test]
+    async fn approved_private_origin_is_permitted() {
+        let db = create_test_db().await;
+        db.create_readarr_origin("http://192.168.50.50:8787")
+            .await
+            .unwrap();
+        assert!(origin_is_permitted(&db, "http://192.168.50.50:8787").await);
+    }
+
+    #[tokio::test]
+    async fn public_origin_is_permitted_without_any_approval() {
+        let db = create_test_db().await;
+        // A real public IP literal — `validate_url` classifies a literal IP
+        // without DNS, so this needs no network I/O.
+        assert!(origin_is_permitted(&db, "http://8.8.8.8").await);
+    }
+
+    #[tokio::test]
+    async fn loopback_is_rejected_when_not_approved() {
+        let db = create_test_db().await;
+        assert!(!origin_is_permitted(&db, "http://127.0.0.1:9999").await);
+    }
+
+    // --- Full pipeline: normalize -> admission -> protocol check ---
+
+    #[tokio::test]
+    async fn approved_target_with_correct_protocol_shape_connects() {
+        let db = create_test_db().await;
+        let base = spawn_server(readarr_status_ok()).await;
+        let origin = livrarr_http::normalized_origin(&base).unwrap();
+        db.create_readarr_origin(&origin).await.unwrap();
+        let fetcher = HttpFetcherImpl::new().unwrap();
+
+        let result = connect_readarr_verified(&db, &fetcher, &base, "any-key").await;
+        assert!(
+            result.is_ok(),
+            "an approved, protocol-correct target must connect"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthy_but_unapproved_private_target_is_still_rejected() {
+        let db = create_test_db().await;
+        // A real, healthy, correctly-shaped Readarr stub — but NOT approved.
+        // If admission didn't fire, this would otherwise succeed.
+        let base = spawn_server(readarr_status_ok()).await;
+        let fetcher = HttpFetcherImpl::new().unwrap();
+
+        let result = connect_readarr_verified(&db, &fetcher, &base, "any-key").await;
+        assert!(
+            result.is_err(),
+            "an unapproved loopback target must be rejected even when reachable and correctly-shaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_readarr_shape_is_rejected() {
+        let db = create_test_db().await;
+        let app = Router::new().route(
+            "/api/v1/system/status",
+            get(|| async { axum::Json(serde_json::json!({"appName": "Sonarr"})) }),
+        );
+        let base = spawn_server(app).await;
+        let origin = livrarr_http::normalized_origin(&base).unwrap();
+        db.create_readarr_origin(&origin).await.unwrap();
+        let fetcher = HttpFetcherImpl::new().unwrap();
+
+        let result = connect_readarr_verified(&db, &fetcher, &base, "any-key").await;
+        assert!(result.is_err(), "a non-Readarr appName must be rejected");
+    }
+
+    #[tokio::test]
+    async fn wrong_key_status_is_rejected() {
+        let db = create_test_db().await;
+        let app = Router::new().route(
+            "/api/v1/system/status",
+            get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+        );
+        let base = spawn_server(app).await;
+        let origin = livrarr_http::normalized_origin(&base).unwrap();
+        db.create_readarr_origin(&origin).await.unwrap();
+        let fetcher = HttpFetcherImpl::new().unwrap();
+
+        let result = connect_readarr_verified(&db, &fetcher, &base, "wrong-key").await;
+        assert!(
+            result.is_err(),
+            "a non-200 status (e.g. an unauthorized key) must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_3xx_responses_are_rejected_generically() {
+        let db = create_test_db().await;
+        // The 3xx ALSO carries a valid, correctly-shaped Readarr body (not
+        // just a bare redirect with an empty/HTML body) — isolates "a 3xx
+        // status itself is rejected" from "the body happened to not parse".
+        let app = Router::new().route(
+            "/api/v1/system/status",
+            get(|| async {
+                (
+                    axum::http::StatusCode::FOUND,
+                    [(axum::http::header::LOCATION, "http://example.com/elsewhere")],
+                    axum::Json(serde_json::json!({"appName": "Readarr"})),
+                )
+            }),
+        );
+        let base = spawn_server(app).await;
+        let origin = livrarr_http::normalized_origin(&base).unwrap();
+        db.create_readarr_origin(&origin).await.unwrap();
+        let fetcher = HttpFetcherImpl::new().unwrap();
+
+        let result = connect_readarr_verified(&db, &fetcher, &base, "any-key").await;
+        assert!(
+            result.is_err(),
+            "a 3xx must never be followed — reject generically instead"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_generic_message_across_different_failure_kinds() {
+        let db = create_test_db().await;
+        let fetcher = HttpFetcherImpl::new().unwrap();
+
+        // Kind 1: unapproved private origin (admission-level rejection) —
+        // no HTTP is even attempted.
+        let err_admission = connect_readarr_verified(&db, &fetcher, "http://10.99.99.99:8787", "k")
+            .await
+            .err()
+            .unwrap();
+
+        // Kind 2: approved target, wrong protocol shape.
+        let app = Router::new().route(
+            "/api/v1/system/status",
+            get(|| async { axum::Json(serde_json::json!({"appName": "Sonarr"})) }),
+        );
+        let base = spawn_server(app).await;
+        let origin = livrarr_http::normalized_origin(&base).unwrap();
+        db.create_readarr_origin(&origin).await.unwrap();
+        let err_protocol = connect_readarr_verified(&db, &fetcher, &base, "k")
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(
+            err_admission.to_string(),
+            err_protocol.to_string(),
+            "every rejection reason must render identically — never surface WHY"
+        );
+    }
+
+    // --- Admin-approved origins CRUD (DB layer) ---
+
+    #[tokio::test]
+    async fn origin_crud_add_list_remove_round_trips() {
+        let db = create_test_db().await;
+        assert!(db.list_readarr_origins().await.unwrap().is_empty());
+
+        let created = db
+            .create_readarr_origin("http://10.0.0.9:8787")
+            .await
+            .unwrap();
+        assert_eq!(created.origin, "http://10.0.0.9:8787");
+
+        let listed = db.list_readarr_origins().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+
+        assert!(db
+            .is_readarr_origin_approved("http://10.0.0.9:8787")
+            .await
+            .unwrap());
+        assert!(!db
+            .is_readarr_origin_approved("http://10.0.0.10:8787")
+            .await
+            .unwrap());
+
+        db.delete_readarr_origin(created.id).await.unwrap();
+        assert!(db.list_readarr_origins().await.unwrap().is_empty());
+        assert!(!db
+            .is_readarr_origin_approved("http://10.0.0.9:8787")
+            .await
+            .unwrap());
     }
 }
 
@@ -66,11 +582,14 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         &self,
         req: ReadarrConnectRequest,
     ) -> Result<ReadarrConnectResponse, ServiceError> {
-        let client = ReadarrClient::new(&req.url, &req.api_key, self.http_client.inner().clone());
+        let client = self
+            .connect_readarr(&req.url, &req.api_key)
+            .await
+            .map_err(|_| readarr_rejected())?;
         let folders = client
             .root_folders()
             .await
-            .map_err(|e| ServiceError::Internal(format!("Readarr connection failed: {e}")))?;
+            .map_err(|_| readarr_rejected())?;
 
         let root_folders = folders
             .into_iter()
@@ -92,7 +611,10 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         user_id: i64,
         req: ReadarrImportRequest,
     ) -> Result<ReadarrPreviewResponse, ServiceError> {
-        let client = ReadarrClient::new(&req.url, &req.api_key, self.http_client.inner().clone());
+        let client = self
+            .connect_readarr(&req.url, &req.api_key)
+            .await
+            .map_err(|_| readarr_rejected())?;
 
         let data = fetch_all_readarr_data(&client).await?;
 
@@ -129,6 +651,14 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         user_id: i64,
         req: ReadarrImportRequest,
     ) -> Result<ReadarrStartResponse, ServiceError> {
+        // Origin trust boundary (Unit B3 Part 1), checked and the client
+        // fully protocol-verified BEFORE anything is claimed — a bad/
+        // unapproved target must never occupy the single-flight slot.
+        let client = self
+            .connect_readarr(&req.url, &req.api_key)
+            .await
+            .map_err(|_| readarr_rejected())?;
+
         // Single-flight guard: claim the running slot under the progress
         // lock atomically (check + set). Two concurrent imports for the
         // same normalized identity can race on `source_provider_data`
@@ -146,19 +676,21 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             .map_err(|e| ServiceError::Internal(format!("read default language: {e}")))?;
 
         let import_id = uuid::Uuid::new_v4().to_string();
+        if !try_claim_readarr_slot(
+            &self.readarr_import_progress,
+            &self.readarr_import_owner,
+            user_id,
+            &import_id,
+        )
+        .await
         {
-            let mut prog = self.readarr_import_progress.lock().await;
-            if prog.running {
-                return Err(ServiceError::Internal(
-                    "Readarr import already running".into(),
-                ));
-            }
-            *prog = ReadarrImportProgress {
-                running: true,
-                import_id: Some(import_id.clone()),
-                phase: "fetching".to_string(),
-                ..Default::default()
-            };
+            // Generic busy rejection (Unit B3 Part 2): carries no owner,
+            // import id, counts, errors, or paths — the single-flight guard
+            // is process-global, not per-user, so a second caller learns
+            // nothing about who is running or what it's doing.
+            return Err(ServiceError::Internal(
+                "Readarr import already running".into(),
+            ));
         }
 
         // Create the DB import record AFTER claiming the slot, so the slot
@@ -180,7 +712,6 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             return Err(ServiceError::Internal(e.to_string()));
         }
 
-        let http_client = self.http_client.clone();
         let readarr_import_service = self.readarr_import_service.clone();
         let readarr_import_progress = self.readarr_import_progress.clone();
         let work_service = self.work_service.clone();
@@ -205,7 +736,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             let _slot_guard = SlotGuard(readarr_import_progress.clone());
 
             let runner = ImportRunner::new(
-                http_client,
+                client,
                 readarr_import_service.clone(),
                 readarr_import_progress.clone(),
                 &id,
@@ -231,8 +762,18 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         Ok(ReadarrStartResponse { import_id })
     }
 
-    async fn progress(&self) -> ReadarrImportProgress {
-        self.readarr_import_progress.lock().await.clone()
+    async fn progress(
+        &self,
+        user_id: i64,
+        import_id: Option<String>,
+    ) -> Result<ReadarrImportProgress, ServiceError> {
+        scoped_readarr_progress(
+            &self.readarr_import_progress,
+            &self.readarr_import_owner,
+            user_id,
+            import_id,
+        )
+        .await
     }
 
     async fn history(&self, user_id: i64) -> Result<ReadarrHistoryResponse, ServiceError> {
@@ -258,6 +799,44 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
             &import_id,
         )
         .await
+    }
+
+    async fn list_origins(&self) -> Result<Vec<ReadarrOriginInfo>, ServiceError> {
+        let origins = self
+            .db
+            .list_readarr_origins()
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+        Ok(origins
+            .into_iter()
+            .map(|o| ReadarrOriginInfo {
+                id: o.id,
+                origin: o.origin,
+                created_at: o.created_at,
+            })
+            .collect())
+    }
+
+    async fn add_origin(&self, url: String) -> Result<ReadarrOriginInfo, ServiceError> {
+        let (_base, origin) = readarr_client::normalize_readarr_base(&url)
+            .map_err(|_| ServiceError::Internal("invalid Readarr origin URL".into()))?;
+        let created = self
+            .db
+            .create_readarr_origin(&origin)
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+        Ok(ReadarrOriginInfo {
+            id: created.id,
+            origin: created.origin,
+            created_at: created.created_at,
+        })
+    }
+
+    async fn remove_origin(&self, id: i64) -> Result<(), ServiceError> {
+        self.db
+            .delete_readarr_origin(id)
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))
     }
 }
 
@@ -598,18 +1177,14 @@ struct ReadarrData {
 }
 
 async fn fetch_all_readarr_data(client: &ReadarrClient) -> Result<ReadarrData, ServiceError> {
+    // Every step maps to the SAME generic rejection — which step failed (and
+    // for book files, which author id) must never leak into the response.
     let root_folders = client
         .root_folders()
         .await
-        .map_err(|e| ServiceError::Internal(format!("Readarr root folders: {e}")))?;
-    let authors = client
-        .authors()
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Readarr authors: {e}")))?;
-    let books = client
-        .books()
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Readarr books: {e}")))?;
+        .map_err(|_| readarr_rejected())?;
+    let authors = client.authors().await.map_err(|_| readarr_rejected())?;
+    let books = client.books().await.map_err(|_| readarr_rejected())?;
     let author_ids: Vec<i64> = authors.iter().map(|a| a.id).collect();
     use futures::stream::{self, StreamExt};
     let file_results: Vec<(i64, Result<Vec<RdBookFile>, _>)> = stream::iter(
@@ -621,14 +1196,10 @@ async fn fetch_all_readarr_data(client: &ReadarrClient) -> Result<ReadarrData, S
     .collect()
     .await;
     let mut book_files: Vec<RdBookFile> = Vec::new();
-    for (aid, res) in file_results {
+    for (_aid, res) in file_results {
         match res {
             Ok(files) => book_files.extend(files),
-            Err(e) => {
-                return Err(ServiceError::Internal(format!(
-                    "Readarr book files (author {aid}): {e}"
-                )));
-            }
+            Err(_) => return Err(readarr_rejected()),
         }
     }
     Ok(ReadarrData {
@@ -911,7 +1482,10 @@ impl<'a> ImportPlanner<'a> {
 // =============================================================================
 
 struct ImportRunner {
-    http_client: HttpClient,
+    /// Already normalized, origin-trust-checked, and protocol-verified
+    /// (Unit B3 Part 1) by `LiveReadarrImportWorkflow::start` before this
+    /// runner was constructed — the runner never re-derives trust.
+    client: ReadarrClient,
     readarr_import_service: Arc<ReadarrImportServiceImpl>,
     readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
     import_id: String,
@@ -956,7 +1530,7 @@ fn resolve_batch_author(name: &str, batch_authors: &[Author]) -> BatchAuthorDeci
 impl ImportRunner {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        http_client: HttpClient,
+        client: ReadarrClient,
         readarr_import_service: Arc<ReadarrImportServiceImpl>,
         readarr_import_progress: Arc<tokio::sync::Mutex<ReadarrImportProgress>>,
         import_id: &str,
@@ -967,7 +1541,7 @@ impl ImportRunner {
         import_workflow: Arc<crate::state::LiveImportWorkflow>,
     ) -> Self {
         Self {
-            http_client,
+            client,
             readarr_import_service,
             readarr_import_progress,
             import_id: import_id.to_string(),
@@ -990,12 +1564,7 @@ impl ImportRunner {
     }
 
     async fn run(mut self) -> Result<(), String> {
-        let client = ReadarrClient::new(
-            &self.req.url,
-            &self.req.api_key,
-            self.http_client.inner().clone(),
-        );
-        let data = fetch_all_readarr_data(&client)
+        let data = fetch_all_readarr_data(&self.client)
             .await
             .map_err(|e| format!("fetch failed: {e}"))?;
 
@@ -1601,12 +2170,17 @@ impl ImportRunner {
             {
                 Ok(p) => p,
                 Err(e) => {
+                    // Server-side log keeps the real path for operators; the
+                    // surfaced error never carries a filesystem path — it
+                    // identifies the book by title instead (mirrors the
+                    // works-phase `Work '{title}': {e}` convention above).
                     warn!(path = %rd_file.path, "Source path validation failed: {e}");
                     self.files_skipped += 1;
                     let mut prog = self.progress().lock().await;
                     prog.files_processed += 1;
                     prog.files_skipped += 1;
-                    prog.errors.push(format!("File '{}': {e}", rd_file.path));
+                    prog.errors
+                        .push(format!("File for '{title}': source path validation failed"));
                     continue;
                 }
             };
@@ -1664,8 +2238,7 @@ impl ImportRunner {
                     let mut prog = self.progress().lock().await;
                     prog.files_skipped += 1;
                     prog.errors.push(format!(
-                        "File '{}': path collision — already claimed by a different work",
-                        rd_file.path
+                        "File for '{title}': path collision — already claimed by a different work"
                     ));
                 }
                 Err(e) => {
@@ -1673,8 +2246,7 @@ impl ImportRunner {
                     self.files_skipped += 1;
                     let mut prog = self.progress().lock().await;
                     prog.files_skipped += 1;
-                    prog.errors
-                        .push(format!("LibraryItem for '{}': {e}", rd_file.path));
+                    prog.errors.push(format!("File for '{title}': {e}"));
                 }
             }
 

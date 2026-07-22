@@ -1,98 +1,187 @@
-//! Readarr API client for library import.
+//! Readarr API client for library import (Unit B3 — origin trust boundary).
 //!
-//! Lightweight client that fetches authors, books, editions, and book files
-//! from a Readarr instance via its REST API.
+//! Every request routes through the shared `HttpFetcher` — paced and capped
+//! by the process-global outbound queue (`RateBucket::Readarr`), body-size
+//! and timeout bounded — and it NEVER follows redirects: any 3xx collapses
+//! to the same generic rejection as every other failure. Every rejection
+//! this client can produce is the SAME opaque [`ReadarrConnectError`] — the
+//! response (and any caller log line built from it) must never surface
+//! anything the probed target returned.
 
-use reqwest::Client;
+use std::time::Duration;
+
+use livrarr_domain::services::{
+    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+};
+use livrarr_domain::RequestPriority;
+use livrarr_http::fetcher::HttpFetcherImpl;
 use serde::Deserialize;
 
-/// Readarr API client.
+/// Every failure establishing or using a Readarr connection collapses to
+/// this ONE opaque error — SSRF/approval rejection, protocol mismatch,
+/// network failure, timeout, oversized body, or any non-2xx response.
+/// Display is fixed; callers must not interpolate any other detail (status,
+/// body, underlying error text) into a user-facing message OR a log line
+/// built from it — that is exactly what the probed target could use to
+/// fingerprint what's behind it.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadarrConnectError;
+
+impl std::fmt::Display for ReadarrConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unable to connect to the Readarr instance")
+    }
+}
+
+impl std::error::Error for ReadarrConnectError {}
+
+impl From<FetchError> for ReadarrConnectError {
+    fn from(_: FetchError) -> Self {
+        ReadarrConnectError
+    }
+}
+
+/// Fixed per-request timeout — unchanged from the client's prior behavior.
+const READARR_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Parse and normalize a raw admin/user-supplied Readarr base URL: reject
+/// non-http(s) schemes, embedded credentials, a query string, and a
+/// fragment. Returns the normalized base (scheme + host[:port] + path, no
+/// trailing slash — an explicitly-configured base path, e.g. a reverse-proxy
+/// subpath, is preserved so only fixed API suffixes are appended after it)
+/// and its bare origin (scheme + host[:port], no path — the
+/// `RateBucket::Readarr` key and the approved-origins lookup key,
+/// `livrarr_http::normalized_origin`).
+pub fn normalize_readarr_base(raw: &str) -> Result<(String, String), ReadarrConnectError> {
+    let parsed = reqwest::Url::parse(raw).map_err(|_| ReadarrConnectError)?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ReadarrConnectError);
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ReadarrConnectError);
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ReadarrConnectError);
+    }
+    let origin = livrarr_http::normalized_origin(raw).ok_or(ReadarrConnectError)?;
+    let path = parsed.path().trim_end_matches('/');
+    Ok((format!("{origin}{path}"), origin))
+}
+
+/// Readarr API client. Construct only from an ALREADY-normalized base+origin
+/// (see [`normalize_readarr_base`]) — the trust decision (admin-approved
+/// private origin, or SSRF-safe-classified public) is made by the caller
+/// (`LiveReadarrImportWorkflow`) before this type exists.
 pub struct ReadarrClient {
-    base_url: String,
+    base: String,
+    origin: String,
     api_key: String,
-    http: Client,
+    fetcher: HttpFetcherImpl,
+    max_body_bytes: usize,
+    timeout: Duration,
 }
 
 impl ReadarrClient {
-    pub fn new(url: &str, api_key: &str, http: Client) -> Self {
-        let base_url = url.trim_end_matches('/').to_string();
+    pub fn new(base: String, origin: String, api_key: String, fetcher: HttpFetcherImpl) -> Self {
         Self {
-            base_url,
-            api_key: api_key.to_string(),
-            http,
+            base,
+            origin,
+            api_key,
+            fetcher,
+            max_body_bytes: livrarr_http::MAX_RESPONSE_BODY_BYTES,
+            timeout: READARR_TIMEOUT,
         }
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ReadarrError> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .http
-            .get(&url)
-            .header("X-Api-Key", &self.api_key)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| ReadarrError::Network(e.without_url().to_string()))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ReadarrError::Api {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        resp.json::<T>()
-            .await
-            .map_err(|e| ReadarrError::Parse(e.to_string()))
+    /// Test-only: shrink the response-body cap so the cap is cheap to
+    /// exercise (mirrors the outbound queue's own test-only seams, e.g.
+    /// `set_breaker_config_for_tests`).
+    #[cfg(test)]
+    pub fn with_max_body_bytes(mut self, max: usize) -> Self {
+        self.max_body_bytes = max;
+        self
     }
 
-    pub async fn root_folders(&self) -> Result<Vec<RdRootFolder>, ReadarrError> {
+    /// Test-only: shrink the per-request timeout so a hung connection is
+    /// cheap to exercise.
+    #[cfg(test)]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<T, ReadarrConnectError> {
+        let req = FetchRequest {
+            url: format!("{}{}", self.base, path),
+            method: HttpMethod::Get,
+            headers: vec![("X-Api-Key".to_string(), self.api_key.clone())],
+            body: None,
+            timeout: self.timeout,
+            rate_bucket: RateBucket::Readarr {
+                origin: self.origin.clone(),
+            },
+            max_body_bytes: self.max_body_bytes,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Interactive,
+        };
+        // No redirects, ever: avoids cross-origin X-Api-Key forwarding and a
+        // trusted-initial redirect loop. Any 3xx falls through to the same
+        // generic rejection as every other non-2xx status below.
+        let resp = self.fetcher.fetch_no_redirect(req).await?;
+        if resp.status != 200 {
+            return Err(ReadarrConnectError);
+        }
+        serde_json::from_slice(&resp.body).map_err(|_| ReadarrConnectError)
+    }
+
+    /// Protocol check — proves the origin actually speaks Readarr's API.
+    /// This is NOT the SSRF trust authority (that decision — admin-approved
+    /// private, or SSRF-safe-classified public — already happened in the
+    /// caller before this client was constructed); it only proves the
+    /// connection is worth using.
+    pub async fn verify_protocol(&self) -> Result<(), ReadarrConnectError> {
+        let status: RdSystemStatus = self.get("/api/v1/system/status").await?;
+        if status.app_name.as_deref() == Some("Readarr") {
+            Ok(())
+        } else {
+            Err(ReadarrConnectError)
+        }
+    }
+
+    pub async fn root_folders(&self) -> Result<Vec<RdRootFolder>, ReadarrConnectError> {
         self.get("/api/v1/rootfolder").await
     }
 
-    pub async fn authors(&self) -> Result<Vec<RdAuthor>, ReadarrError> {
+    pub async fn authors(&self) -> Result<Vec<RdAuthor>, ReadarrConnectError> {
         self.get("/api/v1/author").await
     }
 
-    pub async fn books(&self) -> Result<Vec<RdBook>, ReadarrError> {
+    pub async fn books(&self) -> Result<Vec<RdBook>, ReadarrConnectError> {
         self.get("/api/v1/book").await
     }
 
     pub async fn book_files_by_author(
         &self,
         author_id: i64,
-    ) -> Result<Vec<RdBookFile>, ReadarrError> {
+    ) -> Result<Vec<RdBookFile>, ReadarrConnectError> {
         self.get(&format!("/api/v1/bookfile?authorId={author_id}"))
             .await
     }
 }
 
 // ---------------------------------------------------------------------------
-// Error
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub enum ReadarrError {
-    Network(String),
-    Api { status: u16, body: String },
-    Parse(String),
-}
-
-impl std::fmt::Display for ReadarrError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Network(e) => write!(f, "network error: {e}"),
-            Self::Api { status, body } => write!(f, "API error {status}: {body}"),
-            Self::Parse(e) => write!(f, "parse error: {e}"),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Response types — lightweight deserialization structs
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RdSystemStatus {
+    app_name: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -231,5 +320,198 @@ pub fn media_type_from_extension(path: &str) -> Option<&'static str> {
         "epub" | "mobi" | "azw" | "azw3" | "pdf" | "cbz" | "cbr" => Some("ebook"),
         "mp3" | "m4b" | "m4a" | "flac" | "ogg" | "wma" | "aac" => Some("audiobook"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod url_normalization_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_embedded_credentials() {
+        assert!(normalize_readarr_base("http://user:pass@10.0.0.5:8787").is_err());
+    }
+
+    #[test]
+    fn rejects_query_string() {
+        assert!(normalize_readarr_base("http://10.0.0.5:8787/?x=1").is_err());
+    }
+
+    #[test]
+    fn rejects_fragment() {
+        assert!(normalize_readarr_base("http://10.0.0.5:8787/#frag").is_err());
+    }
+
+    #[test]
+    fn rejects_non_http_scheme() {
+        assert!(normalize_readarr_base("ftp://10.0.0.5:8787").is_err());
+    }
+
+    #[test]
+    fn preserves_explicit_base_path_and_strips_trailing_slash() {
+        let (base, origin) = normalize_readarr_base("http://10.0.0.5:8787/readarr/").unwrap();
+        assert_eq!(base, "http://10.0.0.5:8787/readarr");
+        assert_eq!(origin, "http://10.0.0.5:8787");
+    }
+
+    #[test]
+    fn bare_origin_has_empty_path() {
+        let (base, origin) = normalize_readarr_base("http://10.0.0.5:8787").unwrap();
+        assert_eq!(base, "http://10.0.0.5:8787");
+        assert_eq!(origin, "http://10.0.0.5:8787");
+    }
+
+    #[test]
+    fn default_port_is_omitted_from_origin() {
+        let (_, origin) = normalize_readarr_base("http://readarr.example.com/x").unwrap();
+        assert_eq!(origin, "http://readarr.example.com");
+    }
+}
+
+/// `ReadarrClient` behavior against a real local HTTP server: body cap,
+/// timeout, bucket pacing (never `RateBucket::None`), and end-to-end base-
+/// path joining (Part 1 points 2, 3).
+#[cfg(test)]
+mod client_behavior_tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    async fn spawn_server(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    fn client_for(base: String) -> ReadarrClient {
+        let origin = livrarr_http::normalized_origin(&base).unwrap();
+        ReadarrClient::new(
+            base,
+            origin,
+            "key".to_string(),
+            HttpFetcherImpl::new().unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_rejected_by_the_configured_cap() {
+        let big_body = vec![b'A'; 2048];
+        let app = Router::new().route(
+            "/api/v1/rootfolder",
+            get(move || {
+                let b = big_body.clone();
+                async move { b }
+            }),
+        );
+        let base = spawn_server(app).await;
+        let client = client_for(base).with_max_body_bytes(1024);
+
+        assert!(
+            client.root_folders().await.is_err(),
+            "a body exceeding the configured cap must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn body_within_the_cap_is_accepted() {
+        let app = Router::new().route(
+            "/api/v1/rootfolder",
+            get(|| async { axum::Json(serde_json::json!([])) }),
+        );
+        let base = spawn_server(app).await;
+        let client = client_for(base).with_max_body_bytes(1024);
+
+        assert!(
+            client.root_folders().await.is_ok(),
+            "a small body under the cap must succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hung_connection_times_out_and_is_rejected_generically() {
+        // Accepts the TCP connection but never writes an HTTP response —
+        // the client's short test-injected timeout must still fire.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_socket, _peer) = listener.accept().await.unwrap();
+            // Hold the connection open forever without responding.
+            std::future::pending::<()>().await;
+        });
+        let base = format!("http://127.0.0.1:{}", addr.port());
+        let client = client_for(base).with_timeout(Duration::from_millis(150));
+
+        let err = client.root_folders().await.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            ReadarrConnectError.to_string(),
+            "a timeout must render the same generic message as every other rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_through_the_readarr_bucket_are_paced_not_bypassed() {
+        // RateBucket::None would let both dispatch immediately; the Readarr
+        // bucket paces same-origin calls (Unit B3 point 3) — proves the
+        // client is NOT on RateBucket::None.
+        let app = Router::new()
+            .route(
+                "/api/v1/rootfolder",
+                get(|| async { axum::Json(serde_json::json!([])) }),
+            )
+            .route(
+                "/api/v1/author",
+                get(|| async { axum::Json(serde_json::json!([])) }),
+            );
+        let base = spawn_server(app).await;
+        let client = client_for(base);
+
+        let start = std::time::Instant::now();
+        client.root_folders().await.unwrap();
+        client.authors().await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "the second call through the same Readarr origin must be paced (~500ms), got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_path_is_preserved_end_to_end_not_just_the_bare_origin() {
+        // The Readarr instance lives under a reverse-proxy subpath — every
+        // fixed API suffix must land under that SAME preserved base path,
+        // not at the bare origin root.
+        let app = Router::new().nest(
+            "/readarr-base",
+            Router::new().route(
+                "/api/v1/rootfolder",
+                get(|| async {
+                    axum::Json(serde_json::json!([{
+                        "id": 7, "name": "Books", "path": "/books",
+                        "accessible": true, "freeSpace": 1, "totalSpace": 1
+                    }]))
+                }),
+            ),
+        );
+        let raw_base = spawn_server(app).await;
+        let (base, origin) = normalize_readarr_base(&format!("{raw_base}/readarr-base")).unwrap();
+        let client = ReadarrClient::new(
+            base,
+            origin,
+            "key".to_string(),
+            HttpFetcherImpl::new().unwrap(),
+        );
+
+        let folders = client
+            .root_folders()
+            .await
+            .expect("the request must be routed under the preserved base path");
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].id, 7);
     }
 }
