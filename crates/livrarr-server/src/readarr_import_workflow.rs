@@ -193,8 +193,14 @@ async fn scoped_readarr_progress(
     user_id: i64,
     import_id: Option<String>,
 ) -> Result<ReadarrImportProgress, ServiceError> {
+    // Unit B3 #5: owner is read AFTER acquiring the progress lock (never
+    // before) so owner+progress are one consistent snapshot — a claim
+    // completing between the two reads would otherwise pair a stale owner
+    // with a different, concurrently-claimed owner's live progress.
+    let guard = progress.lock().await;
     let owner_id = owner.load(Ordering::SeqCst);
-    let prog = progress.lock().await.clone();
+    let prog = guard.clone();
+    drop(guard);
 
     if owner_id != user_id {
         return match import_id {
@@ -353,6 +359,86 @@ mod single_flight_and_progress_tests {
         // A real user id is never 0 (the first admin is id 1) — a caller
         // could not accidentally be treated as "the owner" of a fresh slot.
         assert_ne!(owner.load(Ordering::SeqCst), 1);
+    }
+
+    /// Unit B3 #5 (torn progress snapshot / cross-user leak): `owner` is a
+    /// sibling `AtomicI64`, read by the OLD `scoped_readarr_progress`
+    /// BEFORE the progress lock is acquired. If a concurrent claim
+    /// completes in that window, a caller whose stale owner-read happens to
+    /// equal their OWN id (e.g. they owned an earlier, already-finished
+    /// run — the owner field is never cleared) is paired with a DIFFERENT,
+    /// concurrently-claimed owner's LIVE progress.
+    ///
+    /// Deterministic on a real multi-thread runtime: the test holds the
+    /// progress lock itself so both the writer's claim (`try_claim_readarr_
+    /// slot`, simulating user Y's `start()`) and the reader's poll
+    /// (`scoped_readarr_progress`, simulating user X's `progress()`) queue
+    /// up behind the SAME lock in a controlled order (writer first, so its
+    /// write completes before the reader's lock resolves) before the test
+    /// releases it. The existing tests above are all sequential — this is
+    /// the one that actually interleaves the two functions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_claim_never_leaks_into_a_stale_owners_poll() {
+        let (progress, owner) = fresh_state();
+        let x_id = 1i64;
+        let y_id = 2i64;
+
+        // X previously ran and finished. `owner` is never cleared on
+        // completion, so it still reads x_id even though X's run is long
+        // done — this is what makes X's NEXT stale read equal their own id.
+        assert!(try_claim_readarr_slot(&progress, &owner, x_id, "import-x").await);
+        {
+            let mut prog = progress.lock().await;
+            prog.running = false;
+            prog.phase = "done".to_string();
+            prog.works_processed = 5;
+        }
+
+        // Hold the lock ourselves so both the writer (Y's claim) and the
+        // reader (X's poll) queue up behind it in a controlled order.
+        let guard = progress.lock().await;
+
+        let writer_progress = progress.clone();
+        let writer_owner = owner.clone();
+        let writer = tokio::spawn(async move {
+            try_claim_readarr_slot(&writer_progress, &writer_owner, y_id, "import-y").await
+        });
+        // Let the writer reach its (blocked) lock attempt first, so it is
+        // queued ahead of the reader below.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        let reader_progress = progress.clone();
+        let reader_owner = owner.clone();
+        let reader = tokio::spawn(async move {
+            scoped_readarr_progress(&reader_progress, &reader_owner, x_id, None).await
+        });
+        // Let the reader run up to its own (blocked) lock attempt — in the
+        // pre-fix code this is where it loads the still-stale x_id owner,
+        // before Y's claim has written anything.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Release: the writer (queued first) claims for Y, then the reader
+        // resolves and observes the now-updated progress.
+        drop(guard);
+
+        assert!(
+            writer.await.unwrap(),
+            "Y's claim must succeed — X's run already finished"
+        );
+        let result = reader
+            .await
+            .unwrap()
+            .expect("a generic poll (no import_id) must not error");
+
+        assert_ne!(
+            result.import_id.as_deref(),
+            Some("import-y"),
+            "X's poll must never observe Y's concurrently-claimed live import"
+        );
     }
 }
 

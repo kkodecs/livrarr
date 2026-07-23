@@ -105,6 +105,14 @@ pub struct HttpFetcherImpl {
     /// silently chasing it) — e.g. to recover a `magnet:` redirect target
     /// reqwest's redirect-following client rejects.
     no_redirect_client: reqwest::Client,
+    /// Same SSRF-safe configuration as `ssrf_client`, but never auto-follows
+    /// redirects (Unit B3 #3) — for the Readarr client's verify-then-restrict,
+    /// non-admin (untrusted) origins, which must be protected against
+    /// DNS-rebinding on every connection. Deliberately a SEPARATE client from
+    /// `no_redirect_client`, which stays unprotected on purpose: it is shared
+    /// with admin-approved TRUSTED-infrastructure callers (insight #37), and
+    /// adding the SSRF resolver there would regress those trusted setups.
+    readarr_safe_client: reqwest::Client,
 }
 
 impl HttpFetcherImpl {
@@ -133,11 +141,18 @@ impl HttpFetcherImpl {
             .build()
             .map_err(|e| e.to_string())?;
 
+        let readarr_safe_client = reqwest::Client::builder()
+            .dns_resolver(ssrf::SsrfSafeResolver::new())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| e.to_string())?;
+
         Ok(Self {
             client,
             ssrf_client,
             fast_connect_ssrf_client,
             no_redirect_client,
+            readarr_safe_client,
         })
     }
 
@@ -512,6 +527,14 @@ impl HttpFetcherImpl {
         }
 
         Err(FetchError::Connection("too many redirects".to_string()))
+    }
+
+    /// Fetch via the SSRF-safe, no-redirect client (Unit B3 #3) — for the
+    /// Readarr client's untrusted, verify-then-restrict origins. An inherent
+    /// method (not part of the `HttpFetcher` trait) since `ReadarrClient`
+    /// holds a concrete `HttpFetcherImpl`, not a `dyn HttpFetcher`.
+    pub async fn fetch_readarr(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+        self.do_fetch(&self.readarr_safe_client, req).await
     }
 }
 

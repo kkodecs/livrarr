@@ -11,10 +11,12 @@
 use std::time::Duration;
 
 use livrarr_domain::services::{
-    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    FetchError, FetchRequest, HttpMethod, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::RequestPriority;
+use livrarr_http::breaker::BreakerSignal;
 use livrarr_http::fetcher::HttpFetcherImpl;
+use livrarr_http::outbound_queue;
 use serde::Deserialize;
 
 /// Every failure establishing or using a Readarr connection collapses to
@@ -130,8 +132,29 @@ impl ReadarrClient {
         };
         // No redirects, ever: avoids cross-origin X-Api-Key forwarding and a
         // trusted-initial redirect loop. Any 3xx falls through to the same
-        // generic rejection as every other non-2xx status below.
-        let resp = self.fetcher.fetch_no_redirect(req).await?;
+        // generic rejection as every other non-2xx status below. Routed via
+        // `fetch_readarr` (Unit B3 #3): the SSRF-safe client, so a
+        // DNS-rebind between admission and this connection is still caught.
+        let resp = self.fetcher.fetch_readarr(req).await?;
+
+        // Unit B3 #17: Readarr IS breaker-tracked (`breaker::breaker_tracked`),
+        // but `do_fetch`'s own auto-reporting only covers transport-level
+        // failures and, for a completed response, is Indexer-bucket-only —
+        // so report the outcome here, mirroring a sibling provider client
+        // (e.g. `hardcover.rs`'s `hc_post`). Without this, a HalfOpen breaker
+        // never closes: a probe's 200 is never reported as a success.
+        let signal = if resp.status == 200 {
+            BreakerSignal::Success
+        } else {
+            BreakerSignal::Failure
+        };
+        outbound_queue::shared().report_outcome(
+            RateBucket::Readarr {
+                origin: self.origin.clone(),
+            },
+            signal,
+        );
+
         if resp.status != 200 {
             return Err(ReadarrConnectError);
         }
@@ -513,5 +536,121 @@ mod client_behavior_tests {
             .expect("the request must be routed under the preserved base path");
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].id, 7);
+    }
+
+    /// Unit B3 #3 (DNS-rebinding): approval only ever inspects the origin
+    /// STRING (an admin-approved entry is a straight string match — see
+    /// `origin_is_permitted` in `readarr_import_workflow.rs`; a public
+    /// origin is resolved once, at admission time). The data-fetching
+    /// client itself is the last line of defense against a hostname that
+    /// resolves privately by the time of the REAL connection (a rebind
+    /// between admission and use). `localhost` is a real, deterministic
+    /// stand-in for that rebound hostname — this environment's
+    /// `/etc/hosts` maps it only to `127.0.0.1`, exactly where the test
+    /// server listens, so a client with no DNS-rebinding protection
+    /// connects right through.
+    #[tokio::test]
+    async fn get_refuses_a_host_that_resolves_to_a_private_address() {
+        let app = Router::new().route(
+            "/api/v1/rootfolder",
+            get(|| async { axum::Json(serde_json::json!([])) }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let base = format!("http://localhost:{port}");
+        let client = client_for(base);
+
+        let result = client.root_folders().await;
+        assert!(
+            result.is_err(),
+            "a Readarr origin resolving to a private/loopback address must be refused, not connected"
+        );
+    }
+}
+
+/// Unit B3 #17: `ReadarrClient::get` must report outcomes to the outbound
+/// queue's breaker (Readarr IS breaker-tracked — `breaker::breaker_tracked`)
+/// so a HalfOpen probe can actually close it, instead of leaving it stuck
+/// HalfOpen forever (where any subsequent transport hiccup — already
+/// auto-reported as a `Failure` by `do_fetch` for every bucket — re-opens it
+/// immediately, bypassing the normal 5-failure threshold).
+#[cfg(test)]
+mod breaker_report_tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::Router;
+    use livrarr_http::breaker::BreakerSignal;
+    use livrarr_http::outbound_queue;
+    use tokio::net::TcpListener;
+
+    async fn spawn_server(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    /// There is no direct circuit-state accessor exposed outside
+    /// `livrarr-http` (by design — `OutboundQueue`'s registry is private),
+    /// so this proves the close BEHAVIORALLY: trip the breaker Open with an
+    /// already-elapsed window so the very next request is admitted as a
+    /// HalfOpen probe; feed it a real 200 through `ReadarrClient::get`; then
+    /// report one manual `Failure` directly to the SAME bucket, standing in
+    /// for a subsequent transport hiccup. A properly-closed breaker absorbs
+    /// one failure (threshold 5) and keeps admitting; a breaker stuck at
+    /// HalfOpen (the bug) re-opens on ANY single failure, which the next
+    /// `acquire` call surfaces as `CircuitOpen`.
+    #[tokio::test]
+    async fn successful_get_closes_a_half_open_breaker() {
+        let app = Router::new().route(
+            "/api/v1/rootfolder",
+            get(|| async { axum::Json(serde_json::json!([])) }),
+        );
+        let base = spawn_server(app).await;
+        let origin = livrarr_http::normalized_origin(&base).unwrap();
+        let bucket = RateBucket::Readarr {
+            origin: origin.clone(),
+        };
+        let client = ReadarrClient::new(
+            base,
+            origin,
+            "key".to_string(),
+            HttpFetcherImpl::new().unwrap(),
+        );
+
+        // Trip Open with an already-elapsed window: the next admission
+        // check transitions it straight to HalfOpen and lets the probe
+        // through.
+        outbound_queue::shared().report_outcome(
+            bucket.clone(),
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_secs(0)),
+            },
+        );
+
+        client
+            .root_folders()
+            .await
+            .expect("the HalfOpen probe request must succeed");
+
+        // Simulate a single subsequent hiccup directly against the same
+        // bucket. If the probe above closed the breaker, one failure
+        // (threshold 5) must not retrip it.
+        outbound_queue::shared().report_outcome(bucket.clone(), BreakerSignal::Failure);
+
+        let admitted = outbound_queue::shared()
+            .acquire(bucket, RequestPriority::Interactive)
+            .await;
+        assert!(
+            admitted.is_ok(),
+            "a single failure after the probe must not reopen a properly-closed breaker \
+             (a breaker stuck at HalfOpen reopens on any single failure)"
+        );
     }
 }
