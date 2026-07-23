@@ -32,12 +32,23 @@ export interface StreamTokenControllerDeps {
   now: () => number;
   /** Called after a second (permanent) media-error failure. */
   onPermanentFailure?: () => void;
+  /**
+   * Called when the very first mint (on `start()`) fails, so the caller can
+   * surface an error immediately instead of leaving a blank player while
+   * the retry below keeps trying in the background.
+   */
+  onInitialMintError?: (error: unknown) => void;
 }
 
 /** Refresh this long before the token's actual expiry. */
 export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 /** Never schedule a refresh sooner than this, even if exp is imminent. */
 const MIN_REFRESH_DELAY_MS = 1000;
+/** A failed mint/refresh retries after this long, doubling on each further
+ *  consecutive failure — reset the moment a mint succeeds again. */
+export const MINT_RETRY_INITIAL_DELAY_MS = 5 * 1000;
+/** ...never waiting longer than this between retries. */
+export const MINT_RETRY_MAX_DELAY_MS = 60 * 1000;
 
 /**
  * Drives one library item's stream token for the lifetime of an
@@ -51,6 +62,7 @@ export class StreamTokenController {
   private timerHandle: unknown = null;
   private errorRemintUsed = false;
   private disposed = false;
+  private consecutiveMintFailures = 0;
 
   constructor(deps: StreamTokenControllerDeps) {
     this.deps = deps;
@@ -83,14 +95,23 @@ export class StreamTokenController {
     let result: StreamTokenMint;
     try {
       result = await this.deps.mint();
-    } catch {
-      // Leave the current URL (if any) in place; the caller can retry via
-      // the same error path (proactive refresh will also try again next
-      // cycle if this was that path).
+    } catch (err) {
+      if (this.disposed) return;
+      // Leave the current URL (if any) in place, but never leave the cycle
+      // dead: re-arm with bounded exponential backoff so a transient outage
+      // self-heals instead of requiring a media error (or a reload) to
+      // recover. An INITIAL mint failure (no URL has ever been ready) also
+      // surfaces immediately — otherwise the player just stays blank with
+      // no indication anything is wrong.
+      if (!isRefresh) {
+        this.deps.onInitialMintError?.(err);
+      }
+      this.scheduleMintRetry(isRefresh);
       return;
     }
     if (this.disposed) return;
 
+    this.consecutiveMintFailures = 0;
     const url = this.deps.buildUrl(result.token);
     this.deps.onUrlReady(url, snapshot);
     this.scheduleProactiveRefresh(result.exp);
@@ -104,6 +125,18 @@ export class StreamTokenController {
     );
     this.timerHandle = this.deps.scheduleRefresh(delay, () => {
       void this.mintAndSchedule(true);
+    });
+  }
+
+  private scheduleMintRetry(isRefresh: boolean): void {
+    const delay = Math.min(
+      MINT_RETRY_MAX_DELAY_MS,
+      MINT_RETRY_INITIAL_DELAY_MS * 2 ** this.consecutiveMintFailures,
+    );
+    this.consecutiveMintFailures += 1;
+    this.clearTimer();
+    this.timerHandle = this.deps.scheduleRefresh(delay, () => {
+      void this.mintAndSchedule(isRefresh);
     });
   }
 

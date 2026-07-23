@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   StreamTokenController,
   REFRESH_MARGIN_MS,
+  MINT_RETRY_INITIAL_DELAY_MS,
+  MINT_RETRY_MAX_DELAY_MS,
   type StreamTokenControllerDeps,
   type StreamTokenMint,
   type PlaybackSnapshot,
@@ -81,6 +83,111 @@ describe("StreamTokenController — proactive refresh", () => {
     await new StreamTokenController(deps).start();
 
     expect(deps.scheduled[0]!.delay).toBeGreaterThan(0);
+  });
+});
+
+describe("StreamTokenController — mint-failure retry with bounded backoff (#15)", () => {
+  it("surfaces an error and schedules a backoff retry when the INITIAL mint fails", async () => {
+    const mint = vi
+      .fn<() => Promise<StreamTokenMint>>()
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce({ token: "t1", exp: 9_999_999_999 });
+    const onInitialMintError = vi.fn();
+    const deps = makeDeps({ mint, onInitialMintError });
+
+    const controller = new StreamTokenController(deps);
+    await controller.start();
+
+    // (b) the initial mint failure surfaces to the caller immediately —
+    // no silent blank player.
+    expect(onInitialMintError).toHaveBeenCalledTimes(1);
+    expect(onInitialMintError).toHaveBeenCalledWith(expect.any(Error));
+    expect(deps.onUrlReady).not.toHaveBeenCalled();
+
+    // (a) ...and the retry chain does not die: a retry is scheduled at the
+    // initial backoff delay instead of a bare `return`.
+    expect(deps.scheduled).toHaveLength(1);
+    expect(deps.scheduled[0]!.delay).toBe(MINT_RETRY_INITIAL_DELAY_MS);
+
+    // Firing the retry recovers normally, with the same "initial mint"
+    // semantics (no restoreSnapshot — there was never a prior URL).
+    deps.scheduled[0]!.cb();
+    await flush();
+
+    expect(mint).toHaveBeenCalledTimes(2);
+    expect(deps.onUrlReady).toHaveBeenCalledWith(
+      "/api/v1/stream/1?token=t1",
+      null,
+    );
+  });
+
+  it("re-arms with a backoff retry when a PROACTIVE REFRESH mint fails, without surfacing an initial-mint error", async () => {
+    const mint = vi
+      .fn<() => Promise<StreamTokenMint>>()
+      .mockResolvedValueOnce({ token: "t1", exp: 9_999_999_999 })
+      .mockRejectedValueOnce(new Error("network down"));
+    const onInitialMintError = vi.fn();
+    const deps = makeDeps({ mint, onInitialMintError });
+
+    const controller = new StreamTokenController(deps);
+    await controller.start();
+    expect(deps.scheduled).toHaveLength(1); // the normal proactive-refresh timer
+
+    // Fire the proactive refresh; its mint rejects.
+    deps.scheduled[0]!.cb();
+    await flush();
+
+    // (a) the chain doesn't die: a NEW timer is scheduled at the initial
+    // backoff delay (the bug: `scheduleProactiveRefresh` only ever ran on
+    // the success path, so a refresh failure previously killed the chain
+    // for good, leaving only the one-shot `<audio onError>` remint as a
+    // partial self-heal).
+    expect(deps.scheduled).toHaveLength(2);
+    expect(deps.scheduled[1]!.delay).toBe(MINT_RETRY_INITIAL_DELAY_MS);
+    // (b) a REFRESH failure (unlike an INITIAL mint failure) does not
+    // surface an error — the player is already playing a valid URL.
+    expect(onInitialMintError).not.toHaveBeenCalled();
+  });
+
+  it("doubles the backoff on each consecutive failure, caps it at 60s, and resets after a success", async () => {
+    const mint = vi
+      .fn<() => Promise<StreamTokenMint>>()
+      .mockRejectedValue(new Error("down"));
+    const deps = makeDeps({ mint });
+
+    const controller = new StreamTokenController(deps);
+    await controller.start();
+
+    const delays: number[] = [deps.scheduled[0]!.delay];
+    for (let i = 0; i < 5; i++) {
+      const next = deps.scheduled[deps.scheduled.length - 1]!;
+      next.cb();
+      await flush();
+      delays.push(deps.scheduled[deps.scheduled.length - 1]!.delay);
+    }
+
+    expect(delays).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000]);
+    expect(delays[0]).toBe(MINT_RETRY_INITIAL_DELAY_MS);
+    expect(delays[4]).toBe(MINT_RETRY_MAX_DELAY_MS);
+
+    // Recover, then fail again — the backoff must restart from the initial
+    // delay, not resume climbing (or stay capped) from where it left off.
+    mint.mockResolvedValueOnce({ token: "recovered", exp: 9_999_999_999 });
+    const lastRetry = deps.scheduled[deps.scheduled.length - 1]!;
+    lastRetry.cb();
+    await flush();
+    expect(deps.onUrlReady).toHaveBeenCalledWith(
+      "/api/v1/stream/1?token=recovered",
+      null,
+    );
+
+    mint.mockRejectedValueOnce(new Error("down again"));
+    const proactiveTimer = deps.scheduled[deps.scheduled.length - 1]!; // scheduled by the recovery
+    proactiveTimer.cb();
+    await flush();
+    expect(deps.scheduled[deps.scheduled.length - 1]!.delay).toBe(
+      MINT_RETRY_INITIAL_DELAY_MS,
+    );
   });
 });
 

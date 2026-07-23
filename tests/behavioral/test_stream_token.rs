@@ -161,6 +161,38 @@ async fn mint_route_rejects_item_not_owned_by_caller() {
 }
 
 #[tokio::test]
+async fn mint_route_rejects_when_no_auth_context_present() {
+    // Every OTHER test in this file inserts a valid `AuthContext` extension
+    // by hand before calling the router — none of them exercise what a REAL
+    // unauthenticated request hits. `mint_stream_token_route` declares
+    // `ctx: AuthContext` as an extractor argument, and `AuthContext`'s own
+    // `FromRequestParts` impl (crates/livrarr-handlers/src/types/auth.rs) is
+    // the production code that rejects any request with no `AuthContext` in
+    // its extensions — independent of whichever upstream layer (or lack of
+    // one) would otherwise have populated it. If the mint route were ever
+    // moved out from behind `auth_middleware` in router.rs, this extractor
+    // is the last line of defense, and no existing test would notice if it
+    // stopped working.
+    let db = create_test_db().await;
+    let user_a = create_test_user(&db).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = ensure_root(&db, tmp.path()).await;
+    let item_a =
+        seed_playable_item(&db, user_a, root, tmp.path(), "book.m4b", b"audio-bytes").await;
+
+    let app = stream_token_app(route_state(db.clone()));
+    // Deliberately NOT inserting an AuthContext extension.
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/workfile/{item_a}/stream-token"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn mint_route_returns_a_token_and_a_24h_expiry() {
     let db = create_test_db().await;
     let user_a = create_test_user(&db).await;

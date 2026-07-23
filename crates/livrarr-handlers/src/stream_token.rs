@@ -221,6 +221,40 @@ mod tests {
     }
 
     #[test]
+    fn tampered_claims_rejected_as_invalid_signature() {
+        // Complements `tampered_token_rejected` above, which only ever flips
+        // a byte in the SIGNATURE half. The claims half must be equally
+        // tamper-evident: pairing a MODIFIED claims blob with the ORIGINAL
+        // (untouched) signature must also fail — otherwise an attacker who
+        // could edit the encoded user_id/item_id/exp would keep a signature
+        // that was never computed over their edited bytes.
+        let (token, _exp) = mint_stream_token(KEY, 1, 42, now());
+        let (claims_part, sig_part) = token.split_once('.').unwrap();
+
+        // Decode the real claims message, flip its last character, then
+        // re-encode — guarantees a structurally valid (decodable) base64url
+        // blob whose content differs from what `sig_part` was signed over.
+        // (The message is pure ASCII digits/letters/pipes, so this can never
+        // produce invalid UTF-8 and accidentally hit the `Malformed` path
+        // instead of the signature check.)
+        let message = String::from_utf8(
+            data_encoding::BASE64URL_NOPAD
+                .decode(claims_part.as_bytes())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut chars: Vec<char> = message.chars().collect();
+        let last = chars.len() - 1;
+        chars[last] = if chars[last] == '0' { '1' } else { '0' };
+        let tampered_message: String = chars.into_iter().collect();
+        let tampered_claims = data_encoding::BASE64URL_NOPAD.encode(tampered_message.as_bytes());
+
+        let tampered = format!("{tampered_claims}.{sig_part}");
+        let err = verify_stream_token(KEY, &tampered, 42, now()).unwrap_err();
+        assert_eq!(err, StreamTokenError::InvalidSignature);
+    }
+
+    #[test]
     fn expired_token_rejected() {
         let past = now() - chrono::Duration::hours(TTL_HOURS + 1);
         let (token, exp) = mint_stream_token(KEY, 1, 42, past);
