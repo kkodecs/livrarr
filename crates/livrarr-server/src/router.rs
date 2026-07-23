@@ -36,12 +36,14 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .finish()
         .expect("login rate limiter config");
 
-    // Rate limiter for setup: 5 requests per 60 seconds per IP (mirrors
-    // login_governor — cloned before the global governor consumes `extractor`).
+    // Rate limiter for setup: true <=5/min per IP — one attempt per 12s, no
+    // burst head-start. burst_size(5) previously let 5 immediate attempts
+    // through and then refilled every 12s, allowing 9 attempts inside one
+    // minute instead of the intended 5.
     let setup_governor = GovernorConfigBuilder::default()
         .key_extractor(extractor.clone())
-        .period(Duration::from_secs(12)) // 1 token per 12s = 5 per 60s
-        .burst_size(5)
+        .period(Duration::from_secs(12)) // 1 token per 12s, burst 1 => <=5 per 60s
+        .burst_size(1)
         .finish()
         .expect("setup rate limiter config");
 
@@ -708,59 +710,417 @@ mod tests {
     use axum::extract::ConnectInfo;
     use axum::http::Request;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::{AtomicBool, AtomicI64};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
-    async fn ok_handler() -> StatusCode {
-        StatusCode::OK
-    }
+    use livrarr_metadata as m;
 
-    /// Mirrors the `setup_governor` construction in `build_router` (5/min/IP)
-    /// against a standalone route — proving the config trips on the 6th
-    /// request within the window. Keep the period/burst values in sync with
-    /// `build_router` if either changes.
-    #[tokio::test]
-    async fn setup_governor_trips_on_sixth_request_per_minute_per_ip() {
-        let extractor = SmartIpKeyExtractor::new(vec![]);
-        let setup_governor = GovernorConfigBuilder::default()
-            .key_extractor(extractor)
-            .period(Duration::from_secs(12))
-            .burst_size(5)
-            .finish()
-            .expect("setup rate limiter config");
+    /// Build a full, real `AppState` so the test below can call the actual
+    /// `build_router` — not a hand-duplicated stand-in — and exercise the
+    /// production route table end to end. This mirrors `main.rs`'s
+    /// composition root (same constructors, same order) with one
+    /// simplification: no provider credentials/clients are wired (empty
+    /// maps, zero registered providers, `job_runner: None`) because this
+    /// test only ever reaches the `/setup` handler, which touches nothing
+    /// but `auth_service` — the second (rate-limited) request never reaches
+    /// a handler at all. Returns the backing `TempDir` alongside the state;
+    /// it must outlive the router.
+    async fn test_app_state() -> (AppState, tempfile::TempDir) {
+        let db = livrarr_db::test_helpers::create_test_db().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let data_dir_arc = Arc::new(data_dir.clone());
 
-        let app = Router::new().route(
-            "/setup",
-            post(ok_handler).layer(GovernorLayer::new(setup_governor)),
+        let auth_service = Arc::new(crate::auth_service::ServerAuthService::new(
+            db.clone(),
+            crate::auth_crypto::RealAuthCrypto,
+        ));
+
+        let ua = livrarr_http::livrarr_user_agent();
+        let http_client = livrarr_http::HttpClient::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent(&ua)
+            .build()
+            .expect("http client");
+        let http_client_safe = livrarr_http::HttpClient::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent(&ua)
+            .ssrf_safe(true)
+            .build()
+            .expect("ssrf-safe http client");
+        let http_fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().expect("http fetcher");
+        let llm_http_client = livrarr_http::HttpClient::builder()
+            .timeout(Duration::from_secs(60))
+            .user_agent(&ua)
+            .build()
+            .expect("llm http client");
+
+        let live_metadata_config = livrarr_external_data::live_config::LiveMetadataConfig::new(
+            livrarr_db::MetadataConfig {
+                hardcover_enabled: false,
+                hardcover_api_token: None,
+                llm_enabled: false,
+                llm_provider: None,
+                llm_endpoint: None,
+                llm_api_key: None,
+                llm_model: None,
+                audnexus_url: "https://api.audnex.us".to_string(),
+                languages: vec!["en".to_string()],
+                google_books_api_key: None,
+            },
+        );
+        let transport_cache = Arc::new(
+            livrarr_external_data::transport_cache::TransportCache::new(Duration::from_secs(300)),
         );
 
-        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 12345);
+        let import_semaphore = Arc::new(tokio::sync::Semaphore::new(2));
+        let cover_proxy_cache = Arc::new(crate::infra::cover_cache::CoverProxyCache::new());
+        let rss_last_run = Arc::new(AtomicI64::new(0));
+        let rss_sync_running = Arc::new(AtomicBool::new(false));
+        let manual_import_scans_shared = Arc::new(dashmap::DashMap::new());
+        let log_buffer = Arc::new(crate::state::LogBuffer::new());
+        let log_level_handle = {
+            let (_layer, handle): (
+                tracing_subscriber::reload::Layer<
+                    tracing_subscriber::EnvFilter,
+                    tracing_subscriber::Registry,
+                >,
+                tracing_subscriber::reload::Handle<
+                    tracing_subscriber::EnvFilter,
+                    tracing_subscriber::Registry,
+                >,
+            ) = tracing_subscriber::reload::Layer::new(tracing_subscriber::EnvFilter::new("info"));
+            Arc::new(crate::state::LogLevelHandle::new(handle, "info"))
+        };
 
-        for attempt in 1..=5 {
-            let mut req = Request::builder()
-                .method("POST")
-                .uri("/setup")
-                .body(Body::empty())
-                .unwrap();
-            req.extensions_mut().insert(ConnectInfo(peer));
-            let resp = app.clone().oneshot(req).await.unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::OK,
-                "attempt {attempt} within burst must succeed"
+        let settings_service_arc = Arc::new(
+            crate::services::settings_service::LiveSettingsService::new(db.clone()),
+        );
+        let import_io_arc = Arc::new(crate::import_io_service::ImportIoServiceImpl::new(
+            db.clone(),
+        ));
+        let import_workflow_arc =
+            Arc::new(livrarr_library::import_workflow::ImportWorkflowImpl::new(
+                db.clone(),
+                import_semaphore.clone(),
+                data_dir_arc.clone(),
+                Arc::new(crate::chapter_extractor::ChapterExtractorImpl),
+            ));
+        let tag_service_arc = Arc::new(crate::tag_service::LiveTagService::new(
+            import_io_arc.clone(),
+            data_dir_arc.clone(),
+            db.clone(),
+        ));
+        let import_svc_arc = Arc::new(crate::import_service::LiveImportService::new(
+            import_io_arc.clone(),
+            import_workflow_arc.clone(),
+            tag_service_arc.clone(),
+            settings_service_arc.clone(),
+            http_client_safe.clone(),
+        ));
+
+        let trusted_origins_arc = Arc::new(livrarr_http::ssrf::TrustedOrigins::new());
+
+        let readarr_import_service_arc =
+            Arc::new(crate::readarr_import_service::LiveReadarrImportService::new(db.clone()));
+        let readarr_import_progress_arc = Arc::new(tokio::sync::Mutex::new(
+            crate::readarr_import_service::ReadarrImportProgress::default(),
+        ));
+
+        // No providers registered anywhere below (empty maps / empty queue) —
+        // this test never exercises enrichment, so there is nothing for a
+        // real Hardcover/OpenLibrary/etc. client to do.
+        let identity_resolver_arc =
+            Arc::new(m::english_identity_resolver::LiveEnglishIdentityResolver {
+                clients: std::collections::HashMap::new(),
+                cache: transport_cache.clone(),
+                config: m::english_identity_resolver::ResolverConfig::default(),
+            });
+
+        let db_arc = Arc::new(db.clone());
+        let queue = Arc::new(m::DefaultProviderQueueBuilder::new().build(db_arc.clone()));
+        let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
+        let enrichment_service = Arc::new(m::EnrichmentServiceImpl::new(
+            db_arc.clone(),
+            queue.clone(),
+            merge_engine,
+            false,
+        ));
+
+        let work_service_arc: Arc<crate::state::LiveWorkService> = {
+            let ew = m::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                enrichment_service.clone(),
             );
-        }
+            Arc::new(
+                m::work_service::WorkServiceImpl::new(
+                    db.clone(),
+                    ew,
+                    http_fetcher.clone(),
+                    data_dir.clone(),
+                )
+                .with_resolver(identity_resolver_arc.clone()),
+            )
+        };
 
-        let mut sixth = Request::builder()
+        let discovery_service_arc = Arc::new(
+            m::discovery_service::DiscoveryServiceImpl::new(
+                db.clone(),
+                http_fetcher.clone(),
+                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    llm_http_client.clone(),
+                ),
+            )
+            .with_resolver(identity_resolver_arc.clone()),
+        );
+
+        let hmac_key = crate::cover_service::generate_hmac_key();
+        let cover_service = Arc::new(crate::cover_service::LiveCoverService::new(
+            db.clone(),
+            http_fetcher.clone(),
+            std::collections::HashMap::new(),
+            hmac_key.clone(),
+            data_dir_arc.clone(),
+        ));
+
+        let state = AppState {
+            db: db.clone(),
+            auth_service,
+            http_client: http_client.clone(),
+            http_client_safe,
+            http_fetcher: http_fetcher.clone(),
+            config: Arc::new(crate::config::AppConfig::default()),
+            data_dir: data_dir_arc.clone(),
+            startup_time: chrono::Utc::now(),
+            job_runner: None,
+            cover_proxy_cache: cover_proxy_cache.clone(),
+            live_metadata_config: live_metadata_config.clone(),
+            log_buffer: log_buffer.clone(),
+            log_level_handle: log_level_handle.clone(),
+            import_semaphore: import_semaphore.clone(),
+            rss_last_run: rss_last_run.clone(),
+            rss_sync_running: rss_sync_running.clone(),
+            readarr_import_progress: readarr_import_progress_arc.clone(),
+            manual_import_scans: manual_import_scans_shared.clone(),
+            provider_queue: queue,
+            enrichment_service: enrichment_service.clone(),
+
+            author_service: Arc::new(m::author_service::AuthorServiceImpl::new(
+                db.clone(),
+                http_fetcher.clone(),
+                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    llm_http_client.clone(),
+                ),
+            )),
+            series_service: Arc::new(m::series_service::SeriesServiceImpl::new(db.clone())),
+            series_query_service: Arc::new(m::series_query_service::SeriesQueryServiceImpl::new(
+                db.clone(),
+                http_fetcher.clone(),
+                work_service_arc.clone(),
+                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
+                    live_metadata_config.clone(),
+                    llm_http_client.clone(),
+                ),
+            )),
+            work_service: work_service_arc.clone(),
+            discovery_service: discovery_service_arc.clone(),
+            grab_service: Arc::new(livrarr_download::grab_service::GrabServiceImpl::new(
+                db.clone(),
+            )),
+            release_service: Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
+                db.clone(),
+                http_fetcher.clone(),
+                trusted_origins_arc.clone(),
+            )),
+            file_service: Arc::new(livrarr_library::file_service::FileServiceImpl::new(
+                db.clone(),
+            )),
+            chapter_service: Arc::new(livrarr_library::chapter_service::ChapterServiceImpl::new(
+                db.clone(),
+            )),
+            bookmark_service: Arc::new(
+                livrarr_library::bookmark_service::BookmarkServiceImpl::new(db.clone()),
+            ),
+            cross_format_service: Arc::new(
+                livrarr_library::cross_format_service::CrossFormatServiceImpl::new(
+                    db.clone(),
+                    livrarr_library::file_service::FileServiceImpl::new(db.clone()),
+                ),
+            ),
+            import_workflow: import_workflow_arc.clone(),
+            rss_sync_workflow: {
+                let rs = Arc::new(livrarr_download::release_service::ReleaseServiceImpl::new(
+                    db.clone(),
+                    http_fetcher.clone(),
+                    trusted_origins_arc.clone(),
+                ));
+                Arc::new(m::rss_sync_workflow::RssSyncWorkflowImpl::new(
+                    Arc::new(db.clone()),
+                    Arc::new(http_fetcher.clone()),
+                    rs,
+                ))
+            },
+            list_service: {
+                let ew = m::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                    enrichment_service.clone(),
+                );
+                let ws = m::work_service::WorkServiceImpl::new(
+                    db.clone(),
+                    ew,
+                    http_fetcher.clone(),
+                    data_dir.clone(),
+                );
+                Arc::new(m::list_service::ListServiceImpl::new(
+                    db.clone(),
+                    ws,
+                    http_fetcher.clone(),
+                    m::list_service::NoOpBibliographyTrigger,
+                ))
+            },
+            identity_conflict_service: Arc::new(
+                crate::services::identity_conflict_service::LiveIdentityConflictService::new(
+                    db.clone(),
+                ),
+            ),
+            identity_resolver: identity_resolver_arc,
+            enrichment_workflow: Arc::new(
+                m::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                    enrichment_service.clone(),
+                ),
+            ),
+            author_monitor_workflow: {
+                let ew = m::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+                    enrichment_service.clone(),
+                );
+                let ws = m::work_service::WorkServiceImpl::new(
+                    db.clone(),
+                    ew,
+                    http_fetcher.clone(),
+                    data_dir.clone(),
+                );
+                Arc::new(m::author_monitor_workflow::AuthorMonitorWorkflowImpl::new(
+                    Arc::new(db.clone()),
+                    Arc::new(ws),
+                    Arc::new(http_fetcher.clone()),
+                ))
+            },
+            readarr_import_service: readarr_import_service_arc.clone(),
+            settings_service: settings_service_arc.clone(),
+            notification_service: Arc::new(
+                crate::notification_service::NotificationServiceImpl::new(db.clone()),
+            ),
+            history_service: Arc::new(crate::history_service::HistoryServiceImpl::new(db.clone())),
+            queue_service: Arc::new(crate::queue_service::QueueServiceImpl::new(
+                db.clone(),
+                http_client.clone(),
+            )),
+            import_io_service: import_io_arc.clone(),
+            manual_import_db_service: Arc::new(
+                crate::manual_import_service::ManualImportServiceImpl::new(db.clone()),
+            ),
+
+            rss_sync_state: crate::state::RssSyncState {
+                running: rss_sync_running.clone(),
+                last_run: rss_last_run.clone(),
+            },
+            system_state: crate::state::SystemState {
+                log_buffer: log_buffer.clone(),
+                log_level_handle: log_level_handle.clone(),
+            },
+            provider_stats_service: Arc::new(crate::state::LiveProviderStatsService::new(
+                db.clone(),
+            )),
+            log_surface_accessor: crate::state::LogSurfaceAccessorImpl {
+                log_dir: data_dir.join("logs"),
+                init_error: None,
+            },
+            live_metadata_config_accessor: crate::state::LiveMetadataConfigAccessorImpl(
+                live_metadata_config.clone(),
+            ),
+            cover_proxy_cache_accessor: crate::state::CoverProxyCacheAccessorImpl(
+                cover_proxy_cache.clone(),
+            ),
+            tag_service: tag_service_arc.clone(),
+            email_svc: Arc::new(crate::email_service::LiveEmailService::new(
+                settings_service_arc.clone(),
+            )),
+            import_svc: import_svc_arc,
+            matching_svc: crate::matching_service::LiveMatchingService,
+            manual_import_scan_svc:
+                crate::manual_import_scan_service::LiveManualImportScanService {
+                    scans: manual_import_scans_shared.clone(),
+                },
+            readarr_import_wf: Arc::new(
+                crate::readarr_import_workflow::LiveReadarrImportWorkflow::new(
+                    http_fetcher.clone(),
+                    readarr_import_service_arc,
+                    readarr_import_progress_arc,
+                    data_dir_arc.clone(),
+                    work_service_arc.clone(),
+                    db.clone(),
+                    import_workflow_arc.clone(),
+                ),
+            ),
+            cover_service,
+            preadd_cover_service: Arc::new(m::preadd_cover_service::LivePreaddCoverService::new(
+                std::collections::HashMap::new(),
+            )),
+            hmac_key,
+            trusted_origins_rebuilder: crate::state::TrustedOriginsRebuilderImpl(
+                trusted_origins_arc.clone(),
+            ),
+        };
+
+        (state, tmp)
+    }
+
+    /// Drives the REAL production router (`build_router`, not a hand-rolled
+    /// stand-in) so that deleting the `.layer(GovernorLayer::new(setup_governor))`
+    /// line from the `/setup` route in `build_router` turns this test red.
+    ///
+    /// Only asserts the `burst_size(1)` behavior (2nd immediate request is
+    /// rate-limited) — a full 60-second-window assertion (proving the refill
+    /// rate holds a real client to 5/min rather than more) would require the
+    /// test to either sleep ~48 real seconds or mock the governor's clock,
+    /// neither of which this suite currently has infrastructure for. Noted
+    /// as a gap rather than faked.
+    #[tokio::test]
+    async fn setup_route_burst_of_one_blocks_a_second_immediate_request() {
+        let (state, _tmp) = test_app_state().await;
+        let ui_dir = state.data_dir.join("ui-not-present-in-test");
+        let app = build_router(state, ui_dir);
+
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 12345);
+        let body = || Body::from(r#"{"username":"admin","password":"correct-horse-battery"}"#);
+
+        let mut first = Request::builder()
             .method("POST")
-            .uri("/setup")
-            .body(Body::empty())
+            .uri("/api/v1/setup")
+            .header("content-type", "application/json")
+            .body(body())
             .unwrap();
-        sixth.extensions_mut().insert(ConnectInfo(peer));
-        let resp = app.clone().oneshot(sixth).await.unwrap();
+        first.extensions_mut().insert(ConnectInfo(peer));
+        let resp = app.clone().oneshot(first).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the first request must reach the real setup handler and succeed"
+        );
+
+        let mut second = Request::builder()
+            .method("POST")
+            .uri("/api/v1/setup")
+            .header("content-type", "application/json")
+            .body(body())
+            .unwrap();
+        second.extensions_mut().insert(ConnectInfo(peer));
+        let resp = app.clone().oneshot(second).await.unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::TOO_MANY_REQUESTS,
-            "6th request within the window must be rate-limited"
+            "burst_size(1) means a 2nd immediate request from the same IP must be rate-limited"
         );
     }
 }
