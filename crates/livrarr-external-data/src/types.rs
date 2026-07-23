@@ -134,6 +134,12 @@ pub enum ProviderFetchError {
     /// Retryable and budget-consuming; callers map it to
     /// `WillRetry { ServerError }` (5 min).
     Transient,
+    /// The outbound queue's local admission cap rejected the request — no
+    /// HTTP was attempted (D3). A transport-level pause exactly like
+    /// `CircuitOpen`, never a provider verdict; callers map it to
+    /// `WillRetry { QueueFull }`, which — like `CircuitOpen` — never
+    /// consumes a retry-budget attempt.
+    QueueFull(std::time::Duration),
     Other(String),
 }
 
@@ -144,6 +150,7 @@ impl std::fmt::Display for ProviderFetchError {
             Self::NotFound => write!(f, "not found"),
             Self::RateLimited => write!(f, "rate limited"),
             Self::Transient => write!(f, "transient failure"),
+            Self::QueueFull(d) => write!(f, "queue full, retry after {d:?}"),
             Self::Other(s) => write!(f, "{s}"),
         }
     }

@@ -43,6 +43,10 @@ pub enum GoodreadsFetchError {
     /// HTTP was attempted (R-11: the caller must map this to
     /// `WillRetryReason::CircuitOpen`, never burn retry budget on it).
     CircuitOpen(Duration),
+    /// The outbound queue's local admission cap rejected the request — no
+    /// HTTP was attempted (D3: the caller must map this to
+    /// `WillRetryReason::QueueFull`, never burn retry budget on it either).
+    QueueFull(Duration),
 }
 
 /// Build the canonical detail URL for a `gr_key` against the configured base.
@@ -94,6 +98,7 @@ fn map_transport_err(context: &str, err: FetchError) -> GoodreadsFetchError {
     match err {
         FetchError::RateLimited => GoodreadsFetchError::HttpStatus(429),
         FetchError::CircuitOpen { retry_after } => GoodreadsFetchError::CircuitOpen(retry_after),
+        FetchError::QueueFull { retry_after } => GoodreadsFetchError::QueueFull(retry_after),
         other => GoodreadsFetchError::Network(format!("{context}: {other}")),
     }
 }
@@ -372,6 +377,27 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, GoodreadsFetchError::HttpStatus(429)));
+    }
+
+    #[tokio::test]
+    async fn fetch_goodreads_html_maps_fetcher_queue_full_to_queue_full() {
+        // D3/#6: the outbound queue's local admission cap is a transport-
+        // level pause — must surface as GoodreadsFetchError::QueueFull, not
+        // collapse into the generic Network(_) catch-all (budget-consuming).
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::QueueFull {
+                retry_after: Duration::from_secs(1),
+            });
+
+        let err = fetch_goodreads_html(
+            &fetcher,
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, GoodreadsFetchError::QueueFull(_)));
     }
 
     #[tokio::test]

@@ -219,6 +219,20 @@ fn circuit_open_outcome(retry_after: Duration) -> ProviderOutcome<NormalizedWork
     }
 }
 
+/// Common `WillRetry { QueueFull }` mapping (D3): the outbound queue's local
+/// admission cap rejected the request — a transport-level pause exactly
+/// like `circuit_open_outcome`'s `CircuitOpen`, never a provider verdict, so
+/// it must never consume a retry-budget attempt either (`apply_budget_rules`
+/// exempts both reasons identically).
+fn queue_full_outcome(retry_after: Duration) -> ProviderOutcome<NormalizedWorkDetail> {
+    ProviderOutcome::WillRetry {
+        reason: WillRetryReason::QueueFull,
+        next_attempt_at: Utc::now()
+            + chrono::Duration::from_std(retry_after)
+                .unwrap_or_else(|_| chrono::Duration::seconds(60)),
+    }
+}
+
 /// Common `WillRetry { RateLimit }` mapping (Unit A): a live 429 is a real
 /// provider verdict (unlike `CircuitOpen`), so it consumes one retry-budget
 /// attempt. Backoff mirrors `google_books::map_http_error`'s quota-exhaustion
@@ -475,6 +489,9 @@ fn audnexus_error_outcome(
             reason: WillRetryReason::ServerError,
             next_attempt_at: Utc::now() + chrono::Duration::seconds(retry_backoff_secs),
         },
+        crate::types::ProviderFetchError::QueueFull(retry_after) => {
+            queue_full_outcome(*retry_after)
+        }
         crate::types::ProviderFetchError::Other(_) => ProviderOutcome::PermanentFailure {
             reason: PermanentFailureReason::Unsupported,
         },
@@ -827,6 +844,9 @@ fn ol_error_outcome(
             reason: WillRetryReason::ServerError,
             next_attempt_at: Utc::now() + chrono::Duration::seconds(retry_backoff_secs),
         },
+        crate::types::ProviderFetchError::QueueFull(retry_after) => {
+            queue_full_outcome(*retry_after)
+        }
         crate::types::ProviderFetchError::Other(_) => ProviderOutcome::PermanentFailure {
             reason: PermanentFailureReason::Unsupported,
         },
@@ -1397,6 +1417,22 @@ mod unit_a_retry_classification {
         );
     }
 
+    /// D3/#6: a local admission-cap rejection (no HTTP attempted) must
+    /// classify as budget-exempt `WillRetry{QueueFull}` — never fall into
+    /// `ServerError`'s budget-consuming bucket.
+    fn assert_queue_full(outcome: &ProviderOutcome<NormalizedWorkDetail>, ctx: &str) {
+        assert!(
+            matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::QueueFull,
+                    ..
+                }
+            ),
+            "{ctx}: expected WillRetry(QueueFull), got {outcome:?}"
+        );
+    }
+
     fn assert_permanent(outcome: &ProviderOutcome<NormalizedWorkDetail>, ctx: &str) {
         assert!(
             matches!(outcome, ProviderOutcome::PermanentFailure { .. }),
@@ -1574,6 +1610,67 @@ mod unit_a_retry_classification {
         assert_permanent(&outcome, "OL seeded/isbn13");
     }
 
+    /// D3/#6: drives the REAL `OpenLibraryClient` adapter (its actual query
+    /// construction and `ol_error_outcome` classification) against a stub
+    /// TRANSPORT that returns `FetchError::QueueFull` — proving the
+    /// provider→ProviderOutcome mapping this unit adds. Before this unit,
+    /// `query_ol_detail`/`isbn_lookup`'s catch-all folded this into
+    /// `Transient`, which `ol_error_outcome` then turned into a budget-
+    /// CONSUMING `WillRetry{ServerError}` — eventually a terminal
+    /// `PermanentFailure{RetryBudgetExhausted}` even though no HTTP was ever
+    /// attempted. `apply_budget_rules`'s exemption for `WillRetry{QueueFull}`
+    /// (livrarr-enrichment) is already covered by
+    /// `will_retry_queue_full_survives_the_max_attempts_boundary`; this test
+    /// closes the adjacent gap that test could not — that a real provider
+    /// actually PRODUCES the exempt outcome in the first place.
+    #[tokio::test]
+    async fn openlibrary_queue_full_matches_across_anchor_and_seeded() {
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::OlKey("OL1W".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_queue_full(&outcome, "OL anchor/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9781234567890".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_queue_full(&outcome, "OL anchor/isbn13");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(&ol_work(None, Some("OL1W")), RequestPriority::Normal)
+            .await;
+        assert_queue_full(&outcome, "OL seeded/ol_key");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = OpenLibraryClient::new(fetcher);
+        let outcome = client
+            .fetch(
+                &ol_work(Some("9781234567890"), None),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_queue_full(&outcome, "OL seeded/isbn13");
+    }
+
     // -----------------------------------------------------------------
     // Audnexus: `AudnexusClient` is hard-wired to the concrete
     // `HttpFetcherImpl` (not generic over `HttpFetcher`), so it cannot be
@@ -1621,6 +1718,13 @@ mod unit_a_retry_classification {
                 ..
             }
         ));
+        assert!(matches!(
+            audnexus_error_outcome(&ProviderFetchError::QueueFull(Duration::from_secs(1)), 300),
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::QueueFull,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1652,6 +1756,13 @@ mod unit_a_retry_classification {
             ),
             ProviderOutcome::WillRetry {
                 reason: WillRetryReason::CircuitOpen,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ol_error_outcome(&ProviderFetchError::QueueFull(Duration::from_secs(1)), 300),
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::QueueFull,
                 ..
             }
         ));
@@ -2104,6 +2215,7 @@ impl GoodreadsClient {
         let backoff = chrono::Duration::seconds(self.retry_backoff_secs);
         match err {
             GoodreadsFetchError::CircuitOpen(retry_after) => circuit_open_outcome(retry_after),
+            GoodreadsFetchError::QueueFull(retry_after) => queue_full_outcome(retry_after),
             GoodreadsFetchError::AntiBot => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::AntiBotBlock,
                 next_attempt_at: Utc::now() + backoff,

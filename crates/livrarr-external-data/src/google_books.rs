@@ -168,6 +168,14 @@ async fn fetch_gb_search<F: HttpFetcher>(
                         .unwrap_or_else(|_| chrono::Duration::seconds(60)),
             });
         }
+        Err(livrarr_domain::services::FetchError::QueueFull { retry_after }) => {
+            return Err(ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::QueueFull,
+                next_attempt_at: chrono::Utc::now()
+                    + chrono::Duration::from_std(retry_after)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(60)),
+            });
+        }
         Err(e) => {
             tracing::warn!("GoogleBooks: request failed: {e}");
             return Err(ProviderOutcome::WillRetry {
@@ -1169,6 +1177,36 @@ mod tests {
             outcome,
             ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::RateLimit,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_gb_search_maps_fetcher_queue_full_to_queue_full_retry() {
+        // D3/#6: the outbound queue's local admission cap is a transport-
+        // level pause — must classify as WillRetry{QueueFull} (budget-
+        // exempt), not the generic WillRetry{ServerError} (budget-consuming)
+        // every other unmatched transport failure gets.
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::QueueFull {
+                retry_after: Duration::from_secs(1),
+            },
+        );
+
+        let outcome = fetch_gb_search(
+            &fetcher,
+            "test-key",
+            "https://example.com/volumes".into(),
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            outcome,
+            ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::QueueFull,
                 ..
             }
         ));

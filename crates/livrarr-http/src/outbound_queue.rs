@@ -505,6 +505,40 @@ impl OutboundQueue {
             .clone()
     }
 
+    /// D3/#7 (split-lane correctness): re-assert `handle`'s presence in the
+    /// registry under `key` now that a caller has made it non-quiescent (a
+    /// heap push). `bucket_handle`'s own quiescent-only prune only inspects
+    /// state that exists AT CHECK TIME — it cannot see a push that lands a
+    /// few instructions later, under a SEPARATE lock acquisition (the state
+    /// lock, not the registry lock). In that narrow window, a concurrent
+    /// `bucket_handle` call for a DIFFERENT key can still judge this key
+    /// quiescent and prune it, orphaning this handle: the NEXT caller for
+    /// this same key would then mint a second, independent `BucketHandle`
+    /// (its own pace clock, semaphore, and breaker) for what should be one
+    /// lane. Unconditional overwrite is correct here — this caller's handle
+    /// is the one that just became non-quiescent, so it is always the
+    /// entry any later caller for this key must see.
+    ///
+    /// This can push the resident set past `PACE_REGISTRY_CAP`; that is
+    /// expected and logged, not rejected — the hard cap is enforced only via
+    /// quiescent-only eviction (split-lane correctness fix only; a strict
+    /// ceiling is a separate, deferred unit).
+    fn reassert_non_quiescent(&self, key: RateBucket, handle: &BucketHandle) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.insert(key, handle.clone());
+        let resident = registry.len();
+        if resident > PACE_REGISTRY_CAP {
+            tracing::debug!(
+                resident,
+                cap = PACE_REGISTRY_CAP,
+                "pace registry resident set exceeds cap after split-lane reassert"
+            );
+        }
+    }
+
     /// The per-indexer rate-limit breaker for `bucket`, created on first use.
     /// `Some` only for a fully-resolved indexer bucket (`Indexer { indexer:
     /// Some(_) }`); `None` for everything else — provider buckets (whose only
@@ -603,6 +637,12 @@ impl OutboundQueue {
                 tokio::spawn(run_dispatcher(handle.clone(), interval_for(&bucket)));
             }
         }
+
+        // #7: the push above just made this handle non-quiescent. Re-assert
+        // it in the registry so a concurrent bucket_handle() prune — which
+        // could have judged this key quiescent in the window before the
+        // push — can never orphan it.
+        self.reassert_non_quiescent(pace_key(&bucket), &handle);
 
         let result = turn_rx
             .await
@@ -1886,6 +1926,68 @@ mod tests {
         );
 
         drop(permit);
+    }
+
+    /// D3/#7 (split-lane correctness): the window between a caller's OWN
+    /// `bucket_handle()` lookup and its subsequent heap push is exactly
+    /// where a DIFFERENT, concurrent caller's cap-triggered prune can judge
+    /// this key still-quiescent (nothing pushed yet) and evict it — leaving
+    /// this caller to push into a now-orphaned handle while the NEXT caller
+    /// for the same key mints a fresh, independent one (two pace clocks /
+    /// semaphores / breakers for one logical bucket). The real race has no
+    /// `.await` point to interleave two tokio tasks on, so it is simulated
+    /// deterministically: fetch K's handle, force the same quiescent-prune
+    /// mechanism other keys would trigger, push directly onto the
+    /// already-fetched handle (mirroring what `acquire()` does with its own
+    /// `bucket_handle()` result), then call the fix's reassert — the next
+    /// caller for K must reuse the SAME handle, not mint a second one.
+    #[tokio::test]
+    async fn split_lane_reassert_survives_a_concurrent_cap_prune_for_other_keys() {
+        let queue = OutboundQueue::new();
+        let k = RateBucket::Readarr {
+            origin: "split-lane-k".to_string(),
+        };
+
+        // "K fetched": mirrors acquire()'s own internal bucket_handle()
+        // call, captured before anything is pushed — K is still quiescent.
+        let h1 = queue.bucket_handle(&k);
+
+        // "a cap-prune runs for other keys": fill the registry to its cap
+        // with distinct, still-quiescent origins so the next new key
+        // triggers the retain() prune — which, since K is ALSO still
+        // quiescent at this point, sweeps K's entry away too (the real
+        // race: some OTHER concurrent acquire()'s own bucket_handle() call
+        // does this).
+        for i in 0..PACE_REGISTRY_CAP {
+            let churn = RateBucket::Readarr {
+                origin: format!("split-lane-churn-{i}"),
+            };
+            let _ = queue.bucket_handle(&churn);
+        }
+
+        // "K enqueues": push directly onto h1's heap — the same handle the
+        // caller already held before the prune — exactly what acquire()
+        // does with its own bucket_handle() result.
+        let (turn_tx, _turn_rx) = oneshot::channel();
+        {
+            let mut state = h1.state.lock().unwrap();
+            state.heap.push(QueuedItem {
+                priority: RequestPriority::Normal,
+                seq: 0,
+                turn: turn_tx,
+                rl_breaker: None,
+            });
+        }
+        queue.reassert_non_quiescent(pace_key(&k), &h1);
+
+        // The next caller for K must reuse h1 — not mint a second,
+        // independent handle (a second pace clock/semaphore/breaker for the
+        // same key).
+        let refetched = queue.bucket_handle(&k);
+        assert!(
+            Arc::ptr_eq(&h1.state, &refetched.state),
+            "K must have exactly one bucket handle after the reassert, not two"
+        );
     }
 
     /// D3: the per-indexer rate-limit breaker registry never resets an

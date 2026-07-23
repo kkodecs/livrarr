@@ -171,6 +171,9 @@ async fn cached_fetch<F: HttpFetcher>(
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(ProviderFetchError::CircuitOpen(retry_after));
         }
+        Err(FetchError::QueueFull { retry_after }) => {
+            return Err(ProviderFetchError::QueueFull(retry_after));
+        }
         // A transport layer that represents an HTTP status as a distinct
         // error (rather than a normal response) still carries a real status
         // — classify it exactly like one.
@@ -466,6 +469,30 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_by_asin_maps_fetcher_queue_full_to_queue_full() {
+        // D3/#6: the outbound queue's local admission cap (no HTTP attempted)
+        // must surface as a typed QueueFull, not fall into the generic
+        // Transient catch-all (which would silently consume retry budget).
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::QueueFull {
+                retry_after: Duration::from_secs(1),
+            });
+        let cache = AudnexusCache::new();
+
+        let err = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0QUEUEFULL",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::QueueFull(_)));
     }
 
     #[tokio::test]

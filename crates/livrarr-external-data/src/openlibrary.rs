@@ -65,6 +65,9 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(ProviderFetchError::CircuitOpen(retry_after));
         }
+        Err(FetchError::QueueFull { retry_after }) => {
+            return Err(ProviderFetchError::QueueFull(retry_after));
+        }
         // A transport layer that represents an HTTP status as a distinct
         // error (rather than a normal response) still carries a real status
         // — classify it exactly like one, so a wrapped 429/5xx doesn't
@@ -240,6 +243,9 @@ pub async fn isbn_lookup<F: HttpFetcher>(
         Err(FetchError::RateLimited) => return Err(ProviderFetchError::RateLimited),
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(ProviderFetchError::CircuitOpen(retry_after));
+        }
+        Err(FetchError::QueueFull { retry_after }) => {
+            return Err(ProviderFetchError::QueueFull(retry_after));
         }
         Err(FetchError::HttpError { status, .. }) => return Err(classify_ol_error(status)),
         Err(e) => {
@@ -535,6 +541,23 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn query_ol_detail_maps_fetcher_queue_full_to_queue_full() {
+        // D3/#6: the outbound queue's local admission cap (no HTTP attempted)
+        // must surface as a typed QueueFull, not fall into the generic
+        // Transient catch-all (which would silently consume retry budget).
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::QueueFull {
+                retry_after: std::time::Duration::from_secs(1),
+            });
+
+        let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::QueueFull(_)));
     }
 
     #[tokio::test]
@@ -836,6 +859,22 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn isbn_lookup_maps_fetcher_queue_full_to_queue_full() {
+        // D3/#6: same local-admission-cap rule as query_ol_detail above —
+        // must not fold into the generic Transient (budget-consuming) path.
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::QueueFull {
+                retry_after: std::time::Duration::from_secs(1),
+            });
+
+        let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::QueueFull(_)));
     }
 
     #[tokio::test]
