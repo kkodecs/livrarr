@@ -123,9 +123,19 @@ impl HttpFetcherImpl {
             .build()
             .map_err(|e| e.to_string())?;
 
+        // `.no_proxy()` on every SSRF-safe client (Unit B4 #4): reqwest
+        // auto-uses `HTTP(S)_PROXY` from the environment unless told
+        // otherwise, and a configured proxy resolves+connects the target
+        // itself — meaning `SsrfSafeResolver` below would never even be
+        // consulted. `client`/`no_redirect_client` deliberately keep proxy
+        // support: they're the TRUSTED-infrastructure clients (admin-entered
+        // URLs), which may legitimately sit behind a corporate proxy
+        // (insight #37; security-model-policy.md:111 scopes this
+        // requirement to untrusted requests only).
         let ssrf_client = reqwest::Client::builder()
             .dns_resolver(ssrf::SsrfSafeResolver::new())
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()
             .map_err(|e| e.to_string())?;
 
@@ -133,6 +143,7 @@ impl HttpFetcherImpl {
             .dns_resolver(ssrf::SsrfSafeResolver::new())
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(FAST_CONNECT_TIMEOUT)
+            .no_proxy()
             .build()
             .map_err(|e| e.to_string())?;
 
@@ -144,6 +155,7 @@ impl HttpFetcherImpl {
         let readarr_safe_client = reqwest::Client::builder()
             .dns_resolver(ssrf::SsrfSafeResolver::new())
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()
             .map_err(|e| e.to_string())?;
 
@@ -639,6 +651,177 @@ mod retry_after_tests {
             d(Some("  60  ")),
             Duration::from_secs(60),
             "surrounding whitespace trimmed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod proxy_bypass_tests {
+    //! Unit B4 #4: reqwest auto-uses `HTTP(S)_PROXY` from the environment
+    //! unless a client is built with `.no_proxy()` — and when a proxy IS in
+    //! play, the proxy resolves+connects the target itself, so our custom
+    //! `SsrfSafeResolver` (attached via `.dns_resolver()`) is never consulted.
+    //! These tests stand a bare `TcpListener` in for a forward proxy: it
+    //! never speaks HTTP CONNECT, so it can't complete a real tunnel, but the
+    //! one fact that matters — did a connection attempt land on it at all —
+    //! is fully observable without one.
+    use super::*;
+    use livrarr_domain::services::{FetchRequest, HttpMethod, RateBucket, UserAgentProfile};
+    use livrarr_domain::RequestPriority;
+    use std::sync::Mutex;
+
+    /// `std::env::set_var` mutates the whole process — serializes every test
+    /// in this module against each other so two of them can't stomp on the
+    /// same `HTTPS_PROXY` value mid-flight (the default `cargo test` runs
+    /// tests concurrently within one binary).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The lock only orders test execution — it guards no state that a panic
+    /// could leave corrupted — so a poisoned lock (one test panicked while
+    /// holding it) must not cascade into every test queued behind it.
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Snapshots `HTTPS_PROXY` and restores it on drop (including on a
+    /// mid-test panic), so a failure here can never leak a stray proxy
+    /// setting into an unrelated test that runs afterward in this binary.
+    struct EnvVarGuard {
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set_https_proxy(value: &str) -> Self {
+            let previous = std::env::var("HTTPS_PROXY").ok();
+            std::env::set_var("HTTPS_PROXY", value);
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var("HTTPS_PROXY", v),
+                None => std::env::remove_var("HTTPS_PROXY"),
+            }
+        }
+    }
+
+    /// TEST-NET-1 (RFC 5737) — reserved for documentation, never routed on
+    /// the real internet. `is_private_ip` does not (and must not) flag it, so
+    /// it clears the SSRF preflight exactly like a genuine public host, but a
+    /// *direct* connection attempt to it fails fast or blackholes instead of
+    /// ever reaching a real server — so watching whether the fake proxy
+    /// below gets contacted doesn't depend on live network access.
+    const TEST_NET_TARGET: &str = "https://192.0.2.1:1/";
+
+    fn probe_req(url: &str) -> FetchRequest {
+        FetchRequest {
+            url: url.to_string(),
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_millis(800),
+            rate_bucket: RateBucket::None,
+            max_body_bytes: 1024,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Normal,
+        }
+    }
+
+    /// A bare TCP listener standing in for a forward proxy. Returns its
+    /// `http://host:port` URL alongside the listener itself.
+    async fn fake_proxy() -> (tokio::net::TcpListener, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        (listener, format!("http://{addr}"))
+    }
+
+    /// Races the fake proxy's `accept()` against a deadline well above every
+    /// client-side timeout used here, so it reflects "was the proxy ever
+    /// contacted" rather than "which future happened to finish first".
+    async fn proxy_was_contacted(listener: tokio::net::TcpListener) -> bool {
+        tokio::time::timeout(Duration::from_millis(1500), listener.accept())
+            .await
+            .is_ok()
+    }
+
+    /// Builds an `HttpFetcherImpl` with `HTTPS_PROXY` temporarily set to
+    /// `proxy_url`, then immediately releases the lock and restores the env
+    /// var — the fetcher's proxy config is fixed at `build()` time, so
+    /// nothing downstream needs the guard held any longer (and a std
+    /// `MutexGuard` held across an `.await` is its own clippy lint).
+    fn build_fetcher_with_https_proxy(proxy_url: &str) -> HttpFetcherImpl {
+        let _serialize = lock_env();
+        let _env = EnvVarGuard::set_https_proxy(proxy_url);
+        HttpFetcherImpl::new().unwrap()
+    }
+
+    #[tokio::test]
+    async fn fetch_ssrf_safe_does_not_route_through_https_proxy_env() {
+        let (proxy, proxy_url) = fake_proxy().await;
+        let fetcher = build_fetcher_with_https_proxy(&proxy_url);
+        let (contacted, _) = tokio::join!(
+            proxy_was_contacted(proxy),
+            fetcher.fetch_ssrf_safe(probe_req(TEST_NET_TARGET))
+        );
+
+        assert!(
+            !contacted,
+            "fetch_ssrf_safe (ssrf_client) must not route through HTTPS_PROXY — \
+             a proxy would resolve+connect the target itself, bypassing SsrfSafeResolver"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_ssrf_safe_fast_connect_does_not_route_through_https_proxy_env() {
+        let (proxy, proxy_url) = fake_proxy().await;
+        let fetcher = build_fetcher_with_https_proxy(&proxy_url);
+        let (contacted, _) = tokio::join!(
+            proxy_was_contacted(proxy),
+            fetcher.fetch_ssrf_safe_fast_connect(probe_req(TEST_NET_TARGET))
+        );
+
+        assert!(
+            !contacted,
+            "fetch_ssrf_safe_fast_connect (fast_connect_ssrf_client) must not route through HTTPS_PROXY"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_readarr_does_not_route_through_https_proxy_env() {
+        let (proxy, proxy_url) = fake_proxy().await;
+        let fetcher = build_fetcher_with_https_proxy(&proxy_url);
+        let (contacted, _) = tokio::join!(
+            proxy_was_contacted(proxy),
+            fetcher.fetch_readarr(probe_req(TEST_NET_TARGET))
+        );
+
+        assert!(
+            !contacted,
+            "fetch_readarr (readarr_safe_client) must not route through HTTPS_PROXY"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_fetch_still_honors_https_proxy_env() {
+        // Insight #37 / security-model-policy.md:111: only UNTRUSTED
+        // outbound requests must disable env-proxy inheritance. The plain
+        // trusted `client` (admin-configured infra) must keep honoring it —
+        // proven here the same way as the negative cases above, just
+        // asserting the opposite outcome.
+        let (proxy, proxy_url) = fake_proxy().await;
+        let fetcher = build_fetcher_with_https_proxy(&proxy_url);
+        let (contacted, _) = tokio::join!(
+            proxy_was_contacted(proxy),
+            fetcher.fetch(probe_req(TEST_NET_TARGET))
+        );
+
+        assert!(
+            contacted,
+            "trusted `fetch` (unrestricted client) must keep honoring HTTPS_PROXY — \
+             admin-configured infra may legitimately sit behind a corporate proxy"
         );
     }
 }

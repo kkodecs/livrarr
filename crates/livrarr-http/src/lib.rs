@@ -77,7 +77,13 @@ impl HttpClientBuilder {
         }
 
         if self.ssrf_safe {
-            builder = builder.dns_resolver(ssrf::SsrfSafeResolver::new());
+            // Unit B4 #4: without `.no_proxy()`, an env-inherited proxy
+            // would resolve+connect the target itself, bypassing
+            // `SsrfSafeResolver` entirely — see `fetcher.rs`'s matching fix
+            // for the full writeup.
+            builder = builder
+                .dns_resolver(ssrf::SsrfSafeResolver::new())
+                .no_proxy();
         }
 
         let inner = builder
@@ -332,5 +338,92 @@ impl HttpClientContract for DownloadClient {
     }
     fn skip_ssl_validation(&self) -> bool {
         self.skip_ssl
+    }
+}
+
+#[cfg(test)]
+mod ssrf_safe_proxy_tests {
+    //! Unit B4 #4: `HttpClientBuilder::build()`'s `ssrf_safe(true)` branch
+    //! attaches `SsrfSafeResolver`, but without `.no_proxy()` an env-inherited
+    //! proxy bypasses it the same way as the SSRF-safe clients in
+    //! `fetcher.rs` — see that file's `proxy_bypass_tests` module for the
+    //! full mechanism writeup.
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// This lock only orders test execution — it guards no state a panic
+    /// could leave corrupted — so a poisoned lock must not cascade.
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    struct EnvVarGuard {
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set_https_proxy(value: &str) -> Self {
+            let previous = std::env::var("HTTPS_PROXY").ok();
+            std::env::set_var("HTTPS_PROXY", value);
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var("HTTPS_PROXY", v),
+                None => std::env::remove_var("HTTPS_PROXY"),
+            }
+        }
+    }
+
+    /// TEST-NET-1 (RFC 5737) — reserved for documentation, never routed on
+    /// the real internet. See `fetcher::proxy_bypass_tests` for why this
+    /// makes the test deterministic without live network access.
+    const TEST_NET_TARGET: &str = "https://192.0.2.1:1/";
+
+    async fn fake_proxy() -> (tokio::net::TcpListener, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        (listener, format!("http://{addr}"))
+    }
+
+    async fn proxy_was_contacted(listener: tokio::net::TcpListener) -> bool {
+        tokio::time::timeout(Duration::from_millis(1500), listener.accept())
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn ssrf_safe_true_client_does_not_route_through_https_proxy_env() {
+        let (proxy, proxy_url) = fake_proxy().await;
+
+        // Scoped so the lock and env var are released before the `.await`
+        // below: env proxy vars are read once, at `build()` time, so the
+        // client's proxy config is already fixed by the time this block
+        // ends — holding the guard any longer buys nothing (and a std
+        // `MutexGuard` held across an await point is its own clippy lint).
+        let client = {
+            let _serialize = lock_env();
+            let _env = EnvVarGuard::set_https_proxy(&proxy_url);
+            HttpClient::builder().ssrf_safe(true).build().unwrap()
+        };
+
+        let (contacted, _) = tokio::join!(
+            proxy_was_contacted(proxy),
+            client
+                .get(TEST_NET_TARGET)
+                .timeout(Duration::from_millis(800))
+                .send()
+        );
+
+        assert!(
+            !contacted,
+            "an ssrf_safe(true) HttpClient must not route through HTTPS_PROXY — \
+             a proxy would resolve+connect the target itself, bypassing SsrfSafeResolver"
+        );
     }
 }

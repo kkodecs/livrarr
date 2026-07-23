@@ -2175,11 +2175,25 @@ impl GoodreadsClient {
                             )
                             .await
                         {
-                            tracing::info!(
-                                gr_key = payload.gr_key.as_deref().unwrap_or(""),
-                                verified = payload.title.is_some(),
-                                "GR page fetch failed; returning key payload"
-                            );
+                            // Unit B4 #12 (PO-accepted degrade, made
+                            // observable): an SSRF-rejected fetch must stay
+                            // distinguishable in logs from an ordinary fetch
+                            // failure, even though both degrade to the same
+                            // key-only Success below.
+                            if matches!(err, GoodreadsFetchError::SsrfRejected(_)) {
+                                tracing::warn!(
+                                    gr_key = payload.gr_key.as_deref().unwrap_or(""),
+                                    "GR detail fetch blocked by SSRF guard (target or \
+                                     redirect resolved to a private/reserved address); \
+                                     degrading to key-only payload"
+                                );
+                            } else {
+                                tracing::info!(
+                                    gr_key = payload.gr_key.as_deref().unwrap_or(""),
+                                    verified = payload.title.is_some(),
+                                    "GR page fetch failed; returning key payload"
+                                );
+                            }
                             return ProviderOutcome::Success(Box::new(payload));
                         }
                     }
@@ -2356,6 +2370,13 @@ impl GoodreadsClient {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + backoff,
             },
+            // Unit B4 #12 (PO-accepted): identical mapping to `Network`
+            // above — this variant exists only to make an SSRF rejection
+            // legible in logs at the call site, not to change its outcome.
+            GoodreadsFetchError::SsrfRejected(_) => ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: Utc::now() + backoff,
+            },
             GoodreadsFetchError::Parse => ProviderOutcome::NotFound,
         }
     }
@@ -2503,7 +2524,11 @@ async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
                     tracing::warn!(
                         title = %title,
                         isbn,
-                        url = %isbn_hits[idx].detail_url,
+                        // Unit B4 #19: never log the untrusted candidate's
+                        // full path/query (security-model-policy.md:91) —
+                        // origin only.
+                        url = %livrarr_http::normalized_origin(&isbn_hits[idx].detail_url)
+                            .unwrap_or_else(|| "<unparseable>".to_string()),
                         "GR ISBN-tier hit rejected: detail_url failed SSRF validation"
                     );
                 }
@@ -2571,7 +2596,9 @@ async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
         }
         tracing::warn!(
             title = %title,
-            url = %hits[idx].detail_url,
+            // Unit B4 #19: origin only — see the ISBN-tier site above.
+            url = %livrarr_http::normalized_origin(&hits[idx].detail_url)
+                .unwrap_or_else(|| "<unparseable>".to_string()),
             "GR title-tier hit rejected: detail_url failed SSRF validation"
         );
     }
@@ -3001,5 +3028,98 @@ mod tests {
             2,
             "ISBN tier attempted (and rejected), then the title tier"
         );
+    }
+
+    #[test]
+    fn rejected_detail_url_is_redacted_to_origin_only_before_logging() {
+        // Unit B4 #19: the two SSRF-rejection `tracing::warn!` sites above
+        // (ISBN-tier and title-tier) must never emit the untrusted, scraped
+        // `bookUrl` candidate's full path/query — only its origin
+        // (security-model-policy.md:91). There's no tracing-capture crate in
+        // this crate's dependency graph (no tracing-subscriber/tracing-test)
+        // and hand-rolling a capturing `Subscriber` for one LOW-severity
+        // assertion would be disproportionate, so this pins the actual
+        // helper both call sites now use (`livrarr_http::normalized_origin`,
+        // reused rather than reinventing a redaction routine) against the
+        // same off-host bookUrl shape `title_tier_rejects_external_host_book_url`
+        // exercises above.
+        let evil = "https://evil.com/book/show/1?ref=leak-me";
+        let redacted = livrarr_http::normalized_origin(evil).expect("evil.com parses with a host");
+        assert_eq!(redacted, "https://evil.com");
+        assert!(!redacted.contains("book/show"));
+        assert!(!redacted.contains("leak-me"));
+    }
+
+    #[tokio::test]
+    async fn ssrf_rejected_detail_fetch_still_degrades_to_key_only_success() {
+        // Unit B4 #12 — PINS the PO-accepted degrade: a search-tier hit
+        // whose detail page sits on a private/reserved address must still
+        // resolve to a key-only `ProviderOutcome::Success`, exactly like any
+        // other fetch failure, never a hard failure that starves the
+        // identity quorum of a GR key. Any FUTURE change to this must be
+        // deliberate.
+        //
+        // `GoodreadsClient` is hardwired to the concrete `HttpFetcherImpl`
+        // (not generic over `HttpFetcher`), so this drives the REAL fetcher
+        // end-to-end rather than a test double. The autocomplete hit's
+        // `bookUrl` is a relative path, which resolves against `base_url`
+        // (this loopback test server) — so the "detail" fetch targets
+        // 127.0.0.1, which the real SSRF preflight in `fetch_ssrf_safe_impl`
+        // rejects exactly as it would reject a redirect to a private
+        // address (same `FetchError::Ssrf` / `GoodreadsFetchError::
+        // SsrfRejected` path either way — a loopback target is the simplest
+        // way to trigger it without standing up a multi-hop redirect
+        // chain). Confirmed by a temporary diagnostic print during
+        // development that the error reaching `GoodreadsClient::fetch`
+        // here really is `SsrfRejected(_)`, not some other transport
+        // failure that happens to degrade the same way — the precise
+        // variant-mapping guarantee itself lives in the narrower
+        // `map_transport_err_distinguishes_ssrf_rejection_from_generic_network_failure`
+        // test in `goodreads/client.rs`.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let body = br#"[{"title":"Sapiens","bookUrl":"/book/show/1","author":{"name":"Yuval Noah Harari"}}]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.write_all(body).await;
+            let _ = socket.shutdown().await;
+        });
+
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new().unwrap();
+        let http = HttpClient::builder().build().unwrap();
+        let client = GoodreadsClient::new(fetcher, http, base_url);
+
+        let work = Work {
+            title: "Sapiens".to_string(),
+            author_name: "Yuval Noah Harari".to_string(),
+            ..Default::default()
+        };
+
+        let outcome = client.fetch(&work, RequestPriority::Normal).await;
+        server.await.unwrap();
+
+        match outcome {
+            ProviderOutcome::Success(payload) => {
+                assert_eq!(
+                    payload.gr_key.as_deref(),
+                    Some("1"),
+                    "key-only degrade must still carry the resolved gr_key"
+                );
+            }
+            other => panic!(
+                "an SSRF-rejected detail fetch must still degrade to a key-only \
+                 Success, got {other:?}"
+            ),
+        }
     }
 }

@@ -32,6 +32,8 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
             || v4.is_link_local()           // 169.254.0.0/16
             || v4.is_broadcast()            // 255.255.255.255
             || v4.is_unspecified()          // 0.0.0.0
+            || v4.is_multicast()            // 224.0.0.0/4
+            || v4.octets()[0] == 0          // 0.0.0.0/8
             // CGNAT (100.64.0.0/10)
             || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
             // IETF protocol assignments (192.0.0.0/24)
@@ -42,6 +44,7 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
         IpAddr::V6(v6) => {
             v6.is_loopback()                // ::1
             || v6.is_unspecified()          // ::
+            || v6.is_multicast()            // ff00::/8
             // Unique local (fc00::/7)
             || (v6.segments()[0] & 0xfe00) == 0xfc00
             // Link-local (fe80::/10)
@@ -221,6 +224,32 @@ mod tests {
         assert!(!is_private_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
         assert!(!is_private_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
         assert!(!is_private_ip(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))));
+    }
+
+    #[test]
+    fn rejects_multicast_and_full_zero_block() {
+        // Unit B4 #18: multicast and 0.0.0.0/8 must be treated as
+        // private/reserved (security-model-policy.md:108) — previously only
+        // the exact `0.0.0.0` (via `is_unspecified()`) was caught, and
+        // multicast wasn't checked at all, so both the Readarr origin gate
+        // and the redirect gate would admit a multicast/0.0.0.0/8 target as
+        // "public".
+        assert!(
+            is_private_ip(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))),
+            "224.0.0.1 (multicast) must be rejected"
+        );
+        assert!(
+            is_private_ip(IpAddr::V4(Ipv4Addr::new(239, 255, 255, 250))),
+            "239.255.255.250 (multicast) must be rejected"
+        );
+        assert!(
+            is_private_ip(IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1))),
+            "ff02::1 (multicast) must be rejected"
+        );
+        assert!(
+            is_private_ip(IpAddr::V4(Ipv4Addr::new(0, 1, 2, 3))),
+            "0.1.2.3 (0.0.0.0/8) must be rejected"
+        );
     }
 
     #[test]

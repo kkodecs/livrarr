@@ -47,6 +47,16 @@ pub enum GoodreadsFetchError {
     /// HTTP was attempted (D3: the caller must map this to
     /// `WillRetryReason::QueueFull`, never burn retry budget on it either).
     QueueFull(Duration),
+    /// `fetch_ssrf_safe`/`fetch_ssrf_safe_fast_connect` rejected the target
+    /// (or a redirect hop) as private/reserved (Unit B4 #12). Distinguishes
+    /// an SSRF block from a generic `Network` transport failure so the
+    /// key-only-payload fallback it degrades to (`GoodreadsClient::fetch`)
+    /// is observable in logs rather than silently indistinguishable from
+    /// any other connection error. The PO-accepted behavior itself is
+    /// unchanged: `map_fetch_err` maps this exactly like `Network` did
+    /// before (`WillRetry { ServerError }`), and the no-gr_key fetch path
+    /// still degrades to a key-only `Success` exactly as before.
+    SsrfRejected(String),
 }
 
 /// Build the canonical detail URL for a `gr_key` against the configured base.
@@ -99,6 +109,11 @@ fn map_transport_err(context: &str, err: FetchError) -> GoodreadsFetchError {
         FetchError::RateLimited => GoodreadsFetchError::HttpStatus(429),
         FetchError::CircuitOpen { retry_after } => GoodreadsFetchError::CircuitOpen(retry_after),
         FetchError::QueueFull { retry_after } => GoodreadsFetchError::QueueFull(retry_after),
+        // Unit B4 #12: kept distinct from the `Network` catch-all below so
+        // the caller can log an SSRF block as exactly that.
+        FetchError::Ssrf(reason) => {
+            GoodreadsFetchError::SsrfRejected(format!("{context}: {reason}"))
+        }
         other => GoodreadsFetchError::Network(format!("{context}: {other}")),
     }
 }
@@ -607,8 +622,33 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(err, GoodreadsFetchError::Network(_)),
-            "expected the SSRF-safe rejection to surface as a Network fetch error, got {err:?}"
+            // Unit B4 #12: an SSRF-safe rejection now surfaces as its own
+            // distinct variant rather than folding into `Network` — see
+            // `map_transport_err_distinguishes_ssrf_rejection_from_generic_network_failure`.
+            matches!(err, GoodreadsFetchError::SsrfRejected(_)),
+            "expected the SSRF-safe rejection to surface as SsrfRejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn map_transport_err_distinguishes_ssrf_rejection_from_generic_network_failure() {
+        // Unit B4 #12 (PO-accepted degrade, made observable): an SSRF-
+        // rejected fetch (a redirect to — or the initial target itself
+        // being — a private/reserved address) must map to a DISTINCT
+        // `GoodreadsFetchError` variant, not fold into the generic
+        // `Network(_)` catch-all. This lets the fallback-to-key-only-
+        // payload site in `GoodreadsClient::fetch` (provider_client.rs) log
+        // it as an SSRF block rather than an indistinguishable transport
+        // failure. The downstream accepted behavior (still degrades to a
+        // key-only `Success`) is unchanged by this — only the cause becomes
+        // legible.
+        let err = map_transport_err(
+            "GR request",
+            FetchError::Ssrf("address 127.0.0.1 is private/reserved".to_string()),
+        );
+        assert!(
+            matches!(err, GoodreadsFetchError::SsrfRejected(_)),
+            "expected SsrfRejected, got {err:?}"
         );
     }
 
