@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 
+use crate::pool::merge_user_identity_state;
 use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{absolute_http_cover_url, map_db_err, parse_dt};
 use crate::{
@@ -821,9 +822,68 @@ impl WorkDb for SqliteDb {
         .await
         .map_err(map_db_err)?;
 
+        // Preserve the user's own confirmed identity anchor and metadata-field
+        // lock on the loser before it is deleted below — shared with the
+        // startup dedup backfill (`backfill_normalized_identity` in pool.rs)
+        // so both paths apply the identical policy.
+        merge_user_identity_state(&mut tx, req.survivor_id, req.loser_id, req.user_id)
+            .await
+            .map_err(map_db_err)?;
+
+        // Bookmarks are user-authored (reading-position markers) — repoint,
+        // never cascade-drop. `bookmarks.work_id` is `ON DELETE CASCADE`
+        // (migration 049), so an unrepointed row would be destroyed, not
+        // moved, when the loser row is deleted below. library_items are
+        // already repointed above, so the bookmark's library_item_id FK
+        // still resolves.
+        sqlx::query("UPDATE bookmarks SET work_id = ? WHERE user_id = ? AND work_id = ?")
+            .bind(req.survivor_id)
+            .bind(req.user_id)
+            .bind(req.loser_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
+        // Reconcile the cover: the survivor keeps its own cover_url if it has
+        // one, otherwise adopts the loser's; the manual-lock flag follows
+        // whichever cover_url won. cover_manual is `INTEGER NOT NULL`, so a
+        // SQL COALESCE would be a no-op — this must be computed in Rust.
+        let (survivor_cover_url, survivor_cover_manual): (Option<String>, bool) = sqlx::query_as(
+            "SELECT cover_url, cover_manual FROM works WHERE id = ? AND user_id = ?",
+        )
+        .bind(req.survivor_id)
+        .bind(req.user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+        let (loser_cover_url, loser_cover_manual): (Option<String>, bool) = sqlx::query_as(
+            "SELECT cover_url, cover_manual FROM works WHERE id = ? AND user_id = ?",
+        )
+        .bind(req.loser_id)
+        .bind(req.user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+        let (final_cover_url, final_cover_manual) = if survivor_cover_url.is_some() {
+            (survivor_cover_url, survivor_cover_manual)
+        } else {
+            (loser_cover_url, loser_cover_manual)
+        };
+        sqlx::query(
+            "UPDATE works SET cover_url = ?, cover_manual = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(&final_cover_url)
+        .bind(final_cover_manual)
+        .bind(req.survivor_id)
+        .bind(req.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
         // The loser is removed only now that the survivor owns its items,
-        // grabs, and history rows (REQ-015 e). The remaining loser-FK'd rows
-        // (identity anchors, provenance, dissents) cascade away with it —
+        // grabs, history, bookmarks, identity anchor/provenance state, and
+        // cover (REQ-015 e). The remaining loser-FK'd rows (provider retry
+        // state, field dissents, review candidates) cascade away with it —
         // that metadata is system/provider-derived, not per-user consumption
         // data, so its loss is the intended outcome.
         sqlx::query("DELETE FROM works WHERE id = ? AND user_id = ?")
@@ -1597,5 +1657,247 @@ impl crate::EnrichmentRetryDb for SqliteDb {
             return Err(crate::DbError::NotFound { entity: "work" });
         }
         Ok(())
+    }
+}
+
+/// The LIVE user-triggered merge action (`merge_works`, distinct from the
+/// startup dedup backfill in `pool.rs`) must not silently destroy the user's
+/// own data on the loser row it deletes: a reading-position bookmark, a
+/// manually-chosen cover, a confirmed identity anchor, or a metadata-field
+/// lock.
+#[cfg(test)]
+mod merge_works_tests {
+    use super::*;
+    use crate::sqlite::SqliteDb;
+    use crate::test_helpers::create_test_db;
+    use crate::{CreateUserDbRequest, UserDb, UserRole, WorkDbCreate};
+
+    async fn seed_user(db: &SqliteDb, username: &str) -> i64 {
+        db.create_user(CreateUserDbRequest {
+            username: username.into(),
+            password_hash: "hash".into(),
+            role: UserRole::User,
+            api_key_hash: format!("{username}-key"),
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn seed_work(db: &SqliteDb, user_id: i64, title: &str, author: &str) -> i64 {
+        let (work, _created) = db
+            .create_work(CreateWorkDbRequest {
+                user_id,
+                title: title.to_string(),
+                author_name: author.to_string(),
+                normalized_title: livrarr_domain::normalize_for_matching(title),
+                normalized_author: livrarr_domain::normalize_for_matching(author),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        work.id
+    }
+
+    #[tokio::test]
+    async fn merge_works_preserves_loser_bookmark_cover_anchor_and_provenance() {
+        let db = create_test_db().await;
+        let user_id = seed_user(&db, "merge-user").await;
+
+        let survivor_id = seed_work(&db, user_id, "Hobbit Survivor", "J.R.R. Tolkien").await;
+        let loser_id = seed_work(&db, user_id, "Hobbit Loser", "J.R.R. Tolkien").await;
+
+        // The loser holds a reading-position bookmark — needs a library_item
+        // to satisfy bookmarks' FK.
+        let root_folder_result = sqlx::query(
+            "INSERT INTO root_folders (path, media_type) VALUES ('/data/ebooks', 'ebook')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let root_folder_id = root_folder_result.last_insert_rowid();
+
+        let library_item_result = sqlx::query(
+            "INSERT INTO library_items \
+             (user_id, work_id, root_folder_id, path, media_type, file_size, imported_at) \
+             VALUES (?, ?, ?, 'loser.epub', 'ebook', 1024, '2026-01-01T00:00:00Z')",
+        )
+        .bind(user_id)
+        .bind(loser_id)
+        .bind(root_folder_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let loser_item_id = library_item_result.last_insert_rowid();
+
+        sqlx::query(
+            "INSERT INTO bookmarks \
+             (user_id, work_id, library_item_id, media_type, position, sort_key, name) \
+             VALUES (?, ?, ?, 'ebook', 'epubcfi(/6/2)', 1.0, 'My highlight')",
+        )
+        .bind(user_id)
+        .bind(loser_id)
+        .bind(loser_item_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // The loser carries a cover the survivor lacks, manually locked.
+        sqlx::query("UPDATE works SET cover_url = ?, cover_manual = 1 WHERE id = ?")
+            .bind("http://covers.example/hobbit.jpg")
+            .bind(loser_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // The loser holds a user-confirmed anchor of the SAME type as the
+        // survivor's non-user-confirmed anchor — the user's must win.
+        sqlx::query(
+            "INSERT INTO work_identity_anchors \
+             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+             VALUES (?, 'gr_key', 'AUTO123', 'confirmed', 'auto_search', '2026-01-01', ?)",
+        )
+        .bind(survivor_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO work_identity_anchors \
+             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+             VALUES (?, 'gr_key', 'USER456', 'confirmed', 'user', '2026-01-01', ?)",
+        )
+        .bind(loser_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // The loser holds a user-set metadata-field lock; the survivor has no
+        // provenance row for that field at all.
+        sqlx::query(
+            "INSERT INTO work_metadata_provenance (user_id, work_id, field, set_at, setter) \
+             VALUES (?, ?, 'title', '2026-01-01', 'user')",
+        )
+        .bind(user_id)
+        .bind(loser_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let survivor = db
+            .merge_works(MergeWorksDbRequest {
+                user_id,
+                survivor_id,
+                loser_id,
+                monitor_ebook: true,
+                monitor_audiobook: false,
+                series_name: None,
+                series_position: None,
+            })
+            .await
+            .expect("merge_works must succeed");
+
+        // (1) The bookmark survives, repointed to the survivor.
+        let bookmark_work_id: Option<i64> = sqlx::query_scalar("SELECT work_id FROM bookmarks")
+            .fetch_optional(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            bookmark_work_id,
+            Some(survivor_id),
+            "the loser's bookmark must survive the merge, repointed to the survivor"
+        );
+
+        // (2) The survivor adopts the loser's cover; the manual flag follows it.
+        assert_eq!(
+            survivor.cover_url.as_deref(),
+            Some("http://covers.example/hobbit.jpg"),
+            "the survivor must adopt the loser's cover when its own is null"
+        );
+        assert!(
+            survivor.cover_manual,
+            "cover_manual must follow whichever cover_url won the merge"
+        );
+
+        // (3) The loser's user-confirmed anchor wins, not the survivor's auto one.
+        let anchors: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT work_id, anchor_value, setter FROM work_identity_anchors \
+             WHERE anchor_type = 'gr_key'",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            anchors,
+            vec![(survivor_id, "USER456".to_string(), "user".to_string())],
+            "the loser's user-confirmed anchor must survive the merge: {anchors:?}"
+        );
+
+        // (4) The loser's user provenance lock survives under the survivor.
+        let provenance: Vec<(i64, String)> =
+            sqlx::query_as("SELECT work_id, setter FROM work_metadata_provenance")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            provenance,
+            vec![(survivor_id, "user".to_string())],
+            "the loser's user provenance lock must survive the merge: {provenance:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_works_preserves_loser_noncontested_user_anchor() {
+        let db = create_test_db().await;
+        let user_id = seed_user(&db, "noncontested-user").await;
+
+        let survivor_id = seed_work(&db, user_id, "Survivor Title", "Some Author").await;
+        let loser_id = seed_work(&db, user_id, "Loser Title", "Some Author").await;
+
+        // The loser holds a user-confirmed anchor of a type the survivor has
+        // NO anchor for at all — non-contested (nothing on the survivor to
+        // displace). It must still move onto the survivor, not vanish with
+        // the deleted loser row.
+        sqlx::query(
+            "INSERT INTO work_identity_anchors \
+             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+             VALUES (?, 'isbn_13', '9781111111111', 'confirmed', 'user', '2026-01-01', ?)",
+        )
+        .bind(loser_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        db.merge_works(MergeWorksDbRequest {
+            user_id,
+            survivor_id,
+            loser_id,
+            monitor_ebook: false,
+            monitor_audiobook: false,
+            series_name: None,
+            series_position: None,
+        })
+        .await
+        .expect("merge_works must succeed");
+
+        let anchors: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT work_id, anchor_type, anchor_value, setter FROM work_identity_anchors",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            anchors,
+            vec![(
+                survivor_id,
+                "isbn_13".to_string(),
+                "9781111111111".to_string(),
+                "user".to_string()
+            )],
+            "a loser user-confirmed anchor of a type the survivor lacks must survive \
+             onto the survivor: {anchors:?}"
+        );
     }
 }

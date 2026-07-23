@@ -233,17 +233,31 @@ pub async fn create_backup(
     Ok(backup_path)
 }
 
-/// Preserve a user's own confirmed identity anchor and metadata-field lock
+/// Preserve a user's own confirmed identity anchors and metadata-field lock
 /// on `loser_id` before it is merged into `keeper_id` — shared by the
 /// startup dedup backfill ([`backfill_normalized_identity`]) and the live
 /// work-merge action so both apply the identical policy. Must run on the
 /// caller's own connection/transaction, BEFORE the caller's own generic
-/// anchor-merge and provenance-drop statements for the pair: this function
-/// relocates the user's own contested anchor and copies the user's own
-/// contested provenance lock onto the keeper directly (clearing whatever
-/// on the keeper would otherwise block either one) — the caller's own
-/// generic merge-then-drop statements are left to handle everything else
-/// (non-conflicting anchors, non-user provenance) exactly as before.
+/// anchor-merge and provenance-drop statements for the pair.
+///
+/// Relocates EVERY user-confirmed anchor the loser holds onto the keeper, so
+/// none is lost when the loser row is later deleted — split by what the
+/// keeper holds for the same `anchor_type`:
+/// - keeper holds a NON-user confirmed anchor of that type (contested): the
+///   keeper's is cleared and the loser's user anchor moved in — the user's
+///   own choice wins;
+/// - keeper holds NO confirmed anchor of that type (non-contested): a plain
+///   repoint of the loser's user anchor, with nothing on the keeper to
+///   displace;
+/// - keeper ALREADY holds a user-confirmed anchor of that type: left
+///   untouched — the keeper is the surviving row and the one-confirmed-per
+///   (work_id, anchor_type) index permits only one, so the keeper's own user
+///   anchor stays.
+///
+/// Also copies the user's own contested provenance lock onto the keeper
+/// (clearing whatever on the keeper would otherwise block it). The caller's
+/// own generic merge-then-drop statements are left to handle everything else
+/// (non-user anchors, non-user provenance) exactly as before.
 pub(crate) async fn merge_user_identity_state(
     conn: &mut SqliteConnection,
     keeper_id: i64,
@@ -265,6 +279,28 @@ pub(crate) async fn merge_user_identity_state(
     .bind(keeper_id)
     .bind(user_id)
     .bind(loser_id)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    // Anchor types where the loser holds a user-confirmed anchor and the
+    // keeper holds NO confirmed anchor of that type at all — non-contested:
+    // the loser's user anchor moves onto the keeper by a plain repoint, with
+    // nothing on the keeper to displace. Computed from the same pre-mutation
+    // state as the contested set; the two are disjoint by construction (a
+    // type is contested only when the keeper DOES hold a confirmed anchor of
+    // it), so the order the two loops run in is immaterial.
+    let noncontested_anchor_types: Vec<String> = sqlx::query_scalar(
+        "SELECT l.anchor_type FROM work_identity_anchors l \
+         WHERE l.work_id = ? AND l.user_id = ? AND l.confidence = 'confirmed' AND l.setter = 'user' \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM work_identity_anchors k \
+               WHERE k.work_id = ? AND k.user_id = l.user_id \
+                 AND k.anchor_type = l.anchor_type AND k.confidence = 'confirmed' \
+           )",
+    )
+    .bind(loser_id)
+    .bind(user_id)
+    .bind(keeper_id)
     .fetch_all(&mut *conn)
     .await?;
 
@@ -292,6 +328,27 @@ pub(crate) async fn merge_user_identity_state(
         // `INSERT OR IGNORE` anchor-merge below. An UPDATE that leaves
         // (user_id, anchor_type, anchor_value) unchanged cannot collide
         // with itself.
+        sqlx::query(
+            "UPDATE work_identity_anchors SET work_id = ? \
+             WHERE work_id = ? AND user_id = ? AND anchor_type = ? \
+               AND confidence = 'confirmed' AND setter = 'user'",
+        )
+        .bind(keeper_id)
+        .bind(loser_id)
+        .bind(user_id)
+        .bind(anchor_type)
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    for anchor_type in &noncontested_anchor_types {
+        // Plain repoint — the keeper holds no confirmed anchor of this type,
+        // so moving the loser's user anchor cannot collide on the
+        // (work_id, anchor_type) WHERE-confirmed index. Like the contested
+        // move above this is an in-place work_id UPDATE, never
+        // insert-then-delete: it leaves (user_id, anchor_type, anchor_value)
+        // unchanged, so it cannot self-collide on the (user_id, anchor_type,
+        // anchor_value) WHERE-confirmed index either.
         sqlx::query(
             "UPDATE work_identity_anchors SET work_id = ? \
              WHERE work_id = ? AND user_id = ? AND anchor_type = ? \
@@ -509,6 +566,16 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
                 );
             }
 
+            // cover_manual follows whichever cover_url wins just above: the
+            // keeper's own flag when its cover_url survives unchanged,
+            // otherwise the loser's — never a plain COALESCE, which is a
+            // no-op here since cover_manual is `INTEGER NOT NULL`.
+            let final_cover_manual = if keeper_fields.4.is_some() {
+                keeper_fields.5
+            } else {
+                loser_fields.5
+            };
+
             sqlx::query(
                 "UPDATE works SET \
                  monitor_ebook = monitor_ebook OR ?, \
@@ -516,7 +583,7 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
                  series_name = COALESCE(series_name, ?), \
                  series_position = COALESCE(series_position, ?), \
                  cover_url = COALESCE(cover_url, ?), \
-                 cover_manual = COALESCE(cover_manual, ?) \
+                 cover_manual = ? \
                  WHERE id = ?",
             )
             .bind(loser_fields.0)
@@ -524,7 +591,7 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
             .bind(&loser_fields.2)
             .bind(loser_fields.3)
             .bind(&loser_fields.4)
-            .bind(loser_fields.5)
+            .bind(final_cover_manual)
             .bind(keeper_id)
             .execute(&mut *tx)
             .await
@@ -1814,6 +1881,20 @@ mod backfill_normalized_identity_tests {
         .await
         .unwrap();
 
+        // A user-confirmed anchor on the loser of a type the keeper has NO
+        // anchor for at all (non-contested) — must also move onto the keeper,
+        // not be lost when the loser row is deleted.
+        sqlx::query(
+            "INSERT INTO work_identity_anchors \
+             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+             VALUES (?, 'isbn_13', 'USERISBN', 'confirmed', 'user', '2026-01-01', ?)",
+        )
+        .bind(loser_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
         // A user-set provenance lock on the loser, for a field the keeper
         // has no provenance row for at all.
         sqlx::query(
@@ -1879,23 +1960,37 @@ mod backfill_normalized_identity_tests {
             Some("http://covers.example/hobbit.jpg")
         );
 
-        // work_identity_anchors: the loser's USER anchor must survive — not
-        // the keeper's own auto_search anchor.
-        let anchors: Vec<(i64, String, String, String)> = sqlx::query_as(
-            "SELECT work_id, anchor_value, confidence, setter FROM work_identity_anchors",
+        // work_identity_anchors: BOTH of the loser's user anchors survive
+        // onto the keeper — the contested gr_key wins over the keeper's own
+        // auto_search one, and the non-contested isbn_13 (a type the keeper
+        // lacked) is repointed rather than lost.
+        let anchors: Vec<(i64, String, String, String, String)> = sqlx::query_as(
+            "SELECT work_id, anchor_type, anchor_value, confidence, setter \
+             FROM work_identity_anchors ORDER BY anchor_type",
         )
         .fetch_all(db.pool())
         .await
         .unwrap();
         assert_eq!(
             anchors,
-            vec![(
-                keeper_id,
-                "USER456".to_string(),
-                "confirmed".to_string(),
-                "user".to_string()
-            )],
-            "the loser's user-confirmed anchor must win over the keeper's auto_search one: {anchors:?}"
+            vec![
+                (
+                    keeper_id,
+                    "gr_key".to_string(),
+                    "USER456".to_string(),
+                    "confirmed".to_string(),
+                    "user".to_string()
+                ),
+                (
+                    keeper_id,
+                    "isbn_13".to_string(),
+                    "USERISBN".to_string(),
+                    "confirmed".to_string(),
+                    "user".to_string()
+                ),
+            ],
+            "both the contested (gr_key) and non-contested (isbn_13) loser user anchors \
+             must survive onto the keeper: {anchors:?}"
         );
 
         // work_metadata_provenance: the loser's user-set lock must survive
