@@ -400,10 +400,23 @@ where
         // Fsync the parent directory — durably persists the rename's
         // directory-entry change (and, for HardlinkFirst, the earlier
         // hard_link dentry too: one directory fsync flushes all pending
-        // metadata changes for that directory).
+        // metadata changes for that directory). A real fsync failure here
+        // means the rename isn't durable yet — must not advance to
+        // mark_import_intent_renamed/create_library_item; the file and
+        // intent are left exactly as they are for recovery to finish.
         let parent_for_fsync = target_parent.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || fsync_dir(&parent_for_fsync)).await {
-            tracing::warn!(error = %e, "fsync parent dir task panicked");
+        match tokio::task::spawn_blocking(move || fsync_dir(&parent_for_fsync)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(ImportWorkflowError::ImportFailed(format!(
+                    "dir fsync failed: {e}"
+                )));
+            }
+            Err(join) => {
+                return Err(ImportWorkflowError::ImportFailed(format!(
+                    "fsync task panicked: {join}"
+                )));
+            }
         }
 
         if let Err(e) = self.db.mark_import_intent_renamed(intent.id).await {
@@ -482,16 +495,13 @@ where
     /// persisted state plus the on-disk ground truth); only then does the
     /// sweep phase remove aged staging files no remaining intent
     /// references.
-    pub async fn recover_import_intents(&self) -> ImportRecoveryReport {
+    pub async fn recover_import_intents(&self) -> Result<ImportRecoveryReport, DbError> {
         let mut report = ImportRecoveryReport::default();
 
-        let intents = match self.db.list_import_intents().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(error = %e, "import intent recovery: failed to list intents");
-                return report;
-            }
-        };
+        // Propagate rather than default: a listing failure must never look
+        // identical to "nothing to recover" — the caller needs to be able
+        // to tell the two apart and escalate loudly (Unit D2 hardening).
+        let intents = self.db.list_import_intents().await?;
 
         let mut by_work: std::collections::HashMap<(UserId, WorkId), Vec<ImportIntent>> =
             std::collections::HashMap::new();
@@ -527,7 +537,7 @@ where
                     error = %e,
                     "import intent recovery: failed to re-list intents before sweep — skipping sweep"
                 );
-                return report;
+                return Ok(report);
             }
         };
 
@@ -538,7 +548,7 @@ where
                     error = %e,
                     "import intent recovery: failed to list root folders — sweep skipped"
                 );
-                return report;
+                return Ok(report);
             }
         };
 
@@ -556,7 +566,7 @@ where
             );
         }
 
-        report
+        Ok(report)
     }
 
     async fn reconcile_one_intent(&self, intent: ImportIntent, report: &mut ImportRecoveryReport) {
@@ -617,6 +627,23 @@ where
             .map(|m| m.len() as i64)
             .unwrap_or(intent.expected_size);
 
+        if real_size != intent.expected_size {
+            // The intent's expected_size is the crash-consistency contract
+            // between what was staged and what's being finalized. A target
+            // present at the right path but the wrong size is never
+            // trustworthy enough to finalize — escalate instead, matching
+            // the sibling anomalous branch above.
+            tracing::error!(
+                intent_id = intent.id,
+                target = %target.display(),
+                expected_size = intent.expected_size,
+                real_size,
+                "import intent recovery: target file size does not match the intent's expected size — leaving intent for investigation"
+            );
+            report.anomalous += 1;
+            return;
+        }
+
         let finalize_result = self
             .db
             .create_library_item(CreateLibraryItemDbRequest {
@@ -652,10 +679,48 @@ where
     }
 }
 
+/// Test-only failpoint forcing a durability fsync to fail for an exact,
+/// pre-armed path (Unit D2 hardening). A real fsync failure isn't
+/// reproducible on demand from a portable test, so this seam lets tests
+/// exercise the two error-handling arms it guards (`fsync_dir`'s inner
+/// `Err`, and the hardlink-first cross-fs copy fallback's data fsync)
+/// deterministically. Entirely `#[cfg(test)]`-gated — compiles out
+/// completely in non-test builds, so production behavior is unchanged.
+/// Keyed by the exact path being fsynced (never a bare on/off switch) so
+/// concurrent tests using distinct tempdirs can never interfere with each
+/// other.
+#[cfg(test)]
+mod fsync_test_failpoint {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    static ARMED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+    pub(super) fn arm(path: PathBuf) {
+        ARMED
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap()
+            .insert(path);
+    }
+
+    pub(super) fn is_armed(path: &Path) -> bool {
+        ARMED
+            .get()
+            .map(|set| set.lock().unwrap().contains(path))
+            .unwrap_or(false)
+    }
+}
+
 /// Fsync a directory so its pending metadata changes (a rename, a
 /// hard_link) are durable before the caller proceeds. Always run inside
 /// `spawn_blocking` — this is a blocking syscall.
 fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if fsync_test_failpoint::is_armed(dir) {
+        return Err(std::io::Error::other("injected dir fsync failure (test)"));
+    }
     std::fs::File::open(dir)?.sync_all()
 }
 
@@ -845,7 +910,7 @@ mod import_recovery_tests {
             .unwrap();
         assert_eq!(intent.state, ImportIntentState::Staging);
 
-        let report = workflow.recover_import_intents().await;
+        let report = workflow.recover_import_intents().await.unwrap();
 
         assert_eq!(report.rolled_back, 1, "{report:?}");
         assert_eq!(report.completed, 0, "{report:?}");
@@ -901,7 +966,7 @@ mod import_recovery_tests {
             .unwrap();
         assert_eq!(intent.state, ImportIntentState::Staging);
 
-        let report = workflow.recover_import_intents().await;
+        let report = workflow.recover_import_intents().await.unwrap();
 
         assert_eq!(report.completed, 1, "{report:?}");
         assert_eq!(report.rolled_back, 0, "{report:?}");
@@ -948,7 +1013,7 @@ mod import_recovery_tests {
             .unwrap();
         db.mark_import_intent_renamed(intent.id).await.unwrap();
 
-        let report = workflow.recover_import_intents().await;
+        let report = workflow.recover_import_intents().await.unwrap();
 
         assert_eq!(report.completed, 1, "{report:?}");
         let items = db
@@ -1010,7 +1075,7 @@ mod import_recovery_tests {
             .unwrap();
         db.mark_import_intent_renamed(intent.id).await.unwrap();
 
-        let report = workflow.recover_import_intents().await;
+        let report = workflow.recover_import_intents().await.unwrap();
 
         assert_eq!(report.completed, 1, "{report:?}");
         let items = db
@@ -1052,10 +1117,10 @@ mod import_recovery_tests {
         .await
         .unwrap();
 
-        let first = workflow.recover_import_intents().await;
+        let first = workflow.recover_import_intents().await.unwrap();
         assert_eq!(first.completed, 1, "{first:?}");
 
-        let second = workflow.recover_import_intents().await;
+        let second = workflow.recover_import_intents().await.unwrap();
         assert_eq!(
             second,
             ImportRecoveryReport::default(),
@@ -1092,7 +1157,7 @@ mod import_recovery_tests {
             .unwrap();
         db.mark_import_intent_renamed(intent.id).await.unwrap();
 
-        let report = workflow.recover_import_intents().await;
+        let report = workflow.recover_import_intents().await.unwrap();
 
         assert_eq!(report.anomalous, 1, "{report:?}");
         assert_eq!(report.completed, 0, "{report:?}");
@@ -1101,6 +1166,63 @@ mod import_recovery_tests {
             db.list_import_intents().await.unwrap().len(),
             1,
             "an anomalous intent is left in place, not silently discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_flags_size_mismatched_renamed_intent_as_anomalous_and_does_not_finalize() {
+        // A Renamed intent's expected_size is the crash-consistency contract
+        // between what was staged and what recovery finalizes. A target
+        // file present at the right path but the WRONG size (e.g. a
+        // name-reuse race, or something external replacing the file) must
+        // never be silently finalized as if it were the completed import.
+        let (db, workflow, user_id, work_id, root_folder_id, root_dir) = seed().await;
+
+        let target_relative = "D2 Author/D2 Test Book.epub";
+        let target_abs = root_dir.path().join(target_relative);
+        tokio::fs::create_dir_all(target_abs.parent().unwrap())
+            .await
+            .unwrap();
+        // The file actually on disk is a different size than the intent
+        // expects.
+        tokio::fs::write(&target_abs, b"wrong size entirely")
+            .await
+            .unwrap();
+
+        let intent = db
+            .create_import_intent(CreateImportIntentDbRequest {
+                user_id,
+                work_id,
+                root_folder_id,
+                media_type: MediaType::Ebook,
+                target_relative: target_relative.into(),
+                staging_path: root_dir
+                    .path()
+                    .join(".livrarr-import-sizemismatch")
+                    .to_string_lossy()
+                    .into_owned(),
+                expected_size: 999_999,
+                import_id: None,
+            })
+            .await
+            .unwrap();
+        db.mark_import_intent_renamed(intent.id).await.unwrap();
+
+        let report = workflow.recover_import_intents().await.unwrap();
+
+        assert_eq!(report.anomalous, 1, "{report:?}");
+        assert_eq!(report.completed, 0, "{report:?}");
+        assert!(
+            db.list_library_items_by_work(user_id, work_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a size-mismatched target must never be finalized as a LibraryItem"
+        );
+        assert_eq!(
+            db.list_import_intents().await.unwrap().len(),
+            1,
+            "a size-mismatched intent is left in place, not silently discarded"
         );
     }
 
@@ -1192,6 +1314,122 @@ mod import_recovery_tests {
             db.list_import_intents().await.unwrap().len(),
             1,
             "only the original in-flight intent remains — the rejected attempt left nothing behind"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Durability-failure tests: a real fsync failure (dir or data) must
+    // fail the import / recovery pass rather than being silently ignored,
+    // and a DB error listing intents must be surfaced, not defaulted away.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_fails_and_leaves_intent_for_recovery_when_parent_dir_fsync_errors() {
+        // A real fsync failure on the parent directory means the rename's
+        // durability is NOT confirmed. The prior code only caught the
+        // spawn_blocking JoinError (a task panic) and silently ignored a
+        // genuine `Ok(Err(io_error))` from fsync_dir itself, finalizing the
+        // import anyway. This must fail the import instead, leaving the
+        // already-renamed file + intent in place for recovery to finish.
+        let (db, workflow, user_id, work_id, root_folder_id, root_dir) = seed().await;
+
+        let target_relative = "D2 Author/D2 Test Book.epub";
+        let target_parent = root_dir.path().join("D2 Author");
+        fsync_test_failpoint::arm(target_parent.clone());
+
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_path = source_dir.path().join("incoming.epub");
+        tokio::fs::write(&source_path, b"some real bytes")
+            .await
+            .unwrap();
+
+        let result = workflow
+            .import_file(
+                user_id,
+                ImportFileRequest {
+                    work_id,
+                    root_folder_id,
+                    source: source_path,
+                    target_relative: target_relative.into(),
+                    media_type: MediaType::Ebook,
+                    materialization: Materialization::Copy,
+                    import_id: None,
+                    extract_chapters: false,
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(ImportWorkflowError::ImportFailed(msg)) if msg.contains("fsync")),
+            "expected a dir-fsync failure to fail the import, got: {result:?}"
+        );
+        assert!(
+            db.list_library_items_by_work(user_id, work_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "must not finalize a LibraryItem when the durability fsync failed"
+        );
+        assert_eq!(
+            db.list_import_intents().await.unwrap().len(),
+            1,
+            "the intent must survive for recovery to finish the job next startup"
+        );
+        assert!(
+            tokio::fs::try_exists(root_dir.path().join(target_relative))
+                .await
+                .unwrap(),
+            "the rename itself already happened durably on disk before the fsync step"
+        );
+    }
+
+    #[tokio::test]
+    async fn hardlink_first_copy_fallback_never_persists_when_data_fsync_fails() {
+        // Force the hard_link attempt to fail (EEXIST — a file already sits
+        // at `dst`) so the cross-fs copy fallback runs: the exact branch
+        // this bug lives in, regardless of *why* hard_link failed (the code
+        // never distinguishes EXDEV from any other hard_link error).
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("source.epub");
+        tokio::fs::write(&src, b"cross-fs fallback bytes")
+            .await
+            .unwrap();
+
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst = dst_dir.path().join("target.epub");
+        tokio::fs::write(&dst, b"pre-existing decoy").await.unwrap();
+
+        fsync_test_failpoint::arm(dst.clone());
+
+        let result = materialize_hardlink_first(&src, &dst).await;
+
+        assert!(
+            matches!(&result, Err(msg) if msg.contains("data fsync")),
+            "expected the injected data-fsync failure to be surfaced, got: {result:?}"
+        );
+        assert_eq!(
+            tokio::fs::read(&dst).await.unwrap(),
+            b"pre-existing decoy",
+            "persist must never run when the pre-persist data fsync failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_surfaces_list_intents_failure_instead_of_a_default_report() {
+        // A DB error while listing intents must never look identical to
+        // "there was nothing to recover" — the caller (startup) needs to be
+        // able to tell the two apart and escalate loudly.
+        let (db, workflow, _user_id, _work_id, _root_folder_id, _root_dir) = seed().await;
+
+        // A genuine sqlx failure — no mock/seam needed: closing the real
+        // pool makes the next query fail for real.
+        db.pool().close().await;
+
+        let result = workflow.recover_import_intents().await;
+
+        assert!(
+            result.is_err(),
+            "a list_import_intents failure must propagate, not collapse into Ok(ImportRecoveryReport::default())"
         );
     }
 
@@ -1503,6 +1741,18 @@ async fn materialize_hardlink_first(src: &Path, dst: &Path) -> Result<u64, Strin
                 "copy size mismatch: copied {copied} vs source {source_size}"
             ));
         }
+        // The parent-dir fsync the caller runs after this returns only
+        // flushes the rename's directory-entry change — it says nothing
+        // about this file's own data blocks. Sync those explicitly before
+        // persist (the atomic rename), or a crash right after could durably
+        // rename in zero-length or partially-flushed content.
+        #[cfg(test)]
+        if fsync_test_failpoint::is_armed(&dst) {
+            return Err("data fsync failed: injected (test)".to_string());
+        }
+        tmp.as_file()
+            .sync_all()
+            .map_err(|e| format!("data fsync failed: {e}"))?;
         tmp.persist(&dst)
             .map_err(|e| format!("rename failed: {e}"))?;
         Ok(copied)

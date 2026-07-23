@@ -55,8 +55,28 @@ pub async fn recover_interrupted_state(state: &AppState) {
     // or roll back any file import interrupted by an unclean shutdown, then
     // sweep aged, unreferenced staging files. Must run before anything else
     // can start a new import — nothing is in-flight yet at this point.
-    // Self-logs a summary; nothing further to do with the report here.
-    let _ = state.import_workflow.recover_import_intents().await;
+    // recover_import_intents self-logs the reconciliation summary; here we
+    // only need to surface a listing failure (never silently indistinguishable
+    // from "nothing to recover") and escalate any anomalous intent left in
+    // place. Startup always continues — a hard abort would take the whole
+    // app down over one recovery pass (PO decision).
+    match state.import_workflow.recover_import_intents().await {
+        Ok(report) if report.anomalous > 0 => {
+            error!(
+                anomalous = report.anomalous,
+                "import recovery: anomalous intents left in place — needs investigation"
+            );
+        }
+        Ok(_) => {
+            info!("import recovery: startup reconciliation complete, no anomalies");
+        }
+        Err(e) => {
+            error!(
+                error = %e,
+                "import recovery FAILED to list intents — continuing startup; stale intents unreconciled"
+            );
+        }
+    }
 
     // Sweep stale temp files from root folders (crashed imports).
     sweep_stale_temp_files(state).await;
