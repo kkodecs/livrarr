@@ -1,5 +1,5 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use std::path::Path;
 
 /// Create and configure a SQLite connection pool.
@@ -233,6 +233,113 @@ pub async fn create_backup(
     Ok(backup_path)
 }
 
+/// Preserve a user's own confirmed identity anchor and metadata-field lock
+/// on `loser_id` before it is merged into `keeper_id` — shared by the
+/// startup dedup backfill ([`backfill_normalized_identity`]) and the live
+/// work-merge action so both apply the identical policy. Must run on the
+/// caller's own connection/transaction, BEFORE the caller's own generic
+/// anchor-merge and provenance-drop statements for the pair: this function
+/// relocates the user's own contested anchor and copies the user's own
+/// contested provenance lock onto the keeper directly (clearing whatever
+/// on the keeper would otherwise block either one) — the caller's own
+/// generic merge-then-drop statements are left to handle everything else
+/// (non-conflicting anchors, non-user provenance) exactly as before.
+pub(crate) async fn merge_user_identity_state(
+    conn: &mut SqliteConnection,
+    keeper_id: i64,
+    loser_id: i64,
+    user_id: i64,
+) -> Result<(), sqlx::Error> {
+    // Anchor types where the keeper holds a non-user confirmed anchor and
+    // the loser holds a user-confirmed anchor of the SAME type — the
+    // user's anchor must win. Computed once, before any mutation below,
+    // because the delete/move pair that follows removes the very evidence
+    // a live subquery would otherwise need to re-derive it.
+    let contested_anchor_types: Vec<String> = sqlx::query_scalar(
+        "SELECT k.anchor_type FROM work_identity_anchors k \
+         JOIN work_identity_anchors l \
+           ON l.anchor_type = k.anchor_type AND l.user_id = k.user_id \
+         WHERE k.work_id = ? AND k.user_id = ? AND k.confidence = 'confirmed' AND k.setter != 'user' \
+           AND l.work_id = ? AND l.confidence = 'confirmed' AND l.setter = 'user'",
+    )
+    .bind(keeper_id)
+    .bind(user_id)
+    .bind(loser_id)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    for anchor_type in &contested_anchor_types {
+        // Clear the keeper's losing anchor for this type — left in place,
+        // the partial-unique constraint on (work_id, anchor_type) WHERE
+        // confirmed would reject the move below.
+        sqlx::query(
+            "DELETE FROM work_identity_anchors \
+             WHERE work_id = ? AND user_id = ? AND anchor_type = ? \
+               AND confidence = 'confirmed' AND setter != 'user'",
+        )
+        .bind(keeper_id)
+        .bind(user_id)
+        .bind(anchor_type)
+        .execute(&mut *conn)
+        .await?;
+
+        // Move the loser's winning anchor onto the keeper via an in-place
+        // work_id update — never insert-then-delete: the OTHER partial
+        // unique index, on (user_id, anchor_type, anchor_value) WHERE
+        // confirmed, does not distinguish by work_id, so inserting a
+        // keeper copy while the loser's identical row still exists would
+        // self-collide and be silently swallowed by the caller's later
+        // `INSERT OR IGNORE` anchor-merge below. An UPDATE that leaves
+        // (user_id, anchor_type, anchor_value) unchanged cannot collide
+        // with itself.
+        sqlx::query(
+            "UPDATE work_identity_anchors SET work_id = ? \
+             WHERE work_id = ? AND user_id = ? AND anchor_type = ? \
+               AND confidence = 'confirmed' AND setter = 'user'",
+        )
+        .bind(keeper_id)
+        .bind(loser_id)
+        .bind(user_id)
+        .bind(anchor_type)
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    // A user's own metadata-field lock on the loser must survive onto the
+    // keeper, overriding any non-user provenance the keeper holds for the
+    // same field. The keeper's own user lock (if any) is left untouched —
+    // the (work_id, field) primary key makes the insert below a silent
+    // no-op for any field the keeper already user-locked.
+    sqlx::query(
+        "DELETE FROM work_metadata_provenance \
+         WHERE work_id = ? AND user_id = ? AND setter != 'user' \
+           AND field IN ( \
+               SELECT field FROM work_metadata_provenance \
+               WHERE work_id = ? AND user_id = ? AND setter = 'user' \
+           )",
+    )
+    .bind(keeper_id)
+    .bind(user_id)
+    .bind(loser_id)
+    .bind(user_id)
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query(
+        "INSERT OR IGNORE INTO work_metadata_provenance \
+         (user_id, work_id, field, source, set_at, setter, cleared) \
+         SELECT user_id, ?, field, source, set_at, setter, cleared \
+         FROM work_metadata_provenance WHERE work_id = ? AND user_id = ? AND setter = 'user'",
+    )
+    .bind(keeper_id)
+    .bind(loser_id)
+    .bind(user_id)
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
 /// Backfill `normalized_title` / `normalized_author`, merge duplicate work
 /// rows into the oldest keeper across every table that references `works`,
 /// and create the UNIQUE(user_id, normalized_title, normalized_author)
@@ -326,6 +433,103 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
         ids.sort_unstable();
         let keeper_id = ids[0];
         for &dup_id in &ids[1..] {
+            // --- Reconcile: the keeper's own user-sovereign work fields.
+            // Monitor toggles OR together; series/cover keep the keeper's
+            // own non-null value and only adopt the loser's when the
+            // keeper's is null. A keeper value that wins over a genuinely
+            // differing loser value is logged — that loser value becomes
+            // unrecoverable once its `works` row is deleted below. ---
+            let keeper_fields: (
+                bool,
+                bool,
+                Option<String>,
+                Option<f64>,
+                Option<String>,
+                bool,
+            ) = sqlx::query_as(
+                "SELECT monitor_ebook, monitor_audiobook, series_name, series_position, \
+                     cover_url, cover_manual FROM works WHERE id = ?",
+            )
+            .bind(keeper_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| format!("read keeper work fields for work {keeper_id}: {e}"))?;
+            let loser_fields: (
+                bool,
+                bool,
+                Option<String>,
+                Option<f64>,
+                Option<String>,
+                bool,
+            ) = sqlx::query_as(
+                "SELECT monitor_ebook, monitor_audiobook, series_name, series_position, \
+                     cover_url, cover_manual FROM works WHERE id = ?",
+            )
+            .bind(dup_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| format!("read loser work fields for work {dup_id}: {e}"))?;
+
+            if let (Some(k), Some(l)) = (&keeper_fields.2, &loser_fields.2) {
+                if k != l {
+                    tracing::warn!(
+                        keeper_id,
+                        dup_id,
+                        field = "series_name",
+                        "dedup: kept keeper, discarded loser"
+                    );
+                }
+            }
+            if let (Some(k), Some(l)) = (keeper_fields.3, loser_fields.3) {
+                if k != l {
+                    tracing::warn!(
+                        keeper_id,
+                        dup_id,
+                        field = "series_position",
+                        "dedup: kept keeper, discarded loser"
+                    );
+                }
+            }
+            if let (Some(k), Some(l)) = (&keeper_fields.4, &loser_fields.4) {
+                if k != l {
+                    tracing::warn!(
+                        keeper_id,
+                        dup_id,
+                        field = "cover_url",
+                        "dedup: kept keeper, discarded loser"
+                    );
+                }
+            }
+            if keeper_fields.5 != loser_fields.5 {
+                tracing::warn!(
+                    keeper_id,
+                    dup_id,
+                    field = "cover_manual",
+                    "dedup: kept keeper, discarded loser"
+                );
+            }
+
+            sqlx::query(
+                "UPDATE works SET \
+                 monitor_ebook = monitor_ebook OR ?, \
+                 monitor_audiobook = monitor_audiobook OR ?, \
+                 series_name = COALESCE(series_name, ?), \
+                 series_position = COALESCE(series_position, ?), \
+                 cover_url = COALESCE(cover_url, ?), \
+                 cover_manual = COALESCE(cover_manual, ?) \
+                 WHERE id = ?",
+            )
+            .bind(loser_fields.0)
+            .bind(loser_fields.1)
+            .bind(&loser_fields.2)
+            .bind(loser_fields.3)
+            .bind(&loser_fields.4)
+            .bind(loser_fields.5)
+            .bind(keeper_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("reconcile user fields onto keeper for work {keeper_id}: {e}"))?;
+
             // --- Repoint: rows the user relies on or authored directly. ---
             sqlx::query("UPDATE library_items SET work_id = ? WHERE work_id = ? AND user_id = ?")
                 .bind(keeper_id)
@@ -374,6 +578,19 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
             .await
             .map_err(|e| format!("redirect work_identity_conflicts for work {dup_id}: {e}"))?;
 
+            // Import-intent crash-consistency rows must move with the merge
+            // (#20) — work_id is ON DELETE CASCADE (migration 074), so an
+            // unrepointed row would vanish silently when the loser `works`
+            // row is deleted below, instead of surfacing under the
+            // surviving work on the next startup recovery pass.
+            sqlx::query("UPDATE import_intents SET work_id = ? WHERE work_id = ? AND user_id = ?")
+                .bind(keeper_id)
+                .bind(dup_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("redirect import_intents for work {dup_id}: {e}"))?;
+
             // --- Merge: real identity data. Collision-safe — never blind-repoint. ---
             // external_ids: UNIQUE(work_id, id_type, id_value) — keep the
             // keeper's existing value on collision, adopt anything new.
@@ -393,6 +610,14 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
                 .await
                 .map_err(|e| format!("clear residual external_ids for work {dup_id}: {e}"))?;
 
+            // Preserve the user's own confirmed anchor / metadata-field
+            // lock on the loser before the merge-then-drop statements below
+            // run — shared with the live work-merge action so both paths
+            // apply the identical policy.
+            merge_user_identity_state(&mut tx, keeper_id, dup_id, *user_id)
+                .await
+                .map_err(|e| format!("preserve user identity state for work {dup_id}: {e}"))?;
+
             // work_identity_anchors: THREE overlapping unique constraints —
             // the (work_id, anchor_type, anchor_value) primary key, one
             // confirmed anchor per (work_id, anchor_type), and one confirmed
@@ -400,7 +625,11 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
             // ON CONFLICT target cannot guard all three at once, so this uses
             // OR IGNORE (the same sanctioned dedup idiom as
             // `sqlite_notification.rs`'s race guard): the keeper's own
-            // confirmed anchors always win, and anything new merges in.
+            // confirmed anchors win by default, and anything new merges in.
+            // A contested type (loser's user-set anchor beating a keeper
+            // non-user one) was already fully relocated by
+            // `merge_user_identity_state` above, so there's nothing left
+            // here to insert or drop for it.
             sqlx::query(
                 "INSERT OR IGNORE INTO work_identity_anchors \
                  (work_id, anchor_type, anchor_value, confidence, setter, set_at, \
@@ -1530,5 +1759,168 @@ mod backfill_normalized_identity_tests {
                 .await
                 .unwrap();
         assert_eq!(review_candidates, vec![(keeper_id, "[\"A\"]".to_string())]);
+    }
+
+    // ---- (d) Reverse direction: the loser's user data must survive the merge ----
+
+    #[tokio::test]
+    async fn duplicate_merge_preserves_loser_user_edits_and_repoints_import_intents() {
+        let db = create_test_db().await;
+        drop_harness_unique_index(db.pool()).await;
+
+        let user_id = seed_user(&db, "reverse-user").await;
+
+        let keeper_id = seed_unmigrated_work(db.pool(), user_id, "Hobbit", "J.R.R. Tolkien").await;
+        let loser_id =
+            seed_unmigrated_work(db.pool(), user_id, "The Hobbit", "J.R.R. Tolkien").await;
+
+        // The keeper starts with monitor_ebook off (the seed default is on)
+        // and no series/cover — the loser (the higher-id row about to be
+        // dropped) carries all of the user's real edits.
+        sqlx::query("UPDATE works SET monitor_ebook = 0 WHERE id = ?")
+            .bind(keeper_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE works SET monitor_ebook = 1, series_name = 'Middle-earth', \
+             series_position = 1.0, cover_url = 'http://covers.example/hobbit.jpg' WHERE id = ?",
+        )
+        .bind(loser_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // A user-confirmed anchor on the loser conflicts with a
+        // non-user-confirmed anchor of the same type on the keeper.
+        sqlx::query(
+            "INSERT INTO work_identity_anchors \
+             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+             VALUES (?, 'gr_key', 'AUTO123', 'confirmed', 'auto_search', '2026-01-01', ?)",
+        )
+        .bind(keeper_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO work_identity_anchors \
+             (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id) \
+             VALUES (?, 'gr_key', 'USER456', 'confirmed', 'user', '2026-01-01', ?)",
+        )
+        .bind(loser_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // A user-set provenance lock on the loser, for a field the keeper
+        // has no provenance row for at all.
+        sqlx::query(
+            "INSERT INTO work_metadata_provenance (user_id, work_id, field, set_at, setter) \
+             VALUES (?, ?, 'title', '2026-01-01', 'user')",
+        )
+        .bind(user_id)
+        .bind(loser_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // An import-intent crash-consistency row on the loser must be
+        // repointed, not cascade-deleted when the loser `works` row goes.
+        let root_folder_id = seed_root_folder(db.pool()).await;
+        sqlx::query(
+            "INSERT INTO import_intents \
+             (user_id, work_id, root_folder_id, media_type, target_relative, staging_path, \
+              expected_size, state, created_at) \
+             VALUES (?, ?, ?, 'ebook', 'Hobbit/Hobbit.epub', '/staging/hobbit.epub.tmp', \
+                     12345, 'staging', '2026-01-01T00:00:00Z')",
+        )
+        .bind(user_id)
+        .bind(loser_id)
+        .bind(root_folder_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        backfill_normalized_identity(db.pool())
+            .await
+            .expect("the loser's user data must merge onto the keeper without error");
+
+        // monitor_ebook: OR'd — the loser's "on" wins over the keeper's "off".
+        let monitor_ebook: bool =
+            sqlx::query_scalar("SELECT monitor_ebook FROM works WHERE id = ?")
+                .bind(keeper_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert!(
+            monitor_ebook,
+            "monitor_ebook must OR in the loser's true value"
+        );
+
+        // series_name/series_position/cover_url: keeper was null, so it
+        // must adopt the loser's value instead of losing it.
+        let (series_name, series_position, cover_url): (
+            Option<String>,
+            Option<f64>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT series_name, series_position, cover_url FROM works WHERE id = ?",
+        )
+        .bind(keeper_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(series_name.as_deref(), Some("Middle-earth"));
+        assert_eq!(series_position, Some(1.0));
+        assert_eq!(
+            cover_url.as_deref(),
+            Some("http://covers.example/hobbit.jpg")
+        );
+
+        // work_identity_anchors: the loser's USER anchor must survive — not
+        // the keeper's own auto_search anchor.
+        let anchors: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT work_id, anchor_value, confidence, setter FROM work_identity_anchors",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            anchors,
+            vec![(
+                keeper_id,
+                "USER456".to_string(),
+                "confirmed".to_string(),
+                "user".to_string()
+            )],
+            "the loser's user-confirmed anchor must win over the keeper's auto_search one: {anchors:?}"
+        );
+
+        // work_metadata_provenance: the loser's user-set lock must survive
+        // under the keeper, not be dropped with the rest of the loser's row.
+        let provenance: Vec<(i64, String, String)> =
+            sqlx::query_as("SELECT work_id, field, setter FROM work_metadata_provenance")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            provenance,
+            vec![(keeper_id, "title".to_string(), "user".to_string())],
+            "the loser's user provenance lock must survive under the keeper: {provenance:?}"
+        );
+
+        // import_intents: repointed to the keeper, never cascade-deleted.
+        let intents: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT work_id, user_id FROM import_intents")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            intents,
+            vec![(keeper_id, user_id)],
+            "the import_intent row must be repointed to the keeper, not cascade-deleted: {intents:?}"
+        );
     }
 }
