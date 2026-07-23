@@ -97,6 +97,11 @@ async fn main() {
         data_dir_arc.clone(),
         Arc::new(livrarr_server::chapter_extractor::ChapterExtractorImpl),
     ));
+    // D3 #8 / R-5: SLOT_LOCKS is a process-wide static (not owned by any one
+    // service), so its sweep backstop is spawned once here rather than from
+    // a constructor. import_workflow/work_service spawn their own from
+    // their own constructors above/below.
+    let _slot_locks_sweeper = livrarr_metadata::cover_write_gate::spawn_slot_locks_sweeper();
     let tag_service_arc = Arc::new(livrarr_server::tag_service::LiveTagService::new(
         import_io_arc.clone(),
         data_dir_arc.clone(),

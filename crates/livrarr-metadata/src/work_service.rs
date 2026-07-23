@@ -16,7 +16,7 @@ pub struct WorkServiceImpl<D, E, H> {
     enrichment: E,
     http: H,
     data_dir: PathBuf,
-    refresh_locks: KeyedMutex<(UserId, WorkId)>,
+    refresh_locks: Arc<KeyedMutex<(UserId, WorkId)>>,
     bulk_refresh_users: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
     /// Optional multi-provider identity resolver used by the add-time and
     /// mid-enrichment identity leg (`settle_identity`, REQ-010). `None` skips
@@ -66,16 +66,39 @@ impl Drop for EnrichingGuard {
 
 impl<D, E, H> WorkServiceImpl<D, E, H> {
     pub fn new(db: D, enrichment: E, http: H, data_dir: PathBuf) -> Self {
+        let refresh_locks = Arc::new(KeyedMutex::new());
+        spawn_refresh_locks_sweeper(&refresh_locks);
         Self {
             db,
             enrichment,
             http,
             data_dir,
-            refresh_locks: KeyedMutex::new(),
+            refresh_locks,
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             resolver: None,
             enriching: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
+    }
+}
+
+/// D3 #8 / R-5: `KeyedMutex::sweep()` is the backstop for permits `Drop`'s
+/// opportunistic per-guard prune skips (only when the map is contended at
+/// release) — it existed with zero production callers. This spawns a 300s
+/// periodic sweep of `refresh_locks` for the life of the process, sharing
+/// ownership via the `Arc` clone captured in the task. A no-op (never
+/// panics) when no Tokio runtime is current — `WorkServiceImpl::new` /
+/// `without_enrichment` are plain constructors called from many test
+/// contexts, and the sweep is a backstop nothing depends on synchronously.
+fn spawn_refresh_locks_sweeper(locks: &Arc<KeyedMutex<(UserId, WorkId)>>) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let locks = Arc::clone(locks);
+        handle.spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                ticker.tick().await;
+                locks.sweep().await;
+            }
+        });
     }
 }
 
@@ -97,12 +120,14 @@ impl<D, H> WorkServiceImpl<D, (), H> {
         http: H,
         data_dir: PathBuf,
     ) -> WorkServiceImpl<D, StubNoEnrichment, H> {
+        let refresh_locks = Arc::new(KeyedMutex::new());
+        spawn_refresh_locks_sweeper(&refresh_locks);
         WorkServiceImpl {
             db,
             enrichment: StubNoEnrichment,
             http,
             data_dir,
-            refresh_locks: KeyedMutex::new(),
+            refresh_locks,
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             resolver: None,
             enriching: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -2890,6 +2915,71 @@ mod addtime_cover_trust_tests {
         assert_eq!(
             addtime_cover_trust(false, false, false, false),
             crate::cover_resolution::phase1_trust(false, false)
+        );
+    }
+}
+
+#[cfg(test)]
+mod refresh_locks_sweeper_tests {
+    use super::*;
+
+    // The inherent constructors impose no trait bounds on D/E/H — `()`
+    // stands in for both `db` and `http` since this test never calls a
+    // trait method on either, only inspects the sweep wiring.
+    fn new_test_service() -> WorkServiceImpl<(), StubNoEnrichment, ()> {
+        WorkServiceImpl::without_enrichment((), (), PathBuf::from("unused"))
+    }
+
+    /// D3 #8 / R-5: `sweep()` existed with zero production callers. This
+    /// proves the constructor now spawns a task holding a live `Arc` clone
+    /// of the SAME `refresh_locks` the service locks against — strong_count
+    /// is 2 (the struct's own field + the spawned task's clone) only if a
+    /// task was actually spawned and targets this instance; it stays 1 if
+    /// the wiring regresses or spawns an unrelated instance.
+    #[tokio::test]
+    async fn constructor_spawns_a_sweeper_holding_the_live_refresh_locks_arc() {
+        let svc = new_test_service();
+        assert_eq!(
+            Arc::strong_count(&svc.refresh_locks),
+            2,
+            "constructor must spawn exactly one sweep task holding its own \
+             Arc clone of refresh_locks"
+        );
+    }
+
+    /// The sweeper must be a recurring loop, not a one-shot: after the real
+    /// 300s production interval elapses (via tokio's mock clock — no real
+    /// waiting), the task must still be alive and holding its Arc clone.
+    #[tokio::test(start_paused = true)]
+    async fn the_spawned_sweeper_survives_past_one_full_interval_without_dying() {
+        let svc = new_test_service();
+        assert_eq!(Arc::strong_count(&svc.refresh_locks), 2);
+
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        // Let the woken task actually run its tick and re-arm the next one.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            Arc::strong_count(&svc.refresh_locks),
+            2,
+            "the sweep loop must still be alive (looping, not one-shot) \
+             after a full interval elapses"
+        );
+    }
+
+    /// Defensive guard regression test: constructing a service outside any
+    /// Tokio runtime (a handful of the 80+ call sites across the workspace
+    /// are test fixtures; this crate cannot prove every one of them runs
+    /// under `#[tokio::test]`) must never panic. If the guard is ever
+    /// weakened to an unconditional `tokio::spawn`, this turns into a panic.
+    #[test]
+    fn constructor_does_not_panic_outside_a_tokio_runtime() {
+        let svc = new_test_service();
+        assert_eq!(
+            Arc::strong_count(&svc.refresh_locks),
+            1,
+            "no runtime is current here, so no sweep task should be spawned"
         );
     }
 }

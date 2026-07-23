@@ -53,7 +53,7 @@ pub struct ImportRecoveryReport {
 
 pub struct ImportWorkflowImpl<D> {
     db: D,
-    import_locks: KeyedMutex<(UserId, WorkId)>,
+    import_locks: Arc<KeyedMutex<(UserId, WorkId)>>,
     _import_semaphore: Arc<tokio::sync::Semaphore>,
     _data_dir: Arc<PathBuf>,
     /// Injected M4B chapter extraction (REQ-005): the library crate holds no
@@ -68,13 +68,36 @@ impl<D> ImportWorkflowImpl<D> {
         data_dir: Arc<PathBuf>,
         extractor: Arc<dyn ChapterExtractor>,
     ) -> Self {
+        let import_locks = Arc::new(KeyedMutex::new());
+        spawn_import_locks_sweeper(&import_locks);
         Self {
             db,
-            import_locks: KeyedMutex::new(),
+            import_locks,
             _import_semaphore: import_semaphore,
             _data_dir: data_dir,
             extractor,
         }
+    }
+}
+
+/// D3 #8 / R-5: `KeyedMutex::sweep()` is the backstop for permits `Drop`'s
+/// opportunistic per-guard prune skips (only when the map is contended at
+/// release) — it existed with zero production callers. This spawns a 300s
+/// periodic sweep of `import_locks` for the life of the process, sharing
+/// ownership via the `Arc` clone captured in the task. A no-op (never
+/// panics) when no Tokio runtime is current — `ImportWorkflowImpl::new` is a
+/// plain constructor called from many test contexts, and the sweep is a
+/// backstop nothing depends on synchronously.
+fn spawn_import_locks_sweeper(locks: &Arc<KeyedMutex<(UserId, WorkId)>>) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let locks = Arc::clone(locks);
+        handle.spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                ticker.tick().await;
+                locks.sweep().await;
+            }
+        });
     }
 }
 
@@ -2571,5 +2594,90 @@ fn apply_path_mapping(
                 .replace("//", "/")
         }
         None => content_path.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod import_locks_sweeper_tests {
+    use super::*;
+
+    /// Never invoked — `ImportWorkflowImpl::new`'s inherent constructor
+    /// requires a concrete `Arc<dyn ChapterExtractor>`, but this test never
+    /// exercises chapter extraction, only the sweep wiring.
+    struct UnusedChapterExtractor;
+    impl livrarr_domain::services::ChapterExtractor for UnusedChapterExtractor {
+        fn extract_m4b_chapters(
+            &self,
+            _path: &Path,
+        ) -> Result<
+            livrarr_domain::services::ChapterExtractionResult,
+            livrarr_domain::services::ChapterExtractionError,
+        > {
+            unreachable!("test double: sweep-wiring test never extracts chapters")
+        }
+    }
+
+    // The inherent constructor imposes no trait bounds on `D` — `()` stands
+    // in for `db` since this test never calls a trait method on it.
+    fn new_test_workflow() -> ImportWorkflowImpl<()> {
+        ImportWorkflowImpl::new(
+            (),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            Arc::new(PathBuf::from("unused")),
+            Arc::new(UnusedChapterExtractor),
+        )
+    }
+
+    /// D3 #8 / R-5: `sweep()` existed with zero production callers. This
+    /// proves the constructor now spawns a task holding a live `Arc` clone
+    /// of the SAME `import_locks` the workflow locks against — strong_count
+    /// is 2 (the struct's own field + the spawned task's clone) only if a
+    /// task was actually spawned and targets this instance; it stays 1 if
+    /// the wiring regresses or spawns an unrelated instance.
+    #[tokio::test]
+    async fn constructor_spawns_a_sweeper_holding_the_live_import_locks_arc() {
+        let wf = new_test_workflow();
+        assert_eq!(
+            Arc::strong_count(&wf.import_locks),
+            2,
+            "constructor must spawn exactly one sweep task holding its own \
+             Arc clone of import_locks"
+        );
+    }
+
+    /// The sweeper must be a recurring loop, not a one-shot: after the real
+    /// 300s production interval elapses (via tokio's mock clock — no real
+    /// waiting), the task must still be alive and holding its Arc clone.
+    #[tokio::test(start_paused = true)]
+    async fn the_spawned_sweeper_survives_past_one_full_interval_without_dying() {
+        let wf = new_test_workflow();
+        assert_eq!(Arc::strong_count(&wf.import_locks), 2);
+
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        // Let the woken task actually run its tick and re-arm the next one.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            Arc::strong_count(&wf.import_locks),
+            2,
+            "the sweep loop must still be alive (looping, not one-shot) \
+             after a full interval elapses"
+        );
+    }
+
+    /// Defensive guard regression test: constructing a workflow outside any
+    /// Tokio runtime (a handful of the many call sites across the workspace
+    /// are test fixtures; this crate cannot prove every one of them runs
+    /// under `#[tokio::test]`) must never panic. If the guard is ever
+    /// weakened to an unconditional `tokio::spawn`, this turns into a panic.
+    #[test]
+    fn constructor_does_not_panic_outside_a_tokio_runtime() {
+        let wf = new_test_workflow();
+        assert_eq!(
+            Arc::strong_count(&wf.import_locks),
+            1,
+            "no runtime is current here, so no sweep task should be spawned"
+        );
     }
 }

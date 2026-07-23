@@ -64,6 +64,24 @@ pub(crate) async fn lock_slot(
     SLOT_LOCKS.lock((user_id, work_id, media_type)).await
 }
 
+/// D3 #8 / R-5: `KeyedMutex::sweep()` is the backstop for permits `Drop`'s
+/// opportunistic per-guard prune skips (only when the map is contended at
+/// release) — it existed with zero production callers. This spawns a 300s
+/// periodic sweep of `SLOT_LOCKS` for the life of the process. Call once
+/// from the server composition root at startup. Returns `None` (never
+/// panics) when no Tokio runtime is current; the returned handle exists so
+/// tests can observe the task, production callers may discard it.
+pub fn spawn_slot_locks_sweeper() -> Option<tokio::task::JoinHandle<()>> {
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    Some(handle.spawn(async {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            SLOT_LOCKS.sweep().await;
+        }
+    }))
+}
+
 /// The durable sidecar recording a pending candidate's intended DB values.
 /// Crash recovery reads this to tell a committed-but-unfinished save apart
 /// from an undecided or rejected one. `url` is `None` for a user's byte
@@ -697,5 +715,50 @@ mod trust_blocks_candidate_tests {
             CoverTrust::User,
             false,
         ));
+    }
+}
+
+#[cfg(test)]
+mod slot_locks_sweeper_tests {
+    use super::*;
+
+    /// D3 #8 / R-5: `sweep()` existed with zero production callers. This
+    /// proves `spawn_slot_locks_sweeper` actually spawns a task (not a no-op)
+    /// under a live Tokio runtime, and that the loop is a recurring sweep —
+    /// not a one-shot — surviving past the real 300s production interval
+    /// (via tokio's mock clock — no real waiting).
+    #[tokio::test(start_paused = true)]
+    async fn spawns_a_sweeper_that_survives_past_one_full_interval_without_dying() {
+        let handle = spawn_slot_locks_sweeper();
+        assert!(
+            handle.is_some(),
+            "must spawn a sweep task under a live Tokio runtime"
+        );
+        let handle = handle.unwrap();
+        assert!(
+            !handle.is_finished(),
+            "the sweep loop must not exit immediately"
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        // Let the woken task actually run its tick and re-arm the next one.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !handle.is_finished(),
+            "the sweep loop must still be alive (looping, not one-shot) \
+             after a full interval elapses"
+        );
+    }
+
+    /// Defensive guard regression test: calling this outside any Tokio
+    /// runtime must never panic — it must return `None` instead.
+    #[test]
+    fn returns_none_outside_a_tokio_runtime() {
+        assert!(
+            spawn_slot_locks_sweeper().is_none(),
+            "no runtime is current here, so no sweep task should be spawned"
+        );
     }
 }
