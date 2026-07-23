@@ -996,17 +996,13 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             }
         }
 
-        // Tier 3: title+author search fallback
+        // Tier 3: title+author search fallback. Errors route through the
+        // same `ol_error_outcome` classification Tier 1/2 use, so a live
+        // 429/5xx/QueueFull retries instead of terminalizing as NotFound.
         match self.title_author_search(work, priority).await {
             Ok(Some(payload)) => ProviderOutcome::Success(Box::new(payload)),
             Ok(None) => ProviderOutcome::NotFound,
-            Err(crate::types::ProviderFetchError::CircuitOpen(retry_after)) => {
-                circuit_open_outcome(retry_after)
-            }
-            Err(_) => ProviderOutcome::WillRetry {
-                reason: livrarr_domain::WillRetryReason::ServerError,
-                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
-            },
+            Err(e) => ol_error_outcome(&e, self.retry_backoff_secs),
         }
     }
 
@@ -1061,13 +1057,25 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         };
         let resp = match self.fetcher.fetch(req).await {
             Ok(r) => r,
+            Err(livrarr_domain::services::FetchError::RateLimited) => {
+                return Err(crate::types::ProviderFetchError::RateLimited);
+            }
             Err(livrarr_domain::services::FetchError::CircuitOpen { retry_after }) => {
                 return Err(crate::types::ProviderFetchError::CircuitOpen(retry_after));
             }
+            // D3 residual: a local admission-cap rejection is budget-exempt
+            // exactly like `CircuitOpen` — no HTTP was attempted, so it must
+            // never be folded into the budget-consuming `Other`/ServerError
+            // bucket below.
+            Err(livrarr_domain::services::FetchError::QueueFull { retry_after }) => {
+                return Err(crate::types::ProviderFetchError::QueueFull(retry_after));
+            }
+            Err(livrarr_domain::services::FetchError::HttpError { status, .. }) => {
+                return Err(crate::openlibrary::classify_ol_error(status));
+            }
             Err(e) => {
-                return Err(crate::types::ProviderFetchError::Other(format!(
-                    "OL search failed: {e}"
-                )))
+                tracing::debug!(error = %e, "OL search: transport failure");
+                return Err(crate::types::ProviderFetchError::Transient);
             }
         };
 
@@ -1076,10 +1084,7 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                 outbound_queue::shared()
                     .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
             }
-            return Err(crate::types::ProviderFetchError::Other(format!(
-                "OL search returned {}",
-                resp.status
-            )));
+            return Err(crate::openlibrary::classify_ol_error(resp.status));
         }
 
         let data: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| {
@@ -1158,7 +1163,12 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         .await
         {
             Ok(detail) => Ok(Some(self.build_payload(&ol_key, detail))),
-            Err(_) => Ok(None),
+            // A genuine miss stays NotFound; every other error (429/5xx/
+            // QueueFull/CircuitOpen/Other) must propagate so the caller
+            // routes it through `ol_error_outcome` — mirroring Tier 1/2,
+            // which never collapse a live failure into a permanent miss.
+            Err(crate::types::ProviderFetchError::NotFound) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 }
@@ -1360,6 +1370,115 @@ mod openlibrary_qw2_pins {
         assert!(
             matches!(outcome, ProviderOutcome::NotFound),
             "grey author hit must abstain, got {outcome:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // #9: the Tier-3 candidate-detail step used to collapse EVERY
+    // `query_ol_detail` error into `Ok(None)`, so a live 429/5xx on a
+    // title+author search terminalized as `NotFound` instead of retrying —
+    // unlike Tier 1 (ISBN) and Tier 2 (ol_key), which already route errors
+    // through `ol_error_outcome`. Each test here drives a real search hit
+    // (`fuzzy_success_search`) followed by a failing candidate-detail
+    // fetch, proving the fuzzy path now mirrors Tier 1/2.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn tier3_candidate_detail_5xx_is_retryable_not_notfound() {
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_response(fuzzy_success_search());
+        fetcher.push_response(server_error(503));
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch(&work(None, None), RequestPriority::Normal)
+            .await;
+
+        assert!(
+            matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::ServerError,
+                    ..
+                }
+            ),
+            "Tier-3 candidate-detail 503 must retry, not terminalize as NotFound, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tier3_candidate_detail_429_is_ratelimit_not_notfound() {
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_response(fuzzy_success_search());
+        fetcher.push_response(server_error(429));
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch(&work(None, None), RequestPriority::Normal)
+            .await;
+
+        assert!(
+            matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::RateLimit,
+                    ..
+                }
+            ),
+            "Tier-3 candidate-detail 429 must be a RateLimit WillRetry, not NotFound, got {outcome:?}"
+        );
+    }
+
+    /// Tier-3 QueueFull residual: `title_author_search`'s OWN search-call
+    /// transport-error match used to collapse `FetchError::QueueFull` into
+    /// `ProviderFetchError::Other`, which burns retry budget like a genuine
+    /// server error. A local admission-cap rejection never even attempted
+    /// HTTP, so it must stay budget-exempt (mirrors `CircuitOpen`).
+    #[tokio::test]
+    async fn tier3_search_queue_full_is_budget_exempt_not_servererror() {
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_error(FetchError::QueueFull {
+                retry_after: Duration::from_secs(1),
+            });
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch(&work(None, None), RequestPriority::Normal)
+            .await;
+
+        assert!(
+            matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::QueueFull,
+                    ..
+                }
+            ),
+            "Tier-3 search QueueFull must be a budget-exempt WillRetry(QueueFull), got {outcome:?}"
+        );
+    }
+
+    /// A genuine miss (404 on the candidate's detail page) must still
+    /// terminalize as NotFound — proving the fix doesn't turn every error
+    /// into a retry.
+    #[tokio::test]
+    async fn tier3_candidate_detail_404_stays_notfound() {
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_response(fuzzy_success_search());
+        fetcher.push_response(Ok(FetchResponse {
+            status: 404,
+            headers: vec![],
+            body: vec![],
+        }));
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch(&work(None, None), RequestPriority::Normal)
+            .await;
+
+        assert!(
+            matches!(outcome, ProviderOutcome::NotFound),
+            "a genuine miss (404) on the Tier-3 candidate-detail step must stay NotFound, got {outcome:?}"
         );
     }
 }

@@ -17,7 +17,7 @@ use crate::types::ProviderFetchError;
 /// single place this decision is made, shared by `isbn_lookup` and
 /// `query_ol_detail`, so the anchor (`detail_by_key`) and seeded entry paths
 /// built on top of them cannot classify the same status differently.
-fn classify_ol_error(status: u16) -> ProviderFetchError {
+pub(crate) fn classify_ol_error(status: u16) -> ProviderFetchError {
     match status {
         429 => ProviderFetchError::RateLimited,
         500..=599 => ProviderFetchError::Transient,
