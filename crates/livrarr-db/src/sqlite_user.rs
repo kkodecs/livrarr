@@ -113,33 +113,39 @@ impl UserDb for SqliteDb {
     }
 
     async fn update_user(&self, id: UserId, req: UpdateUserDbRequest) -> Result<User, DbError> {
-        let current = self.get_user(id).await?;
         let now = Utc::now().to_rfc3339();
 
-        let username = req.username.unwrap_or(current.username);
-        let password_hash = req.password_hash.unwrap_or(current.password_hash);
-        let role = req.role.unwrap_or(current.role);
-        let role_str = match role {
+        let role_str: Option<&str> = req.role.map(|role| match role {
             UserRole::Admin => "admin",
             UserRole::User => "user",
-        };
+        });
 
         // Sole-admin invariant: the guard only ever fires on a real admin -> user
-        // transition. It is evaluated live, inside this one statement, against the
-        // row's current (pre-update) role and the table-wide admin count, so two
-        // concurrent demotes can't both pass — whichever statement the SQLite
-        // writer lock admits second re-evaluates the count fresh and sees the
-        // other's already-committed demotion. A plain username/password edit, a
-        // no-op role write, or a promotion never touches the predicate, because
-        // `role != 'admin'` or `? != 'user'` is already true for those cases.
+        // transition. Omitted fields (None) are true no-ops via COALESCE against
+        // the LIVE column — there is no separate read-then-write, so no snapshot
+        // can go stale. The guard is evaluated live, inside this one atomic
+        // statement, against the row's current role and the table-wide admin
+        // count, so two concurrent demotes can't both pass — whichever statement
+        // the SQLite writer lock admits second re-evaluates the count fresh and
+        // sees the other's already-committed demotion. A plain username/password
+        // edit, a no-op role write, or a promotion never touches the predicate,
+        // because `role != 'admin'` or `COALESCE(?, role) != 'user'` is already
+        // true for those cases. The first term MUST reference the live column
+        // unconditionally (not COALESCE'd) — it is what stops the last admin
+        // from demoting to zero admins.
         let result = sqlx::query(
-            "UPDATE users SET username = ?, password_hash = ?, role = ?, updated_at = ? \
-             WHERE id = ? \
-               AND (role != 'admin' OR ? != 'user' \
-                    OR (SELECT COUNT(*) FROM users WHERE role = 'admin') > 1)",
+            "UPDATE users \
+                SET username      = COALESCE(?, username), \
+                    password_hash = COALESCE(?, password_hash), \
+                    role          = COALESCE(?, role), \
+                    updated_at    = ? \
+              WHERE id = ? \
+                AND (role != 'admin' \
+                     OR COALESCE(?, role) != 'user' \
+                     OR (SELECT COUNT(*) FROM users WHERE role = 'admin') > 1)",
         )
-        .bind(&username)
-        .bind(&password_hash)
+        .bind(req.username.as_deref())
+        .bind(req.password_hash.as_deref())
         .bind(role_str)
         .bind(&now)
         .bind(id)

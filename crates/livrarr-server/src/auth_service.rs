@@ -410,6 +410,7 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
             password_hash: None,
             role: req.role,
         };
+        let password_changed = req.password.is_some();
         if let Some(ref password) = req.password {
             Self::validate_password(password)?;
             let hash = self
@@ -418,18 +419,25 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
                 .await
                 .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
             db_req.password_hash = Some(hash);
-
-            // Delete sessions BEFORE updating password (safe failure ordering).
-            self.db
-                .delete_user_sessions(id)
-                .await
-                .map_err(AuthError::Db)?;
         }
+
+        // Apply the guarded DB write FIRST. Session invalidation is a side
+        // effect of a *successful* password change, so it must only run
+        // after this commits — otherwise a rejected update (e.g. the
+        // sole-admin guard blocking a self-demote) would still log the
+        // admin out despite nothing having changed.
         let user = self.db.update_user(id, db_req).await.map_err(|e| match e {
             DbError::NotFound { .. } => AuthError::UserNotFound,
             DbError::LastAdmin => AuthError::LastAdmin,
             other => AuthError::Db(other),
         })?;
+
+        if password_changed {
+            self.db
+                .delete_user_sessions(id)
+                .await
+                .map_err(AuthError::Db)?;
+        }
 
         Ok(Self::user_to_response(&user))
     }
@@ -623,6 +631,57 @@ mod tests {
             hash_calls.load(Ordering::SeqCst),
             calls_before_second_post,
             "second POST must be rejected before Argon2 hashing runs"
+        );
+    }
+
+    /// #16 (MED): a rejected sole-admin self-demote must not have the side
+    /// effect of logging the admin out. Session invalidation is a side
+    /// effect of a successful password change — it must only run AFTER the
+    /// guarded DB write actually commits, never before/regardless of
+    /// whether the write is rejected.
+    #[tokio::test]
+    async fn rejected_self_demote_with_password_change_leaves_sessions_intact() {
+        let db = livrarr_db::test_helpers::create_test_db().await;
+        let db_check = db.clone();
+        let service = ServerAuthService::new(db, TestAuthCrypto);
+
+        let now = Utc::now();
+        let session = Session {
+            token_hash: "sole_admin_session".to_string(),
+            user_id: 1,
+            persistent: false,
+            created_at: now,
+            expires_at: now + Duration::hours(1),
+        };
+        db_check
+            .create_session(&session)
+            .await
+            .expect("seed session for sole admin");
+
+        // Sole admin submits a password change bundled with a self-demote.
+        let result = service
+            .update_user(
+                1,
+                AdminUpdateUserRequest {
+                    username: None,
+                    password: Some("newpass123".to_string()),
+                    role: Some(UserRole::User),
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(AuthError::LastAdmin)),
+            "sole-admin self-demote must be rejected, got: {result:?}"
+        );
+
+        let still_there = db_check
+            .get_session("sole_admin_session")
+            .await
+            .expect("session lookup should not error");
+        assert!(
+            still_there.is_some(),
+            "a rejected update must not delete the admin's sessions"
         );
     }
 }

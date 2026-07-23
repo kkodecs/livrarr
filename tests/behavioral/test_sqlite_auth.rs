@@ -983,3 +983,123 @@ async fn update_user_rejects_demotion_and_leaves_password_unchanged_when_mixed()
     assert_eq!(after.password_hash, before.password_hash);
     assert_eq!(after.role, UserRole::Admin);
 }
+
+// =============================================================================
+// #10 (HIGH) — stale-snapshot race in update_user's read-then-write
+// =============================================================================
+
+/// The simplest form of the invariant: a sole admin's plain self-demotion
+/// request (no other fields touched) must be rejected outright, with the
+/// row left exactly as it was.
+#[tokio::test]
+async fn update_user_demoting_sole_admin_is_rejected_and_role_stays_admin() {
+    let (db, _dir) = setup_test_db().await;
+    assert_eq!(db.count_admins().await.unwrap(), 1);
+
+    let err = db
+        .update_user(
+            1,
+            UpdateUserDbRequest {
+                username: None,
+                password_hash: None,
+                role: Some(UserRole::User),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, DbError::LastAdmin));
+
+    let after = db.get_user(1).await.unwrap();
+    assert_eq!(after.role, UserRole::Admin);
+}
+
+/// A username-only edit racing a concurrent demotion of the SAME user must
+/// never resurrect the demoted role from a stale pre-race snapshot. The old
+/// `update_user` read the full row up front, filled omitted fields (like
+/// role, when the request doesn't touch it) from that snapshot, and wrote
+/// the snapshot's role back on every update — so a plain username edit,
+/// racing a demotion that commits in the gap between the snapshot read and
+/// this update's own write, silently re-writes `role='admin'` over the
+/// committed demotion. The fix must make every omitted field (and the
+/// guard) a true no-op against the LIVE column, not the snapshot.
+///
+/// The exact interleaving needed to trigger the stale read is scheduler-
+/// dependent (empirically ~1 in 10-25 single attempts against the old
+/// code), so this races the pair many times in one test — reusing one DB
+/// and resetting role state between attempts — to make the assertion a
+/// reliable regression guard rather than a coin flip.
+#[tokio::test]
+async fn racing_username_edit_never_resurrects_a_concurrently_demoted_role() {
+    let (db, _dir) = setup_test_db().await;
+
+    db.create_user(CreateUserDbRequest {
+        username: "race_second_admin".to_string(),
+        password_hash: "pw".to_string(),
+        role: UserRole::Admin,
+        api_key_hash: "race_second_admin_api".to_string(),
+    })
+    .await
+    .unwrap();
+
+    for attempt in 0..300 {
+        assert_eq!(
+            db.count_admins().await.unwrap(),
+            2,
+            "attempt {attempt}: expected 2 admins going into the race"
+        );
+
+        // Both requests target user id=1: one demotes it (role: user), the
+        // other only renames it (role: None, i.e. "leave role alone").
+        let demote = db.update_user(
+            1,
+            UpdateUserDbRequest {
+                username: None,
+                password_hash: None,
+                role: Some(UserRole::User),
+            },
+        );
+        let username_edit = db.update_user(
+            1,
+            UpdateUserDbRequest {
+                username: Some(format!("renamed_during_race_{attempt}")),
+                password_hash: None,
+                role: None,
+            },
+        );
+
+        let (demote_result, edit_result) = tokio::join!(demote, username_edit);
+        demote_result.unwrap_or_else(|e| {
+            panic!("attempt {attempt}: demoting a non-sole admin must succeed: {e:?}")
+        });
+        edit_result.unwrap_or_else(|e| {
+            panic!("attempt {attempt}: a username-only edit must never be blocked by the admin guard: {e:?}")
+        });
+
+        let after = db.get_user(1).await.unwrap();
+        assert_eq!(
+            after.role,
+            UserRole::User,
+            "attempt {attempt}: the demotion must not be resurrected by a racing username-only edit"
+        );
+        assert_eq!(
+            db.count_admins().await.unwrap(),
+            1,
+            "attempt {attempt}: exactly one admin must remain after the race"
+        );
+
+        // Reset for the next attempt: promote user 1 back to admin. This is
+        // a plain, non-racing, sequential call — promotions always pass the
+        // guard (it only ever restricts an admin -> user transition).
+        db.update_user(
+            1,
+            UpdateUserDbRequest {
+                username: None,
+                password_hash: None,
+                role: Some(UserRole::Admin),
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("attempt {attempt}: reset-promote must succeed: {e:?}"));
+    }
+}
