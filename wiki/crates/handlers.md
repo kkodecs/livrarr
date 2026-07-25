@@ -1,16 +1,16 @@
 # livrarr-handlers
 
-HTTP route handlers. Generic over `AppContext`. Behind the compile wall — cannot depend on `livrarr-db`, `livrarr-metadata`, `livrarr-tagwrite`, or `livrarr-download` directly.
+HTTP route handlers. Handlers bind narrow capability traits rather than the whole context: most are generic over just the `Has*` traits they call (`work::lookup` over `HasDiscoveryService`, `work::list` over `HasWorkService + HasFileService`), and two modules use their own composite trait (`ManualImportHandlerContext`, `OpdsHandlerContext`). `AppContext` is the composite supertrait, used for router composition (`system::routes`) rather than as a per-handler bound. Behind the compile wall — cannot depend on `livrarr-db`, `livrarr-metadata`, `livrarr-tagwrite`, or `livrarr-download` directly.
 
 ---
 
 ## Capability Traits (context.rs)
 
-Each `Has*` trait exposes one service to handlers via an accessor method. `AppContext` is the composite supertrait that requires all of them.
+Each `Has*` trait exposes one service to handlers via an accessor method. `AppContext` is a supertrait union of most — but **not all** — of them: `HasDiscoveryService`, `HasWorkIdentityRepository`, and `HasHttpFetcher` are deliberately outside the union; handlers that need them bind them directly (e.g. `work::lookup` binds `HasDiscoveryService`, `coverproxy::proxy_cover` binds `HasHttpFetcher`).
 
 | Trait | Exposes |
 |---|---|
-| `HasWorkService` | Work CRUD, refresh, merge (17-method `WorkService`; discovery moved out 2026-07-11) |
+| `HasWorkService` | Work CRUD, refresh, merge, identity edit (24-method `WorkService`; discovery moved out 2026-07-11) |
 | `HasDiscoveryService` | Provider search: `lookup`, `lookup_filtered`, `eager_match_by_author` (`DiscoveryService`, work-service-split) |
 | `HasFileService` | Library file management |
 | `HasAuthorService` | Author CRUD |
@@ -39,7 +39,7 @@ Each `Has*` trait exposes one service to handlers via an accessor method. `AppCo
 | `HasEmailService` | Email sending (Kindle etc.) |
 | `HasAuthorMonitorWorkflow` | Author monitoring workflow |
 | `HasImportService` | High-level import service |
-| `HasMatchingService` | Work/file matching |
+| `HasMatchingService` | Extract + reconcile file metadata into `MatchCluster`s (one method, `extract_and_reconcile`; no work lookup) |
 | `HasManualImportScan` | Manual import scan state |
 | `HasReadarrImportWorkflow` | Readarr import workflow |
 | `HasHttpClient` | Outbound HTTP client |
@@ -49,9 +49,9 @@ Each `Has*` trait exposes one service to handlers via an accessor method. `AppCo
 | `HasRssSync` | RSS sync running/last-run state |
 | `HasSystem` | System info accessor |
 | `HasCoverCache` | Cover proxy cache |
-| `AppContext` | Composite supertrait — requires all `Has*` above |
+| `AppContext` | Composite supertrait — unions most `Has*` traits, but **not** `HasDiscoveryService`, `HasWorkIdentityRepository`, or `HasHttpFetcher` |
 
-`impl AppContext for T` is a blanket impl: any type satisfying all `Has*` traits automatically implements `AppContext`.
+`impl AppContext for T` is a blanket impl: any type satisfying the `Has*` traits the union names automatically implements `AppContext`.
 
 ---
 
@@ -59,11 +59,11 @@ Each `Has*` trait exposes one service to handlers via an accessor method. `AppCo
 
 Thin accessor interfaces consumed by handlers for shared mutable state (not services).
 
-- `LiveMetadataConfigAccessor` — read the live metadata config snapshot
+- `LiveMetadataConfigAccessor` — **replace** the live metadata config (one method, `replace`; it is a write, not a read)
 - `RssSyncAccessor` — check/set RSS sync running state and last-run timestamp
-- `SystemAccessor` — expose system info (uptime, hostname, etc.)
+- `SystemAccessor` — log observability only: tail the in-memory log buffer, read and set the log level
 - `ManualImportScanAccessor` — access in-progress manual import scan state map
-- `CoverProxyCacheAccessor` — access the cover proxy LRU cache
+- `CoverProxyCacheAccessor` — `get`/`put` against the cover proxy cache (the cache is TTL + oldest-inserted eviction, not LRU)
 
 ---
 
@@ -78,18 +78,18 @@ Thin accessor interfaces consumed by handlers for shared mutable state (not serv
 ### work.rs
 - `lookup` — search metadata providers for a work by query string
 - `add` — add a work to the library
-- `list` — list all monitored works with optional filters
+- `list` — list the current user's works, paginated (page, size, sort field/direction, media-type and language filters). No monitored-only filter on this route
 - `get` — get a single work by ID
 - `update` — update work metadata or monitoring state
 - `upload_cover` — upload a custom cover image for a work
 - `delete` — delete a work and optionally its files
 - `refresh` — trigger metadata refresh for a single work
-- `refresh_all` — trigger metadata refresh for all works
+- `refresh_all` — trigger metadata refresh across works, optionally filtered by language, monitored, enrichment status, or media type
 - `retry_all_incomplete` — bulk-recover incomplete works (Failed/Unenriched/identity-Pending) through the one road; replaces the deleted background retry job
 - `send_email` — send a library file to an email address (Kindle)
 - `download` — serve a library file for direct browser download
 - `stream` — stream a library file for in-browser reading
-- `author_search` — search for authors related to a work (internal helper used by add flow)
+- `author_search` — admin-only; spawns a full author-monitor run for the current user and returns 202 Accepted. Despite the name it searches nothing directly and is not part of the add flow
 
 ### author.rs
 - `lookup` — search metadata providers for an author
@@ -226,7 +226,7 @@ Thin accessor interfaces consumed by handlers for shared mutable state (not serv
 
 ### manual_import.rs
 
-Composite trait `ManualImportHandlerContext` (requires `AppContext` + manual import accessors).
+Composite trait `ManualImportHandlerContext` — a union of nine `Has*` traits (`HasMatchingService`, `HasManualImportService`, `HasManualImportScan`, `HasAppConfigService`, `HasAuthorService`, `HasWorkService`, `HasDiscoveryService`, `HasImportService`, `HasHistoryService`). It does **not** extend `AppContext`.
 
 - `scan` — initiate a manual import scan of a filesystem path (streams OL matches)
 - `scan_progress` — poll scan progress for an in-flight scan
@@ -255,7 +255,7 @@ Composite trait `ManualImportHandlerContext` (requires `AppContext` + manual imp
 
 ### coverproxy.rs
 - `proxy_cover` — proxy a remote cover image through the server (caches result)
-- `is_allowed_cover_source` — check if a URL's domain is on the cover proxy allowlist
+- `is_allowed_host` — check whether a host is on the cover proxy allowlist
 
 ### mediacover.rs
 - `get_cover` — serve the full-size cover image for a work or author
@@ -266,7 +266,7 @@ Composite trait `ManualImportHandlerContext` (requires `AppContext` + manual imp
 
 ### opds.rs
 
-Composite trait `OpdsHandlerContext` (requires `AppContext` + OPDS-specific accessors).
+Composite trait `OpdsHandlerContext` — a union of six `Has*` traits (`HasAuthService`, `HasAuthorService`, `HasDataDir`, `HasFileService`, `HasManualImportService`, `HasWorkService`). It does **not** extend `AppContext`.
 
 OPDS 1.2 catalog endpoints:
 - `root` — OPDS root navigation feed

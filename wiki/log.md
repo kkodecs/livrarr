@@ -1,5 +1,31 @@
 # Wiki Change Log
 
+## 2026-07-25 — handlers.md verified against source: AppContext is not a union of everything
+
+**Updated pages:**
+- crates/handlers.md — second documentarian verify-and-correct pass, audited against
+  `crates/livrarr-handlers/` at `84db7a44`. 14 claims corrected, 1 renamed, 0 deleted.
+  The load-bearing correction: **`AppContext` does NOT union all `Has*` capability traits.**
+  `HasDiscoveryService`, `HasWorkIdentityRepository`, and `HasHttpFetcher` are deliberately
+  outside it, so handlers needing them bind them directly — the page asserted the opposite in
+  three places (intro, table row, blanket-impl note), and the same error sat in the crate
+  header ("Generic over `AppContext`"; in fact the only `AppContext` bound in the crate is
+  `system::routes`, the router-composition function). Also corrected: the two module composite
+  traits (`ManualImportHandlerContext`, `OpdsHandlerContext`) do **not** extend `AppContext` —
+  they are plain 9- and 6-trait unions; `WorkService` is 24 methods, not 17 (the identity-edit
+  merge added three); `LiveMetadataConfigAccessor` writes rather than reads; `SystemAccessor`
+  is log tail + log level, not "uptime, hostname"; `CoverProxyCacheAccessor` fronts a TTL
+  cache, not an LRU one; `work::author_search` is an admin-only author-monitor trigger, not an
+  add-flow author search; `work::list` is paginated with no monitored filter; `refresh_all`
+  takes four filters. Renamed `is_allowed_cover_source` → `is_allowed_host` (the documented
+  name exists nowhere in the repo).
+
+**Context:** documentarian edit pass #2, scoped by `build/reviews/DOC-EDIT-PACKET-2.md`.
+Per-edit citations: `build/reviews/docs-edit-handlers-md-changelog.md`. Undocumented
+handlers were deliberately left out — including the three identity-edit routes and
+`work::merge` — because adding them is authorship, not correction; they are listed as a
+decision in the changelog.
+
 ## 2026-07-24 — server.md verified against source: 21 wrong claims corrected or cut
 
 **Updated pages:**
