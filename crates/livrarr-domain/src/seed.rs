@@ -286,9 +286,13 @@ pub fn iso639_1_to_3(code: &str) -> &str {
 /// `isbn:` prefix with a valid ISBN seeds the bridge; anything else seeds the
 /// title.
 pub fn lookup_term_to_seed(term: &str, lang: &str) -> WorkSeed {
+    // A bare pasted ISBN (10/13, separators fine) seeds the bridge exactly
+    // like the `isbn:` prefix — classification step 2 of the identity-edit
+    // authority; URLs and other identifier forms stay Fix-match affordances.
     let isbn_13 = term
         .strip_prefix("isbn:")
-        .and_then(|rest| crate::normalization::normalize_isbn13(rest.trim()));
+        .and_then(|rest| crate::normalization::normalize_isbn13(rest.trim()))
+        .or_else(|| crate::normalization::normalize_isbn13(term.trim()));
     let title = if isbn_13.is_some() {
         None
     } else {

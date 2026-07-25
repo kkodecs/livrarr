@@ -606,14 +606,20 @@ impl WorkDb for SqliteDb {
         id: WorkId,
         status: livrarr_domain::IdentityStatus,
     ) -> Result<(), DbError> {
-        let result =
-            sqlx::query("UPDATE works SET identity_status = ? WHERE id = ? AND user_id = ?")
-                .bind(identity_status_str(status))
-                .bind(id)
-                .bind(user_id)
-                .execute(self.pool())
-                .await
-                .map_err(map_db_err)?;
+        // Raw identity_status arm: the mutation advances identity_generation
+        // in the same SQL statement (identity-edit design §Claims — status
+        // arms are not generation loopholes).
+        let result = sqlx::query(
+            "UPDATE works SET identity_status = ?, \
+             identity_generation = identity_generation + 1 \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(identity_status_str(status))
+        .bind(id)
+        .bind(user_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound { entity: "work" });
@@ -757,20 +763,24 @@ impl WorkDb for SqliteDb {
 
         let mut tx = self.pool().begin().await.map_err(map_db_err)?;
 
-        // Re-verify ownership of both ids inside the transaction (defense in
-        // depth — the service layer already checked). NotFound either way,
-        // never distinguishing "doesn't exist" from "not yours" (AC-024).
-        for id in [req.survivor_id, req.loser_id] {
-            let exists: Option<(i64,)> =
-                sqlx::query_as("SELECT id FROM works WHERE id = ? AND user_id = ?")
-                    .bind(id)
-                    .bind(req.user_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(map_db_err)?;
-            if exists.is_none() {
-                return Err(DbError::NotFound { entity: "work" });
-            }
+        // First statement: advance both works' identity generations in one
+        // UPDATE, requiring two rows before any repoint/delete. Doubles as
+        // the ownership check (NotFound either way, never distinguishing
+        // "doesn't exist" from "not yours", AC-024) and durably invalidates
+        // any preview snapshot targeting either work (identity-edit design
+        // §Writer coverage — merge_works).
+        let claimed = sqlx::query(
+            "UPDATE works SET identity_generation = identity_generation + 1 \
+             WHERE id IN (?, ?) AND user_id = ?",
+        )
+        .bind(req.survivor_id)
+        .bind(req.loser_id)
+        .bind(req.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+        if claimed.rows_affected() != 2 {
+            return Err(DbError::NotFound { entity: "work" });
         }
 
         // Reassign the loser's library items and grabs to the survivor
@@ -1349,6 +1359,8 @@ impl WorkDb for SqliteDb {
             "UPDATE works SET enrichment_status = 'pending', enriched_at = NULL, \
              merge_generation = merge_generation + 1, \
              next_convergence_at = NULL, \
+             identity_generation = identity_generation + \
+                 CASE WHEN identity_status = 'not_found' THEN 1 ELSE 0 END, \
              identity_status = CASE \
                  WHEN identity_status = 'not_found' AND (ol_key IS NOT NULL OR gr_key IS NOT NULL OR hc_key IS NOT NULL) THEN 'confirmed' \
                  WHEN identity_status = 'not_found' AND (isbn_13 IS NOT NULL OR asin IS NOT NULL) THEN 'provisional' \
@@ -1623,8 +1635,15 @@ impl crate::WorkDbCreate for SqliteDb {
                     anchor_setter,
                 )
                 .await
-                .map_err(|e| DbError::Constraint {
-                    message: format!("anchor write failed: {e}"),
+                .map_err(|e| match e {
+                    crate::sqlite_work_identity::IdentityTxError::InvalidValue => {
+                        DbError::Constraint {
+                            message: "anchor write failed: invalid anchor value".into(),
+                        }
+                    }
+                    crate::sqlite_work_identity::IdentityTxError::Sqlx(e) => DbError::Constraint {
+                        message: format!("anchor write failed: {e}"),
+                    },
                 })?;
                 tx.commit().await.map_err(map_db_err)?;
                 let work = self.get_work(req.user_id, id).await?;

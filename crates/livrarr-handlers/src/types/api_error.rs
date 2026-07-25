@@ -56,12 +56,51 @@ pub struct TagWriteError(pub String);
 #[error("{0}")]
 pub struct ScanError(pub String);
 
+/// Structured `details` object for the error envelope (identity-edit r4 API
+/// error contract): a stable machine-readable `code`, plus the same-user
+/// collision owner when applicable.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorDetails {
+    pub code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owning_work_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owning_work_title: Option<String>,
+}
+
+impl ErrorDetails {
+    pub fn code(code: &'static str) -> Self {
+        Self {
+            code,
+            owning_work_id: None,
+            owning_work_title: None,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("not found")]
     NotFound,
     #[error("conflict: {reason}")]
     Conflict { reason: String },
+    /// 409 with the structured `details` object (stable code + optional
+    /// collision owner) — the identity-edit door contract.
+    #[error("conflict: {message}")]
+    ConflictDetailed {
+        message: String,
+        details: ErrorDetails,
+    },
+    /// 422 with a caller-facing message (typed classification failures).
+    #[error("{0}")]
+    Unprocessable(String),
+    /// 503 with a stable retryable code and a `Retry-After` header.
+    #[error("service unavailable: {code}")]
+    ServiceUnavailableRetry {
+        code: &'static str,
+        retry_after_secs: u64,
+    },
     #[error("validation error")]
     Validation { errors: Vec<FieldError> },
     #[error("unauthorized")]
@@ -332,6 +371,41 @@ impl From<livrarr_domain::services::HistoryServiceError> for ApiError {
     }
 }
 
+impl From<livrarr_domain::identity_edit::IdentityEditError> for ApiError {
+    fn from(e: livrarr_domain::identity_edit::IdentityEditError) -> Self {
+        use livrarr_domain::identity_edit::IdentityEditError;
+        match e {
+            IdentityEditError::InvalidValue(message) => ApiError::Unprocessable(message),
+            IdentityEditError::StalePreview => ApiError::ConflictDetailed {
+                message: "identity changed or the preview expired — preview again".into(),
+                details: ErrorDetails::code("preview_required"),
+            },
+            IdentityEditError::Collision {
+                owning_work_id,
+                owning_work_title,
+            } => ApiError::ConflictDetailed {
+                message: format!(
+                    "this identifier already belongs to \"{owning_work_title}\" — merge the works instead"
+                ),
+                details: ErrorDetails {
+                    code: "anchor_collision",
+                    owning_work_id: Some(owning_work_id),
+                    owning_work_title: Some(owning_work_title),
+                },
+            },
+            IdentityEditError::NotFound | IdentityEditError::EmptySlot => ApiError::NotFound,
+            IdentityEditError::Capacity { retry_after_secs } => {
+                ApiError::ServiceUnavailableRetry {
+                    code: "preview_capacity",
+                    retry_after_secs,
+                }
+            }
+            IdentityEditError::Unavailable => ApiError::ServiceUnavailable,
+            IdentityEditError::Db(msg) => ApiError::Internal(msg),
+        }
+    }
+}
+
 impl From<livrarr_domain::services::ConflictError> for ApiError {
     fn from(e: livrarr_domain::services::ConflictError) -> Self {
         use livrarr_domain::services::ConflictError;
@@ -339,6 +413,12 @@ impl From<livrarr_domain::services::ConflictError> for ApiError {
             ConflictError::NotFound => ApiError::NotFound,
             ConflictError::AlreadyResolved => ApiError::Conflict {
                 reason: e.to_string(),
+            },
+            // A lost first-statement generation claim: the conflict was open
+            // at the door read, but a different identity mutation won.
+            ConflictError::StaleIdentity => ApiError::ConflictDetailed {
+                message: "identity changed; reload identity conflicts".into(),
+                details: ErrorDetails::code("identity_conflict_stale"),
             },
             ConflictError::InvalidPrimaryAnchor => ApiError::BadRequest(e.to_string()),
             ConflictError::Db(msg) => {
@@ -371,15 +451,45 @@ struct ApiErrorBody {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     field_errors: Option<Vec<FieldError>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<ErrorDetails>,
 }
 
 impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
 
+        let mut details = None;
+        let mut retry_after: Option<u64> = None;
         let (status, error_tag, message, field_errors) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found", "not found".into(), None),
             ApiError::Conflict { reason } => (StatusCode::CONFLICT, "conflict", reason, None),
+            ApiError::ConflictDetailed {
+                message,
+                details: d,
+            } => {
+                details = Some(d);
+                (StatusCode::CONFLICT, "conflict", message, None)
+            }
+            ApiError::Unprocessable(message) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation",
+                message,
+                None,
+            ),
+            ApiError::ServiceUnavailableRetry {
+                code,
+                retry_after_secs,
+            } => {
+                details = Some(ErrorDetails::code(code));
+                retry_after = Some(retry_after_secs);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "service_unavailable",
+                    "service temporarily at capacity — retry shortly".into(),
+                    None,
+                )
+            }
             ApiError::Validation { errors } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "validation",
@@ -488,9 +598,18 @@ impl axum::response::IntoResponse for ApiError {
             error: error_tag.to_string(),
             message,
             field_errors,
+            details,
         };
 
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if let Some(secs) = retry_after {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 

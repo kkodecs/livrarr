@@ -244,6 +244,8 @@ export interface WorkDetailResponse {
   enrichmentStatus: EnrichmentStatus;
   enriching: boolean;
   identityStatus: IdentityStatus;
+  /** True while open identity conflicts pause re-matching and enrichment. */
+  parkedByConflicts: boolean;
   enrichedAt: string | null;
   enrichmentSource: string | null;
   coverManual: boolean;
@@ -1049,7 +1051,69 @@ export interface ApiErrorResponse {
   error: string;
   message: string;
   fieldErrors?: FieldError[];
+  /** Structured machine-readable detail (identity-edit door contract):
+   * stable `code` plus the collision owner when applicable. */
+  details?: ApiErrorDetails;
 }
+
+export interface ApiErrorDetails {
+  code:
+    | "preview_required"
+    | "anchor_collision"
+    | "preview_capacity"
+    | "pending_anchor_stale"
+    | "identity_review_stale"
+    | "identity_conflict_stale"
+    | (string & {});
+  owningWorkId?: number;
+  owningWorkTitle?: string;
+}
+
+// --- Identity edit (preview-confirm; design identity-edit r4) ---
+
+export type IdentitySlot = "gr_work" | "ol_work" | "hc_work" | "isbn_13" | "asin";
+
+export interface IdentityPreviewRequest {
+  input: string;
+  slot: IdentitySlot | null;
+}
+
+export interface ResolvedPreviewRecord {
+  title: string | null;
+  author: string | null;
+  year: number | null;
+  language: string | null;
+  coverUrl: string | null;
+  slot: IdentitySlot;
+  canonicalValue: string;
+}
+
+export interface SiblingAssessment {
+  slot: IdentitySlot;
+  action: "keep" | "drop";
+  cause?: string;
+}
+
+export interface BridgeWarning {
+  slot: IdentitySlot;
+  message: string;
+}
+
+export interface IdentityCollision {
+  owningWorkId: number;
+  owningWorkTitle: string;
+}
+
+export interface IdentityPreviewResponse {
+  resolved: ResolvedPreviewRecord | null;
+  previewId?: string;
+  siblings: SiblingAssessment[];
+  bridgeWarnings: BridgeWarning[];
+  collision?: IdentityCollision;
+  conflictWarning: boolean;
+  reason?: string;
+}
+
 
 export interface FieldError {
   field: string;

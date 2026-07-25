@@ -31,8 +31,8 @@ use tokio::task::JoinSet;
 use tracing::warn;
 
 use crate::{
-    EnrichmentContext, EnrichmentMode, NormalizedWorkDetail, ProviderOutcome, ProviderQueue,
-    ProviderQueueConfig, ProviderQueueError, ScatterGatherResult, WillRetryReason,
+    EnrichmentContext, EnrichmentMode, NormalizedWorkDetail, PreviewFetchOutcome, ProviderOutcome,
+    ProviderQueue, ProviderQueueConfig, ProviderQueueError, ScatterGatherResult, WillRetryReason,
 };
 use livrarr_external_data::provider_client::ProviderClient;
 
@@ -238,6 +238,33 @@ impl<DB> ProviderQueue for DefaultProviderQueue<DB>
 where
     DB: ProviderRetryStateDb + ProviderResponseCacheDb + Send + Sync + 'static,
 {
+    async fn preview_fetch(
+        &self,
+        provider: MetadataProvider,
+        query: AnchorQuery,
+        language: Option<String>,
+        priority: livrarr_domain::RequestPriority,
+    ) -> PreviewFetchOutcome {
+        // Direct client fetch over the registry — no cache, no retry-state,
+        // no budget (identity-edit r4 §Preview seam). An unregistered
+        // provider is truthfully NotConfigured.
+        let Some(entry) = self.providers.get(&provider) else {
+            return PreviewFetchOutcome::NotConfigured;
+        };
+        match entry
+            .client
+            .fetch_by_anchor(query, language.as_deref(), priority)
+            .await
+        {
+            ProviderOutcome::Success(detail) => PreviewFetchOutcome::Resolved(detail),
+            ProviderOutcome::NotFound => PreviewFetchOutcome::NotFound,
+            ProviderOutcome::NotConfigured => PreviewFetchOutcome::NotConfigured,
+            ProviderOutcome::WillRetry { .. }
+            | ProviderOutcome::PermanentFailure { .. }
+            | ProviderOutcome::Conflict { .. } => PreviewFetchOutcome::Unavailable,
+        }
+    }
+
     async fn dispatch_enrichment(
         &self,
         work: &Work,

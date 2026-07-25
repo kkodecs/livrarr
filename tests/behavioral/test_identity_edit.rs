@@ -208,11 +208,10 @@ async fn spawn_goodreads(status: StatusCode) -> String {
 fn work_service(
     db: SqliteDb,
     goodreads_base_url: String,
-) -> impl WorkService + Send + Sync + 'static {
+) -> impl WorkService + 'static {
     let fetcher = HttpFetcherImpl::new().expect("real HTTP fetcher");
     let http = HttpClient::builder().build().expect("real HTTP client");
-    let goodreads =
-        GoodreadsClient::new(fetcher, http, goodreads_base_url).with_retry_backoff(0);
+    let goodreads = GoodreadsClient::new(fetcher, http, goodreads_base_url).with_retry_backoff(0);
     let db_arc = Arc::new(db.clone());
     let queue = DefaultProviderQueueBuilder::new()
         .add_provider(
@@ -637,11 +636,11 @@ async fn collision_preview_unions_ledger_and_columns_without_cross_tenant_leakag
     // RULING 2026-07-24 (contest): the original bare-substring form
     // `contains(&owner.to_string())` is unpassable, not merely weak — `owner` is the
     // first work in a fresh test DB, so its id is "1", and the certified response this
-    // very test requires at :635 carries canonicalValue "12345". No design-conformant
+    // very test requires at :634 carries canonicalValue "12345". No design-conformant
     // response can satisfy both. (An opaque previewId makes it flaky besides.)
     // Three contest entries independently reached this conclusion; the value-level form
     // below keeps the leak check AC-3 actually names — the owner id is emitted only as
-    // `owningWorkId`, inside the collision block already asserted absent at :634.
+    // `owningWorkId`, inside the collision block already asserted absent at :633.
     // Applied to the shared suite so every side is judged against the same corrected
     // assertion; no entry is credited or penalized for the inherited defect.
     assert!(!allowed
@@ -700,7 +699,10 @@ async fn empty_gr_slot_commit_is_atomic_confirmed_and_single_use() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["grKey"], "12345");
     assert_eq!(response["identityStatus"], "confirmed");
-    assert!(generation(&db, work_id).await > before, "commit must advance generation");
+    assert!(
+        generation(&db, work_id).await > before,
+        "commit must advance generation"
+    );
 
     let anchor = sqlx::query(
         "SELECT confidence, setter FROM work_identity_anchors \
@@ -1030,23 +1032,25 @@ async fn edit_closes_only_conflicts_the_certified_slot_actually_settles() {
     .expect("apply user-certified GR");
 
     for id in [same_slot, quorum] {
-        let row =
-            sqlx::query("SELECT status, resolution_notes FROM work_identity_conflicts WHERE id = ?")
-                .bind(id)
-                .fetch_one(db.pool())
-                .await
-                .expect("closed conflict");
+        let row = sqlx::query(
+            "SELECT status, resolution_notes FROM work_identity_conflicts WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(db.pool())
+        .await
+        .expect("closed conflict");
         assert_eq!(row.get::<String, _>("status"), "resolved");
         assert_eq!(
             row.get::<Option<String>, _>("resolution_notes").as_deref(),
             Some("superseded by user identity edit")
         );
     }
-    let status: String = sqlx::query_scalar("SELECT status FROM work_identity_conflicts WHERE id = ?")
-        .bind(other_slot)
-        .fetch_one(db.pool())
-        .await
-        .expect("other conflict");
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM work_identity_conflicts WHERE id = ?")
+            .bind(other_slot)
+            .fetch_one(db.pool())
+            .await
+            .expect("other conflict");
     assert_eq!(status, "open");
 }
 
@@ -1845,7 +1849,10 @@ async fn cc_hc_notconfigured_sibling_is_kept_through_commit() {
         .iter()
         .find(|s| s["slot"] == "hc_work")
         .expect("hc assessment present");
-    assert_eq!(hc["action"], "keep", "NotConfigured HC must be kept: {body}");
+    assert_eq!(
+        hc["action"], "keep",
+        "NotConfigured HC must be kept: {body}"
+    );
 
     let token = preview_id(&body).to_string();
     let (status, _, _) = commit(&app, &db, user_id, work_id, "gr_work", &token).await;
@@ -1855,7 +1862,11 @@ async fn cc_hc_notconfigured_sibling_is_kept_through_commit() {
         .fetch_one(db.pool())
         .await
         .expect("hc column");
-    assert_eq!(hc_key.as_deref(), Some("hc-keep-42"), "kept sibling untouched");
+    assert_eq!(
+        hc_key.as_deref(),
+        Some("hc-keep-42"),
+        "kept sibling untouched"
+    );
 }
 
 /// REQ-IDs: AC-9 (CC-merged, route-level d-arm)
@@ -1884,7 +1895,11 @@ async fn cc_background_writer_after_preview_stales_the_route_commit() {
         commit(&app, &db, user_id, work_id, "gr_work", preview_id(&body)).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error["details"]["code"], "preview_required");
-    assert_eq!(generation(&db, work_id).await, gen_after_writer, "lost claim writes nothing");
+    assert_eq!(
+        generation(&db, work_id).await,
+        gen_after_writer,
+        "lost claim writes nothing"
+    );
     let gr: Option<String> = sqlx::query_scalar("SELECT gr_key FROM works WHERE id = ?")
         .bind(work_id)
         .fetch_one(db.pool())
@@ -1958,7 +1973,11 @@ async fn cc_same_value_column_drift_commits_and_repairs() {
         .fetch_one(db.pool())
         .await
         .expect("gr column");
-    assert_eq!(gr.as_deref(), Some("12345"), "drift is not a no-op — commit repairs");
+    assert_eq!(
+        gr.as_deref(),
+        Some("12345"),
+        "drift is not a no-op — commit repairs"
+    );
 }
 
 /// REQ-IDs: AC-23 (CC-merged: same-user duplicate work-key owner logic)
@@ -2003,18 +2022,25 @@ async fn cc_backfill_owner_preservation_for_duplicate_work_keys() {
         .await
         .expect("backfill");
 
-    let owner_rows = |work: WorkId, ty: &'static str| async move {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM work_identity_anchors \
-             WHERE work_id = ? AND anchor_type = ? AND confidence = 'confirmed'",
-        )
-        .bind(work)
-        .bind(ty)
-        .fetch_one(db.pool())
-        .await
-        .expect("count")
+    let owner_rows = |work: WorkId, ty: &'static str| {
+        let db = db.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM work_identity_anchors \
+                 WHERE work_id = ? AND anchor_type = ? AND confidence = 'confirmed'",
+            )
+            .bind(work)
+            .bind(ty)
+            .fetch_one(db.pool())
+            .await
+            .expect("count")
+        }
     };
-    assert_eq!(owner_rows(dup_high, "ol_work").await, 1, "existing owner preserved");
+    assert_eq!(
+        owner_rows(dup_high, "ol_work").await,
+        1,
+        "existing owner preserved"
+    );
     assert_eq!(
         owner_rows(dup_low, "ol_work").await,
         0,
@@ -2026,7 +2052,11 @@ async fn cc_backfill_owner_preservation_for_duplicate_work_keys() {
         .await
         .expect("loser column");
     assert_eq!(low_col.as_deref(), Some("OL42W"), "loser column intact");
-    assert_eq!(owner_rows(orphan_a, "gr_work").await, 1, "no owner -> lowest id wins");
+    assert_eq!(
+        owner_rows(orphan_a, "gr_work").await,
+        1,
+        "no owner -> lowest id wins"
+    );
     assert_eq!(owner_rows(orphan_b, "gr_work").await, 0);
 }
 

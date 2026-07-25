@@ -27,6 +27,12 @@ pub struct WorkServiceImpl<D, E, H> {
     /// executes for (user, work). Never persisted: empty after a restart
     /// (D-001), same shape as `refresh_locks` but a signal, not a lock.
     enriching: Arc<std::sync::Mutex<std::collections::HashSet<(UserId, WorkId)>>>,
+    /// Identity-edit preview snapshots (single-use intent tokens, r4
+    /// §Preview 6): bounded per-user/global, TTL'd, process-local by design —
+    /// restart → redo preview. The durable `identity_generation` each entry
+    /// carries is the commit staleness authority; this map only frees
+    /// capacity. The lock is never held across a provider await.
+    preview_snapshots: Arc<std::sync::Mutex<PreviewSnapshotStore>>,
 }
 
 /// RAII membership in the `enriching` registry (REQ-005, design §2.5): insert
@@ -77,6 +83,7 @@ impl<D, E, H> WorkServiceImpl<D, E, H> {
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             resolver: None,
             enriching: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            preview_snapshots: Arc::new(std::sync::Mutex::new(PreviewSnapshotStore::default())),
         }
     }
 }
@@ -131,6 +138,7 @@ impl<D, H> WorkServiceImpl<D, (), H> {
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             resolver: None,
             enriching: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            preview_snapshots: Arc::new(std::sync::Mutex::new(PreviewSnapshotStore::default())),
         }
     }
 }
@@ -927,43 +935,52 @@ where
                             .await
                             .map_err(WorkServiceError::Db)?;
                         let candidate_title = parse_title(&cleaned_title);
-                        for hit in hits {
-                            let hit_title = parse_title(&hit.title);
-                            let title = title_verdict(&candidate_title, &hit_title);
-                            let author = author_verdict(
-                                std::slice::from_ref(&cleaned_author),
-                                std::slice::from_ref(&hit.author_name),
-                            );
-                            let title_ok =
-                                matches!(title, TitleVerdict::Same | TitleVerdict::Grey { .. });
-                            let author_ok = !matches!(author, AuthorVerdict::Disagree);
-                            if title_ok && author_ok {
-                                let setter = candidate
-                                    .provenance_setter
-                                    .unwrap_or(ProvenanceSetter::User);
-                                self.preflight_and_merge_anchors(
-                                    hit.id,
-                                    anchors,
-                                    conflict_source_for(setter),
-                                )
-                                .await?;
-                                let work = self
-                                    .db
-                                    .get_work(user_id, hit.id)
-                                    .await
-                                    .map_err(WorkServiceError::Db)?;
-                                let enrichment_status = work.enrichment_status;
-                                return Ok(AddWorkResult {
-                                    work,
-                                    created: false,
-                                    author_created: false,
-                                    author_id: None,
-                                    messages: vec![],
-                                    cover_mtime: None,
-                                    audiobook_cover_mtime: None,
-                                    enrichment_status,
-                                });
-                            }
+                        // Multi-bridge abstention (identity-edit r4, required
+                        // by 076): same-user bridge sharing is now legal, so
+                        // a bridge can legitimately match several works.
+                        // Collect ALL verdict-eligible hits — exactly one
+                        // adopts (unchanged); two or more abstain from bridge
+                        // dedup and fall through to the existing
+                        // normalized-title dedup/create below.
+                        let eligible: Vec<&Work> = hits
+                            .iter()
+                            .filter(|hit| {
+                                let hit_title = parse_title(&hit.title);
+                                let title = title_verdict(&candidate_title, &hit_title);
+                                let author = author_verdict(
+                                    std::slice::from_ref(&cleaned_author),
+                                    std::slice::from_ref(&hit.author_name),
+                                );
+                                matches!(title, TitleVerdict::Same | TitleVerdict::Grey { .. })
+                                    && !matches!(author, AuthorVerdict::Disagree)
+                            })
+                            .collect();
+                        if let [only] = eligible.as_slice() {
+                            let setter = candidate
+                                .provenance_setter
+                                .unwrap_or(ProvenanceSetter::User);
+                            self.preflight_and_merge_anchors(
+                                only.id,
+                                anchors,
+                                conflict_source_for(setter),
+                            )
+                            .await?;
+                            let work = self
+                                .db
+                                .get_work(user_id, only.id)
+                                .await
+                                .map_err(WorkServiceError::Db)?;
+                            let enrichment_status = work.enrichment_status;
+                            return Ok(AddWorkResult {
+                                work,
+                                created: false,
+                                author_created: false,
+                                author_id: None,
+                                messages: vec![],
+                                cover_mtime: None,
+                                audiobook_cover_mtime: None,
+                                enrichment_status,
+                            });
                         }
                     }
                 }
@@ -1168,23 +1185,51 @@ where
         // coincide with a parked status — this guarantees the invariant
         // structurally rather than relying on the gate alone.
         if identity_not_found {
-            let already_parked = matches!(
-                self.db
-                    .get_work(user_id, work_id)
-                    .await
-                    .map(|w| w.identity_status),
-                Ok(IdentityStatus::Conflict) | Ok(IdentityStatus::NeedsReview)
-            );
-            if !already_parked {
-                if let Err(e) = self
-                    .db
-                    .set_identity_status(user_id, work_id, IdentityStatus::NotFound)
-                    .await
-                {
-                    tracing::warn!(
-                        work_id,
-                        "complete_add: set_identity_status(NotFound) failed: {e}"
+            // Delayed NotFound conclusion (identity-edit r4 §Writer coverage):
+            // (work, generation) read together, then an expected-generation
+            // completion — a user edit landing after the read supersedes this
+            // stale conclusion instead of being overwritten by it.
+            match self
+                .db
+                .get_work_with_identity_generation(user_id, work_id)
+                .await
+            {
+                Ok((work, generation)) => {
+                    let already_parked = matches!(
+                        work.identity_status,
+                        IdentityStatus::Conflict | IdentityStatus::NeedsReview
                     );
+                    if !already_parked {
+                        match self
+                            .db
+                            .complete_anchors(
+                                work_id,
+                                generation,
+                                livrarr_domain::services::IdentityCompletion {
+                                    target_badge: Some(IdentityStatus::NotFound),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                        {
+                            Ok(livrarr_domain::services::IdentityCompletionOutcome::Superseded) => {
+                                tracing::debug!(
+                                    work_id,
+                                    "complete_add: NotFound conclusion superseded by newer identity write"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    work_id,
+                                    "complete_add: NotFound status completion failed: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(work_id, "complete_add: work re-read failed: {e}");
                 }
             }
         }
@@ -1998,11 +2043,272 @@ where
         // this service has no filesystem access (compile-wall seam,
         // livrarr-metadata may not depend on livrarr-library). `warnings`
         // starts empty; the handler appends the reorg step's warnings.
+        //
+        // Identity-edit r4: both generations were advanced by the merge
+        // transaction's first statement; eagerly drop both works' local
+        // preview snapshots (the durable generation already makes them
+        // stale — removal only frees capacity).
+        self.remove_preview_snapshots_for(&[survivor_id, loser_id]);
         Ok(MergeWorksResult {
             survivor: updated_survivor,
             library_items_moved,
             grabs_moved,
             warnings: Vec::new(),
+        })
+    }
+
+    async fn preview_identity_edit(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        input: &str,
+        slot_hint: Option<livrarr_domain::identity::AnchorType>,
+    ) -> Result<IdentityEditPreview, livrarr_domain::identity_edit::IdentityEditError> {
+        use livrarr_domain::identity_edit::{classify_identifier_input, IdentityEditError};
+
+        let work = self.get(user_id, work_id).await.map_err(edit_service_err)?;
+
+        // One coherent user-scoped basis: generation + validated
+        // ledger∪column slots + open conflicts. Every assessment below uses
+        // it; the stored snapshot carries ITS generation, never a later read.
+        let basis = self
+            .db
+            .read_identity_edit_basis(user_id, work_id)
+            .await
+            .map_err(|e| IdentityEditError::Db(e.to_string()))?;
+
+        let (slot, canonical) = classify_identifier_input(input, slot_hint)
+            .map_err(|e| IdentityEditError::InvalidValue(e.to_string()))?;
+
+        // Fetch the certified record for the submitted value (§Preview seam).
+        let (resolved, leg_outcomes) = self
+            .fetch_slot_record(&slot, &canonical, work.language.clone())
+            .await;
+        let Some(resolved) = resolved else {
+            let failure_reason = if leg_outcomes
+                .iter()
+                .all(|o| matches!(o, SlotFetchClass::NotFound))
+            {
+                "not_found"
+            } else {
+                "provider_unavailable"
+            };
+            // Provider failure → 200 with resolved: null + reason; nothing is
+            // certifiable; NO snapshot stored.
+            return Ok(IdentityEditPreview {
+                slot: Some(slot),
+                canonical_value: Some(canonical),
+                conflict_warning: !basis.open_conflict_kinds.is_empty(),
+                failure_reason: Some(failure_reason.to_string()),
+                ..IdentityEditPreview::default()
+            });
+        };
+
+        // Collision check (work-key slots): ledger ∪ same-user-filtered
+        // column scan; the owning work's id/title block certification and
+        // the UI offers Merge works. Bridges became legally shareable at 076.
+        if is_work_key_slot(&slot) {
+            if let Some(owner) = self
+                .db
+                .find_anchor_owner(user_id, &slot, &canonical, work_id)
+                .await
+                .map_err(|e| IdentityEditError::Db(e.to_string()))?
+            {
+                return Ok(IdentityEditPreview {
+                    resolved: Some(resolved),
+                    slot: Some(slot),
+                    canonical_value: Some(canonical),
+                    collision: Some(owner),
+                    conflict_warning: !basis.open_conflict_kinds.is_empty(),
+                    ..IdentityEditPreview::default()
+                });
+            }
+        }
+
+        // Sibling assessment (work-key slots): every OTHER work-key slot with
+        // an effective (ledger∪column) value gets a proven-agreement verdict
+        // against the certified record; bridges are informational only.
+        let mut siblings = Vec::new();
+        let mut bridge_warnings = Vec::new();
+        if is_work_key_slot(&slot) {
+            for sibling_slot in [
+                livrarr_domain::identity::AnchorType::new(
+                    livrarr_domain::identity::AnchorType::OL_WORK,
+                ),
+                livrarr_domain::identity::AnchorType::new(
+                    livrarr_domain::identity::AnchorType::GR_WORK,
+                ),
+                livrarr_domain::identity::AnchorType::new(
+                    livrarr_domain::identity::AnchorType::HC_WORK,
+                ),
+            ] {
+                if sibling_slot == slot {
+                    continue;
+                }
+                let Some(value) = basis.slot(&sibling_slot).effective().map(str::to_string) else {
+                    continue;
+                };
+                siblings.push(
+                    self.assess_sibling(&sibling_slot, &value, &resolved, &canonical, &slot, &work)
+                        .await,
+                );
+            }
+            for bridge_slot in [
+                livrarr_domain::identity::AnchorType::new(
+                    livrarr_domain::identity::AnchorType::ISBN_13,
+                ),
+                livrarr_domain::identity::AnchorType::new(
+                    livrarr_domain::identity::AnchorType::ASIN,
+                ),
+            ] {
+                let Some(value) = basis.slot(&bridge_slot).effective().map(str::to_string) else {
+                    continue;
+                };
+                if let Some(warning) = self
+                    .assess_bridge(&bridge_slot, &value, &resolved, &canonical, &slot, &work)
+                    .await
+                {
+                    bridge_warnings.push(warning);
+                }
+            }
+        }
+
+        // Certifiable — store the single-use intent token. The basis
+        // generation (not a later read) is the commit staleness authority.
+        let drop_slots: Vec<livrarr_domain::identity::AnchorType> = siblings
+            .iter()
+            .filter(|s| s.action == SiblingAction::Drop)
+            .map(|s| s.slot.clone())
+            .collect();
+        let preview_id = self.store_preview_snapshot(PreviewSnapshot {
+            user_id,
+            work_id,
+            slot: slot.clone(),
+            canonical_value: canonical.clone(),
+            generation: basis.generation,
+            drop_slots,
+            expires_at: std::time::Instant::now() + PREVIEW_SNAPSHOT_TTL,
+            seq: 0,
+        })?;
+
+        Ok(IdentityEditPreview {
+            resolved: Some(resolved),
+            slot: Some(slot),
+            canonical_value: Some(canonical),
+            preview_id: Some(preview_id),
+            siblings,
+            bridge_warnings,
+            collision: None,
+            conflict_warning: !basis.open_conflict_kinds.is_empty(),
+            failure_reason: None,
+        })
+    }
+
+    async fn commit_identity_edit(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        slot: livrarr_domain::identity::AnchorType,
+        preview_id: &str,
+    ) -> Result<IdentityEditCommit, livrarr_domain::identity_edit::IdentityEditError> {
+        use livrarr_domain::identity::AnchorSetter;
+        use livrarr_domain::identity_edit::IdentityEditError;
+
+        self.get(user_id, work_id).await.map_err(edit_service_err)?;
+
+        // Consume the snapshot atomically (remove-on-read; matching
+        // user+work+slot required) — missing, expired, or already used is
+        // one and the same 409 preview_required.
+        let snapshot = self
+            .consume_preview_snapshot(preview_id, user_id, work_id, &slot)
+            .ok_or(IdentityEditError::StalePreview)?;
+
+        // One current repository snapshot decides true-no-op; a generation
+        // mismatch is stale, never a no-op.
+        let basis = self
+            .db
+            .read_identity_edit_basis(user_id, work_id)
+            .await
+            .map_err(|e| IdentityEditError::Db(e.to_string()))?;
+        if basis.generation != snapshot.generation {
+            return Err(IdentityEditError::StalePreview);
+        }
+
+        let slot_basis = basis.slot(&slot);
+        let old_value = slot_basis
+            .confirmed
+            .as_ref()
+            .map(|(v, _)| v.clone())
+            .or_else(|| slot_basis.column.clone());
+
+        let same_user_confirmed = matches!(
+            &slot_basis.confirmed,
+            Some((v, AnchorSetter::User)) if v == &snapshot.canonical_value
+        );
+        let column_agrees = slot_basis.column.as_deref() == Some(snapshot.canonical_value.as_str());
+        let no_implicated_conflict = !basis
+            .open_conflict_kinds
+            .iter()
+            .any(|k| conflict_kind_implicates(*k, &slot));
+        let is_true_no_op = same_user_confirmed
+            && column_agrees
+            && snapshot.drop_slots.is_empty()
+            && no_implicated_conflict
+            && !slot_basis.dead_end
+            && basis.stored_badge == basis.derived_badge;
+        if is_true_no_op {
+            let work = self.get(user_id, work_id).await.map_err(edit_service_err)?;
+            return Ok(IdentityEditCommit {
+                work,
+                no_op: true,
+                old_value,
+                new_value: snapshot.canonical_value,
+            });
+        }
+
+        self.db
+            .apply_identity_edit(
+                work_id,
+                user_id,
+                slot,
+                &snapshot.canonical_value,
+                snapshot.generation,
+                &snapshot.drop_slots,
+            )
+            .await?;
+
+        // The durable generation already stales every remaining token for
+        // this work; eager removal only frees capacity.
+        self.remove_preview_snapshots_for(&[work_id]);
+
+        let work = self.get(user_id, work_id).await.map_err(edit_service_err)?;
+        Ok(IdentityEditCommit {
+            work,
+            no_op: false,
+            old_value,
+            new_value: snapshot.canonical_value,
+        })
+    }
+
+    async fn clear_identity_slot(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        slot: livrarr_domain::identity::AnchorType,
+    ) -> Result<IdentityEditClear, livrarr_domain::identity_edit::IdentityEditError> {
+        self.get(user_id, work_id).await.map_err(edit_service_err)?;
+
+        let cleared = self.db.apply_identity_clear(work_id, user_id, slot).await?;
+
+        // Eagerly consume/invalidate all of the work's preview snapshots —
+        // the generation bump is the durable backstop.
+        self.remove_preview_snapshots_for(&[work_id]);
+
+        let work = self.get(user_id, work_id).await.map_err(edit_service_err)?;
+        Ok(IdentityEditClear {
+            work,
+            old_value: cleared.old_value,
+            parked_by_conflicts: cleared.parked_by_conflicts,
         })
     }
 }
@@ -2037,6 +2343,372 @@ fn merge_field_conflicts(survivor: &Work, loser: &Work) -> Vec<MergeFieldConflic
     }
 
     conflicts
+}
+
+// =============================================================================
+// Identity-edit preview/commit machinery (design identity-edit r4)
+// =============================================================================
+
+/// Bounds for the process-local preview snapshot store (§Preview 6):
+/// per-user cap 4, global cap 64, TTL 10 min. Load-bearing — the process has
+/// one shared live work service, so saturation is cross-tenant.
+const PREVIEW_PER_USER_CAP: usize = 4;
+const PREVIEW_GLOBAL_CAP: usize = 64;
+const PREVIEW_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+const PREVIEW_CAPACITY_RETRY_SECS: u64 = 30;
+
+/// One stored single-use preview intent (§Preview 6). The observed
+/// `identity_generation` — not a later read — is the commit staleness
+/// authority; the drop set is server-computed and applied exactly.
+struct PreviewSnapshot {
+    user_id: UserId,
+    work_id: WorkId,
+    slot: livrarr_domain::identity::AnchorType,
+    canonical_value: String,
+    generation: i64,
+    drop_slots: Vec<livrarr_domain::identity::AnchorType>,
+    expires_at: std::time::Instant,
+    /// Monotonic insertion order — "oldest" for the per-user eviction.
+    seq: u64,
+}
+
+#[derive(Default)]
+struct PreviewSnapshotStore {
+    map: HashMap<String, PreviewSnapshot>,
+    next_seq: u64,
+}
+
+fn edit_service_err(e: WorkServiceError) -> livrarr_domain::identity_edit::IdentityEditError {
+    match e {
+        WorkServiceError::NotFound => livrarr_domain::identity_edit::IdentityEditError::NotFound,
+        other => livrarr_domain::identity_edit::IdentityEditError::Db(other.to_string()),
+    }
+}
+
+fn is_work_key_slot(slot: &livrarr_domain::identity::AnchorType) -> bool {
+    use livrarr_domain::identity::AnchorType;
+    matches!(
+        slot.as_str(),
+        AnchorType::OL_WORK | AnchorType::GR_WORK | AnchorType::HC_WORK
+    )
+}
+
+/// Whether an open conflict of `kind` implicates an edit of `slot` (the
+/// no-op check and the commit's closure set agree on this mapping): the
+/// slot's own kind(s), plus QuorumTie for any work-key edit.
+fn conflict_kind_implicates(
+    kind: livrarr_domain::identity::IdentityConflictKind,
+    slot: &livrarr_domain::identity::AnchorType,
+) -> bool {
+    use livrarr_domain::identity::{AnchorType, IdentityConflictKind};
+    match kind {
+        IdentityConflictKind::IncomingDifferentOlKey
+        | IdentityConflictKind::OlRedirectCollision => slot.as_str() == AnchorType::OL_WORK,
+        IdentityConflictKind::IncomingDifferentGrKey => slot.as_str() == AnchorType::GR_WORK,
+        IdentityConflictKind::IncomingDifferentHcKey => slot.as_str() == AnchorType::HC_WORK,
+        IdentityConflictKind::QuorumTie => is_work_key_slot(slot),
+    }
+}
+
+/// Ordered preview fallback legs per slot (§Preview seam): gr→Goodreads;
+/// ol→OpenLibrary; asin→Audnexus then Audible; isbn→Google Books (ISBN-echo-
+/// verified) then OpenLibrary; hc→Hardcover with `AnchorQuery::HcKey`.
+fn preview_legs(
+    slot: &livrarr_domain::identity::AnchorType,
+    value: &str,
+) -> Vec<(MetadataProvider, AnchorQuery)> {
+    use livrarr_domain::identity::AnchorType;
+    let v = value.to_string();
+    match slot.as_str() {
+        AnchorType::GR_WORK => vec![(MetadataProvider::Goodreads, AnchorQuery::GrKey(v))],
+        AnchorType::OL_WORK => vec![(MetadataProvider::OpenLibrary, AnchorQuery::OlKey(v))],
+        AnchorType::HC_WORK => vec![(MetadataProvider::Hardcover, AnchorQuery::HcKey(v))],
+        AnchorType::ISBN_13 => vec![
+            (
+                MetadataProvider::GoogleBooks,
+                AnchorQuery::Isbn13(v.clone()),
+            ),
+            (MetadataProvider::OpenLibrary, AnchorQuery::Isbn13(v)),
+        ],
+        _ => vec![
+            (MetadataProvider::Audnexus, AnchorQuery::Asin(v.clone())),
+            (MetadataProvider::Audible, AnchorQuery::Asin(v)),
+        ],
+    }
+}
+
+/// Aggregated non-success class of one preview leg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotFetchClass {
+    NotFound,
+    NotConfigured,
+    Unavailable,
+}
+
+/// Identity evidence for the matching authority: the record's own keys with
+/// the queried slot value overlaid (the record WAS fetched by that key).
+fn record_evidence<'a>(
+    record: &'a livrarr_domain::services::IdentityPreviewRecord,
+    slot: &livrarr_domain::identity::AnchorType,
+    value: &'a str,
+) -> livrarr_domain::identity_matching::IdEvidence<'a> {
+    use livrarr_domain::identity::AnchorType;
+    let mut evidence = livrarr_domain::identity_matching::IdEvidence {
+        ol_key: record.ol_key.as_deref(),
+        gr_key: record.gr_key.as_deref(),
+        hc_key: record.hc_key.as_deref(),
+        isbn_13: record.isbn_13.as_deref(),
+        asin: record.asin.as_deref(),
+    };
+    match slot.as_str() {
+        AnchorType::OL_WORK => evidence.ol_key = Some(value),
+        AnchorType::GR_WORK => evidence.gr_key = Some(value),
+        AnchorType::HC_WORK => evidence.hc_key = Some(value),
+        AnchorType::ISBN_13 => evidence.isbn_13 = Some(value),
+        _ => evidence.asin = Some(value),
+    }
+    evidence
+}
+
+/// The proven-agreement bar (§Preview 3): keep iff title Same — or
+/// Grey{OneSidedSubtitle} corroborated by an agreeing hard identifier
+/// (`title_id_trust`, the AC-004 hatch) — AND author Agree. Everything else
+/// is not proven.
+fn proven_agreement(
+    certified: &livrarr_domain::services::IdentityPreviewRecord,
+    certified_evidence: &livrarr_domain::identity_matching::IdEvidence<'_>,
+    sibling: &livrarr_domain::services::IdentityPreviewRecord,
+    sibling_evidence: &livrarr_domain::identity_matching::IdEvidence<'_>,
+) -> Option<bool> {
+    use livrarr_domain::identity_matching::{
+        author_verdict, parse_title, title_id_trust, title_verdict, AuthorVerdict,
+    };
+    let (Some(cert_title), Some(cert_author)) = (&certified.title, &certified.author) else {
+        return None;
+    };
+    let (Some(sib_title), Some(sib_author)) = (&sibling.title, &sibling.author) else {
+        return None;
+    };
+    let title = title_verdict(&parse_title(cert_title), &parse_title(sib_title));
+    let title_ok = title_id_trust(&title, sibling_evidence, certified_evidence);
+    let author_ok = matches!(
+        author_verdict(
+            std::slice::from_ref(cert_author),
+            std::slice::from_ref(sib_author),
+        ),
+        AuthorVerdict::Agree
+    );
+    Some(title_ok && author_ok)
+}
+
+impl<D, E, H> WorkServiceImpl<D, E, H> {
+    /// Insert a snapshot per the §Preview 6 bounds: expired entries removed
+    /// first, then the user's own oldest evicted at the per-user cap; a
+    /// still-full global cap of OTHER tenants' live tokens is a retryable
+    /// 503 — never evict another tenant's token.
+    fn store_preview_snapshot(
+        &self,
+        mut snapshot: PreviewSnapshot,
+    ) -> Result<String, livrarr_domain::identity_edit::IdentityEditError> {
+        let mut store = self
+            .preview_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        store.map.retain(|_, s| s.expires_at > now);
+
+        let own: Vec<(String, u64)> = store
+            .map
+            .iter()
+            .filter(|(_, s)| s.user_id == snapshot.user_id)
+            .map(|(k, s)| (k.clone(), s.seq))
+            .collect();
+        if own.len() >= PREVIEW_PER_USER_CAP {
+            if let Some((oldest, _)) = own.into_iter().min_by_key(|(_, seq)| *seq) {
+                store.map.remove(&oldest);
+            }
+        }
+        if store.map.len() >= PREVIEW_GLOBAL_CAP {
+            return Err(livrarr_domain::identity_edit::IdentityEditError::Capacity {
+                retry_after_secs: PREVIEW_CAPACITY_RETRY_SECS,
+            });
+        }
+
+        snapshot.seq = store.next_seq;
+        store.next_seq += 1;
+        let preview_id = uuid::Uuid::new_v4().to_string();
+        store.map.insert(preview_id.clone(), snapshot);
+        Ok(preview_id)
+    }
+
+    /// Remove-on-read, single-use: a hit must match user, work, AND slot and
+    /// be unexpired; anything else reads as consumed.
+    fn consume_preview_snapshot(
+        &self,
+        preview_id: &str,
+        user_id: UserId,
+        work_id: WorkId,
+        slot: &livrarr_domain::identity::AnchorType,
+    ) -> Option<PreviewSnapshot> {
+        let mut store = self
+            .preview_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = store.map.remove(preview_id)?;
+        let matches = snapshot.user_id == user_id
+            && snapshot.work_id == work_id
+            && &snapshot.slot == slot
+            && snapshot.expires_at > std::time::Instant::now();
+        matches.then_some(snapshot)
+    }
+
+    fn remove_preview_snapshots_for(&self, work_ids: &[WorkId]) {
+        let mut store = self
+            .preview_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        store.map.retain(|_, s| !work_ids.contains(&s.work_id));
+    }
+}
+
+impl<D, E, H> WorkServiceImpl<D, E, H>
+where
+    E: EnrichmentWorkflow + Send + Sync,
+{
+    /// Ordered-fallback fetch of one slot's record (one `preview_fetch` per
+    /// leg, Interactive priority, riding the process-global outbound queue).
+    /// Returns the first resolved record plus every leg's non-success class.
+    async fn fetch_slot_record(
+        &self,
+        slot: &livrarr_domain::identity::AnchorType,
+        value: &str,
+        language: Option<String>,
+    ) -> (
+        Option<livrarr_domain::services::IdentityPreviewRecord>,
+        Vec<SlotFetchClass>,
+    ) {
+        use livrarr_domain::identity::AnchorType;
+        use livrarr_domain::services::IdentityPreviewOutcome;
+        let mut classes = Vec::new();
+        for (provider, query) in preview_legs(slot, value) {
+            let is_gb = provider == MetadataProvider::GoogleBooks;
+            match self
+                .enrichment
+                .fetch_anchor_preview(
+                    provider,
+                    query,
+                    language.clone(),
+                    RequestPriority::Interactive,
+                )
+                .await
+            {
+                Ok(IdentityPreviewOutcome::Resolved(record)) => {
+                    // GB serves editions by ISBN — trust it only when it
+                    // echoes the queried ISBN back (§Preview seam).
+                    if is_gb
+                        && slot.as_str() == AnchorType::ISBN_13
+                        && record.isbn_13.as_deref() != Some(value)
+                    {
+                        classes.push(SlotFetchClass::NotFound);
+                        continue;
+                    }
+                    return (Some(*record), classes);
+                }
+                Ok(IdentityPreviewOutcome::NotFound) => classes.push(SlotFetchClass::NotFound),
+                Ok(IdentityPreviewOutcome::NotConfigured) => {
+                    classes.push(SlotFetchClass::NotConfigured)
+                }
+                Ok(IdentityPreviewOutcome::Unavailable) | Err(_) => {
+                    classes.push(SlotFetchClass::Unavailable)
+                }
+            }
+        }
+        (None, classes)
+    }
+
+    /// §Preview 3 — one sibling work-key slot vs the certified record. The
+    /// keep bar is PROVEN agreement; uncorroborated Grey, VetoVolume,
+    /// Different, author Abstain/Grey/Disagree, and failed fetches all drop
+    /// (labeled). One deliberate distinction: an unconfigured Hardcover
+    /// contributes no payload to enrichment, so `NotConfigured` keeps —
+    /// HC-only; an unwired GR/OL sibling is unproven and drops.
+    async fn assess_sibling(
+        &self,
+        sibling_slot: &livrarr_domain::identity::AnchorType,
+        value: &str,
+        certified: &livrarr_domain::services::IdentityPreviewRecord,
+        certified_value: &str,
+        certified_slot: &livrarr_domain::identity::AnchorType,
+        work: &Work,
+    ) -> SiblingAssessment {
+        use livrarr_domain::identity::AnchorType;
+        let (record, classes) = self
+            .fetch_slot_record(sibling_slot, value, work.language.clone())
+            .await;
+        let (action, cause) = match record {
+            Some(record) => {
+                let certified_evidence =
+                    record_evidence(certified, certified_slot, certified_value);
+                let sibling_evidence = record_evidence(&record, sibling_slot, value);
+                match proven_agreement(certified, &certified_evidence, &record, &sibling_evidence) {
+                    Some(true) => (SiblingAction::Keep, None),
+                    Some(false) => (SiblingAction::Drop, Some("disagrees".to_string())),
+                    // A payload without usable title/author proves nothing.
+                    None => (SiblingAction::Drop, Some("unproven".to_string())),
+                }
+            }
+            None => {
+                let all_not_configured = !classes.is_empty()
+                    && classes.iter().all(|c| *c == SlotFetchClass::NotConfigured);
+                if all_not_configured && sibling_slot.as_str() == AnchorType::HC_WORK {
+                    (SiblingAction::Keep, None)
+                } else if classes.contains(&SlotFetchClass::Unavailable) {
+                    (SiblingAction::Drop, Some("unverifiable".to_string()))
+                } else {
+                    (SiblingAction::Drop, Some("unproven".to_string()))
+                }
+            }
+        };
+        SiblingAssessment {
+            slot: sibling_slot.clone(),
+            action,
+            cause,
+        }
+    }
+
+    /// Bridges are assessed informationally only (§Preview 3, ratified): a
+    /// PROVEN disagreement warns by name; anything unresolvable stays silent.
+    /// Never enters the drop set.
+    async fn assess_bridge(
+        &self,
+        bridge_slot: &livrarr_domain::identity::AnchorType,
+        value: &str,
+        certified: &livrarr_domain::services::IdentityPreviewRecord,
+        certified_value: &str,
+        certified_slot: &livrarr_domain::identity::AnchorType,
+        work: &Work,
+    ) -> Option<BridgeWarning> {
+        let (record, _) = self
+            .fetch_slot_record(bridge_slot, value, work.language.clone())
+            .await;
+        let record = record?;
+        let certified_evidence = record_evidence(certified, certified_slot, certified_value);
+        let bridge_evidence = record_evidence(&record, bridge_slot, value);
+        match proven_agreement(certified, &certified_evidence, &record, &bridge_evidence) {
+            Some(false) => Some(BridgeWarning {
+                slot: bridge_slot.clone(),
+                message: format!(
+                    "your stored {} resolves to a different book — consider fixing or clearing it",
+                    if bridge_slot.as_str() == livrarr_domain::identity::AnchorType::ISBN_13 {
+                        "ISBN"
+                    } else {
+                        "ASIN"
+                    }
+                ),
+            }),
+            _ => None,
+        }
+    }
 }
 
 // =============================================================================

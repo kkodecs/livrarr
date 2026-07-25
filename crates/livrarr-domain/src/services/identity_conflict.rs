@@ -7,6 +7,11 @@ pub enum ConflictError {
     NotFound,
     #[error("conflict already resolved")]
     AlreadyResolved,
+    /// The conflict was open at the door read, but a different identity
+    /// mutation won the first-statement generation claim (409
+    /// `identity_conflict_stale`, never a 500).
+    #[error("identity changed; reload identity conflicts")]
+    StaleIdentity,
     #[error("invalid primary anchor value")]
     InvalidPrimaryAnchor,
     #[error("serialization failed: {0}")]

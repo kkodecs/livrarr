@@ -14,7 +14,8 @@ use livrarr_domain::identity::{
 };
 use livrarr_domain::identity_matching::{self, AuthorVerdict, IdEvidence, TitleVerdict};
 use livrarr_domain::services::{
-    LlmCallRequest, LlmCaller, LlmPurpose, WorkIdentityError, WorkIdentityRepository,
+    IdentityCompletion, IdentityCompletionOutcome, LlmCallRequest, LlmCaller, LlmPurpose,
+    WorkIdentityError, WorkIdentityRepository,
 };
 use livrarr_domain::{IdentityStatus, UserId, Work};
 
@@ -129,6 +130,16 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
     mode: IdentityMode,
     source: ConflictSource,
 ) -> Result<IdentityReport, WorkIdentityError> {
+    // Coherent basis (identity-edit r4 §Claims): (Work, identity_generation)
+    // from ONE repository read immediately before the provider await. The
+    // caller's `work` supplies only the id — a stale enumerated row must
+    // never pair with a fresh generation. Every post-await write below rides
+    // one claimed completion; a lost claim returns Superseded with zero
+    // writes.
+    let (work, expected_generation) = repo
+        .get_work_with_identity_generation(user_id, work.id)
+        .await?;
+    let work = &work;
     let prior = work.identity_status;
 
     // REQ-006 terminal guard: Conflict / NotFound / NeedsReview are terminal —
@@ -142,6 +153,7 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
             final_status: prior,
             anchors_merged: Vec::new(),
             verdict: None,
+            superseded: false,
         });
     }
 
@@ -152,22 +164,15 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
     };
     let resolution = resolver.resolve(user_id, &seed, tier).await?;
 
-    let mut anchors_merged = Vec::new();
     let mut final_status = prior;
     let verdict;
+    let mut completion = IdentityCompletion::default();
 
     match resolution {
         Resolution::Resolved { identity, .. } => {
             // FLM gate: auto-confirm when the resolved title/author match the seed.
             // Only if both fail do we hold anchors as pending for user review.
-            let verified = flm_match(work, &identity);
-            if verified {
-                anchors_merged = repo
-                    .merge_missing_anchors(work.id, &identity)
-                    .await?
-                    .iter()
-                    .map(|t| t.as_str().to_string())
-                    .collect();
+            if flm_match(work, &identity) {
                 let target = if has_work_anchor(&identity) {
                     IdentityStatus::Confirmed
                 } else if identity.isbn_13.is_some() || identity.asin.is_some() {
@@ -176,68 +181,25 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
                     IdentityStatus::Pending
                 };
                 if target == IdentityStatus::Confirmed && prior != IdentityStatus::Confirmed {
-                    repo.set_identity_confirmed(work.id).await?;
+                    completion.target_badge = Some(IdentityStatus::Confirmed);
                     final_status = IdentityStatus::Confirmed;
                 } else if target == IdentityStatus::Provisional && prior == IdentityStatus::Pending
                 {
-                    repo.set_identity_provisional(work.id).await?;
+                    completion.target_badge = Some(IdentityStatus::Provisional);
                     final_status = IdentityStatus::Provisional;
                 }
+                completion.merge_anchors = Some(identity);
             } else {
-                for (anchor_type, value) in [
-                    (AnchorType::OL_WORK, identity.ol_key.as_deref()),
-                    (AnchorType::GR_WORK, identity.gr_key.as_deref()),
-                    (AnchorType::HC_WORK, identity.hc_key.as_deref()),
-                    (AnchorType::ISBN_13, identity.isbn_13.as_deref()),
-                    (AnchorType::ASIN, identity.asin.as_deref()),
-                ] {
-                    if let Some(v) = value {
-                        if anchor_slot_occupied(work, anchor_type) {
-                            tracing::debug!(
-                                work_id = work.id,
-                                anchor_type,
-                                "pending guess dropped: slot already settled"
-                            );
-                        } else {
-                            repo.record_pending_anchor(work.id, AnchorType::new(anchor_type), v)
-                                .await?;
-                        }
-                    }
-                }
+                completion.pending_guesses = pending_guesses_for(work, &identity);
             }
             verdict = ResolverVerdictKind::Resolved;
         }
         Resolution::Unresolved { captured, .. } => {
             // ST-002: transient — absorb anchors when title/author match, else hold pending.
-            let verified = flm_match(work, &captured);
-            if verified {
-                anchors_merged = repo
-                    .merge_missing_anchors(work.id, &captured)
-                    .await?
-                    .iter()
-                    .map(|t| t.as_str().to_string())
-                    .collect();
+            if flm_match(work, &captured) {
+                completion.merge_anchors = Some(captured);
             } else {
-                for (anchor_type, value) in [
-                    (AnchorType::OL_WORK, captured.ol_key.as_deref()),
-                    (AnchorType::GR_WORK, captured.gr_key.as_deref()),
-                    (AnchorType::HC_WORK, captured.hc_key.as_deref()),
-                    (AnchorType::ISBN_13, captured.isbn_13.as_deref()),
-                    (AnchorType::ASIN, captured.asin.as_deref()),
-                ] {
-                    if let Some(v) = value {
-                        if anchor_slot_occupied(work, anchor_type) {
-                            tracing::debug!(
-                                work_id = work.id,
-                                anchor_type,
-                                "pending guess dropped: slot already settled"
-                            );
-                        } else {
-                            repo.record_pending_anchor(work.id, AnchorType::new(anchor_type), v)
-                                .await?;
-                        }
-                    }
-                }
+                completion.pending_guesses = pending_guesses_for(work, &captured);
             }
             verdict = ResolverVerdictKind::Unresolved;
         }
@@ -248,8 +210,7 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
             if prior == IdentityStatus::Pending && matches!(mode, IdentityMode::Background) {
                 // Persist the ranked candidates behind this park (REQ-010),
                 // queryable per work — previously discarded on this exact path.
-                repo.record_review_candidates(work.id, &candidates).await?;
-                repo.set_needs_review(work.id).await?;
+                completion.review_candidates = Some(candidates);
                 final_status = IdentityStatus::NeedsReview;
             }
             verdict = ResolverVerdictKind::NeedsConfirmation;
@@ -262,7 +223,7 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
             if prior == IdentityStatus::Pending {
                 // A fresh Pending work has no established anchor — the tie itself
                 // is the conflict to surface (AC-007).
-                repo.raise_identity_conflict(conflict).await?;
+                completion.conflicts.push(conflict);
                 final_status = IdentityStatus::Conflict;
             } else {
                 // Settled work (REQ-003 From-Provisional/From-Confirmed, D-Q008):
@@ -276,13 +237,40 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
                     );
                 }
                 if !contradictions.is_empty() {
-                    for c in contradictions {
-                        repo.raise_identity_conflict(c).await?;
-                    }
+                    completion.conflicts = contradictions;
                     final_status = IdentityStatus::Conflict;
                 }
             }
             verdict = ResolverVerdictKind::Conflict;
+        }
+    }
+
+    // Submit every post-await write as ONE claimed completion. Nothing to
+    // write → nothing to claim.
+    let has_writes = completion.merge_anchors.is_some()
+        || completion.target_badge.is_some()
+        || !completion.pending_guesses.is_empty()
+        || completion.review_candidates.is_some()
+        || !completion.conflicts.is_empty();
+    let mut anchors_merged = Vec::new();
+    let mut superseded = false;
+    if has_writes {
+        match repo
+            .complete_anchors(work.id, expected_generation, completion)
+            .await?
+        {
+            IdentityCompletionOutcome::Applied {
+                anchors_merged: merged,
+            } => {
+                anchors_merged = merged.iter().map(|t| t.as_str().to_string()).collect();
+            }
+            IdentityCompletionOutcome::Superseded => {
+                // A user edit/clear (or another identity writer) won the
+                // generation claim mid-await: this resolution is stale and
+                // wrote nothing. The caller re-reads before enrichment.
+                superseded = true;
+                final_status = prior;
+            }
         }
     }
 
@@ -291,7 +279,34 @@ pub async fn settle_identity<R: EnglishIdentityResolver, D: WorkIdentityReposito
         final_status,
         anchors_merged,
         verdict: Some(verdict),
+        superseded,
     })
+}
+
+/// The fuzzy-guess set for a resolution that failed the FLM gate: every
+/// captured value whose slot is not already settled on the work.
+fn pending_guesses_for(work: &Work, captured: &CapturedIdentity) -> Vec<(AnchorType, String)> {
+    let mut guesses = Vec::new();
+    for (anchor_type, value) in [
+        (AnchorType::OL_WORK, captured.ol_key.as_deref()),
+        (AnchorType::GR_WORK, captured.gr_key.as_deref()),
+        (AnchorType::HC_WORK, captured.hc_key.as_deref()),
+        (AnchorType::ISBN_13, captured.isbn_13.as_deref()),
+        (AnchorType::ASIN, captured.asin.as_deref()),
+    ] {
+        if let Some(v) = value {
+            if anchor_slot_occupied(work, anchor_type) {
+                tracing::debug!(
+                    work_id = work.id,
+                    anchor_type,
+                    "pending guess dropped: slot already settled"
+                );
+            } else {
+                guesses.push((AnchorType::new(anchor_type), v.to_string()));
+            }
+        }
+    }
+    guesses
 }
 
 /// FLM (Fuzzy Livrarr Match): may the resolved identity's anchors auto-merge

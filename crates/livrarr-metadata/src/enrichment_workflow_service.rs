@@ -101,6 +101,50 @@ where
     async fn inject_source_data(&self, user_id: UserId, work_id: WorkId, data: SourceProviderData) {
         self.inner.inject_source_data(user_id, work_id, data).await;
     }
+
+    async fn fetch_anchor_preview(
+        &self,
+        provider: MetadataProvider,
+        query: AnchorQuery,
+        language: Option<String>,
+        priority: RequestPriority,
+    ) -> Result<livrarr_domain::services::IdentityPreviewOutcome, EnrichmentWorkflowError> {
+        use livrarr_domain::services::{IdentityPreviewOutcome, IdentityPreviewRecord};
+        Ok(
+            match self
+                .inner
+                .preview_fetch(provider, query, language, priority)
+                .await
+            {
+                livrarr_enrichment::PreviewFetchOutcome::Resolved(detail) => {
+                    // The adapter is where enrichment-layer payloads become
+                    // domain results — livrarr-domain never names
+                    // NormalizedWorkDetail (AC-25).
+                    IdentityPreviewOutcome::Resolved(Box::new(IdentityPreviewRecord {
+                        title: detail.title.clone(),
+                        author: detail.author_name.clone(),
+                        year: detail.year,
+                        language: detail.language.clone(),
+                        cover_url: detail.cover_url.clone(),
+                        ol_key: detail.ol_key.clone(),
+                        gr_key: detail.gr_key.clone(),
+                        hc_key: detail.hc_key.clone(),
+                        isbn_13: detail.isbn_13.clone(),
+                        asin: detail.asin.clone(),
+                    }))
+                }
+                livrarr_enrichment::PreviewFetchOutcome::NotFound => {
+                    IdentityPreviewOutcome::NotFound
+                }
+                livrarr_enrichment::PreviewFetchOutcome::NotConfigured => {
+                    IdentityPreviewOutcome::NotConfigured
+                }
+                livrarr_enrichment::PreviewFetchOutcome::Unavailable => {
+                    IdentityPreviewOutcome::Unavailable
+                }
+            },
+        )
+    }
 }
 
 /// Standalone impl for tests that only need reset, not the full enrichment pipeline.

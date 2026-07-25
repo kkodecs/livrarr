@@ -1547,15 +1547,22 @@ impl WorkIdentityRepository for RecordingIdentityRepo {
         self.confirm_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn supersede_anchor(
+    async fn read_anchors_with_generation(
         &self,
         _work_id: WorkId,
-        _anchor_type: AnchorType,
-        _old_value: &str,
-        _new_value: &str,
-        _setter: AnchorSetter,
+    ) -> Result<(i64, Vec<WorkIdentityAnchor>), WorkIdentityError> {
+        Ok((0, self.anchors.lock().unwrap().clone()))
+    }
+    async fn affirm_anchor_claimed(
+        &self,
+        work_id: WorkId,
+        anchor_type: AnchorType,
+        value: &str,
+        setter: AnchorSetter,
+        _expected_generation: i64,
     ) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
+        self.confirm_anchor_and_recompute_badge(work_id, anchor_type, value, setter)
+            .await
     }
     async fn set_identity_pending(
         &self,

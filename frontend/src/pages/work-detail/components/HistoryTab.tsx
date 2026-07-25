@@ -88,6 +88,14 @@ export function HistoryTab({ workId }: { workId: number }) {
 
 function summarizeHistoryData(entry: HistoryResponse): string {
   const d = entry.data;
+  // Identity rows say what happened to which identifier ("edit: gr_work:
+  // (empty) → 12345"), not just the book title. Version-skew fallbacks below
+  // still apply when either field is missing.
+  if (entry.eventType === "identityResolved") {
+    const action = typeof d.action === "string" ? d.action : null;
+    const identity = typeof d.identity === "string" ? d.identity : null;
+    if (action && identity) return `${action}: ${identity}`;
+  }
   if (d.title && typeof d.title === "string") return d.title;
   if (d.message && typeof d.message === "string") return d.message;
   if (d.path && typeof d.path === "string") return d.path;

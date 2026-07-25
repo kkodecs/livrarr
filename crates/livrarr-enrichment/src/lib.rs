@@ -81,6 +81,20 @@ pub trait EnrichmentService: Send + Sync {
         work_id: WorkId,
         data: livrarr_domain::services::SourceProviderData,
     );
+
+    /// Thread one identity-edit preview fetch down to the queue's client
+    /// registry (identity-edit r4 §Preview seam). Desugared stub default:
+    /// `NotConfigured` for doubles without a queue.
+    fn preview_fetch(
+        &self,
+        provider: livrarr_domain::MetadataProvider,
+        query: livrarr_domain::AnchorQuery,
+        language: Option<String>,
+        priority: RequestPriority,
+    ) -> impl std::future::Future<Output = PreviewFetchOutcome> + Send {
+        let _ = (provider, query, language, priority);
+        async move { PreviewFetchOutcome::NotConfigured }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +207,18 @@ pub enum ProviderQueueError {
     Db(#[from] DbError),
 }
 
+/// Outcome of one identity-edit preview fetch (identity-edit r4 §Preview
+/// seam). Lives at the queue layer because both the provider payload and the
+/// client registry do; the domain leaf sees only the mapped preview record.
+#[derive(Debug, Clone)]
+pub enum PreviewFetchOutcome {
+    Resolved(Box<NormalizedWorkDetail>),
+    NotFound,
+    NotConfigured,
+    /// Retryable outage or permanent fetch failure — nothing certifiable.
+    Unavailable,
+}
+
 /// Shared per-provider request queue. Scatter-gather dispatch with durable
 /// phase-1 outcome persistence.
 ///
@@ -204,6 +230,25 @@ pub trait ProviderQueue: Send + Sync {
         work: &Work,
         context: EnrichmentContext,
     ) -> Result<ScatterGatherResult, ProviderQueueError>;
+
+    /// One preview fetch against the named provider's client by anchor query
+    /// (identity-edit r4): a direct `fetch_by_anchor` — NO provider-response
+    /// cache read or write (that cache's single seam stays
+    /// `dispatch_enrichment`), NO `provider_retry_state` writes, no budget
+    /// bookkeeping. Call records emit at the client wrapper (truthful HTTP).
+    ///
+    /// Desugared stub default (`trait_variant` cannot expand a provided
+    /// `async fn`): a queue double with no registry reports `NotConfigured`.
+    fn preview_fetch(
+        &self,
+        provider: livrarr_domain::MetadataProvider,
+        query: livrarr_domain::AnchorQuery,
+        language: Option<String>,
+        priority: RequestPriority,
+    ) -> impl std::future::Future<Output = PreviewFetchOutcome> + Send {
+        let _ = (provider, query, language, priority);
+        async move { PreviewFetchOutcome::NotConfigured }
+    }
 }
 
 /// TEMP(pk-tdd): reconstructed per-provider outcome for merge input.
@@ -465,6 +510,18 @@ where
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
 {
+    async fn preview_fetch(
+        &self,
+        provider: livrarr_domain::MetadataProvider,
+        query: livrarr_domain::AnchorQuery,
+        language: Option<String>,
+        priority: RequestPriority,
+    ) -> PreviewFetchOutcome {
+        self.queue
+            .preview_fetch(provider, query, language, priority)
+            .await
+    }
+
     async fn enrich_work(
         &self,
         user_id: UserId,

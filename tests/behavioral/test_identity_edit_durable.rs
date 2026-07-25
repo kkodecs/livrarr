@@ -107,7 +107,11 @@ async fn ac21_works_identity_generation_column_exists_not_null_default_zero() {
 
     let user = create_test_user(&db).await;
     let work = create_work(&db, user, "Fresh Work").await;
-    assert_eq!(generation(&db, work).await, 0, "fresh work starts at generation 0");
+    assert_eq!(
+        generation(&db, work).await,
+        0,
+        "fresh work starts at generation 0"
+    );
 }
 
 /// REQ-IDs: AC-21
@@ -124,7 +128,10 @@ async fn ac21_index_swap_044_all_type_index_gone_per_user_work_key_index_present
     .fetch_optional(db.pool())
     .await
     .expect("sqlite_master query");
-    assert!(old.is_none(), "044's all-type per-user index must be dropped by 076");
+    assert!(
+        old.is_none(),
+        "044's all-type per-user index must be dropped by 076"
+    );
 
     let new_sql: Option<String> = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type='index' AND name='uniq_user_confirmed_work_anchor'",
@@ -136,7 +143,10 @@ async fn ac21_index_swap_044_all_type_index_gone_per_user_work_key_index_present
     let sql_lc = sql.to_lowercase();
     assert!(sql_lc.contains("user_id"), "index must be per-user: {sql}");
     for key in ["ol_work", "gr_work", "hc_work"] {
-        assert!(sql_lc.contains(key), "index predicate must include {key}: {sql}");
+        assert!(
+            sql_lc.contains(key),
+            "index predicate must include {key}: {sql}"
+        );
     }
     assert!(
         !sql_lc.contains("isbn_13") && !sql_lc.contains("asin"),
@@ -160,27 +170,52 @@ async fn ac21_uniqueness_semantics_bridge_freedom_is_the_076_delta() {
     let a2 = create_work(&db, user_a, "Beta Book").await;
     let b1 = create_work(&db, user_b, "Gamma Book").await;
 
-    db.confirm_anchor(a1, AnchorType::new(AnchorType::GR_WORK), "777001", AnchorSetter::User)
-        .await
-        .expect("first confirm");
+    db.confirm_anchor(
+        a1,
+        AnchorType::new(AnchorType::GR_WORK),
+        "777001",
+        AnchorSetter::User,
+    )
+    .await
+    .expect("first confirm");
     // Invariant (pre- and post-076): work keys are shareable across users.
-    db.confirm_anchor(b1, AnchorType::new(AnchorType::GR_WORK), "777001", AnchorSetter::User)
-        .await
-        .expect("cross-user same work key is legal (invariant since 044)");
+    db.confirm_anchor(
+        b1,
+        AnchorType::new(AnchorType::GR_WORK),
+        "777001",
+        AnchorSetter::User,
+    )
+    .await
+    .expect("cross-user same work key is legal (invariant since 044)");
     // Invariant (pre- and post-076): same-user duplicate work key rejected.
     assert!(
-        db.confirm_anchor(a2, AnchorType::new(AnchorType::GR_WORK), "777001", AnchorSetter::User)
-            .await
-            .is_err(),
+        db.confirm_anchor(
+            a2,
+            AnchorType::new(AnchorType::GR_WORK),
+            "777001",
+            AnchorSetter::User
+        )
+        .await
+        .is_err(),
         "same-user duplicate work key must violate the per-user unique index"
     );
     // THE 076 delta (RED today — 044's live index still covers bridges):
-    db.confirm_anchor(a1, AnchorType::new(AnchorType::ISBN_13), "9780441013593", AnchorSetter::User)
-        .await
-        .expect("bridge on first work");
-    db.confirm_anchor(a2, AnchorType::new(AnchorType::ISBN_13), "9780441013593", AnchorSetter::User)
-        .await
-        .expect("same-user shared bridge must be accepted post-076");
+    db.confirm_anchor(
+        a1,
+        AnchorType::new(AnchorType::ISBN_13),
+        "9780441013593",
+        AnchorSetter::User,
+    )
+    .await
+    .expect("bridge on first work");
+    db.confirm_anchor(
+        a2,
+        AnchorType::new(AnchorType::ISBN_13),
+        "9780441013593",
+        AnchorSetter::User,
+    )
+    .await
+    .expect("same-user shared bridge must be accepted post-076");
 }
 
 // ---------------------------------------------------------------------------
@@ -197,11 +232,19 @@ async fn chokepoint_confirm_anchor_advances_generation() {
     let work = create_work(&db, user, "Bump Confirm").await;
     ensure_identity_generation_column(&db).await;
     let before = generation(&db, work).await;
-    db.confirm_anchor(work, AnchorType::new(AnchorType::OL_WORK), "OL123W", AnchorSetter::User)
-        .await
-        .expect("confirm");
+    db.confirm_anchor(
+        work,
+        AnchorType::new(AnchorType::OL_WORK),
+        "OL123W",
+        AnchorSetter::User,
+    )
+    .await
+    .expect("confirm");
     let after = generation(&db, work).await;
-    assert!(after > before, "confirm_anchor_in_tx must bump ({before} -> {after})");
+    assert!(
+        after > before,
+        "confirm_anchor_in_tx must bump ({before} -> {after})"
+    );
 }
 
 /// REQ-IDs: AC-9(e) (bump half), design §Claims
@@ -224,7 +267,10 @@ async fn raise_identity_conflict_advances_generation_without_slot_change() {
     .await
     .expect("raise conflict");
     let after = generation(&db, work).await;
-    assert!(after > before, "conflict raise must bump ({before} -> {after})");
+    assert!(
+        after > before,
+        "conflict raise must bump ({before} -> {after})"
+    );
     // The slot columns did not change — the bump is the ONLY signal a preview has.
     let gr: Option<String> = sqlx::query_scalar("SELECT gr_key FROM works WHERE id = ?")
         .bind(work)
@@ -247,7 +293,10 @@ async fn set_identity_pending_advances_generation() {
         .await
         .expect("set pending");
     let after = generation(&db, work).await;
-    assert!(after > before, "set_identity_pending must bump ({before} -> {after})");
+    assert!(
+        after > before,
+        "set_identity_pending must bump ({before} -> {after})"
+    );
 }
 
 /// REQ-IDs: design §Writer coverage (raw status arms are not loopholes)
@@ -263,7 +312,10 @@ async fn set_identity_status_advances_generation_same_statement() {
         .await
         .expect("status write");
     let after = generation(&db, work).await;
-    assert!(after > before, "raw identity_status write must bump ({before} -> {after})");
+    assert!(
+        after > before,
+        "raw identity_status write must bump ({before} -> {after})"
+    );
 }
 
 /// REQ-IDs: AC-10 (manual-refresh recovery half), design §Writer coverage
@@ -274,9 +326,14 @@ async fn reset_for_manual_refresh_notfound_recovery_advances_generation() {
     let user = create_test_user(&db).await;
     let work = create_work(&db, user, "Bump Reset").await;
     ensure_identity_generation_column(&db).await;
-    db.confirm_anchor(work, AnchorType::new(AnchorType::OL_WORK), "OL777W", AnchorSetter::Import)
-        .await
-        .expect("seed anchor");
+    db.confirm_anchor(
+        work,
+        AnchorType::new(AnchorType::OL_WORK),
+        "OL777W",
+        AnchorSetter::Import,
+    )
+    .await
+    .expect("seed anchor");
     db.set_identity_status(user, work, IdentityStatus::NotFound)
         .await
         .expect("park not_found");
@@ -289,9 +346,15 @@ async fn reset_for_manual_refresh_notfound_recovery_advances_generation() {
         .fetch_one(db.pool())
         .await
         .expect("status read");
-    assert_eq!(status, "confirmed", "anchored not_found recovers to confirmed");
+    assert_eq!(
+        status, "confirmed",
+        "anchored not_found recovers to confirmed"
+    );
     let after = generation(&db, work).await;
-    assert!(after > before, "the recovering CASE must bump ({before} -> {after})");
+    assert!(
+        after > before,
+        "the recovering CASE must bump ({before} -> {after})"
+    );
 }
 
 /// REQ-IDs: design §Writer coverage (review dismiss is claimed)
@@ -306,7 +369,10 @@ async fn dismiss_review_advances_generation() {
     let before = generation(&db, work).await;
     db.dismiss_review(work).await.expect("dismiss");
     let after = generation(&db, work).await;
-    assert!(after > before, "review dismiss must bump ({before} -> {after})");
+    assert!(
+        after > before,
+        "review dismiss must bump ({before} -> {after})"
+    );
 }
 
 /// REQ-IDs: design §Claims (delayed completion is generation-gated)
@@ -337,6 +403,8 @@ async fn merge_missing_anchors_write_advances_generation() {
         .expect("merge missing anchors");
     assert!(!merged.is_empty(), "fixture must actually merge an anchor");
     let after = generation(&db, work).await;
-    assert!(after > before, "landed completion must bump ({before} -> {after})");
+    assert!(
+        after > before,
+        "landed completion must bump ({before} -> {after})"
+    );
 }
-

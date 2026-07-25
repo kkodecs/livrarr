@@ -1,9 +1,16 @@
-import { RefreshCw } from "lucide-react";
+import { useState } from "react";
+import { Pencil, RefreshCw, Wand2, X } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { formatRelativeDate, formatDuration } from "@/utils/format";
-import type { WorkDetailResponse, EnrichmentStatus, IdentityStatus } from "@/types/api";
+import type {
+  WorkDetailResponse,
+  EnrichmentStatus,
+  IdentityStatus,
+  IdentitySlot,
+} from "@/types/api";
 import { StatusBadge, type BadgeTone } from "./StatusBadge";
 import { MetadataRow } from "./MetadataRow";
+import { IdentityEditModal, slotLabel, useClearIdentitySlot } from "./IdentityEditModal";
 
 // Identity state machine (REQ-014) — "which book is this?". The section header
 // supplies the context a bare floating badge lacks.
@@ -30,14 +37,53 @@ export function BookInformationTab({
   work,
   onRefresh,
   refreshing,
+  onMergeWorks,
 }: {
   work: WorkDetailResponse;
   onRefresh: () => void;
   refreshing: boolean;
+  onMergeWorks?: (owningWorkId: number) => void;
 }) {
   const identity = IDENTITY_BADGE[work.identityStatus];
   const details = DETAILS_BADGE[work.enrichmentStatus];
   const missing = <span className="text-zinc-600">—</span>;
+  // null = closed; { slot: null } = the slot-free Fix-match road.
+  const [editing, setEditing] = useState<{ slot: IdentitySlot | null } | null>(null);
+  const clearSlot = useClearIdentitySlot(work.id);
+
+  // Per-slot value + affordances (design r4 §Slot roster): pencil on the
+  // editable rows (GR/OL/ASIN), clear (×) on every populated slot; the HC row
+  // is clear-only (internal id — nothing a user could paste); the ISBN row
+  // lives in Details, input via Fix match only.
+  const identityValue = (slot: IdentitySlot, value: string | null, editable: boolean) => (
+    <span className="inline-flex items-center gap-1.5">
+      {value ? <span>{value}</span> : missing}
+      {editable && (
+        <button
+          onClick={() => setEditing({ slot })}
+          className="text-muted transition-colors hover:text-zinc-200"
+          title={`Fix the ${slotLabel(slot)} identifier`}
+          aria-label={`Edit ${slotLabel(slot)}`}
+        >
+          <Pencil size={12} />
+        </button>
+      )}
+      {value && (
+        <button
+          onClick={() => {
+            if (window.confirm(`Clear the ${slotLabel(slot)} identifier "${value}"?`)) {
+              clearSlot.mutate(slot);
+            }
+          }}
+          className="text-muted transition-colors hover:text-red-300"
+          title={`Clear the ${slotLabel(slot)} identifier`}
+          aria-label={`Clear ${slotLabel(slot)}`}
+        >
+          <X size={12} />
+        </button>
+      )}
+    </span>
+  );
 
   return (
     <div className="max-w-2xl">
@@ -45,23 +91,37 @@ export function BookInformationTab({
       <section>
         <div className="flex items-center justify-between gap-4">
           <h3 className="text-sm font-medium text-zinc-100">Identity</h3>
-          <button
-            onClick={onRefresh}
-            disabled={refreshing}
-            className="btn-secondary inline-flex items-center gap-1.5 text-xs"
-          >
-            <RefreshCw size={12} className={cn(refreshing && "animate-spin")} />
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setEditing({ slot: null })}
+              className="btn-secondary inline-flex items-center gap-1.5 text-xs"
+              title="Paste any identifier or provider URL to fix the match"
+            >
+              <Wand2 size={12} />
+              Fix match
+            </button>
+            <button
+              onClick={onRefresh}
+              disabled={refreshing}
+              className="btn-secondary inline-flex items-center gap-1.5 text-xs"
+            >
+              <RefreshCw size={12} className={cn(refreshing && "animate-spin")} />
+              Refresh
+            </button>
+          </div>
         </div>
         <p className="mt-0.5 mb-3 text-xs text-muted">Which book this is — catalog match &amp; identifiers.</p>
         <StatusBadge tone={identity.tone} label={identity.label} tip={identity.tip} />
+        {work.parkedByConflicts && (
+          <p className="mt-2 text-xs text-amber-300">
+            Re-matching is paused until the open identity conflict is reviewed.
+          </p>
+        )}
         <dl className="mt-4">
-          <MetadataRow label="Open Library" value={work.olKey || missing} />
-          <MetadataRow label="Hardcover" value={work.hcKey || missing} />
-          <MetadataRow label="Goodreads" value={work.grKey || missing} />
-          <MetadataRow label="ISBN-13" value={work.isbn13 || missing} />
-          <MetadataRow label="ASIN" value={work.asin || missing} />
+          <MetadataRow label="Open Library" value={identityValue("ol_work", work.olKey, true)} />
+          <MetadataRow label="Hardcover" value={identityValue("hc_work", work.hcKey, false)} />
+          <MetadataRow label="Goodreads" value={identityValue("gr_work", work.grKey, true)} />
+          <MetadataRow label="ASIN" value={identityValue("asin", work.asin, true)} />
         </dl>
       </section>
 
@@ -71,6 +131,9 @@ export function BookInformationTab({
         <p className="mt-0.5 mb-3 text-xs text-muted">What we know about it — series, genres, publisher, cover.</p>
         <StatusBadge tone={details.tone} label={details.label} tip={details.tip} />
         <dl className="mt-4">
+          {/* ISBN doctrine (r4): edition evidence, not identity — read-only
+              here with a one-click clear; corrections go through Fix match. */}
+          <MetadataRow label="ISBN-13" value={identityValue("isbn_13", work.isbn13, false)} />
           {work.originalTitle && <MetadataRow label="Original title" value={work.originalTitle} />}
           <MetadataRow label="Year" value={work.year} />
           {(work.seriesName || work.enriching) && (
@@ -121,6 +184,15 @@ export function BookInformationTab({
           The cover is fetched separately and may appear after this — it never affects the Enriched status.
         </p>
       </section>
+
+      {editing && (
+        <IdentityEditModal
+          workId={work.id}
+          slot={editing.slot}
+          onClose={() => setEditing(null)}
+          onMergeWorks={onMergeWorks}
+        />
+      )}
     </div>
   );
 }
