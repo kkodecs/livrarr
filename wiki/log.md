@@ -1,5 +1,39 @@
 # Wiki Change Log
 
+## 2026-07-25 — goodreads.md verified: we already stopped hitting `/search`, and the pace is 1.5s
+
+**Updated pages:** `wiki/integrations/goodreads.md` (Part B, 2 of 5) and
+`wiki/integrations/audnexus.md` (implemented-vs-intent caveat, per the accepted ruling).
+Tenth documentarian pass.
+
+**The correction that matters most: the page treated a robots.txt violation as an open P1 risk
+that no longer exists.** Three places said we may be hitting `/search` and must audit and remove
+it. The GR client's only search path is `search_goodreads`, which builds
+`/book/auto_complete?format=json&q=<title>` — its own doc calls it "the WAF-free autocomplete JSON
+endpoint", and no function in `goodreads/client.rs` constructs a `/search` URL. The page was
+carrying a compliance alarm for something already fixed.
+
+**The page also contradicted itself on our own rate limit** — 1.5s in one section, "1 req/sec
+(60/min)" in another, with a code pointer at `fetcher.rs:73` that lands on a comment separator in
+the user-agent section. The truth is 1.5s, set in `interval_for` in
+`livrarr-http/src/outbound_queue.rs`, which also makes the "5-7x over the safe rate" figure wrong:
+it was computed from the 1/sec baseline, and against the page's own 5-7s floor the real multiple
+is ~3-5x.
+
+Also: `is_anti_bot_page` is a shared util, not GR-specific, and a hit already fires
+`BreakerSignal::TripImmediately` — so the "GR-specific circuit breaker" open-work item partly
+exists and was demoted rather than left as a P1 gap. A paragraph citing a test-fixture UA at
+`parsers.rs:934` was deleted: that line is inside `extract_description` and contains no such
+string.
+
+**Ruling applied:** both pages now carry an implemented-vs-stated-intent table for their
+operational rules, on the precedent that a rule reading as behaviour when most are aspirational
+creates the same false impression a partial list presented as complete does.
+
+**Context:** pass #10, scoped by `build/reviews/DOC-EDIT-PACKET-6.md`.
+Citations: `build/reviews/docs-edit-integrations-changelog.md` (appended).
+**Split:** `google-books.md`, `hardcover.md`, `openlibrary.md` remain unaudited.
+
 ## 2026-07-25 — the `dyn` claim settled; audnexus.md verified (integrations pass split)
 
 **Updated pages:** `wiki/patterns/async-service.md` (Part A) and `wiki/integrations/audnexus.md`

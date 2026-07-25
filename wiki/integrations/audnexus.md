@@ -104,6 +104,18 @@ What's NOT in Audnexus:
 5. **Don't burn requests on speculative lookups.** Only call Audnexus when we actually need the data for a specific work.
 6. **Don't rotate IPs to bypass rate limits** — applies universally; documented for OL but the principle is the same everywhere.
 
+> **Which of these rules the code actually implements.** The operational rules on this page read
+> as behaviour; only some are. Verified against `livrarr-external-data/src/audnexus.rs`:
+>
+> | Rule | Status |
+> |---|---|
+> | Revalidate with `If-Modified-Since` / reuse on 304 | **Implemented** — `cached_fetch` |
+> | Never send `Cache-Control: no-cache` | **Honored** — the only request header the client ever sets is `If-Modified-Since` |
+> | Never send `?update=1` | **Honored** — the client builds no such parameter |
+> | Don't poll `/health` | **Honored** — the client builds no `/health` URL |
+> | Back off proactively at `x-ratelimit-remaining < 30` | **Stated intent** — the client reads no `x-ratelimit-*` header; pacing comes from `RateBucket::Audnexus` on the outbound queue instead |
+> | "Cache responses locally for 24h, matching their `max-age`" | **Partly** — responses are cached, but by a capacity-bounded in-process map keyed on URL, with freshness handled by revalidation rather than a 24-hour TTL |
+
 ## Self-hosting — our pressure relief valve
 
 If we ever risk overwhelming Audnexus (or the community asks us to offload), we can stand up our own instance. Audnexus is fully self-hostable:

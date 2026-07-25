@@ -9,7 +9,7 @@ This page is also a deprecation-tracking page. We should be actively reducing GR
 - **No official API since 2020-12-08.** Goodreads deprecated the public API; existing keys broke ~2022. Amazon (which acquired GR in 2013) cut the external data feed. **No public signal of reopening.**
 - **What we do:** scrape JSON-LD blobs embedded in `/book/show/<id>` and `/series/<id>` pages.
 - **Anti-bot defense GR runs:** **Cloudflare + DataDome** with TLS/HTTP2 fingerprinting, IP reputation scoring, behavioral analysis, Turnstile challenges.
-- **Our current rate limit:** GR bucket paced at 1.5s through the process-global outbound queue (insight #30) — still above the 5-7s polite floor observed by surviving scrapers; see "Open work" below.
+- **Our current rate limit:** GR bucket paced at 1.5s through the process-global outbound queue — confirmed in `interval_for` (`livrarr-http/src/outbound_queue.rs`) — still faster than the 5-7s polite floor observed by surviving scrapers; see "Open work" below.
 - **Matching is fully deterministic since Phase 5 (2026-07-03, insight #13):** junk-edition filter + the shared 0.75 picker with explicit abstain. No LLM chooses a match anywhere; the only LLM on a GR path is `llm_extract_payload` (HTML-parse repair — repair, not selection). An earlier version of this page said "GR requires LLM disambiguation" — wrong since Phase 5.
 
 ## Authentication
@@ -62,9 +62,16 @@ This page is also a deprecation-tracking page. We should be actively reducing GR
 | [Scraperly guide 2026](https://scraperly.com/scrape/goodreads) | 8-12 req/min |
 | [rreading-glasses](https://github.com/blampe/rreading-glasses) | Default `--rpm=60` (1/sec), but actively triggers backoffs in production |
 
-**Our current implementation:** 1 req/sec (60/min) — sits at the rreading-glasses ceiling but well above the polite floor. We are **5-7x over the empirical safe rate.**
+**Our current implementation: 1.5 s between dispatches (~40/min)**, set in `interval_for` in
+`crates/livrarr-http/src/outbound_queue.rs` — the single source of per-provider pacing. Goodreads
+is paced slower than the API-backed providers there precisely because it is an anti-bot-hostile
+scrape target. Against the 5-7 s floor the sources above report, that is roughly **3-5x over**,
+not the 5-7x this page previously claimed (that figure was computed from a 1 req/sec baseline the
+code does not use).
 
-**Operational rule:** lower the GR rate-bucket to **5-7 second interval** (8-12 req/min). Single biggest risk reduction available for this provider. Code: `crates/livrarr-http/src/fetcher.rs:73`.
+**Operational rule (stated intent):** lower the GR bucket to a **5-7 second interval** (8-12
+req/min). Single biggest risk reduction available for this provider. The value to change is the
+`RateBucket::Goodreads` arm of `interval_for`.
 
 ## User-Agent — OPPOSITE of OpenLibrary
 
@@ -87,7 +94,10 @@ Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/12
 
 Pure browser UA. No "Livrarr" substring. No self-identification. Exactly what the polite-scraper convention recommends for GR.
 
-The string `Mozilla/5.0 (compatible; Livrarr/0.1 test)` exists at `goodreads/parsers.rs:934` but is **inside a `#[cfg(test)] mod tests` block** — a test fixture that never reaches production. Cosmetically ugly but operationally harmless. Earlier wiki drafts incorrectly flagged this as a production issue.
+And it is genuinely what goes on the wire: both GR fetch paths set
+`user_agent: UserAgentProfile::Custom(GOODREADS_USER_AGENT.to_string())` — the page fetch
+(`fetch_goodreads_html_via`) and the autocomplete search (`search_goodreads`). Neither falls back
+to the fetcher's generic `UserAgentProfile::Browser`, which is a different string.
 
 ## robots.txt — what GR allows
 
@@ -107,14 +117,27 @@ Allows with restrictions:
 - RSS feeds
 - `/review/*`
 
-**Implication:** we should not be hitting `/search` from automated flows. If we do (and we may — need to audit `goodreads/`), that's a policy violation that could explain past 403s.
+**Implication:** we should not be hitting `/search` from automated flows — **and we do not.** The
+GR client's only search path is `search_goodreads`, which builds
+`{base}/book/auto_complete?format=json&q=<title>`; its own doc calls this "the WAF-free
+autocomplete JSON endpoint". No function in `goodreads/client.rs` constructs a `/search` URL.
+(Bounded claim: that is the client module. I did not sweep the whole workspace for a GR `/search`
+string — `grep` is unavailable in this environment.)
+
+Note also what the autocomplete doc records: the **author is deliberately kept out of the query
+string**, because prefix-matching on "Title Author" ranks study guides above the real record.
+Author agreement is enforced by the picker instead.
 
 ## Backoff and failure modes
 
 - **403 → terminal-for-session.** DataDome blocks can last hours to days. Once we get 403, stop hitting GR for at least 1 hour; never aggressively switch UAs to evade (that trains DataDome faster — exactly the OL lesson).
 - **429 → exponential backoff with jitter**, honor `Retry-After` if present.
 - **Cloudflare 5xx → exponential backoff**, cap retries, surface.
-- **Anti-bot challenge page** (HTML body contains specific markers): detected by `is_anti_bot_page` in our GR client — good. Should treat as 403-equivalent.
+- **Anti-bot challenge page** (HTML body contains specific markers): detected by
+  `is_anti_bot_page` — defined in `livrarr-external-data/src/provider_util.rs` (shared, not
+  GR-specific) and called by the GR client on every 2xx HTML body. A hit is **already** treated as
+  worse than a 403: the client reports `BreakerSignal::TripImmediately` on the Goodreads bucket, so
+  a soft-blocked 200 opens the breaker at once rather than counting toward a threshold (R-8).
 
 ## Caching
 
@@ -164,13 +187,25 @@ The structural answer to GR risk is reducing dependence, not just throttling har
 
 ## Anti-patterns to avoid
 
-1. **Don't hit `/search`** — disallowed by robots.txt. If we do, audit and remove.
+1. **Don't hit `/search`** — disallowed by robots.txt. (We do not; see the status table below.)
 2. **Don't run faster than 8-12 req/min sustained.** Polite floor.
 3. **Don't identify as `Livrarr` / `LivrarrBot` / any project name on GR.** Browser UA only.
 4. **Don't rotate UAs mid-run after a 403** — trains DataDome faster, makes blocks worse.
 5. **Don't use logged-in sessions.** TOS violation; account suspension risk.
 6. **Don't poll the same page repeatedly** to detect change — use long TTLs and accept staleness.
 7. **Don't expand to new GR endpoints** without considering whether the data is available from HC or Wikidata first.
+
+> **Which of these rules the code actually implements.** Verified against
+> `livrarr-external-data/src/goodreads/client.rs` and `livrarr-http/src/outbound_queue.rs`:
+>
+> | Rule | Status |
+> |---|---|
+> | Don't hit `/search` | **Honored** — the only search path is `/book/auto_complete` |
+> | Browser UA, never a project name | **Honored** — `GOODREADS_USER_AGENT`, set explicitly on both fetch paths |
+> | Don't run faster than 8-12 req/min | **Not honored** — the bucket paces at 1.5 s (~40/min) |
+> | Don't use logged-in sessions | **Honored** — no cookie is ever set on a GR request |
+> | Don't rotate UAs after a 403 | **Structurally impossible** — the UA is a single constant, not a rotating set |
+> | Don't poll the same page repeatedly / long TTLs | **Stated intent** — the GR client has no response cache of its own (contrast Audnexus, which does) |
 
 ## Contributing back to Goodreads
 
@@ -198,8 +233,8 @@ This is part of why GR shouldn't remain our primary source — there's no symmet
 | **Build adaptive rate-limiter** (stay at 1/sec normally; back off to 5-7s for ~1hr on first 4xx/5xx) | **P1** | rreading-glasses proves 1/sec is sustainable IF combined with proper backoff; adaptive captures both speed and politeness |
 | ~~Switch GR UA to pure browser string~~ | n/a | Production already uses pure browser UA (`GOODREADS_USER_AGENT` constant). Earlier P0 flag was based on misreading a test fixture. |
 | **Aggressive caching of `/book/show/<id>` and `/series/<id>` JSON-LD** (weeks TTL) | **P1** | Reduces request volume to the floor without losing freshness |
-| **Audit code for any `/search` calls** and remove or route elsewhere | **P1** | robots.txt violation |
-| **GR-specific circuit breaker** — N consecutive 403s → 1+ hour cooldown for whole provider | **P1** | Avoid OL-style escalation; once burned by DataDome, blocks last hours |
+| ~~Audit code for any `/search` calls~~ | n/a | **Already clean** — the GR client's only search path is `/book/auto_complete`; no `/search` URL is built in `goodreads/client.rs` |
+| **GR-specific circuit breaker** — N consecutive 403s → 1+ hour cooldown for whole provider | **P2** | Partly exists: an anti-bot body on a 2xx already fires `BreakerSignal::TripImmediately` on the Goodreads bucket. What is missing is the 403-counting variant and the explicit 1-hour floor |
 | **Honor `Retry-After` on 429** (defensive — not always sent) | **P2** | Standard polite-consumer |
 | **Promote Hardcover to co-primary** for series matching where coverage exists | **P2** | Structural derisking |
 | **Evaluate rreading-glasses as user-configurable proxy option** | **P3** | Externalize scraping risk for users who want it |
