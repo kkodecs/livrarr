@@ -139,25 +139,37 @@ Foundation crate. All dependency arrows point here. Defines entities, enums, err
 ## Service Traits (services/)
 
 ### WorkService (services/work.rs)
-Manages Work CRUD, metadata lookup, cover images, and bulk refresh.
+Manages Work CRUD, refresh, merge, and the identity-edit surface.
 
-- `add(user_id, req)` — creates a Work (and Author if needed), triggers enrichment
-- `get(user_id, id)` — fetches a Work by ID
-- `get_detail(user_id, id)` — fetches Work with its LibraryItems
+> **12 of the trait's 24 methods are listed here.** Not listed: `resolve_identity`,
+> `resolve_identity_local`, `add_fast`, `complete_add`, `is_enriching`, `converge_work`,
+> `preview_merge_works`, `merge_works`, `preview_identity_edit`, `commit_identity_edit`,
+> `clear_identity_slot`.
+
+- `add(user_id, candidate)` — creates a Work from a `WorkCandidate`
+- `get(user_id, work_id)` — fetches a Work by ID
+- `get_detail(user_id, work_id)` — fetches a `WorkDetailView`
 - `list(user_id, filter)` — lists Works with optional filtering/sorting
-- `list_paginated(user_id, filter, page, per_page)` — paginated Work list
-- `update(user_id, id, req)` — updates user-editable Work fields
-- `delete(user_id, id)` — deletes a Work and its library items
-- `refresh(user_id, id)` — re-enriches a single Work from metadata providers
+- `list_paginated(user_id, page, page_size, sort_by, sort_dir, media_type, language)` — paginated Work list
+- `update(user_id, work_id, req)` — updates user-editable Work fields
+- `delete(user_id, work_id)` — deletes a Work and its library items
+- `refresh(user_id, work_id, surface)` — re-enriches a single Work; `surface` selects Interactive (a person is waiting) vs Bulk (unattended sweep, Low queue priority)
 - `retry_all_incomplete(user_id)` — bulk-recovers incomplete works (Failed/Unenriched/identity-Pending) in a single pass through the one road; replaces the deleted background retry job
-- `refresh_all(user_id)` — kicks off a background bulk re-enrichment pass
-- `upload_cover(user_id, id, bytes)` — replaces the cover with a user-uploaded image
-- `download_cover(user_id, id)` — returns cover image bytes
-- `lookup(user_id, req)` — searches metadata providers for works by title/author
-- `lookup_filtered(user_id, req)` — same but applies library-dedup and language filters
-- `search_works(user_id, term)` — full-text search across library works
-- `try_start_bulk_refresh(user_id)` — starts a bulk refresh if none is running; returns handle
-- `finish_bulk_refresh(user_id, handle)` — processes one batch of the bulk refresh pass
+- `upload_cover(user_id, work_id, bytes)` — replaces the cover with a user-uploaded image
+- `download_cover(user_id, work_id)` — returns cover image bytes
+- `search_works(user_id, query, page, page_size)` — paginated search across library works
+- `try_start_bulk_refresh(user_id)` — acquires the per-user bulk-refresh slot; returns `Option<BulkRefreshGuard>`, `None` when a run is already live. The guard frees the slot on `Drop` — completion, error, panic unwind and task abort all release it
+
+**Bulk refresh has no service method.** `refresh_all` is implemented at the handler layer
+(`livrarr-handlers/src/work.rs::refresh_all`); the trait carries only a commented-out
+placeholder.
+
+### DiscoveryService (services/discovery.rs)
+Provider search — split out of `WorkService`.
+
+- `lookup(req)` — searches metadata providers for works (takes no `user_id`)
+- `lookup_filtered(user_id, req, raw)` — same, applying library-dedup and language filters
+- `eager_match_by_author(user_id, queries)` — bulk best-guess discovery for manual import: groups queries by author and issues one author-scoped query per provider. Suggestion-only — no resolver call, so results carry `candidate_id: None`
 
 ### AuthorService (services/author.rs)
 Manages Author CRUD, lookup, and bibliography.
@@ -167,12 +179,15 @@ Manages Author CRUD, lookup, and bibliography.
 - `list(user_id)` — lists all Authors for a user
 - `update(user_id, id, req)` — updates author metadata and monitor settings
 - `delete(user_id, id)` — deletes an Author and cascades to their Works
-- `lookup(user_id, name)` — searches metadata providers by author name
-- `search(user_id, term)` — full-text search within library authors
-- `bibliography(user_id, author_id, filter)` — returns bibliography entries (cached or fresh)
+- `lookup(query, limit)` — searches metadata providers by author name (takes no `user_id`)
+- `search(user_id, query)` — search within library authors
+- `bibliography(user_id, author_id, raw)` — returns bibliography entries (cached or fresh); `raw` selects the unfiltered set
 - `refresh_bibliography(user_id, author_id)` — forces a fresh bibliography fetch
-- `spawn_bibliography_refresh(user_id, author_id)` — spawns a background bibliography refresh
-- `lookup_authors(user_id, req)` — multi-provider author candidate search
+- `spawn_bibliography_refresh(author_id, user_id)` — spawns a background bibliography refresh (note the argument order: author first)
+- `lookup_authors(term, limit)` — multi-provider author candidate search (takes no `user_id`)
+
+Not listed: `merge(user_id, survivor_id, loser_id)` — the author-dedup merge. 11 of the trait's
+12 methods are above.
 
 ### SeriesService (services/series.rs)
 Manages series CRUD and monitoring.
@@ -180,20 +195,22 @@ Manages series CRUD and monitoring.
 - `list(user_id)` — lists all series for a user
 - `get(user_id, id)` — fetches a series by ID
 - `refresh(user_id, id)` — re-fetches series metadata from Goodreads
-- `monitor(user_id, req)` — sets monitor flags and triggers work creation for new entries
-- `update(user_id, id, req)` — updates series metadata fields
+- `monitor(user_id, series_id, monitored)` — sets the series' monitored flag (one bool, no request struct)
+- `update(user_id, series_id, title)` — updates the series title
 
 ### SeriesQueryService (services/series.rs)
 Read-heavy series views and GR candidate resolution.
 
 - `list_enriched(user_id)` — lists series with library-membership counts
 - `get_detail(user_id, id)` — fetches series with full Work/LibraryItem list
-- `update_flags(user_id, id, req)` — updates monitor flags only
+- `update_flags(user_id, series_id, monitor_ebook, monitor_audiobook, language)` — updates monitor flags
 - `resolve_gr_candidates(user_id, author_id)` — fetches Goodreads author candidates for linking
-- `list_author_series(user_id, author_id)` — lists all series for an author
+- `list_author_series(user_id, author_id, raw)` — lists all series for an author
 - `refresh_author_series(user_id, author_id)` — refreshes series list from Goodreads for an author
-- `monitor_series(user_id, req)` — starts monitoring a series by GR key
+- `monitor_series(user_id, author_id, req)` — starts monitoring a series by GR key
 - `run_series_monitor_worker(params)` — background worker that adds missing series Works
+
+Not listed: `promote_stub` and `series_books` — 8 of the trait's 10 methods are above.
 
 ### GrabService (services/grab.rs)
 Read/remove operations over active download grabs.
@@ -209,24 +226,23 @@ Searches indexers for releases and sends grabs to download clients.
 - `grab(user_id, req)` — sends a release to the configured download client
 
 ### QueueService (services/queue.rs)
-Manages the download queue polling loop.
+Data access used by the download queue view and the polling loop.
 
-- `list_grabs_paginated(user_id, filter)` — paginated grab list for UI queue view
-- `list_download_clients(user_id)` — lists active download clients for polling
-- `try_set_importing(grab_id)` — atomically marks a grab as importing
-- `update_grab_status(grab_id, status)` — updates grab status after poll
+- `list_grabs_paginated(user_id, page, per_page)` — paginated grab list for UI queue view
+- `list_download_clients()` — lists download clients for polling (takes no `user_id`)
+- `try_set_importing(user_id, grab_id)` — atomically marks a grab as importing
+- `update_grab_status(user_id, grab_id, status, error)` — updates grab status after poll
 - `fetch_download_progress(client, download_id)` — polls a download client for progress
 - `summary(user_id)` — returns queue aggregate counts
 
 ### ImportWorkflow (services/import.rs)
 Orchestrates the full import pipeline for a completed grab.
 
-- `import_grab(grab_id)` — runs the complete import workflow for a finished download
-- `retry_import(grab_id)` — retries a previously failed import
-- `confirm_scan(user_id, confirmations)` — finalizes a manual scan-based import
+- `import_grab(user_id, grab_id)` — runs the complete import workflow for a finished download
+- `import_file(user_id, req)` — brings one file into the library as a `LibraryItem`; the shared entry point for every import door (grab, manual, Readarr, scan)
 
 ### BibliographyTrigger (services/import.rs)
-- `trigger(user_id, author_id)` — fires a bibliography refresh after import
+- `trigger(author_id, user_id)` — fires a bibliography refresh after import (note the argument order: author first)
 
 ### ImportService (services/import_service.rs)
 Low-level file import operations.
@@ -244,14 +260,15 @@ Low-level file import operations.
 ### EnrichmentWorkflow (services/enrichment.rs)
 Runs the metadata enrichment pipeline for a Work.
 
-- `enrich_work(user_id, work_id, mode)` — fetches and merges metadata from providers
+- `enrich_work(user_id, work_id, mode, candidate_id, priority, freshness)` — fetches and merges metadata from providers. `priority` is the queue-ordering hint, independent of `mode`; `freshness` decides whether fetches may be served from the persistent provider-response cache
 - `reset_for_manual_refresh(user_id, work_id)` — clears enrichment state for a re-run
+
+Not listed: `inject_source_data` and `fetch_anchor_preview` — 2 of the trait's 4 methods are above.
 
 ### AuthorMonitorWorkflow (services/monitor.rs)
 Checks monitored authors for new works.
 
-- `run_monitor()` — scans all monitored authors and adds new Works found in bibliography
-- `trigger_monitor()` — enqueues a background monitor pass
+- `run_monitor(user_id, cancel)` — scans that user's monitored authors and adds new Works found in bibliography; `cancel` is the cooperative-shutdown token. The trait's only method
 
 ### RssSyncWorkflow (services/rss.rs)
 Polls RSS feeds and auto-grabs matching releases.

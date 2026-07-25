@@ -1,5 +1,30 @@
 # Wiki Change Log
 
+## 2026-07-25 — domain.md service traits verified against source (partial pass — see boundary)
+
+**Updated pages:**
+- crates/domain.md — fourth documentarian verify-and-correct pass. **Partial by design:** the
+  page is 417 lines over ~150 KB of source, so this pass covers the service-trait block from
+  `### WorkService` through `### RssSyncWorkflow` only. 22 claims corrected, 5 deleted.
+  Deleted because they exist nowhere in the repo: `WorkService::finish_bulk_refresh`,
+  `AuthorMonitorWorkflow::trigger_monitor`, `ImportWorkflow::confirm_scan`. Deleted because
+  they are not what the page said they were: `WorkService::refresh_all` (bulk refresh has no
+  service method — it lives at the handler layer, and the trait carries only a commented-out
+  placeholder) and `ImportWorkflow::retry_import` (a route handler in `livrarr-handlers`, not
+  a trait method). `lookup` / `lookup_filtered` were moved off `WorkService` into a new
+  `DiscoveryService` section, where they actually live — and `lookup` takes no `user_id`.
+  The recurring defect, as on db.md: invented request structs and invented or dropped
+  parameters — `enrich_work` takes six arguments not three, `refresh` takes a `surface`,
+  `run_monitor` takes `(user_id, cancel)`, `update_flags` takes five, and two functions
+  (`spawn_bibliography_refresh`, `BibliographyTrigger::trigger`) take `(author_id, user_id)`
+  in that order, the reverse of what the page said.
+
+**Context:** documentarian edit pass #4, scoped by `build/reviews/DOC-EDIT-PACKET-4.md`.
+Per-edit citations and the exact resume boundary: `build/reviews/docs-edit-domain-md-changelog.md`.
+**Not yet audited:** everything above `## Service Traits` (entities, enums, utility functions,
+settings, Readarr types, Torznab, KeyedMutex) and everything from `### ReadarrImportWorkflow`
+to the end of the page.
+
 ## 2026-07-25 — db.md verified against source: signatures were systematically wrong about user scoping
 
 **Updated pages:**
