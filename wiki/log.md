@@ -1,5 +1,37 @@
 # Wiki Change Log
 
+## 2026-07-25 — the `dyn` pair named; google-books.md verified (GB key is a header, not a query param)
+
+**Updated pages:** `wiki/patterns/async-service.md` (the `dyn` absolute, now settled) and
+`wiki/integrations/google-books.md` (Part B, 3 of 5). Eleventh documentarian pass.
+
+**The `dyn` claim is now exact.** Exactly two traits under `livrarr-domain/src/services/` are used
+dynamically, and both are deliberately plain and synchronous — which is what makes them dyn-safe
+when the `trait_variant` ones structurally are not: `ChapterExtractor` (`services/chapter.rs:18`,
+`Arc<dyn>` at `import_workflow.rs:61`, `:69`, `:1853`, `:2143`) and `ProviderCallSink`
+(`services/provider_calls.rs:55`, `Arc<dyn>` across enrichment, external-data and
+`server/main.rs:746`). `ProviderCallSink`'s own doc states the design: "Deliberately sync and
+dyn-safe (`Arc<dyn ProviderCallSink>`) so any crate can record without a db edge or a generics
+explosion." Every other `dyn` in the workspace is `Box<dyn Error>` / `Future` / `Iterator` or
+`Arc<dyn Fn>`. The rule now on the page: an async service trait cannot be `dyn`; a seam that needs
+dynamic dispatch is written plain and sync on purpose.
+
+**google-books.md: the API key is sent as the `X-Goog-Api-Key` header, not `?key=` in the query
+string.** Both fetch paths set that header. The page documented the query-string form, which would
+send a maintainer debugging auth to the wrong place entirely. Also corrected: `quotaExceeded` is
+already discriminated from a bad key (R-9 — a quota 403 trips the breaker until the next Pacific
+midnight; anything else counts as a bad key), so the page's "our handler must catch this" was
+describing finished work — with the real caveat that the *other* fetch path swallows any 403
+undifferentiated. And gzip is **not** enabled: no `Accept-Encoding`, no `(gzip)` UA suffix.
+
+Per the standing ruling, google-books.md now carries an implemented-vs-stated-intent table too.
+Two of its rows are honestly marked **undetermined**: `fields=` and `maxResults` are decided by
+whoever builds the URL, since both fetch functions take a caller-supplied `url: String`.
+
+**Context:** pass #11, scoped by `build/reviews/DOC-EDIT-PACKET-6.md`.
+Citations: `build/reviews/docs-edit-integrations-changelog.md` (appended).
+**Split:** `hardcover.md` and `openlibrary.md` remain unaudited.
+
 ## 2026-07-25 — goodreads.md verified: we already stopped hitting `/search`, and the pace is 1.5s
 
 **Updated pages:** `wiki/integrations/goodreads.md` (Part B, 2 of 5) and

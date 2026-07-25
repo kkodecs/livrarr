@@ -13,7 +13,7 @@ Google Books (GB) is Livrarr's foreign-language metadata provider today, and is 
 
 | Mechanism | When required |
 |---|---|
-| **API key** (`?key=YOUR_KEY` in query string) | Any non-OAuth request. This is what we use. |
+| **API key** — sent as the **`X-Goog-Api-Key` request header**, not `?key=` in the query string | Any non-OAuth request. This is what we use: both GB fetch paths (`fetch_gb_volumes`, `fetch_gb_search`) set that header |
 | **OAuth 2.0** (`Authorization: Bearer ...`, scope `https://www.googleapis.com/auth/books`) | Required only for **per-user data** (`/mylibrary/*` endpoints — bookshelves, etc.). Livrarr doesn't touch user-data endpoints. |
 
 GB does **not** require a User-Agent contact field the way OL does. Identification is via the API key. The key is tied to a GCP project, which is tied to a billing account (even though we stay in the free tier).
@@ -93,6 +93,18 @@ Cover URLs returned by GB are signed/parameterized — they don't 403 on rate li
 5. **Don't use OAuth-gated endpoints (`/mylibrary/*`)** — Livrarr is server-side and shouldn't be managing user GB bookshelves.
 6. **Don't paginate beyond what's necessary.** GB returns up to 40 items per page (`maxResults=40`); for our use we rarely need more than ~10 — set `maxResults` explicitly.
 
+> **Which of these rules the code actually implements.** Verified against
+> `livrarr-external-data/src/google_books.rs`:
+>
+> | Rule | Status |
+> |---|---|
+> | No hardcoded shared API key | **Honored** — the key is a parameter on both fetch paths, supplied per install |
+> | Don't use OAuth-gated `/mylibrary/*` | **Honored** — neither fetch path sends an `Authorization` header |
+> | Always use `fields=` | **Undetermined here** — both fetch functions take a caller-built URL; the answer is at the call sites |
+> | Don't skip gzip | **Not honored** — no `Accept-Encoding` header, no `(gzip)` UA suffix |
+> | Set `maxResults` explicitly / don't over-paginate | **Undetermined here** — same reason as `fields=` |
+> | Don't burn quota on speculative fetches | **Stated intent** — no quota accounting exists in this module; pacing is `RateBucket::GoogleBooks` on the outbound queue |
+
 ## Terms of Service highlights
 
 Reference: <https://developers.google.com/books/terms>
@@ -118,8 +130,15 @@ Reference: <https://developers.google.com/books/terms>
 If Livrarr's GB usage exceeds 1,000 req/day:
 
 1. **Default behavior:** GB returns HTTP 403 with `quotaExceeded` error code in the body.
-2. **Our handler:** must catch this as a separate-from-other-403s case — it's NOT a hard ban, it's a daily quota reset.
-3. **Retry-after:** next reset is midnight Pacific Time. Surface this to the user.
+2. **Our handler — already does this (R-9).** `fetch_gb_search` calls `gb_403_quota_reason`, which
+   reads `/error/errors/0/reason` and matches `quotaExceeded` / `rateLimitExceeded`. A quota 403
+   trips the GoogleBooks breaker open until the next Pacific midnight
+   (`duration_until_pacific_midnight`); any other 403 — including an unparseable body, the
+   conservative default — is treated as a bad key and counted as an ordinary failure.
+   **Caveat:** the other fetch path, `fetch_gb_volumes`, does *not* make this distinction — it
+   returns an empty result on any 403.
+3. **Retry-after:** next reset is midnight Pacific Time — implemented as the breaker's open-for
+   window. Surfacing it to the user is still open.
 4. **Mitigation paths:**
    - User requests quota increase from GCP for their own project (free, but takes time)
    - User adds a second GB API key for failover (multiple GCP projects)
@@ -142,8 +161,9 @@ Tracked separately as bugs/enhancements:
 |---|---|
 | GB as English search fallback when OL fails | **In progress** (this session) |
 | Cache layer for GB volume IDs (avoid re-fetching same volume) | TBD |
-| `fields=` partial response on all GB calls | Audit current GB client; many calls likely fetch full payload today |
-| Gzip + `(gzip)` UA suffix on GB calls | Audit; not sure if enabled |
+| `fields=` partial response on all GB calls | **Audit the call sites, not the client** — `fetch_gb_volumes` and `fetch_gb_search` both take a caller-built `url: String`, so whether `fields=` is present is decided by whoever builds the URL |
+| Gzip + `(gzip)` UA suffix on GB calls | **Not enabled** — neither fetch path sets `Accept-Encoding`, and both use `UserAgentProfile::Server` with no `(gzip)` suffix |
+| `quotaExceeded` distinguished from a bad key | **Done (R-9)** on the `fetch_gb_search` path; `fetch_gb_volumes` still swallows any 403 |
 | User-visible `quotaExceeded` error surface | Pairs with #77 (error-message scrubbing + AI help) |
 | Per-install API key documentation in onboarding | Pairs with #72 (onboarding GB step) |
 

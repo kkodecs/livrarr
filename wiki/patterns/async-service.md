@@ -38,13 +38,27 @@ Errors are **per-service** (`WorkServiceError`, `FileServiceError`, …) plus th
 - **Non-dyn-compatible** — `trait_variant::make(Send)` produces traits that can't be used with `dyn`. Use generics/monomorphization exclusively.
 - **No `dyn` on async service traits** — which follows from the rule above rather than from
   discipline: a `trait_variant::make(Send)` trait cannot be made into a trait object at all.
-- **"Zero `dyn` for service traits" is not true as stated.** At least one trait under
-  `livrarr-domain/src/services/` is deliberately **sync** and *is* used dynamically:
-  `ChapterExtractor` (`services/chapter.rs`) is a plain `Send + Sync` trait whose single method
-  is blocking, and `ImportWorkflowImpl` holds it as `Arc<dyn ChapterExtractor>` and takes one in
-  its constructor. That `dyn` seam is the point: it lets `livrarr-library` carry no
-  `livrarr-tagwrite` edge, with the composition root supplying `ChapterExtractorImpl` as the
-  delegate. Sync-by-design traits in `services/` are where a `dyn` seam can live.
+- **"Zero `dyn` for service traits" is not true as stated.** **Exactly two** traits under
+  `livrarr-domain/src/services/` are used dynamically. Both are deliberately plain and
+  **synchronous** — which is precisely what makes them dyn-safe when the `trait_variant` ones
+  are not:
+  - **`ChapterExtractor`** (`services/chapter.rs:18`) — held as `Arc<dyn ChapterExtractor>` by
+    `ImportWorkflowImpl` and threaded through its helpers
+    (`livrarr-library/src/import_workflow.rs:61`, `:69`, `:1853`, `:2143`). The seam exists so
+    `livrarr-library` carries no `livrarr-tagwrite` edge; the composition root supplies
+    `ChapterExtractorImpl`.
+  - **`ProviderCallSink`** (`services/provider_calls.rs:55`) — `Arc<dyn ProviderCallSink>` across
+    `livrarr-enrichment`, `livrarr-external-data` and the composition root
+    (`livrarr-server/src/main.rs:746`). Its own doc states the design directly: "Deliberately sync
+    and dyn-safe (`Arc<dyn ProviderCallSink>`) so any crate can record without a db edge or a
+    generics explosion."
+
+  Every other `dyn` under `crates/` is a std or third-party trait object — `Box<dyn Error>`,
+  `Box<dyn Future>`, `Box<dyn Iterator>`, `Arc<dyn Fn>`, `Box<dyn tracing_subscriber::Layer>`,
+  `&dyn Debug` — never a livrarr service trait. (Enumerated from a `dyn ` text sweep over
+  `crates/`, 45 hits; `tests/` and `frontend/` not swept.) **The rule to take from this:** an
+  async service trait cannot be `dyn`; when a seam genuinely needs dynamic dispatch, the trait
+  is written plain and sync on purpose.
 - **AppState uses concrete types via type aliases** — not `Arc<dyn Trait>`, not generics with 12+ type params.
 
 ## Stub Policy
