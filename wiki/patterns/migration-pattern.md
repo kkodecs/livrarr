@@ -4,10 +4,9 @@
 
 1. **Never edit applied migrations.** sqlx checksum validation fails if you modify already-applied migration files. Always create new migrations.
 2. **Migrations run at startup.** Embedded in the binary via sqlx. Fatal on failure.
-3. **Pre-migration backup:** `VACUUM INTO 'livrarr.db.pre-migrate-vN-YYYYMMDD-HHMMSS'`. Fatal if backup fails. Skipped if no migrations needed.
-4. **FK checks before and after.** `PRAGMA foreign_key_check` baseline before, fatal if new violations after.
-5. **Backup retention:** keep 3 most recent migration-version backups.
-6. **Each migration in a transaction** where possible. Exceptions must document recovery procedure.
+3. **Pre-migration backup:** `VACUUM INTO 'livrarr.db.pre-migrate-YYYYMMDD-HHMMSS'` — timestamp only, no version component. Fatal if the backup fails. Skipped when the DB file does not yet exist (fresh install), **not** when there is nothing to migrate.
+4. **Backup retention:** keep the 3 most recent. Selection is by filename prefix (`livrarr.db.pre-migrate-`) sorted lexicographically, which is chronological because the names are timestamps.
+5. **Each migration in a transaction** where possible. Exceptions must document recovery procedure.
 
 ## Naming
 

@@ -4,18 +4,27 @@ Governing principle: strict for authoritative state, tolerant for rebuildable st
 
 ## Error Categories and HTTP Mapping
 
-| Category | HTTP | When |
-|----------|------|------|
-| ValidationError | 400 | Bad user input |
-| AuthenticationError | 401 | Missing/expired token |
-| AuthorizationError | 403 | Insufficient permissions |
-| NotFound | 404 | Entity doesn't exist |
-| Conflict | 409 | Duplicate, stale update, state transition rejected |
-| DataCorruption | 500 | Unknown enum (version gate passed) |
-| Timeout | 504 | Upstream deadline exceeded |
-| TransientError | 503 | SQLITE_BUSY |
-| StorageError | 503 | Disk full, SQLITE_IOERR |
-| ExternalDependencyError | 502 | Provider failure |
+The concrete type is `ApiError` in `livrarr-handlers/src/types/api_error.rs` — 23 variants. The
+rows below are the ones this page has always covered, with the variant that actually produces
+each status:
+
+| Category | `ApiError` variant | HTTP | When |
+|----------|--------------------|------|------|
+| Bad user input | `BadRequest` | 400 | Malformed request |
+| Validation failure | `Validation`, `Unprocessable` | **422** | Field-level validation — **not** 400 |
+| AuthenticationError | `Unauthorized` | 401 | Missing/expired token |
+| AuthorizationError | `Forbidden` | 403 | Insufficient permissions |
+| NotFound | `NotFound` | 404 | Entity doesn't exist |
+| Conflict | `Conflict`, `ConflictDetailed` | 409 | Duplicate, stale update, state transition rejected |
+| DataCorruption | `Db(DbError::DataCorruption)` | 500 | Unknown enum (version gate passed) |
+| Service at capacity | `ServiceUnavailable`, `ServiceUnavailableRetry` | 503 | Backpressure; the retry variant carries `Retry-After` |
+| ExternalDependencyError | `BadGateway`, `StructuredBadGateway` | 502 | Provider failure |
+
+Two rows this page used to carry have **no** corresponding variant and no such mapping:
+
+- **Timeout → 504.** `ApiError` has no `Timeout` variant and nothing returns `504`.
+- **StorageError → 503 (disk full, SQLITE_IOERR).** `DbError::Io` maps to **500**, not 503.
+  Likewise `SQLITE_BUSY` produces no 503 — it is absorbed by the connection's `busy_timeout`.
 
 ## Data Read Policies
 

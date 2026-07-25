@@ -1,5 +1,37 @@
 # Wiki Change Log
 
+## 2026-07-25 — wiki/patterns verified: three of four conventions had drifted from the code
+
+**Updated pages:** all four of `wiki/patterns/` — `async-service.md`, `error-handling.md`,
+`migration-pattern.md`, `test-doubles.md`. Eighth documentarian pass, and the first on
+*convention* pages, where the failure mode is "the codebase no longer does this" rather than a
+misspelled name. **13 claims corrected, 4 blocks deleted.**
+
+- **async-service.md** — the page opened "Every service in Livrarr follows the trait + impl +
+  stub pattern." The stub leg is the exception: `livrarr-behavioral/src/stubs.rs` holds seven
+  doubles, and `WorkService`, `AuthorService`, `FileService` and most others have none. Its code
+  sample was also fiction in four places — it pointed at `livrarr-domain/src/services.rs` (no
+  such file; `services/` is a directory), used method names `get_work`/`add_work` (the trait has
+  `add`/`get`), and named two types that exist nowhere in the repo, `DomainError` and
+  `StubWorkService`. Sample corrected against the real trait; errors are per-service.
+- **migration-pattern.md** — rule 4 required `PRAGMA foreign_key_check` before and after every
+  migration, fatal on new violations. **No such check exists anywhere in the codebase** — zero
+  hits. Rule deleted. Also: the backup filename has no `vN` component, and the backup is skipped
+  when the DB file does not yet exist, not when there is nothing to migrate.
+- **test-doubles.md** — documented three test-DB helpers (default, shared-memory with
+  `cache=shared`, temp-file with `tempfile`). `livrarr-db::test_helpers` contains exactly one
+  function, `create_test_db`. The other two were removed rather than rewritten.
+- **error-handling.md** — the HTTP table listed validation as 400; the real `Validation` /
+  `Unprocessable` variants return **422**. `StorageError → 503` is wrong: `DbError::Io` maps to
+  500, and `SQLITE_BUSY` produces no 503 at all — it is absorbed by `busy_timeout`. `Timeout →
+  504` has no variant and nothing returns 504. Table now names the `ApiError` variant behind each
+  row.
+
+**Context:** documentarian edit pass #8, scoped by `build/reviews/DOC-EDIT-PACKET-5.md`.
+Per-edit citations: `build/reviews/docs-edit-patterns-changelog.md`. One convention left
+unverified and flagged: "the codebase uses zero `dyn` for service traits" — an absolute that
+needs a real sweep to confirm or refute.
+
 ## 2026-07-25 — domain.md Entities verified: the "newtype IDs" are type aliases; domain.md complete
 
 **Updated pages:**

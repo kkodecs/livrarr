@@ -1,26 +1,36 @@
 # Async Service Pattern
 
-Every service in Livrarr follows the trait + impl + stub pattern.
+Services follow a trait + impl shape: the trait in `livrarr-domain`, the production
+implementation in the owning crate.
+
+> **The "+ stub" third leg is the exception, not the rule.**
+> `livrarr-behavioral/src/stubs.rs` provides seven doubles in total —
+> `StubHttpFetcher`, `StubLlmCaller`, `StubEnrichmentWorkflow`, `StubSeriesQueryService`,
+> `StubImportWorkflow`, `StubRssSyncWorkflow` and `TagwriteChapterExtractor`. Most service
+> traits — `WorkService`, `AuthorService`, `FileService` and the rest — have **no** stub.
 
 ## Structure
 
 ```rust
-// In livrarr-domain/src/services.rs — trait definition
+// In livrarr-domain/src/services/work.rs — trait definition
+// (there is no services.rs; services/ is a module directory)
 #[trait_variant::make(Send)]
-pub trait WorkService {
-    async fn get_work(&self, user_id: UserId, work_id: WorkId) -> Result<Work, DomainError>;
-    async fn add_work(&self, request: AddWorkRequest) -> Result<Work, DomainError>;
+pub trait WorkService: Send + Sync {
+    async fn add(
+        &self,
+        user_id: UserId,
+        candidate: crate::identity::WorkCandidate,
+    ) -> Result<AddWorkResult, WorkServiceError>;
     // ...
 }
 
 // In livrarr-metadata/src/work_service.rs — production implementation
 pub struct WorkServiceImpl { /* dependencies */ }
 impl WorkService for WorkServiceImpl { /* real logic */ }
-
-// In livrarr-behavioral/src/stubs.rs — test stub
-pub struct StubWorkService { /* configurable responses */ }
-impl WorkService for StubWorkService { /* returns configured data */ }
 ```
+
+Errors are **per-service** (`WorkServiceError`, `FileServiceError`, …) plus the shared
+`ServiceError`. There is no single `DomainError` type.
 
 ## Rules
 
@@ -40,4 +50,6 @@ impl WorkService for StubWorkService { /* returns configured data */ }
 
 ## Where Stubs Live
 
-Test stubs in `livrarr-behavioral/src/stubs.rs`. Cross-crate behavioral tests in `livrarr-behavioral`.
+Test stubs in `livrarr-behavioral/src/stubs.rs` — seven of them, listed at the top of this page.
+That file also carries the `create_test_user` / `create_second_test_user` fixtures. Cross-crate
+behavioral tests live in `livrarr-behavioral`.
