@@ -610,32 +610,39 @@ impl OutboundQueue {
         // state lock (the map lock is a leaf lock released here). `None` for
         // every non-`Indexer{Some}` bucket.
         let rl_breaker = self.rate_limit_breaker(&bucket);
-        let (turn_tx, turn_rx) = oneshot::channel();
 
-        {
+        let enqueue = |turn: oneshot::Sender<TurnResult>, admitted: bool| {
             let mut state = handle
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // D3 admission gate: reject BEFORE enqueueing when this priority
             // has no reserved headroom left. Never touches an already-queued
-            // item — rejection only ever applies to the new arrival.
-            if state.heap.len() >= admission_threshold(priority) {
-                return Err(AdmissionError::QueueFull {
-                    retry_after: QUEUE_FULL_RETRY_AFTER_HINT,
-                });
+            // item — rejection only ever applies to the new arrival. A
+            // re-enqueue after a torn hand-off (below) was already admitted
+            // and is never re-gated.
+            if !admitted && state.heap.len() >= admission_threshold(priority) {
+                return false;
             }
             let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
             state.heap.push(QueuedItem {
                 priority,
                 seq,
-                turn: turn_tx,
-                rl_breaker,
+                turn,
+                rl_breaker: rl_breaker.clone(),
             });
             if !state.dispatcher_running {
                 state.dispatcher_running = true;
                 tokio::spawn(run_dispatcher(handle.clone(), interval_for(&bucket)));
             }
+            true
+        };
+
+        let (turn_tx, mut turn_rx) = oneshot::channel();
+        if !enqueue(turn_tx, false) {
+            return Err(AdmissionError::QueueFull {
+                retry_after: QUEUE_FULL_RETRY_AFTER_HINT,
+            });
         }
 
         // #7: the push above just made this handle non-quiescent. Re-assert
@@ -644,9 +651,37 @@ impl OutboundQueue {
         // push — can never orphan it.
         self.reassert_non_quiescent(pace_key(&bucket), &handle);
 
-        let result = turn_rx
-            .await
-            .expect("dispatcher dropped a queued item without granting its turn");
+        // The dispatcher task runs on whichever runtime first touched the
+        // lane and dies with it (`cargo test`'s multi-runtime model). The
+        // DispatcherGuard clears the running flag, but a waiter already
+        // queued from ANOTHER runtime has no later `acquire` to respawn a
+        // dispatcher for it — so each waiter periodically re-checks and
+        // resurrects the dispatcher on its OWN (live) runtime. In production
+        // (one runtime for the process's lifetime) the probes are no-ops.
+        const DISPATCHER_PROBE: Duration = Duration::from_millis(500);
+        let result = loop {
+            match tokio::time::timeout(DISPATCHER_PROBE, &mut turn_rx).await {
+                Ok(Ok(result)) => break result,
+                Ok(Err(_)) => {
+                    // Torn hand-off: the dispatcher popped this item and died
+                    // before sending the turn. The turn is lost, not granted —
+                    // requeue (already admitted) and keep waiting.
+                    let (turn_tx, new_rx) = oneshot::channel();
+                    enqueue(turn_tx, true);
+                    turn_rx = new_rx;
+                }
+                Err(_elapsed) => {
+                    let mut state = handle
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if !state.dispatcher_running && !state.heap.is_empty() {
+                        state.dispatcher_running = true;
+                        tokio::spawn(run_dispatcher(handle.clone(), interval_for(&bucket)));
+                    }
+                }
+            }
+        };
         result
             .map(|permit| QueuePermit {
                 _permit: Some(permit),

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CoverResolution, DbError, EnrichmentStatus, MetadataProvider, OutcomeClass, RequestPriority,
-    Work, WorkId,
+    AnchorQuery, CoverResolution, DbError, EnrichmentStatus, MetadataProvider, OutcomeClass,
+    RequestPriority, Work, WorkId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -97,4 +97,26 @@ pub trait EnrichmentWorkflow: Send + Sync {
         work_id: WorkId,
         data: super::SourceProviderData,
     );
+
+    /// One preview fetch against the named provider by anchor query (design
+    /// identity-edit r4 §Preview seam). Returns the domain preview record —
+    /// this trait never names the enrichment-layer payload type. No provider
+    /// response cache, no retry-state writes, no budget bookkeeping; call
+    /// records emit at the client wrapper as usual.
+    ///
+    /// Stub default (desugared — `trait_variant` cannot expand a provided
+    /// `async fn`): reports `NotConfigured`, the truthful answer for a
+    /// workflow with no provider registry.
+    fn fetch_anchor_preview(
+        &self,
+        provider: MetadataProvider,
+        query: AnchorQuery,
+        language: Option<String>,
+        priority: RequestPriority,
+    ) -> impl std::future::Future<
+        Output = Result<super::IdentityPreviewOutcome, EnrichmentWorkflowError>,
+    > + Send {
+        let _ = (provider, query, language, priority);
+        async move { Ok(super::IdentityPreviewOutcome::NotConfigured) }
+    }
 }

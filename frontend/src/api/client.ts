@@ -34,6 +34,9 @@ export class ApiError extends Error {
   status: number;
   error: string;
   fieldErrors?: ApiErrorResponse["fieldErrors"];
+  /** Structured detail (identity-edit door contract): stable code + collision
+   * owner. Retained, never discarded — callers branch on `details?.code`. */
+  details?: ApiErrorResponse["details"];
 
   constructor(response: ApiErrorResponse) {
     super(response.message);
@@ -41,6 +44,7 @@ export class ApiError extends Error {
     this.status = response.status;
     this.error = response.error;
     this.fieldErrors = response.fieldErrors;
+    this.details = response.details;
   }
 }
 
@@ -64,6 +68,10 @@ async function normalizeError(res: Response): Promise<ApiErrorResponse> {
         fieldErrors: Array.isArray(b.fieldErrors)
           ? (b.fieldErrors as ApiErrorResponse["fieldErrors"])
           : undefined,
+        details:
+          b.details && typeof b.details === "object"
+            ? (b.details as ApiErrorResponse["details"])
+            : undefined,
       };
     }
   } catch {

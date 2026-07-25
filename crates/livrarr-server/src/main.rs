@@ -659,6 +659,16 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
         std::process::exit(1);
     }
 
+    // Step 9d: Complete the identity ledger from legacy works columns
+    // (identity-edit r4 §startup ledger completion). Runs before services or
+    // jobs exist, so no identity writer can race it and no generation bump is
+    // needed; the completion marker and rows commit atomically. Idempotent.
+    if let Err(e) = livrarr_db::backfill_work_identity_ledger(&pool).await {
+        error!("identity ledger backfill failed: {e}");
+        livrarr_db::pool::release_pid_lock(data_dir);
+        std::process::exit(1);
+    }
+
     // Step 10: Clean up old backups (keep 3).
     {
         let data_dir_clone = data_dir.to_path_buf();

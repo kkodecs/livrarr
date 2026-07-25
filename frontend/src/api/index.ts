@@ -15,6 +15,9 @@ import type {
   AddWorkRequest,
   AddWorkResponse,
   WorkDetailResponse,
+  IdentityPreviewRequest,
+  IdentityPreviewResponse,
+  IdentitySlot,
   UpdateWorkRequest,
   RefreshWorkResponse,
   DeleteWorkResponse,
@@ -171,6 +174,20 @@ export const listWorks = (params?: {
 };
 export const getWork = (id: number) =>
   apiFetch<WorkDetailResponse>(`/work/${id}`);
+export const previewIdentityEdit = (id: number, req: IdentityPreviewRequest) =>
+  apiFetch<IdentityPreviewResponse>(`/work/${id}/identity/preview`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+export const commitIdentityEdit = (id: number, slot: IdentitySlot, previewId: string) =>
+  apiFetch<WorkDetailResponse>(`/work/${id}/identity/${slot}`, {
+    method: "PUT",
+    body: JSON.stringify({ preview_id: previewId }),
+  });
+export const clearIdentitySlot = (id: number, slot: IdentitySlot) =>
+  apiFetch<WorkDetailResponse>(`/work/${id}/identity/${slot}`, {
+    method: "DELETE",
+  });
 export const updateWork = (id: number, req: UpdateWorkRequest) =>
   apiFetch<WorkDetailResponse>(`/work/${id}`, {
     method: "PUT",

@@ -294,6 +294,15 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             post(livrarr_handlers::work::affirm_pending_anchor::<AppState>),
         )
         .route(
+            "/work/{id}/identity/preview",
+            post(livrarr_handlers::work::preview_identity_edit::<AppState>),
+        )
+        .route(
+            "/work/{id}/identity/{slot}",
+            put(livrarr_handlers::work::commit_identity_edit::<AppState>)
+                .delete(livrarr_handlers::work::clear_identity_slot::<AppState>),
+        )
+        .route(
             "/work/{id}/merge/{loser_id}/preview",
             get(livrarr_handlers::work::preview_merge::<AppState>),
         )

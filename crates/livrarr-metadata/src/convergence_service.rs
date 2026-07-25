@@ -102,9 +102,10 @@ where
     // holds a chaseable bridge. Background keeps Audnexus eligible; Convergence
     // attributes any raised conflict.
     let mut work = work;
+    let mut settle_superseded = false;
     if !chaseable.is_empty() {
         if let Some(resolver) = svc.resolver.as_ref() {
-            if let Err(e) = crate::async_resolver::settle_identity(
+            match crate::async_resolver::settle_identity(
                 resolver.as_ref(),
                 &svc.db,
                 user_id,
@@ -114,7 +115,10 @@ where
             )
             .await
             {
-                tracing::warn!(work_id, "convergence identity settle failed: {e}");
+                Ok(report) => settle_superseded = report.superseded,
+                Err(e) => {
+                    tracing::warn!(work_id, "convergence identity settle failed: {e}");
+                }
             }
             work = svc.get(user_id, work_id).await?;
         }
@@ -148,26 +152,30 @@ where
 
     // Step 3 — dead-end accounting (R-1/R-2). A harvested anchor clears its counter;
     // a chaseable anchor still missing and unguessed gets +1 (an at-threshold anchor
-    // is already excluded from `chaseable`, so it is never re-bumped).
-    let still_missing = missing_of(&work);
+    // is already excluded from `chaseable`, so it is never re-bumped). A Superseded
+    // settle skips this entirely: the `before_missing` snapshot predates the winning
+    // identity edit, so applying it would account against the wrong identity.
     let anchors_after = svc.db.list_anchors(work_id).await.unwrap_or_default();
-    let pending_after: Vec<String> = anchors_after
-        .iter()
-        .filter(|a| a.confidence == AnchorConfidence::Pending)
-        .map(|a| a.anchor_type.as_str().to_string())
-        .collect();
-    for t in &before_missing {
-        if !still_missing.contains(t) {
-            let _ = svc
-                .db
-                .clear_anchor_dead_end(work_id, AnchorType::new(t))
-                .await;
+    if !settle_superseded {
+        let still_missing = missing_of(&work);
+        let pending_after: Vec<String> = anchors_after
+            .iter()
+            .filter(|a| a.confidence == AnchorConfidence::Pending)
+            .map(|a| a.anchor_type.as_str().to_string())
+            .collect();
+        for t in &before_missing {
+            if !still_missing.contains(t) {
+                let _ = svc
+                    .db
+                    .clear_anchor_dead_end(work_id, AnchorType::new(t))
+                    .await;
+            }
         }
-    }
-    for at in &chaseable {
-        let key = at.as_str().to_string();
-        if still_missing.contains(&key) && !pending_after.contains(&key) {
-            let _ = svc.db.bump_anchor_attempt(work_id, at.clone()).await;
+        for at in &chaseable {
+            let key = at.as_str().to_string();
+            if still_missing.contains(&key) && !pending_after.contains(&key) {
+                let _ = svc.db.bump_anchor_attempt(work_id, at.clone()).await;
+            }
         }
     }
 

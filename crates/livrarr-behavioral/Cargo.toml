@@ -7,6 +7,10 @@ publish = false
 
 [features]
 qw2_compile_red = []
+# identity-edit staged-red suites (design r4): final-form tests referencing
+# not-yet-implemented surfaces compile only under this feature. See the file
+# headers of tests/behavioral/test_identity_edit*.rs for the protocol.
+identity_edit_red = []
 
 [dependencies]
 livrarr-domain = { workspace = true }
@@ -585,3 +589,17 @@ name = "test_stream_token"
 path = "../../tests/behavioral/test_stream_token.rs"
 
 # --- End Unit C ---
+
+# --- identity-edit red-first suites (design r4; CC-authored) ---
+
+[[test]]
+name = "test_identity_edit_durable"
+path = "../../tests/behavioral/test_identity_edit_durable.rs"
+
+[[test]]
+name = "test_identity_edit"
+path = "../../tests/behavioral/test_identity_edit.rs"
+required-features = ["identity_edit_red"]
+
+# --- End identity-edit suites (merged 2026-07-24: codex base + CC net-new; see
+# --- build/reviews/identity-edit/suite-merge-notes.md) ---

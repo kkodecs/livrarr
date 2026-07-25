@@ -227,6 +227,13 @@ pub struct WorkDetailResponse {
     /// work (in-memory signal; false after restart by design).
     #[serde(default)]
     pub enriching: bool,
+    /// True exactly when open identity conflicts park the work (identity-edit
+    /// r4): re-matching and enrichment stay paused until the Review surface
+    /// settles them. Computed on every shared work-detail mapping from the
+    /// persisted Conflict badge, which the conflict transactions and
+    /// `derive_badge_in_tx` maintain.
+    #[serde(default)]
+    pub parked_by_conflicts: bool,
 }
 
 /// Convert a domain `Work` into a `WorkDetailResponse` (with empty `library_items`).
@@ -313,6 +320,7 @@ pub fn work_to_detail_with_cover_mtime(
         cover_mtime,
         audiobook_cover_mtime,
         enriching: false,
+        parked_by_conflicts: w.identity_status == IdentityStatus::Conflict,
     }
 }
 

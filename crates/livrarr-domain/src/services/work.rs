@@ -479,6 +479,70 @@ pub trait WorkService: Send + Sync {
         loser_id: WorkId,
         choices: Vec<MergeFieldChoiceEntry>,
     ) -> Result<MergeWorksResult, WorkServiceError>;
+
+    // ── identity-edit surface (design identity-edit r4) ──────────────────
+    //
+    // Desugared stub defaults (trait_variant cannot expand a provided
+    // `async fn`): a double that never exercises identity editing compiles
+    // untouched; `WorkServiceImpl` overrides all three.
+
+    /// Phase 1 of the preview-confirm edit: classify the pasted input, fetch
+    /// the certified record, assess siblings/bridges, check same-user
+    /// collision, and (when certifiable) store a single-use snapshot keyed by
+    /// the returned `preview_id`.
+    fn preview_identity_edit(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        input: &str,
+        slot_hint: Option<crate::identity::AnchorType>,
+    ) -> impl std::future::Future<
+        Output = Result<super::IdentityEditPreview, crate::identity_edit::IdentityEditError>,
+    > + Send {
+        let _ = (user_id, work_id, input, slot_hint);
+        async move {
+            Err(crate::identity_edit::IdentityEditError::Db(
+                "identity edit not supported by this service".into(),
+            ))
+        }
+    }
+
+    /// Phase 2: consume the snapshot atomically and either detect a true
+    /// no-op or run the full commit transaction (generation CAS first).
+    fn commit_identity_edit(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        slot: crate::identity::AnchorType,
+        preview_id: &str,
+    ) -> impl std::future::Future<
+        Output = Result<super::IdentityEditCommit, crate::identity_edit::IdentityEditError>,
+    > + Send {
+        let _ = (user_id, work_id, slot, preview_id);
+        async move {
+            Err(crate::identity_edit::IdentityEditError::Db(
+                "identity edit not supported by this service".into(),
+            ))
+        }
+    }
+
+    /// Clear one identity slot (all five). `EmptySlot` when the slot holds no
+    /// confirmed row, no nonempty column, and no pending row.
+    fn clear_identity_slot(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        slot: crate::identity::AnchorType,
+    ) -> impl std::future::Future<
+        Output = Result<super::IdentityEditClear, crate::identity_edit::IdentityEditError>,
+    > + Send {
+        let _ = (user_id, work_id, slot);
+        async move {
+            Err(crate::identity_edit::IdentityEditError::Db(
+                "identity clear not supported by this service".into(),
+            ))
+        }
+    }
 }
 
 /// RAII slot for the per-user bulk-refresh guard (REQ-016). Acquired via

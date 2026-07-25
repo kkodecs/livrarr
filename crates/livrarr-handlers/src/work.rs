@@ -1042,10 +1042,12 @@ pub async fn affirm_pending_anchor<
 
     let anchor_type = AnchorType::new(anchor_type);
 
-    // Resolve the pending guess of this type to its value; 404 if none to affirm.
-    let anchors = state
+    // Pending value + identity generation read together (one transaction):
+    // the coherent basis for the first-statement claim below (identity-edit
+    // r4 §Writer coverage — pending affirm).
+    let (expected_generation, anchors) = state
         .work_identity_repo()
-        .list_anchors(work_id)
+        .read_anchors_with_generation(work_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -1065,18 +1067,29 @@ pub async fn affirm_pending_anchor<
         .ok_or(ApiError::NotFound)?;
 
     // The user verified it: promote pending→confirmed, sync works.*, and
-    // immediately recompute + write the identity_status badge in one
-    // atomic transaction (M-020 fix — badge must not wait for bg refresh).
+    // immediately recompute + write the identity_status badge in one atomic
+    // transaction (M-020 fix — badge must not wait for bg refresh). The
+    // transaction's first statement is the conditional generation claim; a
+    // lost claim means a different identity mutation won since the read.
     state
         .work_identity_repo()
-        .confirm_anchor_and_recompute_badge(
+        .affirm_anchor_claimed(
             work_id,
             anchor_type.clone(),
             &value,
             AnchorSetter::User,
+            expected_generation,
         )
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| match e {
+            livrarr_domain::services::WorkIdentityError::StaleIdentity => {
+                ApiError::ConflictDetailed {
+                    message: "identity changed; reload pending anchors".into(),
+                    details: crate::types::api_error::ErrorDetails::code("pending_anchor_stale"),
+                }
+            }
+            other => ApiError::Internal(other.to_string()),
+        })?;
 
     state
         .history_service()
@@ -1104,4 +1117,257 @@ pub async fn affirm_pending_anchor<
     });
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// =============================================================================
+// Identity edit: preview-confirm + clear (design identity-edit r4)
+// =============================================================================
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityPreviewRequest {
+    pub input: String,
+    #[serde(default)]
+    pub slot: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct IdentityCommitRequest {
+    pub preview_id: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedPreviewDto {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub year: Option<i32>,
+    pub language: Option<String>,
+    pub cover_url: Option<String>,
+    pub slot: String,
+    pub canonical_value: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiblingAssessmentDto {
+    pub slot: String,
+    pub action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeWarningDto {
+    pub slot: String,
+    pub message: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollisionDto {
+    pub owning_work_id: i64,
+    pub owning_work_title: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityPreviewResponse {
+    pub resolved: Option<ResolvedPreviewDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_id: Option<String>,
+    pub siblings: Vec<SiblingAssessmentDto>,
+    pub bridge_warnings: Vec<BridgeWarningDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collision: Option<CollisionDto>,
+    pub conflict_warning: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The five identity slots; editable excludes `hc_work` (internal numeric id
+/// with no public page a user could obtain or verify — §Slot roster).
+fn parse_identity_slot(slot: &str, allow_hc: bool) -> Result<AnchorType, ApiError> {
+    match slot {
+        AnchorType::GR_WORK | AnchorType::OL_WORK | AnchorType::ISBN_13 | AnchorType::ASIN => {
+            Ok(AnchorType::new(slot))
+        }
+        AnchorType::HC_WORK if allow_hc => Ok(AnchorType::new(slot)),
+        AnchorType::HC_WORK => Err(ApiError::BadRequest(
+            "hc_work is not editable — it has no public identifier a user could paste".into(),
+        )),
+        _ => Err(ApiError::BadRequest(format!(
+            "unknown identity slot: {slot}"
+        ))),
+    }
+}
+
+/// Phase 1 of 2 (§Preview): classify + fetch the certified record + assess
+/// siblings/bridges + collision check; a certifiable outcome carries an
+/// opaque single-use `previewId`.
+pub async fn preview_identity_edit<S: HasWorkService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path(work_id): Path<i64>,
+    Json(body): Json<IdentityPreviewRequest>,
+) -> Result<Json<IdentityPreviewResponse>, ApiError> {
+    let slot_hint = match body.slot.as_deref() {
+        None => None,
+        Some(slot) => Some(parse_identity_slot(slot, false)?),
+    };
+
+    let preview = state
+        .work_service()
+        .preview_identity_edit(ctx.user.id, work_id, &body.input, slot_hint)
+        .await
+        .map_err(ApiError::from)?;
+
+    let resolved = preview.resolved.map(|record| ResolvedPreviewDto {
+        title: record.title,
+        author: record.author,
+        year: record.year,
+        language: record.language,
+        cover_url: record.cover_url,
+        slot: preview
+            .slot
+            .as_ref()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default(),
+        canonical_value: preview.canonical_value.clone().unwrap_or_default(),
+    });
+    Ok(Json(IdentityPreviewResponse {
+        resolved,
+        preview_id: preview.preview_id,
+        siblings: preview
+            .siblings
+            .into_iter()
+            .map(|s| SiblingAssessmentDto {
+                slot: s.slot.as_str().to_string(),
+                action: match s.action {
+                    livrarr_domain::services::SiblingAction::Keep => "keep",
+                    livrarr_domain::services::SiblingAction::Drop => "drop",
+                },
+                cause: s.cause,
+            })
+            .collect(),
+        bridge_warnings: preview
+            .bridge_warnings
+            .into_iter()
+            .map(|w| BridgeWarningDto {
+                slot: w.slot.as_str().to_string(),
+                message: w.message,
+            })
+            .collect(),
+        collision: preview.collision.map(|c| CollisionDto {
+            owning_work_id: c.owning_work_id,
+            owning_work_title: c.owning_work_title,
+        }),
+        conflict_warning: preview.conflict_warning,
+        reason: preview.failure_reason,
+    }))
+}
+
+/// Phase 2 (§Commit): consume the snapshot atomically and commit (or detect
+/// the true no-op). Success returns the standard `WorkDetailResponse`.
+pub async fn commit_identity_edit<S: HasWorkService + HasHistoryService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path((work_id, slot)): Path<(i64, String)>,
+    Json(body): Json<IdentityCommitRequest>,
+) -> Result<Json<WorkDetailResponse>, ApiError> {
+    let user_id = ctx.user.id;
+    let slot = parse_identity_slot(&slot, false)?;
+
+    let commit = state
+        .work_service()
+        .commit_identity_edit(user_id, work_id, slot.clone(), &body.preview_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    if !commit.no_op {
+        state
+            .history_service()
+            .record(
+                user_id,
+                history_events::identity_resolved(
+                    work_id,
+                    &commit.work.title,
+                    "edit",
+                    format!(
+                        "{}: {} → {}",
+                        slot.as_str(),
+                        commit.old_value.as_deref().unwrap_or("(empty)"),
+                        commit.new_value
+                    ),
+                ),
+            )
+            .await;
+
+        // Fire-and-forget the refresh the certified identity unlocks
+        // (door→road, insight 46).
+        let s = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = s
+                .work_service()
+                .refresh(user_id, work_id, RefreshSurface::Interactive)
+                .await
+            {
+                tracing::debug!(work_id, "post-edit background refresh skipped: {e}");
+            }
+        });
+    }
+
+    let mut detail = work_to_detail(&commit.work);
+    detail.enriching = state.work_service().is_enriching(user_id, work_id);
+    Ok(Json(detail))
+}
+
+/// Clear one identity slot (§Clear; all five slots). 404 when the slot is
+/// truly empty (no confirmed row, no nonempty column, no pending row).
+pub async fn clear_identity_slot<S: HasWorkService + HasHistoryService>(
+    State(state): State<S>,
+    ctx: AuthContext,
+    Path((work_id, slot)): Path<(i64, String)>,
+) -> Result<Json<WorkDetailResponse>, ApiError> {
+    let user_id = ctx.user.id;
+    let slot = parse_identity_slot(&slot, true)?;
+
+    let cleared = state
+        .work_service()
+        .clear_identity_slot(user_id, work_id, slot.clone())
+        .await
+        .map_err(ApiError::from)?;
+
+    state
+        .history_service()
+        .record(
+            user_id,
+            history_events::identity_resolved(
+                work_id,
+                &cleared.work.title,
+                "clear",
+                format!("{}: {} → (cleared)", slot.as_str(), cleared.old_value),
+            ),
+        )
+        .await;
+
+    // No-conflict clears become chaseable — spawn the re-chase. A parked
+    // work stays paused until the open conflict is reviewed (§Clear).
+    if !cleared.parked_by_conflicts {
+        let s = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = s
+                .work_service()
+                .refresh(user_id, work_id, RefreshSurface::Interactive)
+                .await
+            {
+                tracing::debug!(work_id, "post-clear background refresh skipped: {e}");
+            }
+        });
+    }
+
+    let mut detail = work_to_detail(&cleared.work);
+    detail.enriching = state.work_service().is_enriching(user_id, work_id);
+    Ok(Json(detail))
 }

@@ -225,7 +225,12 @@ export default function WorkDetailPage() {
             <HistoryTab workId={work.id} />
           </Tabs.Content>
           <Tabs.Content value="metadata" className="mt-4">
-            <BookInformationTab work={work} onRefresh={() => refreshMutation.mutate()} refreshing={refreshMutation.isPending} />
+            <BookInformationTab
+              work={work}
+              onRefresh={() => refreshMutation.mutate()}
+              refreshing={refreshMutation.isPending}
+              onMergeWorks={() => setMergeOpen(true)}
+            />
           </Tabs.Content>
         </Tabs.Root>
       </PageContent>

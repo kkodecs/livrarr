@@ -329,6 +329,11 @@ pub struct IdentityReport {
     pub final_status: crate::IdentityStatus,
     pub anchors_merged: Vec<String>,
     pub verdict: Option<ResolverVerdictKind>,
+    /// The post-resolve completion lost its `identity_generation` claim — a
+    /// user edit/clear (or another identity writer) won while the provider
+    /// await was in flight. Nothing was written; the caller discards this
+    /// resolution, re-reads the work, and skips its dead-end accounting.
+    pub superseded: bool,
 }
 
 /// The shared identity outcome a creation path receives from

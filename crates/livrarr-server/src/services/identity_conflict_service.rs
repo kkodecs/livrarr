@@ -53,9 +53,12 @@ impl IdentityConflictService for LiveIdentityConflictService {
         action: ConflictResolutionAction,
         notes: Option<String>,
     ) -> Result<(), ConflictError> {
-        let conflict = self
+        // Conflict + generation read together; the apply's first statement is
+        // the conditional generation claim (identity-edit design — a lost
+        // claim is the dedicated 409, never AlreadyResolved or a 500).
+        let (conflict, generation) = self
             .db
-            .get_identity_conflict(id, user_id)
+            .get_identity_conflict_with_generation(id, user_id)
             .await
             .map_err(|e| ConflictError::Db(e.to_string()))?
             .ok_or(ConflictError::NotFound)?;
@@ -69,10 +72,17 @@ impl IdentityConflictService for LiveIdentityConflictService {
         }
 
         self.db
-            .apply_conflict_resolution(&conflict, action, notes.as_deref(), Utc::now())
+            .apply_conflict_resolution_claimed(
+                &conflict,
+                action,
+                notes.as_deref(),
+                Utc::now(),
+                Some(generation),
+            )
             .await
             .map_err(|e| match e {
                 livrarr_db::ConflictApplyError::AlreadyResolved => ConflictError::AlreadyResolved,
+                livrarr_db::ConflictApplyError::StaleIdentity => ConflictError::StaleIdentity,
                 livrarr_db::ConflictApplyError::InvalidAnchorValue => {
                     ConflictError::InvalidPrimaryAnchor
                 }
@@ -113,9 +123,10 @@ impl IdentityConflictService for LiveIdentityConflictService {
     }
 
     async fn dismiss(&self, id: i64, user_id: UserId) -> Result<(), ConflictError> {
-        let conflict = self
+        // Same coherent-read + claimed-apply contract as resolve.
+        let (conflict, generation) = self
             .db
-            .get_identity_conflict(id, user_id)
+            .get_identity_conflict_with_generation(id, user_id)
             .await
             .map_err(|e| ConflictError::Db(e.to_string()))?
             .ok_or(ConflictError::NotFound)?;
@@ -129,10 +140,11 @@ impl IdentityConflictService for LiveIdentityConflictService {
         }
 
         self.db
-            .apply_conflict_dismiss(&conflict, Utc::now())
+            .apply_conflict_dismiss_claimed(&conflict, Utc::now(), Some(generation))
             .await
             .map_err(|e| match e {
                 livrarr_db::ConflictApplyError::AlreadyResolved => ConflictError::AlreadyResolved,
+                livrarr_db::ConflictApplyError::StaleIdentity => ConflictError::StaleIdentity,
                 livrarr_db::ConflictApplyError::Db(db_err) => ConflictError::Db(db_err.to_string()),
                 // apply_conflict_dismiss never returns InvalidAnchorValue; map defensively
                 livrarr_db::ConflictApplyError::InvalidAnchorValue => {

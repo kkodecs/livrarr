@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use livrarr_domain::identity::*;
-use livrarr_domain::services::WorkIdentityError;
 use livrarr_domain::{IdentityStatus, UserId, WorkId};
 use sqlx::SqliteConnection;
 
@@ -20,6 +19,11 @@ pub enum ConflictApplyError {
     InvalidAnchorValue,
     #[error("conflict already resolved or dismissed")]
     AlreadyResolved,
+    /// The first-statement `identity_generation` claim found zero rows — a
+    /// different identity mutation won since the door's coherent read (409
+    /// `identity_conflict_stale` at the handler, never a 500).
+    #[error("identity changed since the conflict was read")]
+    StaleIdentity,
 }
 
 #[allow(clippy::type_complexity)]
@@ -127,6 +131,36 @@ impl SqliteDb {
             .collect())
     }
 
+    /// Conflict + its work's `identity_generation`, read together in one
+    /// transaction — the coherent basis for the resolve/dismiss doors'
+    /// first-statement claims (identity-edit design §Writer coverage).
+    pub async fn get_identity_conflict_with_generation(
+        &self,
+        id: i64,
+        user_id: UserId,
+    ) -> Result<Option<(IdentityConflict, i64)>, sqlx::Error> {
+        let mut tx = self.pool().begin().await?;
+        let row: Option<ConflictRow> =
+            sqlx::query_as(
+                "SELECT id, user_id, existing_work_id, kind, incoming_payload_json, raised_at, raised_by, raised_source_path, status, resolved_at, resolution_action, resolution_notes
+                 FROM work_identity_conflicts WHERE id = ?1 AND user_id = ?2",
+            )
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(conflict) = row.and_then(|r| parse_conflict_row(r).ok()) else {
+            return Ok(None);
+        };
+        let generation: i64 =
+            sqlx::query_scalar("SELECT identity_generation FROM works WHERE id = ?1")
+                .bind(conflict.existing_work_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        Ok(Some((conflict, generation)))
+    }
+
     pub async fn get_identity_conflict(
         &self,
         id: i64,
@@ -218,6 +252,23 @@ impl SqliteDb {
         notes: Option<&str>,
         resolved_at: DateTime<Utc>,
     ) -> Result<(), ConflictApplyError> {
+        self.apply_conflict_resolution_claimed(conflict, action, notes, resolved_at, None)
+            .await
+    }
+
+    /// [`Self::apply_conflict_resolution`] with an optional first-statement
+    /// conditional `identity_generation` claim (identity-edit design §Writer
+    /// coverage): when `expected_generation` is `Some`, a lost claim returns
+    /// [`ConflictApplyError::StaleIdentity`] before the open-status claim
+    /// runs, so a generation loss is never mislabeled `AlreadyResolved`.
+    pub async fn apply_conflict_resolution_claimed(
+        &self,
+        conflict: &IdentityConflict,
+        action: ConflictResolutionAction,
+        notes: Option<&str>,
+        resolved_at: DateTime<Utc>,
+        expected_generation: Option<i64>,
+    ) -> Result<(), ConflictApplyError> {
         let work_id = conflict.existing_work_id;
         let now = resolved_at.to_rfc3339();
         let action_str = serde_json::to_value(action)
@@ -226,6 +277,14 @@ impl SqliteDb {
             .unwrap_or_else(|| "keep_existing".to_string());
 
         let mut tx = self.pool().begin().await?;
+
+        if let Some(expected) = expected_generation {
+            if !crate::sqlite_work_identity::claim_identity_generation(&mut tx, work_id, expected)
+                .await?
+            {
+                return Err(ConflictApplyError::StaleIdentity);
+            }
+        }
 
         // ── TOCTOU guard ──────────────────────────────────────────────────────
         // Claim the conflict row NOW, inside the tx, guarded by `status = 'open'`.
@@ -307,10 +366,12 @@ impl SqliteDb {
                         )
                         .await
                         .map_err(|e| match e {
-                            WorkIdentityError::InvalidAnchorValue => {
+                            crate::sqlite_work_identity::IdentityTxError::InvalidValue => {
                                 ConflictApplyError::InvalidAnchorValue
                             }
-                            e => ConflictApplyError::Db(sqlx::Error::Protocol(e.to_string())),
+                            crate::sqlite_work_identity::IdentityTxError::Sqlx(e) => {
+                                ConflictApplyError::Db(e)
+                            }
                         })?;
                     }
                 } else {
@@ -367,10 +428,12 @@ impl SqliteDb {
                         )
                         .await
                         .map_err(|e| match e {
-                            WorkIdentityError::InvalidAnchorValue => {
+                            crate::sqlite_work_identity::IdentityTxError::InvalidValue => {
                                 ConflictApplyError::InvalidAnchorValue
                             }
-                            e => ConflictApplyError::Db(sqlx::Error::Protocol(e.to_string())),
+                            crate::sqlite_work_identity::IdentityTxError::Sqlx(e) => {
+                                ConflictApplyError::Db(e)
+                            }
                         })?;
                     }
                 }
@@ -412,10 +475,31 @@ impl SqliteDb {
         conflict: &IdentityConflict,
         dismissed_at: DateTime<Utc>,
     ) -> Result<(), ConflictApplyError> {
+        self.apply_conflict_dismiss_claimed(conflict, dismissed_at, None)
+            .await
+    }
+
+    /// [`Self::apply_conflict_dismiss`] with an optional first-statement
+    /// conditional generation claim — same contract as
+    /// [`Self::apply_conflict_resolution_claimed`].
+    pub async fn apply_conflict_dismiss_claimed(
+        &self,
+        conflict: &IdentityConflict,
+        dismissed_at: DateTime<Utc>,
+        expected_generation: Option<i64>,
+    ) -> Result<(), ConflictApplyError> {
         let work_id = conflict.existing_work_id;
         let now = dismissed_at.to_rfc3339();
 
         let mut tx = self.pool().begin().await?;
+
+        if let Some(expected) = expected_generation {
+            if !crate::sqlite_work_identity::claim_identity_generation(&mut tx, work_id, expected)
+                .await?
+            {
+                return Err(ConflictApplyError::StaleIdentity);
+            }
+        }
 
         // ── TOCTOU guard ──────────────────────────────────────────────────────
         let guard = sqlx::query(
@@ -481,13 +565,18 @@ fn incoming_value_for_kind(
     }
 }
 
-/// Derive the correct `IdentityStatus` badge from the work's remaining confirmed
-/// anchors and open conflicts (mirrors `derived_identity_status`, D-013).
+/// Derive the correct `IdentityStatus` badge from open conflicts and the
+/// validated ledger∪column projection (identity-edit r4): open conflict →
+/// Conflict; confirmed-ledger OR valid-column work key → Confirmed; bridge →
+/// Provisional; else Pending. Column-only legacy values are real identity
+/// (ground truth 6b) — the backfill cannot eliminate every one (intentional
+/// duplicate losers stay column-only) — while quarantined-invalid columns
+/// earn no badge.
 pub(crate) async fn derive_badge_in_tx(
     tx: &mut SqliteConnection,
     work_id: WorkId,
 ) -> Result<IdentityStatus, sqlx::Error> {
-    // If any other open conflict exists for this work, keep the Conflict badge.
+    // If any open conflict exists for this work, keep the Conflict badge.
     let open_conflicts: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM work_identity_conflicts
          WHERE existing_work_id = ?1 AND status = 'open'",
@@ -500,30 +589,44 @@ pub(crate) async fn derive_badge_in_tx(
         return Ok(IdentityStatus::Conflict);
     }
 
-    // Derive from confirmed anchors: work key → Confirmed; ISBN/ASIN → Provisional.
-    let work_key_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM work_identity_anchors
-         WHERE work_id = ?1 AND confidence = 'confirmed'
-           AND anchor_type IN ('ol_work', 'gr_work', 'hc_work')",
+    let confirmed_types: Vec<String> = sqlx::query_scalar(
+        "SELECT anchor_type FROM work_identity_anchors
+         WHERE work_id = ?1 AND confidence = 'confirmed'",
     )
     .bind(work_id)
-    .fetch_one(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
 
-    if work_key_count > 0 {
+    type SlotColumns = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let columns: Option<SlotColumns> =
+        sqlx::query_as("SELECT ol_key, gr_key, hc_key, isbn_13, asin FROM works WHERE id = ?1")
+            .bind(work_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (ol, gr, hc, isbn, asin) = columns.unwrap_or_default();
+
+    let valid_column = |anchor_type: &str, value: &Option<String>| -> bool {
+        value
+            .as_deref()
+            .is_some_and(|v| crate::sqlite_work_identity::column_value_valid(anchor_type, v))
+    };
+    let slot_effective = |anchor_type: &str, value: &Option<String>| -> bool {
+        confirmed_types.iter().any(|t| t == anchor_type) || valid_column(anchor_type, value)
+    };
+
+    if slot_effective(AnchorType::OL_WORK, &ol)
+        || slot_effective(AnchorType::GR_WORK, &gr)
+        || slot_effective(AnchorType::HC_WORK, &hc)
+    {
         return Ok(IdentityStatus::Confirmed);
     }
-
-    let bridge_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM work_identity_anchors
-         WHERE work_id = ?1 AND confidence = 'confirmed'
-           AND anchor_type IN ('isbn_13', 'asin')",
-    )
-    .bind(work_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    if bridge_count > 0 {
+    if slot_effective(AnchorType::ISBN_13, &isbn) || slot_effective(AnchorType::ASIN, &asin) {
         return Ok(IdentityStatus::Provisional);
     }
 
@@ -591,7 +694,7 @@ async fn apply_gap_fills(
         .await
         {
             Ok(()) => {}
-            Err(WorkIdentityError::InvalidAnchorValue) => {
+            Err(crate::sqlite_work_identity::IdentityTxError::InvalidValue) => {
                 tracing::warn!(
                     work_id = %work_id,
                     anchor_type = at,
@@ -599,8 +702,8 @@ async fn apply_gap_fills(
                     "incoming anchor has invalid canonical form — skipping gap-fill for this type"
                 );
             }
-            Err(e) => {
-                return Err(ConflictApplyError::Db(sqlx::Error::Protocol(e.to_string())));
+            Err(crate::sqlite_work_identity::IdentityTxError::Sqlx(e)) => {
+                return Err(ConflictApplyError::Db(e));
             }
         }
     }

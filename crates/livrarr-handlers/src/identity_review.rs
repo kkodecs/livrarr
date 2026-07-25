@@ -127,12 +127,15 @@ pub async fn resolve<S: HasWorkIdentityRepository + HasWorkService + HasHistoryS
             other => ApiError::Internal(other.to_string()),
         })?;
 
-    let candidates = state
+    // Candidates + identity generation read together (one transaction): the
+    // coherent basis for the apply's first-statement claim (identity-edit r4
+    // §Writer coverage — review apply).
+    let (expected_generation, candidates) = state
         .work_identity_repo()
-        .get_review_candidates(work_id)
+        .read_review_candidates_with_generation(work_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or(ApiError::NotFound)?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let candidates = candidates.ok_or(ApiError::NotFound)?;
 
     let chosen = candidates
         .into_iter()
@@ -141,9 +144,15 @@ pub async fn resolve<S: HasWorkIdentityRepository + HasWorkService + HasHistoryS
 
     state
         .work_identity_repo()
-        .apply_review_candidate(work_id, &chosen, AnchorSetter::User)
+        .apply_review_candidate_claimed(work_id, &chosen, AnchorSetter::User, expected_generation)
         .await
         .map_err(|e| match e {
+            // A different identity mutation won the generation claim since
+            // the read above — the dedicated stale 409, never NotParked.
+            WorkIdentityError::StaleIdentity => ApiError::ConflictDetailed {
+                message: "identity changed; reload review candidates".into(),
+                details: crate::types::api_error::ErrorDetails::code("identity_review_stale"),
+            },
             // The park settled between our read and the apply (or was never
             // parked despite a stale candidates row) — 409, mirroring the
             // ConflictError::AlreadyResolved mapping.
@@ -186,11 +195,23 @@ pub async fn dismiss<S: HasWorkIdentityRepository + HasWorkService>(
             other => ApiError::Internal(other.to_string()),
         })?;
 
+    // Generation read coherently with the park state; the dismiss's first
+    // statement is the conditional claim (same contract as resolve).
+    let (expected_generation, _candidates) = state
+        .work_identity_repo()
+        .read_review_candidates_with_generation(work_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
     state
         .work_identity_repo()
-        .dismiss_review(work_id)
+        .dismiss_review_claimed(work_id, expected_generation)
         .await
         .map_err(|e| match e {
+            WorkIdentityError::StaleIdentity => ApiError::ConflictDetailed {
+                message: "identity changed; reload review candidates".into(),
+                details: crate::types::api_error::ErrorDetails::code("identity_review_stale"),
+            },
             // Not parked (or no longer parked) — never downgrade a settled
             // work; 409, same mapping as resolve.
             WorkIdentityError::NotParked => ApiError::Conflict {
