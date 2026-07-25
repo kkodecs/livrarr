@@ -1,5 +1,52 @@
 # Wiki Change Log
 
+## 2026-07-25 — architecture cluster: a diagnosed defect already fixed, and the `t=book` search tier that never existed
+
+**Updated pages:** `wiki/architecture/work-creation-pipeline.md`, `enrichment-pipeline.md`,
+`rss-sync.md`, `grab-system.md`. Sixteenth documentarian pass. **Split:**
+`import-pipeline.md` is unexamined; `metadata-pathway.md` and `roads.md` stay reserved for
+dedicated passes.
+
+**A page telling maintainers to go fix something already fixed.** `work-creation-pipeline.md`
+is a dated analysis whose whole thesis was that background convergence no longer runs, leaving
+monitor- and Readarr-created works in "silent limbo". A recurring convergence sweep now exists,
+is registered with the job scheduler, and is **enabled by default** — hourly, batched per user,
+with a dead-end threshold. The surfaced `needs-review` terminal the page said was missing exists
+too, and fires on the first hopeless pass. Its "Fix pointer" proposed exactly those two things;
+both shipped, so the section is marked CLOSED with its original text kept as the record of what
+was asked for. The batch resolver it cites is gone from the tree entirely.
+
+That page's line numbers had also drifted wholesale — three of three spot-checks wrong. The
+three are corrected and the rest are now marked unverified rather than left looking checked.
+
+**`enrichment-pipeline.md` carried six errors, five already settled on other pages** — the
+"shared 0.75 picker" (the open thread from pass #9, now closed: the selector is the one shared
+deterministic picker, and Goodreads is the only provider that accepts a grey match), the
+LLM identity validator, Hardcover's non-existent LLM tier 2, the "no Bearer prefix" auth, and
+three-setters/four-providers provenance. Its error-handling section was wrong on all three
+counts: there is no exponential backoff (a fixed 5-minute retry, except a 429 which backs off
+6h), `EnrichmentStatus::Conflict` and `::Exhausted` do not exist, and the retry budget is 5 per
+provider, not 3.
+
+**The `t=book` search tier that does not exist turned up on a second page.** Corrected on
+`release.md` last pass; `rss-sync.md` claimed the same two-tier fetch. The RSS feed URL is
+`t=search` unconditionally, with no `limit=` and no `extended=`. More consequential on that
+page: the match step was described as a bare score against monitored works, omitting the hard
+gate that stops an author-less extraction from scoring at all — the substring fallback echoes
+the candidate's own title back, manufacturing a perfect title match with no author to check it
+against. A reader would have thought a high title score alone can auto-grab.
+
+**`grab-system.md`:** RSS sync does not use the release-search path at all (separate feed
+fetch, no query), and nothing is scored during search — results are filtered, deduped by
+`(guid, indexer)`, and sorted.
+
+One thing I did **not** claim: whether the convergence job was missed by the original analysis
+or built in response to it. Nothing in this tree dates it against the 2026-06-14 page.
+
+**Context:** pass #16, scoped by `build/reviews/DOC-EDIT-PACKET-8.md`.
+Citations: `build/reviews/docs-edit-architecture-2-changelog.md`.
+**Progress:** 30 of 40 pages verified.
+
 ## 2026-07-25 — `wiki/domain/` complete; `architecture/overview.md` — a dead crate, a removed edge, and a startup order backwards
 
 **Updated pages:** `wiki/domain/series.md` (completes `wiki/domain/`, 11 of 11) and

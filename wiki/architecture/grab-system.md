@@ -10,10 +10,16 @@ Accepts any Torznab/Newznab URL directly (url + api_path + api_key). Prowlarr is
 
 ### Release Search
 
-1. User or RSS sync triggers search
-2. Query sent to configured indexers (Torznab XML API)
-3. Results parsed, filtered, scored
-4. Presented to user (manual) or auto-grabbed (RSS sync)
+1. A user triggers the search. **RSS sync does not use this path** — it has its own feed
+   fetch with no query (`crates/livrarr-metadata/src/rss_sync_workflow.rs:786-807`), and only
+   the two paths' *grab* step converges. See [rss-sync](rss-sync.md).
+2. Query sent to indexers with interactive search enabled, in parallel
+   (`crates/livrarr-download/src/release_service.rs:73-77`, `:132-141`)
+3. Torznab XML parsed; items missing a `guid` or download URL are dropped with a warning
+   (`:213-230`); results deduped by `(guid, indexer)` (`:295-297`) and sorted — torrents
+   before usenet, torrents by seeders then size, usenet by date then size (`:299-319`).
+   **Nothing is scored here**; scoring belongs to the RSS match step, not to search.
+4. Presented to the user
 
 ### Download Clients
 

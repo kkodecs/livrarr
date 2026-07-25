@@ -6,9 +6,22 @@ Automated release discovery and grabbing for monitored works. Runs as a backgrou
 
 Every 15 minutes (configurable, min 10min, 0=disabled):
 
-1. **Fetch** — poll all RSS-enabled indexers in parallel. No search query — just `t=book` (or `t=search` fallback) with categories and `limit=100&extended=1`. 30s timeout per indexer.
-2. **Parse** — extract title+author from each release title using `m3_string::parse_string()`
-3. **Match** — score extractions against all monitored works (all users) using `m4_scoring::score_candidate()`. Score >= threshold (default 0.80) required.
+1. **Fetch** — poll all RSS-enabled indexers in parallel. No search query. The URL is
+   `{base}/{api_path}?apikey=…&t=search&cat={categories}`
+   (`crates/livrarr-metadata/src/rss_sync_workflow.rs:786-807`): **`t=search`
+   unconditionally — there is no `t=book` tier and no fallback**, and no `limit=` or
+   `extended=` parameter is sent. 30s timeout per indexer (`:119`).
+2. **Parse** — extract title+author from each release title with the **candidate-aware**
+   parse `parse_release_title_with_candidates` (`rss_sync_workflow.rs:319` →
+   `crates/livrarr-matching/src/lib.rs:119-132`), not the plain `parse_string`: when the
+   regex patterns fail it scans for known title/author substrings from the monitored set.
+3. **Match** — score extractions against all monitored works (all users) via
+   `best_match_score` (`rss_sync_workflow.rs:379` → `lib.rs:141-148`). That is **not** a
+   bare `score_candidate` call: every extraction must first clear `fails_hard_gate`, and the
+   highest surviving score wins. The gate is what stops an author-less extraction from
+   scoring at all — the candidate-substring fallback echoes the candidate's own title back,
+   manufacturing a perfect title similarity with no author to check it against (issue #142,
+   `lib.rs:134-140`). Score >= threshold (default 0.80) required.
 4. **Filter** — skip if: not monitored for this media type, active grab exists, already in library
 5. **Grab** — auto-grab best eligible release per user+work+media type per cycle
 
