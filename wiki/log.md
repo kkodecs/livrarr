@@ -1,5 +1,29 @@
 # Wiki Change Log
 
+## 2026-07-25 — domain.md region 1, lower half: normalize_for_matching is production-dead
+
+**Updated pages:**
+- crates/domain.md — sixth documentarian pass. Region 1 split again: this pass covers
+  **Utility Functions, Settings, Readarr Import Types, Torznab and Keyed Mutex**; the Entities
+  section (newtype IDs, entity structs, enums — page lines 9–74) is **still unaudited** and is
+  now the only unverified part of the page.
+  Deleted: `is_foreign_source` — zero hits anywhere in the repo.
+  The headline correction: **`normalize_for_matching` still exists but is production-dead.** Its
+  own doc says it is superseded by `identity_matching::identity_key` (REQ-014), that no
+  production call site uses it, and that it survives only because test fixtures build
+  `normalized_title`/`normalized_author` with it. The page presented it as a live utility, which
+  would send a reader to the wrong normalizer — the exact mismatch that motivated the
+  replacement.
+  Also: `sanitize_path_component` takes two arguments, not one; `TorznabParseResult` has two
+  variants, not three (there is no "empty"); `MetadataConfig` also carries Google Books
+  settings; `KeyedMutex` hard-caps resident keys at 256 and `sweep()` is a backstop, not the
+  primary reclaim path — per-guard drop already prunes. Utility Functions is 6 of 12 functions
+  and the Readarr bullets cover 12 of 14 types; both now say so.
+
+**Context:** documentarian edit pass #6, still governed by `build/reviews/DOC-EDIT-PACKET-4.md`.
+Per-edit citations: `build/reviews/docs-edit-domain-md-region1a-changelog.md`.
+**Still unaudited:** the Entities section only.
+
 ## 2026-07-25 — domain.md region 2 verified: 29 config/settings methods do not take a user_id
 
 **Updated pages:**

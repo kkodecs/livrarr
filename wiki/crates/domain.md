@@ -73,13 +73,17 @@ Foundation crate. All dependency arrows point here. Defines entities, enums, err
 - `ExternalIdType` — provider-specific external ID type
 
 ### Utility Functions (util.rs)
-- `sanitize_path_component(s)` — strips illegal characters for use in file paths
-- `derive_sort_name(name)` — derives a sort-friendly name from an author/title string
-- `normalize_for_matching(s)` — normalizes text for fuzzy matching comparison
-- `normalize_language(s)` — normalizes a language string to a canonical code
-- `normalize_language_opt(s)` — same as above, returns Option
-- `classify_file(path)` — determines MediaType from file extension
-- `is_foreign_source(source)` — returns true if SourceKind is foreign language
+
+> **6 of the module's 12 public functions are listed here.** Not listed:
+> `is_series_stub_key`, `split_series_suffix`, `decode_xml_entities`, `proxy_cover_url`,
+> `unproxy_cover_url`, `strip_isbn_punctuation`.
+
+- `sanitize_path_component(input, fallback)` — strips control characters, replaces illegal chars with `_`, trims trailing dots/spaces, and truncates to 255 bytes. Falls back to `fallback` (then to `"_"`) when the result would be empty, `.` or `..`
+- `derive_sort_name(display_name)` — `"Frank Herbert"` → `"Herbert, Frank"`. Treats the last whitespace-delimited word as the surname — wrong for East Asian, Iberian and compound surnames, but matches the Readarr/Servarr convention
+- `normalize_for_matching(s)` — **superseded in production** by `identity_matching::identity_key` (REQ-014) and no longer called from any production site. Retained only because existing test fixtures build `normalized_title` / `normalized_author` with it. It keeps stopwords and accents, which is exactly why it was replaced
+- `normalize_language(lang)` — normalizes a language string to an ISO 639-1 code, delegating to `normalization::normalize_language` and falling back to the trimmed, lower-cased input. Strips region subtags (`"en-US"` → `"en"`)
+- `normalize_language_opt(lang)` — same, returns `Option`
+- `classify_file(path)` — determines MediaType from file extension: epub/mobi/azw3/pdf → Ebook, mp3/m4a/m4b/flac/ogg/wma → Audiobook, anything else → `None`
 
 ---
 
@@ -89,7 +93,7 @@ Foundation crate. All dependency arrows point here. Defines entities, enums, err
 - `NamingConfig` — file/folder naming format strings and rename flags
 - `MediaManagementConfig` — CWA ingest path, preferred ebook/audiobook formats
 - `ProwlarrConfig` — Prowlarr URL, api_key, enabled flag
-- `MetadataConfig` — Hardcover, LLM, and Audnexus provider settings; language list
+- `MetadataConfig` — Hardcover, LLM, Audnexus and Google Books provider settings; language list
 - `EmailConfig` — SMTP connection and delivery settings
 
 ### Param Structs (service input types)
@@ -117,22 +121,25 @@ Foundation crate. All dependency arrows point here. Defines entities, enums, err
 - `ReadarrHistoryResponse` / `ReadarrImportRecord` — history of past imports
 - `ReadarrUndoResponse` — counts after undoing an import
 
+Not listed: `ReadarrOriginInfo` and `AddReadarrOriginRequest` — the admin-approved origin
+allowlist types. The 9 bullets above cover 12 of the module's 14 public types.
+
 ---
 
 ## Torznab (torznab.rs)
 
 - `TorznabItem` — a single parsed release result from a Torznab feed
-- `TorznabParseResult` — enum for parse outcomes (items, error response, empty)
-- `parse_torznab_xml(xml)` — parses a Torznab XML response into `TorznabParseResult`
+- `TorznabParseResult` — **two** variants: `Items(Vec<TorznabItem>)` and `Error { code, description }`. There is no "empty" variant — an empty feed is `Items` with an empty vec
+- `parse_torznab_xml(xml)` — takes the raw response bytes and returns `Result<TorznabParseResult, String>`. The outer `Err` means the bytes could not be parsed at all (invalid UTF-8, or an XML reader error) — distinct from a well-formed feed carrying the Torznab `Error` variant
 
 ---
 
 ## Keyed Mutex (keyed_mutex.rs)
 
-- `KeyedMutex<K>` — per-key async mutex map; prevents concurrent work on the same key
-- `KeyedMutexGuard` — RAII guard returned by `lock()`; holds the per-key lock
-- `KeyedMutex::lock(key)` — acquires or creates a per-key lock
-- `KeyedMutex::sweep()` — removes entries for keys that are no longer locked
+- `KeyedMutex<K>` — per-key async mutex map; prevents concurrent work on the same key. Resident keys are hard-capped at 256 by an internal semaphore, so the map cannot grow without bound however many distinct keys are ever requested (PRINCIPLES §5)
+- `KeyedMutexGuard` — RAII guard returned by `lock()`; holds the per-key lock and prunes the key on drop
+- `KeyedMutex::lock(key)` — acquires or creates a per-key lock. An **existing** key never waits for capacity; only a genuinely new key waits, and it does so without holding the map lock
+- `KeyedMutex::sweep()` — explicit backstop only. Per-guard pruning on every release already removes unreferenced keys, so a healthy instance rarely needs this called
 
 ---
 
