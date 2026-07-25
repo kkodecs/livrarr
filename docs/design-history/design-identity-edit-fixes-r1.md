@@ -1,53 +1,14 @@
-# Design — identity-edit fix unit (r2)
+# Design — identity-edit fix unit (r1)
 
-**Status:** PO go given 2026-07-25. **Seven of nine defects fixed and green; F1a and F2
-deferred by PO call.** r1 is snapshotted at `docs/design-history/design-identity-edit-fixes-r1.md`.
+**Status:** draft, awaiting PO go + cross-family review. No code written.
 **Base:** `a7f03540` (merge of `race/fable`). **Contract:** `docs/design-identity-edit.md` (r4).
-**Origin:** blinded cross-family review, findings preserved at
-`build/reviews/identity-edit/blind-review/`. The reviewer chose this entry and listed six
-repairs; none of the four contest entries was merge-ready.
+**Origin:** blinded cross-family review, `/mnt/opt/livrarr-review/FINDINGS-B.md` +
+`FINDINGS-SUMMARY.md`. The reviewer chose this entry and listed six repairs; none of the
+four contest entries was merge-ready.
 
 Every defect below was re-verified against the merged tree at the cited `path:line`
 before being written down. The reviewer's own citations pointed into `B/tree/...`; those
 are not repeated here.
-
-## Delivery status (r2)
-
-| Item | State | Evidence |
-|---|---|---|
-| F1a convergence terminal arm | **Deferred (PO, 2026-07-25)** | No pause point in its read-to-write window |
-| F1b delayed NotFound | **Fixed** | `f1b_a_delayed_not_found_must_not_overwrite_an_edit_made_during_the_wait` |
-| F2 add/adopt preflight | **Deferred (PO, 2026-07-25)** | Same reason as F1a |
-| F3 backfill ledger-only owner | **Fixed** | `f3_backfill_preserves_a_confirmed_owner_that_exists_only_in_the_ledger` |
-| F4a empty pending clear | **Fixed** | `f4a_clear_removes_a_pending_row_whose_value_is_empty` |
-| F4b no-op pending cleanup | **Fixed** | `f4b_a_same_value_commit_still_deletes_the_slots_pending_rows` |
-| F5a preview capacity eviction | **Fixed** | `f5a_a_full_preview_store_replaces_the_callers_oldest_token` |
-| F5b URL host classification | **Fixed** | 3 tests in `f5b_*` |
-| F6 frontend component coverage | **Fixed** | 7 tests in `frontend/src/pages/work-detail/components/IdentityEditModal.test.tsx` |
-| F6 Playwright GR-edit happy path | **Blocked** | See below |
-
-Rust pins live in `tests/behavioral/test_identity_edit_fixes.rs` (ungated, registered in
-`crates/livrarr-behavioral/Cargo.toml`). Each was verified RED on the unfixed code before
-its fix landed.
-
-**Why F1a and F2 were deferred.** F1b was testable because enrichment holds the road open
-for a provider round-trip, so a real competing write can be scheduled inside the window.
-F1a and F2 have no such pause — their read-to-write windows contain only fast local
-database calls. Proving their race needs an instrumented repository that injects a
-competing write at a chosen await point, and `converge_work`'s bounds
-(`crates/livrarr-metadata/src/convergence_service.rs:31-47`) name twelve-plus traits such
-a double would have to implement. That harness is a unit of its own; it would also let the
-existing AC-10 suite cover the background roads it currently misses. Both deferred defects
-are millisecond-scale windows with recoverable consequences (F1a parks a work as
-NeedsReview — visible and reversible; F2 can raise a stale conflict), unlike F1b's
-seconds-long window and silent overwrite.
-
-**Why the Playwright happy path is blocked.** `frontend/e2e/` contains exactly one spec,
-`smoke.spec.ts`, deliberately written to be auth-agnostic. There is no fixture for an
-authenticated session and no helper to seed a work, so a GR-edit happy path has nothing to
-drive. Building those fixtures is infrastructure work, not part of this unit. The component
-tests cover the modal's decision logic in the meantime, and were mutation-checked: removing
-the `previewId` guard from `certifiable` makes one fail.
 
 ---
 
