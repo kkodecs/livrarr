@@ -1,5 +1,50 @@
 # Wiki Change Log
 
+## 2026-07-25 — hardcover.md + openlibrary.md verified; `wiki/integrations/` complete
+
+**Updated pages:** `wiki/integrations/hardcover.md` and `wiki/integrations/openlibrary.md`
+(Part B, 4 and 5 of 5). Twelfth documentarian pass. This finishes `wiki/integrations/`.
+
+**The HC page pointed at a crate that doesn't exist.** Two places cited
+`crates/livrarr-metadata/src/hardcover.rs` — there is no such file; the client is
+`crates/livrarr-external-data/src/hardcover.rs`. The claim wrapped around the bad path (that we
+send `Authorization: Bearer <token>` where HC's docs show a raw lowercase `authorization`) is
+**correct**, and now carries four live citations — the client's two request-builders, the
+discovery search, and the admin "Test Connection" probe.
+
+**The page's headline rate-limit warning was a year out of date.** It said refresh-all "can spike
+past 60 with no protection". Every HC request routed through the shared `HttpFetcher` waits in
+the process-global outbound queue, which paces the `Hardcover` bucket at one dispatch per second
+— exactly 60/min — and caps in-flight sends per bucket at 2. Two open-work rows fell with it:
+the user-agent item is done (all four HC request-builders use the `KkodecsBookBot` server
+profile), and the "global 60-RPM token bucket" item is done *differently* — it is a
+minimum-interval pacer, not a token bucket, and the page now says so rather than smoothing it
+over. The real caveat the old sentence got wrong: cover *images* are outside that budget
+entirely — only `covers.openlibrary.org` is paced.
+
+Per the standing ruling, the "Backoff and retries" section now carries an implemented-vs-intent
+table. **None of its four rules is implemented as written**: there is no exponential schedule, no
+jitter and no retry counter anywhere on the HC path — a 429, a 5xx and a **401** all collapse
+into the same fixed 5-minute retry, and our own 10s request timeout means HC's 30s server timeout
+can never be observed. The `per_page` guidance ("start ≤ 10") is honored only on the ISBN search;
+the title search sends 25 and discovery sends 15. Deleted rather than corrected: "we pay ~25 HC
+hits per book" — the enrichment path issues at most three HC calls per work, and the true
+whole-system figure is not something I can produce without a text sweep.
+
+**openlibrary.md needed exactly one correction, and it is a sequencing claim.** The page said a
+blocked OL call "stalls on `will_retry` (eventually `permanent_failure`)". It does not stall: a
+403 classifies as `Other` and maps straight to `PermanentFailure` on the first blocked attempt.
+Only 5xx/transport failures and 429s schedule a retry (the 429 path backs off 6h + up to 3h
+jitter). Everything else on that page that this pass could decide from source held — including
+the deployed user-agent string, the app-name/descriptor split it describes, its insight 44/45
+pointers, and its own "the circuit-breaker doesn't honor `Retry-After` yet" caveat, which is
+still true: `Retry-After` is read only for the per-indexer breaker.
+
+**Context:** pass #12, scoped by `build/reviews/DOC-EDIT-PACKET-7.md`.
+Citations: `build/reviews/docs-edit-integrations-2-changelog.md`.
+**Progress:** 13 of 40 pages verified; `wiki/crates/`, `wiki/patterns/` and
+`wiki/integrations/` are now complete.
+
 ## 2026-07-25 — the `dyn` pair named; google-books.md verified (GB key is a header, not a query param)
 
 **Updated pages:** `wiki/patterns/async-service.md` (the `dyn` absolute, now settled) and

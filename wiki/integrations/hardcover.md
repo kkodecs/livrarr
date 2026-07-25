@@ -19,7 +19,7 @@ API key required. **Per-user, not per-app** — every Livrarr install needs its 
 authorization: <token>
 ```
 
-> **⚠ Header format gotcha.** Docs show the raw token in a lowercase `authorization` header — **no `Bearer` prefix**. Our current code (`crates/livrarr-metadata/src/hardcover.rs:86`) sends `Authorization: Bearer {token}`. Works today, but doesn't match the published format and is a parsing-fragility risk if HC tightens validation. We should fix to match docs exactly. Reference incident: [Calibre-Web-Automated #770](https://github.com/crocodilestick/Calibre-Web-Automated/issues/770) — same surface area, broke them.
+> **⚠ Header format gotcha.** Docs show the raw token in a lowercase `authorization` header — **no `Bearer` prefix**. Our current code sends `Authorization: Bearer {token}` at every HC request-builder found: the client's two (`crates/livrarr-external-data/src/hardcover.rs:72`, `:388`), the discovery search (`crates/livrarr-metadata/src/discovery_service.rs:960`), and the admin "Test Connection" probe (`crates/livrarr-handlers/src/config.rs:310`). Works today, but doesn't match the published format and is a parsing-fragility risk if HC tightens validation. We should fix to match docs exactly. Reference incident: [Calibre-Web-Automated #770](https://github.com/crocodilestick/Calibre-Web-Automated/issues/770) — same surface area, broke them.
 
 **Token lifecycle:**
 - Tokens auto-expire after **1 year** (reset January 1).
@@ -35,7 +35,9 @@ authorization: <token>
 - **Query depth max = 3** (added 2025) — server rejects deeper.
 - **429 response body:** `{ "error": "Throttled" }`. No `Retry-After` header documented.
 
-**Operational rule:** maintain a single global 60-RPM token bucket in front of every HC call (enrichment, refresh, search, covers). Today refresh-all can spike past 60 with no protection.
+**What the code does today.** A request routed through the shared `HttpFetcher` waits in the process-global outbound queue before any HTTP is sent (`crates/livrarr-http/src/fetcher.rs:182-184`). That queue paces the `Hardcover` bucket at one dispatch per second — 60/min (`crates/livrarr-http/src/outbound_queue.rs:239-241`) — and caps concurrent in-flight sends per bucket at 2 (`crates/livrarr-http/src/outbound_queue.rs:38`). All four HC request-builders found carry that bucket (`crates/livrarr-external-data/src/hardcover.rs:80`, `:395`; `crates/livrarr-metadata/src/discovery_service.rs:965`; `crates/livrarr-handlers/src/config.rs:315`).
+
+Cover *images* are outside this budget: only `covers.openlibrary.org` is paced, and every other cover host stays unpaced (`crates/livrarr-domain/src/services/http.rs:64-69`).
 
 ## User-Agent
 
@@ -51,6 +53,12 @@ Our standard UA applies here too: `KkodecsBookBot/<version> (Livrarr; kkodecs@pr
 - Use the **`search()` resolver** (Typesense-backed) for any fuzzy lookup; it's a single round-trip vs walking `books → editions → contributions`.
 - Query depth ≤ 3 (server cap).
 - Cache aggressively client-side (GraphQL POST responses are not HTTP-cacheable upstream).
+
+> **What the client actually sends.** `per_page` is **25** on the title search
+> (`livrarr-external-data/src/hardcover.rs:178`), 10 on the ISBN search (`:465`), and 15 on
+> the discovery/lookup search (`livrarr-metadata/src/discovery_service.rs:950`) — the
+> "start ≤ 10" guidance above is honored only on the ISBN path. All three do go through the
+> `search()` resolver (`hardcover.rs:39-47`).
 
 ### Bad
 - Deep nesting (`book { editions { contributions { author { books { editions {...} } } } } }`) — server rejects past depth 3 anyway.
@@ -84,14 +92,22 @@ Recommended internal TTLs:
 
 Cache key: HC `id` + query selection set. Refresh on user-triggered "refresh metadata" only.
 
-We pay ~25 HC hits per book today on full enrichment + cover — most are redundant within a session and should be served from cache.
-
 ## Backoff and retries
 
 - **429 (Throttled):** no `Retry-After` header documented. Start with 2s backoff, exponential to 60s, jitter, cap retries at 5, then surface as `RateLimited` error.
 - **5xx:** exponential backoff with jitter, cap retries.
 - **30-second timeout:** queries hitting it return 5xx; back off and consider simplifying the query.
 - **401:** token expired or reset. Don't retry — surface to user, prompt for new token.
+
+> **Which of these the code actually implements.** None as written — what exists is a
+> circuit breaker plus one fixed retry delay:
+>
+> | Rule | Status |
+> |---|---|
+> | 429 → 2s backoff, exponential to 60s, jitter, cap at 5, then `RateLimited` | **Not implemented.** A 429 is intercepted as `FetchError::RateLimited` (`livrarr-http/src/fetcher.rs:280`) and reported as one `Failure` to the Hardcover breaker (`:276-278`) — 5 failures inside 60s open the bucket for 60s (`livrarr-http/src/breaker.rs:182-194`). The HC client folds every non-`CircuitOpen` fetch error into `HardcoverError::Http` (`livrarr-external-data/src/hardcover.rs:92`), so a 429 gets the same fixed 5-minute retry as a 5xx. No exponential schedule, no jitter, no per-call retry counter, no distinct `RateLimited` outcome. |
+> | 5xx → exponential backoff with jitter, capped retries | **Not implemented.** A 5xx becomes `WillRetry { ServerError }` with a fixed next attempt 5 minutes out (`livrarr-external-data/src/provider_client.rs:578`, `:758-761`). |
+> | 30-second timeout → back off, simplify the query | **Unreachable as written.** Our own request timeout is 10s (`livrarr-external-data/src/hardcover.rs:79`, `:394`), so we abort before HC's 30s server timeout; a timeout is reported as one breaker `Failure` (`livrarr-http/src/fetcher.rs:226-237`). |
+> | 401 → don't retry, surface to user | **Not implemented.** Every non-2xx status becomes `HardcoverError::Http` (`livrarr-external-data/src/hardcover.rs:95-100`), and the caller schedules a retry 5 minutes out (`:758-761` in `provider_client.rs`) — a 401 is retried like any other HTTP error. |
 
 ## Anti-patterns (explicit from HC docs)
 
@@ -187,9 +203,9 @@ HC has a **Librarian system** — any user can apply, gets edit access on the we
 | Item | Priority |
 |---|---|
 | **Fix auth header to match docs:** `authorization: <token>` (no `Bearer`, lowercase) | **P1** — drift from docs is fragility risk |
-| **Set proper UA** on all HC calls (share with OL/Audnexus stack) | P2 |
-| **Global 60-RPM token bucket** for HC (prevent refresh-all spikes) | P1 |
-| **Exponential backoff** on 429 with jitter, cap retries at 5 | P1 |
+| ~~**Set proper UA** on all HC calls~~ — **done.** All four HC request-builders found use `UserAgentProfile::Server` (`livrarr-external-data/src/hardcover.rs:83`, `:398`; `livrarr-metadata/src/discovery_service.rs:968`; `livrarr-handlers/src/config.rs:318`), which resolves to `KkodecsBookBot/<version> (Livrarr; kkodecs@proton.me; https://github.com/kkodecs/livrarr)` (`livrarr-http/src/lib.rs:168-173`) and is set on every request (`livrarr-http/src/fetcher.rs:203-208`) | Done |
+| ~~**Global 60-RPM token bucket** for HC~~ — **done differently:** the process-global outbound queue paces the `Hardcover` bucket at 1 dispatch/sec (`livrarr-http/src/outbound_queue.rs:239-241`), which is a minimum-interval pacer rather than a token bucket | Done |
+| **Exponential backoff** on 429 with jitter, cap retries at 5 | Open — not implemented as written; see *Backoff and retries* above for what exists instead |
 | **Client-side cache layer** with sane TTLs (book/edition: 30d, series: 7d, search: 24h) | P2 |
 | **Audit query depth and `per_page`** — add CI lint catching depth >3 or `per_page` >25 | P3 |
 | **401 → re-token UX flow** — clean message + settings link | P2 |
@@ -202,7 +218,7 @@ HC has a **Librarian system** — any user can apply, gets edit access on the we
 - `wiki/integrations/google-books.md` (contrast — daily quota model)
 - `wiki/integrations/audnexus.md` (contrast — anonymous + great cache headers)
 - `feedback_kkodecs_contact_email.md` (UA contact field policy)
-- Existing client: `crates/livrarr-metadata/src/hardcover.rs`
+- Existing client: `crates/livrarr-external-data/src/hardcover.rs`
 - HC docs: <https://docs.hardcover.app/api/getting-started/>
 - HC docs repo: <https://github.com/hardcoverapp/hardcover-docs>
 - Real-world auth-header issue: [Calibre-Web-Automated #770](https://github.com/crocodilestick/Calibre-Web-Automated/issues/770)

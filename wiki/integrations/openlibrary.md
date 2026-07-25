@@ -8,7 +8,8 @@ OL is one of Livrarr's primary metadata providers. This page is the canonical re
 - **Apology + clarification email sent to `openlibrary@archive.org`** on 2026-05-25 (see `build/correspondence/2026-05-25-openlibrary-ua-apology.txt`).
 - **Standing instruction: NO MORE UA CHANGES until OL responds.** Every test from our IPs teaches OL's automated systems to escalate. New identifiers we try just get burned.
 - **Deployed UA**: `KkodecsBookBot/<version> (Livrarr; kkodecs@proton.me; https://github.com/kkodecs/livrarr)`. This UA is *also* currently blocked, but it's the right format for when OL clears the block.
-- **User-facing impact:** search returns empty for English titles, enrichment stalls on OL `will_retry` (eventually `permanent_failure` → partial-success commit from HC + GR), some covers fail to backfill, bibliography matching misses works whose primary key wasn't anchored.
+- **User-facing impact:** search returns empty for English titles, some covers fail to backfill, bibliography matching misses works whose primary key wasn't anchored.
+- **How a block is classified today (not a `will_retry` stall):** a 403 falls into `ProviderFetchError::Other` (`crates/livrarr-external-data/src/openlibrary.rs:20-26`) and maps straight to `PermanentFailure { Unsupported }` on the first blocked attempt (`crates/livrarr-external-data/src/provider_client.rs:850-852`) — there is no retry stage in front of it. Only 5xx/transport failures (`WillRetry { ServerError }`, `:843-846`) and 429s (`WillRetry { RateLimit }`, 6h + up to 3h jitter, `:242-250`) schedule a retry.
 - **Tracking:** GH [#83](https://github.com/kkodecs/livrarr/issues/83) (UA fix), [#73](https://github.com/kkodecs/livrarr/issues/73) (search fallback when OL unavailable).
 
 ## OL's published policy
