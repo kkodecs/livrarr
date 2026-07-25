@@ -6,28 +6,34 @@ Foundation crate. All dependency arrows point here. Defines entities, enums, err
 
 ## Entities (entities.rs, enrichment_types.rs, infra_config.rs)
 
-### Newtype IDs
-- `UserId` — typed ID for users
-- `WorkId` — typed ID for works (books)
-- `AuthorId` — typed ID for authors
-- `LibraryItemId` — typed ID for physical files in the library
-- `RootFolderId` — typed ID for root folder paths
-- `GrabId` — typed ID for grab records
-- `DownloadClientId` — typed ID for download clients
-- `RemotePathMappingId` — typed ID for remote path mappings
-- `HistoryId` — typed ID for history events
-- `NotificationId` — typed ID for notifications
-- `ExternalIdRowId` — typed ID for external ID rows
-- `IndexerId` — typed ID for indexers
+### ID Type Aliases
+
+> **These are type aliases, not newtypes.** Every one is `pub type X = i64`. They document
+> intent and read well in signatures, but they provide **no compile-time protection** — a
+> `WorkId` and an `AuthorId` are literally the same type, and passing one where the other
+> belongs compiles cleanly.
+
+- `UserId` — users
+- `WorkId` — works (books)
+- `AuthorId` — authors
+- `LibraryItemId` — physical files in the library
+- `RootFolderId` — root folder paths
+- `GrabId` — grab records
+- `DownloadClientId` — download clients
+- `RemotePathMappingId` — remote path mappings
+- `HistoryId` — history events
+- `NotificationId` — notifications
+- `ExternalIdRowId` — external ID rows
+- `IndexerId` — indexers
 
 ### Core Entity Structs
 - `User` — account record; fields: id, username, password_hash, role, api_key_hash, setup_pending, timestamps
 - `Session` — auth session; fields: token_hash, user_id, persistent, created_at, expires_at
-- `Work` — a book/audiobook entry; fields: id, user_id, title variants, author, series, metadata keys (ol/hc/gr/isbn/asin), enrichment state, monitor flags, cover, timestamps
+- `Work` — a book/audiobook entry; fields: id, user_id, title variants, author, series, metadata keys (ol/hc/gr/isbn/asin), `enrichment_status` **and** `identity_status` (the two-state split — see the enums below), monitor flags, ebook + audiobook cover slots, timestamps
 - `Author` — an author record; fields: id, user_id, name, sort_name, provider keys, monitor settings, added_at
 - `Series` — a book series; fields: id, user_id, author_id, name, gr_key, monitor flags, work_count, added_at
-- `LibraryItem` — a file on disk linked to a Work; fields: id, user_id, work_id, root_folder_id, path, media_type, file_size, import_id, imported_at
-- `PlaybackProgress` — audiobook playback position for a user/item pair
+- `LibraryItem` — a file on disk linked to a Work; fields: id, user_id, work_id, root_folder_id, path, media_type, file_size, import_id, imported_at, `tag_status`, `tagged_at_generation`, duration_seconds, chapter_scan_status
+- `PlaybackProgress` — reading/listening position for a user/item pair. Not audiobook-only: `position` is a CFI string for EPUB, a page number for PDF, or seconds for audio
 - `RootFolder` — a watched library root path and its media type
 - `DownloadClient` — a configured torrent/usenet client (qBit, SAB, etc.)
 - `Grab` — a grab record linking a Work to a download; tracks status, download_id, content_path, retry state
@@ -36,23 +42,30 @@ Foundation crate. All dependency arrows point here. Defines entities, enums, err
 - `HistoryFilter` — filter params for history queries
 - `Notification` — in-app notification for a user; tracks read/dismissed state
 - `ExternalId` — a provider-specific ID (e.g. Goodreads) linked to a Work
-- `Indexer` — a Torznab/Newznab indexer config; URL, api_key, category/search flags, RSS state
+- `Indexer` — a Torznab/Newznab indexer config; URL, api_key, category/search flags, `enable_rss`. The RSS *cursor* is a separate struct, `IndexerRssState`
 - `IndexerRssState` — per-indexer RSS cursor (last_publish_date, last_guid)
-- `IndexerConfig` — global indexer settings (rss_sync_interval, rss_match_threshold)
+- `IndexerConfig` — global indexer settings: rss_sync_interval_minutes, rss_match_threshold, rss_grab_failure_limit
 - `Import` — a Readarr import job record; tracks progress counts and status
 - `FieldProvenance` — which provider/setter last wrote a given Work field
-- `MergeResolved<T>` — wrapper indicating a merge conflict has been resolved
+- `MergeResolved<T>` — newtype wrapper around a value resolved by a merge; carries no conflict information
 - `QueueProgress` — download progress snapshot (percent, eta, download_status)
 - `QueueSummary` — aggregate queue counts (total, downloading, importing)
+
+> **Not listed above.** From `entities.rs`: `AudiobookChapter`, `KashLink`, `NewKashLink`,
+> `CrossFormatState`, `Bookmark` — the chapter and cross-format-resume types. From
+> `enrichment_types.rs`: `CoverCandidate`, `InternalCoverCandidate`, `SelectCoverRequest`,
+> `CoverResolution`, `FieldDissent`, `LogSurfaceStatus`.
 
 ### Core Enums
 - `MediaType` — Ebook / Audiobook
 - `UserRole` — Admin / User
-- `GrabStatus` — grab lifecycle state (queued, downloading, importing, imported, failed, etc.)
-- `EnrichmentStatus` — metadata enrichment state (pending, enriched, skipped, failed, etc.)
+- `GrabStatus` — grab lifecycle state. All seven variants: Sent, Confirmed, Importing, Imported, ImportFailed, Removed, Failed. There is no `Queued` and no `Downloading`
+- `EnrichmentStatus` — enrichment *quality* only, four variants: Unenriched (initial / not yet attempted), Enriched, Thin (identity known, no meaningful metadata found), Failed. There is no `Pending` and no `Skipped`. Identity-track outcomes used to live here and were moved to `IdentityStatus` by migration 055
+- `IdentityStatus` — the persisted identity-confidence badge, the other half of the two-state split: Pending, Confirmed (work anchor), Provisional (ISBN/ASIN bridge only), Conflict, NeedsReview, NotFound
+- `TagStatus` — per-file tag sync state, tracked on LibraryItem rather than Work: Synced, Pending, Failed
 - `EventType` — history event kinds
 - `NotificationType` — notification category
-- `NarrationType` — narration style (unabridged, abridged, etc.)
+- `NarrationType` — Human / Ai / AiAuthorizedReplica, plus Abridged and Unabridged
 - `AuthType` — authentication type
 - `QueueStatus` — download client queue entry state
 - `DownloadClientImplementation` — concrete client type (qBittorrent, SABnzbd, etc.); provides `client_type()` and `protocol()`
@@ -60,17 +73,20 @@ Foundation crate. All dependency arrows point here. Defines entities, enums, err
 - `LlmProvider` — supported LLM backends
 - `HealthCheckType` — health check category
 - `DbError` — database-layer error variants
-- `SourceKind` — metadata source kind; provides `is_foreign()`, `Display`, `FromStr`
-- `MetadataProvider` — named metadata providers (OpenLibrary, Hardcover, etc.)
-- `WorkField` — all enrichable Work fields; provides `normalization_class()`
-- `ProvenanceSetter` — who/what set a provenance record (user, provider, import)
-- `RequestPriority` — HTTP request priority hint
-- `NormalizationClass` — text normalization category for matching
+- `MetadataProvider` — named metadata providers: Hardcover, OpenLibrary, Goodreads, Audnexus, Llm, Readarr, GoogleBooks, Audible; provides `record_key()`
+- `WorkField` — all 26 enrichable Work fields
+- `ProvenanceSetter` — who/what set a provenance record. Six variants: Provider, User, System, AutoAdded, Imported (CSV list import) and Import (external system, e.g. Readarr) — `Imported` and `Import` are distinct
+- `RequestPriority` — queue-ordering hint: Low, Normal, High, Interactive
+- `NormalizationClass` — RichText / DisplayText / Identifier at field level, plus English / ForeignLanguage as work-level merge strategies
 - `OutcomeClass` — enrichment outcome class; provides `is_phase2_terminal()`, `can_merge()`, `all_can_merge()`
 - `WillRetryReason` — why a retry was scheduled
 - `PermanentFailureReason` — why an enrichment permanently failed
 - `ApplyMergeOutcome` — result of applying a merge
 - `ExternalIdType` — provider-specific external ID type
+
+> **Not listed above.** From `entities.rs`, all enums are covered. From `enrichment_types.rs`:
+> `CoverTrust`, `CoverMediaType`, `CoverCandidateSource`, `Freshness`, `DissentReason`,
+> `AnchorQuery` — the cover-trust, cache-freshness, merge-dissent and anchor-query vocabularies.
 
 ### Utility Functions (util.rs)
 

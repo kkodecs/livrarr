@@ -1,5 +1,35 @@
 # Wiki Change Log
 
+## 2026-07-25 — domain.md Entities verified: the "newtype IDs" are type aliases; domain.md complete
+
+**Updated pages:**
+- crates/domain.md — seventh documentarian pass. The Entities section (ID aliases, entity
+  structs, enums) audited against `entities.rs`, `enrichment_types.rs` and `infra_config.rs`,
+  all three read in full. **19 claims corrected, 2 deleted, 2 omission caveats added.**
+  **domain.md is now fully verified end to end.**
+  The headline: **the section called "Newtype IDs" documents type aliases.** Every one is
+  `pub type X = i64` — `WorkId` and `AuthorId` are literally the same type, so passing one where
+  the other belongs compiles cleanly. The page promised a compile-time guarantee the crate does
+  not provide. Renamed to "ID Type Aliases" with the caveat stated.
+  Deleted: `SourceKind` (zero hits anywhere — which also settles pass #6's open question: there
+  was no `SourceKind::is_foreign()` to redirect the deleted `is_foreign_source` to) and
+  `WorkField::normalization_class()` (zero hits).
+  Phantom enum variants corrected: `GrabStatus` was documented with `queued` and `downloading`,
+  neither of which exists — the real seven are Sent/Confirmed/Importing/Imported/ImportFailed/
+  Removed/Failed. `EnrichmentStatus` was documented with `pending` and `skipped`, neither of
+  which exists — it has four variants and `Thin` was missing.
+  Added: `IdentityStatus` and `TagStatus`, both entirely absent. `IdentityStatus` is the identity
+  half of the two-state split (identity outcomes moved off `EnrichmentStatus` in migration 055),
+  and the rest of the wiki leans on it heavily.
+  Also: `PlaybackProgress` is not audiobook-only (CFI for EPUB, page number for PDF, seconds for
+  audio); `ProvenanceSetter` has six variants and `Imported` (CSV) and `Import` (Readarr) are
+  distinct; `MergeResolved<T>` carries no conflict information; `IndexerConfig` has a third
+  field. The section header's claim that those three files account for the section **holds** —
+  verified type by type.
+
+**Context:** documentarian edit pass #7, governed by `build/reviews/DOC-EDIT-PACKET-4.md`.
+Per-edit citations: `build/reviews/docs-edit-domain-md-entities-changelog.md`.
+
 ## 2026-07-25 — domain.md region 1, lower half: normalize_for_matching is production-dead
 
 **Updated pages:**
