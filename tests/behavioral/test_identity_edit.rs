@@ -205,10 +205,7 @@ async fn spawn_goodreads(status: StatusCode) -> String {
     format!("http://{address}")
 }
 
-fn work_service(
-    db: SqliteDb,
-    goodreads_base_url: String,
-) -> impl WorkService + 'static {
+fn work_service(db: SqliteDb, goodreads_base_url: String) -> impl WorkService + 'static {
     let fetcher = HttpFetcherImpl::new().expect("real HTTP fetcher");
     let http = HttpClient::builder().build().expect("real HTTP client");
     let goodreads = GoodreadsClient::new(fetcher, http, goodreads_base_url).with_retry_backoff(0);

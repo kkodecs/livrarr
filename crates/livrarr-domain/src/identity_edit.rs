@@ -189,16 +189,59 @@ fn classify_url(input: &str) -> Result<Option<(AnchorType, String)>, ClassifyErr
     Ok(None)
 }
 
-/// The path segment following the first `marker` in a URL whose host contains
-/// `host` (case-insensitive host/path match; the segment keeps its case).
+/// The path segment following the first `marker` in a URL served by `host`
+/// (case-insensitive match; the segment keeps its case).
+///
+/// `host` is matched against the URL's actual host, never against the whole input:
+/// a provider domain sitting in some other site's query string, path or fragment is
+/// not that provider. Markers are searched in the path alone for the same reason.
+///
+/// A trailing dot in `host` ("amazon.") means "this label under any TLD", which is how
+/// the regional Amazon domains are covered. Otherwise the host must equal the pattern
+/// or be a subdomain of it — so `notgoodreads.com` and `goodreads.com.evil.example`
+/// are both rejected.
+///
+/// The scheme is optional so a pasted `www.goodreads.com/book/show/1` still works, but
+/// a present scheme must be http(s).
 fn url_segment<'a>(input: &'a str, host: &str, markers: &[&str]) -> Option<&'a str> {
+    // ASCII lowercasing is length-preserving, so offsets into `lower` index `input`.
     let lower = input.to_ascii_lowercase();
-    if !lower.contains(host) {
+    let after_scheme = match lower.find("://") {
+        Some(pos) => {
+            if !matches!(&lower[..pos], "http" | "https") {
+                return None;
+            }
+            &lower[pos + 3..]
+        }
+        None => lower.as_str(),
+    };
+    let scheme_len = lower.len() - after_scheme.len();
+
+    // Authority runs to the first '/', '?' or '#'; drop any userinfo and port.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let candidate = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
+
+    let host_matches = match host.strip_suffix('.') {
+        Some(label) => {
+            candidate.starts_with(&format!("{label}.")) || candidate.contains(&format!(".{label}."))
+        }
+        None => candidate == host || candidate.ends_with(&format!(".{host}")),
+    };
+    if !host_matches {
         return None;
     }
+
+    let path_start = scheme_len + authority_end;
+    let path = &lower[path_start..];
+    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+
     for marker in markers {
-        if let Some(pos) = lower.find(marker) {
-            let rest = &input[pos + marker.len()..];
+        if let Some(pos) = path.find(marker) {
+            let rest = &input[path_start + pos + marker.len()..];
             let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
             let seg = &rest[..end];
             if !seg.is_empty() {

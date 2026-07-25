@@ -611,3 +611,9 @@ required-features = ["identity_edit_red"]
 
 # --- End identity-edit suites (merged 2026-07-24: codex base + CC net-new; see
 # --- build/reviews/identity-edit/suite-merge-notes.md) ---
+
+# identity-edit FIX UNIT (docs/design-identity-edit-fixes.md). Ungated: every surface it
+# touches already exists on main, so its RED points at behavior, not at a missing type.
+[[test]]
+name = "test_identity_edit_fixes"
+path = "../../tests/behavioral/test_identity_edit_fixes.rs"

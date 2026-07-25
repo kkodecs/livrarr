@@ -1125,14 +1125,19 @@ impl WorkIdentityRepository for SqliteDb {
         // Empty means no confirmed row, no nonempty column, and no pending
         // row; historical superseded rows do not make a slot nonempty. The
         // rollback (drop) also undoes the claim bump.
+        // Presence, not value: the `clear_identity_slot` contract defines an empty slot
+        // as no confirmed row, no nonempty column, AND no pending row. A pending row
+        // whose value is empty is still a row, and it is exactly the one a user has no
+        // other way to get rid of — filtering it out here strands it forever.
+        if confirmed.is_none() && column.is_none() && pending.is_empty() {
+            drop(tx);
+            return Err(IdentityEditError::EmptySlot);
+        }
         let old_value = confirmed
             .clone()
             .or_else(|| column.clone())
-            .or_else(|| pending.iter().find(|v| !v.is_empty()).cloned());
-        let Some(old_value) = old_value else {
-            drop(tx);
-            return Err(IdentityEditError::EmptySlot);
-        };
+            .or_else(|| pending.iter().find(|v| !v.is_empty()).cloned())
+            .unwrap_or_default();
 
         sqlx::query(
             "UPDATE work_identity_anchors \
@@ -2139,8 +2144,13 @@ pub async fn backfill_work_identity_ledger(pool: &sqlx::SqlitePool) -> Result<()
     .await
     .map_err(|e| format!("scan works columns: {e}"))?;
 
-    let confirmed_rows: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT work_id, anchor_type, anchor_value FROM work_identity_anchors \
+    // The ledger carries its own `user_id` (migration 044) and the 076 uniqueness index
+    // keys on THAT column, so ownership must be read from it directly. Deriving the user
+    // by joining through `works` instead only sees works with a non-NULL legacy column,
+    // which makes a ledger-only owner invisible: a second owner is then elected for the
+    // same (user, type, value) and the insert fails the index, failing startup.
+    let confirmed_rows: Vec<(i64, Option<i64>, String, String)> = sqlx::query_as(
+        "SELECT work_id, user_id, anchor_type, anchor_value FROM work_identity_anchors \
          WHERE confidence = 'confirmed'",
     )
     .fetch_all(&mut *tx)
@@ -2149,15 +2159,15 @@ pub async fn backfill_work_identity_ledger(pool: &sqlx::SqlitePool) -> Result<()
     // (work_id, anchor_type) → confirmed value; and (user, type, value) → owner.
     let mut confirmed_by_work: std::collections::HashMap<(i64, String), String> =
         std::collections::HashMap::new();
-    for (w, t, v) in &confirmed_rows {
+    for (w, _, t, v) in &confirmed_rows {
         confirmed_by_work.insert((*w, t.clone()), v.clone());
     }
-    let user_of: std::collections::HashMap<i64, i64> =
-        works.iter().map(|(id, user, ..)| (*id, *user)).collect();
     let mut owner_of: std::collections::HashMap<(i64, String, String), i64> =
         std::collections::HashMap::new();
-    for (w, t, v) in &confirmed_rows {
-        if let Some(user) = user_of.get(w) {
+    for (w, user, t, v) in &confirmed_rows {
+        // 044 made `user_id` nullable. A NULL row sits outside the 076 partial index
+        // and so cannot collide with anything — it never claims ownership.
+        if let Some(user) = user {
             owner_of.insert((*user, t.clone(), v.clone()), *w);
         }
     }
