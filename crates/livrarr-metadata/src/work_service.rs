@@ -2277,11 +2277,16 @@ where
             .open_conflict_kinds
             .iter()
             .any(|k| conflict_kind_implicates(*k, &slot));
+        // A no-op must be a no-op in the database too: AC-20 requires a commit to clear
+        // the slot's pending guesses, so a surviving pending row is outstanding work and
+        // the commit has to run. Without this the user re-certifies the value they
+        // already have, is told nothing changed, and the stale guess stays affirmable.
         let is_true_no_op = same_user_confirmed
             && column_agrees
             && snapshot.drop_slots.is_empty()
             && no_implicated_conflict
             && !slot_basis.dead_end
+            && slot_basis.pending.is_empty()
             && basis.stored_badge == basis.derived_badge;
         if is_true_no_op {
             let work = self.get(user_id, work_id).await.map_err(edit_service_err)?;
@@ -2550,11 +2555,19 @@ impl<D, E, H> WorkServiceImpl<D, E, H> {
             .filter(|(_, s)| s.user_id == snapshot.user_id)
             .map(|(k, s)| (k.clone(), s.seq))
             .collect();
-        if own.len() >= PREVIEW_PER_USER_CAP {
+        // Replace the caller's own oldest token when they are at their per-user cap OR
+        // when the store is globally full. Evicting only at the per-user cap refuses a
+        // caller who holds a perfectly evictable token just because other users filled
+        // the store — the specified policy is to spend your own slot before you are told
+        // to come back later.
+        let at_own_cap = own.len() >= PREVIEW_PER_USER_CAP;
+        let globally_full = store.map.len() >= PREVIEW_GLOBAL_CAP;
+        if at_own_cap || globally_full {
             if let Some((oldest, _)) = own.into_iter().min_by_key(|(_, seq)| *seq) {
                 store.map.remove(&oldest);
             }
         }
+        // Only now, with the caller's own slot spent, is capacity a real refusal.
         if store.map.len() >= PREVIEW_GLOBAL_CAP {
             return Err(livrarr_domain::identity_edit::IdentityEditError::Capacity {
                 retry_after_secs: PREVIEW_CAPACITY_RETRY_SECS,

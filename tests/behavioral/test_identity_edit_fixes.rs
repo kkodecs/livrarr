@@ -23,8 +23,10 @@ use livrarr_domain::identity::{
 use livrarr_domain::identity_edit::classify_identifier_input;
 use livrarr_domain::services::{
     EnrichmentMode, EnrichmentResult, EnrichmentWorkflow, EnrichmentWorkflowError,
-    SourceProviderData, WorkIdentityRepository, WorkService,
+    IdentityPreviewOutcome, IdentityPreviewRecord, SourceProviderData, WorkIdentityRepository,
+    WorkService,
 };
+use livrarr_domain::AnchorQuery;
 use livrarr_domain::{
     normalize_for_matching, EnrichmentStatus, IdentityStatus, UserId, Work, WorkId,
 };
@@ -43,6 +45,19 @@ async fn create_work(db: &SqliteDb, user_id: UserId, title: &str) -> i64 {
         .await
         .expect("create test work");
     work.id
+}
+
+async fn create_user_n(db: &SqliteDb, n: usize) -> UserId {
+    use livrarr_db::UserDb;
+    db.create_user(livrarr_db::CreateUserDbRequest {
+        username: format!("user{n}"),
+        password_hash: "hash".into(),
+        role: livrarr_domain::UserRole::User,
+        api_key_hash: format!("apikey{n}"),
+    })
+    .await
+    .expect("create user")
+    .id
 }
 
 async fn confirmed_owner_count(db: &SqliteDb, work_id: i64, anchor_type: &str) -> i64 {
@@ -325,6 +340,234 @@ async fn f1b_a_delayed_not_found_must_not_overwrite_an_edit_made_during_the_wait
         final_generation, after_edit,
         "a superseded conclusion must write nothing at all"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F4b — a same-value commit must still clean up the slot's pending rows
+// ---------------------------------------------------------------------------
+
+/// Enrichment that certifies whatever GR key it is asked about. Only the preview seam
+/// (`fetch_anchor_preview`) is exercised; `enrich_work` is never reached by the
+/// preview/commit doors under test.
+#[derive(Clone)]
+struct CertifyingPreviewEnrichment {
+    title: String,
+    author: String,
+}
+
+impl EnrichmentWorkflow for CertifyingPreviewEnrichment {
+    async fn enrich_work(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _mode: EnrichmentMode,
+        _candidate_id: Option<livrarr_domain::identity::CandidateId>,
+        _priority: livrarr_domain::RequestPriority,
+        _freshness: livrarr_domain::Freshness,
+    ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
+        Err(EnrichmentWorkflowError::Queue(
+            "enrich_work is not part of the preview/commit doors under test".into(),
+        ))
+    }
+
+    async fn reset_for_manual_refresh(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+    ) -> Result<(), EnrichmentWorkflowError> {
+        Ok(())
+    }
+
+    async fn inject_source_data(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _data: SourceProviderData,
+    ) {
+    }
+
+    async fn fetch_anchor_preview(
+        &self,
+        _provider: livrarr_domain::MetadataProvider,
+        query: AnchorQuery,
+        _language: Option<String>,
+        _priority: livrarr_domain::RequestPriority,
+    ) -> Result<IdentityPreviewOutcome, EnrichmentWorkflowError> {
+        let mut record = IdentityPreviewRecord {
+            title: Some(self.title.clone()),
+            author: Some(self.author.clone()),
+            language: Some("en".to_string()),
+            ..IdentityPreviewRecord::default()
+        };
+        match query {
+            AnchorQuery::GrKey(k) => record.gr_key = Some(k),
+            AnchorQuery::OlKey(k) => record.ol_key = Some(k),
+            AnchorQuery::HcKey(k) => record.hc_key = Some(k),
+            AnchorQuery::Isbn13(v) => record.isbn_13 = Some(v),
+            AnchorQuery::Asin(v) => record.asin = Some(v),
+        }
+        Ok(IdentityPreviewOutcome::Resolved(Box::new(record)))
+    }
+}
+
+/// Design: `docs/design-identity-edit-fixes.md` F4b.
+///
+/// RED on a7f03540: `is_true_no_op`
+/// (`crates/livrarr-metadata/src/work_service.rs:2253-2258`) weighs the confirmed value,
+/// the column, the drop set, implicated conflicts, dead-ends and badge coherence — and
+/// never looks at the slot's pending rows. Re-certifying the value you already have
+/// therefore returns `changed:false` without entering the transaction, and the stale
+/// pending guess AC-20 requires deleting survives, still affirmable.
+#[tokio::test]
+async fn f4b_a_same_value_commit_still_deletes_the_slots_pending_rows() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let work_id = create_work(&db, user_id, "Test Author Book").await;
+
+    // Already user-confirmed and mirrored into the column, via the real writer.
+    db.confirm_anchor_and_recompute_badge(
+        work_id,
+        AnchorType::new(AnchorType::GR_WORK),
+        "123",
+        AnchorSetter::User,
+    )
+    .await
+    .expect("seed the confirmed GR anchor");
+
+    // A stale fuzzy guess in the same slot, via the real pending writer.
+    db.record_pending_anchor(work_id, AnchorType::new(AnchorType::GR_WORK), "999")
+        .await
+        .expect("seed the stale pending guess");
+
+    let service = WorkServiceImpl::new(
+        db.clone(),
+        CertifyingPreviewEnrichment {
+            title: "Test Author Book".to_string(),
+            author: "Test Author".to_string(),
+        },
+        StubHttpFetcher::new(),
+        tempfile::tempdir().expect("data dir").path().to_path_buf(),
+    );
+
+    // The user re-certifies the value the work already carries.
+    let preview = service
+        .preview_identity_edit(
+            user_id,
+            work_id,
+            "123",
+            Some(AnchorType::new(AnchorType::GR_WORK)),
+        )
+        .await
+        .expect("preview the same value");
+    let token = preview.preview_id.clone().expect("a certifiable preview");
+
+    service
+        .commit_identity_edit(
+            user_id,
+            work_id,
+            AnchorType::new(AnchorType::GR_WORK),
+            &token,
+        )
+        .await
+        .expect("commit the same value");
+
+    let pending_left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM work_identity_anchors \
+         WHERE work_id = ?1 AND anchor_type = 'gr_work' AND confidence = 'pending'",
+    )
+    .bind(work_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count pending rows");
+    assert_eq!(
+        pending_left, 0,
+        "committing a slot must clear its stale pending guesses even when the certified \
+         value is unchanged (AC-20)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F5a — a globally full preview store must replace the caller's own oldest token
+// ---------------------------------------------------------------------------
+
+/// Design: `docs/design-identity-edit-fixes.md` F5a.
+///
+/// RED on a7f03540: per-user eviction fires only once the caller already holds
+/// `PREVIEW_PER_USER_CAP` tokens (`crates/livrarr-metadata/src/work_service.rs:2526`),
+/// but the global-capacity rejection at `:2531` runs regardless. A caller holding an
+/// evictable token but sitting under the per-user cap is refused instead of having their
+/// oldest replaced.
+///
+/// No constructed state: every token in the store is created by the real
+/// `preview_identity_edit` door, which is the only thing that mints one.
+#[tokio::test]
+async fn f5a_a_full_preview_store_replaces_the_callers_oldest_token() {
+    const GLOBAL_CAP: usize = 64;
+    const PER_USER_CAP: usize = 4;
+
+    let db = create_test_db().await;
+    let service = WorkServiceImpl::new(
+        db.clone(),
+        CertifyingPreviewEnrichment {
+            title: "Test Author Book".to_string(),
+            author: "Test Author".to_string(),
+        },
+        StubHttpFetcher::new(),
+        tempfile::tempdir().expect("data dir").path().to_path_buf(),
+    );
+
+    let mut next_key = 1_000_000;
+
+    // The caller takes two tokens first, while there is still room — so that when the
+    // store fills they hold an evictable token but remain under the per-user cap.
+    let caller = create_user_n(&db, 0).await;
+    let caller_work = create_work(&db, caller, "Test Author Book").await;
+    for _ in 0..2 {
+        next_key += 1;
+        service
+            .preview_identity_edit(
+                caller,
+                caller_work,
+                &next_key.to_string(),
+                Some(AnchorType::new(AnchorType::GR_WORK)),
+            )
+            .await
+            .expect("caller's early previews fit");
+    }
+
+    // Fill the rest of the store with other users, PER_USER_CAP each.
+    let mut placed = 2;
+    let mut other = 0;
+    while placed < GLOBAL_CAP {
+        other += 1;
+        let user = create_user_n(&db, other).await;
+        let work = create_work(&db, user, "Test Author Book").await;
+        for _ in 0..PER_USER_CAP.min(GLOBAL_CAP - placed) {
+            next_key += 1;
+            service
+                .preview_identity_edit(
+                    user,
+                    work,
+                    &next_key.to_string(),
+                    Some(AnchorType::new(AnchorType::GR_WORK)),
+                )
+                .await
+                .expect("other users fill the store");
+            placed += 1;
+        }
+    }
+
+    // The store is now globally full and the caller holds 2 of 4 permitted tokens.
+    next_key += 1;
+    service
+        .preview_identity_edit(
+            caller,
+            caller_work,
+            &next_key.to_string(),
+            Some(AnchorType::new(AnchorType::GR_WORK)),
+        )
+        .await
+        .expect("a full store must replace the caller's oldest token, not refuse them");
 }
 
 // ---------------------------------------------------------------------------
