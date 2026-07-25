@@ -12,7 +12,11 @@ Two kinds of rows:
 - **GR-backed:** `gr_key` is a real (numeric) Goodreads series key. Created by the
   monitor flow or by stub promotion/silent resolution.
 - **Stub:** created from a work's `series_name` metadata (back-fill or ongoing
-  reconcile). `gr_key = "stub:" + normalize_for_matching(name)` — internal marker,
+  reconcile). `gr_key = "stub:" + identity_key(name, "").0` — the shared identity
+  normalizer (`crates/livrarr-metadata/src/series_link.rs:28-32`), **not**
+  `normalize_for_matching`: that one is superseded and has no production call site left
+  (`crates/livrarr-domain/src/util.rs:85-90`), and the two recipes disagree on stopwords
+  and accents, so computing a stub key with it yields a different key. Internal marker,
   **masked to `""` at the API boundary** (UI hides GR links for keyless series).
   `work_count = i32::MAX` sentinel (see Work Assignment), masked to 0 at the API.
 
@@ -66,7 +70,12 @@ never truth (N1):** an empty parse is never persisted, never overwrites stored d
 reads as absent — the next expansion refetches, so rosters damaged during the
 2026-07 GR-layout break heal on open. A pagination walk that collects fewer books
 than the header's declared primary count yields EMPTY (drift), never a partial
-roster. Every roster save pairs with a `work_count` update (count IS the GR roster
+roster (`crates/livrarr-metadata/src/series_query_service/gr_fetch.rs:107-119`).
+**A missing primary count is the second EMPTY path** — page 1 parsing books while the
+header states no count means the header drifted, and the walk returns nothing rather
+than adopt GR's full edition soup (`:97-106`). Both route into the same no-write
+guards. Inside a good window the roster is truncated to the declared count and then
+collection-shaped titles are screened out (`:120-129`). Every roster save pairs with a `work_count` update (count IS the GR roster
 size, ST-007). Non-empty stored rosters still never refetch. On the 2026-07 GR
 layout the roster = the first "N primary works" entries (see
 [goodreads.md](../integrations/goodreads.md) § Series pages); positions come only

@@ -1,5 +1,51 @@
 # Wiki Change Log
 
+## 2026-07-25 — `wiki/domain/` complete; `architecture/overview.md` — a dead crate, a removed edge, and a startup order backwards
+
+**Updated pages:** `wiki/domain/series.md` (completes `wiki/domain/`, 11 of 11) and
+`wiki/architecture/overview.md` (starts `wiki/architecture/`, 1 of 12). Fifteenth
+documentarian pass.
+
+**`series.md` was the most accurate page in the effort so far.** One real error in roughly
+thirty checkable claims — the stub key names `normalize_for_matching`, but the code uses the
+shared `identity_key` recipe. That is not a harmless rename: `normalize_for_matching`'s own
+doc says it is superseded and has no production call site left, and the two recipes disagree
+on stopwords and accents on purpose, so anyone computing a stub key the documented way gets a
+different key and a duplicate series row. Everything else held — the uniqueness constraint,
+the `i32::MAX` stub sentinel, the fewest-books-wins guard, all four reconcile trigger points,
+the propagate/warn error split, the cap-50 worker limit, and every roster emptiness rule. Two
+completions added: a missing primary count is a second EMPTY trigger, and collection-shaped
+titles are screened inside the primary window.
+
+**`overview.md` is the most-read architecture page and carried six structural errors.**
+
+- **A crate nothing uses is documented as a live seam.** `livrarr-jobs` is presented as the
+  compile-wall-safe job-triggering mechanism. No crate depends on it and no source file
+  imports it. It declares three traits and nothing consumes them. Flagged on the page as
+  declared-but-unwired; whether that seam is aspirational or was orphaned is a PO question.
+- **A dependency the page tells you to go clean up is already gone.** `livrarr-library` no
+  longer depends on `livrarr-tagwrite`; the page listed the edge *and* labelled it conformance
+  backlog. Same false-alarm class as the refresh-all warning two passes ago.
+- **"`livrarr-server` depends on everything"** — it depends on 11 of the other 16, not
+  including identity, enrichment, jobs or cli. And "nothing depends on it" is true only for
+  production: the behavioral crate dev-depends on it.
+- **`AppContext` does not define the handler service surface.** The page said handlers are
+  generic over it and that it carries 29 associated types and ~40 accessors. It declares zero
+  of either — it is an empty union of 49 `Has*` traits kept for route composition, and
+  handlers bind the narrow traits they actually use.
+- **The startup sequence is 15 steps, not 10, and two were listed in the wrong order.** The
+  backup is taken *before* migrations run — that is the whole point of it — and the version
+  gate fires *after*. The page had "version gate, backup, migrations". Two listed steps do not
+  exist at all: there is no `PRAGMA quick_check` and no foreign-key check.
+- **"LLM is a fallback for ambiguity"** — the third page carrying this, and the reason it kept
+  spreading: here it was stated as an *invariant*. There is no LLM fallback for matching
+  anywhere; every provider uses the shared deterministic picker and abstains below the bar.
+
+**Context:** pass #15, scoped by `build/reviews/DOC-EDIT-PACKET-8.md`.
+Citations: `build/reviews/docs-edit-architecture-1-changelog.md`.
+**Progress:** 26 of 40 pages verified. `wiki/crates/`, `wiki/patterns/`, `wiki/integrations/`
+and `wiki/domain/` are complete.
+
 ## 2026-07-25 — `wiki/domain/` part 2: Goodreads does not need an LLM, and foreign works never take HC/OL metadata
 
 **Updated pages:** `wiki/domain/metadata-sources.md` (fully audited),
