@@ -1,5 +1,35 @@
 # Wiki Change Log
 
+## 2026-07-24 — server.md verified against source: 21 wrong claims corrected or cut
+
+**Updated pages:**
+- crates/server.md — first documentarian verify-and-correct pass. Every factual claim on the
+  page was checked against `crates/livrarr-server/` source; ~3 in 4 held. Deleted: the whole
+  `## Disk (disk.rs)` section (no such file), four phantom functions under `release_helpers.rs`
+  (`search_indexer`, `build_torznab_url`, `clean_search_term`, `fetch_and_parse` — none exist
+  anywhere in the repo), and a `data_dir` field on `LiveImportService` that isn't a field.
+  Corrected: `validate_llm_endpoint_startup` validates URL *shape*, never reachability;
+  `CoverProxyCache` is TTL + oldest-inserted eviction, **not LRU**; `ImportIoServiceImpl` does
+  **no file I/O** (ten DB methods only); `LiveTagService` is not EPUB-only (explicit MP3 batch
+  path); `LiveMatchingService` returns match clusters, never works; `SecondaryApiImpl` is
+  `#[cfg(test)]` and is **not** a production API surface; `fetch_all_readarr_data` is mostly
+  sequential and fetches no editions; `rss_sync_tick` does not check already-running;
+  `AppConfig` has five sections, not three; three `services/*.rs` paths pointed at files that
+  don't exist (two live at the crate root, one is in `livrarr-download`). Added: the 13
+  `AppState` fields the three field tables were missing (of 61 total), including
+  `discovery_service`, `identity_resolver`, and `cover_service`; the Phase 5 table's column
+  header now matches what its rows carry.
+
+**Context:** documentarian role, edit pass #1, scoped by `build/reviews/DOC-EDIT-PACKET.md`.
+Audit report: `build/reviews/docs-audit-server-md.md`. Change log with per-edit citations:
+`build/reviews/docs-edit-server-md-changelog.md`. Undocumented files/job modules were left
+alone — that is authorship, deliberately out of scope for this pass.
+
+**Caveat for future sessions:** Serena's reported line numbers drifted from the real file in
+`main.rs` (it placed `load_config` at 1069/1070; the function is at 1062). Every citation in
+the change log was confirmed by opening the line. Do not cite a Serena `body_location`
+without reading it.
+
 ## 2026-07-14 — Settle-road title trust: cause-aware grey + one trust policy; flm colon-truncation killed
 
 **Updated pages:**
@@ -420,3 +450,8 @@ PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
 - Architecture artifacts live at repo root: ir-v1-work-history.yaml + contract-work-history.yaml (r3 both-family PASS, zero findings; verify.py architecture + review both PASS on file).
 - 2026-07-19: insights.md +76 (work_update echo / NoChange has no producers / content_changed is the truthful changed signal) — work-history Stage 5 session.
 - 2026-07-20: insight 77 added (work-history event system + backfill semantics, feature aa7f6985); insight 48's amendments note already covers the HistoryEvent spine row.
+
+- 2026-07-23: insight 30 — corrected outbound-queue wait semantics: bounded per-priority admission with typed QueueFull → budget-exempt WillRetry{QueueFull} plumbed through all 4 provider adapters (alpha-hardening fixes, audit #6).
+- 2026-07-24: insights.md +78 (anchor uniqueness truth: 042 dropped 041's global, 044's per-user ALL-type index is live; GT6 falsification RCA pointers; 076 delta = bridge freedom). Source: identity-edit dual-suite red-run divergence.
+
+- 2026-07-25 — added insight 79 (outbound-queue dispatcher wedge). Evidence is unusually strong: three of four independent implementations of an unrelated feature converged on the same fix to `outbound_queue.rs`, plus a single-variable A/B that turned a 7-minute hang into 36.82s. Also corrected a claim carried earlier in that session that the fix was one entry's idiosyncratic scope creep — it was not; three entries made it.

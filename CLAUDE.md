@@ -7,6 +7,16 @@
 3. **Check `wiki/` before re-deriving domain knowledge** — read `wiki/index.md` to find relevant pages before reasoning from scratch about how a subsystem works.
 4. **Update `wiki/` when you learn something new** — at block boundaries or when you discover domain knowledge a future session would need, update or create wiki pages per `/pk-wiki`. If you don't write it, the next session re-derives it.
 
+## Design Documents — Supersede, Never Overwrite (PO-approved 2026-07-24)
+
+A design document under `docs/` is revised in place ONLY after the previous revision is
+snapshotted to `docs/design-history/<name>-r<N>.md`. Never rewrite a design round over
+its predecessor: the identity-edit RCA (2026-07-24) found r2's reasoning permanently
+unrecoverable because the file had been overwritten each round, so the basis of a
+false ground-truth claim could not be reconstructed. Standard practice elsewhere is the
+same — accepted decisions are superseded and linked, never edited away. The snapshot is
+part of the same change as the revision, not a later cleanup.
+
 ## Principles
 
 See `ARCHITECTURE.md` Part 1 (Product Principles) and `PRINCIPLES.md` (universal engineering principles). Highest authority in the project. Override everything below when conflicts arise. (Formerly split across `docs/principles.md` and gitignored `build/foundation/principles.md`; consolidated into the tracked root docs 2026-07-05 — see `docs/architecture-review-2026-07-04.md` AR-01.)
@@ -52,6 +62,7 @@ See `ARCHITECTURE.md` Part 1 (Product Principles) and `PRINCIPLES.md` (universal
 ## Code Stage Gate (from playback-enhancements process exception, 2026-05-24)
 
 - **CC must not advance past Step 4a (behavioral tests) in Code stage without tests compiling and failing (red).** Implementation without red tests is a stage violation. The test suite must be in place and verified red before any Step 4b implementation work begins. Writing implementation first and tests second inverts TDD and defeats the purpose of the test-driven gate.
+- **Tests drive the real door (from alpha-hardening retro, 2026-07-23).** Every test — red-first or added later — exercises the production entry path for the behavior it claims to cover: the real route + middleware via the real router, the real `SqliteDb` writer, the real adapter/client seam, the real component. Never an injected outcome, a toy router, or hand-built state the production path could not produce. A green suite over injected results proves nothing: 9 alpha-hardening units shipped green that way and the audit returned 21 findings, most of that class. Any test whose entry point is constructed state needs an explicit justification in its packet.
 
 ## Process Discipline (from v2.1 retro)
 
