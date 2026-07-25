@@ -2,7 +2,11 @@
 
 SQLite database layer. All SQL lives here. Implemented by `SqliteDb` (in `sqlite.rs`). Tests use `create_test_db()` which returns an in-memory SQLite instance.
 
-All traits are implemented by `SqliteDb` unless noted otherwise.
+All traits are implemented by `SqliteDb` unless noted otherwise. Trait contracts and their
+request structs live in `src/api/` (one module per entity), re-exported at the crate root.
+
+> The method lists below are **partial** — several traits carry methods not listed here.
+> `src/api/` is the complete contract.
 
 ---
 
@@ -18,7 +22,7 @@ CRUD for user accounts.
 - `create_user(req)` — insert a new user
 - `update_user(id, req)` — update username, password_hash, role
 - `delete_user(id)` — delete a user
-- `count_admins()` — returns number of admin accounts (used for setup guard)
+- `count_admins()` — returns the number of admin accounts (for the last-admin check)
 - `complete_setup(req)` — finishes initial setup by setting credentials
 - `update_api_key_hash(id, hash)` — rotate a user's API key hash
 
@@ -26,7 +30,7 @@ CRUD for user accounts.
 Auth session management.
 
 - `get_session(token_hash)` — fetch session by token hash
-- `create_session(req)` — insert a new session
+- `create_session(session)` — insert a new session (takes a `&Session`, not a request struct)
 - `delete_session(token_hash)` — delete a specific session (logout)
 - `extend_session(token_hash, new_expiry)` — push expiry forward for active sessions
 - `delete_user_sessions(user_id)` — delete all sessions for a user
@@ -36,27 +40,31 @@ Auth session management.
 Work CRUD, enrichment state, and search.
 
 - `get_work(user_id, id)` — fetch a Work by ID
-- `list_works(user_id, filter)` — list Works with optional filter/sort
+- `list_works(user_id)` — list a user's Works, unbounded (no filter argument; internal use)
 - `list_works_by_author(user_id, author_id)` — list all Works for an Author
-- `list_works_paginated(user_id, filter, page, per_page)` — paginated Work list
-- `create_work(req)` — insert a new Work
-- `update_work_enrichment(id, req)` — apply enrichment data to a Work
+- `list_works_paginated(user_id, page, per_page, sort_by, sort_dir, media_type, language)` — paginated Work list with server-side sort
+- `update_work_enrichment(user_id, id, req)` — apply enrichment data to a Work
 - `update_work_user_fields(user_id, id, req)` — update user-editable fields
-- `set_cover_manual(user_id, id, flag)` — mark cover as manually overridden
-- `delete_work(user_id, id)` — delete a Work
+- `set_cover_manual(user_id, id, manual)` — mark cover as manually overridden
+- `delete_work(user_id, id)` — delete a Work; returns the deleted row for file cleanup
 - `work_exists_by_ol_key(user_id, ol_key)` — check dedup by OpenLibrary key
-- `list_works_for_enrichment(user_id)` — list Works pending enrichment
-- `list_works_by_author_ol_keys(user_id, keys)` — lookup Works by author OL keys (bibliography match)
+- `list_works_for_enrichment(user_id)` — list Works for bulk re-enrichment
+- `list_works_by_author_ol_keys(user_id, author_ol_key)` — takes ONE author OL key; returns `Vec<String>` (monitoring dedup)
 - `list_work_provider_keys_by_author(user_id, author_id)` — fetch all provider keys for an author's Works
-- `find_by_normalized_match(user_id, normalized_title, normalized_author)` — fuzzy dedup lookup
-- `reset_pending_enrichments(user_id)` — reset all works stuck in pending state
+- `find_by_normalized_match(user_id, title, author)` — normalized title+author match (manual scan matching)
 - `list_monitored_works_all_users()` — list monitored Works across all users (for RSS/monitor workers)
-- `set_enrichment_status_skipped(user_id, id)` — mark a Work's enrichment as skipped
 - `apply_enrichment_merge(req)` — atomically apply a merged enrichment result with provenance
-- `reset_for_manual_refresh(user_id, id)` — clear enrichment state for a re-run
-- `list_conflict_works(user_id)` — list Works with unresolved merge conflicts
-- `get_merge_generation(user_id, id)` — fetch the current merge generation counter for optimistic concurrency
-- `search_works(user_id, term)` — full-text search across Work titles/authors
+- `reset_for_manual_refresh(user_id, work_id)` — clear enrichment state for a re-run
+- `list_conflict_works(user_id)` — list Works in Conflict status
+- `get_merge_generation(user_id, work_id)` — fetch the current merge generation counter for optimistic concurrency
+- `search_works(user_id, query, page, per_page)` — paginated title/author `LIKE` match (not full-text search)
+
+### WorkDbCreate
+Work creation is a **separate trait**, deliberately split from `WorkDb` so only `WorkServiceImpl`
+can create Works — compile-time enforcement of M2, the single creation gate. Every other path
+must call `WorkService::add()`.
+
+- `create_work(req)` — insert a new Work; returns `(work, actually_created)`, where `false` means the UNIQUE constraint matched an existing row and that existing row is returned
 
 ### AuthorDb
 Author CRUD and monitor queries.
@@ -81,54 +89,57 @@ Physical file record management.
 - `delete_library_item(user_id, id)` — delete a file record
 - `library_items_exist_for_root(root_folder_id)` — check if any files reference a root folder (delete guard)
 - `list_taggable_items_by_work(user_id, work_id)` — fetch items eligible for tag writing
-- `update_library_item_size(id, size)` — update stored file size
+- `update_library_item_size(user_id, id, file_size)` — update stored file size
 - `work_has_library_item(user_id, work_id, media_type)` — check if a Work has a file of given type
 
 ### RootFolderDb
-Root folder CRUD.
+Root folder CRUD. **Not user-scoped** — root folders are shared infrastructure, admin-managed
+and visible to all users, so none of these take a `user_id`.
 
 - `get_root_folder(id)` — fetch a root folder by ID
-- `list_root_folders(user_id)` — list all root folders
-- `create_root_folder(req)` — insert a new root folder
+- `list_root_folders()` — list all root folders
+- `create_root_folder(path, media_type)` — insert a new root folder (no request struct)
 - `delete_root_folder(id)` — delete a root folder
-- `get_root_folder_by_media_type(user_id, media_type)` — fetch the default root folder for a media type
+- `get_root_folder_by_media_type(media_type)` — fetch the root folder for a media type (at most one per type)
 
 ### GrabDb
 Download grab lifecycle management.
 
-- `get_grab(id)` — fetch a grab by ID
-- `list_active_grabs(user_id)` — list grabs not in terminal state
-- `upsert_grab(req)` — insert or update a grab record (used on re-grab)
-- `update_grab_status(id, status)` — set grab status
-- `update_grab_download_id(id, download_id)` — store the download client's internal ID
-- `get_grab_by_download_id(download_id)` — find a grab by download client ID (queue poll)
-- `reset_importing_grabs()` — reset stuck "importing" grabs on startup
-- `set_grab_content_path(id, path)` — record the extracted content path for import
-- `list_grabs_paginated(user_id, filter)` — paginated grab list for UI
-- `try_set_importing(id)` — atomically transition grab to importing (returns false if already claimed)
+- `get_grab(user_id, id)` — fetch a grab by ID
+- `list_active_grabs()` — list sent/confirmed grabs for import polling (**not** user-scoped)
+- `upsert_grab(req)` — insert or replace a grab record; replaces a failed/removed row, `Constraint` error if the existing one is active
+- `update_grab_status(user_id, id, status, import_error)` — set grab status
+- `update_grab_download_id(user_id, id, download_id)` — store the download client's internal ID
+- `get_grab_by_download_id(download_id)` — find a grab by download client ID (cross-user by design, for poller matching)
+- `reset_importing_grabs()` — reset importing grabs to confirmed on startup
+- `set_grab_content_path(user_id, id, content_path)` — record the raw remote content path from the download client
+- `list_grabs_paginated(user_id, page, per_page)` — paginated grab list, newest first (no filter argument)
+- `try_set_importing(user_id, id)` — atomically transition grab to importing (returns false if not in an importable state)
 - `active_grab_exists(user_id, work_id, media_type)` — check if an active grab exists to prevent duplicates
-- `list_retriable_grabs(user_id)` — list failed grabs eligible for retry
-- `increment_import_retry(id)` — bump the retry counter on import failure
+- `list_retriable_grabs(max_retries)` — list importFailed grabs eligible for retry (**not** user-scoped; takes the retry cap)
+- `increment_import_retry(user_id, id)` — bump the retry counter on import failure
 - `queue_summary(user_id)` — returns aggregate queue counts
 
 ### DownloadClientDb
-Download client configuration CRUD.
+Download client configuration CRUD. **Not user-scoped** — shared infrastructure, admin-managed
+and visible to all users.
 
-- `get_download_client(id)` — fetch a client record (no credentials)
-- `get_download_client_with_credentials(id)` — fetch with decrypted credentials
-- `list_download_clients(user_id)` — list all clients
+- `get_download_client(id)` — fetch a client record
+- `get_download_client_with_credentials(id)` — returns the same data; a separate method so callers making outbound connections (test, grab, import poll) signal that intent
+- `list_download_clients()` — list all clients
 - `create_download_client(req)` — insert a new client
 - `update_download_client(id, req)` — update client settings
 - `delete_download_client(id)` — delete a client
 - `get_default_download_client(protocol)` — fetch the default client for a given protocol
 
 ### RemotePathMappingDb
-Remote-to-local path mapping CRUD.
+Remote-to-local path mapping CRUD. **Not user-scoped** — shared infrastructure, admin-managed
+and visible to all users.
 
 - `get_remote_path_mapping(id)` — fetch a mapping
-- `list_remote_path_mappings(user_id)` — list all mappings
-- `create_remote_path_mapping(req)` — insert a new mapping
-- `update_remote_path_mapping(id, req)` — update a mapping
+- `list_remote_path_mappings()` — list all mappings
+- `create_remote_path_mapping(host, remote_path, local_path)` — insert a new mapping (no request struct)
+- `update_remote_path_mapping(id, host, remote_path, local_path)` — update a mapping (no request struct)
 - `delete_remote_path_mapping(id)` — delete a mapping
 
 ### HistoryDb
@@ -141,8 +152,8 @@ Event history.
 ### NotificationDb
 In-app notification CRUD.
 
-- `list_notifications(user_id)` — list all notifications
-- `list_notifications_paginated(user_id, page, per_page)` — paginated notification list
+- `list_notifications(user_id, unread_only)` — list notifications, optionally unread only
+- `list_notifications_paginated(user_id, unread_only, page, per_page)` — paginated notification list
 - `create_notification(req)` — insert a new notification
 - `mark_notification_read(user_id, id)` — mark a notification read
 - `dismiss_notification(user_id, id)` — dismiss a single notification
@@ -164,32 +175,30 @@ Application configuration reads and writes.
 - `update_indexer_config(req)` — update global indexer config
 
 ### EnrichmentRetryDb
-Enrichment retry scheduling.
+Enrichment retry scheduling. A **single-method** trait.
 
-- `list_works_for_retry()` — list Works due for an enrichment retry
-- `reset_enrichment_for_refresh(user_id, id)` — clear retry state for a manual re-run
-- `increment_retry_count(user_id, id)` — bump the retry counter after a failed enrichment
+- `reset_enrichment_for_refresh(user_id, work_id)` — reset enrichment for manual refresh (status = pending)
 
 ### IndexerDb
-Indexer configuration and RSS state.
+Indexer configuration and RSS state. **Not user-scoped — indexers are global.**
 
-- `get_indexer(id)` — fetch an indexer (no credentials)
-- `get_indexer_with_credentials(id)` — fetch with decrypted API key
-- `list_indexers(user_id)` — list all indexers
-- `list_enabled_interactive_indexers(user_id)` — list indexers enabled for manual search
+- `get_indexer(id)` — fetch an indexer
+- `get_indexer_with_credentials(id)` — returns the same data; a separate method so callers making outbound calls (test, search) signal that intent
+- `list_indexers()` — list all indexers
+- `list_enabled_interactive_indexers()` — list indexers enabled for manual search
 - `create_indexer(req)` — insert a new indexer
 - `update_indexer(id, req)` — update indexer settings
 - `delete_indexer(id)` — delete an indexer
-- `set_supports_book_search(id, flag)` — update book search capability flag
-- `list_enabled_rss_indexers()` — list indexers with RSS enabled (for sync worker)
-- `get_rss_state(indexer_id)` — fetch the RSS cursor for an indexer
-- `upsert_rss_state(state)` — save updated RSS cursor after a sync pass
+- `set_supports_book_search(id, supports)` — update book search capability flag
+- `list_enabled_rss_indexers()` — list indexers with `enabled=1 AND enable_rss=1` (for sync worker)
+- `get_rss_state(indexer_id)` — fetch the RSS cursor for an indexer (`None` on first sync)
+- `upsert_rss_state(indexer_id, last_publish_date, last_guid)` — save the updated RSS cursor after a sync pass
 
 ### AuthorBibliographyDb
 Cached author bibliography storage.
 
 - `get_bibliography(author_id)` — fetch cached bibliography for an author
-- `save_bibliography(req)` — persist a freshly fetched bibliography
+- `save_bibliography(author_id, entries, raw_entries)` — persist a freshly fetched bibliography (no request struct)
 - `delete_bibliography(author_id)` — clear cached bibliography
 
 ### SeriesDb
@@ -199,16 +208,16 @@ Series records and work-series links.
 - `list_all_series(user_id)` — list all series for a user
 - `list_series_for_author(user_id, author_id)` — list series belonging to an author
 - `upsert_series(req)` — insert or update a series record
-- `update_series_flags(id, monitor_ebook, monitor_audiobook)` — update monitor flags
-- `update_series_work_count(id, count)` — update the known work count for a series
-- `link_work_to_series(req)` — associate a Work with a Series
+- `update_series_flags(user_id, id, monitor_ebook, monitor_audiobook, monitor_language)` — update monitor flags and propagate to linked works; `monitor_language: None` leaves the existing setting untouched
+- `update_series_work_count(user_id, id, work_count)` — update the known work count for a series
+- `link_work_to_series(user_id, req)` — associate a Work with a Series (assignment-guarded)
 - `list_monitored_series_for_authors(user_id, author_ids)` — list monitored series for a set of authors
 
 ### SeriesCacheDb
 Goodreads series list cache per author.
 
 - `get_series_cache(author_id)` — fetch cached series list for an author
-- `save_series_cache(req)` — persist a freshly fetched series list
+- `save_series_cache(author_id, entries, raw_entries)` — persist a freshly fetched series list (no request struct)
 - `delete_series_cache(author_id)` — clear cached series list
 
 ### ImportDb
@@ -218,8 +227,8 @@ Readarr import job tracking.
 - `get_import(id)` — fetch an import job by ID
 - `list_imports(user_id)` — list all import jobs for a user
 - `update_import_status(id, status)` — update job status
-- `update_import_counts(id, counts)` — update running progress counters
-- `set_import_completed(id, stats)` — mark an import job complete with final counts
+- `update_import_counts(id, authors, works, files, skipped)` — update running progress counters
+- `set_import_completed(id)` — mark an import job complete (sets status + completed_at; takes no counts)
 - `list_library_items_by_import(import_id)` — fetch all files created by an import job
 - `delete_library_item_by_id(id)` — delete a specific library item (used by undo)
 - `delete_orphan_works_by_import(import_id)` — delete Works left orphaned after an undo
@@ -229,29 +238,29 @@ Readarr import job tracking.
 Audiobook playback progress persistence.
 
 - `get_progress(user_id, library_item_id)` — fetch playback position for a user/item pair
-- `upsert_progress(user_id, library_item_id, position)` — save or update playback position
+- `upsert_progress(user_id, library_item_id, position, progress_pct, kind, cross_format_ts)` — save or update playback position, with the finished_at lifecycle and the same-transaction cross-format advance
 
 ### ListImportDb
 Book list import (CSV/ISBN) workflow storage.
 
-- `insert_list_import_preview_row(req)` — insert a single preview row during parse
-- `count_list_import_previews(preview_id)` — count rows in a preview batch
-- `get_list_import_source(preview_id)` — fetch the source identifier for a preview
-- `create_list_import_record(req)` — create the import record when confirm is called
-- `get_list_import_record(id)` — fetch an import record
-- `get_list_import_preview_row(preview_id, row_index)` — fetch one preview row for processing
-- `tag_last_work_with_import(import_id, work_id)` — tag the most recently created Work with the import ID
-- `increment_list_import_works_created(import_id)` — bump the works_created counter
-- `complete_list_import(import_id)` — mark a list import complete
-- `get_list_import_status_for_user(user_id)` — fetch import status for UI polling
-- `delete_works_by_list_import(import_id)` — delete all Works created by a list import (undo)
+- `insert_list_import_preview_row(preview_id, user_id, row_index, title, author, isbn_13, isbn_10, goodreads_book_id, year, source_status, source_rating, preview_status, source, created_at)` — insert a single preview row during parse (14 explicit params, no request struct)
+- `count_list_import_previews(preview_id, user_id)` — count rows in a preview batch
+- `get_list_import_source(preview_id, user_id)` — fetch the source identifier for a preview
+- `create_list_import_record(id, user_id, source, started_at)` — create the import record (status = 'running') when confirm is called
+- `get_list_import_record(id)` — fetch an import record's ownership + status
+- `get_list_import_preview_row(preview_id, user_id, row_index)` — fetch one preview row for processing
+- `tag_last_work_with_import(import_id, user_id)` — tag the user's most-recently-created Work with the import ID (takes no work_id)
+- `increment_list_import_works_created(import_id, delta)` — bump the works_created counter
+- `complete_list_import(import_id, user_id, completed_at)` — mark a list import complete; scoped to status = 'running', returns rows_affected
+- `get_list_import_status_for_user(import_id, user_id)` — fetch import status for UI polling
+- `delete_works_by_list_import(import_id, user_id)` — delete all Works created by a list import (undo)
 - `mark_list_import_undone(import_id)` — mark a list import as undone
-- `list_list_imports(user_id)` — list all list imports for a user
+- `list_list_imports(user_id)` — list a user's list imports, newest first, limit 50
 - `work_exists_by_isbn_13(user_id, isbn)` — check dedup by ISBN-13
 - `work_exists_by_isbn_10(user_id, isbn)` — check dedup by ISBN-10
 - `delete_stale_list_import_previews(cutoff)` — purge unclaimed preview batches older than cutoff
-- `tag_work_with_import(import_id, work_id)` — associate a Work with a list import
-- `list_works_by_import(import_id)` — list all Works created by a specific list import
+- `tag_work_with_import(user_id, work_id, import_id)` — associate a specific Work with a list import (race-free, unlike `tag_last_work_with_import`)
+- `list_works_by_import(import_id, user_id)` — list the Work IDs tagged with a specific list import
 
 ### ProvenanceDb
 Per-field metadata provenance tracking.
@@ -272,16 +281,16 @@ Per-provider enrichment retry state machine.
 - `record_will_retry_paused(user_id, work_id, provider, next_attempt_at)` — breaker-open pause, no attempt spent (R-11)
 - `record_terminal_outcome(user_id, work_id, provider, outcome, normalized_payload_json)` — record a phase-2 terminal outcome (Success carries the payload)
 - `reset_all_retry_states(user_id, work_id)` — clear all retry states for a Work
-- `list_works_due_for_retry()` — list Works with at least one provider due for retry
-- `list_works_with_terminal_provider_rows()` — list Works with permanently failed providers
-- `reset_not_configured_outcomes()` — reset terminal "not configured" outcomes when config changes
+- `list_works_due_for_retry(user_id, now)` — list Works with at least one provider due for retry
+- `list_works_with_terminal_provider_rows(user_id)` — list Works with permanently failed providers
+- `reset_not_configured_outcomes(provider)` — reset terminal "not configured" outcomes for one provider when config changes
 
 ### ExternalIdDb
 External provider ID storage (e.g. Goodreads IDs).
 
-- `upsert_external_id(req)` — insert or update a single external ID
-- `upsert_external_ids_batch(reqs)` — bulk upsert external IDs
-- `list_external_ids(work_id)` — list all external IDs for a Work
+- `upsert_external_id(user_id, req)` — insert or update a single external ID
+- `upsert_external_ids_batch(user_id, reqs)` — bulk upsert external IDs
+- `list_external_ids(user_id, work_id)` — list all external IDs for a Work
 
 ---
 
@@ -353,7 +362,7 @@ External provider ID storage (e.g. Goodreads IDs).
 - `ProviderRetryState` — full retry state row for one work/provider pair
 
 ### Enrichment Merge
-- `ApplyEnrichmentMergeRequest` — atomic merge payload: work update, new status, provenance upserts/deletes, external ID updates, expected generation
+- `ApplyEnrichmentMergeRequest` — atomic merge payload: user/work IDs, expected merge generation, optional work update, new enrichment status, provenance upserts/deletes. It carries **no** external-ID field
 
 ---
 

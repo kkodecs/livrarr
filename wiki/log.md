@@ -1,5 +1,37 @@
 # Wiki Change Log
 
+## 2026-07-25 — db.md verified against source: signatures were systematically wrong about user scoping
+
+**Updated pages:**
+- crates/db.md — third documentarian verify-and-correct pass, audited against all 22 trait
+  modules in `crates/livrarr-db/src/api/` at `b33e8fe8`. **4 methods deleted** (they exist
+  nowhere in the repo: `reset_pending_enrichments`, `set_enrichment_status_skipped`,
+  `list_works_for_retry`, `increment_retry_count`), and roughly **70 bullet-level claims
+  corrected** across every trait section except `AuthorDb`, `HistoryDb`, `ConfigDb` and
+  `ProvenanceDb`, which were already accurate.
+  The systematic defect: the page invented `user_id` parameters on traits that are deliberately
+  **not** user-scoped — `RootFolderDb`, `RemotePathMappingDb`, `DownloadClientDb` and
+  `IndexerDb` are all shared, admin-managed infrastructure ("Not user-scoped — indexers are
+  global"), and `list_active_grabs` / `list_retriable_grabs` are cross-user by design. It also
+  invented request structs for methods that take explicit parameters (`create_root_folder`,
+  `save_bibliography`, `save_series_cache`, `create_list_import_record`,
+  `insert_list_import_preview_row` — that last one takes 14 explicit params), and dropped real
+  parameters elsewhere (`update_grab_status`'s `import_error`, `update_series_flags`'s
+  `monitor_language`, `list_notifications`' `unread_only`, `upsert_progress`'s three trailing
+  args). Other corrections: `create_work` is **not** on `WorkDb` — it lives on the separate
+  `WorkDbCreate` trait, split deliberately so only `WorkServiceImpl` can create Works
+  (compile-time enforcement of M2); `search_works` is a paginated `LIKE` match, not full-text
+  search; `EnrichmentRetryDb` has one method, not three; `ApplyEnrichmentMergeRequest` carries
+  no external-ID field; `get_*_with_credentials` returns the same data as its plain sibling and
+  exists to signal intent, not because the plain one omits credentials.
+  Added a standing caveat that the method lists are partial and `src/api/` is the full contract.
+
+**Context:** documentarian edit pass #3, scoped by `build/reviews/DOC-EDIT-PACKET-3.md`.
+Per-edit citations: `build/reviews/docs-edit-db-md-changelog.md`. The packet expected staleness
+from the identity-edit merge; there was none to correct — this page has never documented the
+identity surface at all (no `WorkIdentityRepository`, no `apply_identity_clear`, no startup
+backfill). That is an absence, not a stale claim, and adding it would be authorship.
+
 ## 2026-07-25 — handlers.md verified against source: AppContext is not a union of everything
 
 **Updated pages:**
