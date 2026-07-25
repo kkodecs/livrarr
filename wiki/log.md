@@ -1,5 +1,58 @@
 # Wiki Change Log
 
+## 2026-07-25 — `wiki/domain/` part 2: Goodreads does not need an LLM, and foreign works never take HC/OL metadata
+
+**Updated pages:** `wiki/domain/metadata-sources.md` (fully audited),
+`metadata-principles.md` (fully audited), and one line of `series.md`. Fourteenth
+documentarian pass. **`series.md` is otherwise unexamined** — see the split note below.
+
+**The biggest correction: Goodreads is not LLM-dependent.** The page said so in four places,
+including a blockquote insisting that without an LLM configured the GR client "returns
+`NotFound` rather than guessing — this is intentional, not a bug." The GR pick is
+deterministic — a junk-edition filter plus the shared title+author picker, and the adapter's
+own doc says "no LLM is involved in the pick." `NotFound` comes from GR **abstaining** below
+the bar. The only LLM on that path repairs a failed HTML parse on foreign pages; with no LLM
+configured that fallback is simply off and the provider works normally. A maintainer reading
+the old page would have concluded English enrichment needed an LLM subscription it does not
+need.
+
+**Foreign works never take Hardcover or OpenLibrary metadata — the page listed both as
+contributors.** They sit in the foreign priority order, but their payloads are removed from
+the merge inputs at the chokepoint; the function that does it notes that reordering was
+insufficient, which is exactly why the list is misleading on its own. Their *anchors* are
+still captured upstream, where identity is language-agnostic. This also settles the page's
+own contradiction between its "never use OpenLibrary for foreign language" rule and its
+priority list.
+
+**Two more of that shape.** "Provider Priority" described a fallback chain — Hardcover, then
+OpenLibrary "if Hardcover fails" — when providers are dispatched in parallel and merged by
+rank, and OpenLibrary ranks fourth of five, behind Goodreads and Readarr. Timeouts were
+documented as varying by enrichment mode (10s synchronous, 30s background); there is no such
+switch — the timeout is fixed per call site, 10s for HC/GB, 30s for OL-detail/GR/Audnexus.
+
+**Also corrected:** `metadata_source` was dropped as a dead column by migration 061, so the
+rule built on it cannot hold; the Goodreads pace is 1.5s not 1s (the same stale figure fixed
+on `goodreads.md` in pass #10); Google Books now uses the shared deterministic picker, not
+Jaccard ≥ 0.75; a Google Books key alone unlocks non-English languages, and no supported
+language is LLM-dependent today. **Deleted:** two Key Rules about SRU parsing and timeouts —
+no SRU client and no DNB/KB/NDL/OPAC provider exists anywhere in the workspace. The gotchas
+themselves are kept, marked historical, because they record why that route was abandoned.
+
+**On the principles page,** M7 told developers to apply LLM "identity validation". No LLM
+selects or confirms a match anywhere; that clause is now an explicit exception. M5's
+"User > Provider > System" hid the case the principle most needs: `AutoAdded` is not `User` —
+a monitor-created work was never validated by anyone, so it is deliberately not a lock anchor.
+
+**Split:** `series.md` received one correction — "Globally shared per user" → user-scoped, the
+last known instance of the `big7.md` inversion — and **nothing else on it was audited.** It is
+the densest page in the directory and its claims (stub sentinel, roster emptiness rules,
+uniqueness constraint, cap-50) each need their own source read. Unexamined, not believed
+correct.
+
+**Context:** pass #14, scoped by `build/reviews/DOC-EDIT-PACKET-8.md`.
+Citations: `build/reviews/docs-edit-domain-pages-2-changelog.md`.
+**Progress:** 23 of 40 pages verified, plus `series.md` partial.
+
 ## 2026-07-25 — `wiki/domain/` part 1: the scoping model was inverted, and the state machines had drifted
 
 **Updated pages:** `wiki/domain/big7.md`, `author.md`, `work.md`, `grab.md`, `release.md`,

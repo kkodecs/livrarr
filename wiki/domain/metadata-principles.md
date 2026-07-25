@@ -20,7 +20,9 @@ Where possible, contribute corrections and additions back to open metadata sourc
 
 ## M5: User metadata is sovereign
 
-Metadata explicitly set by the user must not be overwritten by automated enrichment, refresh, or any background process. Provenance (User > Provider > System) enforces this. User-owned fields survive manual refresh, hard refresh, and re-enrichment. This is non-negotiable.
+Metadata explicitly set by the user must not be overwritten by automated enrichment, refresh, or any background process. Provenance enforces this. User-owned fields survive manual refresh, hard refresh, and re-enrichment. This is non-negotiable.
+
+The setter is one of six, not three: `Provider`, `User`, `System`, `AutoAdded`, `Imported`, `Import` (`crates/livrarr-domain/src/enrichment_types.rs:176-198`). The distinction that matters for this principle is that **`AutoAdded` is not `User`** — a work created by the author or series monitor was never per-work validated by anyone, so it is deliberately not a lock anchor (`:187-192`).
 
 ## M6: DB metadata and file metadata must be synced
 
@@ -28,7 +30,9 @@ The metadata stored in the database and the metadata embedded in the file (EPUB/
 
 ## M7: Use LLM cleanup liberally
 
-Public metadata (titles, authors, descriptions, series names) can and should be cleaned up by LLM. There is no privacy concern with sharing publicly available book metadata with an LLM provider. Apply title cleanup, bibliography filtering, series list cleaning, and identity validation wherever it improves quality. The LLM privacy boundary (never send filenames, paths, checksums, user preferences, API keys, IDs) still applies.
+Public metadata (titles, authors, descriptions, series names) can and should be cleaned up by LLM. There is no privacy concern with sharing publicly available book metadata with an LLM provider. Apply title cleanup, bibliography filtering and series list cleaning wherever it improves quality. The LLM privacy boundary (never send filenames, paths, checksums, user preferences, API keys, IDs) still applies.
+
+**Identity validation is the exception, and it is off.** No LLM selects or confirms a match anywhere on the identity path: the add door runs the deterministic `settle_identity` authority, and the one LLM identity-verify function in the tree has no caller at all (`crates/livrarr-identity/src/async_resolver.rs:46-97`; see `wiki/domain/work.md`). "Cleanup" is repair of text we already trust — it is not selection, and a repaired payload carries no extra trust.
 
 ## M8: We are the authority — always enrich
 

@@ -1,6 +1,8 @@
 # Series
 
-An ordered collection of related works. Globally shared per user. GR-backed rows are
+An ordered collection of related works. User-scoped: every series row carries a `user_id`
+(`crates/livrarr-domain/src/entities.rs:456`) and is fenced by it
+(`crates/livrarr-db/src/cross_user_isolation_tests.rs:607`). GR-backed rows are
 sourced from Goodreads; **stub** rows are sourced from work metadata (sprint-c-series,
 2026-06-12).
 
