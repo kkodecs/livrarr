@@ -1,5 +1,35 @@
 # Wiki Change Log
 
+## 2026-07-25 — domain.md region 2 verified: 29 config/settings methods do not take a user_id
+
+**Updated pages:**
+- crates/domain.md — fifth documentarian pass, completing the service-trait half of the page.
+  Region 2 (`### ReadarrImportWorkflow` → `### Common Error`, 18 traits) audited against source
+  at `de5f1be7`; every trait read in full. The region carried 84 method bullets: **roughly 65
+  corrected, 2 deleted, 4 missing methods added, 6 partial-list caveats added — exactly one
+  bullet needed nothing.** Combined with pass #4, the whole `## Service Traits` block is verified;
+  only the top of the page (entities/enums/utility functions, settings, Readarr types, Torznab,
+  KeyedMutex — lines 1–137) remains unaudited.
+  **The dominant defect: 29 methods across seven traits were shown taking a `user_id` they do
+  not take** — `RootFolderService` (4), `DownloadClientSettingsService` (5),
+  `DownloadClientCredentialService` (1), `IndexerSettingsService` (9),
+  `IndexerCredentialService` (1), `AppConfigService` (7), `RemotePathMappingService` (5), plus
+  `ManualImportService::list_root_folders` and two `ImportIoService` list methods. These are
+  admin/global config surfaces; the page implied a per-user access model that does not exist.
+  Deleted because they are not on the trait claimed: `ManualImportService::create_history_event`
+  and `ImportIoService::create_library_item`.
+  Other corrections: `EmailService::send_file` takes `(file_bytes, filename, extension)` — not a
+  user and item id; it performs no lookup. `ListService::preview` takes raw bytes. `confirm`
+  takes five arguments, `validate_metadata_languages` six, `update_progress` six.
+  `ReadarrImportWorkflow::progress/preview/start/undo` all take `user_id`. `HistoryService` has
+  a second, infallible `record` method. `HttpFetcher` has four methods, not two — and
+  `fetch_no_redirect` **defaults to `fetch`, which follows redirects**, so a test double that
+  overrides only `fetch` silently gets redirect-following behavior.
+
+**Context:** documentarian edit pass #5, still governed by `build/reviews/DOC-EDIT-PACKET-4.md`.
+Per-edit citations: `build/reviews/docs-edit-domain-md-region2-changelog.md`.
+**Still unaudited:** page lines 1–137 (region 1).
+
 ## 2026-07-25 — domain.md service traits verified against source (partial pass — see boundary)
 
 **Updated pages:**

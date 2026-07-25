@@ -279,17 +279,20 @@ Polls RSS feeds and auto-grabs matching releases.
 Handles the full Readarr library migration flow.
 
 - `connect(req)` — validates Readarr API connection and returns root folder list
-- `preview(req)` — dry-runs an import and returns what would be created/skipped
-- `start(req)` — launches a Readarr import job, returns import_id
-- `progress(import_id)` — returns live progress for a running import
+- `preview(user_id, req)` — dry-runs an import and returns what would be created/skipped
+- `start(user_id, req)` — launches a Readarr import job, returns import_id
+- `progress(user_id, import_id)` — returns live progress for **this user's own** run; `import_id` is optional and, when given, additionally requires the caller's run to match it. A mismatch or a non-owned run yields `NotFound`, never confirming another user owns it
 - `history(user_id)` — lists past Readarr imports
-- `undo(import_id)` — rolls back a completed Readarr import
+- `undo(user_id, import_id)` — rolls back a completed Readarr import
+
+Not listed: the origin trust boundary — `list_origins()`, `add_origin(url)`, `remove_origin(id)`,
+the admin-managed allowlist of approved Readarr origins. 6 of the trait's 9 methods are above.
 
 ### ListService (services/list.rs)
 Imports book lists (CSV/ISBN) into the library.
 
-- `preview(req)` — parses and previews a list import without committing
-- `confirm(user_id, preview_id)` — commits a previewed list import
+- `preview(user_id, bytes)` — parses and previews a list import without committing (takes the raw file bytes, not a request struct)
+- `confirm(user_id, preview_id, import_id, row_indices, language)` — commits selected rows of a previewed list import
 - `complete(user_id, import_id)` — finalizes a list import job
 - `undo(user_id, import_id)` — removes works added by a list import
 - `list_imports(user_id)` — lists past list import summaries
@@ -298,137 +301,148 @@ Imports book lists (CSV/ISBN) into the library.
 Library file read/management operations.
 
 - `list(user_id)` — lists all LibraryItems
-- `list_paginated(user_id, page, per_page)` — paginated LibraryItem list
-- `get(user_id, id)` — fetches a single LibraryItem
-- `delete(user_id, id)` — deletes a LibraryItem from disk and DB
-- `resolve_path(item)` — resolves the absolute path for a LibraryItem
-- `prepare_email(user_id, id)` — reads file bytes for email attachment delivery
-- `get_progress(user_id, item_id)` — fetches playback progress for an audiobook
-- `update_progress(user_id, item_id, position)` — updates playback progress
+- `list_paginated(user_id, page, page_size)` — paginated LibraryItem list
+- `get(user_id, item_id)` — fetches a single LibraryItem
+- `delete(user_id, item_id)` — deletes a LibraryItem
+- `resolve_path(user_id, item_id)` — resolves the absolute path for a LibraryItem (takes ids, not an item)
+- `prepare_email(user_id, item_id)` — builds an `EmailPayload` (file bytes, filename, extension) for the caller to send
+- `get_progress(user_id, item_id)` — fetches playback progress
+- `update_progress(user_id, item_id, position, progress_pct, kind, cross_format_ts)` — updates playback progress; only `ProgressKind::Progress` with a finite `cross_format_ts` may advance the cross-format furthest mark
+
+Not listed: `get_progress_for_items(user_id, library_item_ids)` — the batch read. 8 of the
+trait's 9 methods are above.
 
 ### NotificationService (services/notification.rs)
 In-app notification management.
 
-- `list_paginated(user_id, page, per_page)` — paginated notification list
+- `list_paginated(user_id, unread_only, page, page_size)` — paginated notification list
 - `mark_read(user_id, id)` — marks a notification read
 - `dismiss(user_id, id)` — dismisses a single notification
 - `dismiss_all(user_id)` — dismisses all notifications for a user
 - `create(req)` — creates a new notification
 
 ### HistoryService (services/history.rs)
-Event history read operations.
+Event history read + the observer write.
 
-- `list_paginated(user_id, filter, page, per_page)` — paginated filtered history
+- `list_paginated(user_id, filter, page, page_size)` — paginated filtered history
+- `record(user_id, draft)` — records one history event. **Infallible by signature** — history is an observer, never an actor, so the impl absorbs write failures with a logged warning and callers cannot propagate one
 
 ### RootFolderService (services/root_folder.rs)
-Root folder CRUD.
+Root folder CRUD. **No method takes a `user_id`.**
 
-- `get_root_folder(user_id, id)` — fetches a root folder
-- `list_root_folders(user_id)` — lists all root folders
-- `create_root_folder(user_id, path, media_type)` — adds a new root folder
-- `delete_root_folder(user_id, id)` — removes a root folder
+- `get_root_folder(id)` — fetches a root folder
+- `list_root_folders()` — lists all root folders
+- `create_root_folder(path, media_type)` — adds a new root folder
+- `delete_root_folder(id)` — removes a root folder
 
 ### DownloadClientSettingsService (services/download_client_settings.rs)
-Download client configuration CRUD.
+Download client configuration CRUD. **No method takes a `user_id`.**
 
-- `get_download_client(user_id, id)` — fetches a client record
-- `list_download_clients(user_id)` — lists all clients
-- `create_download_client(user_id, req)` — adds a new client
-- `update_download_client(user_id, id, req)` — edits a client
-- `delete_download_client(user_id, id)` — removes a client
+- `get_download_client(id)` — fetches a client record
+- `list_download_clients()` — lists all clients
+- `create_download_client(params)` — adds a new client
+- `update_download_client(id, params)` — edits a client
+- `delete_download_client(id)` — removes a client
 
 ### DownloadClientCredentialService (services/download_client_credentials.rs)
-Credential-bearing client access.
+Credential-bearing client access. The trait's only method.
 
-- `get_download_client_with_credentials(user_id, id)` — fetches client including decrypted credentials
+- `get_download_client_with_credentials(id)` — fetches a client including credentials
 
 ### IndexerSettingsService (services/indexer_settings.rs)
-Indexer configuration CRUD and Prowlarr/RSS config.
+Indexer configuration CRUD and Prowlarr/RSS config. **No method takes a `user_id`.**
 
-- `get_indexer(user_id, id)` — fetches an indexer
-- `list_indexers(user_id)` — lists all indexers
-- `create_indexer(user_id, req)` — adds a new indexer
-- `update_indexer(user_id, id, req)` — edits an indexer
-- `delete_indexer(user_id, id)` — removes an indexer
-- `set_supports_book_search(id, flag)` — updates the book-search capability flag
-- `get_prowlarr_config(user_id)` — fetches Prowlarr integration config
-- `update_prowlarr_config(user_id, req)` — updates Prowlarr config
-- `get_indexer_config(user_id)` — fetches global indexer (RSS) config
-- `update_indexer_config(user_id, req)` — updates global indexer config
+- `get_indexer(id)` — fetches an indexer
+- `list_indexers()` — lists all indexers
+- `create_indexer(params)` — adds a new indexer
+- `update_indexer(id, params)` — edits an indexer
+- `delete_indexer(id)` — removes an indexer
+- `set_supports_book_search(id, supports)` — updates the book-search capability flag
+- `get_prowlarr_config()` — fetches Prowlarr integration config
+- `update_prowlarr_config(params)` — updates Prowlarr config
+- `get_indexer_config()` — fetches global indexer (RSS) config
+- `update_indexer_config(params)` — updates global indexer config
 
 ### IndexerCredentialService (services/indexer_credentials.rs)
-Credential-bearing indexer access.
+Credential-bearing indexer access. The trait's only method.
 
-- `get_indexer_with_credentials(user_id, id)` — fetches indexer including decrypted API key
+- `get_indexer_with_credentials(id)` — fetches an indexer including its API key
 
 ### AppConfigService (services/app_config.rs)
-Application-wide configuration reads and updates.
+Application-wide configuration reads and updates. **No method takes a `user_id`.**
 
-- `get_naming_config(user_id)` — fetches file/folder naming config
-- `get_media_management_config(user_id)` — fetches media management settings
-- `update_media_management_config(user_id, req)` — updates media management settings
-- `get_metadata_config(user_id)` — fetches metadata provider config
-- `update_metadata_config(user_id, req)` — updates metadata provider config
-- `get_email_config(user_id)` — fetches email delivery config
-- `update_email_config(user_id, req)` — updates email config
-- `validate_metadata_languages(langs)` — validates a list of language codes
+- `get_naming_config()` — fetches file/folder naming config
+- `get_media_management_config()` — fetches media management settings
+- `update_media_management_config(params)` — updates media management settings
+- `get_metadata_config()` — fetches metadata provider config
+- `update_metadata_config(params)` — updates metadata provider config
+- `get_email_config()` — fetches email delivery config
+- `update_email_config(params)` — updates email config
+- `validate_metadata_languages(languages, llm_enabled, llm_endpoint, llm_api_key, llm_model, google_books_api_key)` — validates a language list against the configured providers
+
+Not listed: `get_default_language()`, `update_default_language(language)`, and
+`validate_default_language(language)` — the default language applied wherever a creation door
+has no explicit one. 8 of the trait's 11 methods are above.
 
 ### EmailService (services/email.rs)
-Email delivery operations.
+Email delivery operations. Takes no user or item ids — the caller supplies the bytes.
 
-- `send_test(user_id)` — sends a test email to configured recipient
-- `send_file(user_id, item_id)` — emails a library file as attachment
+- `send_test()` — sends a test email to the configured recipient
+- `send_file(file_bytes, filename, extension)` — sends a file as an attachment. It performs no lookup; `FileService::prepare_email` produces the payload
 
 ### RemotePathMappingService (services/remote_path_mapping.rs)
-Remote path mapping CRUD.
+Remote path mapping CRUD. **No method takes a `user_id`.**
 
-- `get_remote_path_mapping(user_id, id)` — fetches a mapping
-- `list_remote_path_mappings(user_id)` — lists all mappings
-- `create_remote_path_mapping(user_id, req)` — adds a new mapping
-- `update_remote_path_mapping(user_id, id, req)` — edits a mapping
-- `delete_remote_path_mapping(user_id, id)` — removes a mapping
+- `get_remote_path_mapping(id)` — fetches a mapping
+- `list_remote_path_mappings()` — lists all mappings
+- `create_remote_path_mapping(host, remote_path, local_path)` — adds a new mapping (no request struct)
+- `update_remote_path_mapping(id, host, remote_path, local_path)` — edits a mapping (no request struct)
+- `delete_remote_path_mapping(id)` — removes a mapping
 
 ### ManualImportService (services/manual_import.rs)
 Data access facade used by the manual import UI workflow.
 
 - `list_works(user_id)` — lists all Works for work-file linking
-- `list_root_folders(user_id)` — lists root folders for target selection
+- `list_root_folders()` — lists root folders for target selection (takes no `user_id`)
 - `list_library_items_by_work(user_id, work_id)` — lists files linked to a Work
-- `list_library_items_by_work_ids(user_id, ids)` — bulk fetch files by multiple Work IDs
-- `get_work(user_id, id)` — fetches a single Work
-- `delete_library_item(user_id, id)` — removes a file from the library
-- `create_library_item(user_id, req)` — links a file to a Work as a LibraryItem
-- `create_history_event(req)` — records a history event
+- `list_library_items_by_work_ids(user_id, work_ids)` — bulk fetch files by multiple Work IDs
+- `get_work(user_id, work_id)` — fetches a single Work
+- `delete_library_item(user_id, item_id)` — removes a file from the library
+- `create_library_item(user_id, work_id, root_folder_id, path, media_type, file_size)` — links a file to a Work as a LibraryItem (six explicit params, no request struct)
 
 ### MatchingService (services/matching.rs)
-Filename parsing and Work matching.
+Filename and embedded-metadata extraction. The trait's only method.
 
-- `extract_and_reconcile(input)` — parses a file path and matches it to a library Work
+- `extract_and_reconcile(input)` — parses a file path (or grouped paths) into `MatchCluster`s carrying author, title, series, language, isbn, asin and year. It does **not** look up or return a Work
 
 ### ImportIoService (services/import_io.rs)
-I/O operations used during the import pipeline.
+Data access used during the import pipeline — every method here reads or writes a record.
 
-- `get_grab(id)` — fetches a grab record
-- `get_download_client(id)` — fetches a download client
-- `set_grab_content_path(id, path)` — records the content path for a completed download
-- `get_work(user_id, id)` — fetches a Work
+- `get_grab(user_id, grab_id)` — fetches a grab record
+- `get_download_client(client_id)` — fetches a download client
+- `set_grab_content_path(user_id, grab_id, content_path)` — records the content path for a completed download
+- `get_work(user_id, work_id)` — fetches a Work
 - `list_library_items_by_work(user_id, work_id)` — fetches existing files for a Work
-- `get_root_folder(id)` — fetches a root folder
-- `list_root_folders(user_id)` — lists root folders for import targeting
-- `list_remote_path_mappings(user_id)` — lists path mappings for seedbox resolution
-- `update_library_item_size(id, size)` — updates file size after import
-- `create_library_item(req)` — creates a LibraryItem record after successful import
+- `get_root_folder(root_folder_id)` — fetches a root folder
+- `list_root_folders()` — lists root folders for import targeting (takes no `user_id`)
+- `list_remote_path_mappings()` — lists path mappings for seedbox resolution (takes no `user_id`)
+- `update_library_item_size(user_id, item_id, new_size)` — updates file size after import
+- `update_library_item_path(user_id, item_id, new_path)` — persists a new relative path after the merge reorganize step physically relocates the file
+
+This trait has no `create_library_item`; `ManualImportService::create_library_item` does.
 
 ### HttpFetcher (services/http.rs)
 Outbound HTTP client abstraction.
 
 - `fetch(req)` — makes an HTTP request with rate limiting, timeout, and user-agent control
 - `fetch_ssrf_safe(req)` — same but validates the URL is not an internal/private address
+- `fetch_ssrf_safe_fast_connect(req)` — as `fetch_ssrf_safe`, but the TCP-connect phase is bounded far tighter than `req.timeout`, to fail fast on an unreachable host. **Defaulted** to plain `fetch_ssrf_safe`; `HttpFetcherImpl` is the only override
+- `fetch_no_redirect(req)` — returns the raw 3xx (status + `Location`) instead of chasing it. **Defaulted to `fetch`, which FOLLOWS redirects** — a test double that needs no-redirect behavior must override this method itself; overriding `fetch` alone is not enough
 
 ### LlmCaller (services/llm.rs)
-LLM invocation abstraction.
+LLM invocation abstraction. The trait's only method.
 
-- `call(req)` — calls an LLM provider with a templated prompt, returns structured response
+- `call(req)` — calls an LLM provider with a system + user template and a typed field context; returns the response content plus the model used and elapsed time
 
 ### Common Error (services/common.rs)
 - `ServiceError` — top-level service error enum; converts from `DbError`
