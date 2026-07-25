@@ -1166,6 +1166,28 @@ where
             }
         }
 
+        // The delayed NotFound conclusion below is DECIDED by the enrichment call that
+        // follows, so the generation it claims must be observed HERE, before the wait.
+        // Reading it afterwards claims a generation the decision never saw: the CAS then
+        // succeeds against a user edit that landed mid-flight and stamps the stale
+        // conclusion over the correction. Guarded in form, unguarded in fact.
+        //
+        // Observed after the bridge-only settle leg above on purpose — that leg is a
+        // legitimate identity writer whose own writes are already claimed, so its bump
+        // must not invalidate this conclusion.
+        let generation_before_enrichment = self
+            .db
+            .get_work_with_identity_generation(user_id, work_id)
+            .await
+            .map(|(_, generation)| generation)
+            .inspect_err(|e| {
+                tracing::warn!(
+                    work_id,
+                    "complete_add: pre-enrichment generation read failed: {e}"
+                );
+            })
+            .ok();
+
         let (enrichment_status, identity_not_found) = self
             .ensure_identity_and_enrichment(
                 user_id,
@@ -1185,21 +1207,26 @@ where
         // coincide with a parked status — this guarantees the invariant
         // structurally rather than relying on the gate alone.
         if identity_not_found {
-            // Delayed NotFound conclusion (identity-edit r4 §Writer coverage):
-            // (work, generation) read together, then an expected-generation
-            // completion — a user edit landing after the read supersedes this
-            // stale conclusion instead of being overwritten by it.
+            // Delayed NotFound conclusion (identity-edit r4 §Writer coverage): the
+            // completion claims the PRE-wait generation captured above, so a user edit
+            // landing during enrichment supersedes this stale conclusion instead of
+            // being overwritten by it. The work re-read below is only for the
+            // already-parked check — its generation is deliberately discarded.
             match self
                 .db
                 .get_work_with_identity_generation(user_id, work_id)
                 .await
             {
-                Ok((work, generation)) => {
+                Ok((work, _post_wait_generation)) => {
                     let already_parked = matches!(
                         work.identity_status,
                         IdentityStatus::Conflict | IdentityStatus::NeedsReview
                     );
-                    if !already_parked {
+                    // No pre-wait generation means there is nothing legitimate to claim
+                    // against, so the conclusion is dropped rather than written blind.
+                    if let (false, Some(generation)) =
+                        (already_parked, generation_before_enrichment)
+                    {
                         match self
                             .db
                             .complete_anchors(
