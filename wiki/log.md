@@ -1,5 +1,48 @@
 # Wiki Change Log
 
+## 2026-07-25 — `wiki/domain/` part 1: the scoping model was inverted, and the state machines had drifted
+
+**Updated pages:** `wiki/domain/big7.md`, `author.md`, `work.md`, `grab.md`, `release.md`,
+`cross-format-resume.md`, `list.md`. `library-item.md` was audited and needed no change.
+Thirteenth documentarian pass. **Split:** `metadata-principles.md`, `metadata-sources.md` and
+`series.md` are **unexamined**, not believed correct.
+
+**The load-bearing page had the load-bearing error.** `big7.md` said Author, Series and Work
+are "Global (shared) — all users see the same data". They are user-scoped: each row carries a
+`user_id`, and `cross_user_isolation_tests.rs` proves per entity that one user cannot fetch or
+list another's — a cross-user read returns `NotFound`, not a filtered row. `author.md` and
+`work.md` had both inherited the error, which is exactly what the packet warned would happen.
+Release was listed as "Global"; it is not persisted at all.
+
+**Three state machines were documented against the wrong enum.** `grab.md` listed five states,
+two of which are real — `GrabStatus` has seven, and *Downloading*/*Completed* belong to
+`QueueStatus`, the download client's enum. `work.md`'s two "terminal states" are on neither
+enum a reader would check: retry exhaustion is **per provider** (and the budget is 5, not 3),
+and `Conflict` is an `IdentityStatus` meaning a differing confirmed anchor — the identity
+outcomes left `EnrichmentStatus` in migration 055.
+
+**No LLM confirms identity at add-time.** `work.md` said an LLM validator does. The add path
+runs the deterministic `settle_identity` authority and auto-merges anchors only through a
+title-and-author gate; the one LLM identity-verify function in the tree is background-only,
+skipped whenever a work anchor exists, and reference-tracking finds no caller for it.
+
+**`release.md` described a search we do not run** — a two-tier `t=book`/`t=search` flow that
+does not exist (there is one `t=search` request, carrying the author's last name only), dedup
+"by GUID, highest-priority indexer wins" when the real key is `(guid, indexer)` with no
+priority tiebreak, and "sorted by seeders descending" when torrents sort ahead of usenet on
+different keys. Its "never stored in the database" is true but was hiding a 24-hour in-memory
+search cache — the actual reason a repeat search can show releases an indexer has dropped.
+
+**One correction worth flagging on its own:** `cross-format-resume.md` claimed its 49-test
+behavioural suite is gitignored and its `[[test]]` entry "deliberately NOT committed". Both
+halves are false — file and manifest entry are tracked — and this is the precise shape
+`CLAUDE.md` warns breaks fresh clones, so the page was steering a maintainer toward the hazard
+rather than away from it.
+
+**Context:** pass #13, scoped by `build/reviews/DOC-EDIT-PACKET-8.md`.
+Citations: `build/reviews/docs-edit-domain-pages-changelog.md`.
+**Progress:** 21 of 40 pages verified.
+
 ## 2026-07-25 — hardcover.md + openlibrary.md verified; `wiki/integrations/` complete
 
 **Updated pages:** `wiki/integrations/hardcover.md` and `wiki/integrations/openlibrary.md`

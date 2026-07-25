@@ -4,7 +4,7 @@ A mechanism for bulk-importing works from external sources. User-scoped.
 
 ## What Lists Are
 
-Lists are import sessions, not persistent collections. A user provides a CSV (Goodreads export) or URL (OpenLibrary list), the system parses it, proposes matches, and the user confirms which works to add.
+Lists are import sessions, not persistent collections. A user provides a list from one of three supported sources — a Goodreads CSV export, OpenLibrary, or Hardcover (`crates/livrarr-domain/src/services/list.rs:15-19`) — the system parses it, proposes matches, and the user confirms which works to add.
 
 ## Lifecycle
 

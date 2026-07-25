@@ -17,7 +17,7 @@ Whispersync-model position sync between an ebook and its audiobook. Delivered 20
 - `livrarr-library/src/import_workflow.rs` — `establish_kash_link` (free fn) + `extract_chapters_and_kash` hook on ALL THREE import paths (grab ×2, manual via `extract_chapters_for_item`).
 - `livrarr-handlers/src/cross_format.rs` — 4 routes under `/workfile/{id}/cross-format/*`; all link-absent/stale errors map to 404 (the reader treats 404 as "no cross-format here").
 - Frontend: `utils/kashAnchors.ts` (CFI→ts binary search), `components/ResumePromptBanner.tsx`, both readers integrate. Ebook seek-vs-progress classification uses a TIME SETTLE WINDOW (`jumpUntilRef`: mount+3s, programmatic jumps +1.5s) — epub.js fires multiple `relocated` per jump and react-reader's own arrows bypass our handlers, so consume-once flags don't work.
-- Behavioral suite: `tests/behavioral/test_cross_format_resume.rs` (49 tests) — GITIGNORED like all tests/; lives locally, `[[test]]` entry deliberately NOT committed.
+- Behavioral suite: `tests/behavioral/test_cross_format_resume.rs` — 49 test functions, and **it is committed, not local-only**: the file is tracked in git (first landed in `be784e1a`) and its `[[test]]` entry is registered at `crates/livrarr-behavioral/Cargo.toml:375-377`. The `tests/` gitignore blocks only *new* files; this one is tracked, so a fresh clone builds and runs it.
 
 ## Gotchas (hard-won)
 

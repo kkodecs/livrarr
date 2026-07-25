@@ -1,6 +1,8 @@
 # Author
 
-A person who writes books. Globally shared across all users.
+A person who writes books. User-scoped — every author row carries a `user_id`
+(`crates/livrarr-domain/src/entities.rs:436`) and reads are fenced by it
+(`crates/livrarr-db/src/cross_user_isolation_tests.rs:476`, `:488`).
 
 ## Lifecycle
 
