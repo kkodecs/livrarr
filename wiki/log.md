@@ -1,5 +1,34 @@
 # Wiki Change Log
 
+## 2026-07-25 — the `dyn` claim settled; audnexus.md verified (integrations pass split)
+
+**Updated pages:** `wiki/patterns/async-service.md` (Part A) and `wiki/integrations/audnexus.md`
+(Part B, 1 of 5). Ninth documentarian pass.
+
+**Part A — "zero `dyn` for service traits" is true as scoped and false as read.** No async
+service trait can be a trait object at all: `trait_variant::make(Send)` produces non-dyn-compatible
+traits, so that half of the claim holds for a reason stronger than discipline. But
+`ChapterExtractor` (`livrarr-domain/src/services/chapter.rs`) is a **plain, deliberately sync**
+trait in the same `services/` directory, and `ImportWorkflowImpl` holds it as
+`Arc<dyn ChapterExtractor>` and takes one in its constructor. That seam is load-bearing: it is
+what lets `livrarr-library` carry no `livrarr-tagwrite` edge, with the composition root supplying
+`ChapterExtractorImpl`. Page now states the bounded version — sync-by-design traits in `services/`
+are where a `dyn` seam can live.
+
+**Part B — audnexus.md.** This is a provider page and most of it is claims about Audnexus's own
+service (rate limits, cache headers, maintainer, self-hosting), which are not ours to verify and
+were left alone. The repo-checkable half was stale in five of six rows: `If-Modified-Since` is
+**implemented**, not TBD — `cached_fetch` stores `Last-Modified`, replays it, and serves 304 from
+cache; a UA profile **is** set; `?region=` and `?update=1` are **never sent**; and
+`x-ratelimit-*` headers are genuinely unread. Also corrected: the page listed chapter extraction
+as active Audnexus use. The client builds exactly two URLs, neither of them `/chapters` — chapters
+come from the M4B container locally via the `ChapterExtractor` seam Part A just examined.
+
+**Context:** documentarian edit pass #9, scoped by `build/reviews/DOC-EDIT-PACKET-6.md`.
+Per-edit citations: `build/reviews/docs-edit-integrations-changelog.md`.
+**Split:** `goodreads.md`, `google-books.md`, `hardcover.md` and `openlibrary.md` remain
+unaudited — four of five integration pages.
+
 ## 2026-07-25 — wiki/patterns verified: three of four conventions had drifted from the code
 
 **Updated pages:** all four of `wiki/patterns/` — `async-service.md`, `error-handling.md`,

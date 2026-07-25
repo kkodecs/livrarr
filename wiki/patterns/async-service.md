@@ -36,7 +36,15 @@ Errors are **per-service** (`WorkServiceError`, `FileServiceError`, …) plus th
 
 - **`trait_variant::make(Send)`** — not `async-trait`. All async traits need Send (tokio multi-threaded runtime).
 - **Non-dyn-compatible** — `trait_variant::make(Send)` produces traits that can't be used with `dyn`. Use generics/monomorphization exclusively.
-- **No `dyn` on async service traits.** The codebase uses zero `dyn` for service traits.
+- **No `dyn` on async service traits** — which follows from the rule above rather than from
+  discipline: a `trait_variant::make(Send)` trait cannot be made into a trait object at all.
+- **"Zero `dyn` for service traits" is not true as stated.** At least one trait under
+  `livrarr-domain/src/services/` is deliberately **sync** and *is* used dynamically:
+  `ChapterExtractor` (`services/chapter.rs`) is a plain `Send + Sync` trait whose single method
+  is blocking, and `ImportWorkflowImpl` holds it as `Arc<dyn ChapterExtractor>` and takes one in
+  its constructor. That `dyn` seam is the point: it lets `livrarr-library` carry no
+  `livrarr-tagwrite` edge, with the composition root supplying `ChapterExtractorImpl` as the
+  delegate. Sync-by-design traits in `services/` are where a `dyn` seam can live.
 - **AppState uses concrete types via type aliases** — not `Arc<dyn Trait>`, not generics with 12+ type params.
 
 ## Stub Policy

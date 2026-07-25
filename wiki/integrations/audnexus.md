@@ -4,7 +4,12 @@ Audnexus (audnex.us) is Livrarr's audiobook metadata provider — a community-ru
 
 ## Current operational status
 
-- **Active use today:** audiobook enrichment by ASIN, audiobook covers, chapter extraction.
+- **Active use today:** audiobook enrichment by ASIN, with a title+author search fallback. Our
+  client module (`livrarr-external-data/src/audnexus.rs`) builds exactly two URLs —
+  `{base}/books/{asin}` and `{base}/books?title=…&author=…` — and nothing else.
+  **Chapter data does not come from Audnexus.** Chapters are extracted from the M4B container
+  locally, via `ChapterExtractor` → `livrarr-tagwrite`; no `/books/{ASIN}/chapters` call exists
+  in this client.
 - **Maintainer:** [@djdembeck](https://github.com/djdembeck) under [laxamentumtech org](https://github.com/laxamentumtech/audnexus). Active — v1.14.0 released May 23, 2026 (192 stars, GPL-3.0).
 - **Infra:** Cloudflare-fronted; Bun + MongoDB + Redis stack.
 - **Status page:** none. Only signal of issues is HTTP responses.
@@ -142,11 +147,11 @@ If we ever risk overwhelming Audnexus (or the community asks us to offload), we 
 
 | Item | Status |
 |---|---|
-| Set descriptive UA on Audnexus calls | Audit current client; share UA with OL/HC stack |
-| Implement `If-Modified-Since` for 304 revalidation | TBD — pure win, no code-side downsides |
-| Honor `x-ratelimit-remaining` for proactive throttling | TBD |
-| Region-aware ASIN lookups (track origin region per audiobook) | Already partial; verify per code path |
-| `?update=1` gating — UI-triggered only | Audit; ensure no automated flow sends it |
+| Set descriptive UA on Audnexus calls | **Done** — requests carry `UserAgentProfile::Server`; the literal string is owned by `livrarr-http` |
+| Implement `If-Modified-Since` for 304 revalidation | **Done (R-13)** — `cached_fetch` stores each response's `Last-Modified`, replays it as `If-Modified-Since`, and serves a `304` straight from cache without re-parsing |
+| Honor `x-ratelimit-remaining` for proactive throttling | **Not done** — the client reads no `x-ratelimit-*` header. Pacing comes from `RateBucket::Audnexus` on the process-global outbound queue instead |
+| Region-aware ASIN lookups (track origin region per audiobook) | **Not started** — the client sends no `?region=` parameter on either URL |
+| `?update=1` gating — UI-triggered only | **Nothing to gate** — the client never sends `?update=1` |
 | Self-host instructions in deployment docs (advanced) | Future — only if Audnexus pressure becomes real |
 
 ## Related
